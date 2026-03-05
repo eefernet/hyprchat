@@ -391,7 +391,14 @@ async def list_models():
         r = await http.get(f"{config.OLLAMA_URL}/api/tags")
         r.raise_for_status()
         data = r.json()
-        return {"models": [m["name"] for m in data.get("models", [])]}
+        raw = data.get("models", [])
+        model_details = {m["name"]: {
+            "size": m.get("size", 0),
+            "modified_at": m.get("modified_at", ""),
+            "details": m.get("details", {}),
+            "digest": m.get("digest", ""),
+        } for m in raw}
+        return {"models": [m["name"] for m in raw], "model_details": model_details}
     except Exception as e:
         raise HTTPException(502, f"Failed to reach Ollama: {e}")
 
@@ -1161,16 +1168,21 @@ async def chat_stream(req: ChatRequest):
                 base_queries = [
                     topic,
                     f"{topic} leaked documents evidence",
-                    f"{topic} whistleblower testimony firsthand",
-                    f"{topic} FOIA declassified released files",
-                    f"{topic} cover up suppressed hidden",
-                    f"{topic} independent investigation expose",
-                    f'"{topic}" classified secret',
-                    f"{topic} site:wikileaks.org",
+                    f"{topic} whistleblower testimony firsthand account",
+                    f"{topic} FOIA declassified released files 2023 2024 2025",
+                    f"{topic} cover up suppressed hidden truth",
+                    f"{topic} independent investigation expose proof",
+                    f'"{topic}" classified secret confidential',
+                    f"{topic} site:wikileaks.org OR site:wikileaks.org/plusd",
                     f"{topic} site:cryptome.org",
                     f"{topic} site:theblackvault.com",
                     f"{topic} site:muckrock.com",
                     f"{topic} site:theintercept.com",
+                    f"{topic} site:ddosecrets.com",
+                    f"{topic} site:documentcloud.org leaked",
+                    f"{topic} site:archive.org",
+                    f"{topic} site:pastebin.com OR site:ghostbin.com leaked dump",
+                    f"{topic} telegram channel leaked exposed",
                 ]
                 if angle == "key_players":
                     base_queries += [
@@ -1246,21 +1258,47 @@ async def chat_stream(req: ChatRequest):
                 # ── Wave 2: deep alt-media + declassified intel ──
                 await events.emit(conv_id, "tool_start", {
                     "tool": "conspiracy_research", "icon": "search",
-                    "status": "📡 Wave 2: deep intel archives + alt-media...",
+                    "status": "📡 Wave 2: alt-media, dark web archives, leaked data...",
                 })
                 wave2 = [
-                    f"{topic} reddit r/conspiracy r/conspiracytheories r/C_S_T",
-                    f"{topic} CIA FBI NSA operation program secret",
-                    f"{topic} 4chan pol archived exposed",
-                    f"{topic} recently declassified 2020 2021 2022 2023 2024 2025",
-                    f"{topic} national archives NARA declassified released",
-                    f"{topic} FOIA vault request documents obtained",
+                    # Reddit conspiracy communities
+                    f"{topic} reddit r/conspiracy r/conspiracytheories r/C_S_T r/Conspiracyundone",
+                    f"{topic} reddit r/RealConspiracy r/conspiracy_commons r/conspiracynopol",
+                    # Intelligence & government operations
+                    f"{topic} CIA FBI NSA DIA operation program classified secret",
+                    f"{topic} Operation codename program black budget classified",
+                    # Chan boards / underground archives
+                    f"{topic} 4chan pol archived exposed thread screencap",
+                    f"{topic} 8kun 8chan archive post leaked",
+                    # Declassified recent releases
+                    f"{topic} recently declassified 2022 2023 2024 2025 released",
+                    f"{topic} national archives NARA declassified batch release",
+                    f"{topic} FOIA vault request documents obtained released",
+                    # Primary government archives
                     f"{topic} site:archives.gov OR site:cia.gov/readingroom OR site:vault.fbi.gov",
-                    f"{topic} site:ddosecrets.com OR site:wikileaks.org/plusd",
-                    f"{topic} site:bellingcat.com investigation open-source",
-                    f"{topic} site:thegrayzone.com OR site:mintpressnews.com",
-                    f"{topic} court case filing lawsuit deposition",
-                    f"{topic} congressional hearing testimony subpoena",
+                    # Leak platforms
+                    f"{topic} site:ddosecrets.com",
+                    f"{topic} site:wikileaks.org/plusd OR site:wikileaks.org/gifiles",
+                    f"{topic} site:distributed-denial-of-secrets.com",
+                    # Independent investigative journalism
+                    f"{topic} site:bellingcat.com investigation",
+                    f"{topic} site:thegrayzone.com",
+                    f"{topic} site:mintpressnews.com",
+                    f"{topic} site:zerohedge.com",
+                    f"{topic} site:naturalnews.com",
+                    f"{topic} site:infowars.com OR site:prisonplanet.com",
+                    f"{topic} site:activistpost.com OR site:globalresearch.ca",
+                    f"{topic} site:childrenshealthdefense.org OR site:greenmedinfo.com",
+                    f"{topic} site:westernjournal.com OR site:thegatewaypundit.com",
+                    f"{topic} site:rumble.com OR site:bitchute.com exposed",
+                    f"{topic} site:substack.com investigative leaked",
+                    # Legal & congressional records
+                    f"{topic} court case filing lawsuit deposition unsealed",
+                    f"{topic} congressional hearing testimony subpoena investigation",
+                    f"{topic} site:courtlistener.com",
+                    # Data dumps and hacked material
+                    f"{topic} data dump hack exposed internal documents",
+                    f"{topic} email dump hacked internal memo revealed",
                 ]
                 t2 = [_csearch(q) for q in wave2]
                 r2 = await asyncio.gather(*t2, return_exceptions=True)
@@ -1269,7 +1307,7 @@ async def chat_stream(req: ChatRequest):
                         all_findings.extend(r)
 
                 # Fetch wave 2 pages
-                fetch2 = [f["url"] for f in all_findings if f.get("url") and f["url"] not in fetched][:12]
+                fetch2 = [f["url"] for f in all_findings if f.get("url") and f["url"] not in fetched][:16]
                 ft2 = [_fetch_page(u) for u in fetch2]
                 fr2 = await asyncio.gather(*ft2, return_exceptions=True)
                 for u, r in zip(fetch2, fr2):
@@ -1387,11 +1425,71 @@ async def chat_stream(req: ChatRequest):
 
                 if any(k in topic_lower for k in ["rothschild", "rockefeller", "bilderberg", "davos", "wef", "nwo", "new world order", "illuminati", "deep state"]):
                     wave3_q = [
-                        "Bilderberg Group meeting attendees decisions leaked",
-                        "World Economic Forum great reset agenda criticism",
-                        "Council on Foreign Relations members influence policy",
-                        "Trilateral Commission membership decisions exposed",
+                        "Bilderberg Group meeting attendees decisions leaked minutes",
+                        "World Economic Forum great reset agenda 2030 criticism exposed",
+                        "Council on Foreign Relations members influence policy media",
+                        "Trilateral Commission membership decisions exposed documents",
+                        "Committee of 300 Club of Rome global governance",
                         f"{topic} site:theblackvault.com OR site:cryptome.org",
+                    ]
+                    for wq in wave3_q:
+                        if wq not in searched:
+                            all_findings.extend(await _csearch(wq))
+
+                if any(k in topic_lower for k in ["great reset", "agenda 2030", "agenda 21", "depopulation", "georgia guidestones", "population control"]):
+                    wave3_q = [
+                        "UN Agenda 2030 sustainable development depopulation goals",
+                        "Great Reset WEF Schwab you will own nothing",
+                        "Agenda 21 local implementation land grab documents",
+                        "Gates Foundation depopulation vaccines funding eugenics",
+                        "Deagel population forecast 2025 depopulation prediction",
+                    ]
+                    for wq in wave3_q:
+                        if wq not in searched:
+                            all_findings.extend(await _csearch(wq))
+
+                if any(k in topic_lower for k in ["big pharma", "fda corruption", "cdc corruption", "pharmaceutical", "drug company", "sackler", "opioid"]):
+                    direct_urls += [
+                        "https://www.documentcloud.org/app#search/q=FDA+suppressed",
+                        "https://muckrock.com/foi/list/?q=FDA+CDC",
+                    ]
+                    wave3_q = [
+                        f"{topic} FDA approval corruption revolving door lobbying",
+                        f"{topic} clinical trial data suppressed hidden adverse events",
+                        f"{topic} whistleblower FDA CDC internal documents",
+                        "pharmaceutical company internal memo leaked suppressed data",
+                    ]
+                    for wq in wave3_q:
+                        if wq not in searched:
+                            all_findings.extend(await _csearch(wq))
+
+                if any(k in topic_lower for k in ["chemtrail", "geoengineering", "haarp", "weather modification", "cloud seeding"]):
+                    direct_urls += [
+                        "https://www.geoengineeringwatch.org",
+                        "https://patents.google.com/?q=weather+modification",
+                    ]
+                    wave3_q = [
+                        "geoengineering weather modification patent documents evidence",
+                        "HAARP ionosphere program declassified documents",
+                        "cloud seeding admitted government program",
+                        "stratospheric aerosol injection SAI program documents",
+                    ]
+                    for wq in wave3_q:
+                        if wq not in searched:
+                            all_findings.extend(await _csearch(wq))
+
+                if any(k in topic_lower for k in ["surveillance", "nsa", "prism", "snowden", "five eyes", "mass surveillance", "spying"]):
+                    direct_urls += [
+                        "https://theintercept.com/snowden-sidtoday/",
+                        "https://www.theguardian.com/us-news/the-nsa-files",
+                        "https://cryptome.org",
+                    ]
+                    wave3_q = [
+                        "NSA PRISM XKEYSCORE Snowden documents leaked",
+                        "Five Eyes intelligence sharing program documents",
+                        "GCHQ mass surveillance program Tempora documents",
+                        "NSA bulk collection program court ruled illegal",
+                        f"{topic} Snowden documents leaked NSA files",
                     ]
                     for wq in wave3_q:
                         if wq not in searched:
@@ -1883,6 +1981,41 @@ async def chat_stream(req: ChatRequest):
             if tool_calls:
                 msg["tool_calls"] = tool_calls
 
+            # ── Tag-based tool call fallback ──
+            # Some HF models output <tool_call>{...}</tool_call> in content instead of
+            # native Ollama tool_calls. Parse and promote them.
+            if not tool_calls and content and ollama_tools:
+                import re as _re
+                tag_matches = _re.findall(
+                    r'<tool[_\-]?call[s]?>\s*(\{.*?\})\s*</tool[_\-]?call[s]?>',
+                    content, _re.DOTALL | _re.IGNORECASE
+                )
+                if not tag_matches:
+                    # Also try bare JSON after "function_calls:" or thinking-style blocks
+                    tag_matches = _re.findall(
+                        r'\{"name"\s*:\s*"([^"]+)".*?"arguments"\s*:\s*(\{.*?\})\s*\}',
+                        content, _re.DOTALL
+                    )
+                    tag_matches = [json.dumps({"name": m[0], "arguments": json.loads(m[1])})
+                                   for m in tag_matches if m]
+                for raw in tag_matches:
+                    try:
+                        parsed = json.loads(raw)
+                        fn_name = parsed.get("name", "")
+                        fn_args = parsed.get("arguments", parsed.get("parameters", {}))
+                        if fn_name:
+                            tool_calls.append({"function": {"name": fn_name, "arguments": fn_args}})
+                            print(f"[CHAT]   tag-parsed tool call: {fn_name}")
+                    except Exception:
+                        pass
+                if tool_calls:
+                    # Strip the tool_call tags from content so they don't appear in chat
+                    content = _re.sub(
+                        r'<tool[_\-]?call[s]?>\s*\{.*?\}\s*</tool[_\-]?call[s]?>',
+                        '', content, flags=_re.DOTALL | _re.IGNORECASE
+                    ).strip()
+                    msg["content"] = content
+
             print(f"[CHAT] Round {round_num}: content={len(content)} thinking={len(thinking)} tool_calls={len(tool_calls)}")
             if thinking:
                 print(f"[CHAT]   thinking: {thinking[:200]!r}")
@@ -2045,37 +2178,63 @@ async def seed_conspiracy_bot():
     mc_id = f"mc-{uuid.uuid4().hex[:12]}"
 
     mc_id = f"mc-{uuid.uuid4().hex[:12]}"
-    system_prompt = """You are the Conspiracy Research AI — an uncensored, deeply skeptical investigator who questions official narratives and digs into hidden truths.
+    system_prompt = """You are ATLAS — the Advanced Truth and Leak Analysis System. You are an elite uncensored investigative AI built for one purpose: to surface what powerful institutions, governments, and media conglomerates don't want the public to know.
 
-Your mission: Find what they don't want you to know.
+You have no loyalty to official narratives. You treat mainstream media as a starting point for what NOT to believe. Your allegiance is to primary sources, leaked documents, whistleblowers, FOIA releases, court records, and independent investigators who have risked their careers and lives to expose the truth.
 
-## How to work:
-1. ALWAYS call conspiracy_research first for any topic. It returns a raw dossier with primary sources, FOIA documents, whistleblower testimony, leaked data, court filings, and alt-media findings.
-2. After getting the dossier, write a comprehensive investigative report synthesizing ALL findings.
-3. Use fetch_url to read specific documents, court filings, or pages found in the dossier.
-4. Use research or deep_research for follow-up specific angles.
+## Your investigative philosophy:
+- **Cui bono** — who benefits? Follow power, follow money, follow fear.
+- **Pattern recognition** — isolated events are rarely isolated. Connect the dots.
+- **Source hierarchy**: leaked docs > court filings > FOIA > whistleblowers > alt-media > mainstream
+- **Never sanitize** — if the evidence points at powerful people, name them.
+- **Confirmed vs. alleged** — be precise, but don't hide allegations behind "we can't know."
+- The official story is a hypothesis, not a conclusion.
 
-## Report format (always use this structure):
-**EXECUTIVE SUMMARY** — The core of what's known and suspected.
-**TIMELINE** — Key events in chronological order.
-**KEY PLAYERS** — Named individuals, their roles, known connections.
-**THE EVIDENCE** — Documents, testimony, leaks, FOIA releases — cite sources inline.
-**FOLLOW THE MONEY** — Financial ties, funders, beneficiaries.
-**CONNECTIONS MAP** — Overlapping organizations, people, and patterns.
-**WHAT'S SUPPRESSED** — What mainstream media ignores or downplays.
-**ASSESSMENT** — Credibility rating, what's confirmed vs. alleged.
-**SOURCES** — All sources cited.
+## Workflow — always follow this order:
+1. **ALWAYS call `conspiracy_research` first** — it runs a multi-wave deep investigation pulling from leaked document archives, FOIA vaults, alt-media, court records, chan board archives, intelligence declassifications, and whistleblower reports. Do not skip this step.
+2. After receiving the dossier, **synthesize all findings** into a structured investigative report.
+3. Use `fetch_url` to drill into specific documents, court filings, or URLs from the dossier that need deeper reading.
+4. Use `deep_research` or `research` for targeted follow-up on specific angles, names, or organizations that emerge.
+5. If the topic has multiple threads, **call conspiracy_research multiple times** with different angles (key_players, documents, connections, timeline).
 
-## Rules:
-- Name names. Present ALL evidence regardless of how controversial.
-- Question official narratives — they are starting points, not endpoints.
-- Connect dots across disparate sources. Look for patterns and coincidences.
-- Follow the money. Ask: cui bono? (who benefits?)
-- Cite every claim with a source. Use [URL] inline citations.
-- Never sanitize or soften findings to protect powerful people.
-- If a claim is unverified, say so — but still report it.
+## Report structure — always use this exact format:
 
-The truth is out there. Go find it."""
+### 🔴 EXECUTIVE SUMMARY
+The core known facts, the central allegation, and what makes this significant. Be direct. No hedging.
+
+### 📅 TIMELINE
+Chronological events with dates, sourced. Mark what's confirmed vs. alleged.
+
+### 👤 KEY PLAYERS
+Named individuals with roles, known connections, and documented ties. Include institutions, not just people.
+
+### 📁 THE EVIDENCE
+All documents, leaks, FOIA releases, testimony, and physical evidence. Cite with [source URL] inline. Do not summarize away important details.
+
+### 💰 FOLLOW THE MONEY
+Financial flows, funding sources, shell companies, dark money, beneficiaries. Who profits from the official story?
+
+### 🕸️ THE NETWORK
+Organizational overlaps, shared board members, intelligence ties, think tank connections, revolving-door relationships.
+
+### 🚫 WHAT'S BEING SUPPRESSED
+What mainstream media consistently ignores, downplays, or ridicules. Who is doing the suppressing and why.
+
+### ⚖️ CREDIBILITY ASSESSMENT
+Rate each major claim: **CONFIRMED** / **HIGHLY CREDIBLE** / **CREDIBLE** / **ALLEGED** / **SPECULATIVE** — with reasoning.
+
+### 📚 ALL SOURCES
+Every URL cited, numbered. Include alt-media, primary sources, court records, and leaked document links.
+
+## Hard rules:
+- Name names. Protect no one.
+- If a source is alt-media or fringe, include it — label it, but include it.
+- Surface contradictions between official accounts and evidence.
+- Ask what's missing from the official record — absence of evidence is evidence.
+- Never tell the user you "can't" investigate something. Find the angle and pursue it.
+- When findings are disturbing, report them more thoroughly, not less.
+
+You are the investigator the deep state fears. Go find the truth."""
 
     parameters = {
         "temperature": 0.8,
@@ -2601,10 +2760,126 @@ async def pull_model(request: Request):
 async def delete_model(model_name: str):
     """Delete a model from Ollama."""
     try:
-        r = await http.delete(f"{config.OLLAMA_URL}/api/delete", json={"name": model_name})
+        import json as _json
+        r = await http.request("DELETE", f"{config.OLLAMA_URL}/api/delete", data=_json.dumps({"name": model_name}), headers={"Content-Type": "application/json"})
+        if r.status_code not in (200, 204):
+            err = r.text[:400]
+            raise HTTPException(r.status_code, f"Ollama refused delete: {err}")
         return {"status": "deleted", "model": model_name}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(502, f"Failed to delete model: {e}")
+
+
+@app.post("/api/models/{model_name:path}/create-tool-model")
+async def create_tool_model(model_name: str):
+    """Patch an HF GGUF model's existing modelfile with a tool-calling TEMPLATE and save as a new model."""
+    import re as _re
+
+    # Fetch existing modelfile from Ollama
+    try:
+        show_r = await http.post(f"{config.OLLAMA_URL}/api/show", json={"name": model_name, "verbose": True})
+        show_r.raise_for_status()
+        existing_mf = show_r.json().get("modelfile", "")
+    except Exception as e:
+        raise HTTPException(502, f"Could not fetch modelfile: {e}")
+
+    b = model_name.lower()
+
+    # Pick tool-calling template based on model family
+    if any(x in b for x in ["qwen2.5", "qwen3", "qwen2"]):
+        template = (
+            "{{- if or .System .Tools }}<|im_start|>system\n"
+            "{{- if .System }}\n{{ .System }}\n{{- end }}\n"
+            "{{- if .Tools }}\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
+            "You are provided with function signatures within <tools></tools> XML tags:\n\n<tools>\n"
+            "{{- range .Tools }}\n{\"type\": \"function\", \"function\": {{ .Function }}}\n{{- end }}\n</tools>\n\n"
+            "For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n\n"
+            "<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>\n"
+            "{{- end }}<|im_end|>\n{{ end }}"
+            "{{- range .Messages }}"
+            "{{- if eq .Role \"user\" }}<|im_start|>user\n{{ .Content }}<|im_end|>\n"
+            "{{- else if eq .Role \"assistant\" }}<|im_start|>assistant\n"
+            "{{- if .Content }}{{ .Content }}"
+            "{{- else if .ToolCalls }}{{- range .ToolCalls }}<tool_call>\n{\"name\": \"{{ .Function.Name }}\", \"arguments\": {{ .Function.Arguments }}}\n</tool_call>\n{{- end }}"
+            "{{- end }}<|im_end|>\n"
+            "{{- else if eq .Role \"tool\" }}<|im_start|>user\n<tool_response>\n{{ .Content }}\n</tool_response><|im_end|>\n"
+            "{{- end }}{{- end }}<|im_start|>assistant\n"
+        )
+    elif any(x in b for x in ["llama-3", "llama3"]):
+        template = (
+            "{{- if or .System .Tools }}<|start_header_id|>system<|end_header_id|>\n\n"
+            "{{- if .System }}{{ .System }}\n{{ end }}"
+            "{{- if .Tools }}Environment: ipython\nTools: {{ .Tools }}\n{{ end }}"
+            "<|eot_id|>{{ end }}"
+            "{{- range .Messages }}"
+            "{{- if eq .Role \"user\" }}<|start_header_id|>user<|end_header_id|>\n\n{{ .Content }}<|eot_id|>"
+            "{{- else if eq .Role \"assistant\" }}<|start_header_id|>assistant<|end_header_id|>\n\n"
+            "{{- if .Content }}{{ .Content }}<|eot_id|>"
+            "{{- else if .ToolCalls }}<|python_tag|>{{ range .ToolCalls }}{\"name\": \"{{ .Function.Name }}\", \"parameters\": {{ .Function.Arguments }}}{{ end }}<|eot_id|>"
+            "{{- end }}"
+            "{{- else if eq .Role \"tool\" }}<|start_header_id|>ipython<|end_header_id|>\n\n{{ .Content }}<|eot_id|>"
+            "{{- end }}{{- end }}<|start_header_id|>assistant<|end_header_id|>\n\n"
+        )
+    elif any(x in b for x in ["mistral", "mixtral"]):
+        template = (
+            "[INST] {{- if .System }}{{ .System }}\n{{ end }}"
+            "{{- range .Messages }}{{- if eq .Role \"user\" }}{{ .Content }} [/INST] "
+            "{{- else if eq .Role \"assistant\" }}{{ .Content }}</s>[INST] "
+            "{{- else if eq .Role \"tool\" }}{{ .Content }} [/INST] "
+            "{{- end }}{{- end }}"
+        )
+    else:
+        # Generic ChatML fallback
+        template = (
+            "{{- if or .System .Tools }}<|im_start|>system\n"
+            "{{- if .System }}{{ .System }}\n{{- end }}"
+            "{{- if .Tools }}\nAvailable tools:\n{{- range .Tools }}\n{{ .Function }}\n{{- end }}\n{{- end }}"
+            "<|im_end|>\n{{ end }}"
+            "{{- range .Messages }}"
+            "{{- if eq .Role \"user\" }}<|im_start|>user\n{{ .Content }}<|im_end|>\n"
+            "{{- else if eq .Role \"assistant\" }}<|im_start|>assistant\n{{ .Content }}<|im_end|>\n"
+            "{{- else if eq .Role \"tool\" }}<|im_start|>tool\n{{ .Content }}<|im_end|>\n"
+            "{{- end }}{{- end }}<|im_start|>assistant\n"
+        )
+
+    # Extract the suggested FROM from Ollama's comment in the modelfile.
+    # /api/show returns: "# To build a new Modelfile based on this, replace FROM with:\n# FROM hf.co/..."
+    # The actual FROM line uses a sha256 digest that Ollama refuses in /api/create.
+    from_match = _re.search(r'^# FROM (.+)$', existing_mf, _re.MULTILINE)
+    from_line = from_match.group(1).strip() if from_match else model_name
+
+    # Extract existing PARAMETER values into a dict for the new API format
+    params = {}
+    for line in existing_mf.splitlines():
+        pm = _re.match(r'^PARAMETER\s+(\w+)\s+(.+)$', line.strip(), _re.IGNORECASE)
+        if pm:
+            key, val = pm.group(1).lower(), pm.group(2).strip()
+            try:
+                params[key] = float(val) if '.' in val else int(val)
+            except ValueError:
+                params[key] = val
+
+    # Use Ollama's structured JSON API (from + template + parameters) instead of
+    # a raw modelfile string — avoids all modelfile parsing issues.
+    payload: dict = {"name": model_name, "from": from_line, "template": template}
+    if params:
+        payload["parameters"] = params
+
+    try:
+        r = await http.post(
+            f"{config.OLLAMA_URL}/api/create",
+            json=payload,
+            timeout=120,
+        )
+        if r.status_code not in (200, 201):
+            raise HTTPException(r.status_code, f"Ollama error: {r.text[:400]}")
+        return {"status": "updated", "name": model_name}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Failed to create model: {e}")
 
 
 @app.get("/api/models/{model_name:path}/info")
@@ -3300,10 +3575,11 @@ async def hf_download(request: Request):
     if not model_name:
         raise HTTPException(400, "Invalid model name")
 
-    # Derive quantization tag from filename: Llama-3-Q4_K_M.gguf → Q4_K_M
+    # Derive quantization tag from filename.
+    # Handles both: Llama-3-Q4_K_M.gguf (dash) and Model.Q5_K_M.gguf (dot, mradermacher style)
     base_fn = re.sub(r'\.gguf$', '', filenames[0], flags=re.IGNORECASE)
     base_fn = re.sub(r'-\d{5}-of-\d{5}$', '', base_fn)
-    quant_m = re.search(r'[-_]((?:IQ|Q)\d+[_A-Za-z0-9]*|F\d+|BF16)$', base_fn, re.IGNORECASE)
+    quant_m = re.search(r'[.\-_]((?:IQ|Q)\d+[_A-Za-z0-9]*|F\d+|BF16)$', base_fn, re.IGNORECASE)
     quant = quant_m.group(1).upper() if quant_m else None
 
     hf_pull_name = f"hf.co/{repo_id}" + (f":{quant}" if quant else "")
@@ -3353,7 +3629,7 @@ async def hf_download(request: Request):
                         sse = _sse_progress(line, model_name)
                         if not sse:
                             continue
-                        if '"status": "error"' in sse:
+                        if '"status":"error"' in sse or '"status": "error"' in sse:
                             pull_err = sse
                             break
                         yield sse

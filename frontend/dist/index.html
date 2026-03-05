@@ -7,10 +7,195 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⟩</text></svg>">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body, #root { height: 100%; width: 100%; overflow: hidden; }
+  html, body { height: 100%; width: 100%; overflow: hidden; }
+
+  /* App starts slightly above + invisible — fades and drifts into place */
+  #root {
+    height: 100%; width: 100%; overflow: hidden;
+    transform: translateY(-28px);
+    opacity: 0;
+    will-change: transform, opacity;
+  }
+  #root.hc-reveal {
+    transform: translateY(0) !important;
+    opacity: 1 !important;
+    transition: transform 1.1s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.9s ease !important;
+  }
+
+  /* ── Loading Screen ── */
+  #hc-loading {
+    position: fixed; inset: 0; z-index: 99999;
+    background: linear-gradient(135deg, #1a1e28 0%, #242933 40%, #2E3440 100%);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    overflow: hidden;
+  }
+
+  /* Background clears gently after items have drifted away */
+  #hc-loading.hc-dismiss {
+    animation: hcBgClear 1.2s ease 0.4s forwards;
+    pointer-events: none;
+  }
+  @keyframes hcBgClear {
+    0%   { background: linear-gradient(135deg,#1a1e28 0%,#242933 40%,#2E3440 100%); }
+    100% { background: transparent; }
+  }
+
+  /* ── Graceful drop — slow drift off the bottom ── */
+  @keyframes hcDrop {
+    0%   { transform: translateY(0)     rotate(0deg)              scale(1);   opacity: 1; }
+    15%  { transform: translateY(-6px)  rotate(calc(var(--hc-spin,4deg)*-0.3)) scale(1.02); opacity: 1; }
+    100% { transform: translateY(90vh)  rotate(var(--hc-spin,4deg))            scale(0.85); opacity: 0; }
+  }
+
+  .hc-drop {
+    animation: hcDrop var(--hc-dur,1.0s) cubic-bezier(0.4, 0, 0.6, 1) var(--hc-delay,0s) forwards !important;
+  }
+
+  /* grid bg */
+  #hc-loading::before {
+    content: ''; position: absolute; inset: 0; opacity: .025;
+    background-image: linear-gradient(#88C0D0 1px, transparent 1px), linear-gradient(90deg, #88C0D0 1px, transparent 1px);
+    background-size: 64px 64px;
+    transition: opacity 0.2s;
+  }
+  #hc-loading.hc-dismiss::before { opacity: 0; }
+
+  .hc-load-logo {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #88C0D0;
+    box-shadow: 0 0 20px #88C0D0cc, 0 0 48px #88C0D055;
+    margin-bottom: 28px;
+    animation: hcGlow 2.5s ease-in-out infinite;
+  }
+  @keyframes hcGlow {
+    0%,100% { box-shadow: 0 0 20px #88C0D0cc, 0 0 48px #88C0D055; }
+    50%      { box-shadow: 0 0 32px #88C0D0ff, 0 0 72px #88C0D09a; }
+  }
+
+  .hc-load-title {
+    font-size: 11px; letter-spacing: 4px; text-transform: uppercase;
+    color: #4C566A; margin-bottom: 36px; font-weight: 700;
+  }
+
+  .hc-load-card {
+    position: relative; max-width: 520px; width: 88%;
+    background: rgba(59,66,82,0.55); backdrop-filter: blur(16px);
+    border: 1px solid rgba(136,192,208,0.18);
+    border-radius: 18px; padding: 36px 40px;
+    text-align: center;
+    animation: hcSlideUp .9s cubic-bezier(.16,1,.3,1) both;
+  }
+  @keyframes hcSlideUp {
+    from { opacity: 0; transform: translateY(28px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .hc-load-quote {
+    font-size: 15px; line-height: 1.75; color: #D8DEE9;
+    font-style: italic; margin-bottom: 14px;
+  }
+  .hc-load-attr {
+    font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: #81A1C1;
+  }
+
+  /* floating emojis */
+  .hc-em {
+    position: fixed; font-size: 22px; pointer-events: none; user-select: none;
+    animation: hcFloat var(--hc-float-dur,4s) ease-in-out infinite var(--hc-float-del,0s);
+  }
+  @keyframes hcFloat {
+    0%   { transform: translateY(0px)   rotate(-4deg) scale(1);    opacity: .7; }
+    30%  { transform: translateY(-18px) rotate( 4deg) scale(1.06); opacity: 1; }
+    60%  { transform: translateY(-8px)  rotate(-2deg) scale(.97);  opacity: .8; }
+    100% { transform: translateY(0px)   rotate(-4deg) scale(1);    opacity: .7; }
+  }
+
+  /* pulsing dots */
+  .hc-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: #88C0D0;
+    box-shadow: 0 0 8px #88C0D0aa;
+    display: inline-block; margin: 0 4px;
+    animation: hcPulse 1.4s ease-in-out infinite;
+  }
+  @keyframes hcPulse {
+    0%,100% { opacity: .3; transform: scale(.7); }
+    50%      { opacity: 1;  transform: scale(1.2); }
+  }
+
+  .hc-load-status {
+    margin-top: 26px; font-size: 10px; color: #4C566A;
+    letter-spacing: 2px; text-transform: uppercase;
+    animation: hcSlideUp .9s .3s cubic-bezier(.16,1,.3,1) both;
+  }
 </style>
 </head>
 <body>
+
+<!-- ═══════════════════════════════════════════
+     LOADING SCREEN — pure HTML, no React dep
+     Dismissed by React once models load
+     ═══════════════════════════════════════════ -->
+<div id="hc-loading">
+  <!-- Floating emojis scattered around the viewport -->
+  <span class="hc-em" style="top:7%;  left:8%;  --hc-float-dur:4.1s;--hc-float-del:0s;   --hc-spin:-12deg">✨</span>
+  <span class="hc-em" style="top:12%; right:10%;--hc-float-dur:3.7s;--hc-float-del:.4s;  --hc-spin: 18deg">🔭</span>
+  <span class="hc-em" style="top:28%; left:4%;  --hc-float-dur:5.2s;--hc-float-del:.9s;  --hc-spin:-20deg">✝️</span>
+  <span class="hc-em" style="top:22%; right:6%; --hc-float-dur:4.6s;--hc-float-del:.2s;  --hc-spin: 15deg">💫</span>
+  <span class="hc-em" style="top:55%; left:5%;  --hc-float-dur:4.9s;--hc-float-del:.6s;  --hc-spin:-10deg">🧬</span>
+  <span class="hc-em" style="top:60%; right:7%; --hc-float-dur:3.9s;--hc-float-del:1.1s; --hc-spin: 22deg">📖</span>
+  <span class="hc-em" style="top:75%; left:11%; --hc-float-dur:5.5s;--hc-float-del:.3s;  --hc-spin:-16deg">🌌</span>
+  <span class="hc-em" style="top:78%; right:12%;--hc-float-dur:4.3s;--hc-float-del:.7s;  --hc-spin: 9deg">💡</span>
+  <span class="hc-em" style="top:40%; left:2%;  --hc-float-dur:6.1s;--hc-float-del:.1s;  --hc-spin:-25deg">🕊️</span>
+  <span class="hc-em" style="top:45%; right:3%; --hc-float-dur:4.7s;--hc-float-del:.5s;  --hc-spin: 14deg">⭐</span>
+  <span class="hc-em" style="top:88%; left:20%; --hc-float-dur:5.0s;--hc-float-del:.8s;  --hc-spin:-8deg">🙏</span>
+  <span class="hc-em" style="top:85%; right:22%;--hc-float-dur:3.8s;--hc-float-del:.2s;  --hc-spin: 30deg">🔬</span>
+
+  <div class="hc-load-logo"></div>
+  <div class="hc-load-title">HyprChat</div>
+
+  <div class="hc-load-card">
+    <div class="hc-load-quote" id="hc-quote-text"></div>
+    <div class="hc-load-attr"  id="hc-quote-attr"></div>
+  </div>
+
+  <div class="hc-load-status">
+    <span class="hc-dot" style="animation-delay:0s"></span>
+    <span class="hc-dot" style="animation-delay:.18s"></span>
+    <span class="hc-dot" style="animation-delay:.36s"></span>
+    <span style="margin-left:10px">Initializing</span>
+  </div>
+</div>
+
+<script>
+(function(){
+  var defaults=[
+    {t:'"The fear of the LORD is the beginning of wisdom, and knowledge of the Holy One is understanding."',a:'Proverbs 9:10'},
+    {t:'"The heavens declare the glory of God; the skies proclaim the work of his hands."',a:'Psalm 19:1'},
+    {t:'"Science without religion is lame, religion without science is blind."',a:'Albert Einstein'},
+    {t:'"Two things fill the mind with ever-increasing wonder and awe — the starry heavens above me and the moral law within me."',a:'Immanuel Kant'},
+    {t:'"For in him we live and move and have our being."',a:'Acts 17:28'},
+    {t:'"The more I study science, the more I believe in God."',a:'Albert Einstein'},
+    {t:'"I am the way, the truth, and the life."',a:'John 14:6'},
+    {t:'"We are made of star-stuff. We are a way for the cosmos to know itself."',a:'Carl Sagan'},
+    {t:'"The important thing is not to stop questioning. Curiosity has its own reason for existing."',a:'Albert Einstein'},
+    {t:'"For wisdom is more precious than rubies, and nothing you desire can compare with her."',a:'Proverbs 8:11'},
+    {t:'"For God so loved the world that he gave his one and only Son, that whoever believes in him shall not perish but have eternal life."',a:'John 3:16'},
+    {t:'"Equipped with his five senses, man explores the universe around him and calls the adventure Science."',a:'Edwin Hubble'},
+    {t:'"The universe is not only stranger than we imagine, it is stranger than we can imagine."',a:'J.B.S. Haldane'},
+    {t:'"Ask and it will be given to you; seek and you will find; knock and the door will be opened to you."',a:'Matthew 7:7'},
+  ];
+  var custom=[];
+  try{custom=JSON.parse(localStorage.getItem('hc-custom-quotes')||'[]');}catch{}
+  var all=defaults.concat(custom.filter(function(q){return q&&q.t;}));
+  var q=all[Math.floor(Math.random()*all.length)];
+  var txt=q.t;
+  if(txt[0]!=='"')txt='"'+txt+'"';
+  document.getElementById('hc-quote-text').textContent=txt;
+  document.getElementById('hc-quote-attr').textContent=q.a?'— '+q.a:'';
+})();
+</script>
+
 <div id="root"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
@@ -140,7 +325,7 @@ const Pill = ({ev,t,expanded,onToggle})=>{
   const marqueeKey = Math.floor(status.length / 30);
 
   return <div style={{animation:"fadeIn .3s",marginBottom:2}}>
-    <div onClick={ev.data?.detail?onToggle:undefined} style={{display:"inline-flex",alignItems:"center",gap:5,padding:"3px 10px",background:bg,border:`1px solid ${bc}`,borderRadius:expanded?"8px 8px 0 0":8,fontSize:11,color:tc,cursor:ev.data?.detail?"pointer":"default",maxWidth:"100%",transition:"all .2s",animation:isActive?`fadeIn .3s, pillGlow 2s ease-in-out infinite`:"fadeIn .3s",boxShadow:isActive?`0 0 6px ${bc}`:"none"}}>
+    <div onClick={ev.data?.detail?onToggle:undefined} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 12px",background:bg,border:`1px solid ${bc}`,borderRadius:expanded?"9px 9px 0 0":9,fontSize:12,color:tc,cursor:ev.data?.detail?"pointer":"default",maxWidth:"100%",transition:"all .2s",animation:isActive?`fadeIn .3s, pillGlow 2s ease-in-out infinite`:"fadeIn .3s",boxShadow:isActive?`0 0 8px ${bc}`:"none"}}>
       {isS&&!isD&&<span style={{display:"inline-block",animation:getIconAnim(toolName),flexShrink:0,lineHeight:1,transformOrigin:"center"}}>{icon}</span>}
       {isD&&<><span style={{color:t.ok,flexShrink:0,lineHeight:1}}>✓</span><span style={{flexShrink:0,lineHeight:1}}>{icon}</span></>}
       <span style={{fontWeight:600,flexShrink:0}}>{label}</span>
@@ -400,7 +585,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
         </div>)}
       </div>
     </div>}
-    <div style={{flex:1,overflowY:"auto",padding:16}}>
+    <div style={{flex:1,overflowY:"auto",padding:20}}>
       {tab==="convs"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
         {!(ws.conversations||[]).length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No conversations yet.<br/>Click "+ Add Chats" to add some.</div>}
         {(ws.conversations||[]).map(c=><div key={c.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}66`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
@@ -498,6 +683,113 @@ function SandboxSection({t,btnS,labelS}){
 }
 
 // ============================================================
+// ModelPicker — custom dropdown replacing plain <select> for model selection
+function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact=false}){
+  const [open,setOpen]=useState(false);
+  const [dropPos,setDropPos]=useState({top:0,left:0,width:220});
+  const triggerRef=useRef(null);
+  useEffect(()=>{
+    if(!open)return;
+    const handler=(e)=>{if(triggerRef.current&&!triggerRef.current.contains(e.target))setOpen(false);};
+    document.addEventListener("mousedown",handler);
+    return()=>document.removeEventListener("mousedown",handler);
+  },[open]);
+  const openDropdown=()=>{
+    if(triggerRef.current){
+      const r=triggerRef.current.getBoundingClientRect();
+      setDropPos({top:r.bottom+4,left:r.left,width:Math.max(r.width,240)});
+    }
+    setOpen(p=>!p);
+  };
+  const famIcon=(n)=>{const b=(n||"").toLowerCase();if(b.includes("qwen"))return"🌸";if(b.includes("llama"))return"🦙";if(b.includes("mistral")||b.includes("mixtral"))return"💨";if(b.includes("gemma"))return"💎";if(b.includes("phi"))return"φ";if(b.includes("deepseek"))return"🔍";if(b.includes("coder")||b.includes("codestral"))return"💻";if(b.includes("wizard"))return"🧙";if(b.includes("hf.co"))return"🤗";return"🤖";};
+  const szCol=(tag)=>{const l=(tag||"").toLowerCase();if(l.match(/70b|65b|72b/))return t.err;if(l.match(/30b|32b|34b/))return t.warm;if(l.match(/13b|14b|27b/))return t.acc;if(l.match(/7b|8b/))return t.ok;if(l.match(/1b|3b|4b/))return t.f1;return t.mut;};
+  const modelCaps=(m)=>{const b=(m||"").toLowerCase();const caps=[];
+    if(b.match(/embed/))return[{emoji:"🔢",color:"#9b59b6",label:"Embed"}];
+    if(b.match(/llava|vision|[\-:]vl[\-:$]/)||b.match(/vl\b/))caps.push({emoji:"👁",color:"#e67e22",label:"Vision"});
+    if(b.match(/qwen3|deepseek-r1|r1[\-:]|qwq/))caps.push({emoji:"💭",color:"#c792ea",label:"Thinking"});
+    if(b.match(/coder|codestral|starcoder|deepseek-coder/))caps.push({emoji:"💻",color:"#2ecc71",label:"Code"});
+    if(!b.match(/embed/)&&b.match(/qwen|llama3|llama-3|mistral|mixtral|command|hermes|deepseek|phi3|phi-3|wizardlm|gemma|llama3\./))caps.push({emoji:"🔧",color:"#3498db",label:"Tools"});
+    return caps;};
+  const [name,tag="latest"]=(value||"").split(":");
+  const sc=szCol(tag);
+  const caps=modelCaps(value||"");
+  const md=modelDetails?.[value]||{};
+  const paramSz=md.details?.parameter_size||"";
+  return <div ref={triggerRef} style={{position:"relative",...style}}>
+    <div onClick={openDropdown} style={{display:"flex",alignItems:"center",gap:6,padding:compact?"3px 8px":"5px 10px",background:open?`${t.acc}15`:t.bgDeep,border:`1px solid ${open?t.acc:t.brd}${open?"55":"33"}`,borderRadius:8,cursor:"pointer",minWidth:compact?100:150,transition:"all .15s",userSelect:"none"}}>
+      <span style={{fontSize:compact?12:14,flexShrink:0}}>{famIcon(name)}</span>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontSize:compact?10:11,fontWeight:600,color:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name||"Select model"}</div>
+        {!compact&&<div style={{display:"flex",gap:3,flexWrap:"wrap",marginTop:1}}>
+          <span style={{fontSize:8,color:sc,fontWeight:700}}>{tag}</span>
+          {paramSz&&<span style={{fontSize:8,color:t.mut}}>{paramSz}</span>}
+          {caps.map(c=><span key={c.label} style={{fontSize:7,padding:"0px 3px",borderRadius:3,background:`${c.color}20`,color:c.color,fontWeight:700,border:`1px solid ${c.color}33`}}>{c.emoji}</span>)}
+        </div>}
+      </div>
+      <span style={{fontSize:9,color:t.mut,flexShrink:0,transition:"transform .2s",transform:open?"rotate(180deg)":"none"}}>▾</span>
+    </div>
+    {open&&(()=>{
+      const getMaker=(m)=>{
+        if(m.startsWith("hf.co/")){const parts=m.replace("hf.co/","").split("/");return parts[0]||"HuggingFace";}
+        const b=m.toLowerCase();
+        if(b.includes("qwen"))return"Alibaba";
+        if(b.includes("llama"))return"Meta";
+        if(b.includes("mistral")||b.includes("mixtral"))return"Mistral AI";
+        if(b.includes("gemma"))return"Google";
+        if(b.includes("phi"))return"Microsoft";
+        if(b.includes("deepseek"))return"DeepSeek";
+        if(b.includes("command"))return"Cohere";
+        if(b.includes("hermes"))return"NousResearch";
+        if(b.includes("wizard")||b.includes("vicuna"))return"WizardLM";
+        if(b.includes("codestral")||b.includes("starcoder"))return"Mistral AI";
+        return"Other";
+      };
+      const grouped={};
+      [...models].sort((a,b)=>a.localeCompare(b)).forEach(m=>{
+        const mk=getMaker(m);
+        if(!grouped[mk])grouped[mk]=[];
+        grouped[mk].push(m);
+      });
+      const sortedMakers=Object.keys(grouped).sort((a,b)=>{
+        // HuggingFace authors after main makers, "Other" last
+        if(a==="Other")return 1;if(b==="Other")return-1;
+        return a.localeCompare(b);
+      });
+      return <div style={{position:"fixed",top:dropPos.top,left:dropPos.left,minWidth:dropPos.width,maxWidth:380,background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:10,boxShadow:`0 8px 32px #00000077`,zIndex:99999,maxHeight:360,overflowY:"auto",padding:"4px"}}>
+        {sortedMakers.map(maker=><div key={maker}>
+          <div style={{padding:"5px 10px 3px",fontSize:8,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.8,borderTop:maker===sortedMakers[0]?"none":`1px solid ${t.brd}22`,marginTop:maker===sortedMakers[0]?0:4,paddingTop:maker===sortedMakers[0]?5:7}}>{maker}</div>
+          {grouped[maker].map(m=>{
+            const isHF=m.startsWith("hf.co/");
+            const [mn,mt="latest"]=m.split(":");
+            const displayName=isHF?m.replace("hf.co/","").split("/").pop()?.split(":")[0]||mn:mn;
+            const sc2=szCol(mt);const sel=m===value;
+            const mc=modelCaps(m);const mdi=modelDetails?.[m]||{};const ps=mdi.details?.parameter_size||"";
+            return <div key={m} onClick={()=>{onChange(m);setOpen(false);}}
+              style={{display:"flex",alignItems:"center",gap:8,padding:"6px 9px",borderRadius:7,cursor:"pointer",background:sel?`${t.acc}18`:isHF?`#ff660008`:"transparent",border:`1px solid ${sel?t.acc:isHF?"#ff660033":"transparent"}`,marginBottom:1,transition:"background .1s"}}
+              onMouseEnter={e=>{if(!sel)e.currentTarget.style.background=isHF?`#ff660015`:`${t.surface}88`;}}
+              onMouseLeave={e=>{if(!sel)e.currentTarget.style.background=isHF?`#ff660008`:"transparent";}}>
+              <span style={{fontSize:15,flexShrink:0}}>{isHF?"🤗":famIcon(mn)}</span>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:"flex",alignItems:"center",gap:4}}>
+                  <div style={{fontSize:11,fontWeight:sel?700:500,color:sel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{displayName}</div>
+                  {isHF&&<span style={{fontSize:7,padding:"1px 4px",borderRadius:3,background:"#ff660022",color:"#ff6600",fontWeight:700,flexShrink:0,border:"1px solid #ff660033"}}>HF</span>}
+                </div>
+                <div style={{display:"flex",gap:3,alignItems:"center",marginTop:1,flexWrap:"wrap"}}>
+                  <span style={{fontSize:8,color:sc2,fontWeight:700}}>{mt}</span>
+                  {ps&&<span style={{fontSize:8,color:t.mut}}>{ps}</span>}
+                  {mc.map(c=><span key={c.label} style={{fontSize:8,padding:"1px 4px",borderRadius:4,background:`${c.color}20`,color:c.color,fontWeight:600,border:`1px solid ${c.color}33`}}>{c.emoji} {c.label}</span>)}
+                </div>
+              </div>
+              {sel&&<span style={{fontSize:10,color:t.acc,flexShrink:0}}>✓</span>}
+            </div>;
+          })}
+        </div>)}
+      </div>;
+    })()}
+  </div>;
+}
+
+// ============================================================
 function HyprChat(){
   const [tm,setTm]=useState(()=>{try{return localStorage.getItem("hc-theme")||"nord";}catch{return "nord";}});
   const [fi,setFi]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font")||"0");}catch{return 0;}});
@@ -508,9 +800,9 @@ function HyprChat(){
   const [compactMode,setCompactMode]=useState(()=>{try{return localStorage.getItem("hc-compact")==="1";}catch{return false;}});
   const [autoExpandThink,setAutoExpandThink]=useState(()=>{try{return localStorage.getItem("hc-auto-expand-think")==="1";}catch{return false;}});
   const [lastPersonaId,setLastPersonaId]=useState(()=>{try{return localStorage.getItem("hc-last-persona")||null;}catch{return null;}});
-  const [fontSize,setFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font-size")||"13");}catch{return 13;}});
-  const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"13");}catch{return 13;}});
-  const [chatWidth,setChatWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-w")||"760");}catch{return 760;}});
+  const [fontSize,setFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font-size")||"14");}catch{return 14;}});
+  const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"14");}catch{return 14;}});
+  const [chatWidth,setChatWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-w")||"880");}catch{return 880;}});
   const [wsModel,setWsModel]=useState(()=>{try{return localStorage.getItem("hc-ws-model")||"qwen2.5:7b";}catch{return "qwen2.5:7b";}});
   const [ctxTokens,setCtxTokens]=useState(0);
   const [genTokens,setGenTokens]=useState(0);
@@ -518,6 +810,9 @@ function HyprChat(){
   const [previewContent,setPreviewContent]=useState(null);
   const [previewError,setPreviewError]=useState(null);
   const [showChangelog,setShowChangelog]=useState(false);
+  const [customQuotes,setCustomQuotes]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-custom-quotes")||"[]");}catch{return [];}});
+  const [newQuoteText,setNewQuoteText]=useState("");
+  const [newQuoteAttr,setNewQuoteAttr]=useState("");
   const [changelogContent,setChangelogContent]=useState(null);
   const [ollamaUrl,setOllamaUrl]=useState("");
   const [ollamaUrlSaving,setOllamaUrlSaving]=useState(false);
@@ -566,6 +861,7 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-font-size",fontSize);}catch{}},[fontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-ui-font-size",uiFontSize);}catch{}},[uiFontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
+  useEffect(()=>{try{localStorage.setItem("hc-custom-quotes",JSON.stringify(customQuotes));}catch{}},[customQuotes]);
   useEffect(()=>{try{localStorage.setItem("hc-ws-model",wsModel);}catch{}},[wsModel]);
   useEffect(()=>{try{localStorage.setItem("hc-model-params",JSON.stringify(modelParams));}catch{}},[modelParams]);
   useEffect(()=>{try{localStorage.setItem("hc-prompts",JSON.stringify(prompts));}catch{}},[prompts]);
@@ -577,6 +873,12 @@ function HyprChat(){
   const [streaming,setStreaming]=useState(false);
   const [sidebar,setSidebar]=useState(true);
   const [models,setModels]=useState([]);
+  const [modelDetails,setModelDetails]=useState({});
+  const [modelInfoCache,setModelInfoCache]=useState({});
+  const [modelInfoLoading,setModelInfoLoading]=useState(false);
+  const [showModelfile,setShowModelfile]=useState(false);
+  const [hfInstalledTab,setHfInstalledTab]=useState(false);
+  const [makingToolModel,setMakingToolModel]=useState(null); // model name currently being processed
   const [sq,setSq]=useState("");
   const [copied,setCopied]=useState(null);
   const [tokC,setTokC]=useState(0);
@@ -621,7 +923,7 @@ function HyprChat(){
   const [quickResults,setQuickResults]=useState([]); // per send
   const [searchLoading,setSearchLoading]=useState(false);
 
-  const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0);
+  const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0),chatScrollRef=useRef(null);
   const act = convs.find(c=>c.id===actId);
 
   // Save helpers — persist to backend
@@ -642,7 +944,41 @@ function HyprChat(){
 
   // Load
   useEffect(()=>{
-    fetch(`${API}/api/models`).then(r=>r.json()).then(d=>setModels(d.models||[])).catch(()=>setModels(["qwen3.5:27b","qwen3-coder:30b"]));
+    const dismissLoader=(()=>{
+      let called=false;
+      return ()=>{
+        if(called)return; called=true;
+        const el=document.getElementById('hc-loading');
+        const root=document.getElementById('root');
+        if(!el)return;
+        // 1. App falls in from above
+        if(root){root.classList.add('hc-reveal');}
+        // 2. Each element drifts down with gentle staggered delays
+        const drops=[
+          {sel:'.hc-load-logo',  delay:'0s',    dur:'0.9s',  spin:'0deg'},
+          {sel:'.hc-load-title', delay:'0.08s', dur:'0.95s', spin:'2deg'},
+          {sel:'.hc-load-status',delay:'0.14s', dur:'0.95s', spin:'-2deg'},
+          {sel:'.hc-load-card',  delay:'0.22s', dur:'1.1s',  spin:'1deg'},
+        ];
+        drops.forEach(({sel,delay,dur,spin})=>{
+          const node=el.querySelector(sel);
+          if(node){node.style.setProperty('--hc-delay',delay);node.style.setProperty('--hc-dur',dur);node.style.setProperty('--hc-spin',spin);node.classList.add('hc-drop');}
+        });
+        // Emojis drift down one by one, gently staggered
+        el.querySelectorAll('.hc-em').forEach((em,i)=>{
+          const delay=(i*0.055).toFixed(3)+'s';
+          const dur=(0.85+i*0.02).toFixed(2)+'s';
+          em.style.setProperty('--hc-delay',delay);
+          em.style.setProperty('--hc-dur',dur);
+          em.classList.add('hc-drop');
+        });
+        // 3. Background fades after items have cleared
+        el.classList.add('hc-dismiss');
+        setTimeout(()=>{if(el.parentNode)el.parentNode.removeChild(el);},1800);
+      };
+    })();
+    setTimeout(dismissLoader,5000); // fallback
+    fetch(`${API}/api/models`).then(r=>r.json()).then(d=>{setModels(d.models||[]);setModelDetails(d.model_details||{});dismissLoader();}).catch(()=>{setModels(["qwen3.5:27b","qwen3-coder:30b"]);dismissLoader();});
     fetch(`${API}/api/conversations`).then(r=>r.json()).then(cs=>{if(cs.length){
       const isCouncil=v=>v==="1"||v===1||v===true;
       setConvs(cs.map(c=>({...c, messages: [], is_council: isCouncil(c.is_council), council_config_id: c.council_config_id||null})));
@@ -712,7 +1048,13 @@ function HyprChat(){
     if(reqId===loadReqRef.current) setLoadingConv(false);
   }, []);
 
-  useEffect(()=>{chatEnd.current?.scrollIntoView({behavior:"smooth"});},[act?.messages]);
+  useEffect(()=>{
+    const el=chatScrollRef.current;
+    if(!el)return;
+    // Only auto-scroll if user is already near the bottom (within 200px)
+    const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<200;
+    if(nearBottom)el.scrollTop=el.scrollHeight;
+  },[act?.messages]);
   useEffect(()=>{if(panel==="chat")inpRef.current?.focus();},[actId,panel]);
 
   const uConv=useCallback((id,u)=>{
@@ -770,7 +1112,7 @@ function HyprChat(){
     if(!inp.trim()||councilRunning)return;
     const cid=actId;const cv=convs.find(c=>c.id===cid);
     if(!cv?.council_config_id)return;
-    const userMsg=inp.trim();setInp("");
+    const userMsg=inp.trim();setInp("");if(inpRef.current){inpRef.current.style.height="auto";}
     // Quick search first if enabled
     let qResults=[];
     if(quickSearch&&userMsg){
@@ -938,7 +1280,8 @@ function HyprChat(){
     }else{setQuickResults([]);}
     const um={role:"user",content};
     uConv(cid,c=>({...c,title:(!c.messages||!c.messages.length)?content.slice(0,40):c.title,messages:[...(c.messages||[]),um,{role:"assistant",content:"",isS:true}]}));
-    setInp("");setAttachments([]);
+    setInp("");setAttachments([]);if(inpRef.current){inpRef.current.style.height="auto";}
+    setTimeout(()=>{if(chatScrollRef.current)chatScrollRef.current.scrollTop=chatScrollRef.current.scrollHeight;},0);
     const am=[...(cv?.messages||[]),um];
     await sendMessages(cid, am, um.content);
   };
@@ -1062,7 +1405,7 @@ function HyprChat(){
           }catch{}}
       }
       setPullProg("Done!");setPullName("");
-      const r2=await fetch(`${API}/api/models`);const d2=await r2.json();setModels(d2.models||[]);
+      const r2=await fetch(`${API}/api/models`);const d2=await r2.json();setModels(d2.models||[]);setModelDetails(d2.model_details||{});
       setTimeout(()=>setPullProg(null),2000);
     }catch(e){setPullProg(`Error: ${e.message}`);setTimeout(()=>setPullProg(null),3000);}
   };
@@ -1127,7 +1470,7 @@ function HyprChat(){
             if(d.status==="error"){setHfDownloadError(d.message);setHfDownloadProg(null);setHfDownloadPct(0);}
             else if(d.status==="done"){
               setHfDownloadProg(d.message||"✓ Done!");setHfDownloadPct(100);
-              fetch(`${API}/api/models`).then(r=>r.json()).then(d=>setModels(d.models||[])).catch(()=>{});
+              fetch(`${API}/api/models`).then(r=>r.json()).then(d=>{setModels(d.models||[]);setModelDetails(d.model_details||{});}).catch(()=>{});
               setTimeout(()=>{setHfDownloadProg(null);setHfSelectedFiles([]);setHfDownloadPct(0);},4000);
             }else if(d.status==="downloading"){
               if(d.pct)setHfDownloadPct(d.pct);
@@ -1140,6 +1483,7 @@ function HyprChat(){
     setHfDownloading(false);
   };
   const fmtSize=(bytes)=>{if(!bytes)return"?";if(bytes>1e9)return`${(bytes/1e9).toFixed(1)} GB`;if(bytes>1e6)return`${(bytes/1e6).toFixed(0)} MB`;return`${(bytes/1e3).toFixed(0)} KB`;};
+  const capTags=(n)=>{const b=(n||"").toLowerCase();const caps=[];if(b.match(/embed/))caps.push({label:"Embed",emoji:"🔢",color:"#9b59b6"});if(b.match(/llava|vision|[\-:]vl$|[\-:]vl[\-:]/))caps.push({label:"Vision",emoji:"👁",color:"#e67e22"});if(b.match(/coder|codestral|starcoder|deepseek-coder/))caps.push({label:"Code",emoji:"💻",color:"#2ecc71"});if(!b.match(/embed/)&&b.match(/qwen|llama3|llama-3|mistral|mixtral|command|hermes|deepseek|phi3|phi-3|wizardlm|gemma|llama3\./))caps.push({label:"Tools",emoji:"🔧",color:"#3498db"});return caps;};
   const isMultiPart=(files)=>files.some(f=>/\d{5}-of-\d{5}\.gguf$/i.test(f.name));
   const getPartGroups=(files)=>{
     const groups={};
@@ -1237,8 +1581,8 @@ function HyprChat(){
     });
   };
 
-  const glass={background:`${t.surface}BB`,backdropFilter:"blur(20px)",border:`1px solid ${t.brd}33`};
-  const nb=(p,ico,lab)=><button onClick={()=>setPanel(p)} title={lab} style={{width:38,height:38,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:10,cursor:"pointer",border:"none",background:panel===p?`${t.acc}20`:"transparent",color:panel===p?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0}}>{ico}{panel===p&&<div style={{position:"absolute",left:0,top:"20%",width:3,height:"60%",borderRadius:"0 3px 3px 0",background:t.acc}}/>}</button>;
+  const glass={background:`${t.surface}CC`,backdropFilter:"blur(24px)",border:`1px solid ${t.brd}44`};
+  const nb=(p,ico,lab)=><button onClick={()=>setPanel(p)} title={lab} style={{width:44,height:44,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:12,cursor:"pointer",border:"none",background:panel===p?`${t.acc}22`:"transparent",color:panel===p?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:panel===p?`0 0 10px ${t.acc}22`:"none"}}>{ico}{panel===p&&<div style={{position:"absolute",left:0,top:"18%",width:3,height:"64%",borderRadius:"0 3px 3px 0",background:t.acc,boxShadow:`0 0 6px ${t.acc}`}}/>}</button>;
   const svc=n=>{const s=health[n];return <div title={`${n}: ${s?.status||"?"}`} style={{width:6,height:6,borderRadius:"50%",background:s?.status==="ok"?t.ok:t.err,boxShadow:`0 0 6px ${s?.status==="ok"?t.ok:t.err}88`}}/>;};
   const filtC=convs.filter(c=>{
     const matchSearch=(c.title||"").toLowerCase().includes(sq.toLowerCase());
@@ -1246,10 +1590,10 @@ function HyprChat(){
     const matchTag=!activeTagFilter||tags.includes(activeTagFilter);
     return matchSearch&&matchTag;
   });
-  const inputS={width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}40`,color:t.text,padding:"8px 10px",borderRadius:6,fontFamily:font,fontSize:12,outline:"none",boxSizing:"border-box"};
-  const labelS={fontSize:10,color:t.mut,display:"block",marginBottom:4,textTransform:"uppercase",letterSpacing:.5};
-  const cardS={background:`${t.surface}88`,border:`1px solid ${t.brd}44`,borderRadius:12,padding:16,marginBottom:12,animation:"fadeIn .3s"};
-  const btnS=(c,bg)=>({background:bg||`${c}22`,border:`1px solid ${c}44`,color:c,padding:"5px 10px",borderRadius:6,cursor:"pointer",fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:5});
+  const inputS={width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"9px 12px",borderRadius:8,fontFamily:font,fontSize:13,outline:"none",boxSizing:"border-box"};
+  const labelS={fontSize:11,color:t.mut,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:.6};
+  const cardS={background:`${t.surface}88`,border:`1px solid ${t.brd}44`,borderRadius:14,padding:18,marginBottom:14,animation:"fadeIn .3s"};
+  const btnS=(c,bg)=>({background:bg||`${c}22`,border:`1px solid ${c}44`,color:c,padding:"6px 12px",borderRadius:8,cursor:"pointer",fontFamily:font,fontSize:11,display:"flex",alignItems:"center",gap:5});
 
   // ============================================================
   // PANELS
@@ -1262,15 +1606,16 @@ function HyprChat(){
   // ============================================================
   // RENDER
   // ============================================================
-  const _uiScale=uiFontSize/13;
+  const _uiScale=uiFontSize/14;
   return <div style={{height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:`linear-gradient(135deg,${t.bgDeep} 0%,${t.bg} 50%,${t.bgDeep} 100%)`,color:t.text,overflow:"hidden",position:"relative"}}>
-    <div style={{position:"absolute",inset:0,opacity:.02,zIndex:0,backgroundImage:`linear-gradient(${t.acc} 1px,transparent 1px),linear-gradient(90deg,${t.acc} 1px,transparent 1px)`,backgroundSize:"50px 50px"}}/>
+    <div style={{position:"absolute",inset:0,opacity:.025,zIndex:0,backgroundImage:`linear-gradient(${t.acc} 1px,transparent 1px),linear-gradient(90deg,${t.acc} 1px,transparent 1px)`,backgroundSize:"64px 64px"}}/>
+    <div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${t.acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:.4}}/>
 
     {/* NAV RAIL */}
-    <div style={{width:52,minWidth:52,display:"flex",flexDirection:"column",alignItems:"center",...glass,borderRight:`1px solid ${t.brd}22`,zIndex:11,padding:"10px 0",gap:2}}>
+    <div style={{width:60,minWidth:60,display:"flex",flexDirection:"column",alignItems:"center",...glass,borderRight:`1px solid ${t.brd}33`,zIndex:11,padding:"12px 0",gap:3}}>
       {/* Logo dot */}
-      <div style={{width:38,height:38,display:"flex",alignItems:"center",justifyContent:"center",marginBottom:6}}>
-        <div style={{width:10,height:10,borderRadius:"50%",background:t.acc,boxShadow:`0 0 12px ${t.acc}CC`,animation:"glow 3s ease-in-out infinite"}}/>
+      <div style={{width:44,height:44,display:"flex",alignItems:"center",justifyContent:"center",marginBottom:6}}>
+        <div style={{width:13,height:13,borderRadius:"50%",background:t.acc,boxShadow:`0 0 16px ${t.acc}DD,0 0 32px ${t.acc}55`,animation:"glow 3s ease-in-out infinite"}}/>
       </div>
       {nb("chat",<IC.Chat/>,"Chat")}
       {nb("kb",<IC.Database/>,"Knowledge Bases")}
@@ -1281,15 +1626,15 @@ function HyprChat(){
       {nb("models",<IC.Layers/>,"Model Manager")}
       <div style={{flex:1}}/>
       {nb("settings",<IC.Settings/>,"Settings")}
-      <button onClick={()=>setSidebar(p=>!p)} title={sidebar?"Hide conversations":"Show conversations"} style={{width:38,height:38,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:10,cursor:"pointer",border:"none",background:"transparent",color:t.mut,transition:"all .15s",marginTop:4}}>
+      <button onClick={()=>setSidebar(p=>!p)} title={sidebar?"Hide conversations":"Show conversations"} style={{width:44,height:44,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:12,cursor:"pointer",border:"none",background:"transparent",color:t.mut,transition:"all .15s",marginTop:4}}>
         <IC.Sidebar/>
       </button>
     </div>
 
     {/* CONVERSATION LIST */}
-    <div style={{width:sidebar?230:0,minWidth:sidebar?230:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",display:"flex",flexDirection:"column",borderRight:`1px solid ${t.brd}18`,overflow:"hidden",background:`${t.bgDeep}CC`,backdropFilter:"blur(20px)"}}>
+    <div style={{width:sidebar?252:0,minWidth:sidebar?252:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",display:"flex",flexDirection:"column",borderRight:`1px solid ${t.brd}28`,overflow:"hidden",background:`${t.bgDeep}DD`,backdropFilter:"blur(24px)"}}>
       <div style={{padding:"12px 10px 6px",flexShrink:0}}>
-        <div style={{fontSize:10,fontWeight:700,letterSpacing:3,textTransform:"uppercase",color:t.mut,marginBottom:8,paddingLeft:2}}>HyprChat <span style={{fontSize:7,color:t.mut,opacity:.5,fontWeight:400}}>v9</span></div>
+        <div style={{fontSize:11,fontWeight:700,letterSpacing:3,textTransform:"uppercase",color:t.mut,marginBottom:8,paddingLeft:2}}>HyprChat <span style={{fontSize:8,color:t.mut,opacity:.5,fontWeight:400}}>v9</span></div>
       </div>
       <div style={{padding:"0 8px 6px",display:"flex",flexDirection:"column",gap:4,flexShrink:0}}>
         {lastPersonaId&&mcs.find(m=>m.id===lastPersonaId)&&<div style={{display:"flex",alignItems:"center",gap:5,padding:"4px 8px",background:`${t.pink}10`,border:`1px solid ${t.pink}28`,borderRadius:6,fontSize:10}}>
@@ -1297,7 +1642,7 @@ function HyprChat(){
           <span onClick={()=>{setLastPersonaId(null);localStorage.removeItem("hc-last-persona");}} style={{cursor:"pointer",color:t.mut,opacity:.7}}>✕</span>
         </div>}
         <div style={{display:"flex",gap:4}}>
-          <button onClick={newChat} style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,background:`${t.acc}15`,border:`1px solid ${t.acc}28`,color:t.acc,padding:"7px 10px",borderRadius:8,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:600}}><IC.Plus/> New Chat</button>
+          <button onClick={newChat} style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,background:`${t.acc}18`,border:`1px solid ${t.acc}38`,color:t.acc,padding:"8px 10px",borderRadius:9,cursor:"pointer",fontFamily:font,fontSize:12,fontWeight:600,boxShadow:`0 0 8px ${t.acc}18`}}><IC.Plus/> New Chat</button>
           <button onClick={()=>{setWsPanel(p=>!p);setActiveWs(null);setWsDetail(null);}} style={{...btnS(wsPanel?t.acc:t.mut),padding:"5px 8px",fontSize:11}} title="Workspaces">🗂</button>
         </div>
         {!wsPanel&&<>
@@ -1306,16 +1651,16 @@ function HyprChat(){
           const allTags=[...new Set(Object.values(convTags).flat())];
           if(!allTags.length)return null;
           return <div style={{display:"flex",flexWrap:"wrap",gap:3,padding:"2px 0"}}>
-            <button onClick={()=>setActiveTagFilter(null)} style={{fontSize:9,padding:"2px 6px",borderRadius:10,background:!activeTagFilter?`${t.acc}22`:`${t.surface}55`,border:`1px solid ${!activeTagFilter?t.acc:t.brd}33`,color:!activeTagFilter?t.acc:t.mut,cursor:"pointer"}}>All</button>
-            {allTags.map(tag=><button key={tag} onClick={()=>setActiveTagFilter(activeTagFilter===tag?null:tag)} style={{fontSize:9,padding:"2px 6px",borderRadius:10,background:activeTagFilter===tag?`${t.warm}22`:`${t.surface}55`,border:`1px solid ${activeTagFilter===tag?t.warm:t.brd}33`,color:activeTagFilter===tag?t.warm:t.mut,cursor:"pointer"}}>{tag}</button>)}
+            <button onClick={()=>setActiveTagFilter(null)} style={{fontSize:10,padding:"3px 8px",borderRadius:10,background:!activeTagFilter?`${t.acc}22`:`${t.surface}55`,border:`1px solid ${!activeTagFilter?t.acc:t.brd}33`,color:!activeTagFilter?t.acc:t.mut,cursor:"pointer"}}>All</button>
+            {allTags.map(tag=><button key={tag} onClick={()=>setActiveTagFilter(activeTagFilter===tag?null:tag)} style={{fontSize:10,padding:"3px 8px",borderRadius:10,background:activeTagFilter===tag?`${t.warm}22`:`${t.surface}55`,border:`1px solid ${activeTagFilter===tag?t.warm:t.brd}33`,color:activeTagFilter===tag?t.warm:t.mut,cursor:"pointer"}}>{tag}</button>)}
           </div>;
         })()}
       </>}
       </div>
       {!wsPanel?<div style={{flex:1,overflowY:"auto",padding:"2px 5px"}}>
         {filtC.map(c=>{const isCouncil=c.is_council==="1"||c.is_council===1||c.is_council===true;const tags=convTags[c.id]||[];return <div key={c.id} style={{marginBottom:1}}>
-        <div onClick={()=>loadConversation(c.id)} style={{padding:"6px 8px",borderRadius:6,cursor:"pointer",background:c.id===actId&&panel==="chat"?`${t.acc}10`:isCouncil?`${t.pink}07`:"transparent",border:c.id===actId&&panel==="chat"?`1px solid ${t.acc}20`:isCouncil?`1px solid ${t.pink}15`:"1px solid transparent",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:11,color:c.id===actId?t.text:t.dim,flex:1}}>{c.title||"New Chat"}</div>
+        <div onClick={()=>loadConversation(c.id)} style={{padding:"8px 10px",borderRadius:8,cursor:"pointer",background:c.id===actId&&panel==="chat"?`${t.acc}14`:isCouncil?`${t.pink}09`:"transparent",border:c.id===actId&&panel==="chat"?`1px solid ${t.acc}30`:isCouncil?`1px solid ${t.pink}20`:"1px solid transparent",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:c.id===actId?t.text:t.dim,flex:1,fontWeight:c.id===actId?500:400}}>{c.title||"New Chat"}</div>
           <div style={{display:"flex",gap:2,flexShrink:0}}>
             <button onClick={e=>{e.stopPropagation();setShowTagEditor(showTagEditor===c.id?null:c.id);setNewTagInput("");}} style={{background:"none",border:"none",color:tags.length?t.warm:t.mut,cursor:"pointer",padding:2,opacity:tags.length?1:.3,display:"flex",flexShrink:0,fontSize:9}}>🏷</button>
             <button onClick={e=>{e.stopPropagation();delChat(c.id);}} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:2,opacity:.3,display:"flex",flexShrink:0}}><IC.Trash/></button>
@@ -1362,14 +1707,14 @@ function HyprChat(){
           </div>;
         })}
       </div>}
-      <div style={{padding:"5px 9px",borderTop:`1px solid ${t.brd}15`,fontSize:9,color:t.mut,display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
+      <div style={{padding:"7px 11px",borderTop:`1px solid ${t.brd}22`,fontSize:10,color:t.mut,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
         {svc("ollama")}Ollama {svc("codebox")}CB {svc("searxng")}SX {svc("n8n")}n8n
       </div>
     </div>
 
     {/* MAIN */}
     <div style={{flex:1,display:"flex",flexDirection:"column",zIndex:5,minWidth:0}}>
-      <div style={{padding:"6px 13px",...glass,borderBottom:`1px solid ${t.brd}15`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:7,flexShrink:0}}>
+      <div style={{padding:"9px 16px",...glass,borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0}}>
         <div style={{display:"flex",alignItems:"center",gap:6}}>
           {panel==="chat"&&act&&<>
             {act.is_council?(()=>{
@@ -1380,7 +1725,7 @@ function HyprChat(){
                 <span style={{fontSize:9,color:t.mut}}>{(cfg?.members||[]).length} members</span>
                 {councilRunning&&<div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
               </div>;
-            })():<select value={act.model||models[0]||""} onChange={e=>uConv(actId,{model:e.target.value})} style={{background:t.bgDeep,border:`1px solid ${t.brd}38`,color:t.acc,padding:"4px 22px 4px 7px",borderRadius:6,fontFamily:font,fontSize:11,cursor:"pointer",outline:"none",appearance:"none",minWidth:130}}>{models.map(m=><option key={m} value={m}>{m}</option>)}</select>}
+            })():<ModelPicker value={act.model||models[0]||""} onChange={v=>uConv(actId,{model:v})} models={models} modelDetails={modelDetails} t={t} font={font} compact={true}/>}
             {!act.is_council&&act.persona_name&&<div style={{display:"flex",alignItems:"center",gap:5,padding:"3px 10px",background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:20}}>
               {act.persona_avatar&&<img src={`${API}${act.persona_avatar}`} style={{width:16,height:16,borderRadius:5,objectFit:"cover"}} alt=""/>}
               <span style={{fontSize:10,fontWeight:600,color:t.pink}}>{act.persona_name}</span>
@@ -1390,7 +1735,7 @@ function HyprChat(){
         </div>
         {/* Token counter + export — persistent */}
         <div style={{display:"flex",alignItems:"center",gap:8}}>
-          {panel==="chat"&&act&&(act.messages||[]).length>0&&<button onClick={exportChat} title="Export conversation as Markdown" style={{background:"none",border:`1px solid ${t.brd}28`,color:t.mut,cursor:"pointer",padding:"3px 8px",borderRadius:8,fontFamily:font,fontSize:9,display:"flex",alignItems:"center",gap:3}}><IC.Download/> export</button>}
+          {panel==="chat"&&act&&(act.messages||[]).length>0&&<button onClick={exportChat} title="Export conversation as Markdown" style={{background:"none",border:`1px solid ${t.brd}33`,color:t.mut,cursor:"pointer",padding:"4px 10px",borderRadius:8,fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:3}}><IC.Download/> export</button>}
           {panel==="chat"&&act&&(()=>{
             // During streaming: show live gen tokens (from ctx_update). After: show total context.
             const liveToks=streaming&&tokC>0?tokC:0;
@@ -1418,7 +1763,7 @@ function HyprChat(){
       </div>
 
       {/* Stream bar */}
-      <div style={{height:2,background:`${t.surface}88`,overflow:"hidden",opacity:streaming?1:0,transition:"opacity .3s"}}>
+      <div style={{height:3,background:`${t.surface}88`,overflow:"hidden",opacity:streaming?1:0,transition:"opacity .3s"}}>
         <div style={{height:"100%",background:`linear-gradient(90deg,transparent,${t.acc},transparent)`,animation:streaming?"slide 1.5s ease-in-out infinite":"none",width:"40%"}}/>
       </div>
 
@@ -1433,14 +1778,14 @@ function HyprChat(){
             onPreview={openPreview} models={models} wsModel={wsModel}
             onPersonaCreated={mc=>{setMcs(p=>[...p,mc]);setPanel("personas");setEditMc(mc.id);}}/>
       :panel==="kb"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 18px",borderBottom:`1px solid ${t.brd}22`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Database/><span style={{fontSize:13,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Knowledge Bases</span></div>
+    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+      <div style={{display:"flex",alignItems:"center",gap:8}}><IC.Database/><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Knowledge Bases</span></div>
       <button onClick={async()=>{
         const r=await fetch(`${API}/api/knowledge-bases`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New KB",description:""})}).catch(()=>null);
         if(r){const kb=await r.json();setKbs(p=>[...p,{...kb,files:[]}]);}else{setKbs(p=>[...p,{id:`kb-${Date.now()}`,name:"New KB",description:"",files:[]}]);}
       }} style={btnS(t.acc)}><IC.Plus/> New KB</button>
     </div>
-    <div style={{flex:1,overflowY:"auto",padding:16}}>
+    <div style={{flex:1,overflowY:"auto",padding:20}}>
       {kbs.map(kb=><div key={kb.id} style={cardS}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
           <div style={{flex:1}}>
@@ -1471,8 +1816,8 @@ function HyprChat(){
   </div>
 
       :panel==="tools"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 18px",borderBottom:`1px solid ${t.brd}22`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Tool/><span style={{fontSize:13,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.warm}}>Tools</span></div>
+    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Tool/><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.warm}}>Tools</span></div>
       <div style={{display:"flex",gap:5}}>
         <button onClick={()=>{setPasteMode(p=>!p);setPasteCode("");setPasteToolName("");setPasteToolDesc("");}} style={btnS(pasteMode?t.warm:t.mut)}>
           {pasteMode?"✕ Cancel":"✦ Paste Code"}
@@ -1527,7 +1872,7 @@ function HyprChat(){
         </button>
       </div>
     </div>}
-    <div style={{flex:1,overflowY:"auto",padding:16}}>
+    <div style={{flex:1,overflowY:"auto",padding:20}}>
       {builtinTools.length>0&&<div style={{marginBottom:16}}>
         <div style={{fontSize:9,fontWeight:700,color:t.mut,letterSpacing:1,textTransform:"uppercase",marginBottom:8}}>Built-in</div>
         {builtinTools.map(bt=>{
@@ -1620,14 +1965,14 @@ function HyprChat(){
   </div>
 
       :panel==="council"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 18px",borderBottom:`1px solid ${t.brd}22`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Council/><span style={{fontSize:13,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.pink}}>Council of AI</span></div>
+    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Council/><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.pink}}>Council of AI</span></div>
       <button onClick={async()=>{
         const r=await fetch(`${API}/api/councils`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New Council",host_model:models[0]||"qwen3.5:27b",host_system_prompt:""})});
         const c=await r.json();setCouncils(p=>[...p,c]);setActiveCouncilId(c.id);
       }} style={btnS(t.pink)}><IC.Plus/> New Council</button>
     </div>
-    <div style={{flex:1,overflowY:"auto",padding:16}}>
+    <div style={{flex:1,overflowY:"auto",padding:20}}>
       {!councils.length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No councils yet.<br/>Create one to debate with multiple AIs.</div>}
       {councils.map(council=>{
         const isActive=activeCouncilId===council.id;
@@ -1649,9 +1994,7 @@ function HyprChat(){
               <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8}}>
                 <IC.Crown/><span style={{fontSize:11,fontWeight:700,color:t.warm,textTransform:"uppercase",letterSpacing:.5}}>Host / Moderator</span>
               </div>
-              <select value={council.host_model||models[0]||""} onChange={e=>{const v=e.target.value;setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_model:v}:c));fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_model:v})}).catch(()=>{});}} style={{...inputS,marginBottom:6,cursor:"pointer",color:t.warm}}>
-                {models.map(m=><option key={m} value={m}>{m}</option>)}
-              </select>
+              <ModelPicker value={council.host_model||models[0]||""} onChange={v=>{setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_model:v}:c));fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_model:v})}).catch(()=>{});}} models={models} modelDetails={modelDetails} t={t} font={font} style={{marginBottom:6}}/>
               <textarea value={council.host_system_prompt||""} onChange={e=>{const v=e.target.value;setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_system_prompt:v}:c));}}
                 onBlur={()=>fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_system_prompt:council.host_system_prompt||""})}).catch(()=>{})}
                 placeholder="Host system prompt (optional)..." rows={2}
@@ -1681,9 +2024,7 @@ function HyprChat(){
                       <IC.Bot/>{member.persona_name||member.model.split(":")[0]}
                     </div>
                     {isEditing?<>
-                      <select value={member.model} onChange={e=>{const v=e.target.value;setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.map(m=>m.id===member.id?{...m,model:v}:m)}:c));fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:v})}).catch(()=>{});}} style={{...inputS,fontSize:11,cursor:"pointer"}}>
-                        {models.map(m=><option key={m} value={m}>{m}</option>)}
-                      </select>
+                      <ModelPicker value={member.model} onChange={v=>{setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.map(m=>m.id===member.id?{...m,model:v}:m)}:c));fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:v})}).catch(()=>{});}} models={models} modelDetails={modelDetails} t={t} font={font}/>
                       <input value={editMemberForm.persona_name||""} onChange={e=>setEditMemberForm(p=>({...p,persona_name:e.target.value}))} placeholder="Persona name (optional)" style={{...inputS,fontSize:11}}/>
                       <textarea value={editMemberForm.system_prompt||""} onChange={e=>setEditMemberForm(p=>({...p,system_prompt:e.target.value}))} placeholder="System prompt..." rows={3} style={{...inputS,resize:"vertical",fontSize:11}}/>
                       <div style={{display:"flex",gap:4}}>
@@ -1719,8 +2060,8 @@ function HyprChat(){
     </div>
   </div>
       :panel==="personas"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 18px",borderBottom:`1px solid ${t.brd}22`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
-      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Cube/><span style={{fontSize:13,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.pink}}>Personas</span></div>
+    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
+      <div style={{display:"flex",alignItems:"center",gap:8}}><IC.Cube/><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.pink}}>Personas</span></div>
       <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
         <button onClick={async()=>{
           try{
@@ -1745,7 +2086,7 @@ function HyprChat(){
         }} style={btnS(t.pink)}><IC.Plus/> New Persona</button>
       </div>
     </div>
-    <div style={{flex:1,overflowY:"auto",padding:16}}>
+    <div style={{flex:1,overflowY:"auto",padding:20}}>
       {mcs.map(mc=>{const isE=editMc===mc.id;const avatar=mc.parameters?.avatar;
         return <div key={mc.id} style={{...cardS,borderColor:isE?`${t.pink}55`:`${t.brd}44`}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
@@ -1778,9 +2119,7 @@ function HyprChat(){
           {isE&&<div style={{animation:"fadeIn .2s"}}>
             <div style={{marginBottom:12}}>
               <label style={labelS}>Base Model</label>
-              <select value={mc.base_model} onChange={e=>setMcs(p=>p.map(x=>x.id===mc.id?{...x,base_model:e.target.value}:x))} style={{...inputS,cursor:"pointer",color:t.acc}}>
-                {models.map(m=><option key={m} value={m}>{m}</option>)}
-              </select>
+              <ModelPicker value={mc.base_model} onChange={v=>setMcs(p=>p.map(x=>x.id===mc.id?{...x,base_model:v}:x))} models={models} modelDetails={modelDetails} t={t} font={font}/>
             </div>
             <div style={{marginBottom:12}}>
               <label style={labelS}>System Prompt</label>
@@ -1829,10 +2168,10 @@ function HyprChat(){
 
       :panel==="prompts"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"14px 18px",borderBottom:`1px solid ${t.brd}22`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
-      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Zap/><span style={{fontSize:13,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.f1}}>Prompt Library</span></div>
+      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Zap/><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.f1}}>Prompt Library</span></div>
       <button onClick={()=>{const id=`p-${Date.now()}`;setPrompts(p=>[{id,title:"New Prompt",content:"",category:"General"},...p]);}} style={btnS(t.f1)}><IC.Plus/> New Prompt</button>
     </div>
-    <div style={{flex:1,overflowY:"auto",padding:16}}>
+    <div style={{flex:1,overflowY:"auto",padding:20}}>
       {!prompts.length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>
         <div style={{fontSize:28,marginBottom:8}}>⚡</div>
         <div style={{fontWeight:600,marginBottom:4}}>No saved prompts yet</div>
@@ -1897,7 +2236,7 @@ function HyprChat(){
         <div style={{flex:1,overflowY:"auto",padding:"10px 10px"}}>
           {(()=>{
             const families={};
-            models.forEach(m=>{
+            models.filter(m=>!m.startsWith("hf.co/")).forEach(m=>{
               const [name,tag="latest"]=m.split(":");
               const base=name.toLowerCase();
               let fam="Other";
@@ -1914,7 +2253,6 @@ function HyprChat(){
               families[fam].push({m,name,tag});
             });
             const szCol=(tag)=>{const l=(tag||"").toLowerCase();if(l.match(/70b|65b|72b/))return t.err;if(l.match(/30b|32b|34b/))return t.warm;if(l.match(/13b|14b|27b/))return t.acc;if(l.match(/7b|8b/))return t.ok;if(l.match(/1b|3b|4b/))return t.f1;return t.mut;};
-            const capTags=(n)=>{const b=(n||"").toLowerCase();const caps=[];if(b.match(/embed/))caps.push({label:"Embed",emoji:"🔢",color:"#9b59b6"});if(b.match(/llava|vision|[\-:]vl$|[\-:]vl[\-:]/))caps.push({label:"Vision",emoji:"👁",color:"#e67e22"});if(b.match(/coder|codestral|starcoder|deepseek-coder/))caps.push({label:"Code",emoji:"💻",color:"#2ecc71"});if(!b.match(/embed/)&&b.match(/qwen|llama3|llama-3|mistral|mixtral|command|hermes|deepseek|phi3|phi-3|wizardlm|gemma|llama3\./))caps.push({label:"Tools",emoji:"🔧",color:"#3498db"});return caps;};
             const icon=(n)=>{const b=n.toLowerCase();if(b.includes("qwen"))return"🌸";if(b.includes("llama"))return"🦙";if(b.includes("mistral")||b.includes("mixtral"))return"💨";if(b.includes("gemma"))return"💎";if(b.includes("phi"))return"φ";if(b.includes("deepseek"))return"🔍";if(b.includes("coder")||b.includes("code"))return"💻";if(b.includes("wizard"))return"🧙";return"🤖";};
             const famEmoji={Qwen:"🌸",Llama:"🦙",Mistral:"💨",Gemma:"💎",Phi:"φ",DeepSeek:"🔍",Command:"⚡",WizardLM:"🧙",Hermes:"🏛",Other:"🤖"};
             if(!models.length)return <div style={{padding:"20px 8px",color:t.mut,fontSize:11,fontStyle:"italic",textAlign:"center"}}>No models found.<br/>Pull one below.</div>;
@@ -1925,17 +2263,24 @@ function HyprChat(){
               {items.map(({m,name,tag})=>{
                 const sc=szCol(tag);const sel=modelParamsOpen===m;
                 const hasCustom=Object.values(modelParams[m]||{}).some(v=>v&&v!=="default");
-                return <div key={m} onClick={()=>setModelParamsOpen(sel?null:m)}
+                const md=modelDetails[m]||{};
+                const quant=(md.details?.quantization_level||"").toUpperCase();
+                const paramSz=md.details?.parameter_size||"";
+                const diskSz=md.size?fmtSize(md.size):"";
+                return <div key={m} onClick={()=>{const newSel=sel?null:m;setModelParamsOpen(newSel);setShowModelfile(false);if(newSel&&!modelInfoCache[newSel]){setModelInfoLoading(true);fetch(`${API}/api/models/${encodeURIComponent(newSel)}/info`).then(r=>r.json()).then(d=>setModelInfoCache(p=>({...p,[newSel]:d}))).catch(()=>{}).finally(()=>setModelInfoLoading(false));}}}
                   style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",borderRadius:8,marginBottom:2,cursor:"pointer",background:sel?`${t.acc}12`:`${t.surface}44`,border:`1px solid ${sel?t.acc:t.brd}${sel?"44":"18"}`,transition:"all .15s"}}>
                   <span style={{fontSize:15,flexShrink:0}}>{icon(name)}</span>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:11,fontWeight:600,color:sel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name}</div>
                     <div style={{display:"flex",alignItems:"center",gap:3,marginTop:2,flexWrap:"wrap"}}>
                       <span style={{fontSize:9,color:sc,fontWeight:700}}>{tag}</span>
+                      {quant&&<span style={{fontSize:8,padding:"1px 4px",borderRadius:4,background:`${t.f1}18`,color:t.f1,fontWeight:600,border:`1px solid ${t.f1}33`}}>{quant}</span>}
+                      {diskSz&&<span style={{fontSize:8,color:t.mut}}>{diskSz}</span>}
                       {capTags(name).map(c=><span key={c.label} style={{fontSize:8,padding:"1px 4px",borderRadius:4,background:`${c.color}22`,color:c.color,fontWeight:600,border:`1px solid ${c.color}44`}}>{c.emoji} {c.label}</span>)}
                     </div>
                   </div>
                   {hasCustom&&<div style={{width:6,height:6,borderRadius:"50%",background:t.acc,flexShrink:0}}/>}
+                  <button onClick={async e=>{e.stopPropagation();if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}setModels(p=>p.filter(x=>x!==m));setModelDetails(p=>{const n={...p};delete n[m];return n;});if(modelParamsOpen===m)setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}}  style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"2px 4px",borderRadius:4,flexShrink:0,display:"flex",alignItems:"center",opacity:.5,transition:"opacity .15s"}} onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=.5}><IC.Trash/></button>
                   <span style={{fontSize:9,color:t.mut,flexShrink:0,transition:"transform .2s",transform:sel?"rotate(90deg)":"none"}}>›</span>
                 </div>;
               })}
@@ -1985,9 +2330,7 @@ function HyprChat(){
               <div style={{fontSize:9,color:t.mut,marginTop:5}}>Sets Ollama num_ctx. Usage shown in the top-right context bar.</div>
             </div>
             <div style={{marginBottom:20}}><label style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.5,display:"block",marginBottom:8}}>Workspace Analysis Model</label>
-              <select value={wsModel} onChange={e=>setWsModel(e.target.value)} style={{...inputS,cursor:"pointer",color:t.acc}}>
-                {models.map(m=><option key={m} value={m}>{m}</option>)}
-              </select>
+              <ModelPicker value={wsModel} onChange={setWsModel} models={models} modelDetails={modelDetails} t={t} font={font}/>
               <div style={{fontSize:9,color:t.mut,marginTop:4}}>Small, fast model for workspace topic auto-detection.</div>
             </div>
           </div>
@@ -1999,18 +2342,45 @@ function HyprChat(){
             const icon=(n)=>{const b=n.toLowerCase();if(b.includes("qwen"))return"🌸";if(b.includes("llama"))return"🦙";if(b.includes("mistral"))return"💨";if(b.includes("gemma"))return"💎";if(b.includes("phi"))return"φ";if(b.includes("deepseek"))return"🔍";if(b.includes("coder")||b.includes("code"))return"💻";return"🤖";};
             const szCol=(tag)=>{const l=(tag||"").toLowerCase();if(l.match(/70b|65b|72b/))return t.err;if(l.match(/30b|32b|34b/))return t.warm;if(l.match(/13b|14b|27b/))return t.acc;if(l.match(/7b|8b/))return t.ok;if(l.match(/1b|3b|4b/))return t.f1;return t.mut;};
             const sc=szCol(tag);
+            const md=modelDetails[m]||{};const det=md.details||{};
+            const diskSz=md.size?fmtSize(md.size):"";
+            const quant=(det.quantization_level||"").toUpperCase();
+            const paramSz=det.parameter_size||"";
+            const family=det.family||"";
+            const format=(det.format||"").toUpperCase();
+            const modifiedAt=md.modified_at?(()=>{try{return new Date(md.modified_at).toLocaleDateString();}catch{return md.modified_at;}})():"";
+            const info=modelInfoCache[m]||{};
             return <div style={{maxWidth:520,animation:"fadeIn .2s"}}>
               {/* Model header */}
-              <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:24,paddingBottom:16,borderBottom:`1px solid ${t.brd}22`}}>
+              <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16,paddingBottom:14,borderBottom:`1px solid ${t.brd}22`}}>
                 <span style={{fontSize:28}}>{icon(name)}</span>
                 <div style={{flex:1}}>
                   <div style={{fontSize:15,fontWeight:700,color:t.text}}>{name}</div>
-                  <span style={{fontSize:10,fontWeight:700,color:sc,background:`${sc}15`,padding:"2px 8px",borderRadius:8,border:`1px solid ${sc}33`}}>{tag}</span>
+                  <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:3}}>
+                    <span style={{fontSize:10,fontWeight:700,color:sc,background:`${sc}15`,padding:"2px 8px",borderRadius:8,border:`1px solid ${sc}33`}}>{tag}</span>
+                    {quant&&<span style={{fontSize:9,fontWeight:700,color:t.f1,background:`${t.f1}15`,padding:"2px 7px",borderRadius:8,border:`1px solid ${t.f1}33`}}>{quant}</span>}
+                    {format&&<span style={{fontSize:9,color:t.mut,background:`${t.surface}88`,padding:"2px 7px",borderRadius:8,border:`1px solid ${t.brd}33`}}>{format}</span>}
+                  </div>
                 </div>
                 <div style={{display:"flex",gap:6}}>
                   <button onClick={()=>uConv(actId,{model:m})} style={{...btnS(t.acc),padding:"5px 12px"}}>Use</button>
-                  <button onClick={async()=>{try{await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});setModels(p=>p.filter(x=>x!==m));setModelParamsOpen(null);}catch{}}} style={{...btnS(t.err),padding:"5px 8px"}}><IC.Trash/></button>
+                  <button onClick={async()=>{if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}setModels(p=>p.filter(x=>x!==m));setModelDetails(p=>{const n={...p};delete n[m];return n;});setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}} style={{...btnS(t.err),padding:"5px 8px"}}><IC.Trash/></button>
                 </div>
+              </div>
+              {/* Info strip */}
+              {(paramSz||diskSz||family||modifiedAt)&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:16,padding:"10px 14px",background:`${t.surface}44`,borderRadius:10,border:`1px solid ${t.brd}18`}}>
+                {paramSz&&<div style={{display:"flex",flexDirection:"column",gap:1}}><span style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Parameters</span><span style={{fontSize:12,fontWeight:700,color:t.text}}>{paramSz}</span></div>}
+                {diskSz&&<div style={{display:"flex",flexDirection:"column",gap:1}}><span style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Disk Size</span><span style={{fontSize:12,fontWeight:700,color:t.text}}>{diskSz}</span></div>}
+                {family&&<div style={{display:"flex",flexDirection:"column",gap:1}}><span style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Family</span><span style={{fontSize:12,fontWeight:700,color:t.text,textTransform:"capitalize"}}>{family}</span></div>}
+                {modifiedAt&&<div style={{display:"flex",flexDirection:"column",gap:1,marginLeft:"auto"}}><span style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Added</span><span style={{fontSize:11,color:t.dim}}>{modifiedAt}</span></div>}
+              </div>}
+              {/* Modelfile viewer */}
+              <div style={{marginBottom:16}}>
+                <button onClick={()=>setShowModelfile(p=>!p)} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:10,padding:0,display:"flex",alignItems:"center",gap:4,marginBottom:showModelfile?8:0}}>
+                  <span style={{transition:"transform .2s",transform:showModelfile?"rotate(90deg)":"none",display:"inline-block"}}>›</span>
+                  {modelInfoLoading&&!info.modelfile?"Loading modelfile...":"📄 View Modelfile"}
+                </button>
+                {showModelfile&&<pre style={{background:t.bgDeep,border:`1px solid ${t.brd}33`,borderRadius:8,padding:"10px 12px",fontSize:10,color:t.dim,overflowX:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all",maxHeight:240,overflowY:"auto",lineHeight:1.5}}>{info.modelfile||"No modelfile data."}</pre>}
               </div>
               {/* Parameter sliders */}
               <div style={{fontSize:10,color:t.mut,marginBottom:16}}>Override parameters for this model. Leave blank to use global defaults.</div>
@@ -2061,8 +2431,60 @@ function HyprChat(){
     {/* ── HUGGINGFACE TAB ── */}
     {modelsTab==="hf"&&<div style={{flex:1,display:"flex",overflow:"hidden"}}>
 
-      {/* Left: search + results */}
+      {/* Left: search/installed toggle + results */}
       <div style={{width:310,minWidth:310,borderRight:`1px solid ${t.brd}18`,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        {/* Sub-tab toggle */}
+        <div style={{display:"flex",borderBottom:`1px solid ${t.brd}22`,flexShrink:0}}>
+          {[["search","🔍 Search"],[true,"📦 Installed"]].map(([key,label])=>{
+            const active=key==="search"?!hfInstalledTab:hfInstalledTab;
+            const count=key===true?models.filter(m=>m.startsWith("hf.co/")).length:0;
+            return <button key={String(key)} onClick={()=>setHfInstalledTab(key===true)} style={{flex:1,padding:"9px 8px",border:"none",borderBottom:`2px solid ${active?t.acc:"transparent"}`,background:active?`${t.acc}10`:"transparent",color:active?t.acc:t.mut,fontFamily:font,fontSize:10,cursor:"pointer",fontWeight:active?700:400,display:"flex",alignItems:"center",justifyContent:"center",gap:5,transition:"all .15s"}}>
+              {label}{count>0&&key===true&&<span style={{fontSize:8,background:`${t.acc}22`,color:t.acc,padding:"1px 5px",borderRadius:8,border:`1px solid ${t.acc}33`}}>{count}</span>}
+            </button>;
+          })}
+        </div>
+
+        {/* INSTALLED HF MODELS */}
+        {hfInstalledTab?<div style={{flex:1,overflowY:"auto",padding:"8px 8px"}}>
+          {(()=>{
+            const hfModels=models.filter(m=>m.startsWith("hf.co/"));
+            if(!hfModels.length)return <div style={{padding:"30px 12px",textAlign:"center",color:t.mut,fontSize:11,fontStyle:"italic",lineHeight:1.6}}>No HuggingFace models installed yet.<br/>Use the Search tab to find and download models.</div>;
+            return hfModels.map(m=>{
+              const md=modelDetails[m]||{};
+              const quant=(md.details?.quantization_level||"").toUpperCase();
+              const paramSz=md.details?.parameter_size||"";
+              const diskSz=md.size?fmtSize(md.size):"";
+              const isSel=modelParamsOpen===m;
+              const repoPath=m.replace("hf.co/","");
+              const [repoBase,quantTag=""]=repoPath.split(":");
+              const repoName=repoBase.split("/").pop()||repoBase;
+              const caps=capTags(repoName);
+              // add vision cap for VL models
+              const allCaps=[...caps];
+              if(!allCaps.find(c=>c.label==="Vision")&&repoName.toLowerCase().match(/vl|vision|llava/))allCaps.push({label:"Vision",emoji:"👁",color:"#e67e22"});
+              return <div key={m} onClick={()=>{const newSel=isSel?null:m;setModelParamsOpen(newSel);setShowModelfile(false);if(newSel&&!modelInfoCache[newSel]){setModelInfoLoading(true);fetch(`${API}/api/models/${encodeURIComponent(newSel)}/info`).then(r=>r.json()).then(d=>setModelInfoCache(p=>({...p,[newSel]:d}))).catch(()=>{}).finally(()=>setModelInfoLoading(false));}}}
+                style={{padding:"9px 10px",borderRadius:8,marginBottom:4,cursor:"pointer",background:isSel?`${t.acc}12`:`${t.surface}33`,border:`1px solid ${isSel?t.acc:t.brd}${isSel?"44":"15"}`,transition:"all .12s",display:"flex",alignItems:"center",gap:8}}>
+                <span style={{fontSize:14,flexShrink:0}}>🤗</span>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:10,color:t.mut,marginBottom:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{repoBase}</div>
+                  <div style={{fontSize:11,fontWeight:600,color:isSel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:3}}>{repoName}</div>
+                  <div style={{display:"flex",gap:4,flexWrap:"wrap",alignItems:"center"}}>
+                    {quant&&<span style={{fontSize:8,padding:"1px 4px",borderRadius:4,background:`${t.f1}18`,color:t.f1,fontWeight:600,border:`1px solid ${t.f1}33`}}>{quant}</span>}
+                    {paramSz&&<span style={{fontSize:8,color:t.mut}}>{paramSz}</span>}
+                    {diskSz&&<span style={{fontSize:8,color:t.mut}}>{diskSz}</span>}
+                    {allCaps.map(c=><span key={c.label} style={{fontSize:8,padding:"1px 4px",borderRadius:4,background:`${c.color}22`,color:c.color,fontWeight:600,border:`1px solid ${c.color}44`}}>{c.emoji} {c.label}</span>)}
+                  </div>
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:3,flexShrink:0}}>
+                  <button onClick={async e=>{e.stopPropagation();if(makingToolModel)return;setMakingToolModel(m);try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}/create-tool-model`,{method:"POST"});const d=await r.json();if(!r.ok){alert(`Failed: ${d.detail||r.statusText}`);return;}alert(`✅ Modelfile patched for tool calling!`);}catch(e){alert(`Error: ${e.message}`);}finally{setMakingToolModel(null);}}} disabled={!!makingToolModel} title="Patch modelfile to enable native tool calling" style={{background:makingToolModel===m?`${t.mut}15`:`${t.ok}22`,border:`1px solid ${makingToolModel===m?t.mut:t.ok}55`,color:makingToolModel===m?t.mut:t.ok,cursor:makingToolModel?"wait":"pointer",padding:"4px 8px",borderRadius:5,fontSize:9,fontWeight:700,whiteSpace:"nowrap",transition:"all .15s"}}>{makingToolModel===m?"⏳ Patching…":"🔧 Enable Tools"}</button>
+                  <button onClick={async e=>{e.stopPropagation();if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}setModels(p=>p.filter(x=>x!==m));setModelDetails(p=>{const n={...p};delete n[m];return n;});if(modelParamsOpen===m)setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}}  style={{background:"none",border:`1px solid ${t.err}33`,color:t.err,cursor:"pointer",padding:"3px 8px",borderRadius:5,fontSize:9,fontWeight:600,opacity:.6,transition:"opacity .15s"}} onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=.6}>🗑 Delete</button>
+                </div>
+                <span style={{fontSize:9,color:t.mut,flexShrink:0,transition:"transform .2s",transform:isSel?"rotate(90deg)":"none"}}>›</span>
+              </div>;
+            });
+          })()}
+        </div>
+        :<>
         <div style={{padding:"10px 10px",flexShrink:0,borderBottom:`1px solid ${t.brd}15`}}>
           <div style={{display:"flex",gap:5}}>
             <input value={hfSearch} onChange={e=>setHfSearch(e.target.value)} onKeyDown={e=>e.key==="Enter"&&hfDoSearch(hfSearch)}
@@ -2086,22 +2508,116 @@ function HyprChat(){
           </div>}
           {hfResults.map(m=>{
             const [author,name]=m.id.split("/");const isSel=hfSelected?.id===m.id;
+            const hfCaps=(()=>{const b=(m.id||"").toLowerCase();const pt=(m.pipeline_tag||"").toLowerCase();const caps=[];
+              if(pt==="feature-extraction"||b.match(/embed/))caps.push({label:"Embed",emoji:"🔢",color:"#9b59b6"});
+              else if(pt==="image-text-to-text"||pt==="image-to-text"||b.match(/llava|vision|[\-:]vl[\-:$]/))caps.push({label:"Vision",emoji:"👁",color:"#e67e22"});
+              else if(b.match(/coder|codestral|starcoder|deepseek-coder/))caps.push({label:"Code",emoji:"💻",color:"#2ecc71"});
+              else if(pt==="text-generation"||b.match(/qwen|llama|mistral|mixtral|command|hermes|deepseek|phi|gemma/))caps.push({label:"Tools",emoji:"🔧",color:"#3498db"});
+              return caps;})();
             return <div key={m.id} onClick={()=>hfSelectModel(m)} style={{padding:"9px 10px",borderRadius:8,marginBottom:3,cursor:"pointer",background:isSel?`${t.acc}12`:`${t.surface}33`,border:`1px solid ${isSel?t.acc:t.brd}${isSel?"44":"15"}`,transition:"all .12s"}}>
               <div style={{fontSize:9,color:t.mut,marginBottom:1}}>{author}/</div>
               <div style={{fontSize:11,fontWeight:600,color:isSel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:4}}>{name||m.id}</div>
-              <div style={{display:"flex",gap:8,fontSize:9,color:t.mut}}>
-                <span>⬇ {m.downloads>999?`${(m.downloads/1000).toFixed(1)}k`:m.downloads}</span>
-                <span>♥ {m.likes}</span>
-                {m.pipeline_tag&&<span style={{color:t.f1,marginLeft:"auto"}}>{m.pipeline_tag}</span>}
+              <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+                <span style={{fontSize:9,color:t.mut}}>⬇ {m.downloads>999?`${(m.downloads/1000).toFixed(1)}k`:m.downloads}</span>
+                <span style={{fontSize:9,color:t.mut}}>♥ {m.likes}</span>
+                {hfCaps.map(c=><span key={c.label} style={{fontSize:8,padding:"1px 5px",borderRadius:4,background:`${c.color}22`,color:c.color,fontWeight:600,border:`1px solid ${c.color}44`,marginLeft:2}}>{c.emoji} {c.label}</span>)}
               </div>
             </div>;
           })}
         </div>
+        </>}
       </div>
 
-      {/* Right: detail panel */}
+      {/* Right: detail panel — installed model settings OR search detail */}
       <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-        {!hfSelected?<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:10,opacity:.4}}>
+        {hfInstalledTab&&modelParamsOpen&&models.includes(modelParamsOpen)?
+          /* installed model settings panel */
+          <div style={{flex:1,overflowY:"auto",padding:"20px 24px"}}>
+            {(()=>{
+              const m=modelParamsOpen;const [mname,mtag="latest"]=m.split(":");const mp=modelParams[m]||{};
+              const hasCustom=Object.values(mp).some(v=>v&&v!=="default");
+              const mdi=modelDetails[m]||{};const det=mdi.details||{};
+              const diskSz=mdi.size?fmtSize(mdi.size):"";
+              const quant=(det.quantization_level||"").toUpperCase();
+              const paramSz=det.parameter_size||"";
+              const family=det.family||"";
+              const format=(det.format||"").toUpperCase();
+              const modifiedAt=mdi.modified_at?(()=>{try{return new Date(mdi.modified_at).toLocaleDateString();}catch{return mdi.modified_at;}})():"";
+              const info=modelInfoCache[m]||{};
+              const repoPath=m.replace("hf.co/","");
+              const repoName=repoPath.split("/").pop()?.split(":")[0]||m;
+              const sc=(tag)=>{const l=(tag||"").toLowerCase();if(l.match(/70b|65b|72b/))return t.err;if(l.match(/30b|32b|34b/))return t.warm;if(l.match(/13b|14b|27b/))return t.acc;if(l.match(/7b|8b/))return t.ok;if(l.match(/1b|3b|4b/))return t.f1;return t.mut;};
+              return <div style={{maxWidth:520,animation:"fadeIn .2s"}}>
+                <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16,paddingBottom:14,borderBottom:`1px solid ${t.brd}22`}}>
+                  <span style={{fontSize:28}}>🤗</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:9,color:t.mut,marginBottom:2}}>{repoPath.split(":")[0]}</div>
+                    <div style={{fontSize:14,fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{repoName}</div>
+                    <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:3}}>
+                      {quant&&<span style={{fontSize:9,fontWeight:700,color:t.f1,background:`${t.f1}15`,padding:"2px 7px",borderRadius:8,border:`1px solid ${t.f1}33`}}>{quant}</span>}
+                      {format&&<span style={{fontSize:9,color:t.mut,background:`${t.surface}88`,padding:"2px 7px",borderRadius:8,border:`1px solid ${t.brd}33`}}>{format}</span>}
+                    </div>
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:5,alignItems:"flex-end"}}>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>uConv(actId,{model:m})} style={{...btnS(t.acc),padding:"5px 12px"}}>Use</button>
+                      <button onClick={async()=>{if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}setModels(p=>p.filter(x=>x!==m));setModelDetails(p=>{const n={...p};delete n[m];return n;});setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}} style={{...btnS(t.err),padding:"5px 8px"}}><IC.Trash/></button>
+                    </div>
+                    <button onClick={async e=>{e.stopPropagation();if(makingToolModel)return;setMakingToolModel(m);try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}/create-tool-model`,{method:"POST"});const d=await r.json();if(!r.ok){alert(`Failed: ${d.detail||r.statusText}`);return;}alert(`✅ Modelfile patched — this model can now use tools!`);}catch(e){alert(`Error: ${e.message}`);}finally{setMakingToolModel(null);}}} disabled={!!makingToolModel} style={{background:makingToolModel===m?`${t.mut}15`:`${t.ok}22`,border:`1px solid ${makingToolModel===m?t.mut:t.ok}66`,color:makingToolModel===m?t.mut:t.ok,cursor:makingToolModel?"wait":"pointer",padding:"5px 12px",borderRadius:7,fontSize:10,fontWeight:700,whiteSpace:"nowrap",letterSpacing:.3,transition:"all .15s"}}>{makingToolModel===m?"⏳ Patching…":"🔧 Enable Tool Calling"}</button>
+                  </div>
+                </div>
+                {(paramSz||diskSz||family||modifiedAt)&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:16,padding:"10px 14px",background:`${t.surface}44`,borderRadius:10,border:`1px solid ${t.brd}18`}}>
+                  {paramSz&&<div style={{display:"flex",flexDirection:"column",gap:1}}><span style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Parameters</span><span style={{fontSize:12,fontWeight:700,color:t.text}}>{paramSz}</span></div>}
+                  {diskSz&&<div style={{display:"flex",flexDirection:"column",gap:1}}><span style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Disk Size</span><span style={{fontSize:12,fontWeight:700,color:t.text}}>{diskSz}</span></div>}
+                  {family&&<div style={{display:"flex",flexDirection:"column",gap:1}}><span style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Family</span><span style={{fontSize:12,fontWeight:700,color:t.text,textTransform:"capitalize"}}>{family}</span></div>}
+                  {modifiedAt&&<div style={{display:"flex",flexDirection:"column",gap:1,marginLeft:"auto"}}><span style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Added</span><span style={{fontSize:11,color:t.dim}}>{modifiedAt}</span></div>}
+                </div>}
+                <div style={{marginBottom:16}}>
+                  <button onClick={()=>setShowModelfile(p=>!p)} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:10,padding:0,display:"flex",alignItems:"center",gap:4,marginBottom:showModelfile?8:0}}>
+                    <span style={{transition:"transform .2s",transform:showModelfile?"rotate(90deg)":"none",display:"inline-block"}}>›</span>
+                    {modelInfoLoading&&!info.modelfile?"Loading modelfile...":"📄 View Modelfile"}
+                  </button>
+                  {showModelfile&&<pre style={{background:t.bgDeep,border:`1px solid ${t.brd}33`,borderRadius:8,padding:"10px 12px",fontSize:10,color:t.dim,overflowX:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all",maxHeight:200,overflowY:"auto",lineHeight:1.5}}>{info.modelfile||"No modelfile data."}</pre>}
+                </div>
+                <div style={{fontSize:10,color:t.mut,marginBottom:16}}>Override parameters for this model. Leave blank to use global defaults.</div>
+                {[["temperature","Temperature","0","2","0.05","Precise","Balanced","Creative"],["top_p","Top-P","0.1","1","0.05","Focused","Balanced","Diverse"],["repeat_penalty","Repeat Penalty","1","2","0.05","None","Normal","Strong"]].map(([key,lbl,min,max,step,l1,l2,l3])=>{
+                  const raw=mp[key]||"";const isEmpty=raw===""||raw==="default";
+                  const numVal=isEmpty?parseFloat(key==="temperature"?defaultTemp:key==="top_p"?defaultTopP:"1.1"):parseFloat(raw);
+                  return <div key={key} style={{marginBottom:20}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                      <span style={{fontSize:10,color:isEmpty?t.mut:t.text,textTransform:"uppercase",letterSpacing:.5}}>{lbl}</span>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        {!isEmpty&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:9,padding:0,opacity:.7}}>reset</button>}
+                        <span style={{fontSize:13,fontWeight:700,color:isEmpty?t.mut:t.acc,fontVariantNumeric:"tabular-nums",minWidth:36,textAlign:"right"}}>{isEmpty?"default":numVal.toFixed(2)}</span>
+                      </div>
+                    </div>
+                    <input type="range" min={min} max={max} step={step} value={numVal} onChange={e=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:e.target.value}}))} style={{width:"100%",accentColor:isEmpty?t.mut:t.acc,cursor:"pointer",opacity:isEmpty?.6:1}}/>
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut,marginTop:2}}><span>{l1}</span><span>{l2}</span><span>{l3}</span></div>
+                  </div>;
+                })}
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:20}}>
+                  {[["top_k","Top-K","1","200","1","Integer sample pool"],["num_ctx","Context (tokens)","2048","131072","1024","Max token window"]].map(([key,lbl,min,max,step,desc])=>{
+                    const val=mp[key]||"";const isEmpty=val===""||val==="default";
+                    return <div key={key} style={{background:`${t.surface}44`,borderRadius:10,padding:"10px 12px",border:`1px solid ${isEmpty?t.brd:t.acc}22`}}>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                        <span style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>{lbl}</span>
+                        {!isEmpty&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:9,padding:0}}>reset</button>}
+                      </div>
+                      <input type="number" value={isEmpty?"":val} onChange={e=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:e.target.value}}))} placeholder="Default" min={min} max={max} step={step} style={{...inputS,padding:"5px 8px",fontSize:12,color:isEmpty?t.mut:t.acc,width:"100%"}}/>
+                      <div style={{fontSize:9,color:t.mut,marginTop:4}}>{desc}</div>
+                    </div>;
+                  })}
+                </div>
+                {hasCustom&&<button onClick={()=>setModelParams(p=>{const n={...p};delete n[m];return n;})} style={{...btnS(t.err),fontSize:10,width:"100%",justifyContent:"center"}}>Reset All to Defaults</button>}
+              </div>;
+            })()}
+          </div>
+        :hfInstalledTab?
+          <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:10,opacity:.4}}>
+            <span style={{fontSize:36}}>🤗</span>
+            <div style={{fontSize:12,color:t.mut}}>Select an installed model to view settings</div>
+          </div>
+        :!hfSelected?<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:10,opacity:.4}}>
           <span style={{fontSize:36}}>🤗</span>
           <div style={{fontSize:12,color:t.mut}}>Search and select a model to view details</div>
         </div>:
@@ -2186,7 +2702,7 @@ function HyprChat(){
           <button disabled={ollamaUrlSaving} onClick={async()=>{
             setOllamaUrlSaving(true);
             try{await fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({ollama_url:ollamaUrl})});
-              const r2=await fetch(`${API}/api/models`);const d2=await r2.json();setModels(d2.models||[]);
+              const r2=await fetch(`${API}/api/models`);const d2=await r2.json();setModels(d2.models||[]);setModelDetails(d2.model_details||{});
             }catch{}
             setOllamaUrlSaving(false);
           }} style={{...btnS(t.ok),opacity:ollamaUrlSaving?.6:1}}>
@@ -2233,7 +2749,7 @@ function HyprChat(){
           <input type="range" min="10" max="16" step="1" value={uiFontSize} onChange={e=>setUiFontSize(parseInt(e.target.value))} style={{flex:1,accentColor:t.acc}}/>
           <span style={{fontSize:11,color:t.acc,fontWeight:700,minWidth:30}}>{uiFontSize}px</span>
         </div>
-        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut,marginTop:2}}><span>Compact (10)</span><span>Default (12)</span><span>Large (16)</span></div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut,marginTop:2}}><span>Compact (10)</span><span>Default (14)</span><span>Large (16)</span></div>
       </div>
 
       <div style={{marginBottom:20}}><label style={labelS}>Message Font Size</label>
@@ -2241,7 +2757,7 @@ function HyprChat(){
           <input type="range" min="11" max="16" step="1" value={fontSize} onChange={e=>setFontSize(parseInt(e.target.value))} style={{flex:1,accentColor:t.acc}}/>
           <span style={{fontSize:11,color:t.acc,fontWeight:700,minWidth:30}}>{fontSize}px</span>
         </div>
-        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut,marginTop:2}}><span>Small (11)</span><span>Default (13)</span><span>Large (16)</span></div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut,marginTop:2}}><span>Small (11)</span><span>Default (14)</span><span>Large (16)</span></div>
       </div>
 
       <div style={{marginBottom:20}}><label style={labelS}>Chat Width</label>
@@ -2249,7 +2765,31 @@ function HyprChat(){
           <input type="range" min="560" max="1200" step="20" value={chatWidth} onChange={e=>setChatWidth(parseInt(e.target.value))} style={{flex:1,accentColor:t.acc}}/>
           <span style={{fontSize:11,color:t.acc,fontWeight:700,minWidth:40}}>{chatWidth}px</span>
         </div>
-        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut,marginTop:2}}><span>Narrow (560)</span><span>Default (760)</span><span>Wide (1200)</span></div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut,marginTop:2}}><span>Narrow (560)</span><span>Default (880)</span><span>Wide (1200)</span></div>
+      </div>
+
+      {/* ── LOADING SCREEN QUOTES ── */}
+      <div style={{marginBottom:20}}>
+        <label style={labelS}>Loading Screen Quotes</label>
+        <div style={{fontSize:11,color:t.mut,marginBottom:10,lineHeight:1.5}}>Add your own quotes that appear on the loading screen. One is chosen at random on each refresh.</div>
+        {customQuotes.length>0&&<div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:12}}>
+          {customQuotes.map((q,i)=><div key={i} style={{background:`${t.surface}66`,border:`1px solid ${t.brd}33`,borderRadius:10,padding:"10px 12px",display:"flex",gap:8,alignItems:"flex-start"}}>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:12,color:t.dim,fontStyle:"italic",lineHeight:1.5,marginBottom:3}}>"{q.t}"</div>
+              {q.a&&<div style={{fontSize:10,color:t.mut,letterSpacing:1}}>— {q.a}</div>}
+            </div>
+            <button onClick={()=>setCustomQuotes(p=>p.filter((_,j)=>j!==i))} style={{background:"none",border:`1px solid ${t.err}33`,color:t.err,cursor:"pointer",borderRadius:6,padding:"3px 7px",fontSize:10,flexShrink:0,opacity:.7}}>✕</button>
+          </div>)}
+        </div>}
+        <div style={{background:`${t.surface}55`,border:`1px solid ${t.brd}33`,borderRadius:12,padding:14,display:"flex",flexDirection:"column",gap:8}}>
+          <textarea value={newQuoteText} onChange={e=>setNewQuoteText(e.target.value)} placeholder='Enter your quote text...' rows={3} style={{...inputS,resize:"vertical",lineHeight:1.5}}/>
+          <div style={{display:"flex",gap:8}}>
+            <input value={newQuoteAttr} onChange={e=>setNewQuoteAttr(e.target.value)} placeholder="Attribution (e.g. John 3:16 or Carl Sagan)" style={{...inputS,flex:1}}
+              onKeyDown={e=>{if(e.key==="Enter"&&newQuoteText.trim()){setCustomQuotes(p=>[...p,{t:newQuoteText.trim(),a:newQuoteAttr.trim()}]);setNewQuoteText("");setNewQuoteAttr("");}}}/>
+            <button onClick={()=>{if(!newQuoteText.trim())return;setCustomQuotes(p=>[...p,{t:newQuoteText.trim(),a:newQuoteAttr.trim()}]);setNewQuoteText("");setNewQuoteAttr("");}}
+              disabled={!newQuoteText.trim()} style={{...btnS(t.f1),opacity:newQuoteText.trim()?1:.4,flexShrink:0}}>+ Add</button>
+          </div>
+        </div>
       </div>
 
       <div><label style={labelS}>Service Health</label>
@@ -2272,7 +2812,7 @@ function HyprChat(){
         {/* CHAT - full width, pills inline */}
         <div style={{flex:1,display:"flex",overflow:"hidden"}}>
           {/* Messages */}
-          <div style={{flex:1,overflowY:"auto",padding:"12px 0"}}>
+          <div ref={chatScrollRef} style={{flex:1,overflowY:"auto",padding:"16px 0"}}>
           {!act||!(act.messages||[]).length&&!councilRunning?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",gap:10,opacity:.5}}>
             {loadingConv?<><div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div><div style={{fontSize:12,color:t.mut,letterSpacing:1}}>Loading conversation...</div></>
             :act?.is_council?<><div style={{fontSize:36,animation:"float 4s ease-in-out infinite"}}>⚖️</div><div style={{fontSize:12,color:t.mut,letterSpacing:1}}>{loadingConv?"Loading council history...":"Ask the council"}</div></>
@@ -2458,12 +2998,12 @@ function HyprChat(){
               const personaAvatar=!isU&&act?.persona_avatar;
               const personaName=!isU&&act?.persona_name;
               const personaColor=!isU&&act?.persona_name?t.pink:t.acc;
-              return <div key={i} style={{marginBottom:compactMode?6:13,display:"flex",gap:9,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(i*.04,.2)}s both`}}>
-                <div style={{width:27,height:27,borderRadius:7,display:"flex",alignItems:"center",justifyContent:"center",background:isU?`${t.f4}20`:`${personaColor}15`,border:`1px solid ${isU?t.f4:personaColor}28`,color:isU?t.f4:personaColor,flexShrink:0,marginTop:2,overflow:"hidden"}}>
+              return <div key={i} style={{marginBottom:compactMode?8:20,display:"flex",gap:12,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(i*.04,.2)}s both`}}>
+                <div style={{width:32,height:32,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",background:isU?`${t.f4}20`:`${personaColor}18`,border:`1px solid ${isU?t.f4:personaColor}33`,color:isU?t.f4:personaColor,flexShrink:0,marginTop:2,overflow:"hidden",boxShadow:`0 0 8px ${isU?t.f4:personaColor}22`}}>
                   {isU?<IC.User/>:personaAvatar?<img src={`${API}${personaAvatar}`} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
                 </div>
                 <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontSize:10,marginBottom:2,fontWeight:600,letterSpacing:.5,display:"flex",alignItems:"center",gap:5}}>
+                  <div style={{fontSize:11,marginBottom:3,fontWeight:600,letterSpacing:.5,display:"flex",alignItems:"center",gap:6}}>
                     {isU?<span style={{color:t.mut}}>you</span>:personaName
                       ?<span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"1px 7px",background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:10,color:t.pink}}>
                         {personaAvatar&&<img src={`${API}${personaAvatar}`} style={{width:11,height:11,borderRadius:3,objectFit:"cover"}} alt=""/>}
@@ -2471,7 +3011,7 @@ function HyprChat(){
                       </span>
                       :<span style={{color:t.mut}}>{act.model||"assistant"}</span>}
                   </div>
-                  <div style={{background:isU?`${t.surface}50`:"transparent",padding:isU?"8px 12px":"0",borderRadius:isU?9:0,border:isU?`1px solid ${t.brd}18`:"none",lineHeight:1.6,fontSize:fontSize,color:t.dim}}>
+                  <div style={{background:isU?`${t.surface}60`:"transparent",padding:isU?"10px 14px":"0",borderRadius:isU?10:0,border:isU?`1px solid ${t.brd}28`:"none",lineHeight:1.7,fontSize:fontSize,color:t.dim}}>
                     {isEditing?<div style={{display:"flex",flexDirection:"column",gap:6}}>
                       <textarea defaultValue={msg.content} ref={el=>{if(el&&!el._set){el._set=true;el.style.height=Math.min(el.scrollHeight,200)+"px";}}} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.acc}44`,color:t.text,padding:"8px 10px",borderRadius:6,fontFamily:font,fontSize:12,outline:"none",resize:"vertical",lineHeight:1.5,boxSizing:"border-box"}}
                         onChange={e=>setEditingMsg(p=>({...p,content:e.target.value}))}/>
@@ -2559,19 +3099,19 @@ function HyprChat(){
               return <button key={tl.id} onClick={()=>{
                 if(!actId)return;
                 uConv(actId,c=>{const ids=c.tool_ids||[];return{...c,tool_ids:on?ids.filter(x=>x!==tl.id):[...ids,tl.id]};});
-              }} style={{display:"flex",alignItems:"center",gap:4,padding:"3px 8px",borderRadius:12,fontSize:9,fontWeight:on?600:400,cursor:"pointer",whiteSpace:"nowrap",background:on?`${col}18`:`${t.surface}44`,border:`1px solid ${on?col:t.brd}28`,color:on?col:t.mut,transition:"all .15s"}}>
+              }} style={{display:"flex",alignItems:"center",gap:4,padding:"4px 10px",borderRadius:12,fontSize:10,fontWeight:on?600:400,cursor:"pointer",whiteSpace:"nowrap",background:on?`${col}18`:`${t.surface}44`,border:`1px solid ${on?col:t.brd}33`,color:on?col:t.mut,transition:"all .15s",boxShadow:on?`0 0 6px ${col}22`:"none"}}>
                 {isQs&&searchLoading?<span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span>:(on?<IC.ToggleOn/>:<IC.ToggleOff/>)}{tl.name}
               </button>;
             })}
           </div>
         </div>
         {/* INPUT */}
-        <div style={{padding:"4px 16px 11px",flexShrink:0}}>
+        <div style={{padding:"6px 18px 14px",flexShrink:0}}>
           {/* Attachment chips */}
           {attachments.length>0&&<div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",flexWrap:"wrap",gap:4,padding:"4px 0"}}>
             {attachments.map((a,i)=><Chip key={i} l={`📎 ${a.name}`} c={t.f1} bg={`${t.f1}15`} onX={()=>setAttachments(p=>p.filter((_,j)=>j!==i))}/>)}
           </div>}
-          <div style={{maxWidth:chatWidth,margin:"0 auto",...glass,borderRadius:14,padding:"3px 3px 3px 8px",display:"flex",alignItems:"flex-end",gap:4,border:`1px solid ${councilRunning?t.pink:streaming?t.warm:quickSearch?t.f1:t.acc}28`,boxShadow:`0 0 ${councilRunning||streaming?26:12}px ${councilRunning?t.pink:streaming?t.warm:t.acc}${councilRunning||streaming?"18":"08"}`,transition:"box-shadow .4s,border-color .4s"}}>
+          <div style={{maxWidth:chatWidth,margin:"0 auto",...glass,borderRadius:16,padding:"4px 4px 4px 12px",display:"flex",alignItems:"flex-end",gap:5,border:`1px solid ${councilRunning?t.pink:streaming?t.warm:quickSearch?t.f1:t.acc}38`,boxShadow:`0 0 ${councilRunning||streaming?32:16}px ${councilRunning?t.pink:streaming?t.warm:t.acc}${councilRunning||streaming?"22":"0C"}`,transition:"box-shadow .4s,border-color .4s"}}>
             {!act?.is_council&&<><button onClick={()=>fileRef.current?.click()} title="Attach file" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"7px 3px",display:"flex",flexShrink:0,opacity:.6}}>
               <IC.Paperclip/>
             </button>
@@ -2596,12 +3136,12 @@ function HyprChat(){
             <textarea ref={inpRef} value={inp} onChange={e=>setInp(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
               placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Ask the council...":"Message"}`} rows={1}
               disabled={streaming||councilRunning}
-              style={{flex:1,background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:12.5,outline:"none",resize:"none",padding:"8px 0",maxHeight:120,lineHeight:1.5}}
+              style={{flex:1,background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:14,outline:"none",resize:"none",padding:"9px 0",maxHeight:140,lineHeight:1.6}}
               onInput={e=>{e.target.style.height="auto";e.target.style.height=Math.min(e.target.scrollHeight,120)+"px";}}
               onPaste={e=>{const files=Array.from(e.clipboardData?.files||[]);if(files.length){e.preventDefault();handleFileUpload(files);}}}/>
-            {councilRunning?<button onClick={()=>setCouncilRunning(false)} style={{background:t.pink,border:"none",color:"#fff",padding:"7px 11px",borderRadius:10,cursor:"pointer",display:"flex",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :streaming?<button onClick={stop} style={{background:t.err,border:"none",color:"#fff",padding:"7px 11px",borderRadius:10,cursor:"pointer",display:"flex",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :<button onClick={send} disabled={!inp.trim()&&!attachments.length} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.acc):t.sfBri,border:"none",color:(inp.trim()||attachments.length)?t.bgDeep:t.mut,padding:"7px 11px",borderRadius:10,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",flexShrink:0,transition:"all .2s"}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
+            {councilRunning?<button onClick={()=>setCouncilRunning(false)} style={{background:t.pink,border:"none",color:"#fff",padding:"9px 13px",borderRadius:12,cursor:"pointer",display:"flex",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            :streaming?<button onClick={stop} style={{background:t.err,border:"none",color:"#fff",padding:"9px 13px",borderRadius:12,cursor:"pointer",display:"flex",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            :<button onClick={send} disabled={!inp.trim()&&!attachments.length} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.acc):t.sfBri,border:"none",color:(inp.trim()||attachments.length)?t.bgDeep:t.mut,padding:"9px 13px",borderRadius:12,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",flexShrink:0,transition:"all .2s",boxShadow:(inp.trim()||attachments.length)?`0 0 12px ${t.acc}44`:"none"}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
           </div>
         </div>
       </>}
