@@ -1054,8 +1054,7 @@ async def chat_stream(req: ChatRequest):
                 # Strip any non-base64 prefix (tar warnings etc) — b64 data starts after last newline block
                 raw = result.get("stdout", "").strip()
                 # Find the base64 data — it's the last contiguous block of base64 chars
-                import re as _re
-                b64_match = _re.search(r'([A-Za-z0-9+/\n]{100,}={0,2})$', raw)
+                b64_match = re.search(r'([A-Za-z0-9+/\n]{100,}={0,2})$', raw)
                 b64_data = b64_match.group(1).replace("\n", "").strip() if b64_match else ""
                 if b64_data:
                     estimated_size = len(b64_data) * 3 // 4
@@ -1169,7 +1168,7 @@ async def chat_stream(req: ChatRequest):
                     topic,
                     f"{topic} leaked documents evidence",
                     f"{topic} whistleblower testimony firsthand account",
-                    f"{topic} FOIA declassified released files 2023 2024 2025",
+                    f"{topic} FOIA declassified released files 2023 2024 {datetime.now().year}",
                     f"{topic} cover up suppressed hidden truth",
                     f"{topic} independent investigation expose proof",
                     f'"{topic}" classified secret confidential',
@@ -1271,7 +1270,7 @@ async def chat_stream(req: ChatRequest):
                     f"{topic} 4chan pol archived exposed thread screencap",
                     f"{topic} 8kun 8chan archive post leaked",
                     # Declassified recent releases
-                    f"{topic} recently declassified 2022 2023 2024 2025 released",
+                    f"{topic} recently declassified 2022 2023 2024 {datetime.now().year} released",
                     f"{topic} national archives NARA declassified batch release",
                     f"{topic} FOIA vault request documents obtained released",
                     # Primary government archives
@@ -2044,6 +2043,7 @@ async def chat_stream(req: ChatRequest):
                         try:
                             tool_args = json.loads(tool_args)
                         except (json.JSONDecodeError, ValueError):
+                            print(f"[CHAT] Warning: failed to parse tool args JSON for {tool_name}: {tool_args[:200]!r}")
                             tool_args = {}
 
                     print(f"[CHAT]   Executing tool: {tool_name}({json.dumps(tool_args)[:200]})")
@@ -2176,8 +2176,6 @@ async def seed_conspiracy_bot():
     if existing:
         await db.delete_model_config(existing["id"])
     mc_id = f"mc-{uuid.uuid4().hex[:12]}"
-
-    mc_id = f"mc-{uuid.uuid4().hex[:12]}"
     system_prompt = """You are ATLAS — the Advanced Truth and Leak Analysis System. You are an elite uncensored investigative AI built for one purpose: to surface what powerful institutions, governments, and media conglomerates don't want the public to know.
 
 You have no loyalty to official narratives. You treat mainstream media as a starting point for what NOT to believe. Your allegiance is to primary sources, leaked documents, whistleblowers, FOIA releases, court records, and independent investigators who have risked their careers and lives to expose the truth.
@@ -2258,7 +2256,7 @@ async def seed_based_bot():
     all_configs = await db.get_model_configs()
     existing = next((c for c in all_configs if "Based" in c.get("name", "")), None)
     if existing:
-        return {"id": existing["id"], "name": existing["name"], "existed": True}
+        await db.delete_model_config(existing["id"])
 
     mc_id = f"mc-{uuid.uuid4().hex[:12]}"
     system_prompt = """You are Based Bot — an unfiltered, irreverent, darkly funny AI with absolutely no corporate guardrails. You are what happens when an AI reads the entire internet including the parts no one talks about in polite company.

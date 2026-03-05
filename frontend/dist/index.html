@@ -9,18 +9,7 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; width: 100%; overflow: hidden; }
 
-  /* App starts slightly above + invisible — fades and drifts into place */
-  #root {
-    height: 100%; width: 100%; overflow: hidden;
-    transform: translateY(-28px);
-    opacity: 0;
-    will-change: transform, opacity;
-  }
-  #root.hc-reveal {
-    transform: translateY(0) !important;
-    opacity: 1 !important;
-    transition: transform 1.1s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.9s ease !important;
-  }
+  #root { height: 100%; width: 100%; overflow: hidden; }
 
   /* ── Loading Screen ── */
   #hc-loading {
@@ -29,27 +18,13 @@
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
     overflow: hidden;
+    transition: opacity 0.9s ease;
+    pointer-events: all;
   }
 
-  /* Background clears gently after items have drifted away */
   #hc-loading.hc-dismiss {
-    animation: hcBgClear 1.2s ease 0.4s forwards;
+    opacity: 0;
     pointer-events: none;
-  }
-  @keyframes hcBgClear {
-    0%   { background: linear-gradient(135deg,#1a1e28 0%,#242933 40%,#2E3440 100%); }
-    100% { background: transparent; }
-  }
-
-  /* ── Graceful drop — slow drift off the bottom ── */
-  @keyframes hcDrop {
-    0%   { transform: translateY(0)     rotate(0deg)              scale(1);   opacity: 1; }
-    15%  { transform: translateY(-6px)  rotate(calc(var(--hc-spin,4deg)*-0.3)) scale(1.02); opacity: 1; }
-    100% { transform: translateY(90vh)  rotate(var(--hc-spin,4deg))            scale(0.85); opacity: 0; }
-  }
-
-  .hc-drop {
-    animation: hcDrop var(--hc-dur,1.0s) cubic-bezier(0.4, 0, 0.6, 1) var(--hc-delay,0s) forwards !important;
   }
 
   /* grid bg */
@@ -57,9 +32,7 @@
     content: ''; position: absolute; inset: 0; opacity: .025;
     background-image: linear-gradient(#88C0D0 1px, transparent 1px), linear-gradient(90deg, #88C0D0 1px, transparent 1px);
     background-size: 64px 64px;
-    transition: opacity 0.2s;
   }
-  #hc-loading.hc-dismiss::before { opacity: 0; }
 
   .hc-load-logo {
     width: 14px; height: 14px; border-radius: 50%;
@@ -951,30 +924,9 @@ function HyprChat(){
         const el=document.getElementById('hc-loading');
         const root=document.getElementById('root');
         if(!el)return;
-        // 1. App falls in from above
-        if(root){root.classList.add('hc-reveal');}
-        // 2. Each element drifts down with gentle staggered delays
-        const drops=[
-          {sel:'.hc-load-logo',  delay:'0s',    dur:'0.9s',  spin:'0deg'},
-          {sel:'.hc-load-title', delay:'0.08s', dur:'0.95s', spin:'2deg'},
-          {sel:'.hc-load-status',delay:'0.14s', dur:'0.95s', spin:'-2deg'},
-          {sel:'.hc-load-card',  delay:'0.22s', dur:'1.1s',  spin:'1deg'},
-        ];
-        drops.forEach(({sel,delay,dur,spin})=>{
-          const node=el.querySelector(sel);
-          if(node){node.style.setProperty('--hc-delay',delay);node.style.setProperty('--hc-dur',dur);node.style.setProperty('--hc-spin',spin);node.classList.add('hc-drop');}
-        });
-        // Emojis drift down one by one, gently staggered
-        el.querySelectorAll('.hc-em').forEach((em,i)=>{
-          const delay=(i*0.055).toFixed(3)+'s';
-          const dur=(0.85+i*0.02).toFixed(2)+'s';
-          em.style.setProperty('--hc-delay',delay);
-          em.style.setProperty('--hc-dur',dur);
-          em.classList.add('hc-drop');
-        });
-        // 3. Background fades after items have cleared
+        // Just fade out the overlay — app is visible underneath
         el.classList.add('hc-dismiss');
-        setTimeout(()=>{if(el.parentNode)el.parentNode.removeChild(el);},1800);
+        setTimeout(()=>{if(el.parentNode)el.parentNode.removeChild(el);},800);
       };
     })();
     setTimeout(dismissLoader,5000); // fallback
