@@ -509,7 +509,7 @@ function HyprChat(){
   const [autoExpandThink,setAutoExpandThink]=useState(()=>{try{return localStorage.getItem("hc-auto-expand-think")==="1";}catch{return false;}});
   const [lastPersonaId,setLastPersonaId]=useState(()=>{try{return localStorage.getItem("hc-last-persona")||null;}catch{return null;}});
   const [fontSize,setFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font-size")||"13");}catch{return 13;}});
-  const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"12");}catch{return 12;}});
+  const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"13");}catch{return 13;}});
   const [chatWidth,setChatWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-w")||"760");}catch{return 760;}});
   const [wsModel,setWsModel]=useState(()=>{try{return localStorage.getItem("hc-ws-model")||"qwen2.5:7b";}catch{return "qwen2.5:7b";}});
   const [ctxTokens,setCtxTokens]=useState(0);
@@ -549,6 +549,7 @@ function HyprChat(){
   const [hfDownloading,setHfDownloading]=useState(false);
   const [hfDownloadProg,setHfDownloadProg]=useState(null);
   const [hfDownloadError,setHfDownloadError]=useState(null);
+  const [hfDownloadPct,setHfDownloadPct]=useState(0);
   const [hfDownloadName,setHfDownloadName]=useState("");
   const [hfSelectedFiles,setHfSelectedFiles]=useState([]); // filenames to download
   const [hfGgufOnly,setHfGgufOnly]=useState(true);
@@ -892,6 +893,7 @@ function HyprChat(){
       if(sendTopK!==undefined)body.top_k=sendTopK;
       if(sendRepeatPenalty!==undefined)body.repeat_penalty=sendRepeatPenalty;
       const res=await fetch(`${API}/api/chat/stream`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:ctrl.signal});
+      if(!res.ok){const errText=await res.text().catch(()=>res.statusText);throw new Error(`HTTP ${res.status}: ${errText}`);}
       const rdr=res.body.getReader(),dec=new TextDecoder();
       let full="",buf="";
       while(true){
@@ -916,7 +918,7 @@ function HyprChat(){
   };
 
   const send=async()=>{
-    if(!inp.trim()&&!attachments.length||streaming)return;
+    if(streaming||(!inp.trim()&&!attachments.length))return;
     let cid=actId;
     if(!cid){await newChat();return;}
     const cv=convs.find(c=>c.id===cid);
@@ -1047,6 +1049,7 @@ function HyprChat(){
     if(!pullName.trim())return;setPullProg("Starting...");
     try{
       const res=await fetch(`${API}/api/models/pull`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:pullName})});
+      if(!res.ok){setPullProg(`Error: ${res.status} ${res.statusText}`);setTimeout(()=>setPullProg(null),3000);return;}
       const rdr=res.body.getReader(),dec=new TextDecoder();let buf="";
       while(true){
         const{done,value}=await rdr.read();if(done)break;
@@ -1074,22 +1077,44 @@ function HyprChat(){
     }catch{setHfResults([]);}
     setHfLoading(false);
   };
+  // Strip HTML tags from HuggingFace README content (badges, img, div, etc.)
+  const hfCleanReadme=(text)=>{
+    if(!text)return text;
+    // Preserve code blocks, strip HTML outside them
+    const parts=text.split(/(```[\s\S]*?```)/g);
+    return parts.map((p,i)=>{
+      if(i%2===1)return p;
+      return p
+        .replace(/<img[^>]*>/gi,"")  // remove images
+        .replace(/<a[^>]*>([\s\S]*?)<\/a>/gi,"$1")  // unwrap anchors
+        .replace(/<\/?(div|span|p|center|details|summary|br|strong|em|code|pre|table|tr|td|th|thead|tbody|ul|ol|li|h[1-6]|b|i)[^>]*>/gi,"")
+        .replace(/<[^>]{1,200}>/g,"")  // strip remaining short tags
+        .replace(/&nbsp;/g," ").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&amp;/g,"&").replace(/&quot;/g,'"')
+        .replace(/\[!\[.*?\]\(.*?\)\]\(.*?\)/g,"")  // strip badge links [![...](...)](...)
+        .replace(/!\[.*?\]\(.*?\)/g,"");  // strip remaining images ![](...)
+    }).join("");
+  };
   const hfSelectModel=async(model)=>{
-    setHfSelected(model);setHfModelInfo(null);setHfReadme(null);setHfSelectedFiles([]);setHfDownloadError(null);setHfDownloadProg(null);
+    setHfSelected(model);setHfModelInfo(null);setHfReadme(null);setHfSelectedFiles([]);setHfDownloadError(null);setHfDownloadProg(null);setHfDownloadPct(0);
     const repoId=model.id;
-    // derive a default model name from repo id
     const defaultName=repoId.split("/").pop().toLowerCase().replace(/[^a-z0-9\-:.]/g,"-").slice(0,60);
     setHfDownloadName(defaultName);
-    try{const r=await fetch(`${API}/api/hf/model?repo_id=${encodeURIComponent(repoId)}`);const d=await r.json();setHfModelInfo(d);}catch{}
+    // Fetch model info and README in parallel
     setHfReadmeLoading(true);
-    try{const r=await fetch(`${API}/api/hf/readme?repo_id=${encodeURIComponent(repoId)}`);const d=await r.json();setHfReadme(d.content||"");}catch{}
+    const [infoR,readmeR]=await Promise.allSettled([
+      fetch(`${API}/api/hf/model?repo_id=${encodeURIComponent(repoId)}`).then(r=>r.json()),
+      fetch(`${API}/api/hf/readme?repo_id=${encodeURIComponent(repoId)}`).then(r=>r.json()),
+    ]);
+    if(infoR.status==="fulfilled")setHfModelInfo(infoR.value);
+    if(readmeR.status==="fulfilled")setHfReadme(hfCleanReadme(readmeR.value?.content||""));
     setHfReadmeLoading(false);
   };
   const hfDownload=async()=>{
     if(!hfSelected||!hfSelectedFiles.length)return;
-    setHfDownloading(true);setHfDownloadProg("Starting...");setHfDownloadError(null);
+    setHfDownloading(true);setHfDownloadProg("Contacting Ollama...");setHfDownloadError(null);setHfDownloadPct(0);
     try{
       const res=await fetch(`${API}/api/hf/download`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({repo_id:hfSelected.id,filenames:hfSelectedFiles,model_name:hfDownloadName.trim()})});
+      if(!res.ok){setHfDownloadError(`Server error: ${res.status} ${res.statusText}`);setHfDownloading(false);return;}
       const rdr=res.body.getReader(),dec=new TextDecoder();let buf="";
       while(true){
         const{done,value}=await rdr.read();if(done)break;
@@ -1099,13 +1124,19 @@ function HyprChat(){
           if(!ln.startsWith("data: "))continue;
           try{
             const d=JSON.parse(ln.slice(6));
-            if(d.status==="error"){setHfDownloadError(d.message);setHfDownloadProg(null);}
-            else if(d.status==="done"){setHfDownloadProg("✓ "+d.message);fetch(`${API}/api/models`).then(r=>r.json()).then(d=>setModels(d.models||[])).catch(()=>{});}
-            else if(d.message)setHfDownloadProg(d.message);
+            if(d.status==="error"){setHfDownloadError(d.message);setHfDownloadProg(null);setHfDownloadPct(0);}
+            else if(d.status==="done"){
+              setHfDownloadProg(d.message||"✓ Done!");setHfDownloadPct(100);
+              fetch(`${API}/api/models`).then(r=>r.json()).then(d=>setModels(d.models||[])).catch(()=>{});
+              setTimeout(()=>{setHfDownloadProg(null);setHfSelectedFiles([]);setHfDownloadPct(0);},4000);
+            }else if(d.status==="downloading"){
+              if(d.pct)setHfDownloadPct(d.pct);
+              if(d.message)setHfDownloadProg(d.message);
+            }else if(d.message)setHfDownloadProg(d.message);
           }catch{}
         }
       }
-    }catch(e){setHfDownloadError(e.message);}
+    }catch(e){setHfDownloadError(e.message);setHfDownloadPct(0);}
     setHfDownloading(false);
   };
   const fmtSize=(bytes)=>{if(!bytes)return"?";if(bytes>1e9)return`${(bytes/1e9).toFixed(1)} GB`;if(bytes>1e6)return`${(bytes/1e6).toFixed(0)} MB`;return`${(bytes/1e3).toFixed(0)} KB`;};
@@ -1185,12 +1216,22 @@ function HyprChat(){
       }
       return <div key={i}>{p.split("\n").map((ln,j)=>{
         if(ln.match(/^---+$|^\*\*\*+$|^___+$/))return <hr key={j} style={{border:"none",borderTop:`1px solid ${t.brd}44`,margin:"10px 0"}}/>;
+        if(ln.match(/^##### /))return <div key={j} style={{fontSize:12,fontWeight:700,color:t.acc,margin:"8px 0 3px"}}>{inlineParse(ln.slice(6))}</div>;
+        if(ln.match(/^#### /))return <div key={j} style={{fontSize:13,fontWeight:700,color:t.acc,margin:"10px 0 4px"}}>{inlineParse(ln.slice(5))}</div>;
         if(ln.match(/^### /))return <div key={j} style={{fontSize:14,fontWeight:700,color:t.acc,margin:"12px 0 5px"}}>{inlineParse(ln.slice(4))}</div>;
         if(ln.match(/^## /))return <div key={j} style={{fontSize:15,fontWeight:700,color:t.acc,margin:"14px 0 6px"}}>{inlineParse(ln.slice(3))}</div>;
         if(ln.match(/^# /))return <div key={j} style={{fontSize:17,fontWeight:700,color:t.acc,margin:"16px 0 7px"}}>{inlineParse(ln.slice(2))}</div>;
         if(ln.match(/^>\s?/))return <div key={j} style={{borderLeft:`3px solid ${t.acc}44`,paddingLeft:10,margin:"2px 0",color:t.mut,fontStyle:"italic"}}>{inlineParse(ln.replace(/^>\s?/,""))}</div>;
         if(ln.match(/^[-*+]\s+/))return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:t.acc,marginTop:"0.25em",fontSize:"0.7em",flexShrink:0}}>●</span><span style={{flex:1}}>{inlineParse(ln.replace(/^[-*+]\s+/,""))}</span></div>;
         if(ln.match(/^\d+\.\s+/)){const num=ln.match(/^(\d+)\./)[1];return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:t.acc,minWidth:18,flexShrink:0,fontWeight:600,fontSize:"0.9em"}}>{num}.</span><span style={{flex:1}}>{inlineParse(ln.replace(/^\d+\.\s+/,""))}</span></div>;}
+        if(ln.match(/^\|.+\|/)){
+          const isDivider=ln.replace(/[\s\-:|]/g,"").length===0;
+          if(isDivider)return null;
+          const cells=ln.split("|").slice(1,-1).map(c=>c.trim());
+          return <div key={j} style={{display:"flex",gap:0,borderBottom:`1px solid ${t.brd}22`,fontSize:11}}>
+            {cells.map((c,ci)=><div key={ci} style={{flex:1,padding:"3px 8px",borderRight:ci<cells.length-1?`1px solid ${t.brd}22`:"none",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{inlineParse(c)}</div>)}
+          </div>;
+        }
         return <div key={j} style={{minHeight:ln===""?8:"auto"}}>{inlineParse(ln)}</div>;
       })}</div>;
     });
@@ -1221,7 +1262,8 @@ function HyprChat(){
   // ============================================================
   // RENDER
   // ============================================================
-  return <div style={{height:"100vh",width:"100vw",display:"flex",fontFamily:font,background:`linear-gradient(135deg,${t.bgDeep} 0%,${t.bg} 50%,${t.bgDeep} 100%)`,color:t.text,overflow:"hidden",position:"relative",fontSize:uiFontSize}}>
+  const _uiScale=uiFontSize/13;
+  return <div style={{height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:`linear-gradient(135deg,${t.bgDeep} 0%,${t.bg} 50%,${t.bgDeep} 100%)`,color:t.text,overflow:"hidden",position:"relative"}}>
     <div style={{position:"absolute",inset:0,opacity:.02,zIndex:0,backgroundImage:`linear-gradient(${t.acc} 1px,transparent 1px),linear-gradient(90deg,${t.acc} 1px,transparent 1px)`,backgroundSize:"50px 50px"}}/>
 
     {/* NAV RAIL */}
@@ -1872,6 +1914,7 @@ function HyprChat(){
               families[fam].push({m,name,tag});
             });
             const szCol=(tag)=>{const l=(tag||"").toLowerCase();if(l.match(/70b|65b|72b/))return t.err;if(l.match(/30b|32b|34b/))return t.warm;if(l.match(/13b|14b|27b/))return t.acc;if(l.match(/7b|8b/))return t.ok;if(l.match(/1b|3b|4b/))return t.f1;return t.mut;};
+            const capTags=(n)=>{const b=(n||"").toLowerCase();const caps=[];if(b.match(/embed/))caps.push({label:"Embed",emoji:"🔢",color:"#9b59b6"});if(b.match(/llava|vision|[\-:]vl$|[\-:]vl[\-:]/))caps.push({label:"Vision",emoji:"👁",color:"#e67e22"});if(b.match(/coder|codestral|starcoder|deepseek-coder/))caps.push({label:"Code",emoji:"💻",color:"#2ecc71"});if(!b.match(/embed/)&&b.match(/qwen|llama3|llama-3|mistral|mixtral|command|hermes|deepseek|phi3|phi-3|wizardlm|gemma|llama3\./))caps.push({label:"Tools",emoji:"🔧",color:"#3498db"});return caps;};
             const icon=(n)=>{const b=n.toLowerCase();if(b.includes("qwen"))return"🌸";if(b.includes("llama"))return"🦙";if(b.includes("mistral")||b.includes("mixtral"))return"💨";if(b.includes("gemma"))return"💎";if(b.includes("phi"))return"φ";if(b.includes("deepseek"))return"🔍";if(b.includes("coder")||b.includes("code"))return"💻";if(b.includes("wizard"))return"🧙";return"🤖";};
             const famEmoji={Qwen:"🌸",Llama:"🦙",Mistral:"💨",Gemma:"💎",Phi:"φ",DeepSeek:"🔍",Command:"⚡",WizardLM:"🧙",Hermes:"🏛",Other:"🤖"};
             if(!models.length)return <div style={{padding:"20px 8px",color:t.mut,fontSize:11,fontStyle:"italic",textAlign:"center"}}>No models found.<br/>Pull one below.</div>;
@@ -1887,7 +1930,10 @@ function HyprChat(){
                   <span style={{fontSize:15,flexShrink:0}}>{icon(name)}</span>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:11,fontWeight:600,color:sel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name}</div>
-                    <div style={{fontSize:9,color:sc,fontWeight:700}}>{tag}</div>
+                    <div style={{display:"flex",alignItems:"center",gap:3,marginTop:2,flexWrap:"wrap"}}>
+                      <span style={{fontSize:9,color:sc,fontWeight:700}}>{tag}</span>
+                      {capTags(name).map(c=><span key={c.label} style={{fontSize:8,padding:"1px 4px",borderRadius:4,background:`${c.color}22`,color:c.color,fontWeight:600,border:`1px solid ${c.color}44`}}>{c.emoji} {c.label}</span>)}
+                    </div>
                   </div>
                   {hasCustom&&<div style={{width:6,height:6,borderRadius:"50%",background:t.acc,flexShrink:0}}/>}
                   <span style={{fontSize:9,color:t.mut,flexShrink:0,transition:"transform .2s",transform:sel?"rotate(90deg)":"none"}}>›</span>
@@ -2098,15 +2144,19 @@ function HyprChat(){
                 {hfSelectedFiles.length>0&&<div style={{marginTop:10,display:"flex",flexDirection:"column",gap:6,paddingTop:10,borderTop:`1px solid ${t.brd}18`}}>
                   <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Ollama Model Name</div>
                   <input value={hfDownloadName} onChange={e=>setHfDownloadName(e.target.value)} placeholder="e.g. llama3-q5" style={{...inputS,fontSize:11,padding:"6px 8px"}}/>
-                  <div style={{fontSize:9,color:t.mut}}>{hfSelectedFiles.length} file{hfSelectedFiles.length>1?"s":""} · {fmtSize(hfModelInfo.gguf_files.filter(f=>hfSelectedFiles.includes(f.name)).reduce((a,f)=>a+f.size,0))}</div>
-                  <button onClick={hfDownload} disabled={hfDownloading||!hfDownloadName.trim()} style={{...btnS(t.ok),width:"100%",justifyContent:"center",padding:"7px"}}>
-                    <IC.Download/>{hfDownloading?"Downloading...":"Download & Register"}
+                  <div style={{fontSize:9,color:t.mut}}>{hfSelectedFiles.length} file{hfSelectedFiles.length>1?"s":""} · {fmtSize((hfModelInfo?.gguf_files||[]).filter(f=>hfSelectedFiles.includes(f.name)).reduce((a,f)=>a+(f.size||0),0))}</div>
+                  <button onClick={hfDownload} disabled={hfDownloading||!hfDownloadName.trim()} style={{...btnS(hfDownloading?t.mut:t.ok),width:"100%",justifyContent:"center",padding:"8px",opacity:hfDownloading?.7:1}}>
+                    <IC.Download/>{hfDownloading?"Fetching via Ollama...":"Download & Register"}
                   </button>
-                  {hfDownloadProg&&<div style={{padding:"7px 10px",background:`${t.surface}66`,borderRadius:8,border:`1px solid ${hfDownloadProg.startsWith("✓")?t.ok:t.brd}33`,fontSize:10,color:hfDownloadProg.startsWith("✓")?t.ok:t.acc,display:"flex",alignItems:"center",gap:5}}>
-                    {!hfDownloadProg.startsWith("✓")&&<div style={{display:"flex",gap:2}}>{[0,1,2].map(i=><div key={i} style={{width:3,height:3,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
-                    {hfDownloadProg}
+                  {(hfDownloadProg||hfDownloading)&&<div style={{borderRadius:8,overflow:"hidden",border:`1px solid ${hfDownloadPct===100?t.ok:t.brd}33`,background:`${t.surface}66`}}>
+                    {hfDownloadPct>0&&<div style={{height:3,background:`linear-gradient(90deg,${t.acc},${t.ok})`,width:`${hfDownloadPct}%`,transition:"width .4s ease",borderRadius:3}}/>}
+                    <div style={{padding:"7px 10px",fontSize:10,color:hfDownloadPct===100?t.ok:t.acc,display:"flex",alignItems:"center",gap:5}}>
+                      {hfDownloadPct<100&&<div style={{display:"flex",gap:2,flexShrink:0}}>{[0,1,2].map(i=><div key={i} style={{width:3,height:3,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
+                      <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{hfDownloadProg||"Working..."}</span>
+                      {hfDownloadPct>0&&hfDownloadPct<100&&<span style={{flexShrink:0,fontWeight:700}}>{hfDownloadPct}%</span>}
+                    </div>
                   </div>}
-                  {hfDownloadError&&<div style={{padding:"7px 10px",background:`${t.err}10`,borderRadius:8,border:`1px solid ${t.err}33`,fontSize:10,color:t.err}}>{hfDownloadError}</div>}
+                  {hfDownloadError&&<div style={{padding:"7px 10px",background:`${t.err}10`,borderRadius:8,border:`1px solid ${t.err}33`,fontSize:10,color:t.err,wordBreak:"break-word"}}>{hfDownloadError}</div>}
                 </div>}
               </>}
             </div>

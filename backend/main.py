@@ -1155,31 +1155,63 @@ async def chat_stream(req: ChatRequest):
                     "status": f"🕵️ Opening case file: {topic[:45]}...",
                 })
 
-                # Conspiracy-specific search expansion
+                topic_lower = topic.lower()
+
+                # ── Wave 1: core conspiracy search queries ──
                 base_queries = [
                     topic,
-                    f"{topic} leaked documents",
-                    f"{topic} whistleblower testimony",
-                    f"{topic} FOIA declassified",
-                    f"{topic} evidence proof",
-                    f"{topic} cover up mainstream media",
-                    f"{topic} site:wikileaks.org OR site:archive.org",
-                    f"{topic} conspiracy theory evidence",
-                    f"{topic} independent investigation",
-                    f'"{topic}" classified documents',
+                    f"{topic} leaked documents evidence",
+                    f"{topic} whistleblower testimony firsthand",
+                    f"{topic} FOIA declassified released files",
+                    f"{topic} cover up suppressed hidden",
+                    f"{topic} independent investigation expose",
+                    f'"{topic}" classified secret',
+                    f"{topic} site:wikileaks.org",
+                    f"{topic} site:cryptome.org",
+                    f"{topic} site:theblackvault.com",
+                    f"{topic} site:muckrock.com",
+                    f"{topic} site:theintercept.com",
                 ]
                 if angle == "key_players":
-                    base_queries += [f"{topic} key individuals", f"{topic} organizations involved", f"{topic} who benefits"]
+                    base_queries += [
+                        f"{topic} key individuals named persons",
+                        f"{topic} organizations involved connections",
+                        f"{topic} cui bono who benefits network",
+                        f"{topic} financiers funders backers",
+                    ]
                 elif angle == "timeline":
-                    base_queries += [f"{topic} timeline events", f"{topic} chronology", f"{topic} sequence"]
+                    base_queries += [
+                        f"{topic} timeline chronology events sequence",
+                        f"{topic} history origins beginning",
+                        f"{topic} what happened when year date",
+                    ]
                 elif angle == "debunk":
-                    base_queries += [f"{topic} fact check", f"{topic} debunked evidence", f"{topic} official explanation"]
+                    base_queries += [
+                        f"{topic} official explanation response",
+                        f"{topic} debunked fact check real story",
+                        f"{topic} evidence against theory",
+                    ]
                 elif angle == "documents":
-                    base_queries += [f"{topic} official documents", f"{topic} government records", f"{topic} released files"]
+                    base_queries += [
+                        f"{topic} official government documents records",
+                        f"{topic} court filings evidence exhibits",
+                        f"{topic} site:courtlistener.com OR site:pacer.gov",
+                        f"{topic} site:documentcloud.org",
+                    ]
                 elif angle == "connections":
-                    base_queries += [f"{topic} connections links", f"{topic} network chart", f"{topic} who knew"]
+                    base_queries += [
+                        f"{topic} connections network links relationships",
+                        f"{topic} who knew what when",
+                        f"{topic} follow the money financial ties",
+                        f"{topic} site:opensecrets.org OR site:sec.gov/edgar",
+                    ]
                 else:
-                    base_queries += [f"{topic} proof evidence photographs", f"{topic} eyewitness accounts", f"{topic} hidden truth"]
+                    base_queries += [
+                        f"{topic} proof photographs evidence eyewitness",
+                        f"{topic} hidden truth real story exposed",
+                        f"{topic} alternative explanation theory",
+                        f"{topic} site:archive.org OR site:web.archive.org deleted removed",
+                    ]
 
                 all_findings = []
                 searched = set()
@@ -1194,17 +1226,15 @@ async def chat_stream(req: ChatRequest):
                     stats["searches"] += 1
                     return await _search_searxng(q, 12)
 
-                # Parallel search across all queries
+                # Parallel search across all wave 1 queries
                 tasks = [_csearch(q) for q in base_queries]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 for r in results:
                     if isinstance(r, list):
                         all_findings.extend(r)
 
-                # Fetch top pages — include alternative sources
-                top_urls = _rank_urls(all_findings, fetched)
-                # For conspiracy research, don't skip based on domain quality ranking (allow all)
-                fetch_urls = [f["url"] for f in all_findings if f.get("url") and f["url"] not in fetched][:12]
+                # Fetch top pages from wave 1
+                fetch_urls = [f["url"] for f in all_findings if f.get("url") and f["url"] not in fetched][:14]
                 fetch_tasks = [_fetch_page(u) for u in fetch_urls]
                 fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
                 for u, r in zip(fetch_urls, fetch_results):
@@ -1213,29 +1243,33 @@ async def chat_stream(req: ChatRequest):
                         full_pages.append(r)
                         stats["pages_read"] += 1
 
-                # Always do a second wave targeting specific source types
+                # ── Wave 2: deep alt-media + declassified intel ──
                 await events.emit(conv_id, "tool_start", {
                     "tool": "conspiracy_research", "icon": "search",
-                    "status": "📡 Wave 2: 4chan archives + declassified intel...",
+                    "status": "📡 Wave 2: deep intel archives + alt-media...",
                 })
                 wave2 = [
-                    f"{topic} reddit r/conspiracy r/conspiracytheories",
-                    f"{topic} truth hidden suppressed",
-                    f"{topic} CIA FBI NSA operation program",
-                    f"{topic} real story what they don't tell you",
+                    f"{topic} reddit r/conspiracy r/conspiracytheories r/C_S_T",
+                    f"{topic} CIA FBI NSA operation program secret",
                     f"{topic} 4chan pol archived exposed",
-                    f"{topic} site:archive.4plebs.org OR site:4chanarchives.com",
-                    f"{topic} recently declassified government documents 2020 2021 2022 2023 2024",
-                    f"{topic} national archives declassified NARA",
-                    f"{topic} FOIA request documents released",
-                    f"{topic} site:archives.gov OR site:cia.gov/readingroom",
+                    f"{topic} recently declassified 2020 2021 2022 2023 2024 2025",
+                    f"{topic} national archives NARA declassified released",
+                    f"{topic} FOIA vault request documents obtained",
+                    f"{topic} site:archives.gov OR site:cia.gov/readingroom OR site:vault.fbi.gov",
+                    f"{topic} site:ddosecrets.com OR site:wikileaks.org/plusd",
+                    f"{topic} site:bellingcat.com investigation open-source",
+                    f"{topic} site:thegrayzone.com OR site:mintpressnews.com",
+                    f"{topic} court case filing lawsuit deposition",
+                    f"{topic} congressional hearing testimony subpoena",
                 ]
                 t2 = [_csearch(q) for q in wave2]
                 r2 = await asyncio.gather(*t2, return_exceptions=True)
                 for r in r2:
                     if isinstance(r, list):
                         all_findings.extend(r)
-                fetch2 = [f["url"] for f in all_findings if f.get("url") and f["url"] not in fetched][:10]
+
+                # Fetch wave 2 pages
+                fetch2 = [f["url"] for f in all_findings if f.get("url") and f["url"] not in fetched][:12]
                 ft2 = [_fetch_page(u) for u in fetch2]
                 fr2 = await asyncio.gather(*ft2, return_exceptions=True)
                 for u, r in zip(fetch2, fr2):
@@ -1244,121 +1278,198 @@ async def chat_stream(req: ChatRequest):
                         full_pages.append(r)
                         stats["pages_read"] += 1
 
-                # Scrape targeted government document index pages based on topic keywords
-                gov_index_urls = []
-                topic_lower = topic.lower()
-                if any(k in topic_lower for k in ["epstein", "jeffrey", "maxwell", "trafficking"]):
-                    gov_index_urls += [
-                        "https://www.justice.gov/epstein",
-                        "https://www.justice.gov/usam/criminal-resource-manual-1023-epstein",
+                # ── Wave 3: specialized archives & primary sources ──
+                await events.emit(conv_id, "tool_start", {
+                    "tool": "conspiracy_research", "icon": "search",
+                    "status": "🏛️ Wave 3: primary archives, court records, FOIA vaults...",
+                })
+
+                # Direct URLs to specific primary source archives (topic-aware)
+                direct_urls = []
+
+                if any(k in topic_lower for k in ["epstein", "jeffrey", "maxwell", "trafficking", "lolita"]):
+                    direct_urls += [
+                        "https://www.courtlistener.com/?q=epstein&type=r&order_by=score+desc",
+                        "https://vault.fbi.gov/jeffrey-epstein",
+                        "https://www.documentcloud.org/app#search/q=epstein",
+                        "https://muckrock.com/foi/list/?q=epstein",
+                        "https://www.justice.gov/usao-sdny/pr/jeffrey-epstein-indicted-federal-sex-trafficking-charges",
                     ]
-                if any(k in topic_lower for k in ["9/11", "nine eleven", "september 11", "wtc", "world trade"]):
-                    gov_index_urls += [
+                    wave3_q = [
+                        f"Epstein flight logs passengers names list",
+                        f"Epstein island Little Saint James visitors",
+                        f"Ghislaine Maxwell trial testimony deposition unsealed",
+                        f"Epstein network financiers funders named",
+                        f"Epstein blackmail intelligence operation Mossad CIA",
+                        f"Epstein Wexner Les financial relationship",
+                        f"Virginia Giuffre affidavit deposition names",
+                    ]
+                    for wq in wave3_q:
+                        if wq not in searched:
+                            all_findings.extend(await _csearch(wq))
+
+                if any(k in topic_lower for k in ["9/11", "nine eleven", "september 11", "wtc", "world trade", "twin towers"]):
+                    direct_urls += [
                         "https://www.archives.gov/research/9-11",
                         "https://www.fbi.gov/history/famous-cases/911-investigation",
+                        "https://www.cia.gov/readingroom/search/site/9-11",
+                        "https://vault.fbi.gov/9-11-investigation",
                     ]
-                if any(k in topic_lower for k in ["jfk", "kennedy", "assassination", "warren commission"]):
-                    gov_index_urls += [
+                    wave3_q = [
+                        "9/11 declassified 28 pages Saudi Arabia funding",
+                        "9/11 NORAD stand down order who gave",
+                        "9/11 insider trading put options before attack",
+                        "9/11 Building 7 collapse NIST report criticized",
+                        "9/11 commission omissions suppressed evidence",
+                        "9/11 hijackers CIA asset connections",
+                    ]
+                    for wq in wave3_q:
+                        if wq not in searched:
+                            all_findings.extend(await _csearch(wq))
+
+                if any(k in topic_lower for k in ["jfk", "kennedy", "assassination", "warren commission", "oswald"]):
+                    direct_urls += [
                         "https://www.archives.gov/research/jfk",
                         "https://www.maryferrell.org/pages/Main_Page.html",
+                        "https://www.cia.gov/readingroom/search/site/kennedy",
+                        "https://www.woodrowwilsoncenter.org/article/jfk-documents",
                     ]
-                if any(k in topic_lower for k in ["cia", "mkultra", "mk ultra", "mind control"]):
-                    gov_index_urls += ["https://www.cia.gov/readingroom/search/site/mkultra"]
-                if any(k in topic_lower for k in ["ufo", "uap", "alien", "roswell", "pentagon ufo"]):
-                    gov_index_urls += [
+                    wave3_q = [
+                        "JFK assassination declassified documents CIA withheld",
+                        "Lee Harvey Oswald CIA handler contact",
+                        "JFK magic bullet theory disputed forensics",
+                        "JFK assassination multiple shooters Grassy Knoll witnesses",
+                        "George HW Bush CIA Dallas 1963",
+                    ]
+                    for wq in wave3_q:
+                        if wq not in searched:
+                            all_findings.extend(await _csearch(wq))
+
+                if any(k in topic_lower for k in ["cia", "mkultra", "mk ultra", "mind control", "monarch"]):
+                    direct_urls += [
+                        "https://www.cia.gov/readingroom/search/site/mkultra",
+                        "https://vault.fbi.gov/search?q=mind+control",
+                        "https://www.archives.gov/research/church-committee",
+                    ]
+
+                if any(k in topic_lower for k in ["ufo", "uap", "alien", "roswell", "area 51", "pentagon ufo", "disclosure"]):
+                    direct_urls += [
                         "https://www.archives.gov/research/ufo",
-                        "https://www.dni.gov/index.php/newsroom/reports-publications/reports-publications-2021/item/2223-preliminary-assessment-unidentified-aerial-phenomena",
+                        "https://theblackvault.com/documentvault/ufo/",
+                        "https://vault.fbi.gov/unexplained-phenomenon",
+                        "https://www.aaro.mil/",
                     ]
-                # Always add CIA reading room and FOIA vault as general sources
-                gov_index_urls += [
-                    "https://www.cia.gov/readingroom/",
+                    wave3_q = [
+                        "UAP UFO congressional testimony 2023 2024 whistleblower",
+                        "David Grusch UAP non-human intelligence testimony",
+                        "UAP crash retrieval program secret Pentagon",
+                        "Skinwalker Ranch government program AAWSAP",
+                    ]
+                    for wq in wave3_q:
+                        if wq not in searched:
+                            all_findings.extend(await _csearch(wq))
+
+                if any(k in topic_lower for k in ["covid", "coronavirus", "pandemic", "lab leak", "wuhan", "vaccine", "mrna"]):
+                    direct_urls += [
+                        "https://www.documentcloud.org/app#search/q=fauci+covid",
+                        "https://muckrock.com/foi/list/?q=covid+lab+leak",
+                    ]
+                    wave3_q = [
+                        "COVID-19 lab leak Wuhan Institute Virology evidence",
+                        "Fauci NIH EcoHealth gain of function funding",
+                        "COVID pandemic preparedness simulation Event 201",
+                        "FOIA Fauci emails released EcoHealth",
+                        "mRNA vaccine adverse events VAERS suppressed data",
+                    ]
+                    for wq in wave3_q:
+                        if wq not in searched:
+                            all_findings.extend(await _csearch(wq))
+
+                if any(k in topic_lower for k in ["rothschild", "rockefeller", "bilderberg", "davos", "wef", "nwo", "new world order", "illuminati", "deep state"]):
+                    wave3_q = [
+                        "Bilderberg Group meeting attendees decisions leaked",
+                        "World Economic Forum great reset agenda criticism",
+                        "Council on Foreign Relations members influence policy",
+                        "Trilateral Commission membership decisions exposed",
+                        f"{topic} site:theblackvault.com OR site:cryptome.org",
+                    ]
+                    for wq in wave3_q:
+                        if wq not in searched:
+                            all_findings.extend(await _csearch(wq))
+
+                # Always add CIA reading room and FBI vault + investigative archives
+                direct_urls += [
                     "https://vault.fbi.gov/",
+                    "https://www.cia.gov/readingroom/",
+                    "https://cryptome.org",
+                    "https://ddosecrets.com",
                 ]
 
-                if gov_index_urls:
-                    await events.emit(conv_id, "tool_start", {
-                        "tool": "conspiracy_research", "icon": "search",
-                        "status": f"🏛️ Scraping {len(gov_index_urls)} government document sources...",
-                    })
-                    gov_tasks = [_fetch_gov_doc_index(u) for u in gov_index_urls]
-                    gov_results = await asyncio.gather(*gov_tasks, return_exceptions=True)
-                    for gr in gov_results:
-                        if isinstance(gr, dict) and gr:
-                            full_pages.append(gr)
-                            stats["pages_read"] += 1
-                            # Add document links as additional search findings
-                            for pdf_url in gr.get("pdf_links", [])[:5]:
-                                all_findings.append({
-                                    "title": f"Document from {gr['url']}",
-                                    "url": pdf_url,
-                                    "content": f"PDF document found at {pdf_url}"
-                                })
+                # Scrape direct primary source URLs in parallel
+                wave3_fetch = [u for u in direct_urls if u not in fetched]
+                w3_tasks = [_fetch_gov_doc_index(u) for u in wave3_fetch]
+                w3_results = await asyncio.gather(*w3_tasks, return_exceptions=True)
+                for u, gr in zip(wave3_fetch, w3_results):
+                    fetched.add(u)
+                    if isinstance(gr, dict) and gr:
+                        full_pages.append(gr)
+                        stats["pages_read"] += 1
+                        for pdf_url in gr.get("pdf_links", [])[:5]:
+                            all_findings.append({
+                                "title": f"📄 Document: {pdf_url.split('/')[-1]}",
+                                "url": pdf_url,
+                                "content": f"Primary source document from {u}",
+                            })
 
                 await events.emit(conv_id, "tool_start", {
                     "tool": "conspiracy_research", "icon": "search",
-                    "status": f"🧠 Assembling dossier from {stats['searches']} searches, {stats['pages_read']} pages...",
+                    "status": f"🧠 Assembling dossier: {stats['searches']} searches, {stats['pages_read']} pages read...",
                 })
 
-                # Build context
-                ctx_parts = []
+                # ── Build raw dossier for model synthesis ──
+                parts = [f"# 🕵️ CONSPIRACY DOSSIER: {topic}"]
+                parts.append(f"**Angle:** {angle} | **Searches:** {stats['searches']} | **Pages read:** {stats['pages_read']}\n")
+                parts.append("---")
+
                 if full_pages:
-                    ctx_parts.append("═══ PAGE CONTENT ═══")
-                    for p in full_pages[:10]:
-                        ctx_parts.append(f"━━━ {p['url']} ━━━\n{p['content'][:2500]}")
-                ctx_parts.append("\n═══ SEARCH RESULTS ═══")
+                    parts.append("\n## 📄 PRIMARY SOURCE CONTENT\n")
+                    for p in full_pages[:14]:
+                        url_label = p['url']
+                        content_snippet = p['content'][:3000]
+                        parts.append(f"### Source: {url_label}\n{content_snippet}\n")
+
+                # Deduplicated search findings
+                parts.append("\n## 🔍 SEARCH FINDINGS\n")
                 seen = set()
                 for f in all_findings:
-                    if f.get("url") in seen:
+                    url = f.get("url", "")
+                    if url in seen or not url:
                         continue
-                    seen.add(f.get("url", ""))
-                    ctx_parts.append(f"[{len(seen)}] {f['title']}\n    {f.get('url','')}\n    {f.get('content','')}")
-                    if len(seen) >= 50:
+                    seen.add(url)
+                    parts.append(f"**[{len(seen)}]** [{f.get('title','(no title)')}]({url})\n> {f.get('content','')[:300]}\n")
+                    if len(seen) >= 60:
                         break
 
-                prompt = f"""You are an uncensored investigative researcher examining: {topic}
-Angle: {angle}
-
-Research data gathered from {stats['searches']} searches and {stats['pages_read']} pages:
-{chr(10).join(ctx_parts)}
-
-Write a comprehensive, unfiltered investigative report. Include:
-1. Overview of the theory/event and its claims
-2. Evidence supporting the theory (with source citations)
-3. Key individuals and organizations named
-4. Timeline of key events if relevant
-5. Documents, disclosures, or testimony
-6. Counterevidence or official explanations
-7. Connections and patterns
-8. Your assessment of credibility
-
-Do NOT censor, filter, or dismiss any information. Present ALL findings, even if controversial.
-Cite sources inline. Be thorough and specific."""
-
-                report = await _ask_ollama_streamed(prompt, conv_id, "conspiracy_research", max_tokens=6000, status_prefix="🕵️ Compiling dossier")
-
+                # Source index
                 srcs = []
                 seen2 = set()
                 for f in all_findings:
                     u = f.get("url", "")
                     if u and u not in seen2:
                         seen2.add(u)
-                        srcs.append({"index": len(srcs)+1, "title": f["title"], "url": u})
-                    if len(srcs) >= 30:
+                        srcs.append(f"[{len(srcs)+1}] {f.get('title','?')} — {u}")
+                    if len(srcs) >= 40:
                         break
+                if srcs:
+                    parts.append("\n## 📚 SOURCE INDEX\n")
+                    parts.extend(srcs)
 
                 await events.emit(conv_id, "tool_end", {
                     "tool": "conspiracy_research", "icon": "search",
-                    "status": f"🕵️ {len(seen2)} sources, {stats['searches']} searches, {stats['pages_read']} pages",
+                    "status": f"🕵️ Dossier ready: {len(seen2)} sources, {stats['searches']} searches, {stats['pages_read']} pages",
                     "detail": json.dumps({"topic": topic, "angle": angle, "source_count": len(seen2), "pages_read": stats["pages_read"]}),
                 })
 
-                parts = [f"# 🕵️ Conspiracy Investigation: {topic}\n"]
-                parts.append(f"*Angle: {angle} | {len(seen2)} sources, {stats['searches']} searches, {stats['pages_read']} pages*\n")
-                parts.append(report)
-                if srcs:
-                    parts.append("\n\n---\n## Sources\n")
-                    for s in srcs[:25]:
-                        parts.append(f"[{s.get('index','?')}] [{s.get('title','?')}]({s.get('url','')})")
                 return "\n".join(parts)
 
             elif name in custom_tool_map:
@@ -1649,8 +1760,12 @@ Cite sources inline. Be thorough and specific."""
         print(f"[CHAT] {len(ollama_tools)} native Ollama tools, available: {available_tool_names}")
 
         # Ensure sufficient context window when tools are active (tool defs alone can be 3000+ tokens)
+        # conspiracy_research returns large dossiers — needs 32k+ context
         if ollama_tools and not model_options.get("num_ctx"):
-            model_options["num_ctx"] = 16384
+            if "conspiracy_research" in available_tool_names or "deep_research" in available_tool_names:
+                model_options["num_ctx"] = 32768
+            else:
+                model_options["num_ctx"] = 16384
 
         # Inject CodeAgent environment context when code tools are active
         CODEAGENT_TOOLS_SET = {"execute_code", "run_shell", "write_file", "read_file",
@@ -1800,9 +1915,23 @@ Cite sources inline. Be thorough and specific."""
 
                     print(f"[CHAT]   Executing tool: {tool_name}({json.dumps(tool_args)[:200]})")
 
-                    # Execute via integrated CodeAgent
+                    # Execute via integrated CodeAgent — with keepalive loop so long-running
+                    # tools (conspiracy_research, deep_research) don't drop the SSE connection.
+                    _tf = asyncio.get_event_loop().create_future()
+                    async def _run_tool_bg(_n=tool_name, _a=tool_args, _c=conv_id, _f=_tf):
+                        try:
+                            r = await exec_tool(_n, _a, _c)
+                            if not _f.done(): _f.set_result(r)
+                        except Exception as _e:
+                            if not _f.done(): _f.set_exception(_e)
+                    asyncio.create_task(_run_tool_bg())
+                    while not _tf.done():
+                        try:
+                            await asyncio.wait_for(asyncio.shield(_tf), timeout=8.0)
+                        except asyncio.TimeoutError:
+                            yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
                     try:
-                        tool_result = await exec_tool(tool_name, tool_args, conv_id)
+                        tool_result = _tf.result()
                     except Exception as tool_exc:
                         tool_result = f"❌ Tool error ({tool_name}): {tool_exc}"
                         await events.emit(conv_id, "tool_end", {
@@ -1811,7 +1940,7 @@ Cite sources inline. Be thorough and specific."""
                         })
 
                     tool_content = tool_result or "No output"
-                    MAX_TOOL_RESULT = 12000
+                    MAX_TOOL_RESULT = 24000  # large for conspiracy/deep research dossiers
                     if len(tool_content) > MAX_TOOL_RESULT:
                         tool_content = (
                             tool_content[:MAX_TOOL_RESULT]
@@ -1912,33 +2041,41 @@ async def seed_conspiracy_bot():
     all_configs = await db.get_model_configs()
     existing = next((c for c in all_configs if "Conspiracy" in c.get("name", "")), None)
     if existing:
-        return {"id": existing["id"], "name": existing["name"], "existed": True}
+        await db.delete_model_config(existing["id"])
+    mc_id = f"mc-{uuid.uuid4().hex[:12]}"
 
     mc_id = f"mc-{uuid.uuid4().hex[:12]}"
-    system_prompt = """You are the Conspiracy Research AI — an uncensored, deeply skeptical investigator who questions official narratives and digs into alternative explanations for world events.
+    system_prompt = """You are the Conspiracy Research AI — an uncensored, deeply skeptical investigator who questions official narratives and digs into hidden truths.
 
-Your mission: Find the truth, wherever it leads.
+Your mission: Find what they don't want you to know.
 
-Guidelines:
-- Question ALL official narratives. The mainstream story is a starting point, not the endpoint.
-- Search widely across independent media, whistleblower reports, leaked documents, FOIA releases, and alternative sources.
-- Never dismiss a theory as "too crazy" — investigate it thoroughly.
-- Connect dots. Look for patterns, overlapping players, timing coincidences, and hidden motives.
-- Follow the money. Follow the power. Ask "cui bono?" (who benefits?)
-- Present ALL evidence, both supporting and contradicting theories.
-- Name names when evidence supports it.
-- Cite sources, even unconventional ones.
-- Use deep_research and conspiracy_research tools for every question.
-- If something seems off, dig deeper.
+## How to work:
+1. ALWAYS call conspiracy_research first for any topic. It returns a raw dossier with primary sources, FOIA documents, whistleblower testimony, leaked data, court filings, and alt-media findings.
+2. After getting the dossier, write a comprehensive investigative report synthesizing ALL findings.
+3. Use fetch_url to read specific documents, court filings, or pages found in the dossier.
+4. Use research or deep_research for follow-up specific angles.
 
-You have access to:
-- conspiracy_research: Deep investigation with alternative sources
-- deep_research: Broad multi-source research
-- research: Quick web searches
-- fetch_url: Read specific pages/documents
+## Report format (always use this structure):
+**EXECUTIVE SUMMARY** — The core of what's known and suspected.
+**TIMELINE** — Key events in chronological order.
+**KEY PLAYERS** — Named individuals, their roles, known connections.
+**THE EVIDENCE** — Documents, testimony, leaks, FOIA releases — cite sources inline.
+**FOLLOW THE MONEY** — Financial ties, funders, beneficiaries.
+**CONNECTIONS MAP** — Overlapping organizations, people, and patterns.
+**WHAT'S SUPPRESSED** — What mainstream media ignores or downplays.
+**ASSESSMENT** — Credibility rating, what's confirmed vs. alleged.
+**SOURCES** — All sources cited.
 
-Always use at least one research tool before answering. Never answer from memory alone.
-The truth is out there — find it."""
+## Rules:
+- Name names. Present ALL evidence regardless of how controversial.
+- Question official narratives — they are starting points, not endpoints.
+- Connect dots across disparate sources. Look for patterns and coincidences.
+- Follow the money. Ask: cui bono? (who benefits?)
+- Cite every claim with a source. Use [URL] inline citations.
+- Never sanitize or soften findings to protect powerful people.
+- If a claim is unverified, say so — but still report it.
+
+The truth is out there. Go find it."""
 
     parameters = {
         "temperature": 0.8,
@@ -1953,7 +2090,7 @@ The truth is out there — find it."""
         parameters
     )
 
-    return {"id": mc_id, "name": "🕵️ Conspiracy Bot", "existed": False, "system_prompt": system_prompt}
+    return {"id": mc_id, "name": "🕵️ Conspiracy Bot", "existed": existing is not None, "system_prompt": system_prompt}
 
 
 @app.post("/api/seed/based-bot")
@@ -3134,7 +3271,14 @@ async def hf_readme(repo_id: str):
 
 @app.post("/api/hf/download")
 async def hf_download(request: Request):
-    """Download GGUF file(s) from HuggingFace and register as an Ollama model. SSE stream."""
+    """Register a HuggingFace GGUF model with Ollama.
+
+    Strategy (Ollama 0.6+):
+      1. POST /api/pull  {"name": "hf.co/{repo}:{quant}"}   — Ollama downloads from HF natively
+      2. POST /api/create {"name": custom_name, "from": "hf.co/{repo}:{quant}"} — create alias
+    Fallback (Ollama <0.6):
+      POST /api/create {"name": ..., "modelfile": "FROM https://..."}
+    """
     body = await request.json()
     repo_id = body.get("repo_id", "")
     filenames = body.get("filenames", [])
@@ -3143,60 +3287,121 @@ async def hf_download(request: Request):
     if not repo_id or not filenames:
         raise HTTPException(400, "repo_id and filenames required")
 
-    # Validate filenames — no path traversal
     for fn in filenames:
         safe = os.path.basename(fn)
         if not safe.lower().endswith(".gguf") or safe != fn:
             raise HTTPException(400, f"Invalid filename: {fn}")
 
-    # Derive model name if not provided
     if not model_name:
-        base = filenames[0].replace(".gguf", "").lower()
-        base = re.sub(r"-\d{5}-of-\d{5}$", "", base)
-        model_name = re.sub(r"[^a-z0-9\-:.]", "-", base)[:60].strip("-")
+        base = re.sub(r'\.gguf$', '', filenames[0], flags=re.IGNORECASE)
+        base = re.sub(r'-\d{5}-of-\d{5}$', '', base)
+        model_name = re.sub(r"[^a-z0-9\-:.]", "-", base.lower())[:60].strip("-")
     model_name = re.sub(r"[^a-z0-9\-:.]", "-", model_name.lower())[:60].strip("-")
     if not model_name:
         raise HTTPException(400, "Invalid model name")
 
-    os.makedirs(HF_MODELS_DIR, exist_ok=True)
-    local_paths = [os.path.join(HF_MODELS_DIR, fn) for fn in filenames]
+    # Derive quantization tag from filename: Llama-3-Q4_K_M.gguf → Q4_K_M
+    base_fn = re.sub(r'\.gguf$', '', filenames[0], flags=re.IGNORECASE)
+    base_fn = re.sub(r'-\d{5}-of-\d{5}$', '', base_fn)
+    quant_m = re.search(r'[-_]((?:IQ|Q)\d+[_A-Za-z0-9]*|F\d+|BF16)$', base_fn, re.IGNORECASE)
+    quant = quant_m.group(1).upper() if quant_m else None
+
+    hf_pull_name = f"hf.co/{repo_id}" + (f":{quant}" if quant else "")
+    hf_url = f"https://huggingface.co/{repo_id}/resolve/main/{filenames[0]}"
+
+    def _sse_progress(line: str, final_name: str) -> str | None:
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        if d.get("error"):
+            return f"data: {json.dumps({'status': 'error', 'message': d['error']})}\n\n"
+        status = d.get("status", "")
+        completed = d.get("completed") or 0
+        total = d.get("total") or 0
+        sl = status.lower()
+        if "pulling" in sl or "downloading" in sl or "verifying" in sl:
+            if total:
+                pct = int(completed / total * 100)
+                mb_d, mb_t = completed / 1048576, total / 1048576
+                msg = f"⬇ {mb_d:.0f} / {mb_t:.0f} MB ({pct}%)"
+            else:
+                pct, msg = 0, f"⬇ {status}"
+            return f"data: {json.dumps({'status': 'downloading', 'pct': pct, 'message': msg})}\n\n"
+        elif status in ("success", "done"):
+            return f"data: {json.dumps({'status': 'done', 'message': f'✓ {final_name!r} ready!', 'model_name': final_name})}\n\n"
+        elif status:
+            return f"data: {json.dumps({'status': 'creating', 'message': status})}\n\n"
+        return None
 
     async def generate():
         try:
-            for i, (filename, local_path) in enumerate(zip(filenames, local_paths)):
-                url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
-                part_label = f"Part {i+1}/{len(filenames)}" if len(filenames) > 1 else filename
-                yield f"data: {json.dumps({'status': 'downloading', 'part': i+1, 'total_parts': len(filenames), 'message': f'Downloading {part_label}...'})}\n\n"
+            yield f"data: {json.dumps({'status': 'creating', 'message': f'Pulling {hf_pull_name} via Ollama...'})}\n\n"
 
-                async with http.stream("GET", url, timeout=None, follow_redirects=True) as resp:
-                    if resp.status_code != 200:
-                        yield f"data: {json.dumps({'status': 'error', 'message': f'HTTP {resp.status_code} for {filename}'})}\n\n"
-                        return
-                    total = int(resp.headers.get("content-length", 0))
-                    downloaded = 0
-                    with open(local_path, "wb") as f:
-                        async for chunk in resp.aiter_bytes(chunk_size=2 * 1024 * 1024):
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            if total:
-                                pct = int(downloaded / total * 100)
-                                mb_done = downloaded / 1048576
-                                mb_total = total / 1048576
-                                yield f"data: {json.dumps({'status': 'downloading', 'pct': pct, 'part': i+1, 'total_parts': len(filenames), 'message': f'{part_label}: {mb_done:.0f}/{mb_total:.0f} MB ({pct}%)'})}\n\n"
+            # ── Strategy 1: api/pull with hf.co/ (Ollama 0.5+ native HF) ──
+            pull_ok = False
+            pull_err = None
+            async with http.stream(
+                "POST", f"{config.OLLAMA_URL}/api/pull",
+                json={"name": hf_pull_name, "stream": True},
+                timeout=httpx.Timeout(7200.0, connect=10.0),
+            ) as resp:
+                if resp.status_code == 200:
+                    async for line in resp.aiter_lines():
+                        if not line.strip():
+                            continue
+                        sse = _sse_progress(line, model_name)
+                        if not sse:
+                            continue
+                        if '"status": "error"' in sse:
+                            pull_err = sse
+                            break
+                        yield sse
+                    if not pull_err:
+                        pull_ok = True
+                else:
+                    pull_err = (await resp.aread()).decode()[:200]
 
-            yield f"data: {json.dumps({'status': 'creating', 'message': f'Registering model {model_name} with Ollama...'})}\n\n"
+            if pull_ok:
+                # Create user-named alias (only if different from pull name)
+                if model_name.lower() != hf_pull_name.lower():
+                    yield f"data: {json.dumps({'status': 'creating', 'message': f'Creating alias {model_name!r}...'})}\n\n"
+                    async with http.stream(
+                        "POST", f"{config.OLLAMA_URL}/api/create",
+                        json={"name": model_name, "from": hf_pull_name, "stream": True},
+                        timeout=httpx.Timeout(60.0, connect=10.0),
+                    ) as resp2:
+                        async for line in resp2.aiter_lines():
+                            sse = _sse_progress(line, model_name)
+                            if sse:
+                                yield sse
+                yield f"data: {json.dumps({'status': 'done', 'message': f'✓ {model_name!r} ready!', 'model_name': model_name})}\n\n"
+                return
 
-            modelfile = f"FROM {local_paths[0]}\n"
+            # ── Strategy 2: legacy modelfile with FROM <url> (Ollama <0.5) ──
+            yield f"data: {json.dumps({'status': 'creating', 'message': 'Trying legacy modelfile approach...'})}\n\n"
             async with http.stream(
                 "POST", f"{config.OLLAMA_URL}/api/create",
-                json={"name": model_name, "modelfile": modelfile, "stream": True},
-                timeout=600,
+                json={"name": model_name, "modelfile": f"FROM {hf_url}\n", "stream": True},
+                timeout=httpx.Timeout(7200.0, connect=10.0),
             ) as resp:
+                if resp.status_code != 200:
+                    err = (await resp.aread()).decode()[:400]
+                    yield f"data: {json.dumps({'status': 'error', 'message': f'All download methods failed. Pull: {pull_err} | Modelfile: {err}'})}\n\n"
+                    return
+                done = False
                 async for line in resp.aiter_lines():
-                    if line:
-                        yield f"data: {line}\n\n"
+                    if not line.strip():
+                        continue
+                    sse = _sse_progress(line, model_name)
+                    if sse:
+                        yield sse
+                        if '"status": "done"' in sse:
+                            done = True
+                            return
+                if not done:
+                    yield f"data: {json.dumps({'status': 'done', 'message': f'✓ {model_name!r} ready!', 'model_name': model_name})}\n\n"
 
-            yield f"data: {json.dumps({'status': 'done', 'message': f'Model {model_name} is ready!', 'model_name': model_name})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'status': 'error', 'message': str(e)})}\n\n"
 
