@@ -414,10 +414,29 @@ async def _search_searxng(query: str, count: int = 10) -> list:
         data = r.json()
         results = []
         for item in data.get("results", [])[:count]:
+            url = item.get("url", "")
+            url_lower = url.lower()
+            thumbnail = item.get("thumbnail") or item.get("img_src") or ""
+            r_type = "web"
+            if "youtube.com/watch" in url_lower or "youtu.be/" in url_lower:
+                r_type = "youtube"
+                vid_id = None
+                if "youtube.com/watch" in url_lower:
+                    qs = url.split("?", 1)[1] if "?" in url else ""
+                    for part in qs.split("&"):
+                        if part.startswith("v="):
+                            vid_id = part[2:].split("&")[0]; break
+                elif "youtu.be/" in url_lower:
+                    vid_id = url.split("youtu.be/")[1].split("?")[0].split("/")[0]
+                if vid_id:
+                    thumbnail = f"https://img.youtube.com/vi/{vid_id}/mqdefault.jpg"
+            elif thumbnail or any(url_lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
+                r_type = "image"
             results.append({
-                "title": item.get("title", ""), "url": item.get("url", ""),
+                "title": item.get("title", ""), "url": url,
                 "content": (item.get("content", "") or "")[:500],
                 "engine": item.get("engine", ""), "score": item.get("score", 0),
+                "thumbnail": thumbnail, "type": r_type,
             })
         for box in data.get("infoboxes", []):
             results.append({
@@ -751,7 +770,9 @@ Target length: {length} words."""
         u = f.get("url", "")
         if u and u not in seen:
             seen.add(u)
-            srcs.append({"index": len(srcs)+1, "title": f["title"], "url": u})
+            srcs.append({"index": len(srcs)+1, "title": f["title"], "url": u,
+                         "thumbnail": f.get("thumbnail", ""), "type": f.get("type", "web"),
+                         "snippet": f.get("content", "")[:200]})
         if len(srcs) >= 25:
             break
 
@@ -908,6 +929,32 @@ async def chat_stream(req: ChatRequest):
                 r = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=15)
                 data = r.json()
                 results = data.get("results", [])[:config.SEARCH_RESULTS_COUNT]
+                # Build structured cards for inline UI rendering
+                sr_cards = []
+                for item in results:
+                    url = item.get("url", "")
+                    url_lower = url.lower()
+                    thumbnail = item.get("thumbnail") or item.get("img_src") or ""
+                    r_type = "web"
+                    if "youtube.com/watch" in url_lower or "youtu.be/" in url_lower:
+                        r_type = "youtube"
+                        vid_id = None
+                        if "youtube.com/watch" in url_lower:
+                            qs = url.split("?", 1)[1] if "?" in url else ""
+                            for part in qs.split("&"):
+                                if part.startswith("v="):
+                                    vid_id = part[2:].split("&")[0]; break
+                        elif "youtu.be/" in url_lower:
+                            vid_id = url.split("youtu.be/")[1].split("?")[0].split("/")[0]
+                        if vid_id:
+                            thumbnail = f"https://img.youtube.com/vi/{vid_id}/mqdefault.jpg"
+                    elif thumbnail or any(url_lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
+                        r_type = "image"
+                    sr_cards.append({"title": item.get("title", ""), "url": url,
+                                     "snippet": item.get("content", "")[:200],
+                                     "thumbnail": thumbnail, "type": r_type})
+                if sr_cards:
+                    await events.emit(conv_id, "search_results", {"query": query, "results": sr_cards})
                 await events.emit(conv_id, "tool_end", {"tool": "research", "icon": "search", "status": f'📡 Signal acquired: {len(results)} hits',
                     "detail": json.dumps({"query": query, "results": [{"title": r.get("title",""), "url": r.get("url","")} for r in results[:5]]}),
                 })
@@ -1139,6 +1186,13 @@ async def chat_stream(req: ChatRequest):
                     "status": f"📊 {sc} sources, {ss} searches, {pr} pages ({tm:.0f}s)",
                     "detail": json.dumps({"topic": topic, "depth": depth, "source_count": sc, "pages_read": pr, "key_entities": entities[:8]}),
                 })
+                if sources:
+                    await events.emit(conv_id, "search_results", {
+                        "query": topic,
+                        "results": [{"title": s["title"], "url": s["url"],
+                                     "thumbnail": s.get("thumbnail", ""), "type": s.get("type", "web"),
+                                     "snippet": s.get("snippet", "")} for s in sources[:12]]
+                    })
 
                 parts = [f"# Deep Research: {topic}\n"]
                 parts.append(f"*{sc} sources, {ss} searches, {pr} pages read ({tm:.0f}s)*\n")
@@ -2122,9 +2176,23 @@ async def chat_stream(req: ChatRequest):
                 # Empty content AND no tool calls
                 print(f"[CHAT]   Empty response with no tool calls (round {round_num})")
                 if round_num == 0:
-                    # Nudge the model and retry once
+                    # Nudge with tool-aware hint
                     print(f"[CHAT]   Retrying with nudge message...")
-                    messages.append({"role": "user", "content": "Please respond to my message."})
+                    if ollama_tools:
+                        nudge = (
+                            "You must respond to my previous message. "
+                            "If research or information is needed, call one of your available tools now. "
+                            "Do not output an empty response."
+                        )
+                    else:
+                        nudge = "Please respond to my previous message."
+                    messages.append({"role": "user", "content": nudge})
+                    continue
+                elif round_num == 1 and ollama_tools:
+                    # Tools may be confusing the model — strip them and try for a plain response
+                    print(f"[CHAT]   Retrying without tools for plain response...")
+                    ollama_tools = []
+                    payload["tools"] = []
                     continue
                 await events.emit(conv_id, "complete", {"status": "Complete"})
                 yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
@@ -3601,7 +3669,7 @@ async def hf_download(request: Request):
                 msg = f"⬇ {mb_d:.0f} / {mb_t:.0f} MB ({pct}%)"
             else:
                 pct, msg = 0, f"⬇ {status}"
-            return f"data: {json.dumps({'status': 'downloading', 'pct': pct, 'message': msg})}\n\n"
+            return f"data: {json.dumps({'status': 'downloading', 'pct': pct, 'message': msg, 'completed': completed, 'total': total})}\n\n"
         elif status in ("success", "done"):
             return f"data: {json.dumps({'status': 'done', 'message': f'✓ {final_name!r} ready!', 'model_name': final_name})}\n\n"
         elif status:

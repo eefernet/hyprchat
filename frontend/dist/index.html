@@ -351,7 +351,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
   const thinkingEvts = evts.filter(e=>e.type==="thinking"||e.type==="thought_done");
   const toolEvts = evts.filter(e=>e.type==="tool_start"||e.type==="tool_end"||e.type==="tool_error");
   const streamEvts = evts.filter(e=>e.type==="streaming"||e.type==="complete");
-  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_end","tool_error","streaming","complete","code_output","file_ready"].includes(e.type));
+  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_end","tool_error","streaming","complete","code_output","file_ready","search_results"].includes(e.type));
 
   // Thinking: collapse to just the final state
   if(thinkingEvts.length){
@@ -386,6 +386,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
 
   const codeOutputEvts = evts.filter(e=>e.type==="code_output");
   const fileReadyEvts = evts.filter(e=>e.type==="file_ready");
+  const searchResultEvts = evts.filter(e=>e.type==="search_results");
 
   const CodeOutputCards = ()=><>{codeOutputEvts.map((e,i)=>{
     const d=e.data||{};
@@ -417,6 +418,41 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
     </div>;
   })}</>;
 
+  const SearchResultCards = ()=><>{searchResultEvts.map((e,ei)=>{
+    const d=e.data||{};
+    const results=d.results||[];
+    if(!results.length)return null;
+    return <div key={ei} style={{marginTop:10}}>
+      <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:6,display:"flex",alignItems:"center",gap:4}}>
+        <IC.Search/><span>{d.query||"Search"}</span><span style={{opacity:.5}}>· {results.length} sources</span>
+      </div>
+      <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:4}}>
+        {results.map((r,ri)=>{
+          const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();
+          const isYT=r.type==="youtube";
+          const isImg=r.type==="image";
+          return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:10,overflow:"hidden",cursor:"pointer",minWidth:155,maxWidth:190,flexShrink:0,transition:"border-color .15s"}}
+            onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
+            <div style={{width:"100%",height:88,background:isYT?"#0a0a0a":`${t.acc}06`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+              {r.thumbnail
+                ?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>e.target.style.display="none"}/>
+                :hn?<img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:36,height:36,borderRadius:8,opacity:.8}} alt="" onError={e=>e.target.style.opacity="0"}/>
+                :<span style={{fontSize:24,opacity:.3}}>🌐</span>}
+              {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
+                <div style={{width:28,height:28,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:"#fff",boxShadow:"0 2px 8px rgba(0,0,0,.5)"}}>▶</div>
+              </div>}
+            </div>
+            <div style={{padding:"6px 8px",flex:1,display:"flex",flexDirection:"column",gap:2}}>
+              <div style={{fontSize:10,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.35}}>{r.title}</div>
+              {r.snippet&&<div style={{fontSize:9,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
+              <div style={{fontSize:8,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:"auto",paddingTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
+            </div>
+          </a>;
+        })}
+      </div>
+    </div>;
+  })}</>;
+
 
   if(!showAll){
     const activeThinking = merged.find(e=>e.type==="thinking");
@@ -431,6 +467,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
       </div>
       <CodeOutputCards/>
       <FileReadyButtons/>
+      <SearchResultCards/>
     </div>;
   }
 
@@ -443,6 +480,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
     </div>
     <CodeOutputCards/>
     <FileReadyButtons/>
+    <SearchResultCards/>
   </div>;
 };
 
@@ -728,7 +766,7 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
         if(a==="Other")return 1;if(b==="Other")return-1;
         return a.localeCompare(b);
       });
-      return <div style={{position:"fixed",top:dropPos.top,left:dropPos.left,minWidth:dropPos.width,maxWidth:380,background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:10,boxShadow:`0 8px 32px #00000077`,zIndex:99999,maxHeight:360,overflowY:"auto",padding:"4px"}}>
+      return ReactDOM.createPortal(<div style={{position:"fixed",top:dropPos.top,left:dropPos.left,minWidth:dropPos.width,maxWidth:380,background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:10,boxShadow:`0 8px 32px #00000077`,zIndex:99999,maxHeight:360,overflowY:"auto",padding:"4px"}}>
         {sortedMakers.map(maker=><div key={maker}>
           <div style={{padding:"5px 10px 3px",fontSize:8,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.8,borderTop:maker===sortedMakers[0]?"none":`1px solid ${t.brd}22`,marginTop:maker===sortedMakers[0]?0:4,paddingTop:maker===sortedMakers[0]?5:7}}>{maker}</div>
           {grouped[maker].map(m=>{
@@ -757,7 +795,7 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
             </div>;
           })}
         </div>)}
-      </div>;
+      </div>, document.body);
     })()}
   </div>;
 }
@@ -815,10 +853,9 @@ function HyprChat(){
   const [hfReadme,setHfReadme]=useState(null);
   const [hfReadmeLoading,setHfReadmeLoading]=useState(false);
   const [hfDownloading,setHfDownloading]=useState(false);
-  const [hfDownloadProg,setHfDownloadProg]=useState(null);
-  const [hfDownloadError,setHfDownloadError]=useState(null);
-  const [hfDownloadPct,setHfDownloadPct]=useState(0);
   const [hfDownloadName,setHfDownloadName]=useState("");
+  const [downloads,setDownloads]=useState([]); // [{id,name,status,pct,message,error,completedBytes,totalBytes,startTime,speed,eta}]
+  const [downloadsExpanded,setDownloadsExpanded]=useState(false);
   const [hfSelectedFiles,setHfSelectedFiles]=useState([]); // filenames to download
   const [hfGgufOnly,setHfGgufOnly]=useState(true);
   const t=THEMES[tm], font=FONTS[fi].v;
@@ -1406,11 +1443,18 @@ function HyprChat(){
   };
   const hfDownload=async()=>{
     if(!hfSelected||!hfSelectedFiles.length)return;
-    setHfDownloading(true);setHfDownloadProg("Contacting Ollama...");setHfDownloadError(null);setHfDownloadPct(0);
+    const dlId=`dl-${Date.now()}`;
+    const dlName=hfDownloadName.trim();
+    const totalSize=(hfModelInfo?.gguf_files||[]).filter(f=>hfSelectedFiles.includes(f.name)).reduce((a,f)=>a+(f.size||0),0);
+    setHfDownloading(true);
+    setDownloads(p=>[...p,{id:dlId,name:dlName||hfSelectedFiles[0],status:"creating",pct:0,message:"Contacting Ollama...",error:null,completedBytes:0,totalBytes:totalSize,startTime:Date.now(),speed:0,eta:0}]);
+    setDownloadsExpanded(true);
+    const updDl=upd=>setDownloads(p=>p.map(d=>d.id===dlId?{...d,...upd}:d));
     try{
-      const res=await fetch(`${API}/api/hf/download`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({repo_id:hfSelected.id,filenames:hfSelectedFiles,model_name:hfDownloadName.trim()})});
-      if(!res.ok){setHfDownloadError(`Server error: ${res.status} ${res.statusText}`);setHfDownloading(false);return;}
+      const res=await fetch(`${API}/api/hf/download`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({repo_id:hfSelected.id,filenames:hfSelectedFiles,model_name:dlName})});
+      if(!res.ok){updDl({status:"error",error:`Server error: ${res.status} ${res.statusText}`});setHfDownloading(false);return;}
       const rdr=res.body.getReader(),dec=new TextDecoder();let buf="";
+      let lastBytes=0,lastTime=Date.now();
       while(true){
         const{done,value}=await rdr.read();if(done)break;
         buf+=dec.decode(value,{stream:true});
@@ -1419,19 +1463,27 @@ function HyprChat(){
           if(!ln.startsWith("data: "))continue;
           try{
             const d=JSON.parse(ln.slice(6));
-            if(d.status==="error"){setHfDownloadError(d.message);setHfDownloadProg(null);setHfDownloadPct(0);}
+            if(d.status==="error"){updDl({status:"error",error:d.message});}
             else if(d.status==="done"){
-              setHfDownloadProg(d.message||"✓ Done!");setHfDownloadPct(100);
+              updDl({status:"done",pct:100,message:d.message||"Done!"});
               fetch(`${API}/api/models`).then(r=>r.json()).then(d=>{setModels(d.models||[]);setModelDetails(d.model_details||{});}).catch(()=>{});
-              setTimeout(()=>{setHfDownloadProg(null);setHfSelectedFiles([]);setHfDownloadPct(0);},4000);
+              setTimeout(()=>setDownloads(p=>p.filter(dl=>dl.id!==dlId)),10000);
             }else if(d.status==="downloading"){
-              if(d.pct)setHfDownloadPct(d.pct);
-              if(d.message)setHfDownloadProg(d.message);
-            }else if(d.message)setHfDownloadProg(d.message);
+              const now=Date.now();
+              const completed=d.completed||0,total=d.total||0;
+              let speed=0,eta=0;
+              if(completed>lastBytes&&now>lastTime){
+                const dt=(now-lastTime)/1000;
+                speed=(completed-lastBytes)/dt;
+                if(speed>0&&total>completed)eta=Math.round((total-completed)/speed);
+              }
+              if(completed>0){lastBytes=completed;lastTime=now;}
+              updDl({status:"downloading",pct:d.pct||0,message:d.message,completedBytes:completed,totalBytes:total||totalSize,speed,eta});
+            }else if(d.message)updDl({message:d.message,status:d.status||"creating"});
           }catch{}
         }
       }
-    }catch(e){setHfDownloadError(e.message);setHfDownloadPct(0);}
+    }catch(e){updDl({status:"error",error:e.message});}
     setHfDownloading(false);
   };
   const fmtSize=(bytes)=>{if(!bytes)return"?";if(bytes>1e9)return`${(bytes/1e9).toFixed(1)} GB`;if(bytes>1e6)return`${(bytes/1e6).toFixed(0)} MB`;return`${(bytes/1e3).toFixed(0)} KB`;};
@@ -1451,8 +1503,10 @@ function HyprChat(){
   const inlineParse=(text)=>{
     if(!text)return null;
     // Split by: inline-code, bold+link, bold, italic(*), italic(_), link
-    return text.split(/(`[^`]+`|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\))/g).map((s,k)=>{
+    return text.split(/(`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\))/g).map((s,k)=>{
       if(!s)return null;
+      const imgMatch=s.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+      if(imgMatch){const[,alt,src]=imgMatch;return <img key={k} src={src} alt={alt||""} style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`}} onError={e=>e.target.style.display="none"}/>;}
       if(s.startsWith("`")&&s.endsWith("`")&&s.length>1)
         return <code key={k} style={{background:`${t.surface}CC`,padding:"1px 5px",borderRadius:3,fontFamily:font,fontSize:"0.88em",color:t.warm}}>{s.slice(1,-1)}</code>;
       const boldLinkMatch=s.match(/^\*\*\[([^\]]+)\]\(([^)]+)\)\*\*$/);
@@ -1687,6 +1741,56 @@ function HyprChat(){
         </div>
         {/* Token counter + export — persistent */}
         <div style={{display:"flex",alignItems:"center",gap:8}}>
+          {/* Downloads pill */}
+          {downloads.length>0&&(()=>{
+            const active=downloads.filter(d=>d.status!=="done"&&d.status!=="error");
+            const fmtSpd=b=>{if(b>=1e6)return`${(b/1e6).toFixed(1)} MB/s`;if(b>=1e3)return`${(b/1e3).toFixed(0)} KB/s`;return`${b.toFixed(0)} B/s`;};
+            const fmtEta=s=>{if(s>=3600)return`${Math.floor(s/3600)}h${Math.floor((s%3600)/60)}m`;if(s>=60)return`${Math.floor(s/60)}m${s%60}s`;return`${s}s`;};
+            const pillColor=active.length?t.ok:t.mut;
+            return <div style={{position:"relative"}}>
+              <button onClick={()=>setDownloadsExpanded(p=>!p)} style={{display:"flex",alignItems:"center",gap:5,padding:"4px 10px",background:`${pillColor}15`,border:`1px solid ${pillColor}44`,borderRadius:10,color:pillColor,cursor:"pointer",fontSize:10,fontWeight:600,fontFamily:font}}>
+                <IC.Download/>
+                <span>{active.length?`${active.length} active`:"Done"}</span>
+                <span style={{fontSize:8,opacity:.6,display:"inline-block",transform:downloadsExpanded?"rotate(180deg)":"none",transition:"transform .2s"}}>▼</span>
+              </button>
+              {downloadsExpanded&&<>
+                <div onClick={()=>setDownloadsExpanded(false)} style={{position:"fixed",inset:0,zIndex:99}}/>
+                <div style={{position:"absolute",top:"calc(100% + 8px)",right:0,zIndex:100,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:14,boxShadow:`0 6px 32px #0009`,width:340,padding:12,animation:"fadeIn .2s"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,paddingBottom:8,borderBottom:`1px solid ${t.brd}22`}}>
+                    <span style={{fontSize:11,fontWeight:700,color:t.text}}>Downloads</span>
+                    <button onClick={()=>{setDownloads(p=>p.filter(d=>d.status!=="done"&&d.status!=="error"));}} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:9,padding:"2px 6px"}}>Clear done</button>
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:360,overflowY:"auto"}}>
+                    {downloads.map(dl=>{
+                      const isActive=dl.status==="downloading"||dl.status==="creating";
+                      const isDone=dl.status==="done";
+                      const isErr=dl.status==="error";
+                      const clr=isDone?t.ok:isErr?t.err:t.acc;
+                      return <div key={dl.id} style={{background:`${t.surface}66`,borderRadius:10,border:`1px solid ${clr}22`,padding:"9px 11px"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5,gap:6}}>
+                          <span style={{fontSize:11,fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{dl.name}</span>
+                          <span style={{fontSize:8,padding:"1px 6px",borderRadius:8,background:`${clr}18`,color:clr,fontWeight:700,flexShrink:0,textTransform:"uppercase"}}>{isDone?"Done":isErr?"Error":dl.status}</span>
+                        </div>
+                        {!isErr&&<div style={{height:4,background:`${t.surface}AA`,borderRadius:4,overflow:"hidden",marginBottom:6}}>
+                          <div style={{height:"100%",width:`${dl.pct}%`,background:`linear-gradient(90deg,${t.acc},${t.ok})`,borderRadius:4,transition:"width .5s ease"}}/>
+                        </div>}
+                        {isErr
+                          ?<div style={{fontSize:9,color:t.err,wordBreak:"break-word"}}>{dl.error}</div>
+                          :<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:4}}>
+                            <span style={{fontSize:9,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{dl.message||"Working..."}</span>
+                            <div style={{display:"flex",gap:5,flexShrink:0,alignItems:"center"}}>
+                              {dl.totalBytes>0&&<span style={{fontSize:9,color:t.dim,fontFamily:font}}>{fmtSize(dl.completedBytes||0)}<span style={{opacity:.5}}>/{fmtSize(dl.totalBytes)}</span></span>}
+                              {isActive&&dl.speed>0&&<span style={{fontSize:9,color:t.acc,fontWeight:700,fontFamily:font}}>{fmtSpd(dl.speed)}</span>}
+                              {isActive&&dl.eta>0&&<span style={{fontSize:9,color:t.warm,fontFamily:font}}>~{fmtEta(dl.eta)}</span>}
+                            </div>
+                          </div>}
+                      </div>;
+                    })}
+                  </div>
+                </div>
+              </>}
+            </div>;
+          })()}
           {panel==="chat"&&act&&(act.messages||[]).length>0&&<button onClick={exportChat} title="Export conversation as Markdown" style={{background:"none",border:`1px solid ${t.brd}33`,color:t.mut,cursor:"pointer",padding:"4px 10px",borderRadius:8,fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:3}}><IC.Download/> export</button>}
           {panel==="chat"&&act&&(()=>{
             // During streaming: show live gen tokens (from ctx_update). After: show total context.
@@ -2614,17 +2718,9 @@ function HyprChat(){
                   <input value={hfDownloadName} onChange={e=>setHfDownloadName(e.target.value)} placeholder="e.g. llama3-q5" style={{...inputS,fontSize:11,padding:"6px 8px"}}/>
                   <div style={{fontSize:9,color:t.mut}}>{hfSelectedFiles.length} file{hfSelectedFiles.length>1?"s":""} · {fmtSize((hfModelInfo?.gguf_files||[]).filter(f=>hfSelectedFiles.includes(f.name)).reduce((a,f)=>a+(f.size||0),0))}</div>
                   <button onClick={hfDownload} disabled={hfDownloading||!hfDownloadName.trim()} style={{...btnS(hfDownloading?t.mut:t.ok),width:"100%",justifyContent:"center",padding:"8px",opacity:hfDownloading?.7:1}}>
-                    <IC.Download/>{hfDownloading?"Fetching via Ollama...":"Download & Register"}
+                    <IC.Download/>{hfDownloading?"Queued — see downloads bar":"Download & Register"}
                   </button>
-                  {(hfDownloadProg||hfDownloading)&&<div style={{borderRadius:8,overflow:"hidden",border:`1px solid ${hfDownloadPct===100?t.ok:t.brd}33`,background:`${t.surface}66`}}>
-                    {hfDownloadPct>0&&<div style={{height:3,background:`linear-gradient(90deg,${t.acc},${t.ok})`,width:`${hfDownloadPct}%`,transition:"width .4s ease",borderRadius:3}}/>}
-                    <div style={{padding:"7px 10px",fontSize:10,color:hfDownloadPct===100?t.ok:t.acc,display:"flex",alignItems:"center",gap:5}}>
-                      {hfDownloadPct<100&&<div style={{display:"flex",gap:2,flexShrink:0}}>{[0,1,2].map(i=><div key={i} style={{width:3,height:3,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
-                      <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{hfDownloadProg||"Working..."}</span>
-                      {hfDownloadPct>0&&hfDownloadPct<100&&<span style={{flexShrink:0,fontWeight:700}}>{hfDownloadPct}%</span>}
-                    </div>
-                  </div>}
-                  {hfDownloadError&&<div style={{padding:"7px 10px",background:`${t.err}10`,borderRadius:8,border:`1px solid ${t.err}33`,fontSize:10,color:t.err,wordBreak:"break-word"}}>{hfDownloadError}</div>}
+                  {hfDownloading&&<div style={{fontSize:9,color:t.mut,textAlign:"center",paddingTop:4}}>Track progress in the downloads bar at the top right</div>}
                 </div>}
               </>}
             </div>
