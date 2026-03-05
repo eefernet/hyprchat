@@ -1,0 +1,2400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HyprChat</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⟩</text></svg>">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body, #root { height: 100%; width: 100%; overflow: hidden; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const API = window.HYPRCHAT_API || "";
+const THEMES = {
+  nord:{name:"Nord",bg:"#2E3440",bgDeep:"#242933",surface:"#3B4252",sfHov:"#434C5E",sfBri:"#4C566A",brd:"#4C566A",text:"#ECEFF4",dim:"#D8DEE9",mut:"#81A1C1",acc:"#88C0D0",acc2:"#81A1C1",warm:"#EBCB8B",ok:"#A3BE8C",err:"#BF616A",pink:"#B48EAD",f1:"#8FBCBB",f4:"#5E81AC"},
+  catppuccin:{name:"Catppuccin",bg:"#1E1E2E",bgDeep:"#181825",surface:"#313244",sfHov:"#45475A",sfBri:"#585B70",brd:"#45475A",text:"#CDD6F4",dim:"#BAC2DE",mut:"#89B4FA",acc:"#89B4FA",acc2:"#74C7EC",warm:"#F9E2AF",ok:"#A6E3A1",err:"#F38BA8",pink:"#CBA6F7",f1:"#94E2D5",f4:"#7287FD"},
+  gruvbox:{name:"Gruvbox",bg:"#282828",bgDeep:"#1D2021",surface:"#3C3836",sfHov:"#504945",sfBri:"#665C54",brd:"#504945",text:"#EBDBB2",dim:"#D5C4A1",mut:"#83A598",acc:"#83A598",acc2:"#8EC07C",warm:"#FABD2F",ok:"#B8BB26",err:"#FB4934",pink:"#D3869B",f1:"#8EC07C",f4:"#076678"},
+  tokyoNight:{name:"Tokyo Night",bg:"#1A1B26",bgDeep:"#16161E",surface:"#24283B",sfHov:"#292E42",sfBri:"#3B4261",brd:"#3B4261",text:"#C0CAF5",dim:"#A9B1D6",mut:"#7AA2F7",acc:"#7AA2F7",acc2:"#7DCFFF",warm:"#E0AF68",ok:"#9ECE6A",err:"#F7768E",pink:"#BB9AF7",f1:"#73DACA",f4:"#2AC3DE"},
+  rosePine:{name:"Rosé Pine",bg:"#191724",bgDeep:"#1F1D2E",surface:"#26233A",sfHov:"#2A2837",sfBri:"#403D52",brd:"#403D52",text:"#E0DEF4",dim:"#C4A7E7",mut:"#9CCFD8",acc:"#9CCFD8",acc2:"#C4A7E7",warm:"#F6C177",ok:"#31748F",err:"#EB6F92",pink:"#C4A7E7",f1:"#9CCFD8",f4:"#EA9A97"},
+  dracula:{name:"Dracula",bg:"#282A36",bgDeep:"#1E1F29",surface:"#343746",sfHov:"#414354",sfBri:"#4D4F64",brd:"#44475A",text:"#F8F8F2",dim:"#CFCFCF",mut:"#6272A4",acc:"#BD93F9",acc2:"#FF79C6",warm:"#F1FA8C",ok:"#50FA7B",err:"#FF5555",pink:"#FF79C6",f1:"#8BE9FD",f4:"#BD93F9"},
+  oneLight:{name:"One Light",bg:"#FAFAFA",bgDeep:"#F0F0F0",surface:"#E8E8E8",sfHov:"#DEDEDE",sfBri:"#D0D0D0",brd:"#C8C8C8",text:"#383A42",dim:"#494B53",mut:"#A0A1A7",acc:"#4078F2",acc2:"#526FFF",warm:"#C18401",ok:"#50A14F",err:"#E45649",pink:"#A626A4",f1:"#0184BC",f4:"#4078F2"},
+  midnight:{name:"Midnight",bg:"#0A0A0F",bgDeep:"#050508",surface:"#111118",sfHov:"#1A1A24",sfBri:"#222230",brd:"#1E1E2E",text:"#C8C8E8",dim:"#9090B8",mut:"#4A4A6A",acc:"#7C6FCD",acc2:"#5A4FA0",warm:"#E0A060",ok:"#40C080",err:"#E05060",pink:"#B060B0",f1:"#40A0C0",f4:"#6060C0"},
+  terminal:{name:"Terminal",bg:"#0a0f0a",bgDeep:"#050805",surface:"#0d1a0d",sfHov:"#112211",sfBri:"#163316",brd:"#1a3a1a",text:"#00ff41",dim:"#00cc33",mut:"#008822",acc:"#00ff41",acc2:"#33ff77",warm:"#ffcc00",ok:"#00ff41",err:"#ff3333",pink:"#ff00ff",f1:"#00ccff",f4:"#00ff88"},
+  cyberpunk:{name:"Cyberpunk",bg:"#0d0015",bgDeep:"#080010",surface:"#150025",sfHov:"#1a002e",sfBri:"#220038",brd:"#2a0045",text:"#f0e6ff",dim:"#c8a8ff",mut:"#7733aa",acc:"#ff00ff",acc2:"#cc00cc",warm:"#ffee00",ok:"#00ffcc",err:"#ff1155",pink:"#ff00cc",f1:"#00ccff",f4:"#aa00ff"},
+  solarizedDark:{name:"Solarized Dark",bg:"#002b36",bgDeep:"#001e27",surface:"#073642",sfHov:"#0a4153",sfBri:"#0d4f63",brd:"#094858",text:"#839496",dim:"#657b83",mut:"#586e75",acc:"#268bd2",acc2:"#2aa198",warm:"#b58900",ok:"#859900",err:"#dc322f",pink:"#d33682",f1:"#2aa198",f4:"#6c71c4"},
+  solarizedLight:{name:"Solarized Light",bg:"#fdf6e3",bgDeep:"#eee8d5",surface:"#ece6d0",sfHov:"#e0d9c2",sfBri:"#d3cbb4",brd:"#c0b8a0",text:"#657b83",dim:"#586e75",mut:"#93a1a1",acc:"#268bd2",acc2:"#2aa198",warm:"#b58900",ok:"#859900",err:"#dc322f",pink:"#d33682",f1:"#2aa198",f4:"#6c71c4"},
+  materialOcean:{name:"Material Ocean",bg:"#0f111a",bgDeep:"#090b10",surface:"#1a1c25",sfHov:"#21232d",sfBri:"#292b36",brd:"#2a2d3a",text:"#a6accd",dim:"#8b91b8",mut:"#4b526d",acc:"#82aaff",acc2:"#89ddff",warm:"#ffcb6b",ok:"#c3e88d",err:"#f07178",pink:"#c792ea",f1:"#89ddff",f4:"#7986cb"},
+  ayuDark:{name:"Ayu Dark",bg:"#0b0e14",bgDeep:"#070910",surface:"#0d1017",sfHov:"#111520",sfBri:"#161a26",brd:"#1a1f2e",text:"#cccac2",dim:"#b3b1ad",mut:"#626a73",acc:"#39bae6",acc2:"#59c2ff",warm:"#ffb454",ok:"#aad94c",err:"#f28779",pink:"#d2a6ff",f1:"#95e6cb",f4:"#39bae6"},
+};
+const FONTS = [
+  {name:"JetBrains Mono",v:"'JetBrains Mono',monospace",i:"JetBrains+Mono:wght@300;400;500;600;700"},
+  {name:"Fira Code",v:"'Fira Code',monospace",i:"Fira+Code:wght@300;400;500;600;700"},
+  {name:"Source Code Pro",v:"'Source Code Pro',monospace",i:"Source+Code+Pro:wght@300;400;500;600;700"},
+  {name:"IBM Plex Mono",v:"'IBM Plex Mono',monospace",i:"IBM+Plex+Mono:wght@300;400;500;600;700"},
+  {name:"Victor Mono",v:"'Victor Mono',monospace",i:"Victor+Mono:wght@300;400;500;600;700"},
+  {name:"Inconsolata",v:"'Inconsolata',monospace",i:"Inconsolata:wght@300;400;500;600;700"},
+  {name:"Cascadia Code",v:"'Cascadia Code',monospace",i:"Cascadia+Code:wght@300;400;500;600;700"},
+  {name:"Space Mono",v:"'Space Mono',monospace",i:"Space+Mono:wght@400;700"},
+  {name:"Geist Mono",v:"'Geist Mono',monospace",i:"Geist+Mono:wght@300;400;500;600;700"},
+];
+
+const sv=(d,w=16)=><svg width={w} height={w} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{d}</svg>;
+const IC={
+  Send:()=>sv(<><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></>,18),
+  Plus:()=>sv(<><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></>),
+  Trash:()=>sv(<><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></>,14),
+  Sidebar:()=>sv(<><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></>,18),
+  Bot:()=>sv(<><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/></>),
+  User:()=>sv(<><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></>),
+  Copy:()=>sv(<><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></>,14),
+  Check:()=>sv(<polyline points="20 6 9 17 4 12"/>,14),
+  Search:()=>sv(<><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></>,14),
+  Stop:()=><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>,
+  ChevDown:()=>sv(<polyline points="6 9 12 15 18 9"/>,14),
+  Database:()=>sv(<><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></>),
+  Tool:()=>sv(<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>),
+  Code:()=>sv(<><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></>),
+  Cube:()=>sv(<><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></>),
+  Upload:()=>sv(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></>),
+  X:()=>sv(<><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></>,14),
+  Chat:()=>sv(<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>),
+  Settings:()=>sv(<><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-2.82 1.18V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1.08H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1.08-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1.08 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.604.852 1.08 1.51 1.08H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1.08z"/></>),
+  Terminal:()=>sv(<><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></>,14),
+  Globe:()=>sv(<><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/></>,14),
+  Zap:()=>sv(<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>,14),
+  Activity:()=>sv(<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>,14),
+  Download:()=>sv(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></>),
+  Pencil:()=>sv(<><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></>,14),
+  Refresh:()=>sv(<><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></>,14),
+  Paperclip:()=>sv(<><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></>,14),
+  Image:()=>sv(<><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></>),
+  Layers:()=>sv(<><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></>),
+  ToggleOn:()=>sv(<><rect x="1" y="5" width="22" height="14" rx="7" ry="7"/><circle cx="16" cy="12" r="3"/></>),
+  ToggleOff:()=>sv(<><rect x="1" y="5" width="22" height="14" rx="7" ry="7"/><circle cx="8" cy="12" r="3"/></>),
+  Council:()=>sv(<><path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M7 21H17"/><path d="M12 21V7"/><path d="m22 7-4.5-2.5L13 7"/><path d="m2 7 4.5-2.5L11 7"/></>),
+  Trophy:()=>sv(<><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2z"/></>),
+  Flash:()=>sv(<><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><path d="M9 11h4M11 9v4"/></>,14),
+  Star:()=>sv(<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>,14),
+  Crown:()=>sv(<><path d="M2 20h20"/><path d="m2 16 5-10 5 4 5-4 5 10"/></>,14),
+};
+
+const TIC = {code:IC.Code,search:IC.Search,terminal:IC.Terminal,globe:IC.Globe,workflow:IC.Activity};
+
+// Status pill - inline with chat, expressive and geeky
+const Pill = ({ev,t,expanded,onToggle})=>{
+  const isS = ev.type==="tool_start"||ev.type==="thinking"||ev.type==="streaming";
+  const isE = ev.type==="tool_error"||ev.type==="error";
+  const isD = ev.type==="tool_end"||ev.type==="complete"||ev.type==="thought_done";
+  const isThink = ev.type==="thinking"||ev.type==="thought_done";
+  const bg=isE?`${t.err}18`:isD?`${t.ok}12`:isThink?`${t.f4}10`:`${t.acc}10`;
+  const bc=isE?`${t.err}40`:isD?`${t.ok}28`:isThink?`${t.f4}28`:`${t.acc}28`;
+  const tc=isE?t.err:isD?t.ok:isThink?t.f4:t.acc;
+  let detail = null;
+  if(expanded && ev.data?.detail){try{detail=JSON.parse(ev.data.detail);}catch{detail=ev.data.detail;}}
+  
+  const toolName = ev.data?.tool||ev.type;
+  const status = ev.data?.status||"";
+  
+  // Geeky expressive labels + icons
+  const labelMap = {
+    "thinking": ["🧠", "Reasoning"],
+    "thought_done": ["💡", "Reasoned"],
+    "processing": isD ? ["⚡", "Initialized"] : ["🔮", "Connecting"],
+    "execute_code": isD ? ["🎯", "Executed"] : ["⚡", "Sandbox"],
+    "research": isD ? ["📡", "Signal Acquired"] : ["🔎", "Scanning"],
+    "deep_research": isD ? ["📊", "Intel Ready"] : ["🔬", "Deep Scan"],
+    "conspiracy_research": isD ? ["🕵️", "Dossier Ready"] : ["🔮", "Digging"],
+    "write_file": isD ? ["💾", "Committed"] : ["📝", "Writing"],
+    "read_file": isD ? ["📖", "Loaded"] : ["📂", "Reading"],
+    "list_files": isD ? ["📋", "Indexed"] : ["🗂️", "Scanning"],
+    "run_shell": isD ? ["⚡", "Exited"] : ["🖥️", "Shell"],
+    "fetch_url": isD ? ["🌐", "Fetched"] : ["🕸️", "Spidering"],
+    "install_package": isD ? ["📦", "Installed"] : ["📥", "Installing"],
+    "streaming": ["✍️", "Transmitting"],
+    "complete": ["✅", "Done"],
+    "download_file": isD ? ["📎", "Ready"] : ["📤", "Packaging"],
+    "delete_file": isD ? ["🗑️", "Deleted"] : ["🗑️", "Deleting"],
+    "download_project": isD ? ["📦", "Packaged"] : ["📦", "Archiving"],
+    "error": ["❌", "Error"],
+    "tool_error": ["❌", "Error"],
+  };
+  const [icon, label] = labelMap[toolName] || (isE ? ["❌", toolName] : isD ? ["✓", toolName] : ["⏳", toolName]);
+  const isActive = isS && !isD;
+  const showMarquee = isThink && isActive && !expanded && status.length > 15;
+  const getIconAnim = (name) => {
+    if(name==="execute_code"||name==="run_shell") return "spin 1.2s linear infinite";
+    if(name==="research"||name==="deep_research"||name==="fetch_url"||name==="conspiracy_research") return "swing 1.5s ease-in-out infinite";
+    if(name==="write_file"||name==="download_file"||name==="download_project") return "bounce 1s ease-in-out infinite";
+    if(name==="thinking"||name==="streaming") return "bop 2s ease-in-out infinite";
+    return "bop 1.5s ease-in-out infinite";
+  };
+  const marqueeKey = Math.floor(status.length / 30);
+
+  return <div style={{animation:"fadeIn .3s",marginBottom:2}}>
+    <div onClick={ev.data?.detail?onToggle:undefined} style={{display:"inline-flex",alignItems:"center",gap:5,padding:"3px 10px",background:bg,border:`1px solid ${bc}`,borderRadius:expanded?"8px 8px 0 0":8,fontSize:11,color:tc,cursor:ev.data?.detail?"pointer":"default",maxWidth:"100%",transition:"all .2s",animation:isActive?`fadeIn .3s, pillGlow 2s ease-in-out infinite`:"fadeIn .3s",boxShadow:isActive?`0 0 6px ${bc}`:"none"}}>
+      {isS&&!isD&&<span style={{display:"inline-block",animation:getIconAnim(toolName),flexShrink:0,lineHeight:1,transformOrigin:"center"}}>{icon}</span>}
+      {isD&&<><span style={{color:t.ok,flexShrink:0,lineHeight:1}}>✓</span><span style={{flexShrink:0,lineHeight:1}}>{icon}</span></>}
+      <span style={{fontWeight:600,flexShrink:0}}>{label}</span>
+      {showMarquee
+        ? <span className="pill-marquee-wrap">
+            <span key={marqueeKey} className="pill-marquee-inner" style={{color:tc,opacity:.75,fontStyle:"italic"}}>
+              {status}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{status}
+            </span>
+          </span>
+        : <span style={{opacity:.6,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:350,fontStyle:isThink?"italic":"normal"}}>{status}</span>
+      }
+      {ev.data?.detail&&<span style={{opacity:.3,flexShrink:0,fontSize:8,marginLeft:2}}>{expanded?"▴":"▾"}</span>}
+    </div>
+    {expanded&&detail&&<div style={{background:`${t.bgDeep}`,border:`1px solid ${bc}`,borderTop:"none",borderRadius:"0 0 8px 8px",padding:10,fontSize:11,maxHeight:250,overflowY:"auto",maxWidth:600}}>
+      {typeof detail==="string"?<pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontFamily:"inherit"}}>{detail}</pre>
+      :detail.thinking?<div style={{color:t.dim,fontStyle:"italic",lineHeight:1.6,whiteSpace:"pre-wrap"}}>{detail.thinking}</div>
+      :detail.code?<div>
+        {detail.language&&<div style={{color:t.mut,marginBottom:4,fontSize:10}}>🔧 <span style={{color:t.acc}}>{detail.language}</span></div>}
+        <pre style={{margin:0,padding:8,background:`${t.surface}88`,borderRadius:4,whiteSpace:"pre-wrap",color:t.warm,fontSize:11,maxHeight:100,overflow:"auto",border:`1px solid ${t.brd}18`}}>{detail.code}</pre>
+        {detail.stdout&&<><div style={{color:t.ok,marginTop:6,fontWeight:600,fontSize:10}}>📤 stdout:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.dim,fontSize:11,background:`${t.ok}08`,borderRadius:4,marginTop:2}}>{detail.stdout}</pre></>}
+        {detail.stderr&&<><div style={{color:t.err,marginTop:6,fontWeight:600,fontSize:10}}>⚠️ stderr:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.err,fontSize:11,background:`${t.err}08`,borderRadius:4,marginTop:2}}>{detail.stderr}</pre></>}
+      </div>
+      :detail.results?<div>{detail.results.map((r,i)=><div key={i} style={{marginBottom:4}}><a href={r.url} target="_blank" style={{color:t.acc,textDecoration:"none",fontSize:11}}>🔗 {r.title}</a></div>)}</div>
+      :detail.method?<div>
+        <div style={{color:t.mut,fontSize:10,marginBottom:4}}>⚙️ <span style={{color:t.acc}}>{detail.method}</span></div>
+        {detail.args&&<pre style={{margin:0,padding:6,background:`${t.surface}66`,borderRadius:4,whiteSpace:"pre-wrap",color:t.dim,fontSize:10,maxHeight:60,overflow:"auto"}}>{JSON.stringify(detail.args,null,2)}</pre>}
+        {detail.result&&<><div style={{color:t.ok,marginTop:4,fontWeight:600,fontSize:10}}>📤 Result:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.dim,fontSize:10,maxHeight:80,overflow:"auto"}}>{detail.result}</pre></>}
+      </div>
+      :<pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontSize:10}}>{JSON.stringify(detail,null,2)}</pre>}
+    </div>}
+  </div>;
+};
+
+// Inline tool status: shows latest pill, expands to show all
+const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
+  const [showAll,setShowAll]=useState(false);
+  if(!evts.length) return null;
+
+  // Stable string key for expandedPill — avoids collapse when new events arrive
+  const getPillKey = (ev) => {
+    if(ev.type==="thinking"||ev.type==="thought_done") return "thinking";
+    if(ev.type==="streaming"||ev.type==="complete") return "streaming";
+    return ev.data?.tool || ev.type;
+  };
+
+  // Collapse events: keep only meaningful pills
+  const merged = [];
+
+  // First pass: group by category
+  const thinkingEvts = evts.filter(e=>e.type==="thinking"||e.type==="thought_done");
+  const toolEvts = evts.filter(e=>e.type==="tool_start"||e.type==="tool_end"||e.type==="tool_error");
+  const streamEvts = evts.filter(e=>e.type==="streaming"||e.type==="complete");
+  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_end","tool_error","streaming","complete","code_output","file_ready"].includes(e.type));
+
+  // Thinking: collapse to just the final state
+  if(thinkingEvts.length){
+    const done = thinkingEvts.find(e=>e.type==="thought_done");
+    merged.push(done || thinkingEvts[thinkingEvts.length-1]);
+  }
+
+  // Tools: pair start→end by tool name, keep unpaired starts
+  const toolPairs = {};
+  for(const e of toolEvts){
+    const key = e.data?.tool||"unknown";
+    if(!toolPairs[key]) toolPairs[key] = [];
+    toolPairs[key].push(e);
+  }
+  for(const [key, group] of Object.entries(toolPairs)){
+    const end = group.find(e=>e.type==="tool_end"||e.type==="tool_error");
+    merged.push(end || group[group.length-1]);
+  }
+
+  // Streaming: collapse to final state
+  if(streamEvts.length){
+    const done = streamEvts.find(e=>e.type==="complete");
+    merged.push(done || streamEvts[streamEvts.length-1]);
+  }
+
+  // Other events pass through
+  merged.push(...otherEvts);
+
+  const latest = merged[merged.length-1];
+  const completedCount = merged.filter(e=>e.type==="tool_end"||e.type==="complete"||e.type==="thought_done").length;
+  const totalSteps = merged.length;
+
+  const codeOutputEvts = evts.filter(e=>e.type==="code_output");
+  const fileReadyEvts = evts.filter(e=>e.type==="file_ready");
+
+  const CodeOutputCards = ()=><>{codeOutputEvts.map((e,i)=>{
+    const d=e.data||{};
+    return <div key={i} style={{marginTop:6,borderRadius:8,overflow:"hidden",border:`1px solid ${d.success?t.ok:t.err}33`,background:t.bgDeep,fontSize:11}}>
+      <div style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:`${d.success?t.ok:t.err}10`,borderBottom:`1px solid ${d.success?t.ok:t.err}22`}}>
+        <span>{d.success?"🎯":"❌"}</span>
+        <span style={{fontWeight:600,color:d.success?t.ok:t.err}}>{d.language} output</span>
+        <span style={{color:t.mut,marginLeft:"auto"}}>{d.exec_time?.toFixed?.(1)}s</span>
+      </div>
+      {d.stdout&&<>
+        <div style={{padding:"4px 10px 2px",fontSize:10,color:t.ok,fontWeight:600}}>stdout</div>
+        <pre style={{margin:0,padding:"4px 10px 8px",whiteSpace:"pre-wrap",color:t.dim,maxHeight:200,overflowY:"auto",fontSize:11}}>{d.stdout}</pre>
+      </>}
+      {d.stderr&&<>
+        <div style={{padding:"4px 10px 2px",fontSize:10,color:t.err,fontWeight:600}}>stderr</div>
+        <pre style={{margin:0,padding:"4px 10px 8px",whiteSpace:"pre-wrap",color:t.err,maxHeight:120,overflowY:"auto",fontSize:11}}>{d.stderr}</pre>
+      </>}
+    </div>;
+  })}</>;
+
+  const FileReadyButtons = ()=><>{fileReadyEvts.map((e,i)=>{
+    const d=e.data||{};
+    return <div key={i} style={{display:"inline-flex",alignItems:"center",gap:4,marginTop:5}}>
+      <a href={`${API}${d.url}`} download={d.filename}
+        style={{display:"inline-flex",alignItems:"center",gap:7,padding:"7px 14px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+        <span style={{fontSize:16}}>📁</span><span>{d.filename}</span><span style={{fontSize:10,opacity:.6}}>⬇</span>
+      </a>
+      {onPreview&&<button onClick={()=>onPreview(d.filename,d.url)} title="Preview" style={{padding:"7px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:13,display:"flex",alignItems:"center"}}>👁</button>}
+    </div>;
+  })}</>;
+
+
+  if(!showAll){
+    const activeThinking = merged.find(e=>e.type==="thinking");
+    const primaryPill = activeThinking || latest;
+    return <div style={{padding:"4px 0"}}>
+      <div style={{display:"flex",flexDirection:"column",gap:3}}>
+        <Pill ev={primaryPill} t={t} expanded={expandedPill===getPillKey(primaryPill)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(primaryPill)?null:getPillKey(primaryPill))}/>
+        {primaryPill!==latest&&<Pill ev={latest} t={t} expanded={expandedPill===getPillKey(latest)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(latest)?null:getPillKey(latest))}/>}
+        {totalSteps>1&&<button onClick={()=>setShowAll(true)} style={{background:`${t.surface}60`,border:`1px solid ${t.brd}22`,color:t.mut,padding:"2px 8px",borderRadius:10,fontSize:10,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",alignSelf:"flex-start",marginTop:1}}>
+          {completedCount} step{completedCount!==1?"s":""} ▾
+        </button>}
+      </div>
+      <CodeOutputCards/>
+      <FileReadyButtons/>
+    </div>;
+  }
+
+  return <div style={{padding:"4px 0"}}>
+    <button onClick={()=>setShowAll(false)} style={{background:`${t.surface}60`,border:`1px solid ${t.brd}22`,color:t.mut,padding:"2px 8px",borderRadius:10,fontSize:10,cursor:"pointer",fontFamily:"inherit",marginBottom:4}}>
+      Hide steps ▴
+    </button>
+    <div style={{display:"flex",flexDirection:"column",gap:2}}>
+      {merged.map((ev)=><Pill key={getPillKey(ev)} ev={ev} t={t} expanded={expandedPill===getPillKey(ev)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(ev)?null:getPillKey(ev))}/>)}
+    </div>
+    <CodeOutputCards/>
+    <FileReadyButtons/>
+  </div>;
+};
+
+const Chip=({l,c,bg,onX})=><span style={{display:"inline-flex",alignItems:"center",gap:4,background:bg,color:c,padding:"3px 8px",borderRadius:20,fontSize:10,fontWeight:600}}>{l}{onX&&<span onClick={onX} style={{cursor:"pointer",opacity:.7}}>&times;</span>}</span>;
+
+// ============================================================
+// WORKSPACE DETAIL COMPONENT
+// ============================================================
+function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onPreview,models,wsModel,onPersonaCreated}){
+  const [tab,setTab]=React.useState("convs");
+  const [editMode,setEditMode]=React.useState(false);
+  const [wsName,setWsName]=React.useState("");
+  const [wsDesc,setWsDesc]=React.useState("");
+  const [addPanel,setAddPanel]=React.useState(false);
+  const [addSearch,setAddSearch]=React.useState("");
+  const [analyzing,setAnalyzing]=React.useState(false);
+  const [creatingKb,setCreatingKb]=React.useState(false);
+  React.useEffect(()=>{if(ws){setWsName(ws.name||"");setWsDesc(ws.description||"");};},[ws?.id]);
+  if(wsLoading)return<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.mut}}><div style={{textAlign:"center"}}><div style={{fontSize:24,marginBottom:8}}>⏳</div>Loading workspace...</div></div>;
+  if(!ws)return<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.mut}}><div style={{textAlign:"center"}}><div style={{fontSize:36,marginBottom:8}}>🗂</div>Select a workspace</div></div>;
+  const font="'JetBrains Mono',monospace";
+  const inputS={width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}40`,color:t.text,padding:"8px 10px",borderRadius:6,fontFamily:font,fontSize:12,outline:"none",boxSizing:"border-box"};
+  const btnS=(c,bg)=>({background:bg||`${c}22`,border:`1px solid ${c}44`,color:c,padding:"5px 10px",borderRadius:6,cursor:"pointer",fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:5});
+  const topics=Array.isArray(ws.topics)?ws.topics:(typeof ws.topics==="string"?JSON.parse(ws.topics||"[]"):[]);
+  const convIds=(ws.conversations||[]).map(c=>c.id);
+  const availableConvs=convs.filter(c=>!convIds.includes(c.id));
+  const filteredAvail=availableConvs.filter(c=>(c.title||"").toLowerCase().includes(addSearch.toLowerCase()));
+  const saveEdit=async()=>{
+    await fetch(`${API}/api/workspaces/${ws.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:wsName,description:wsDesc})}).catch(()=>{});
+    setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,name:wsName,description:wsDesc}:w));
+    setWsDetail(d=>({...d,name:wsName,description:wsDesc}));
+    setEditMode(false);
+  };
+  const analyzeTopics=async()=>{
+    setAnalyzing(true);
+    try{
+      const r=await fetch(`${API}/api/workspaces/${ws.id}/analyze`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||"qwen2.5:7b"})});
+      const d=await r.json();
+      setWsDetail(prev=>({...prev,topics:d.topics||[]}));
+      setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,topics:d.topics||[]}:w));
+    }catch{}
+    setAnalyzing(false);
+  };
+  const createPersona=async()=>{
+    setCreatingKb(true);
+    try{
+      const r=await fetch(`${API}/api/workspaces/${ws.id}/create-kb`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:ws.name})});
+      const kb=await r.json();
+      const mcR=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:`${ws.name} Persona`,base_model:models[0]||"",system_prompt:`You are a specialized assistant with knowledge from: ${ws.name}`,tool_ids:[],kb_ids:[kb.id],parameters:{}})});
+      const mc=await mcR.json();
+      onPersonaCreated(mc);
+    }catch{}
+    setCreatingKb(false);
+  };
+  const addConv=async(convId)=>{
+    await fetch(`${API}/api/workspaces/${ws.id}/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({conversation_id:convId})}).catch(()=>{});
+    const conv=convs.find(c=>c.id===convId);
+    if(conv){setWsDetail(d=>({...d,conversations:[...(d.conversations||[]),{id:conv.id,title:conv.title,model:conv.model,updated_at:conv.updated_at}]}));setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,conv_count:(w.conv_count||0)+1}:w));}
+  };
+  const removeConv=async(convId)=>{
+    await fetch(`${API}/api/workspaces/${ws.id}/conversations/${convId}`,{method:"DELETE"}).catch(()=>{});
+    setWsDetail(d=>({...d,conversations:(d.conversations||[]).filter(c=>c.id!==convId)}));
+    setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,conv_count:Math.max(0,(w.conv_count||0)-1)}:w));
+  };
+  const deleteWs=async()=>{
+    await fetch(`${API}/api/workspaces/${ws.id}`,{method:"DELETE"}).catch(()=>{});
+    setWorkspaces(p=>p.filter(w=>w.id!==ws.id));
+    setActiveWs(null);setWsDetail(null);
+  };
+  const fileIcon=(filename)=>{
+    const ext=(filename||"").split(".").pop().toLowerCase();
+    if(["py","js","ts","rs","go","java","c","cpp"].includes(ext))return "💻";
+    if(["md","txt","pdf","docx"].includes(ext))return "📄";
+    if(["csv","json","xml","yaml"].includes(ext))return "📊";
+    if(["tar","gz","zip"].includes(ext))return "📦";
+    return "📎";
+  };
+  return<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}22`,background:`${t.surface}44`,flexShrink:0}}>
+      <div style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:8}}>
+        <span style={{fontSize:24,lineHeight:1}}>🗂</span>
+        <div style={{flex:1,minWidth:0}}>
+          {editMode?<input value={wsName} onChange={e=>setWsName(e.target.value)} style={{...inputS,fontSize:16,fontWeight:700,background:"transparent",border:`1px solid ${t.acc}44`,marginBottom:6}}/>
+            :<div style={{fontSize:16,fontWeight:700,color:t.text,marginBottom:4}}>{ws.name}</div>}
+          {editMode?<input value={wsDesc} onChange={e=>setWsDesc(e.target.value)} placeholder="Description..." style={{...inputS,fontSize:11,color:t.mut}}/>
+            :<div style={{fontSize:11,color:t.mut}}>{ws.description||"No description"}</div>}
+        </div>
+        <div style={{display:"flex",gap:4,flexShrink:0}}>
+          {editMode
+            ?<><button onClick={saveEdit} style={btnS(t.ok)}>💾 Save</button><button onClick={()=>setEditMode(false)} style={btnS(t.mut)}>Cancel</button></>
+            :<><button onClick={()=>setEditMode(true)} style={btnS(t.mut)}>✏️ Edit</button>
+              <button onClick={analyzeTopics} disabled={analyzing} style={btnS(t.acc)}>{analyzing?"⏳":"🔬"} Analyze</button>
+              <button onClick={createPersona} disabled={creatingKb} style={btnS(t.pink)}>{creatingKb?"⏳":"✦"} Create Persona</button>
+              <button onClick={deleteWs} style={btnS(t.err)}>🗑</button></>}
+        </div>
+      </div>
+      {topics.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+        {topics.map((tp,i)=><span key={i} style={{fontSize:10,padding:"3px 8px",borderRadius:12,background:tp.color+"22",color:tp.color,border:`1px solid ${tp.color}44`,fontWeight:600}}>{tp.label}</span>)}
+      </div>}
+    </div>
+    <div style={{display:"flex",gap:0,borderBottom:`1px solid ${t.brd}22`,flexShrink:0}}>
+      {[["convs","💬 Conversations"],["files","📎 Files"]].map(([id,label])=><button key={id} onClick={()=>{setTab(id);setAddPanel(false);}} style={{padding:"10px 16px",background:tab===id?`${t.acc}15`:"transparent",border:"none",borderBottom:tab===id?`2px solid ${t.acc}`:"2px solid transparent",color:tab===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:tab===id?700:400}}>{label}</button>)}
+      <button onClick={()=>setAddPanel(p=>!p)} style={{marginLeft:"auto",padding:"10px 14px",background:addPanel?`${t.warm}15`:"transparent",border:"none",borderBottom:addPanel?`2px solid ${t.warm}`:"2px solid transparent",color:addPanel?t.warm:t.mut,cursor:"pointer",fontFamily:font,fontSize:11}}>+ Add Chats</button>
+    </div>
+    {addPanel&&<div style={{padding:12,borderBottom:`1px solid ${t.brd}22`,background:`${t.warm}07`,animation:"fadeIn .2s",flexShrink:0}}>
+      <input value={addSearch} onChange={e=>setAddSearch(e.target.value)} placeholder="Search conversations..." style={{...inputS,marginBottom:8}}/>
+      <div style={{maxHeight:180,overflowY:"auto",display:"flex",flexDirection:"column",gap:3}}>
+        {filteredAvail.length===0&&<div style={{fontSize:11,color:t.mut,padding:8,textAlign:"center"}}>All conversations are already in this workspace.</div>}
+        {filteredAvail.map(c=><div key={c.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:`${t.surface}44`,borderRadius:8,cursor:"pointer",border:`1px solid ${t.brd}22`}} onClick={()=>addConv(c.id)}>
+          <span style={{fontSize:12,flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.title||"New Chat"}</span>
+          <span style={{fontSize:10,color:t.mut}}>{c.model||""}</span>
+          <span style={{color:t.ok,fontSize:10}}>+ Add</span>
+        </div>)}
+      </div>
+    </div>}
+    <div style={{flex:1,overflowY:"auto",padding:16}}>
+      {tab==="convs"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
+        {!(ws.conversations||[]).length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No conversations yet.<br/>Click "+ Add Chats" to add some.</div>}
+        {(ws.conversations||[]).map(c=><div key={c.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}66`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
+          <span style={{fontSize:18}}>💬</span>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:12,fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.title||"New Chat"}</div>
+            <div style={{fontSize:10,color:t.mut,marginTop:2}}>{c.model||""} {c.updated_at?new Date(c.updated_at).toLocaleDateString():""}</div>
+          </div>
+          <button onClick={()=>onOpenConv(c.id)} style={btnS(t.acc)}>Open →</button>
+          <button onClick={()=>removeConv(c.id)} style={btnS(t.err)}>✕</button>
+        </div>)}
+      </div>}
+      {tab==="files"&&<div style={{display:"flex",flexWrap:"wrap",gap:10}}>
+        {!(ws.files||[]).length&&<div style={{width:"100%",textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No files yet.<br/>Files are tracked automatically when the AI downloads them in workspace chats.</div>}
+        {(ws.files||[]).map((f,i)=><div key={i} style={{width:180,padding:"12px 14px",borderRadius:10,background:`${t.surface}66`,border:`1px solid ${t.brd}33`,animation:"fadeIn .3s",display:"flex",flexDirection:"column",gap:6}}>
+          <span style={{fontSize:28,lineHeight:1}}>{fileIcon(f.filename)}</span>
+          <div style={{fontSize:11,fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.filename}</div>
+          <div style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.conversation_title||"Unknown chat"}</div>
+          <div style={{display:"flex",gap:4,marginTop:"auto"}}>
+            {onPreview&&<button onClick={()=>onPreview(f.filename,f.url)} style={{...btnS(t.acc),flex:1,justifyContent:"center"}}>👁</button>}
+            <a href={`${API}${f.url}`} download={f.filename} style={{...btnS(t.ok),flex:1,justifyContent:"center",textDecoration:"none"}}>⬇</a>
+          </div>
+        </div>)}
+      </div>}
+    </div>
+  </div>;
+}
+
+// ============================================================
+function SandboxSection({t,btnS,labelS}){
+  const [sbInfo,setSbInfo]=useState(null);
+  const [cleanupDays,setCleanupDays]=useState(30);
+  const [cleaning,setCleaning]=useState(false);
+  const [cleanResult,setCleanResult]=useState(null);
+  const fmtBytes=(b)=>{if(!b)return"0 B";if(b<1024)return`${b} B`;if(b<1048576)return`${(b/1024).toFixed(1)} KB`;return`${(b/1048576).toFixed(1)} MB`;};
+  useEffect(()=>{
+    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{setSbInfo(d);setCleanupDays(d.file_cleanup_days??30);}).catch(()=>{});
+  },[]);
+  const saveCleanupDays=async(v)=>{
+    setCleanupDays(v);
+    await fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({file_cleanup_days:v})}).catch(()=>{});
+  };
+  const cleanNow=async()=>{
+    setCleaning(true);setCleanResult(null);
+    try{const r=await fetch(`${API}/api/settings/cleanup-now`,{method:"POST"});const d=await r.json();setCleanResult(d);
+      const r2=await fetch(`${API}/api/settings`);const d2=await r2.json();setSbInfo(d2);
+    }catch{setCleanResult({error:"Failed"});}
+    setCleaning(false);
+  };
+  const INTERVALS=[
+    {label:"Every week",days:7},{label:"Every 2 weeks",days:14},
+    {label:"Monthly (default)",days:30},{label:"Every 3 months",days:90},
+    {label:"Every 6 months",days:180},{label:"Yearly",days:365},
+    {label:"Never",days:0},
+  ];
+  return <div style={{marginBottom:20}}>
+    <label style={labelS}>Sandbox & File Cleanup</label>
+    <div style={{background:`${t.surface}66`,border:`1px solid ${t.brd}22`,borderRadius:10,padding:"10px 14px",marginBottom:10,fontSize:11}}>
+      <div style={{display:"flex",flexWrap:"wrap",gap:"6px 20px",marginBottom:sbInfo?.sandbox_dir?6:0}}>
+        {sbInfo?.sandbox_dir&&<div style={{color:t.mut}}>
+          <span style={{color:t.acc}}>📁 </span>
+          <span style={{fontFamily:"monospace",fontSize:10,color:t.dim,wordBreak:"break-all"}}>{sbInfo.sandbox_dir}</span>
+        </div>}
+      </div>
+      <div style={{display:"flex",gap:20,flexWrap:"wrap"}}>
+        <div><span style={{color:t.mut}}>Files: </span><span style={{fontWeight:700,color:t.text}}>{sbInfo?.sandbox_file_count??"—"}</span></div>
+        <div><span style={{color:t.mut}}>Size: </span><span style={{fontWeight:700,color:t.text}}>{sbInfo!=null?fmtBytes(sbInfo.sandbox_size_bytes):"—"}</span></div>
+        <div><span style={{color:t.mut}}>Venv: </span><span style={{fontWeight:700,color:sbInfo?.sandbox_venv_ready?t.ok:t.mut}}>{sbInfo?.sandbox_venv_ready?"✓ Ready":"building..."}</span></div>
+      </div>
+    </div>
+    <div style={{marginBottom:8}}>
+      <div style={{fontSize:10,color:t.mut,marginBottom:5}}>Auto-delete tool output files after:</div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+        {INTERVALS.map(iv=><button key={iv.days} onClick={()=>saveCleanupDays(iv.days)}
+          style={{...btnS(cleanupDays===iv.days?t.acc:t.mut),background:cleanupDays===iv.days?`${t.acc}22`:`${t.surface}55`,fontWeight:cleanupDays===iv.days?700:400,fontSize:10}}>
+          {iv.label}
+        </button>)}
+      </div>
+      {cleanupDays===0&&<div style={{fontSize:10,color:t.warm,marginTop:4}}>⚠ Files will never be cleaned automatically. Clean manually when needed.</div>}
+    </div>
+    <div style={{display:"flex",alignItems:"center",gap:8}}>
+      <button onClick={cleanNow} disabled={cleaning} style={{...btnS(t.err),opacity:cleaning?.6:1}}>
+        {cleaning?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span> Cleaning...</>:"🗑 Clean Now"}
+      </button>
+      {cleanResult&&!cleanResult.error&&<span style={{fontSize:11,color:t.ok}}>
+        ✓ Removed {cleanResult.deleted} file{cleanResult.deleted!==1?"s":""}{cleanResult.freed_bytes>0?`, freed ${fmtBytes(cleanResult.freed_bytes)}`:""}
+      </span>}
+      {cleanResult?.skipped&&<span style={{fontSize:11,color:t.mut}}>↷ {cleanResult.skipped}</span>}
+      {cleanResult?.error&&<span style={{fontSize:11,color:t.err}}>✕ {cleanResult.error}</span>}
+    </div>
+    <div style={{fontSize:10,color:t.mut,marginTop:6,lineHeight:1.5}}>
+      Tool-generated files (code outputs, downloads) are stored in <code style={{background:`${t.surface}`,padding:"1px 5px",borderRadius:3,fontSize:9}}>{sbInfo?.sandbox_outputs_dir||"sandbox/outputs/"}</code> and cleaned automatically. User uploads and knowledge base files are never auto-deleted.
+    </div>
+  </div>;
+}
+
+// ============================================================
+function HyprChat(){
+  const [tm,setTm]=useState(()=>{try{return localStorage.getItem("hc-theme")||"nord";}catch{return "nord";}});
+  const [fi,setFi]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font")||"0");}catch{return 0;}});
+  const [tokenLimit,setTokenLimit]=useState(()=>{try{return parseInt(localStorage.getItem("hc-token-limit")||"0");}catch{return 0;}});
+  const [numCtx,setNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-num-ctx")||"0");}catch{return 0;}});
+  const [defaultTemp,setDefaultTemp]=useState(()=>{try{return parseFloat(localStorage.getItem("hc-temp")||"0.7");}catch{return 0.7;}});
+  const [defaultTopP,setDefaultTopP]=useState(()=>{try{return parseFloat(localStorage.getItem("hc-top-p")||"0.9");}catch{return 0.9;}});
+  const [compactMode,setCompactMode]=useState(()=>{try{return localStorage.getItem("hc-compact")==="1";}catch{return false;}});
+  const [autoExpandThink,setAutoExpandThink]=useState(()=>{try{return localStorage.getItem("hc-auto-expand-think")==="1";}catch{return false;}});
+  const [lastPersonaId,setLastPersonaId]=useState(()=>{try{return localStorage.getItem("hc-last-persona")||null;}catch{return null;}});
+  const [fontSize,setFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font-size")||"13");}catch{return 13;}});
+  const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"12");}catch{return 12;}});
+  const [chatWidth,setChatWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-w")||"760");}catch{return 760;}});
+  const [wsModel,setWsModel]=useState(()=>{try{return localStorage.getItem("hc-ws-model")||"qwen2.5:7b";}catch{return "qwen2.5:7b";}});
+  const [ctxTokens,setCtxTokens]=useState(0);
+  const [genTokens,setGenTokens]=useState(0);
+  const [previewFile,setPreviewFile]=useState(null);
+  const [previewContent,setPreviewContent]=useState(null);
+  const [previewError,setPreviewError]=useState(null);
+  const [showChangelog,setShowChangelog]=useState(false);
+  const [changelogContent,setChangelogContent]=useState(null);
+  const [ollamaUrl,setOllamaUrl]=useState("");
+  const [ollamaUrlSaving,setOllamaUrlSaving]=useState(false);
+  const [modelParams,setModelParams]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-model-params")||"{}");}catch{return {};}});
+  const [modelParamsOpen,setModelParamsOpen]=useState(null); // model name
+  const [prompts,setPrompts]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-prompts")||"[]");}catch{return [];}});
+  const [showPromptPicker,setShowPromptPicker]=useState(false);
+  const [promptSearch,setPromptSearch]=useState("");
+  const [editPrompt,setEditPrompt]=useState(null); // {id, title, content, category}
+
+  const [convTags,setConvTags]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-conv-tags")||"{}");}catch{return {};}});
+  const [activeTagFilter,setActiveTagFilter]=useState(null);
+  const [showTagEditor,setShowTagEditor]=useState(null); // conv id
+  const [newTagInput,setNewTagInput]=useState("");
+  const [previewWidth,setPreviewWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-preview-w")||"420");}catch{return 420;}});
+  const [pasteMode,setPasteMode]=useState(false);
+  const [pasteCode,setPasteCode]=useState("");
+  const [pasteToolName,setPasteToolName]=useState("");
+  const [pasteToolDesc,setPasteToolDesc]=useState("");
+  const t=THEMES[tm], font=FONTS[fi].v;
+
+  useEffect(()=>{try{localStorage.setItem("hc-theme",tm);}catch{}},[tm]);
+  useEffect(()=>{try{localStorage.setItem("hc-font",String(fi));}catch{}},[fi]);
+  useEffect(()=>{try{localStorage.setItem("hc-token-limit",String(tokenLimit));}catch{}},[tokenLimit]);
+  useEffect(()=>{try{localStorage.setItem("hc-num-ctx",String(numCtx));}catch{}},[numCtx]);
+  useEffect(()=>{try{localStorage.setItem("hc-temp",String(defaultTemp));}catch{}},[defaultTemp]);
+  useEffect(()=>{try{localStorage.setItem("hc-top-p",String(defaultTopP));}catch{}},[defaultTopP]);
+  useEffect(()=>{try{localStorage.setItem("hc-compact",compactMode?"1":"0");}catch{}},[compactMode]);
+  useEffect(()=>{try{localStorage.setItem("hc-auto-expand-think",autoExpandThink?"1":"0");}catch{}},[autoExpandThink]);
+  useEffect(()=>{try{localStorage.setItem("hc-font-size",fontSize);}catch{}},[fontSize]);
+  useEffect(()=>{try{localStorage.setItem("hc-ui-font-size",uiFontSize);}catch{}},[uiFontSize]);
+  useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
+  useEffect(()=>{try{localStorage.setItem("hc-ws-model",wsModel);}catch{}},[wsModel]);
+  useEffect(()=>{try{localStorage.setItem("hc-model-params",JSON.stringify(modelParams));}catch{}},[modelParams]);
+  useEffect(()=>{try{localStorage.setItem("hc-prompts",JSON.stringify(prompts));}catch{}},[prompts]);
+  useEffect(()=>{try{localStorage.setItem("hc-conv-tags",JSON.stringify(convTags));}catch{}},[convTags]);
+
+  const [convs,setConvs]=useState([]);
+  const [actId,setActId]=useState(null);
+  const [inp,setInp]=useState("");
+  const [streaming,setStreaming]=useState(false);
+  const [sidebar,setSidebar]=useState(true);
+  const [models,setModels]=useState([]);
+  const [sq,setSq]=useState("");
+  const [copied,setCopied]=useState(null);
+  const [tokC,setTokC]=useState(0);
+  const [tokS,setTokS]=useState(0);
+  const [sessionTokens,setSessionTokens]=useState(0);
+  const [panel,setPanel]=useState("chat");
+  const [evts,setEvts]=useState([]);
+  const [kbs,setKbs]=useState([]);
+  const [tools,setTools]=useState([]);
+  const [mcs,setMcs]=useState([]);
+  const [health,setHealth]=useState({});
+  const [pullName,setPullName]=useState("");
+  const [pullProg,setPullProg]=useState(null);
+  const [editMc,setEditMc]=useState(null);
+  const [editTool,setEditTool]=useState(null);
+  const [expandedBuiltin,setExpandedBuiltin]=useState(null);
+  const [editKb,setEditKb]=useState(null);
+  const [builtinTools,setBuiltinTools]=useState([]);
+  const [expandedPill,setExpandedPill]=useState(null);
+  const [loadingConv,setLoadingConv]=useState(false);
+  const [editingMsg,setEditingMsg]=useState(null); // {index, content}
+  const [attachments,setAttachments]=useState([]); // [{name, content}]
+  const [workspaces,setWorkspaces]=useState([]);
+  const [wsPanel,setWsPanel]=useState(false);
+  const [activeWs,setActiveWs]=useState(null);
+  const [wsDetail,setWsDetail]=useState(null);
+  const [wsLoading,setWsLoading]=useState(false);
+
+  // Council state
+  const [councils,setCouncils]=useState([]);
+  const [activeCouncilId,setActiveCouncilId]=useState(null);
+  const [councilRunning,setCouncilRunning]=useState(false);
+  const [councilResponses,setCouncilResponses]=useState({}); // {memberId: {model,content,done}}
+  const [councilHostContent,setCouncilHostContent]=useState("");
+  const [councilVotes,setCouncilVotes]=useState([]); // live votes during current stream
+  const [councilVoting,setCouncilVoting]=useState(false); // voting phase active
+  const [editMember,setEditMember]=useState(null); // member id being edited
+  const [editMemberForm,setEditMemberForm]=useState({system_prompt:"",persona_name:""});
+
+  // Quick search — derived from active conversation's tool_ids
+  const quickSearch = (act?.tool_ids||[]).includes("quick_search");
+  const [quickResults,setQuickResults]=useState([]); // per send
+  const [searchLoading,setSearchLoading]=useState(false);
+
+  const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0);
+  const act = convs.find(c=>c.id===actId);
+
+  // Save helpers — persist to backend
+  const saveTool=(tl)=>{fetch(`${API}/api/tools/${tl.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:tl.name,description:tl.description,code:tl.code})}).catch(()=>{});};
+  const savePersona=(mc)=>{fetch(`${API}/api/model-configs/${mc.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:mc.name,base_model:mc.base_model,system_prompt:mc.system_prompt,tool_ids:mc.tool_ids||[],kb_ids:mc.kb_ids||[],parameters:mc.parameters||{}})}).catch(()=>{});};
+  const saveKb=(kb)=>{fetch(`${API}/api/knowledge-bases/${kb.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:kb.name,description:kb.description})}).catch(()=>{});};
+
+  // Combined tool list for personas (builtin + custom uploaded tools)
+  const allTools = (() => {
+    const seen = new Set();
+    const merged = [];
+    // builtinTools already includes custom tools from /api/builtin-tools
+    for (const tl of builtinTools) { if (!seen.has(tl.id)) { seen.add(tl.id); merged.push(tl); } }
+    // Only add from tools DB if not already present
+    for (const tl of tools) { if (!seen.has(tl.id)) { seen.add(tl.id); merged.push({id:tl.id, name:tl.name, description:tl.description||tl.filename, icon:"code"}); } }
+    return merged;
+  })();
+
+  // Load
+  useEffect(()=>{
+    fetch(`${API}/api/models`).then(r=>r.json()).then(d=>setModels(d.models||[])).catch(()=>setModels(["qwen3.5:27b","qwen3-coder:30b"]));
+    fetch(`${API}/api/conversations`).then(r=>r.json()).then(cs=>{if(cs.length){
+      const isCouncil=v=>v==="1"||v===1||v===true;
+      setConvs(cs.map(c=>({...c, messages: [], is_council: isCouncil(c.is_council), council_config_id: c.council_config_id||null})));
+      setActId(cs[0].id);
+      // Fetch full first conversation
+      fetch(`${API}/api/conversations/${cs[0].id}`).then(r=>r.json()).then(full=>{
+        const parseMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
+        setConvs(prev=>prev.map(c=>c.id===cs[0].id?{...c, messages:(full.messages||[]).map(m=>({role:m.role,content:m.content,metadata:parseMeta(m)})), model:full.model||c.model, system_prompt:full.system_prompt||c.system_prompt, tool_ids:full.tool_ids||c.tool_ids||[], model_config_id:full.model_config_id||null, is_council:isCouncil(full.is_council), council_config_id:full.council_config_id||null}:c));
+      }).catch(()=>{});
+    }}).catch(()=>{});
+    fetch(`${API}/api/knowledge-bases`).then(r=>r.json()).then(setKbs).catch(()=>{});
+    fetch(`${API}/api/tools`).then(r=>r.json()).then(setTools).catch(()=>{});
+    fetch(`${API}/api/model-configs`).then(r=>r.json()).then(setMcs).catch(()=>{});
+    fetch(`${API}/api/health`).then(r=>r.json()).then(d=>setHealth(d.services||{})).catch(()=>{});
+    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);}).catch(()=>{});
+    fetch(`${API}/api/workspaces`).then(r=>r.json()).then(setWorkspaces).catch(()=>{});
+    fetch(`${API}/api/councils`).then(r=>r.json()).then(setCouncils).catch(()=>{});
+    const quickSearchEntry={id:"quick_search",name:"⚡ Quick Search",description:"SearXNG instant search with inline YouTube, image & web previews",icon:"flash"};
+    fetch(`${API}/api/builtin-tools`).then(r=>r.json()).then(d=>{if(Array.isArray(d))setBuiltinTools([...d,quickSearchEntry]);}).catch(()=>{
+      setBuiltinTools([
+        {id:"codeagent",name:"⚡ CodeAgent",description:"Code execution, shell, file management, downloads",icon:"cpu"},
+        {id:"deep_research",name:"🔬 Deep Research",description:"Multi-source parallel research with AI synthesis",icon:"search"},
+        quickSearchEntry,
+      ]);
+    });
+  },[]);
+
+  // SSE — with exponential backoff reconnection
+  useEffect(()=>{
+    if(sseR.current)sseR.current.close();
+    if(!actId)return;
+    let closed=false,retryDelay=1000,retryTimer=null;
+    const connect=()=>{
+      if(closed)return;
+      const es=new EventSource(`${API}/api/events/${actId}`);
+      es.onmessage=e=>{try{const ev=JSON.parse(e.data);if(ev.type!=="heartbeat"&&ev.type!=="keepalive")setEvts(p=>[...p.slice(-50),ev]);retryDelay=1000;}catch{}};
+      es.onerror=()=>{es.close();if(!closed){retryTimer=setTimeout(()=>{retryDelay=Math.min(retryDelay*2,30000);connect();},retryDelay);}};
+      sseR.current=es;
+    };
+    connect();
+    return()=>{closed=true;if(retryTimer)clearTimeout(retryTimer);sseR.current?.close();};
+  },[actId]);
+
+  // Auto-expand thinking pill when enabled
+  useEffect(()=>{
+    if(autoExpandThink&&evts.some(e=>e.type==="thinking")){setExpandedPill("thinking");}
+  },[evts,autoExpandThink]);
+
+  // Load conversation messages from backend when switching chats
+  const loadConversation = useCallback(async (id) => {
+    const reqId = ++loadReqRef.current;
+    setActId(id);setPanel("chat");setEvts([]);setExpandedPill(null);
+    setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");setCouncilVotes([]);setCouncilVoting(false);
+    setCtxTokens(0);setSessionTokens(0);setTokC(0);setTokS(0);setGenTokens(0);
+    setLoadingConv(true);
+    try {
+      const r = await fetch(`${API}/api/conversations/${id}`);
+      if(!r.ok) throw new Error(`HTTP ${r.status}`);
+      const full = await r.json();
+      if(reqId!==loadReqRef.current) return; // stale — newer request in flight
+      if (full && full.messages) {
+        const parseMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
+        const isCouncil=v=>v==="1"||v===1||v===true;
+        setConvs(prev=>prev.map(c=>c.id===id ? {...c, messages: full.messages.map(m=>({role:m.role,content:m.content,metadata:parseMeta(m)})), model: full.model||c.model, system_prompt: full.system_prompt||c.system_prompt, tool_ids: full.tool_ids||c.tool_ids||[], model_config_id: full.model_config_id||null, is_council: isCouncil(full.is_council), council_config_id: full.council_config_id||null} : c));
+      }
+    } catch(e) { console.error("Failed to load conversation:", e); }
+    if(reqId===loadReqRef.current) setLoadingConv(false);
+  }, []);
+
+  useEffect(()=>{chatEnd.current?.scrollIntoView({behavior:"smooth"});},[act?.messages]);
+  useEffect(()=>{if(panel==="chat")inpRef.current?.focus();},[actId,panel]);
+
+  const uConv=useCallback((id,u)=>{
+    setConvs(p=>p.map(c=>{
+      if(c.id!==id)return c;
+      const updated=typeof u==="function"?u(c):{...c,...u};
+      const patch={};
+      for(const k of ["title","model","system_prompt","tool_ids","persona_name","persona_avatar","is_council","council_config_id"]){
+        if(JSON.stringify(updated[k])!==JSON.stringify(c[k])&&updated[k]!==undefined)patch[k]=updated[k];
+      }
+      if(Object.keys(patch).length&&!id.startsWith("l-")){
+        fetch(`${API}/api/conversations/${id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)}).catch(()=>{});
+      }
+      return updated;
+    }));
+  },[]);
+
+  const newChat=async()=>{
+    let newId=null;
+    try{
+      const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:"New Chat",model:models[0]||"qwen3.5:27b"})});
+      const c=await r.json();c.messages=[];setConvs(p=>[c,...p]);setActId(c.id);newId=c.id;
+    }catch{newId=`l-${Date.now()}`;setConvs(p=>[{id:newId,title:"New Chat",messages:[],model:models[0]||"",system_prompt:""},...p]);setActId(newId);}
+    setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
+    // Carry over last-used persona
+    if(newId&&lastPersonaId){
+      const mc=mcs.find(m=>m.id===lastPersonaId);
+      if(mc){
+        setTimeout(()=>uConv(newId,{model:mc.base_model||models[0]||"",system_prompt:mc.system_prompt||"",tool_ids:mc.tool_ids||[],model_config_id:mc.id,persona_name:mc.name,persona_avatar:mc.parameters?.avatar}),50);
+      }
+    }
+  };
+
+  const delChat=async id=>{
+    fetch(`${API}/api/conversations/${id}`,{method:"DELETE"}).catch(()=>{});
+    setConvs(p=>{const n=p.filter(c=>c.id!==id);if(actId===id){setActId(n[0]?.id||null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");}return n;});
+  };
+
+  // Start a new council chat session
+  const startCouncilChat=async(councilId)=>{
+    const council=councils.find(c=>c.id===councilId);
+    if(!council)return;
+    try{
+      const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:`⚖️ ${council.name}`,model:council.host_model||models[0]||"qwen3.5:27b"})});
+      const c=await r.json();
+      // patch is_council + council_config_id
+      await fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({is_council:"1",council_config_id:councilId})}).catch(()=>{});
+      c.messages=[];c.is_council=true;c.council_config_id=councilId;
+      setConvs(p=>[c,...p]);setActId(c.id);setPanel("chat");setEvts([]);setQuickResults([]);
+    }catch(err){console.error("Council chat start failed",err);}
+  };
+
+  // Send a message to the council
+  const sendCouncil=async()=>{
+    if(!inp.trim()||councilRunning)return;
+    const cid=actId;const cv=convs.find(c=>c.id===cid);
+    if(!cv?.council_config_id)return;
+    const userMsg=inp.trim();setInp("");
+    // Quick search first if enabled
+    let qResults=[];
+    if(quickSearch&&userMsg){
+      setSearchLoading(true);
+      try{const sr=await fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:userMsg,count:6})});const sd=await sr.json();qResults=sd.results||[];}catch{}
+      setSearchLoading(false);
+    }
+    setQuickResults(qResults);
+    // Add user message to UI
+    uConv(cid,c=>({...c,messages:[...(c.messages||[]),{role:"user",content:userMsg,metadata:{}}]}));
+    fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",body:new URLSearchParams({role:"user",content:userMsg})}).catch(()=>{});
+    // Title generation
+    if(!(cv.messages||[]).length){const title=userMsg.slice(0,40)+(userMsg.length>40?"...":"");uConv(cid,{title});fetch(`${API}/api/conversations/${cid}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({title})}).catch(()=>{});}
+    // Start council streaming
+    setCouncilRunning(true);setCouncilResponses({});setCouncilHostContent("");setCouncilVotes([]);setCouncilVoting(false);
+    const msgs=(cv.messages||[]).map(m=>({role:m.role,content:m.content}));
+    msgs.push({role:"user",content:userMsg});
+    try{
+      const res=await fetch(`${API}/api/council/chat/stream`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({conversation_id:cid,council_id:cv.council_config_id,messages:msgs,quick_search:quickSearch})});
+      const rdr=res.body.getReader(),dec=new TextDecoder();let buf="";
+      while(true){
+        const{done,value}=await rdr.read();if(done)break;
+        buf+=dec.decode(value,{stream:true});
+        const lines=buf.split("\n");buf=lines.pop()||"";
+        for(const ln of lines){
+          if(!ln.startsWith("data: "))continue;
+          try{const d=JSON.parse(ln.slice(6));
+            if(d.type==="council_token"){
+              setCouncilResponses(p=>({...p,[d.member_id]:{model:d.model,content:(p[d.member_id]?.content||"")+d.content,done:false}}));
+            }else if(d.type==="council_done"){
+              setCouncilResponses(p=>({...p,[d.member_id]:{...(p[d.member_id]||{model:d.model,content:""}),done:true}}));
+            }else if(d.type==="council_voting"){
+              setCouncilVoting(true);
+            }else if(d.type==="council_vote"){
+              setCouncilVotes(p=>[...p,{voter_id:d.voter_id,voter_name:d.voter_name,voted_for:d.voted_for,voted_for_name:d.voted_for_name,reason:d.reason}]);
+            }else if(d.type==="council_votes"){
+              setCouncilVoting(false);
+              if(d.updated_points){setCouncils(p=>p.map(c=>c.id===cv.council_config_id?{...c,members:(c.members||[]).map(m=>d.updated_points[m.id]!==undefined?{...m,points:d.updated_points[m.id]}:m)}:c));}
+            }else if(d.type==="council_host_token"){
+              setCouncilHostContent(p=>p+d.content);
+            }else if(d.type==="council_complete"){
+              // Finalize: move streaming state into conversation messages
+              setCouncilVotes(votes=>{
+                setCouncilResponses(p=>{
+                  const council=councils.find(c=>c.id===cv.council_config_id);
+                  const newMsgs=[];
+                  const memberList=council?.members||[];
+                  // Fallback: also include any responses not covered by memberList
+                  const coveredIds=new Set(memberList.map(m=>m.id));
+                  const allMemberIds=[...memberList.map(m=>m.id),...Object.keys(p).filter(id=>!coveredIds.has(id))];
+                  for(const mid of allMemberIds){
+                    const member=memberList.find(m=>m.id===mid)||{id:mid,model:"",persona_name:""};
+                    const resp=p[mid];
+                    if(resp?.content)newMsgs.push({role:"assistant",content:resp.content,metadata:{council_member_id:mid,council_model:resp.model||member.model,council_persona:member.persona_name||resp.model||""}});
+                  }
+                  setCouncilHostContent(host=>{
+                    if(host)newMsgs.push({role:"assistant",content:host,metadata:{council_host:true,votes}});
+                    if(newMsgs.length)uConv(cid,c=>({...c,messages:[...(c.messages||[]),...newMsgs]}));
+                    return "";
+                  });
+                  return {};
+                });
+                setCouncilVoting(false);
+                return [];
+              });
+            }
+          }catch{}
+        }
+      }
+    }catch(e){console.error("Council stream error",e);}
+    setCouncilRunning(false);
+  };
+
+  // Update council member score
+  const scoreCouncilMember=async(councilId,memberId,delta)=>{
+    const council=councils.find(c=>c.id===councilId);if(!council)return;
+    const member=(council.members||[]).find(m=>m.id===memberId);if(!member)return;
+    const newPoints=(member.points||0)+delta;
+    await fetch(`${API}/api/councils/members/${memberId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({points:newPoints})}).catch(()=>{});
+    setCouncils(p=>p.map(c=>c.id===councilId?{...c,members:c.members.map(m=>m.id===memberId?{...m,points:newPoints}:m)}:c));
+  };
+
+  // Rough token estimate: ~4 chars per token
+  const estimateTokens = (msgs) => msgs.reduce((sum,m)=>sum+Math.ceil((m.content||"").length/4),0);
+
+  // Core send logic — used by send, regenerate, and edit
+  const sendMessages=async(cid, messagesToSend, appendUser)=>{
+    setStreaming(true);setTokC(0);setTokS(0);setEvts([]);setExpandedPill(null);setCtxTokens(0);setGenTokens(0);
+    try{
+      const cv=convs.find(c=>c.id===cid);
+      let am = messagesToSend.map(m=>({role:m.role,content:m.content}));
+      // Get model-specific params, falling back to globals
+      const modelName=cv?.model||models[0]||"";
+      const mp=modelParams[modelName]||{};
+      const resolveParam=(mpVal,globalVal)=>{
+        if(mpVal===undefined||mpVal===""||mpVal==="default")return globalVal||undefined;
+        const n=parseFloat(mpVal);return isNaN(n)?undefined:n;
+      };
+      const sendTemp=resolveParam(mp.temperature,defaultTemp);
+      const sendTopP=resolveParam(mp.top_p,defaultTopP);
+      const sendNumCtx=resolveParam(mp.num_ctx,numCtx)||undefined;
+      const sendTopK=mp.top_k&&mp.top_k!=="default"?parseInt(mp.top_k)||undefined:undefined;
+      const sendRepeatPenalty=mp.repeat_penalty&&mp.repeat_penalty!=="default"?parseFloat(mp.repeat_penalty)||undefined:undefined;
+
+      // Context window limiting — trim oldest messages to fit within num_ctx
+      const effectiveLimit = sendNumCtx || tokenLimit;
+      if(effectiveLimit>0){
+        let est=estimateTokens(am);
+        while(est>effectiveLimit && am.length>2){
+          am.splice(0,1);
+          est=estimateTokens(am);
+        }
+      }
+
+      const ctrl=new AbortController();abortR.current=ctrl;
+      const body={conversation_id:cid,model:modelName,messages:am,system_prompt:cv?.system_prompt||"",tool_ids:cv?.tool_ids||[],persona_id:cv?.model_config_id||null};
+      if(sendNumCtx)body.num_ctx=sendNumCtx;
+      if(sendTemp!==undefined)body.temperature=sendTemp;
+      if(sendTopP!==undefined)body.top_p=sendTopP;
+      if(sendTopK!==undefined)body.top_k=sendTopK;
+      if(sendRepeatPenalty!==undefined)body.repeat_penalty=sendRepeatPenalty;
+      const res=await fetch(`${API}/api/chat/stream`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:ctrl.signal});
+      const rdr=res.body.getReader(),dec=new TextDecoder();
+      let full="",buf="";
+      while(true){
+        const{done,value}=await rdr.read();if(done)break;
+        buf+=dec.decode(value,{stream:true});
+        const lines=buf.split("\n");buf=lines.pop()||"";
+        for(const ln of lines){
+          if(!ln.startsWith("data: "))continue;
+          try{const d=JSON.parse(ln.slice(6));
+            if(d.type==="token"){full+=d.content;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={role:"assistant",content:full,isS:true};return{...c,messages:m};});}
+            else if(d.type==="done"){setTokS(d.speed);if(d.gen_tokens||d.tokens)setSessionTokens(p=>p+((d.gen_tokens||d.tokens)||0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens)setGenTokens(d.gen_tokens);}
+            else if(d.type==="ctx_update"){if(d.gen_tokens)setTokC(d.gen_tokens);if(d.prompt_tokens)setCtxTokens(d.prompt_tokens);}
+            else if(d.type==="error"){full=`\`\`\`\n⚠ ${d.error}\n\`\`\``;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={role:"assistant",content:full,isS:false};return{...c,messages:m};});}
+          }catch{}}
+      }
+      uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={role:"assistant",content:full,isS:false};return{...c,messages:m};});
+      // Save to DB
+      if(appendUser) fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",body:new URLSearchParams({role:"user",content:appendUser})}).catch(()=>{});
+      fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",body:new URLSearchParams({role:"assistant",content:full})}).catch(()=>{});
+    }catch(e){if(e.name!=="AbortError")uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={role:"assistant",content:`\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false};return{...c,messages:m};});}
+    setStreaming(false);setAttachments([]);
+  };
+
+  const send=async()=>{
+    if(!inp.trim()&&!attachments.length||streaming)return;
+    let cid=actId;
+    if(!cid){await newChat();return;}
+    const cv=convs.find(c=>c.id===cid);
+    // Route council chats to council sender
+    if(cv?.is_council){await sendCouncil();return;}
+    // Build content with attachments
+    let content = inp.trim();
+    if(attachments.length){
+      const fileCtx = attachments.map(a=>`📎 **${a.name}**:\n\`\`\`\n${a.content}\n\`\`\``).join("\n\n");
+      content = content ? `${content}\n\n${fileCtx}` : fileCtx;
+    }
+    // Quick search for regular chats
+    if(quickSearch&&content.trim()){
+      setSearchLoading(true);
+      try{const sr=await fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:content.trim().slice(0,200),count:6})});const sd=await sr.json();setQuickResults(sd.results||[]);}catch{setQuickResults([]);}
+      setSearchLoading(false);
+    }else{setQuickResults([]);}
+    const um={role:"user",content};
+    uConv(cid,c=>({...c,title:(!c.messages||!c.messages.length)?content.slice(0,40):c.title,messages:[...(c.messages||[]),um,{role:"assistant",content:"",isS:true}]}));
+    setInp("");setAttachments([]);
+    const am=[...(cv?.messages||[]),um];
+    await sendMessages(cid, am, um.content);
+  };
+
+  const regenerate=async(msgIndex)=>{
+    if(streaming)return;
+    const cid=actId;if(!cid)return;
+    // Remove the assistant message at msgIndex and re-send everything before it
+    uConv(cid,c=>{const m=[...(c.messages||[])];m[msgIndex]={role:"assistant",content:"",isS:true};return{...c,messages:m.slice(0,msgIndex+1)};});
+    const cv=convs.find(c=>c.id===cid);
+    const msgsBeforeRegen=(cv?.messages||[]).slice(0,msgIndex);
+    await sendMessages(cid, msgsBeforeRegen, null);
+  };
+
+  const editMessage=async(msgIndex, newContent)=>{
+    if(streaming)return;
+    const cid=actId;if(!cid)return;
+    setEditingMsg(null);
+    // Replace the user message and remove everything after it, then re-send
+    uConv(cid,c=>{const m=(c.messages||[]).slice(0,msgIndex);m.push({role:"user",content:newContent});m.push({role:"assistant",content:"",isS:true});return{...c,messages:m};});
+    const cv=convs.find(c=>c.id===cid);
+    const msgsUpToEdit=(cv?.messages||[]).slice(0,msgIndex);
+    msgsUpToEdit.push({role:"user",content:newContent});
+    await sendMessages(cid, msgsUpToEdit, newContent);
+  };
+
+  // File upload handler
+  const handleFileUpload=async(files)=>{
+    const newAttachments=[];
+    for(const file of files){
+      if(file.size>5*1024*1024){continue;} // Skip files > 5MB
+      try{
+        const text=await file.text();
+        newAttachments.push({name:file.name,content:text.substring(0,20000)});
+      }catch{
+        // Binary file — read as base64 preview
+        newAttachments.push({name:file.name,content:`[Binary file: ${file.name}, ${(file.size/1024).toFixed(1)}KB]`});
+      }
+    }
+    setAttachments(p=>[...p,...newAttachments]);
+  };
+
+  const stop=()=>{abortR.current?.abort();setStreaming(false);};
+
+  const openPreview=async(filename,url)=>{
+    const ext=(filename||"").split(".").pop().toLowerCase();
+    setPreviewFile({filename,url,type:ext});
+    setPreviewContent(null);
+    setPreviewError(null);
+    if(["md","txt","html","py","js","ts","json","css","sh","rs","go","java","c","cpp","yaml","toml","xml","csv","log","conf","ini","env"].includes(ext)){
+      try{
+        const r=await fetch(`${API}${url}`);
+        if(!r.ok){setPreviewError(`File unavailable (HTTP ${r.status}). It may have been cleaned up.`);return;}
+        const text=await r.text();
+        setPreviewContent(text);
+      }catch(e){setPreviewError("Failed to load file: "+e.message);}
+    }
+  };
+  const closePreview=()=>{setPreviewFile(null);setPreviewContent(null);setPreviewError(null);};
+
+  const startPreviewDrag=(e)=>{
+    e.preventDefault();
+    const startX=e.clientX,startW=previewWidth;
+    const onMove=(ev)=>{
+      const nw=Math.max(260,Math.min(900,startW+(startX-ev.clientX)));
+      setPreviewWidth(nw);
+    };
+    const onUp=()=>{
+      localStorage.setItem("hc-preview-w",String(previewWidth));
+      window.removeEventListener("mousemove",onMove);
+      window.removeEventListener("mouseup",onUp);
+    };
+    window.addEventListener("mousemove",onMove);
+    window.addEventListener("mouseup",onUp);
+  };
+
+  const exportChat=()=>{
+    const cv=convs.find(c=>c.id===actId);
+    if(!cv)return;
+    const lines=[`# ${cv.title||"Chat Export"}`,`*Exported: ${new Date().toLocaleString()}*`,""];
+    for(const m of(cv.messages||[])){
+      if(m.role==="system")continue;
+      lines.push(`## ${m.role==="user"?"You":"Assistant"}`,"",(m.content||""),"");
+    }
+    const blob=new Blob([lines.join("\n")],{type:"text/markdown"});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download=`${(cv.title||"chat").replace(/[^a-z0-9]/gi,"_").toLowerCase()}.md`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  const cp=(txt,id)=>{
+    // navigator.clipboard only works on HTTPS/localhost — use fallback for HTTP
+    if(navigator.clipboard&&window.isSecureContext){
+      navigator.clipboard.writeText(txt).then(()=>{setCopied(id);setTimeout(()=>setCopied(null),1500);}).catch(()=>{});
+    } else {
+      // Fallback: textarea + execCommand
+      const ta=document.createElement("textarea");
+      ta.value=txt;ta.style.cssText="position:fixed;left:-9999px;top:-9999px";
+      document.body.appendChild(ta);ta.select();
+      try{document.execCommand("copy");setCopied(id);setTimeout(()=>setCopied(null),1500);}catch{}
+      document.body.removeChild(ta);
+    }
+  };
+
+  // Pull model
+  const pullModel=async()=>{
+    if(!pullName.trim())return;setPullProg("Starting...");
+    try{
+      const res=await fetch(`${API}/api/models/pull`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:pullName})});
+      const rdr=res.body.getReader(),dec=new TextDecoder();let buf="";
+      while(true){
+        const{done,value}=await rdr.read();if(done)break;
+        buf+=dec.decode(value,{stream:true});
+        const lines=buf.split("\n");buf=lines.pop()||"";
+        for(const ln of lines){
+          if(!ln.startsWith("data: "))continue;
+          try{const d=JSON.parse(ln.slice(6));
+            if(d.status){let p=d.status;if(d.completed&&d.total)p+=` ${Math.round(d.completed/d.total*100)}%`;setPullProg(p);}
+          }catch{}}
+      }
+      setPullProg("Done!");setPullName("");
+      const r2=await fetch(`${API}/api/models`);const d2=await r2.json();setModels(d2.models||[]);
+      setTimeout(()=>setPullProg(null),2000);
+    }catch(e){setPullProg(`Error: ${e.message}`);setTimeout(()=>setPullProg(null),3000);}
+  };
+
+  // Markdown
+  const inlineParse=(text)=>{
+    if(!text)return null;
+    // Split by: inline-code, bold+link, bold, italic(*), italic(_), link
+    return text.split(/(`[^`]+`|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\))/g).map((s,k)=>{
+      if(!s)return null;
+      if(s.startsWith("`")&&s.endsWith("`")&&s.length>1)
+        return <code key={k} style={{background:`${t.surface}CC`,padding:"1px 5px",borderRadius:3,fontFamily:font,fontSize:"0.88em",color:t.warm}}>{s.slice(1,-1)}</code>;
+      const boldLinkMatch=s.match(/^\*\*\[([^\]]+)\]\(([^)]+)\)\*\*$/);
+      if(boldLinkMatch){
+        const [,lt,lu]=boldLinkMatch;
+        if(lu.startsWith("/api/downloads/")){
+          const fn=lu.split("/").pop();
+          return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"6px 0"}}>
+            <a href={`${API}${lu}`} download={fn} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontFamily:font,fontSize:13,fontWeight:700,cursor:"pointer",transition:"all .15s"}}>
+              <span style={{fontSize:18}}>📁</span><span>{fn}</span><span style={{fontSize:10,opacity:.6,marginLeft:4}}>⬇</span>
+            </a>
+            <button onClick={()=>openPreview(fn,lu)} style={{padding:"8px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:14,fontFamily:font}}>👁</button>
+          </span>;
+        }
+        return <a key={k} href={lu} target="_blank" rel="noopener" style={{color:t.acc,textDecoration:"none",borderBottom:`1px solid ${t.acc}40`,fontWeight:700}}>{lt}</a>;
+      }
+      if(s.startsWith("**")&&s.endsWith("**")&&s.length>4)return <strong key={k} style={{color:t.text,fontWeight:600}}>{s.slice(2,-2)}</strong>;
+      if((s.startsWith("*")&&s.endsWith("*")&&s.length>2)||(s.startsWith("_")&&s.endsWith("_")&&s.length>2))
+        return <em key={k} style={{fontStyle:"italic"}}>{s.slice(1,-1)}</em>;
+      const linkMatch=s.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      if(linkMatch){
+        const [,lt,lu]=linkMatch;
+        if(lu.startsWith("/api/downloads/")){
+          const fn=lu.split("/").pop();
+          return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"6px 0"}}>
+            <a href={`${API}${lu}`} download={fn} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontFamily:font,fontSize:13,fontWeight:700,cursor:"pointer",transition:"all .15s"}}>
+              <span style={{fontSize:18}}>📁</span><span>{fn}</span><span style={{fontSize:10,opacity:.6,marginLeft:4}}>⬇</span>
+            </a>
+            <button onClick={()=>openPreview(fn,lu)} style={{padding:"8px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:14,fontFamily:font}}>👁</button>
+          </span>;
+        }
+        return <a key={k} href={lu} target="_blank" rel="noopener" style={{color:t.acc,textDecoration:"none",borderBottom:`1px solid ${t.acc}40`}}>{lt}</a>;
+      }
+      return s;
+    });
+  };
+
+  const md=(text)=>{
+    if(!text)return null;
+    // Strip <think>...</think> blocks (model reasoning not for display)
+    text = text.replace(/<think>[\s\S]*?<\/think>/g,'').trimStart();
+    if(!text)return null;
+    // Normalize bare /api/downloads/ paths to markdown download links
+    text = text.replace(/(?<!\]\()\/api\/downloads\/([^\s)"'`\]]+)/g, '[📎 $1](/api/downloads/$1)');
+    return text.split(/(```[\s\S]*?```)/g).map((p,i)=>{
+      if(p.startsWith("```")){
+        const m=p.match(/```(\w*)\n?([\s\S]*?)```/);const lang=m?.[1]||"",code=m?.[2]||p.slice(3,-3);const bid=`c${i}`;
+        return <div key={i} style={{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`}}>
+            <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:1}}><IC.Terminal/>{lang||"code"}</span>
+            <button onClick={()=>cp(code,bid)} style={{background:"none",border:"none",color:copied===bid?t.ok:t.dim,cursor:"pointer",padding:3,display:"flex",alignItems:"center",gap:4,fontSize:10,fontFamily:font}}>
+              {copied===bid?<><IC.Check/> copied</>:<><IC.Copy/> copy</>}
+            </button>
+          </div>
+          <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
+        </div>;
+      }
+      return <div key={i}>{p.split("\n").map((ln,j)=>{
+        if(ln.match(/^---+$|^\*\*\*+$|^___+$/))return <hr key={j} style={{border:"none",borderTop:`1px solid ${t.brd}44`,margin:"10px 0"}}/>;
+        if(ln.match(/^### /))return <div key={j} style={{fontSize:14,fontWeight:700,color:t.acc,margin:"12px 0 5px"}}>{inlineParse(ln.slice(4))}</div>;
+        if(ln.match(/^## /))return <div key={j} style={{fontSize:15,fontWeight:700,color:t.acc,margin:"14px 0 6px"}}>{inlineParse(ln.slice(3))}</div>;
+        if(ln.match(/^# /))return <div key={j} style={{fontSize:17,fontWeight:700,color:t.acc,margin:"16px 0 7px"}}>{inlineParse(ln.slice(2))}</div>;
+        if(ln.match(/^>\s?/))return <div key={j} style={{borderLeft:`3px solid ${t.acc}44`,paddingLeft:10,margin:"2px 0",color:t.mut,fontStyle:"italic"}}>{inlineParse(ln.replace(/^>\s?/,""))}</div>;
+        if(ln.match(/^[-*+]\s+/))return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:t.acc,marginTop:"0.25em",fontSize:"0.7em",flexShrink:0}}>●</span><span style={{flex:1}}>{inlineParse(ln.replace(/^[-*+]\s+/,""))}</span></div>;
+        if(ln.match(/^\d+\.\s+/)){const num=ln.match(/^(\d+)\./)[1];return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:t.acc,minWidth:18,flexShrink:0,fontWeight:600,fontSize:"0.9em"}}>{num}.</span><span style={{flex:1}}>{inlineParse(ln.replace(/^\d+\.\s+/,""))}</span></div>;}
+        return <div key={j} style={{minHeight:ln===""?8:"auto"}}>{inlineParse(ln)}</div>;
+      })}</div>;
+    });
+  };
+
+  const glass={background:`${t.surface}BB`,backdropFilter:"blur(20px)",border:`1px solid ${t.brd}33`};
+  const nb=(p,ico,lab)=><button onClick={()=>setPanel(p)} title={lab} style={{background:panel===p?`${t.acc}20`:"transparent",border:panel===p?`1px solid ${t.acc}33`:"1px solid transparent",color:panel===p?t.acc:t.mut,padding:7,borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</button>;
+  const svc=n=>{const s=health[n];return <div title={`${n}: ${s?.status||"?"}`} style={{width:6,height:6,borderRadius:"50%",background:s?.status==="ok"?t.ok:t.err,boxShadow:`0 0 6px ${s?.status==="ok"?t.ok:t.err}88`}}/>;};
+  const filtC=convs.filter(c=>{
+    const matchSearch=(c.title||"").toLowerCase().includes(sq.toLowerCase());
+    const tags=convTags[c.id]||[];
+    const matchTag=!activeTagFilter||tags.includes(activeTagFilter);
+    return matchSearch&&matchTag;
+  });
+  const inputS={width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}40`,color:t.text,padding:"8px 10px",borderRadius:6,fontFamily:font,fontSize:12,outline:"none",boxSizing:"border-box"};
+  const labelS={fontSize:10,color:t.mut,display:"block",marginBottom:4,textTransform:"uppercase",letterSpacing:.5};
+  const cardS={background:`${t.surface}88`,border:`1px solid ${t.brd}44`,borderRadius:12,padding:16,marginBottom:12,animation:"fadeIn .3s"};
+  const btnS=(c,bg)=>({background:bg||`${c}22`,border:`1px solid ${c}44`,color:c,padding:"5px 10px",borderRadius:6,cursor:"pointer",fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:5});
+
+  // ============================================================
+  // PANELS
+  // ============================================================
+
+  // ============================================================
+  // PANELS (inlined in render to avoid focus loss)
+  // ============================================================
+
+  // ============================================================
+  // RENDER
+  // ============================================================
+  return <div style={{height:"100vh",width:"100vw",display:"flex",fontFamily:font,background:`linear-gradient(135deg,${t.bgDeep} 0%,${t.bg} 50%,${t.bgDeep} 100%)`,color:t.text,overflow:"hidden",position:"relative",fontSize:uiFontSize}}>
+    <div style={{position:"absolute",inset:0,opacity:.02,zIndex:0,backgroundImage:`linear-gradient(${t.acc} 1px,transparent 1px),linear-gradient(90deg,${t.acc} 1px,transparent 1px)`,backgroundSize:"50px 50px"}}/>
+
+    {/* SIDEBAR */}
+    <div style={{width:sidebar?255:0,minWidth:sidebar?255:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",display:"flex",flexDirection:"column",...glass,borderRight:`1px solid ${t.brd}22`,overflow:"hidden",zIndex:10}}>
+      <div style={{padding:"11px 11px 7px",display:"flex",alignItems:"center",gap:7}}>
+        <div style={{width:8,height:8,borderRadius:"50%",background:t.acc,boxShadow:`0 0 10px ${t.acc}AA`,animation:"glow 3s ease-in-out infinite"}}/>
+        <span style={{fontSize:11,fontWeight:700,letterSpacing:3,textTransform:"uppercase",color:t.acc}}>HyprChat</span>
+        <span style={{fontSize:8,color:t.mut,marginLeft:"auto",background:t.surface,padding:"2px 5px",borderRadius:3}}>v9</span>
+      </div>
+      <div style={{padding:"4px 7px",display:"flex",gap:3,borderBottom:`1px solid ${t.brd}15`}}>
+        {nb("chat",<IC.Chat/>,"Chat")}
+        {nb("kb",<IC.Database/>,"Knowledge Bases")}
+        {nb("tools",<IC.Tool/>,"Tools")}
+        {nb("personas",<IC.Cube/>,"Personas")}
+        {nb("prompts",<IC.Zap/>,"Prompt Library")}
+        {nb("council",<IC.Council/>,"Council of AI")}
+        {nb("settings",<IC.Settings/>,"Settings")}
+      </div>
+      <div style={{padding:"7px 7px 3px",display:"flex",flexDirection:"column",gap:4}}>
+        {lastPersonaId&&mcs.find(m=>m.id===lastPersonaId)&&<div style={{display:"flex",alignItems:"center",gap:5,padding:"4px 8px",background:`${t.pink}10`,border:`1px solid ${t.pink}28`,borderRadius:6,fontSize:10}}>
+          <span style={{color:t.pink,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>🎭 {mcs.find(m=>m.id===lastPersonaId).name}</span>
+          <span onClick={()=>{setLastPersonaId(null);localStorage.removeItem("hc-last-persona");}} style={{cursor:"pointer",color:t.mut,opacity:.7}}>✕</span>
+        </div>}
+        <div style={{display:"flex",gap:4}}>
+          <button onClick={newChat} style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,background:`${t.acc}15`,border:`1px solid ${t.acc}28`,color:t.acc,padding:"7px 10px",borderRadius:8,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:600}}><IC.Plus/> New Chat</button>
+          <button onClick={()=>{setWsPanel(p=>!p);setActiveWs(null);setWsDetail(null);}} style={{...btnS(wsPanel?t.acc:t.mut),padding:"5px 8px",fontSize:11}} title="Workspaces">🗂</button>
+        </div>
+        {!wsPanel&&<>
+        <input value={sq} onChange={e=>setSq(e.target.value)} placeholder="Search..." style={{...inputS,padding:"5px 8px",fontSize:11}}/>
+        {(()=>{
+          const allTags=[...new Set(Object.values(convTags).flat())];
+          if(!allTags.length)return null;
+          return <div style={{display:"flex",flexWrap:"wrap",gap:3,padding:"2px 0"}}>
+            <button onClick={()=>setActiveTagFilter(null)} style={{fontSize:9,padding:"2px 6px",borderRadius:10,background:!activeTagFilter?`${t.acc}22`:`${t.surface}55`,border:`1px solid ${!activeTagFilter?t.acc:t.brd}33`,color:!activeTagFilter?t.acc:t.mut,cursor:"pointer"}}>All</button>
+            {allTags.map(tag=><button key={tag} onClick={()=>setActiveTagFilter(activeTagFilter===tag?null:tag)} style={{fontSize:9,padding:"2px 6px",borderRadius:10,background:activeTagFilter===tag?`${t.warm}22`:`${t.surface}55`,border:`1px solid ${activeTagFilter===tag?t.warm:t.brd}33`,color:activeTagFilter===tag?t.warm:t.mut,cursor:"pointer"}}>{tag}</button>)}
+          </div>;
+        })()}
+      </>}
+      </div>
+      {!wsPanel?<div style={{flex:1,overflowY:"auto",padding:"2px 5px"}}>
+        {filtC.map(c=>{const isCouncil=c.is_council==="1"||c.is_council===1||c.is_council===true;const tags=convTags[c.id]||[];return <div key={c.id} style={{marginBottom:1}}>
+        <div onClick={()=>loadConversation(c.id)} style={{padding:"6px 8px",borderRadius:6,cursor:"pointer",background:c.id===actId&&panel==="chat"?`${t.acc}10`:isCouncil?`${t.pink}07`:"transparent",border:c.id===actId&&panel==="chat"?`1px solid ${t.acc}20`:isCouncil?`1px solid ${t.pink}15`:"1px solid transparent",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:11,color:c.id===actId?t.text:t.dim,flex:1}}>{c.title||"New Chat"}</div>
+          <div style={{display:"flex",gap:2,flexShrink:0}}>
+            <button onClick={e=>{e.stopPropagation();setShowTagEditor(showTagEditor===c.id?null:c.id);setNewTagInput("");}} style={{background:"none",border:"none",color:tags.length?t.warm:t.mut,cursor:"pointer",padding:2,opacity:tags.length?1:.3,display:"flex",flexShrink:0,fontSize:9}}>🏷</button>
+            <button onClick={e=>{e.stopPropagation();delChat(c.id);}} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:2,opacity:.3,display:"flex",flexShrink:0}}><IC.Trash/></button>
+          </div>
+        </div>
+        {tags.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:2,padding:"1px 8px 4px"}}>
+          {tags.map(tag=><span key={tag} onClick={e=>{e.stopPropagation();setActiveTagFilter(activeTagFilter===tag?null:tag);}} style={{fontSize:8,padding:"1px 5px",borderRadius:8,background:`${t.warm}18`,color:t.warm,border:`1px solid ${t.warm}28`,cursor:"pointer"}}>{tag}</span>)}
+        </div>}
+        {showTagEditor===c.id&&<div style={{padding:"4px 8px 6px",animation:"fadeIn .15s"}} onClick={e=>e.stopPropagation()}>
+          <div style={{display:"flex",gap:4}}>
+            <input value={newTagInput} onChange={e=>setNewTagInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newTagInput.trim()){const tag=newTagInput.trim();setConvTags(p=>({...p,[c.id]:[...new Set([...(p[c.id]||[]),tag])]}));setNewTagInput("");}}} placeholder="Add tag..." style={{...inputS,padding:"3px 6px",fontSize:10,flex:1}}/>
+            <button onClick={()=>{if(newTagInput.trim()){const tag=newTagInput.trim();setConvTags(p=>({...p,[c.id]:[...new Set([...(p[c.id]||[]),tag])]}));setNewTagInput("");}}} style={{...btnS(t.warm),padding:"3px 7px",fontSize:9}}>+</button>
+          </div>
+          {tags.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:2,marginTop:3}}>
+            {tags.map(tag=><span key={tag} style={{fontSize:8,padding:"1px 5px",borderRadius:8,background:`${t.warm}18`,color:t.warm,border:`1px solid ${t.warm}28`,display:"flex",alignItems:"center",gap:2}}>
+              {tag}<span onClick={()=>setConvTags(p=>({...p,[c.id]:(p[c.id]||[]).filter(x=>x!==tag)}))} style={{cursor:"pointer",opacity:.7}}>×</span>
+            </span>)}
+          </div>}
+        </div>}
+      </div>;})}
+      </div>:<div style={{flex:1,overflowY:"auto",padding:"8px 6px"}}>
+        <button onClick={async()=>{
+          const r=await fetch(`${API}/api/workspaces`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New Workspace"})});
+          const d=await r.json();setWorkspaces(p=>[...p,d]);
+          setActiveWs(d.id);setWsDetail({...d,conversations:[],files:[]});
+        }} style={{...btnS(t.acc),width:"100%",marginBottom:8,justifyContent:"center",fontSize:11}}><IC.Plus/> New Workspace</button>
+        {!workspaces.length&&<div style={{textAlign:"center",padding:30,color:t.mut,fontSize:11}}>No workspaces yet.<br/>Group related chats together.</div>}
+        {workspaces.map(ws=>{
+          const topics=Array.isArray(ws.topics)?ws.topics:(typeof ws.topics==="string"?JSON.parse(ws.topics||"[]"):[]);
+          const isA=activeWs===ws.id;
+          return <div key={ws.id} onClick={async()=>{
+            setActiveWs(ws.id);setWsLoading(true);
+            const r=await fetch(`${API}/api/workspaces/${ws.id}`);
+            setWsDetail(await r.json());setWsLoading(false);
+          }} style={{padding:"10px 12px",borderRadius:12,border:`1px solid ${isA?t.acc:t.brd}33`,background:isA?`${t.acc}10`:`${t.surface}44`,marginBottom:6,cursor:"pointer",transition:"all .2s",animation:"fadeIn .3s"}}>
+            <div style={{fontWeight:700,fontSize:12,color:isA?t.acc:t.text,marginBottom:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ws.name}</div>
+            {ws.description&&<div style={{fontSize:10,color:t.mut,marginBottom:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ws.description}</div>}
+            {topics.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:3,marginBottom:4}}>
+              {topics.slice(0,3).map((tp,i)=><span key={i} style={{fontSize:9,padding:"2px 6px",borderRadius:10,background:tp.color+"22",color:tp.color,border:`1px solid ${tp.color}44`,fontWeight:600}}>{tp.label}</span>)}
+            </div>}
+            <div style={{fontSize:9,color:t.mut,display:"flex",gap:10}}>
+              <span>💬 {ws.conv_count||0}</span><span>📎 {ws.file_count||0}</span>
+            </div>
+          </div>;
+        })}
+      </div>}
+      <div style={{padding:"5px 9px",borderTop:`1px solid ${t.brd}15`,fontSize:9,color:t.mut,display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
+        {svc("ollama")}Ollama {svc("codebox")}CB {svc("searxng")}SX {svc("n8n")}n8n
+      </div>
+    </div>
+
+    {/* MAIN */}
+    <div style={{flex:1,display:"flex",flexDirection:"column",zIndex:5,minWidth:0}}>
+      <div style={{padding:"6px 13px",...glass,borderBottom:`1px solid ${t.brd}15`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:7,flexShrink:0}}>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <button onClick={()=>setSidebar(!sidebar)} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:3,display:"flex"}}><IC.Sidebar/></button>
+          {panel==="chat"&&act&&<>
+            {act.is_council?(()=>{
+              const cfg=councils.find(c=>c.id===act.council_config_id);
+              return <div style={{display:"flex",alignItems:"center",gap:6,padding:"3px 10px",background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:20}}>
+                <IC.Council/>
+                <span style={{fontSize:10,fontWeight:700,color:t.pink}}>{cfg?.name||"Council"}</span>
+                <span style={{fontSize:9,color:t.mut}}>{(cfg?.members||[]).length} members</span>
+                {councilRunning&&<div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
+              </div>;
+            })():<select value={act.model||models[0]||""} onChange={e=>uConv(actId,{model:e.target.value})} style={{background:t.bgDeep,border:`1px solid ${t.brd}38`,color:t.acc,padding:"4px 22px 4px 7px",borderRadius:6,fontFamily:font,fontSize:11,cursor:"pointer",outline:"none",appearance:"none",minWidth:130}}>{models.map(m=><option key={m} value={m}>{m}</option>)}</select>}
+            {!act.is_council&&act.persona_name&&<div style={{display:"flex",alignItems:"center",gap:5,padding:"3px 10px",background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:20}}>
+              {act.persona_avatar&&<img src={`${API}${act.persona_avatar}`} style={{width:16,height:16,borderRadius:5,objectFit:"cover"}} alt=""/>}
+              <span style={{fontSize:10,fontWeight:600,color:t.pink}}>{act.persona_name}</span>
+              <span onClick={()=>uConv(actId,{persona_name:null,persona_avatar:null,tool_ids:[],system_prompt:""})} style={{cursor:"pointer",opacity:.5,fontSize:10,color:t.pink}}>✕</span>
+            </div>}
+          </>}
+        </div>
+        {/* Token counter + export — persistent */}
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          {panel==="chat"&&act&&(act.messages||[]).length>0&&<button onClick={exportChat} title="Export conversation as Markdown" style={{background:"none",border:`1px solid ${t.brd}28`,color:t.mut,cursor:"pointer",padding:"3px 8px",borderRadius:8,fontFamily:font,fontSize:9,display:"flex",alignItems:"center",gap:3}}><IC.Download/> export</button>}
+          {panel==="chat"&&act&&(()=>{
+            // During streaming: show live gen tokens (from ctx_update). After: show total context.
+            const liveToks=streaming&&tokC>0?tokC:0;
+            const totalToks=ctxTokens||sessionTokens||0;
+            const toks=liveToks||totalToks;
+            const modelName=act?.model||models[0]||"";
+            const mp=modelParams[modelName]||{};
+            const maxCtx=mp.num_ctx&&mp.num_ctx!=="default"?parseInt(mp.num_ctx)||0:numCtx||tokenLimit||0;
+            const ratio=maxCtx>0?Math.min(1,toks/maxCtx):0;
+            const cc=maxCtx>0?(ratio>0.85?t.err:ratio>0.6?t.warm:t.ok):streaming?t.acc:t.warm;
+            const fmtK=n=>n>=1000?`${(n/1000).toFixed(1)}k`:String(n);
+            return <div style={{display:"flex",flexDirection:"column",overflow:"hidden",borderRadius:10,border:`1px solid ${cc}45`,background:`${cc}12`,minWidth:90,cursor:"default"}} title={`Context: ${toks} tokens${maxCtx>0?` / ${maxCtx}`:""}${genTokens>0?` | Generated: ${genTokens}`:""}`}>
+              <div style={{display:"flex",alignItems:"center",gap:5,padding:"5px 11px"}}>
+                <span style={{fontSize:13,display:"inline-block",animation:streaming?"bop 1.5s ease-in-out infinite":"none"}}>🧠</span>
+                <span style={{fontSize:13,color:cc,fontWeight:700,fontFamily:font,letterSpacing:.2}}>{fmtK(toks)}</span>
+                {maxCtx>0&&<span style={{fontSize:10,color:t.mut,fontFamily:font}}>/{fmtK(maxCtx)}</span>}
+                {streaming&&tokS>0&&<span style={{fontSize:9,color:`${cc}99`,marginLeft:2}}>{tokS}t/s</span>}
+              </div>
+              {maxCtx>0&&<div style={{height:3,background:`${t.surface}88`}}>
+                <div style={{height:"100%",background:cc,width:`${ratio*100}%`,transition:"width .4s ease"}}/>
+              </div>}
+            </div>;
+          })()}
+        </div>
+      </div>
+
+      {/* Stream bar */}
+      <div style={{height:2,background:`${t.surface}88`,overflow:"hidden",opacity:streaming?1:0,transition:"opacity .3s"}}>
+        <div style={{height:"100%",background:`linear-gradient(90deg,transparent,${t.acc},transparent)`,animation:streaming?"slide 1.5s ease-in-out infinite":"none",width:"40%"}}/>
+      </div>
+
+      {/* Status pills - removed from here, now in chat area */}
+
+      {/* Panels */}
+      {wsPanel&&activeWs
+        ?<WorkspaceDetail ws={wsDetail} wsLoading={wsLoading} t={t} API={API}
+            workspaces={workspaces} setWorkspaces={setWorkspaces}
+            setActiveWs={setActiveWs} setWsDetail={setWsDetail}
+            convs={convs} onOpenConv={id=>{setWsPanel(false);loadConversation(id);}}
+            onPreview={openPreview} models={models} wsModel={wsModel}
+            onPersonaCreated={mc=>{setMcs(p=>[...p,mc]);setPanel("personas");setEditMc(mc.id);}}/>
+      :panel==="kb"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+    <div style={{padding:"14px 18px",borderBottom:`1px solid ${t.brd}22`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Database/><span style={{fontSize:13,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Knowledge Bases</span></div>
+      <button onClick={async()=>{
+        const r=await fetch(`${API}/api/knowledge-bases`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New KB",description:""})}).catch(()=>null);
+        if(r){const kb=await r.json();setKbs(p=>[...p,{...kb,files:[]}]);}else{setKbs(p=>[...p,{id:`kb-${Date.now()}`,name:"New KB",description:"",files:[]}]);}
+      }} style={btnS(t.acc)}><IC.Plus/> New KB</button>
+    </div>
+    <div style={{flex:1,overflowY:"auto",padding:16}}>
+      {kbs.map(kb=><div key={kb.id} style={cardS}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+          <div style={{flex:1}}>
+            <input value={kb.name} onChange={e=>setKbs(p=>p.map(k=>k.id===kb.id?{...k,name:e.target.value}:k))} style={{...inputS,fontSize:14,fontWeight:600,background:"transparent",border:"none",padding:"0 0 4px 0",color:t.text}}/>
+            <input value={kb.description||""} onChange={e=>setKbs(p=>p.map(k=>k.id===kb.id?{...k,description:e.target.value}:k))} placeholder="Description..." style={{...inputS,background:"transparent",border:"none",padding:0,fontSize:11,color:t.mut}}/>
+          </div>
+          <button onClick={async()=>{fetch(`${API}/api/knowledge-bases/${kb.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.filter(k=>k.id!==kb.id));}} style={btnS(t.err)}><IC.Trash/></button>
+        </div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:10}}>
+          {(kb.files||[]).map((f,i)=><Chip key={i} l={`${f.filename||f.name} (${((f.file_size||f.size||0)/1024).toFixed(1)}KB)`} c={t.f1} bg={`${t.f1}22`}
+            onX={()=>{if(f.id)fetch(`${API}/api/knowledge-bases/files/${f.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:(k.files||[]).filter((_,j)=>j!==i)}:k));}}/>)}
+          {!(kb.files||[]).length&&<span style={{fontSize:11,color:t.mut,fontStyle:"italic"}}>No files uploaded</span>}
+        </div>
+        <label style={{display:"flex",alignItems:"center",gap:6,padding:"8px 14px",background:`${t.f1}10`,border:`1px dashed ${t.f1}44`,borderRadius:8,cursor:"pointer",fontSize:11,color:t.f1}}>
+          <IC.Upload/> Upload files
+          <input type="file" multiple accept=".pdf,.md,.txt,.json,.csv,.docx,.html,.py,.js,.ts,.yaml,.yml" style={{display:"none"}} onChange={async e=>{
+            for(const f of e.target.files){
+              const fd=new FormData();fd.append("file",f);
+              try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files`,{method:"POST",body:fd});const d=await r.json();
+                setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:[...(k.files||[]),{filename:d.filename||f.name,file_size:d.size||f.size}]}:k));
+              }catch{setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:[...(k.files||[]),{name:f.name,size:f.size}]}:k));}
+            }e.target.value="";
+          }}/>
+        </label>
+      </div>)}
+      {!kbs.length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No knowledge bases yet.</div>}
+    </div>
+  </div>
+
+      :panel==="tools"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+    <div style={{padding:"14px 18px",borderBottom:`1px solid ${t.brd}22`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Tool/><span style={{fontSize:13,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.warm}}>Tools</span></div>
+      <div style={{display:"flex",gap:5}}>
+        <button onClick={()=>{setPasteMode(p=>!p);setPasteCode("");setPasteToolName("");setPasteToolDesc("");}} style={btnS(pasteMode?t.warm:t.mut)}>
+          {pasteMode?"✕ Cancel":"✦ Paste Code"}
+        </button>
+        <label style={btnS(t.warm)}><IC.Upload/> Upload .py<input type="file" accept=".py" multiple style={{display:"none"}} onChange={async e=>{
+          for(const f of e.target.files){const fd=new FormData();fd.append("file",f);
+            try{const r=await fetch(`${API}/api/tools/upload`,{method:"POST",body:fd});const d=await r.json();setTools(p=>[...p,d]);}
+            catch{const rd=new FileReader();rd.onload=ev=>{setTools(p=>[...p,{id:`t-${Date.now()}`,name:f.name.replace(".py",""),description:`Uploaded: ${f.name}`,filename:f.name,code:ev.target.result}]);};rd.readAsText(f);}
+          }e.target.value="";
+        }}/></label>
+        <button onClick={async()=>{
+          const tl={name:"new_tool",description:"",filename:"new_tool.py",code:"# New tool\ndef run(input: str) -> str:\n    return input"};
+          try{const r=await fetch(`${API}/api/tools`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(tl)});const d=await r.json();setTools(p=>[...p,d]);setEditTool(d.id);}
+          catch{const id=`t-${Date.now()}`;setTools(p=>[...p,{id,...tl}]);setEditTool(id);}
+        }} style={btnS(t.acc)}><IC.Plus/> New</button>
+      </div>
+    </div>
+    {pasteMode&&<div style={{padding:16,borderBottom:`1px solid ${t.brd}22`,background:`${t.warm}07`,animation:"fadeIn .2s"}}>
+      <div style={{fontSize:11,fontWeight:700,color:t.warm,marginBottom:8,letterSpacing:.5,textTransform:"uppercase"}}>Paste Python Tool</div>
+      <textarea value={pasteCode} rows={10} placeholder={"def my_tool(query: str) -> str:\n    \"\"\"Brief description of what this tool does.\"\"\"\n    # your code here\n    return result"}
+        onChange={e=>{
+          const code=e.target.value;
+          setPasteCode(code);
+          const nameM=code.match(/def\s+(\w+)\s*\(/);
+          const descM=code.match(/"""([\s\S]*?)"""/)||code.match(/'''([\s\S]*?)'''/);
+          if(nameM) setPasteToolName(nameM[1]);
+          if(descM) setPasteToolDesc(descM[1].trim().split("\n")[0]);
+        }}
+        style={{...inputS,color:t.warm,lineHeight:1.6,resize:"vertical",tabSize:4,height:"auto",fontFamily:"monospace",marginBottom:8}}/>
+      <div style={{display:"flex",gap:8,marginBottom:10}}>
+        <div style={{flex:1}}>
+          <div style={{fontSize:10,color:t.mut,marginBottom:3}}>Function name</div>
+          <input value={pasteToolName} onChange={e=>setPasteToolName(e.target.value)} placeholder="my_tool" style={{...inputS,fontFamily:"monospace"}}/>
+        </div>
+        <div style={{flex:2}}>
+          <div style={{fontSize:10,color:t.mut,marginBottom:3}}>Description (shown to AI)</div>
+          <input value={pasteToolDesc} onChange={e=>setPasteToolDesc(e.target.value)} placeholder="What this tool does..." style={inputS}/>
+        </div>
+      </div>
+      <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
+        {pasteCode&&<div style={{fontSize:10,color:t.mut,alignSelf:"center",flex:1}}>
+          {pasteCode.split("\n").length} lines · {(pasteCode.length/1024).toFixed(1)} KB
+        </div>}
+        <button disabled={!pasteCode.trim()||!pasteToolName.trim()} onClick={async()=>{
+          const tl={name:pasteToolName.trim(),description:pasteToolDesc.trim(),filename:`${pasteToolName.trim()}.py`,code:pasteCode.trim()};
+          try{const r=await fetch(`${API}/api/tools`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(tl)});
+            const d=await r.json();setTools(p=>[...p,d]);}
+          catch{const id=`t-${Date.now()}`;setTools(p=>[...p,{id,...tl}]);}
+          setPasteMode(false);setPasteCode("");setPasteToolName("");setPasteToolDesc("");
+        }} style={{...btnS(t.warm),opacity:(!pasteCode.trim()||!pasteToolName.trim())?.4:1}}>
+          ✦ Register Tool
+        </button>
+      </div>
+    </div>}
+    <div style={{flex:1,overflowY:"auto",padding:16}}>
+      {builtinTools.length>0&&<div style={{marginBottom:16}}>
+        <div style={{fontSize:9,fontWeight:700,color:t.mut,letterSpacing:1,textTransform:"uppercase",marginBottom:8}}>Built-in</div>
+        {builtinTools.map(bt=>{
+          const isExp=expandedBuiltin===bt.id;
+          const isCa=bt.id==="codeagent";
+          const isDr=bt.id==="deep_research";
+          const isQs=bt.id==="quick_search";
+          const isCt=bt.id==="conspiracy_research";
+          const btCol=isQs?t.f1:isCt?t.err:t.acc;
+          const btIcon=isCa?"⚡":isDr?"🔬":isQs?"⚡":isCt?"🕵️":"🔧";
+          return <div key={bt.id} style={{...cardS,borderColor:`${btCol}33`,marginBottom:8,cursor:"pointer"}} onClick={()=>setExpandedBuiltin(isExp?null:bt.id)}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <div style={{width:32,height:32,borderRadius:8,background:`${btCol}18`,border:`1px solid ${btCol}33`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>{btIcon}</div>
+                <div>
+                  <div style={{fontSize:13,fontWeight:600,color:btCol}}>{bt.name}</div>
+                  <div style={{fontSize:10,color:t.mut}}>{bt.description}</div>
+                </div>
+              </div>
+              <span style={{fontSize:9,color:t.mut,display:"inline-block",transition:"transform .2s",transform:isExp?"rotate(90deg)":"rotate(0deg)"}}>▶</span>
+            </div>
+            {isExp&&<div style={{marginTop:12,animation:"fadeIn .2s"}}>
+              {isCa&&<>
+                <div style={{fontSize:10,color:t.dim,marginBottom:6}}>All capabilities — available when CodeAgent is selected:</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                  {["execute_code","run_shell","write_file","read_file","list_files","download_file","download_project","delete_file","research","fetch_url"].map(s=><span key={s} style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.warm}18`,color:t.warm,border:`1px solid ${t.warm}33`,fontFamily:"monospace"}}>{s}</span>)}
+                </div>
+              </>}
+              {isDr&&<>
+                <div style={{fontSize:10,color:t.dim,marginBottom:8}}>Parameters passed to the AI:</div>
+                <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                  <div style={{fontSize:10}}><span style={{color:t.acc,fontFamily:"monospace",fontWeight:600}}>depth</span> <span style={{color:t.mut}}>1–5</span></div>
+                  <div style={{paddingLeft:10,display:"flex",flexDirection:"column",gap:2}}>
+                    {[["1","Quick fact-check (~20s)"],["2","Topic overview (~40s)"],["3","Deep-dive (~60s) ← default"],["4","Comprehensive analysis (~90s)"],["5","Exhaustive sweep (~120s)"]].map(([d,desc])=><div key={d} style={{fontSize:9,color:t.mut}}><span style={{color:t.f1,fontFamily:"monospace"}}>{d}</span> — {desc}</div>)}
+                  </div>
+                  <div style={{fontSize:10,marginTop:2}}><span style={{color:t.acc,fontFamily:"monospace",fontWeight:600}}>mode</span> <span style={{color:t.mut}}>quick · research · compare</span></div>
+                  <div style={{fontSize:10}}><span style={{color:t.acc,fontFamily:"monospace",fontWeight:600}}>focus</span> <span style={{color:t.mut}}>"security", "performance", "recent news", …</span></div>
+                  <div style={{fontSize:10}}><span style={{color:t.acc,fontFamily:"monospace",fontWeight:600}}>topic_b</span> <span style={{color:t.mut}}>second subject for compare mode</span></div>
+                </div>
+              </>}
+              {isCt&&<>
+                <div style={{fontSize:10,color:t.dim,marginBottom:6}}>Uncensored investigative research targeting alternative sources, leaked documents, and whistleblower reports:</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                  {["Alternative news","Leaked documents","FOIA releases","Whistleblower reports","Reddit conspiracy","Timeline analysis","Key player mapping","No filtering"].map(s=><span key={s} style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.err}18`,color:t.err,border:`1px solid ${t.err}33`}}>{s}</span>)}
+                </div>
+              </>}
+              {isQs&&<>
+                <div style={{fontSize:10,color:t.dim,marginBottom:6}}>Runs a SearXNG search on each message and shows results as inline cards above chat. Enabled per-conversation via the tool pill in the input bar, or permanently via a persona.</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:4}}>
+                  {["YouTube thumbnails","Image previews","Web link cards","Click-to-open"].map(s=><span key={s} style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.f1}18`,color:t.f1,border:`1px solid ${t.f1}33`}}>{s}</span>)}
+                </div>
+              </>}
+            </div>}
+          </div>;
+        })}
+      </div>}
+      {!tools.length&&!pasteMode&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>
+        <div style={{fontSize:28,marginBottom:8}}>⚙️</div>
+        <div style={{fontWeight:600,marginBottom:4}}>No custom tools yet</div>
+        <div>Paste Python code or upload a .py file to create a tool the AI can call.</div>
+      </div>}
+      {tools.map(tl=>{
+        const snippet=(tl.code||"").split("\n").slice(0,2).join("\n");
+        return <div key={tl.id} style={{...cardS,borderColor:editTool===tl.id?`${t.warm}55`:`${t.brd}44`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:editTool===tl.id?8:0}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,flex:1,minWidth:0}}>
+              <div style={{width:32,height:32,borderRadius:8,background:`${t.warm}22`,border:`1px solid ${t.warm}44`,display:"flex",alignItems:"center",justifyContent:"center",color:t.warm,flexShrink:0}}><IC.Code/></div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:13,fontWeight:600,color:t.text}}>{tl.name}</div>
+                {tl.description&&<div style={{fontSize:10,color:t.mut,marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{tl.description}</div>}
+                {!editTool!==tl.id&&snippet&&<pre style={{margin:"4px 0 0",fontSize:9,color:`${t.warm}88`,fontFamily:"monospace",overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis",maxWidth:"100%"}}>{snippet}</pre>}
+              </div>
+            </div>
+            <div style={{display:"flex",gap:4,flexShrink:0,marginLeft:8}}>
+              <button onClick={()=>{if(editTool===tl.id){saveTool(tl);}setEditTool(editTool===tl.id?null:tl.id);}} style={btnS(editTool===tl.id?t.ok:t.mut)}>{editTool===tl.id?"Save":"Edit"}</button>
+              <button onClick={()=>{fetch(`${API}/api/tools/${tl.id}`,{method:"DELETE"}).catch(()=>{});setTools(p=>p.filter(x=>x.id!==tl.id));}} style={btnS(t.err)}><IC.Trash/></button>
+            </div>
+          </div>
+          {editTool===tl.id&&<div style={{animation:"fadeIn .2s"}}>
+            <div style={{display:"flex",gap:8,marginBottom:8}}>
+              <input value={tl.name} onChange={e=>setTools(p=>p.map(x=>x.id===tl.id?{...x,name:e.target.value}:x))} placeholder="Name" style={{...inputS,flex:1,fontFamily:"monospace"}}/>
+              <input value={tl.description||""} onChange={e=>setTools(p=>p.map(x=>x.id===tl.id?{...x,description:e.target.value}:x))} placeholder="Description (shown to AI)" style={{...inputS,flex:2}}/>
+            </div>
+            <textarea value={tl.code||""} onChange={e=>setTools(p=>p.map(x=>x.id===tl.id?{...x,code:e.target.value}:x))} rows={14}
+              style={{...inputS,color:t.warm,lineHeight:1.6,resize:"vertical",tabSize:4,height:"auto",fontFamily:"monospace"}}/>
+          </div>}
+        </div>;
+      })}
+    </div>
+  </div>
+
+      :panel==="council"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+    <div style={{padding:"14px 18px",borderBottom:`1px solid ${t.brd}22`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Council/><span style={{fontSize:13,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.pink}}>Council of AI</span></div>
+      <button onClick={async()=>{
+        const r=await fetch(`${API}/api/councils`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New Council",host_model:models[0]||"qwen3.5:27b",host_system_prompt:""})});
+        const c=await r.json();setCouncils(p=>[...p,c]);setActiveCouncilId(c.id);
+      }} style={btnS(t.pink)}><IC.Plus/> New Council</button>
+    </div>
+    <div style={{flex:1,overflowY:"auto",padding:16}}>
+      {!councils.length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No councils yet.<br/>Create one to debate with multiple AIs.</div>}
+      {councils.map(council=>{
+        const isActive=activeCouncilId===council.id;
+        return <div key={council.id} style={{...cardS,border:`1px solid ${isActive?t.pink:t.brd}33`,background:isActive?`${t.pink}08`:`${t.surface}88`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+            <div style={{flex:1}}>
+              <input value={council.name} onChange={e=>setCouncils(p=>p.map(c=>c.id===council.id?{...c,name:e.target.value}:c))}
+                onBlur={()=>fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:council.name})}).catch(()=>{})}
+                style={{...inputS,fontSize:14,fontWeight:600,background:"transparent",border:"none",padding:"0 0 4px 0",color:t.text}}/>
+            </div>
+            <div style={{display:"flex",gap:4}}>
+              <button onClick={()=>setActiveCouncilId(isActive?null:council.id)} style={btnS(isActive?t.pink:t.mut)}>{isActive?"▲ Collapse":"▼ Expand"}</button>
+              <button onClick={async()=>{await fetch(`${API}/api/councils/${council.id}`,{method:"DELETE"}).catch(()=>{});setCouncils(p=>p.filter(c=>c.id!==council.id));if(activeCouncilId===council.id)setActiveCouncilId(null);}} style={btnS(t.err)}><IC.Trash/></button>
+            </div>
+          </div>
+          {isActive&&<>
+            {/* Host model section */}
+            <div style={{marginBottom:14,padding:12,background:`${t.warm}08`,border:`1px solid ${t.warm}28`,borderRadius:10}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8}}>
+                <IC.Crown/><span style={{fontSize:11,fontWeight:700,color:t.warm,textTransform:"uppercase",letterSpacing:.5}}>Host / Moderator</span>
+              </div>
+              <select value={council.host_model||models[0]||""} onChange={e=>{const v=e.target.value;setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_model:v}:c));fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_model:v})}).catch(()=>{});}} style={{...inputS,marginBottom:6,cursor:"pointer",color:t.warm}}>
+                {models.map(m=><option key={m} value={m}>{m}</option>)}
+              </select>
+              <textarea value={council.host_system_prompt||""} onChange={e=>{const v=e.target.value;setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_system_prompt:v}:c));}}
+                onBlur={()=>fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_system_prompt:council.host_system_prompt||""})}).catch(()=>{})}
+                placeholder="Host system prompt (optional)..." rows={2}
+                style={{...inputS,resize:"vertical",fontSize:11,color:t.mut}}/>
+            </div>
+            {/* Council members grid */}
+            <div style={{marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <span style={{fontSize:10,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Council Members</span>
+                <button onClick={async()=>{
+                  if(!models.length)return;
+                  const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:models[0],system_prompt:"",persona_name:""})});
+                  const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));
+                }} style={btnS(t.acc)}><IC.Plus/> Add Model</button>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:8}}>
+                {(council.members||[]).map(member=>{
+                  const isEditing=editMember===member.id;
+                  const pts=member.points||0;
+                  const ptsColor=pts>0?t.ok:pts<0?t.err:t.mut;
+                  return <div key={member.id} style={{background:`${t.surface}AA`,border:`1px solid ${t.brd}33`,borderRadius:14,padding:12,display:"flex",flexDirection:"column",gap:6,transition:"all .2s",position:"relative"}}>
+                    {/* Points badge */}
+                    <div style={{position:"absolute",top:8,right:8,background:pts>0?`${t.ok}20`:pts<0?`${t.err}20`:`${t.mut}10`,border:`1px solid ${ptsColor}40`,borderRadius:10,padding:"2px 7px",fontSize:10,fontWeight:700,color:ptsColor}}>
+                      {pts>0?"+":""}{pts} pts
+                    </div>
+                    <div style={{fontSize:10,color:t.mut,display:"flex",alignItems:"center",gap:4,marginBottom:2}}>
+                      <IC.Bot/>{member.persona_name||member.model.split(":")[0]}
+                    </div>
+                    {isEditing?<>
+                      <select value={member.model} onChange={e=>{const v=e.target.value;setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.map(m=>m.id===member.id?{...m,model:v}:m)}:c));fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:v})}).catch(()=>{});}} style={{...inputS,fontSize:11,cursor:"pointer"}}>
+                        {models.map(m=><option key={m} value={m}>{m}</option>)}
+                      </select>
+                      <input value={editMemberForm.persona_name||""} onChange={e=>setEditMemberForm(p=>({...p,persona_name:e.target.value}))} placeholder="Persona name (optional)" style={{...inputS,fontSize:11}}/>
+                      <textarea value={editMemberForm.system_prompt||""} onChange={e=>setEditMemberForm(p=>({...p,system_prompt:e.target.value}))} placeholder="System prompt..." rows={3} style={{...inputS,resize:"vertical",fontSize:11}}/>
+                      <div style={{display:"flex",gap:4}}>
+                        <button onClick={()=>{
+                          const up={system_prompt:editMemberForm.system_prompt,persona_name:editMemberForm.persona_name};
+                          fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)}).catch(()=>{});
+                          setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.map(m=>m.id===member.id?{...m,...up}:m)}:c));
+                          setEditMember(null);
+                        }} style={btnS(t.ok)}>Save</button>
+                        <button onClick={()=>setEditMember(null)} style={btnS(t.mut)}>Cancel</button>
+                      </div>
+                    </>:<>
+                      <div style={{fontSize:12,fontWeight:600,color:t.acc,wordBreak:"break-word"}}>{member.model}</div>
+                      {member.system_prompt&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={member.system_prompt}>{member.system_prompt.slice(0,60)}...</div>}
+                      <div style={{display:"flex",gap:4,marginTop:"auto"}}>
+                        <button onClick={()=>{setEditMember(member.id);setEditMemberForm({system_prompt:member.system_prompt||"",persona_name:member.persona_name||""});}} style={{...btnS(t.acc),flex:1,justifyContent:"center",fontSize:10}}><IC.Pencil/> Edit</button>
+                        <button onClick={async()=>{await fetch(`${API}/api/councils/members/${member.id}`,{method:"DELETE"}).catch(()=>{});setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.filter(m=>m.id!==member.id)}:c));}} style={btnS(t.err)}><IC.Trash/></button>
+                      </div>
+                    </>}
+                  </div>;
+                })}
+                {!(council.members||[]).length&&<div style={{gridColumn:"1/-1",textAlign:"center",padding:"20px 0",color:t.mut,fontSize:11,fontStyle:"italic"}}>Add models to the council to debate your questions.</div>}
+              </div>
+            </div>
+            {/* Start council chat button */}
+            <button onClick={()=>startCouncilChat(council.id)} disabled={!(council.members||[]).length}
+              style={{...btnS(t.pink),width:"100%",justifyContent:"center",padding:"9px 14px",fontSize:12,fontWeight:700,opacity:!(council.members||[]).length?.4:1}}>
+              <IC.Council/> Start Council Chat
+            </button>
+          </>}
+        </div>;
+      })}
+    </div>
+  </div>
+      :panel==="personas"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+    <div style={{padding:"14px 18px",borderBottom:`1px solid ${t.brd}22`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
+      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Cube/><span style={{fontSize:13,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.pink}}>Personas</span></div>
+      <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+        <button onClick={async()=>{
+          try{
+            const r=await fetch(`${API}/api/seed/conspiracy-bot`,{method:"POST"});
+            const d=await r.json();
+            if(!d.existed){const mc2=await fetch(`${API}/api/model-configs`).then(r=>r.json());setMcs(mc2);}
+            alert(d.existed?"Conspiracy Bot already exists! Look for '🕵️ Conspiracy Bot' in the list.":"✅ Conspiracy Bot persona created! Select it and use 'Use' to activate.");
+          }catch(e){alert("Failed to create conspiracy bot: "+e.message);}
+        }} style={{...btnS(t.err),fontSize:10}}>🕵️ Seed Conspiracy Bot</button>
+        <button onClick={async()=>{
+          try{
+            const r=await fetch(`${API}/api/seed/based-bot`,{method:"POST"});
+            const d=await r.json();
+            if(!d.existed){const mc2=await fetch(`${API}/api/model-configs`).then(r=>r.json());setMcs(mc2);}
+            alert(d.existed?"Based Bot already exists! Look for '🤖 Based Bot' in the list.":"✅ Based Bot persona created! Select it and use 'Use' to activate.");
+          }catch(e){alert("Failed to create based bot: "+e.message);}
+        }} style={{...btnS(t.warm),fontSize:10}}>🤖 Seed Based Bot</button>
+        <button onClick={async()=>{
+          const mc={name:"New Persona",base_model:models[0]||"",system_prompt:"You are a helpful assistant.",tool_ids:[],kb_ids:[],parameters:{}};
+          try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});const d=await r.json();setMcs(p=>[...p,d]);setEditMc(d.id);}
+          catch{const id=`mc-${Date.now()}`;setMcs(p=>[...p,{id,...mc}]);setEditMc(id);}
+        }} style={btnS(t.pink)}><IC.Plus/> New Persona</button>
+      </div>
+    </div>
+    <div style={{flex:1,overflowY:"auto",padding:16}}>
+      {mcs.map(mc=>{const isE=editMc===mc.id;const avatar=mc.parameters?.avatar;
+        return <div key={mc.id} style={{...cardS,borderColor:isE?`${t.pink}55`:`${t.brd}44`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <label style={{cursor:"pointer",position:"relative"}}>
+                <div style={{width:44,height:44,borderRadius:12,background:`${t.pink}22`,border:`1px solid ${t.pink}44`,display:"flex",alignItems:"center",justifyContent:"center",color:t.pink,overflow:"hidden",fontSize:20}}>
+                  {avatar?<img src={`${API}${avatar}`} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
+                </div>
+                {isE&&<div style={{position:"absolute",bottom:-2,right:-2,background:t.pink,borderRadius:"50%",width:16,height:16,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Image/></div>}
+                {isE&&<input type="file" accept="image/*" style={{display:"none"}} onChange={async e=>{
+                  const f=e.target.files[0];if(!f)return;
+                  const fd=new FormData();fd.append("file",f);
+                  try{const r=await fetch(`${API}/api/model-configs/${mc.id}/avatar`,{method:"POST",body:fd});const d=await r.json();
+                    setMcs(p=>p.map(x=>x.id===mc.id?{...x,parameters:{...x.parameters,avatar:d.avatar_url}}:x));
+                  }catch{const url=URL.createObjectURL(f);setMcs(p=>p.map(x=>x.id===mc.id?{...x,parameters:{...x.parameters,avatar:url}}:x));}
+                }}/>}
+              </label>
+              <div>
+                {isE?<input value={mc.name} onChange={e=>setMcs(p=>p.map(x=>x.id===mc.id?{...x,name:e.target.value}:x))} style={{...inputS,fontSize:14,fontWeight:600,background:"transparent",border:"none",padding:0,color:t.text,width:200}}/>
+                :<div style={{fontSize:14,fontWeight:600,color:t.text}}>{mc.name}</div>}
+                <div style={{fontSize:10,color:t.mut,marginTop:2}}>Base: {mc.base_model||"none"}</div>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:4}}>
+              <button onClick={()=>{uConv(actId,{model:mc.base_model,system_prompt:mc.system_prompt,tool_ids:mc.tool_ids||[],model_config_id:mc.id,persona_name:mc.name,persona_avatar:mc.parameters?.avatar});setLastPersonaId(mc.id);localStorage.setItem("hc-last-persona",mc.id);setPanel("chat");}} style={btnS(t.ok)}>Use</button>
+              <button onClick={()=>{if(isE){savePersona(mc);}setEditMc(isE?null:mc.id);}} style={btnS(t.mut)}>{isE?"Done":"Edit"}</button>
+              <button onClick={()=>{fetch(`${API}/api/model-configs/${mc.id}`,{method:"DELETE"}).catch(()=>{});setMcs(p=>p.filter(x=>x.id!==mc.id));}} style={btnS(t.err)}><IC.Trash/></button>
+            </div>
+          </div>
+          {isE&&<div style={{animation:"fadeIn .2s"}}>
+            <div style={{marginBottom:12}}>
+              <label style={labelS}>Base Model</label>
+              <select value={mc.base_model} onChange={e=>setMcs(p=>p.map(x=>x.id===mc.id?{...x,base_model:e.target.value}:x))} style={{...inputS,cursor:"pointer",color:t.acc}}>
+                {models.map(m=><option key={m} value={m}>{m}</option>)}
+              </select>
+            </div>
+            <div style={{marginBottom:12}}>
+              <label style={labelS}>System Prompt</label>
+              <textarea value={mc.system_prompt||""} onChange={e=>setMcs(p=>p.map(x=>x.id===mc.id?{...x,system_prompt:e.target.value}:x))} rows={14} style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:220}}/>
+            </div>
+            <div style={{marginBottom:12}}>
+              <label style={labelS}><span style={{display:"flex",alignItems:"center",gap:4}}><IC.Tool/> Tools (enable/disable)</span></label>
+              <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                {allTools.map(tl=>{
+                  const on=(mc.tool_ids||[]).includes(tl.id);
+                  const tlCol=tl.id==="quick_search"?t.f1:t.warm;
+                  return <div key={tl.id} onClick={()=>setMcs(p=>p.map(x=>x.id===mc.id?{...x,tool_ids:on?(x.tool_ids||[]).filter(y=>y!==tl.id):[...(x.tool_ids||[]),tl.id]}:x))}
+                    style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",background:on?`${tlCol}12`:`${t.surface}44`,border:`1px solid ${on?tlCol:t.brd}33`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+                    <span style={{color:on?tlCol:t.mut}}>{on?<IC.ToggleOn/>:<IC.ToggleOff/>}</span>
+                    <span style={{fontSize:12,fontWeight:on?600:400,color:on?t.text:t.dim}}>{tl.name}</span>
+                    <span style={{fontSize:10,color:t.mut,marginLeft:"auto"}}>{tl.description}</span>
+                  </div>;
+                })}
+                {!allTools.length&&<span style={{fontSize:10,color:t.mut,fontStyle:"italic"}}>Loading tools...</span>}
+              </div>
+            </div>
+            <div>
+              <label style={labelS}><span style={{display:"flex",alignItems:"center",gap:4}}><IC.Database/> Knowledge Bases</span></label>
+              <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                {kbs.map(kb=>{
+                  const on=(mc.kb_ids||[]).includes(kb.id);
+                  return <div key={kb.id} onClick={()=>setMcs(p=>p.map(x=>x.id===mc.id?{...x,kb_ids:on?(x.kb_ids||[]).filter(y=>y!==kb.id):[...(x.kb_ids||[]),kb.id]}:x))}
+                    style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",background:on?`${t.f1}12`:`${t.surface}44`,border:`1px solid ${on?t.f1:t.brd}33`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+                    <span style={{color:on?t.f1:t.mut}}>{on?<IC.ToggleOn/>:<IC.ToggleOff/>}</span>
+                    <span style={{fontSize:12,fontWeight:on?600:400,color:on?t.text:t.dim}}>{kb.name}</span>
+                    <span style={{fontSize:10,color:t.mut,marginLeft:"auto"}}>{(kb.files||[]).length} files</span>
+                  </div>;
+                })}
+                {!kbs.length&&<span style={{fontSize:10,color:t.mut,fontStyle:"italic"}}>No KBs — create some in Knowledge Bases</span>}
+              </div>
+            </div>
+          </div>}
+          {!isE&&((mc.tool_ids||[]).length>0||(mc.kb_ids||[]).length>0)&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:4}}>
+            {(mc.tool_ids||[]).map(tid=>{const tl=allTools.find(x=>x.id===tid);if(!tl)return null;const c=tl.id==="quick_search"?t.f1:t.warm;return <Chip key={tid} l={tl.name} c={c} bg={`${c}15`}/>;})}
+            {(mc.kb_ids||[]).map(kid=>{const kb=kbs.find(x=>x.id===kid);return kb?<Chip key={kid} l={kb.name} c={t.f1} bg={`${t.f1}15`}/>:null;})}
+          </div>}
+        </div>;
+      })}
+    </div>
+  </div>
+
+      :panel==="prompts"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+    <div style={{padding:"14px 18px",borderBottom:`1px solid ${t.brd}22`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
+      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Zap/><span style={{fontSize:13,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.f1}}>Prompt Library</span></div>
+      <button onClick={()=>{const id=`p-${Date.now()}`;setPrompts(p=>[{id,title:"New Prompt",content:"",category:"General"},...p]);}} style={btnS(t.f1)}><IC.Plus/> New Prompt</button>
+    </div>
+    <div style={{flex:1,overflowY:"auto",padding:16}}>
+      {!prompts.length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>
+        <div style={{fontSize:28,marginBottom:8}}>⚡</div>
+        <div style={{fontWeight:600,marginBottom:4}}>No saved prompts yet</div>
+        <div>Save reusable prompts here and insert them into any chat with one click.</div>
+        <button onClick={()=>{setPrompts([
+          {id:`p-${Date.now()}-1`,title:"Explain Simply",content:"Explain this as if I'm 12 years old, using simple language and analogies.",category:"Learning"},
+          {id:`p-${Date.now()}-2`,title:"Code Review",content:"Review this code for bugs, performance issues, security vulnerabilities, and suggest improvements.",category:"Coding"},
+          {id:`p-${Date.now()}-3`,title:"Summarize",content:"Summarize the key points from the above in bullet points.",category:"Writing"},
+          {id:`p-${Date.now()}-4`,title:"Pros & Cons",content:"List the pros and cons of this in a balanced way.",category:"Analysis"},
+        ]);}} style={{...btnS(t.f1),marginTop:12,justifyContent:"center"}}>Load Starter Prompts</button>
+      </div>}
+      {prompts.map(p=>{
+        const isEditing=editPrompt?.id===p.id;
+        return <div key={p.id} style={{...cardS,borderColor:isEditing?`${t.f1}55`:`${t.brd}44`}}>
+          {isEditing?<div style={{animation:"fadeIn .2s"}}>
+            <div style={{display:"flex",gap:8,marginBottom:8}}>
+              <input value={editPrompt.title} onChange={e=>setEditPrompt(ep=>({...ep,title:e.target.value}))} placeholder="Title" style={{...inputS,flex:2,fontWeight:600}}/>
+              <input value={editPrompt.category} onChange={e=>setEditPrompt(ep=>({...ep,category:e.target.value}))} placeholder="Category" style={{...inputS,flex:1,fontSize:10}}/>
+            </div>
+            <textarea value={editPrompt.content} onChange={e=>setEditPrompt(ep=>({...ep,content:e.target.value}))} rows={5} placeholder="Your prompt text..." style={{...inputS,resize:"vertical",lineHeight:1.5,marginBottom:8}}/>
+            <div style={{display:"flex",gap:4,justifyContent:"flex-end"}}>
+              <button onClick={()=>{setPrompts(ps=>ps.map(x=>x.id===p.id?{...x,...editPrompt}:x));setEditPrompt(null);}} style={btnS(t.ok)}>Save</button>
+              <button onClick={()=>setEditPrompt(null)} style={btnS(t.mut)}>Cancel</button>
+            </div>
+          </div>:<div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:13,fontWeight:600,color:t.text}}>{p.title}</div>
+                <div style={{fontSize:10,color:t.f1,marginTop:1}}>{p.category||"General"}</div>
+              </div>
+              <div style={{display:"flex",gap:4,flexShrink:0}}>
+                <button onClick={()=>{setInp(p.content);setPanel("chat");}} style={{...btnS(t.f1),fontSize:9}}>⚡ Use</button>
+                <button onClick={()=>setEditPrompt({id:p.id,title:p.title,content:p.content,category:p.category||"General"})} style={btnS(t.mut)}><IC.Pencil/></button>
+                <button onClick={()=>setPrompts(ps=>ps.filter(x=>x.id!==p.id))} style={btnS(t.err)}><IC.Trash/></button>
+              </div>
+            </div>
+            <div style={{fontSize:11,color:t.dim,lineHeight:1.5,maxHeight:80,overflow:"hidden"}}>
+              {p.content.slice(0,200)}{p.content.length>200?"...":""}
+            </div>
+          </div>}
+        </div>;
+      })}
+    </div>
+  </div>
+
+      :panel==="settings"?<div style={{flex:1,overflowY:"auto",padding:20}}>
+    <div style={{maxWidth:650}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <h3 style={{fontSize:13,fontWeight:700,color:t.acc,letterSpacing:1,textTransform:"uppercase",margin:0}}>Settings</h3>
+        <button onClick={async()=>{setShowChangelog(true);if(!changelogContent){try{const r=await fetch(`${API}/api/changelog`);const d=await r.json();setChangelogContent(d.content||"");}catch{setChangelogContent("# Changelog\n\nFailed to load.");};}}} style={{...btnS(t.f1),fontSize:10}}>📋 View Changelog</button>
+      </div>
+      
+      <div style={{marginBottom:20}}><label style={labelS}>Ollama Server URL</label>
+        <div style={{display:"flex",gap:6}}>
+          <input value={ollamaUrl} onChange={e=>setOllamaUrl(e.target.value)} placeholder="http://192.168.1.110:11434" style={{...inputS,flex:1,fontFamily:"monospace"}}/>
+          <button disabled={ollamaUrlSaving} onClick={async()=>{
+            setOllamaUrlSaving(true);
+            try{await fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({ollama_url:ollamaUrl})});
+              const r2=await fetch(`${API}/api/models`);const d2=await r2.json();setModels(d2.models||[]);
+            }catch{}
+            setOllamaUrlSaving(false);
+          }} style={{...btnS(t.ok),opacity:ollamaUrlSaving?.6:1}}>
+            {ollamaUrlSaving?"Saving...":"Save & Reload"}
+          </button>
+        </div>
+        <div style={{fontSize:10,color:t.mut,marginTop:4}}>Change the Ollama server address. Saved persistently — survives restarts.</div>
+      </div>
+
+      <div style={{marginBottom:20}}><label style={labelS}>Theme</label>
+        <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+          {Object.entries(THEMES).map(([k,th])=><button key={k} onClick={()=>setTm(k)} style={{background:tm===k?`${th.acc}20`:t.bgDeep,border:`1px solid ${tm===k?th.acc:t.brd}44`,color:tm===k?th.acc:t.dim,padding:"7px 12px",borderRadius:8,cursor:"pointer",fontFamily:font,fontSize:11,display:"flex",alignItems:"center",gap:6}}>
+            <div style={{display:"flex",gap:2}}>{[th.acc,th.warm,th.ok,th.pink].map((c,i)=><div key={i} style={{width:8,height:8,borderRadius:"50%",background:c}}/>)}</div>{th.name}
+          </button>)}
+        </div>
+      </div>
+
+      <div style={{marginBottom:20}}><label style={labelS}>Font</label>
+        <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+          {FONTS.map((f,i)=><button key={i} onClick={()=>setFi(i)} style={{background:fi===i?`${t.acc}20`:t.bgDeep,border:`1px solid ${fi===i?t.acc:t.brd}44`,color:fi===i?t.acc:t.dim,padding:"7px 12px",borderRadius:8,cursor:"pointer",fontFamily:f.v,fontSize:11}}>{f.name}</button>)}
+        </div>
+        <div style={{marginTop:6,fontSize:11.5,color:t.dim,fontFamily:font,background:t.bgDeep,padding:10,borderRadius:8,border:`1px solid ${t.brd}22`}}>
+          Preview: The quick brown fox jumps over the lazy dog. <code style={{color:t.warm}}>0123456789 {'{ } ( ) [ ] => ->'}</code>
+        </div>
+      </div>
+
+      <div style={{marginBottom:20}}><label style={labelS}>Context Window (num_ctx)</label>
+        <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:4}}>
+          {[0,4096,8192,16384,32768,65536,131072].map(v=><button key={v} onClick={()=>setNumCtx(v)} style={{background:numCtx===v?`${t.acc}20`:t.bgDeep,border:`1px solid ${numCtx===v?t.acc:t.brd}44`,color:numCtx===v?t.acc:t.dim,padding:"6px 10px",borderRadius:6,cursor:"pointer",fontFamily:font,fontSize:11}}>
+            {v===0?"Model Default":v>=1000?`${(v/1024).toFixed(0)}k`:v}
+          </button>)}
+        </div>
+        <div style={{fontSize:10,color:t.mut}}>Sets Ollama num_ctx and trims old messages to stay within the limit. When tools are active, defaults to 16k if unset. Usage shown in header progress bar.</div>
+      </div>
+
+      <div style={{marginBottom:20}}><label style={labelS}>Default Temperature</label>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <input type="range" min="0" max="2" step="0.05" value={defaultTemp} onChange={e=>setDefaultTemp(parseFloat(e.target.value))} style={{flex:1,accentColor:t.acc}}/>
+          <span style={{fontSize:11,color:t.acc,fontWeight:700,minWidth:30}}>{defaultTemp.toFixed(2)}</span>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut,marginTop:2}}><span>Precise (0)</span><span>Balanced (0.7)</span><span>Creative (2)</span></div>
+      </div>
+
+      <div style={{marginBottom:20}}><label style={labelS}>Default Top-P</label>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <input type="range" min="0.1" max="1" step="0.05" value={defaultTopP} onChange={e=>setDefaultTopP(parseFloat(e.target.value))} style={{flex:1,accentColor:t.acc}}/>
+          <span style={{fontSize:11,color:t.acc,fontWeight:700,minWidth:30}}>{defaultTopP.toFixed(2)}</span>
+        </div>
+      </div>
+
+      <div style={{marginBottom:20}}><label style={labelS}>Per-Model Parameters</label>
+        <div style={{fontSize:10,color:t.mut,marginBottom:8}}>Override parameters for specific models. Leave "Default" to use global settings or Ollama defaults.</div>
+        {models.length===0&&<div style={{fontSize:11,color:t.mut,fontStyle:"italic",padding:8}}>No models loaded</div>}
+        <div style={{display:"flex",flexDirection:"column",gap:6}}>
+          {models.map(m=>{
+            const mp=modelParams[m]||{};
+            const isOpen=modelParamsOpen===m;
+            const hasCustom=Object.values(mp).some(v=>v&&v!=="default");
+            return <div key={m} style={{background:`${t.surface}66`,border:`1px solid ${isOpen||hasCustom?t.acc:t.brd}33`,borderRadius:10,overflow:"hidden"}}>
+              <div onClick={()=>setModelParamsOpen(isOpen?null:m)} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",cursor:"pointer"}}>
+                <span style={{fontSize:13}}>{(()=>{const n=m.toLowerCase();if(n.includes("qwen"))return"🌸";if(n.includes("llama"))return"🦙";if(n.includes("mistral"))return"💨";if(n.includes("gemma"))return"💎";return"🤖";})()}</span>
+                <span style={{fontSize:11,fontWeight:600,color:isOpen||hasCustom?t.acc:t.text,flex:1}}>{m}</span>
+                {hasCustom&&<span style={{fontSize:9,padding:"2px 6px",borderRadius:8,background:`${t.acc}15`,color:t.acc,border:`1px solid ${t.acc}33`}}>custom</span>}
+                <span style={{fontSize:9,color:t.mut,transition:"transform .2s",display:"inline-block",transform:isOpen?"rotate(90deg)":"none"}}>▶</span>
+              </div>
+              {isOpen&&<div style={{padding:"8px 14px 12px",borderTop:`1px solid ${t.brd}22`,animation:"fadeIn .2s"}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                  {[
+                    ["temperature","Temperature","0","2","0.05"],
+                    ["top_p","Top-P","0.1","1","0.05"],
+                    ["top_k","Top-K (integer)","1","200","1"],
+                    ["num_ctx","Context Size (tokens)","2048","131072","1024"],
+                    ["repeat_penalty","Repeat Penalty","1","2","0.05"],
+                  ].map(([key,label,min,max,step])=>{
+                    const val=mp[key]||"";
+                    const isDefault=val===""||val==="default";
+                    return <div key={key}>
+                      <div style={{fontSize:9,color:t.mut,marginBottom:3,textTransform:"uppercase",letterSpacing:.5}}>{label}</div>
+                      <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                        <input type="number" value={isDefault?"":val} onChange={e=>{const v=e.target.value;setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:v}}));}}
+                          placeholder="Default" min={min} max={max} step={step}
+                          style={{...inputS,width:"100%",fontSize:11,padding:"4px 7px",color:isDefault?t.mut:t.acc}}/>
+                        {!isDefault&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:10,padding:2,flexShrink:0}}>✕</button>}
+                      </div>
+                    </div>;
+                  })}
+                </div>
+                <button onClick={()=>setModelParams(p=>{const n={...p};delete n[m];return n;})} style={{...btnS(t.err),fontSize:9,marginTop:8}}>Reset to Defaults</button>
+              </div>}
+            </div>;
+          })}
+        </div>
+      </div>
+
+      <div style={{marginBottom:20}}><label style={labelS}>Behavior</label>
+        <div style={{display:"flex",flexDirection:"column",gap:6}}>
+          {[
+            [compactMode,setCompactMode,"Compact message layout","Reduce padding between messages"],
+            [autoExpandThink,setAutoExpandThink,"Auto-expand thinking pill","Automatically opens reasoning view when model starts thinking"],
+          ].map(([val,setter,label,desc],idx)=><div key={idx} onClick={()=>setter(!val)} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 12px",background:`${t.surface}66`,borderRadius:8,border:`1px solid ${val?t.acc:t.brd}33`,cursor:"pointer"}}>
+            <span style={{color:val?t.acc:t.mut}}>{val?<IC.ToggleOn/>:<IC.ToggleOff/>}</span>
+            <div>
+              <div style={{fontSize:12,fontWeight:600,color:val?t.text:t.dim}}>{label}</div>
+              <div style={{fontSize:10,color:t.mut}}>{desc}</div>
+            </div>
+          </div>)}
+        </div>
+      </div>
+
+      <div style={{marginBottom:20}}><label style={labelS}>UI Font Size</label>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <input type="range" min="10" max="16" step="1" value={uiFontSize} onChange={e=>setUiFontSize(parseInt(e.target.value))} style={{flex:1,accentColor:t.acc}}/>
+          <span style={{fontSize:11,color:t.acc,fontWeight:700,minWidth:30}}>{uiFontSize}px</span>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut,marginTop:2}}><span>Compact (10)</span><span>Default (12)</span><span>Large (16)</span></div>
+      </div>
+
+      <div style={{marginBottom:20}}><label style={labelS}>Message Font Size</label>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <input type="range" min="11" max="16" step="1" value={fontSize} onChange={e=>setFontSize(parseInt(e.target.value))} style={{flex:1,accentColor:t.acc}}/>
+          <span style={{fontSize:11,color:t.acc,fontWeight:700,minWidth:30}}>{fontSize}px</span>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut,marginTop:2}}><span>Small (11)</span><span>Default (13)</span><span>Large (16)</span></div>
+      </div>
+
+      <div style={{marginBottom:20}}><label style={labelS}>Chat Width</label>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <input type="range" min="560" max="1200" step="20" value={chatWidth} onChange={e=>setChatWidth(parseInt(e.target.value))} style={{flex:1,accentColor:t.acc}}/>
+          <span style={{fontSize:11,color:t.acc,fontWeight:700,minWidth:40}}>{chatWidth}px</span>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut,marginTop:2}}><span>Narrow (560)</span><span>Default (760)</span><span>Wide (1200)</span></div>
+      </div>
+
+      <div style={{marginBottom:20}}><label style={labelS}>Workspace Analysis Model</label>
+        <select value={wsModel} onChange={e=>setWsModel(e.target.value)} style={{...inputS,cursor:"pointer",color:t.acc}}>
+          {models.map(m=><option key={m} value={m}>{m}</option>)}
+        </select>
+        <div style={{fontSize:10,color:t.mut,marginTop:4}}>Used for auto-detecting topics in workspaces. A small fast model works well.</div>
+      </div>
+
+      <div style={{marginBottom:20}}><label style={labelS}>Ollama Models</label>
+        <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:8}}>
+          {(()=>{
+            // Group models by family
+            const families={};
+            models.forEach(m=>{
+              const [name,tag="latest"]=m.split(":");
+              const family=name.replace(/-\d+b$/i,"").replace(/:\w+$/,"").split("-").slice(0,2).join("-");
+              if(!families[family])families[family]=[];
+              families[family].push({m,name,tag});
+            });
+            const getSizeColor=(tag)=>{
+              const lower=(tag||"").toLowerCase();
+              if(lower.includes("70b")||lower.includes("65b")||lower.includes("72b"))return t.err;
+              if(lower.includes("30b")||lower.includes("32b")||lower.includes("34b"))return t.warm;
+              if(lower.includes("13b")||lower.includes("14b")||lower.includes("27b"))return t.acc;
+              if(lower.includes("7b")||lower.includes("8b"))return t.ok;
+              if(lower.includes("1b")||lower.includes("3b")||lower.includes("4b"))return t.f1;
+              return t.mut;
+            };
+            const getModelIcon=(name)=>{
+              const n=name.toLowerCase();
+              if(n.includes("qwen"))return "🌸";
+              if(n.includes("llama"))return "🦙";
+              if(n.includes("mistral")||n.includes("mixtral"))return "💨";
+              if(n.includes("gemma"))return "💎";
+              if(n.includes("phi"))return "φ";
+              if(n.includes("deepseek"))return "🔍";
+              if(n.includes("coder")||n.includes("code"))return "💻";
+              if(n.includes("wizard"))return "🧙";
+              return "🤖";
+            };
+            return Object.entries(families).map(([fam,items])=><div key={fam} style={{marginBottom:4}}>
+              {Object.keys(families).length>1&&<div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:3,paddingLeft:4}}>{fam}</div>}
+              {items.map(({m,name,tag})=>{
+                const szCol=getSizeColor(tag);
+                return <div key={m} style={{display:"flex",alignItems:"center",gap:8,background:`${t.surface}66`,padding:"8px 12px",borderRadius:8,border:`1px solid ${t.brd}22`,marginBottom:2}}>
+                  <span style={{fontSize:14,flexShrink:0}}>{getModelIcon(name)}</span>
+                  <span style={{fontSize:12,fontWeight:600,color:t.text}}>{name}</span>
+                  <span style={{fontSize:10,fontWeight:700,color:szCol,background:`${szCol}18`,padding:"1px 7px",borderRadius:10,border:`1px solid ${szCol}33`,flexShrink:0}}>{tag}</span>
+                  <span style={{marginLeft:"auto"}}/>
+                  <button onClick={()=>uConv(actId,{model:m})} style={{background:"none",border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",padding:"3px 6px",borderRadius:5,fontSize:9,opacity:.8}}>Use</button>
+                  <button onClick={async()=>{try{await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});setModels(p=>p.filter(x=>x!==m));}catch{}}} style={{background:"none",border:`1px solid ${t.err}33`,color:t.err,cursor:"pointer",padding:"3px 6px",borderRadius:5,display:"flex",alignItems:"center",gap:3,fontSize:9,opacity:.7}}>
+                    <IC.Trash/> Remove
+                  </button>
+                </div>;
+              })}
+            </div>);
+          })()}
+          {!models.length&&<div style={{fontSize:11,color:t.mut,fontStyle:"italic",padding:8}}>No models loaded</div>}
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          <input value={pullName} onChange={e=>setPullName(e.target.value)} placeholder="Pull model (e.g. llama3.1:8b)" onKeyDown={e=>e.key==="Enter"&&pullModel()} style={{...inputS,flex:1}}/>
+          <button onClick={pullModel} disabled={!pullName.trim()||!!pullProg} style={btnS(t.ok)}>
+            <IC.Download/>{pullProg?"Pulling...":"Pull"}
+          </button>
+        </div>
+        {pullProg&&<div style={{marginTop:6,padding:"8px 12px",background:`${t.surface}66`,borderRadius:8,border:`1px solid ${t.brd}22`,fontSize:11,color:t.acc,display:"flex",alignItems:"center",gap:6}}>
+          <div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
+          {pullProg}
+        </div>}
+      </div>
+
+      <div><label style={labelS}>Service Health</label>
+        <div style={{display:"flex",flexDirection:"column",gap:5}}>
+          {Object.entries(health).map(([n,s])=><div key={n} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",background:`${t.surface}66`,borderRadius:8,border:`1px solid ${t.brd}22`}}>
+            <div style={{width:8,height:8,borderRadius:"50%",background:s?.status==="ok"?t.ok:t.err,boxShadow:`0 0 6px ${s?.status==="ok"?t.ok:t.err}88`}}/>
+            <span style={{fontSize:12,fontWeight:600,color:t.text,textTransform:"capitalize"}}>{n}</span>
+            <span style={{fontSize:10,color:s?.status==="ok"?t.ok:t.err,marginLeft:"auto"}}>{s?.status||"unknown"}</span>
+          </div>)}
+        </div>
+      </div>
+
+      {/* ── SANDBOX & FILE CLEANUP ── */}
+      <SandboxSection t={t} btnS={btnS} labelS={labelS}/>
+
+    </div>
+  </div>
+
+      :<>
+        {/* CHAT - full width, pills inline */}
+        <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+          {/* Messages */}
+          <div style={{flex:1,overflowY:"auto",padding:"12px 0"}}>
+          {!act||!(act.messages||[]).length&&!councilRunning?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",gap:10,opacity:.5}}>
+            {loadingConv?<><div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div><div style={{fontSize:12,color:t.mut,letterSpacing:1}}>Loading conversation...</div></>
+            :act?.is_council?<><div style={{fontSize:36,animation:"float 4s ease-in-out infinite"}}>⚖️</div><div style={{fontSize:12,color:t.mut,letterSpacing:1}}>{loadingConv?"Loading council history...":"Ask the council"}</div></>
+            :<><div style={{fontSize:36,animation:"float 4s ease-in-out infinite"}}>⟩_</div><div style={{fontSize:12,color:t.mut,letterSpacing:1}}>Start a conversation</div></>}
+          </div>:act?.is_council?(()=>{
+            // ── COUNCIL CHAT VIEW ──
+            const councilCfg=councils.find(c=>c.id===act.council_config_id);
+            const getMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
+            // Group historical messages into turns
+            const turns=[];let curTurn=null;
+            for(const msg of(act.messages||[])){
+              const meta=getMeta(msg);
+              if(msg.role==="user"&&!meta.council_member_id&&!meta.council_host){
+                curTurn={user:msg,responses:[],host:null};turns.push(curTurn);
+              }else if(msg.role==="assistant"){
+                if(!curTurn){curTurn={user:{role:"user",content:""},responses:[],host:null};turns.push(curTurn);}
+                if(meta.council_host)curTurn.host=msg;
+                else curTurn.responses.push(msg);
+              }
+            }
+            const isLastTurn=(ti)=>ti===turns.length-1;
+            return <div style={{maxWidth:"100%",padding:"0 20px",overflowY:"auto"}}>
+              {/* Quick search results inline */}
+              {quickResults.length>0&&<div style={{marginBottom:16,animation:"fadeIn .3s"}}>
+                <div style={{fontSize:10,fontWeight:700,color:t.f1,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,display:"flex",alignItems:"center",gap:4}}>
+                  <IC.Flash/> Quick Search Results
+                  <button onClick={()=>setQuickResults([])} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"0 4px",fontSize:10,marginLeft:"auto"}}>✕</button>
+                </div>
+                <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:6}}>
+                  {quickResults.map((r,ri)=>{const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();const isYT=r.type==="youtube";const isImg=r.type==="image";
+                    return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:12,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}>
+                      <div style={{width:"100%",height:110,background:isYT?"#0a0a0a":`${t.acc}06`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                        {r.thumbnail?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>e.target.style.display="none"}/>:
+                          hn?<img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:40,height:40,borderRadius:8}} alt="" onError={e=>e.target.style.opacity="0"}/>:
+                          <span style={{fontSize:28,opacity:.4}}>🌐</span>}
+                        {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
+                          <div style={{width:34,height:34,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#fff",boxShadow:"0 2px 10px rgba(0,0,0,.5)"}}>▶</div>
+                        </div>}
+                      </div>
+                      <div style={{padding:"8px 10px",display:"flex",flexDirection:"column",gap:3}}>
+                        <div style={{fontSize:11,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.title}</div>
+                        {r.snippet&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
+                        <div style={{fontSize:9,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
+                      </div>
+                    </a>;})}
+                </div>
+              </div>}
+              {turns.map((turn,ti)=><div key={ti} style={{marginBottom:28,animation:`fadeIn .3s both`}}>
+                {/* User message */}
+                <div style={{display:"flex",gap:9,alignItems:"flex-start",marginBottom:12}}>
+                  <div style={{width:27,height:27,borderRadius:7,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.f4}20`,border:`1px solid ${t.f4}28`,color:t.f4,flexShrink:0,marginTop:2}}><IC.User/></div>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:10,color:t.mut,marginBottom:2,fontWeight:600,letterSpacing:.5}}>you</div>
+                    <div style={{background:`${t.surface}50`,padding:"8px 12px",borderRadius:9,border:`1px solid ${t.brd}18`,lineHeight:1.6,fontSize:fontSize,color:t.dim}}>{md(turn.user.content)}</div>
+                  </div>
+                </div>
+                {/* Council response cards */}
+                <div style={{marginLeft:36}}>
+                  <div style={{fontSize:10,color:t.mut,marginBottom:6,fontWeight:600,textTransform:"uppercase",letterSpacing:.5,display:"flex",alignItems:"center",gap:4}}>
+                    <IC.Council/> Council Responses
+                  </div>
+                  {(()=>{
+                    const hostMeta=turn.host?getMeta(turn.host):{};
+                    const isLive=councilRunning&&isLastTurn(ti);
+                    const turnVotes=isLive?councilVotes:(hostMeta.votes||[]);
+                    const turnTally=turnVotes.reduce((a,v)=>({...a,[v.voted_for]:(a[v.voted_for]||0)+1}),{});
+                    return <>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:10,marginBottom:10}}>
+                    {turn.responses.map((resp,ri)=>{
+                      const meta=getMeta(resp);
+                      const model=meta.council_model||act.model||"";
+                      const memberId=meta.council_member_id;
+                      const member=councilCfg?.members?.find(m=>m.id===memberId)||{};
+                      const pts=member.points||0;
+                      const ptsColor=pts>0?t.ok:pts<0?t.err:t.mut;
+                      const votesReceived=turnTally[memberId]||0;
+                      const cid2=`cr${ti}-${ri}`;
+                      return <div key={ri} style={{background:`${t.surface}AA`,border:`1px solid ${votesReceived>0?t.pink:t.brd}${votesReceived>0?"55":"33"}`,borderRadius:14,overflow:"hidden",transition:"all .2s"}}>
+                        <div style={{padding:"8px 12px",background:`${t.acc}08`,borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:6}}>
+                          <IC.Bot/>
+                          <span style={{fontSize:11,fontWeight:700,color:t.acc,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{meta.council_persona||model.split(":")[0]}</span>
+                          <span style={{fontSize:9,color:t.mut,flexShrink:0}}>{model.split(":")[1]||""}</span>
+                          {votesReceived>0&&<span style={{background:`${t.pink}20`,border:`1px solid ${t.pink}44`,borderRadius:10,padding:"2px 7px",fontSize:10,fontWeight:700,color:t.pink,flexShrink:0}}>{"🗳 ".repeat(Math.min(votesReceived,3))}{votesReceived}</span>}
+                          <span style={{background:pts>0?`${t.ok}20`:pts<0?`${t.err}20`:`${t.mut}10`,border:`1px solid ${ptsColor}40`,borderRadius:10,padding:"2px 7px",fontSize:10,fontWeight:700,color:ptsColor,flexShrink:0}}>{pts>0?"+":""}{pts}pt</span>
+                        </div>
+                        <div style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:320,overflowY:"auto"}}>{md(resp.content)}</div>
+                        {memberId&&<div style={{padding:"6px 10px",borderTop:`1px solid ${t.brd}18`,display:"flex",gap:4}}>
+                          <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,5)} title="Best answer (+5)" style={{...btnS(t.ok),flex:1,justifyContent:"center",padding:"4px 6px",fontSize:9}}><IC.Star/> Best</button>
+                          <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,2)} title="Good answer (+2)" style={{...btnS(t.acc),padding:"4px 6px",fontSize:9}}>👍</button>
+                          <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,-2)} title="Poor answer (-2)" style={{...btnS(t.err),padding:"4px 6px",fontSize:9}}>👎</button>
+                          <button onClick={()=>cp(resp.content,cid2)} style={{...btnS(t.mut),padding:"4px 6px",fontSize:9}}>{copied===cid2?<IC.Check/>:<IC.Copy/>}</button>
+                        </div>}
+                      </div>;
+                    })}
+                    {/* Live streaming cards */}
+                    {councilRunning&&isLastTurn(ti)&&Object.entries(councilResponses).map(([mid,resp])=>{
+                      const member=councilCfg?.members?.find(m=>m.id===mid)||{};
+                      return <div key={mid} style={{background:`${t.surface}AA`,border:`1px solid ${t.acc}44`,borderRadius:14,overflow:"hidden"}}>
+                        <div style={{padding:"8px 12px",background:`${t.acc}10`,borderBottom:`1px solid ${t.acc}22`,display:"flex",alignItems:"center",gap:6}}>
+                          <span style={{display:"inline-block",animation:"bop 2s ease-in-out infinite"}}><IC.Bot/></span>
+                          <span style={{fontSize:11,fontWeight:700,color:t.acc,flex:1}}>{member.persona_name||resp.model?.split(":")[0]||mid}</span>
+                          {!resp.done?<div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>:<span style={{color:t.ok,fontSize:11}}>✓</span>}
+                        </div>
+                        <div style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:320,overflowY:"auto"}}>
+                          {md(resp.content||"")}
+                          {!resp.done&&<span style={{display:"inline-block",width:2,height:13,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
+                        </div>
+                      </div>;
+                    })}
+                  </div>
+                  {/* Voting phase indicator */}
+                  {isLive&&councilVoting&&turnVotes.length===0&&<div style={{background:`${t.pink}08`,border:`1px solid ${t.pink}28`,borderRadius:12,padding:"10px 14px",marginBottom:10,animation:"fadeIn .3s",display:"flex",alignItems:"center",gap:8}}>
+                    <div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
+                    <span style={{fontSize:11,color:t.pink,fontWeight:600}}>🗳 AI members are voting...</span>
+                  </div>}
+                  {/* AI Peer Votes */}
+                  {turnVotes.length>0&&<div style={{background:`${t.pink}08`,border:`1px solid ${t.pink}28`,borderRadius:12,padding:"10px 14px",marginBottom:10,animation:"fadeIn .3s"}}>
+                    <div style={{fontSize:10,fontWeight:700,color:t.pink,textTransform:"uppercase",letterSpacing:.5,marginBottom:6,display:"flex",alignItems:"center",gap:4}}>
+                      🗳 AI Peer Votes
+                    </div>
+                    {turnVotes.map((v,vi)=><div key={vi} style={{fontSize:11,color:t.dim,padding:"3px 0",display:"flex",gap:5,alignItems:"baseline",flexWrap:"wrap",animation:"fadeIn .3s"}}>
+                      <span style={{color:t.acc,fontWeight:600,flexShrink:0}}>{v.voter_name}</span>
+                      <span style={{color:t.mut,fontSize:10}}>voted for</span>
+                      <span style={{color:t.ok,fontWeight:600,flexShrink:0}}>{v.voted_for_name}</span>
+                      {v.reason&&<span style={{color:t.mut,fontSize:10,flex:1}}>— {v.reason}</span>}
+                    </div>)}
+                  </div>}
+                  </>;})()}
+                  {/* Host synthesis */}
+                  {(turn.host||(councilRunning&&isLastTurn(ti)&&councilHostContent))&&<div style={{background:`${t.warm}08`,border:`1px solid ${t.warm}28`,borderRadius:14,padding:"12px 16px",marginTop:4,animation:"fadeIn .3s"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8}}>
+                      <IC.Crown/><span style={{fontSize:11,fontWeight:700,color:t.warm}}>Host Synthesis</span>
+                      {councilCfg?.host_model&&<span style={{fontSize:9,color:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:4}}>{councilCfg.host_model}</span>}
+                      {councilRunning&&isLastTurn(ti)&&!turn.host&&<div style={{display:"flex",gap:3,marginLeft:"auto"}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.warm,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
+                    </div>
+                    <div style={{fontSize:fontSize-1,lineHeight:1.6,color:t.dim}}>
+                      {md(turn.host?.content||councilHostContent)}
+                      {councilRunning&&isLastTurn(ti)&&councilHostContent&&!turn.host&&<span style={{display:"inline-block",width:2,height:13,background:t.warm,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
+                    </div>
+                  </div>}
+                </div>
+              </div>)}
+              {/* Initial streaming before first user message turn is built */}
+              {councilRunning&&!turns.length&&Object.keys(councilResponses).length>0&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:10}}>
+                {Object.entries(councilResponses).map(([mid,resp])=><div key={mid} style={{background:`${t.surface}AA`,border:`1px solid ${t.acc}44`,borderRadius:14,overflow:"hidden"}}>
+                  <div style={{padding:"8px 12px",background:`${t.acc}10`,borderBottom:`1px solid ${t.acc}22`,display:"flex",alignItems:"center",gap:6}}>
+                    <span style={{display:"inline-block",animation:"bop 2s ease-in-out infinite"}}><IC.Bot/></span>
+                    <span style={{fontSize:11,fontWeight:700,color:t.acc}}>{resp.model?.split(":")[0]||mid}</span>
+                    {!resp.done&&<div style={{display:"flex",gap:3,marginLeft:"auto"}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
+                  </div>
+                  <div style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim}}>{md(resp.content||"")}</div>
+                </div>)}
+              </div>}
+              <div ref={chatEnd}/>
+            </div>;
+          })():<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 16px"}}>
+            {/* Quick search results for regular chats */}
+            {quickResults.length>0&&<div style={{marginBottom:16,animation:"fadeIn .3s"}}>
+              <div style={{fontSize:10,fontWeight:700,color:t.f1,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,display:"flex",alignItems:"center",gap:4}}>
+                <IC.Flash/> Quick Search Results
+                <button onClick={()=>setQuickResults([])} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"0 4px",fontSize:10,marginLeft:"auto"}}>✕</button>
+              </div>
+              <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:6}}>
+                {quickResults.map((r,ri)=>{const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();const isYT=r.type==="youtube";const isImg=r.type==="image";
+                  return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:12,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}>
+                    <div style={{width:"100%",height:110,background:isYT?"#0a0a0a":`${t.acc}06`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                      {r.thumbnail?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>e.target.style.display="none"}/>:
+                        hn?<img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:40,height:40,borderRadius:8}} alt="" onError={e=>e.target.style.opacity="0"}/>:
+                        <span style={{fontSize:28,opacity:.4}}>🌐</span>}
+                      {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
+                        <div style={{width:34,height:34,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#fff",boxShadow:"0 2px 10px rgba(0,0,0,.5)"}}>▶</div>
+                      </div>}
+                    </div>
+                    <div style={{padding:"8px 10px",display:"flex",flexDirection:"column",gap:3}}>
+                      <div style={{fontSize:11,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.title}</div>
+                      {r.snippet&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
+                      <div style={{fontSize:9,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
+                    </div>
+                  </a>;})}
+              </div>
+            </div>}
+            {(act.messages||[]).filter(msg=>msg.role==="user"||msg.role==="assistant").map((msg,i)=>{const isU=msg.role==="user";const mid=`m${i}`;const isEditing=editingMsg?.index===i;
+              const personaAvatar=!isU&&act?.persona_avatar;
+              const personaName=!isU&&act?.persona_name;
+              const personaColor=!isU&&act?.persona_name?t.pink:t.acc;
+              return <div key={i} style={{marginBottom:compactMode?6:13,display:"flex",gap:9,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(i*.04,.2)}s both`}}>
+                <div style={{width:27,height:27,borderRadius:7,display:"flex",alignItems:"center",justifyContent:"center",background:isU?`${t.f4}20`:`${personaColor}15`,border:`1px solid ${isU?t.f4:personaColor}28`,color:isU?t.f4:personaColor,flexShrink:0,marginTop:2,overflow:"hidden"}}>
+                  {isU?<IC.User/>:personaAvatar?<img src={`${API}${personaAvatar}`} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
+                </div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:10,marginBottom:2,fontWeight:600,letterSpacing:.5,display:"flex",alignItems:"center",gap:5}}>
+                    {isU?<span style={{color:t.mut}}>you</span>:personaName
+                      ?<span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"1px 7px",background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:10,color:t.pink}}>
+                        {personaAvatar&&<img src={`${API}${personaAvatar}`} style={{width:11,height:11,borderRadius:3,objectFit:"cover"}} alt=""/>}
+                        {personaName}
+                      </span>
+                      :<span style={{color:t.mut}}>{act.model||"assistant"}</span>}
+                  </div>
+                  <div style={{background:isU?`${t.surface}50`:"transparent",padding:isU?"8px 12px":"0",borderRadius:isU?9:0,border:isU?`1px solid ${t.brd}18`:"none",lineHeight:1.6,fontSize:fontSize,color:t.dim}}>
+                    {isEditing?<div style={{display:"flex",flexDirection:"column",gap:6}}>
+                      <textarea defaultValue={msg.content} ref={el=>{if(el&&!el._set){el._set=true;el.style.height=Math.min(el.scrollHeight,200)+"px";}}} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.acc}44`,color:t.text,padding:"8px 10px",borderRadius:6,fontFamily:font,fontSize:12,outline:"none",resize:"vertical",lineHeight:1.5,boxSizing:"border-box"}}
+                        onChange={e=>setEditingMsg(p=>({...p,content:e.target.value}))}/>
+                      <div style={{display:"flex",gap:4}}>
+                        <button onClick={()=>editMessage(i,editingMsg.content)} style={btnS(t.ok)}>Save & Send</button>
+                        <button onClick={()=>setEditingMsg(null)} style={btnS(t.mut)}>Cancel</button>
+                      </div>
+                    </div>
+                    :md(msg.content)}
+                    {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
+                    {msg.isS&&!msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
+                  </div>
+                  {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:null;})()}
+                  {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:null;})()}
+                  {!msg.isS&&!isEditing&&<div style={{display:"flex",gap:3,marginTop:3}}>
+                    {!isU&&msg.content&&<button onClick={()=>cp(msg.content,mid)} style={{background:"none",border:`1px solid ${t.brd}18`,color:copied===mid?t.ok:t.mut,cursor:"pointer",padding:"2px 6px",borderRadius:4,fontFamily:font,fontSize:9,display:"flex",alignItems:"center",gap:3}}>
+                      {copied===mid?<><IC.Check/> copied</>:<><IC.Copy/> copy</>}
+                    </button>}
+                    {!isU&&msg.content&&!streaming&&<button onClick={()=>regenerate(i)} style={{background:"none",border:`1px solid ${t.brd}18`,color:t.mut,cursor:"pointer",padding:"2px 6px",borderRadius:4,fontFamily:font,fontSize:9,display:"flex",alignItems:"center",gap:3}}>
+                      <IC.Refresh/> regenerate
+                    </button>}
+                    {isU&&!streaming&&<button onClick={()=>setEditingMsg({index:i,content:msg.content})} style={{background:"none",border:`1px solid ${t.brd}18`,color:t.mut,cursor:"pointer",padding:"2px 6px",borderRadius:4,fontFamily:font,fontSize:9,display:"flex",alignItems:"center",gap:3}}>
+                      <IC.Pencil/> edit
+                    </button>}
+                  </div>}
+                </div>
+              </div>;
+            })}
+            {evts.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}><ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/></div>}
+            <div ref={chatEnd}/>
+          </div>}
+        </div>
+          {/* Preview panel */}
+          {previewFile&&<div style={{width:previewWidth,flexShrink:0,borderLeft:`1px solid ${t.brd}33`,background:t.bgDeep,display:"flex",flexDirection:"column",position:"relative",overflow:"hidden",transition:"width .15s"}}>
+            {/* Drag handle */}
+            <div onMouseDown={startPreviewDrag} style={{position:"absolute",left:0,top:0,bottom:0,width:5,cursor:"col-resize",zIndex:10,background:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}44`} onMouseLeave={e=>e.currentTarget.style.background="transparent"}/>
+            {/* Header */}
+            <div style={{padding:"9px 12px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:7,flexShrink:0,background:`${t.surface}88`}}>
+              <span style={{fontSize:11,fontWeight:700,color:t.text,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{previewFile.filename}</span>
+              <span style={{fontSize:9,color:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:4,flexShrink:0}}>.{previewFile.type}</span>
+              <a href={`${API}${previewFile.url}`} download={previewFile.filename} style={{color:t.ok,fontSize:10,textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.ok}44`,borderRadius:4,flexShrink:0}}>⬇</a>
+              <button onClick={closePreview} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:16,padding:"0 2px",flexShrink:0,lineHeight:1}}>✕</button>
+            </div>
+            {/* Content */}
+            <div style={{flex:1,overflowY:"auto",padding:14}}>
+              {previewError?<div style={{display:"flex",flexDirection:"column",gap:10,padding:16,background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:10,color:t.err}}>
+                <div style={{fontWeight:700,fontSize:12}}>⚠ {previewError}</div>
+                <a href={`${API}${previewFile.url}`} download={previewFile.filename} style={{color:t.ok,fontSize:11,textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.ok}44`,borderRadius:6,display:"inline-flex",alignItems:"center",gap:4}}>⬇ Download anyway</a>
+              </div>
+              :["png","jpg","jpeg","gif","webp","svg"].includes(previewFile.type)
+                ?<img src={`${API}${previewFile.url}`} style={{maxWidth:"100%",borderRadius:6,display:"block"}} alt={previewFile.filename}/>
+                :previewFile.type==="html"&&previewContent
+                ?<iframe sandbox="allow-scripts allow-same-origin" srcDoc={previewContent} style={{width:"100%",height:"100%",border:"none",borderRadius:6,background:"#fff",minHeight:400}} title={previewFile.filename}/>
+                :previewFile.type==="md"&&previewContent
+                ?<div style={{lineHeight:1.7,fontSize:12,color:t.dim}}>{(() => {
+                    if(!previewContent)return null;
+                    let text=previewContent;
+                    text=text.replace(/(?<!\]\()\/api\/downloads\/([^\s)"'`\]]+)/g,'[📎 $1](/api/downloads/$1)');
+                    return text.split(/(```[\s\S]*?```)/g).map((p,i)=>{
+                      if(p.startsWith("```")){const m=p.match(/```(\w*)\n?([\s\S]*?)```/);const code=m?.[2]||p.slice(3,-3);return <pre key={i} style={{margin:"8px 0",padding:10,background:`${t.surface}88`,borderRadius:6,overflowX:"auto",fontSize:11,color:t.warm,border:`1px solid ${t.brd}33`}}>{code}</pre>;}
+                      return <span key={i} style={{whiteSpace:"pre-wrap"}}>{p.split("\n").map((ln,j)=>{
+                        if(ln.match(/^### /))return<div key={j} style={{fontSize:13,fontWeight:700,color:t.acc,margin:"10px 0 4px"}}>{ln.slice(4)}</div>;
+                        if(ln.match(/^## /))return<div key={j} style={{fontSize:14,fontWeight:700,color:t.acc,margin:"12px 0 5px"}}>{ln.slice(3)}</div>;
+                        if(ln.match(/^# /))return<div key={j} style={{fontSize:16,fontWeight:700,color:t.acc,margin:"14px 0 6px"}}>{ln.slice(2)}</div>;
+                        return<div key={j} style={{minHeight:ln===""?8:"auto"}}>{ln}</div>;
+                      })}</span>;
+                    });
+                  })()}</div>
+                :previewContent
+                ?<pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:11,color:t.dim,fontFamily:font,lineHeight:1.6}}>{previewContent}</pre>
+                :!["png","jpg","jpeg","gif","webp","svg"].includes(previewFile.type)
+                ?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:12,gap:6}}><span style={{fontSize:32}}>⏳</span>Loading...</div>
+                :null
+              }
+            </div>
+          </div>}
+        </div>
+        {/* TOOL TOGGLES BAR + QUICK SEARCH */}
+        <div style={{padding:"0 16px",flexShrink:0}}>
+          <div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",gap:4,overflowX:"auto",padding:"4px 0",alignItems:"center"}}>
+            {!act?.is_council&&allTools.map(tl=>{
+              const on=(act?.tool_ids||[]).includes(tl.id);
+              const isQs=tl.id==="quick_search";
+              const col=isQs?t.f1:t.warm;
+              return <button key={tl.id} onClick={()=>{
+                if(!actId)return;
+                uConv(actId,c=>{const ids=c.tool_ids||[];return{...c,tool_ids:on?ids.filter(x=>x!==tl.id):[...ids,tl.id]};});
+              }} style={{display:"flex",alignItems:"center",gap:4,padding:"3px 8px",borderRadius:12,fontSize:9,fontWeight:on?600:400,cursor:"pointer",whiteSpace:"nowrap",background:on?`${col}18`:`${t.surface}44`,border:`1px solid ${on?col:t.brd}28`,color:on?col:t.mut,transition:"all .15s"}}>
+                {isQs&&searchLoading?<span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span>:(on?<IC.ToggleOn/>:<IC.ToggleOff/>)}{tl.name}
+              </button>;
+            })}
+          </div>
+        </div>
+        {/* INPUT */}
+        <div style={{padding:"4px 16px 11px",flexShrink:0}}>
+          {/* Attachment chips */}
+          {attachments.length>0&&<div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",flexWrap:"wrap",gap:4,padding:"4px 0"}}>
+            {attachments.map((a,i)=><Chip key={i} l={`📎 ${a.name}`} c={t.f1} bg={`${t.f1}15`} onX={()=>setAttachments(p=>p.filter((_,j)=>j!==i))}/>)}
+          </div>}
+          <div style={{maxWidth:chatWidth,margin:"0 auto",...glass,borderRadius:14,padding:"3px 3px 3px 8px",display:"flex",alignItems:"flex-end",gap:4,border:`1px solid ${councilRunning?t.pink:streaming?t.warm:quickSearch?t.f1:t.acc}28`,boxShadow:`0 0 ${councilRunning||streaming?26:12}px ${councilRunning?t.pink:streaming?t.warm:t.acc}${councilRunning||streaming?"18":"08"}`,transition:"box-shadow .4s,border-color .4s"}}>
+            {!act?.is_council&&<><button onClick={()=>fileRef.current?.click()} title="Attach file" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"7px 3px",display:"flex",flexShrink:0,opacity:.6}}>
+              <IC.Paperclip/>
+            </button>
+            <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>{if(e.target.files?.length)handleFileUpload(Array.from(e.target.files));e.target.value="";}}/>
+            {prompts.length>0&&<div style={{position:"relative"}}>
+              <button onClick={()=>{setShowPromptPicker(p=>!p);setPromptSearch("");}} title="Prompt Library (⚡)" style={{background:showPromptPicker?`${t.f1}15`:"none",border:"none",color:showPromptPicker?t.f1:t.mut,cursor:"pointer",padding:"7px 5px",display:"flex",flexShrink:0,fontSize:13,opacity:showPromptPicker?1:.7}}>⚡</button>
+              {showPromptPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:50,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8}}>
+                <input value={promptSearch} onChange={e=>setPromptSearch(e.target.value)} placeholder="Search prompts..." style={{...inputS,marginBottom:6,padding:"5px 8px",fontSize:11}} autoFocus/>
+                <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
+                  {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={()=>{setInp(p.content);setShowPromptPicker(false);setTimeout(()=>inpRef.current?.focus(),50);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
+                    <div style={{fontSize:11,fontWeight:600,color:t.text}}>{p.title}</div>
+                    <div style={{fontSize:9,color:t.f1,marginTop:1}}>{p.category||"General"}</div>
+                  </div>)}
+                  {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())).length===0&&<div style={{textAlign:"center",padding:16,color:t.mut,fontSize:11}}>No matches</div>}
+                </div>
+                <div style={{borderTop:`1px solid ${t.brd}22`,marginTop:4,paddingTop:4}}>
+                  <button onClick={()=>{setShowPromptPicker(false);setPanel("prompts");}} style={{...btnS(t.f1),width:"100%",justifyContent:"center",fontSize:9}}>Manage Prompts →</button>
+                </div>
+              </div>}
+            </div>}
+            </>}
+            <textarea ref={inpRef} value={inp} onChange={e=>setInp(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
+              placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Ask the council...":"Message"}`} rows={1}
+              disabled={streaming||councilRunning}
+              style={{flex:1,background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:12.5,outline:"none",resize:"none",padding:"8px 0",maxHeight:120,lineHeight:1.5}}
+              onInput={e=>{e.target.style.height="auto";e.target.style.height=Math.min(e.target.scrollHeight,120)+"px";}}
+              onPaste={e=>{const files=Array.from(e.clipboardData?.files||[]);if(files.length){e.preventDefault();handleFileUpload(files);}}}/>
+            {councilRunning?<button onClick={()=>setCouncilRunning(false)} style={{background:t.pink,border:"none",color:"#fff",padding:"7px 11px",borderRadius:10,cursor:"pointer",display:"flex",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            :streaming?<button onClick={stop} style={{background:t.err,border:"none",color:"#fff",padding:"7px 11px",borderRadius:10,cursor:"pointer",display:"flex",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            :<button onClick={send} disabled={!inp.trim()&&!attachments.length} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.acc):t.sfBri,border:"none",color:(inp.trim()||attachments.length)?t.bgDeep:t.mut,padding:"7px 11px",borderRadius:10,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",flexShrink:0,transition:"all .2s"}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
+          </div>
+        </div>
+      </>}
+    </div>
+
+    {/* Close prompt picker on outside click */}
+    {showPromptPicker&&<div onClick={()=>setShowPromptPicker(false)} style={{position:"fixed",inset:0,zIndex:49}}/>}
+
+    {/* Changelog Modal */}
+    {showChangelog&&<div style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setShowChangelog(false);}}>
+      <div style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,width:"min(720px,95vw)",maxHeight:"85vh",display:"flex",flexDirection:"column",boxShadow:`0 8px 48px #0008`,overflow:"hidden",animation:"fadeIn .25s"}}>
+        <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:8,flexShrink:0,background:`${t.surface}88`}}>
+          <span style={{fontSize:18}}>📋</span>
+          <span style={{fontSize:14,fontWeight:700,color:t.acc,flex:1}}>HyprChat Changelog</span>
+          <button onClick={()=>setShowChangelog(false)} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:18,padding:"0 4px",lineHeight:1}}>✕</button>
+        </div>
+        <div style={{flex:1,overflowY:"auto",padding:24,lineHeight:1.7}}>
+          {!changelogContent?<div style={{textAlign:"center",padding:40,color:t.mut}}>Loading...</div>
+          :changelogContent.split(/(```[\s\S]*?```)/g).map((p,i)=>{
+            if(p.startsWith("```")){const m=p.match(/```(\w*)\n?([\s\S]*?)```/);const code=m?.[2]||p.slice(3,-3);return <pre key={i} style={{margin:"8px 0",padding:10,background:`${t.surface}88`,borderRadius:6,overflowX:"auto",fontSize:11,color:t.warm,border:`1px solid ${t.brd}33`}}>{code}</pre>;}
+            return <span key={i} style={{whiteSpace:"pre-wrap"}}>{p.split("\n").map((ln,j)=>{
+              if(ln.match(/^---+$/))return <hr key={j} style={{border:"none",borderTop:`1px solid ${t.brd}44`,margin:"16px 0"}}/>;
+              if(ln.match(/^### /))return <div key={j} style={{fontSize:13,fontWeight:700,color:t.f1,margin:"14px 0 5px"}}>{ln.slice(4)}</div>;
+              if(ln.match(/^## /))return <div key={j} style={{fontSize:15,fontWeight:700,color:t.acc,margin:"16px 0 6px"}}>{ln.slice(3)}</div>;
+              if(ln.match(/^# /))return <div key={j} style={{fontSize:18,fontWeight:700,color:t.acc,margin:"18px 0 8px"}}>{ln.slice(2)}</div>;
+              if(ln.match(/^[-*+]\s+/))return <div key={j} style={{display:"flex",gap:7,paddingLeft:4,margin:"2px 0"}}><span style={{color:t.acc,flexShrink:0}}>•</span><span style={{flex:1}}>{ln.replace(/^[-*+]\s+/,"")}</span></div>;
+              return <div key={j} style={{minHeight:ln===""?8:"auto",fontSize:12,color:t.dim}}>{ln}</div>;
+            })}</span>;
+          })}
+        </div>
+      </div>
+    </div>}
+
+    <style>{`
+      @import url('https://fonts.googleapis.com/css2?family=${FONTS[fi].i}&display=swap');
+      @keyframes blink{0%,50%{opacity:1}51%,100%{opacity:0}}
+      @keyframes pulse{0%,80%,100%{opacity:.3;transform:scale(.8)}40%{opacity:1;transform:scale(1.2)}}
+      @keyframes slide{0%{transform:translateX(-100%)}100%{transform:translateX(350%)}}
+      @keyframes marquee-think{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+      .pill-marquee-wrap{overflow:hidden;max-width:280px;display:inline-block;vertical-align:middle}
+      .pill-marquee-inner{display:inline-block;white-space:nowrap;animation:marquee-think 8s linear infinite}
+      @keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+      @keyframes glow{0%,100%{box-shadow:0 0 8px ${t.acc}88}50%{box-shadow:0 0 16px ${t.acc}CC}}
+      @keyframes pGlow{0%,100%{box-shadow:0 0 4px ${t.err}44}50%{box-shadow:0 0 14px ${t.err}88}}
+      @keyframes pCouncilGlow{0%,100%{box-shadow:0 0 4px ${t.pink}44}50%{box-shadow:0 0 14px ${t.pink}88}}
+      @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)}}
+      @keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
+      @keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+      @keyframes swing{0%,100%{transform:rotate(-12deg)}50%{transform:rotate(12deg)}}
+      @keyframes bop{0%,100%{transform:scale(1)}50%{transform:scale(1.3)}}
+      @keyframes pillGlow {
+  0%,100%{box-shadow:0 0 4px var(--pill-glow,rgba(120,200,255,.25));}
+  50%{box-shadow:0 0 10px var(--pill-glow,rgba(120,200,255,.55));}
+}
+      @keyframes glitch{0%,90%,100%{transform:skewX(0)}92%{transform:skewX(-5deg)}94%{transform:skewX(5deg)}96%{transform:skewX(-3deg)}98%{transform:skewX(3deg)}}
+      @keyframes scanline{0%{transform:translateY(-100%)}100%{transform:translateY(100vh)}}
+      @keyframes ripple{0%{transform:scale(0);opacity:1}100%{transform:scale(4);opacity:0}}
+      a[download]:hover{background:${t.ok}28 !important;border-color:${t.ok}66 !important;transform:translateY(-1px);box-shadow:0 3px 12px ${t.ok}22;}
+      a[download]:active{transform:translateY(0);}
+      *{scrollbar-width:thin;scrollbar-color:${t.sfBri} transparent}
+      *::-webkit-scrollbar{width:5px}*::-webkit-scrollbar-track{background:transparent}
+      *::-webkit-scrollbar-thumb{background:${t.sfBri};border-radius:3px}
+      ::selection{background:${t.acc}44}
+      textarea::placeholder,input::placeholder{color:${t.mut}55}
+      select option{background:${t.bgDeep};color:${t.text}}
+      button{transition:all .15s ease;position:relative;overflow:hidden}button:hover{filter:brightness(1.15);transform:translateY(-1px)}button:active{transform:translateY(0)}
+    `}</style>
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<HyprChat/>);
+</script>
+</body>
+</html>

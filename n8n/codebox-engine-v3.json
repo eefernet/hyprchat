@@ -1,0 +1,87 @@
+{
+  "name": "CodeAgent Engine v3",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "execute-code",
+        "responseMode": "responseNode",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "webhook-001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 300],
+      "webhookId": "2ef0aa79-debf-40ee-b42d-f120f25fc732"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ================================================================\n// CodeAgent Engine v3 — Smart Execution Pipeline\n// ================================================================\n// Pipeline: Execute → (if fail) Detect Deps → Auto-Install → Retry\n//           → (if still fail) SearXNG Search → AI Fix → Retry\n// Up to 3 attempts total. Returns rich debug trail.\n// ================================================================\n\nconst CODEBOX_URL = 'http://192.168.1.201:8585';\nconst SEARXNG_URL = 'http://192.168.1.141:8888';\nconst OLLAMA_URL = 'http://192.168.1.110:11434';\nconst FIX_MODEL = 'qwen3-coder:30b';\nconst MAX_ATTEMPTS = 3;\n\nconst input = $input.item.json.body || $input.item.json;\nconst code = input.code || '';\nconst language = (input.language || 'python').toLowerCase();\nconst stdin = input.stdin || '';\nconst timeout = input.timeout || 60;\n\nconst debug_trail = [];\nlet currentCode = code;\nlet lastResult = null;\n\n// ── Helper: Execute code on Codebox ──\nasync function executeCode(codeStr, lang, stdinStr, timeoutSec) {\n  const start = Date.now();\n  try {\n    const resp = await fetch(`${CODEBOX_URL}/execute`, {\n      method: 'POST',\n      headers: { 'Content-Type': 'application/json' },\n      body: JSON.stringify({\n        code: codeStr,\n        language: lang,\n        stdin: stdinStr,\n        timeout: timeoutSec,\n      }),\n    });\n    const data = await resp.json();\n    return {\n      success: data.success === true || data.exit_code === 0,\n      stdout: (data.stdout || '').substring(0, 5000),\n      stderr: (data.stderr || '').substring(0, 3000),\n      exit_code: data.exit_code ?? -1,\n      compile_output: (data.compile_output || '').substring(0, 2000),\n      execution_time: data.execution_time || ((Date.now() - start) / 1000),\n    };\n  } catch (err) {\n    return {\n      success: false,\n      stdout: '',\n      stderr: `Codebox error: ${err.message}`,\n      exit_code: -1,\n      compile_output: '',\n      execution_time: (Date.now() - start) / 1000,\n    };\n  }\n}\n\n// ── Helper: Detect missing dependencies from error ──\nfunction detectMissingDeps(stderr, compileOutput, lang) {\n  const error = (stderr + ' ' + compileOutput).toLowerCase();\n  const deps = [];\n\n  // Python\n  if (lang === 'python') {\n    const pyMatches = error.match(/no module named ['\"]?([a-z0-9_.-]+)/gi) || [];\n    for (const m of pyMatches) {\n      const mod = m.replace(/no module named ['\"]?/i, '').replace(/['\"].*/, '');\n      if (mod && !['__main__', 'builtins'].includes(mod)) deps.push(`pip install ${mod}`);\n    }\n  }\n  // Node.js\n  if (['javascript', 'typescript', 'node'].includes(lang)) {\n    const nodeMatches = error.match(/cannot find module ['\"]([a-z0-9@/._-]+)/gi) || [];\n    for (const m of nodeMatches) {\n      const mod = m.replace(/cannot find module ['\"]?/i, '').replace(/['\"].*/, '');\n      if (mod && !mod.startsWith('.') && !mod.startsWith('/')) deps.push(`npm install -g ${mod}`);\n    }\n  }\n  // Rust\n  if (lang === 'rust') {\n    const rustMatches = error.match(/can't find crate.*`([a-z0-9_]+)`/gi) || [];\n    for (const m of rustMatches) {\n      const crate = m.match(/`([a-z0-9_]+)`/)?.[1];\n      if (crate) deps.push(`cargo install ${crate}`);\n    }\n  }\n  // C/C++ missing headers\n  if (['c', 'c++', 'cpp'].includes(lang)) {\n    const headerMatches = error.match(/fatal error:.*([a-z0-9_/]+\\.h)/gi) || [];\n    for (const m of headerMatches) {\n      const header = m.match(/([a-z0-9_/]+\\.h)/)?.[1];\n      if (header) deps.push(`apt-get install -y lib${header.replace('.h', '')}-dev 2>/dev/null || true`);\n    }\n  }\n  // Go\n  if (lang === 'go') {\n    const goMatches = error.match(/cannot find package \"([^\"]+)\"/gi) || [];\n    for (const m of goMatches) {\n      const pkg = m.match(/\"([^\"]+)\"/)?.[1];\n      if (pkg && pkg.includes('/')) deps.push(`go get ${pkg}`);\n    }\n  }\n\n  return deps;\n}\n\n// ── Helper: Install dependencies via Codebox shell ──\nasync function installDeps(commands) {\n  const results = [];\n  for (const cmd of commands) {\n    try {\n      const resp = await fetch(`${CODEBOX_URL}/command`, {\n        method: 'POST',\n        headers: { 'Content-Type': 'application/json' },\n        body: JSON.stringify({ command: cmd, timeout: 30 }),\n      });\n      const data = await resp.json();\n      results.push({ command: cmd, stdout: data.stdout || '', stderr: data.stderr || '', success: !data.stderr?.includes('ERROR') });\n    } catch (err) {\n      results.push({ command: cmd, error: err.message, success: false });\n    }\n  }\n  return results;\n}\n\n// ── Helper: Search SearXNG for error solutions ──\nasync function searchError(errorStr, lang) {\n  // Clean up error for better search — remove file paths, line numbers\n  const cleanError = errorStr\n    .substring(0, 200)\n    .replace(/\\/[a-z0-9_/.]+/gi, '')\n    .replace(/line \\d+/gi, '')\n    .replace(/\\s+/g, ' ')\n    .trim();\n\n  const query = `${lang} ${cleanError}`;\n  try {\n    const resp = await fetch(\n      `${SEARXNG_URL}/search?q=${encodeURIComponent(query)}&format=json&categories=it&engines=stackoverflow,github,duckduckgo`,\n      { signal: AbortSignal.timeout(10000) }\n    );\n    const data = await resp.json();\n    const results = (data.results || []).slice(0, 5);\n    return results.map((r, i) =>\n      `${i + 1}. ${r.title || 'No title'}\\n   ${(r.content || '').substring(0, 400)}\\n   URL: ${r.url || ''}`\n    ).join('\\n\\n');\n  } catch (err) {\n    return `Search failed: ${err.message}`;\n  }\n}\n\n// ── Helper: AI fix code using Ollama ──\nasync function aiFixCode(originalCode, errorOutput, searchResults, lang) {\n  const prompt = `You are a code fixer. Fix this ${lang} code that produced an error.\n\nCODE:\n\\`\\`\\`\n${originalCode}\n\\`\\`\\`\n\nERROR:\n\\`\\`\\`\n${errorOutput}\n\\`\\`\\`\n\nSEARCH RESULTS:\n${searchResults || 'None available'}\n\nRules:\n- Respond with ONLY the complete fixed code\n- No explanations, no markdown fences, no comments about changes\n- Keep the same overall structure and intent\n- Fix the specific error(s) identified\n- If you can't fix it, return the original code unchanged`;\n\n  try {\n    const resp = await fetch(`${OLLAMA_URL}/api/generate`, {\n      method: 'POST',\n      headers: { 'Content-Type': 'application/json' },\n      body: JSON.stringify({\n        model: FIX_MODEL,\n        prompt: prompt,\n        stream: false,\n        options: { temperature: 0.1, num_predict: 4096 },\n      }),\n      signal: AbortSignal.timeout(120000),\n    });\n    const data = await resp.json();\n    let fixed = (data.response || '').trim();\n    // Strip markdown fences if the model added them despite instructions\n    fixed = fixed.replace(/^```[a-z]*\\n?/i, '').replace(/\\n?```$/i, '').trim();\n    // Validate: must be substantial code, not just an explanation\n    if (!fixed || fixed.length < 5 || fixed.split('\\n').length < originalCode.split('\\n').length * 0.3) {\n      return null; // AI response was garbage, don't use it\n    }\n    return fixed;\n  } catch (err) {\n    return null;\n  }\n}\n\n// ── Helper: Lint check (basic static analysis) ──\nfunction quickLintCheck(codeStr, lang) {\n  const warnings = [];\n  if (lang === 'python') {\n    if (codeStr.includes('print ') && !codeStr.includes('print(')) {\n      warnings.push('Python 3 requires print() as a function, not a statement');\n    }\n  }\n  if (['c', 'c++', 'cpp'].includes(lang)) {\n    if (!codeStr.includes('main')) {\n      warnings.push('Missing main() function');\n    }\n  }\n  if (lang === 'java') {\n    if (!codeStr.includes('class ')) {\n      warnings.push('Java requires a class definition');\n    }\n  }\n  return warnings;\n}\n\n// ================================================================\n// MAIN EXECUTION PIPELINE\n// ================================================================\n\n// Pre-flight: Quick lint warnings\nconst lintWarnings = quickLintCheck(currentCode, language);\n\nfor (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {\n  const trailEntry = {\n    attempt,\n    code: currentCode.substring(0, 3000),\n    action: attempt === 1 ? 'initial' : 'unknown',\n  };\n\n  // ── Execute ──\n  const result = await executeCode(currentCode, language, stdin, timeout);\n  lastResult = result;\n\n  trailEntry.success = result.success;\n  trailEntry.stdout = result.stdout.substring(0, 1000);\n  trailEntry.stderr = result.stderr.substring(0, 1000);\n  trailEntry.compile_output = result.compile_output.substring(0, 500);\n  trailEntry.execution_time = result.execution_time;\n\n  // ── Success! ──\n  if (result.success) {\n    debug_trail.push(trailEntry);\n    break;\n  }\n\n  // ── Failed — can we fix it? ──\n  if (attempt >= MAX_ATTEMPTS) {\n    trailEntry.action = 'final_failure';\n    debug_trail.push(trailEntry);\n    break;\n  }\n\n  const errorText = result.stderr || result.compile_output || 'Unknown error';\n\n  // ── Step A: Try auto-installing missing dependencies ──\n  const missingDeps = detectMissingDeps(result.stderr, result.compile_output, language);\n  if (missingDeps.length > 0 && attempt === 1) {\n    trailEntry.action = 'dep_install';\n    trailEntry.deps_detected = missingDeps;\n    const installResults = await installDeps(missingDeps);\n    trailEntry.install_results = installResults;\n    debug_trail.push(trailEntry);\n    // Don't change the code — just retry with deps installed\n    continue;\n  }\n\n  // ── Step B: Search + AI Fix ──\n  trailEntry.action = 'ai_fix';\n\n  // Search for the error\n  const searchResults = await searchError(errorText, language);\n  trailEntry.search_query = `${language} ${errorText.substring(0, 100)}`;\n  trailEntry.search_results_count = (searchResults.match(/^\\d+\\./gm) || []).length;\n\n  // Ask AI to fix\n  const fixedCode = await aiFixCode(currentCode, errorText, searchResults, language);\n  if (fixedCode && fixedCode !== currentCode) {\n    trailEntry.ai_fixed = true;\n    trailEntry.fixed_code_preview = fixedCode.substring(0, 500);\n    currentCode = fixedCode;\n  } else {\n    trailEntry.ai_fixed = false;\n    trailEntry.ai_note = 'AI could not produce a fix';\n  }\n\n  debug_trail.push(trailEntry);\n}\n\n// ================================================================\n// BUILD RESPONSE\n// ================================================================\n\nconst wasFixed = debug_trail.length > 1 && lastResult?.success;\nconst totalTime = debug_trail.reduce((sum, t) => sum + (t.execution_time || 0), 0);\n\nconst response = {\n  // Standard fields (backward compatible)\n  success: lastResult?.success || false,\n  stdout: lastResult?.stdout || '',\n  stderr: lastResult?.stderr || '',\n  exit_code: lastResult?.exit_code ?? -1,\n  language: language,\n  execution_time: lastResult?.execution_time || 0,\n  compile_output: lastResult?.compile_output || null,\n\n  // Engine metadata\n  job_id: `engine-v3-${Date.now()}`,\n  attempts: debug_trail.length,\n  total_time: Math.round(totalTime * 1000) / 1000,\n  was_auto_fixed: wasFixed,\n  fixed_code: wasFixed ? currentCode : null,\n  original_code: wasFixed ? code : null,\n\n  // Debug trail\n  debug_trail: debug_trail,\n\n  // Lint warnings (informational)\n  lint_warnings: lintWarnings.length > 0 ? lintWarnings : null,\n};\n\nreturn { json: response };\n"
+      },
+      "id": "engine-001",
+      "name": "CodeAgent Engine",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "respond-001",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [480, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "CodeAgent Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CodeAgent Engine": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "instanceId": "8b2744b25d8fe68d00c317ba7b31c1c81c0700ffcbf23c75eff0ee6ed4acf22f"
+  },
+  "tags": [
+    {
+      "name": "hyprchat"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+[Unit]
+Description=HyprChat AI Platform
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/hyprchat/backend
+ExecStart=/usr/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+Environment=DATABASE_PATH=/opt/hyprchat/data/hyprchat.db
+Environment=UPLOAD_DIR=/opt/hyprchat/data/uploads
+Environment=TOOLS_DIR=/opt/hyprchat/data/tools
+Environment=KB_DIR=/opt/hyprchat/data/knowledge_bases
+
+[Install]
+WantedBy=multi-user.target

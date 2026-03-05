@@ -1,0 +1,87 @@
+{
+  "name": "Deep Research Engine v1",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "deep-research",
+        "responseMode": "responseNode",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "webhook-dr-001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 300],
+      "webhookId": "a1b2c3d4-deep-research-engine-v1"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ================================================================\n// Deep Research Engine v1 — Multi-phase parallel research pipeline\n// ================================================================\n// Phase 1: PLAN — Generate diverse search queries from topic\n// Phase 2: SEARCH — Parallel SearXNG queries\n// Phase 3: FETCH — Parallel URL content extraction\n// Phase 4: ANALYZE — Identify gaps, generate follow-ups\n// Phase 5: SEARCH II — Follow-up queries in parallel\n// Phase 6: FETCH II — Read new sources\n// Phase 7: SYNTHESIZE — Produce structured research report\n// ================================================================\n\nconst SEARXNG_URL = 'http://192.168.1.141:8888';\nconst OLLAMA_URL = 'http://192.168.1.110:11434';\nconst RESEARCH_MODEL = 'qwen3.5:27b';\nconst FAST_MODEL = 'qwen3.5:27b';\n\nconst input = $input.item.json.body || $input.item.json;\nconst topic = input.topic || input.query || '';\nconst depth = input.depth || 'standard'; // 'quick', 'standard', 'deep'\nconst focus = input.focus || ''; // optional focus area\nconst maxSources = depth === 'deep' ? 15 : depth === 'quick' ? 5 : 10;\nconst doFollowUp = depth !== 'quick';\n\nconst timeline = [];\nconst allSources = [];\nlet totalSearches = 0;\nlet totalFetches = 0;\n\nfunction log(phase, msg) {\n  timeline.push({ phase, message: msg, time: new Date().toISOString() });\n}\n\n// ── Helper: Call Ollama ──\nasync function askAI(prompt, model, maxTokens = 4096) {\n  try {\n    const resp = await fetch(`${OLLAMA_URL}/api/generate`, {\n      method: 'POST',\n      headers: { 'Content-Type': 'application/json' },\n      body: JSON.stringify({\n        model: model || RESEARCH_MODEL,\n        prompt: prompt,\n        stream: false,\n        options: { temperature: 0.3, num_predict: maxTokens },\n      }),\n      signal: AbortSignal.timeout(180000),\n    });\n    const data = await resp.json();\n    return (data.response || '').trim();\n  } catch (err) {\n    log('ai_error', `AI call failed: ${err.message}`);\n    return '';\n  }\n}\n\n// ── Helper: Search SearXNG ──\nasync function search(query, engines = 'google,duckduckgo,brave,wikipedia') {\n  totalSearches++;\n  try {\n    const params = new URLSearchParams({\n      q: query,\n      format: 'json',\n      categories: 'general,science,it,news',\n      engines: engines,\n      language: 'en',\n    });\n    const resp = await fetch(`${SEARXNG_URL}/search?${params}`, {\n      signal: AbortSignal.timeout(15000),\n    });\n    const data = await resp.json();\n    return (data.results || []).slice(0, 8).map(r => ({\n      title: r.title || '',\n      url: r.url || '',\n      snippet: (r.content || '').substring(0, 500),\n      engine: r.engine || '',\n    }));\n  } catch (err) {\n    log('search_error', `Search failed for \"${query}\": ${err.message}`);\n    return [];\n  }\n}\n\n// ── Helper: Fetch URL content ──\nasync function fetchUrl(url) {\n  totalFetches++;\n  try {\n    const resp = await fetch(url, {\n      signal: AbortSignal.timeout(10000),\n      headers: { 'User-Agent': 'HyprChat-Research/1.0' },\n      redirect: 'follow',\n    });\n    let text = await resp.text();\n    // Strip HTML tags, scripts, styles\n    text = text.replace(/<script[^>]*>[\\s\\S]*?<\\/script>/gi, '');\n    text = text.replace(/<style[^>]*>[\\s\\S]*?<\\/style>/gi, '');\n    text = text.replace(/<[^>]+>/g, ' ');\n    text = text.replace(/\\s+/g, ' ').trim();\n    return text.substring(0, 6000);\n  } catch (err) {\n    return '';\n  }\n}\n\n// ── Helper: Run searches in parallel ──\nasync function parallelSearch(queries) {\n  const results = await Promise.allSettled(\n    queries.map(q => search(q))\n  );\n  const allResults = [];\n  for (let i = 0; i < results.length; i++) {\n    if (results[i].status === 'fulfilled') {\n      for (const r of results[i].value) {\n        r.query = queries[i];\n        allResults.push(r);\n      }\n    }\n  }\n  return allResults;\n}\n\n// ── Helper: Fetch URLs in parallel (with concurrency limit) ──\nasync function parallelFetch(urls, limit = 5) {\n  const results = {};\n  for (let i = 0; i < urls.length; i += limit) {\n    const batch = urls.slice(i, i + limit);\n    const settled = await Promise.allSettled(\n      batch.map(url => fetchUrl(url))\n    );\n    for (let j = 0; j < settled.length; j++) {\n      if (settled[j].status === 'fulfilled' && settled[j].value) {\n        results[batch[j]] = settled[j].value;\n      }\n    }\n  }\n  return results;\n}\n\n// ── Helper: Deduplicate results by URL ──\nfunction dedup(results) {\n  const seen = new Set();\n  return results.filter(r => {\n    if (seen.has(r.url)) return false;\n    seen.add(r.url);\n    return true;\n  });\n}\n\n// ================================================================\n// PHASE 1: PLAN — Generate search queries\n// ================================================================\nlog('plan', `Starting research on: ${topic}`);\n\nconst planPrompt = `You are a research planner. Given a topic, generate diverse search queries to thoroughly research it.\n\nTopic: ${topic}${focus ? `\\nFocus area: ${focus}` : ''}\nDepth: ${depth}\n\nGenerate ${depth === 'deep' ? '8-10' : depth === 'quick' ? '3-4' : '5-7'} search queries that:\n- Cover different aspects and angles of the topic\n- Include specific technical terms where relevant\n- Mix broad overview queries with specific detail queries\n- Include queries for recent developments/news\n- Include queries for authoritative/primary sources\n\nRespond with ONLY the queries, one per line. No numbering, no explanations.`;\n\nconst planResponse = await askAI(planPrompt, FAST_MODEL, 1024);\nconst queries = planResponse\n  .split('\\n')\n  .map(q => q.replace(/^\\d+[\\.\\)\\-]\\s*/, '').trim())\n  .filter(q => q.length > 5 && q.length < 200)\n  .slice(0, depth === 'deep' ? 10 : depth === 'quick' ? 4 : 7);\n\nlog('plan', `Generated ${queries.length} search queries`);\n\nif (queries.length === 0) {\n  // Fallback: use the topic directly\n  queries.push(topic);\n  queries.push(`${topic} explained`);\n  queries.push(`${topic} latest developments`);\n}\n\n// ================================================================\n// PHASE 2: SEARCH — Parallel SearXNG queries\n// ================================================================\nlog('search', `Executing ${queries.length} parallel searches`);\n\nconst searchResults = await parallelSearch(queries);\nconst dedupedResults = dedup(searchResults);\n\nlog('search', `Found ${dedupedResults.length} unique results from ${totalSearches} searches`);\n\n// ================================================================\n// PHASE 3: FETCH — Read top URLs concurrently\n// ================================================================\n// Score and rank results\nconst scoredResults = dedupedResults.map(r => {\n  let score = 0;\n  // Prefer authoritative domains\n  const domain = (r.url || '').toLowerCase();\n  if (domain.includes('wikipedia.org')) score += 3;\n  if (domain.includes('arxiv.org')) score += 4;\n  if (domain.includes('.gov')) score += 3;\n  if (domain.includes('.edu')) score += 3;\n  if (domain.includes('github.com')) score += 2;\n  if (domain.includes('stackoverflow.com')) score += 2;\n  if (domain.includes('nature.com') || domain.includes('science.org')) score += 4;\n  // Penalize junk\n  if (domain.includes('pinterest') || domain.includes('facebook') || domain.includes('twitter') || domain.includes('tiktok')) score -= 5;\n  if (domain.includes('quora.com')) score -= 1;\n  // Prefer results with substantial snippets\n  if ((r.snippet || '').length > 100) score += 1;\n  // Prefer results whose title matches the topic\n  if ((r.title || '').toLowerCase().includes(topic.toLowerCase().split(' ')[0])) score += 1;\n  return { ...r, score };\n}).sort((a, b) => b.score - a.score);\n\nconst urlsToFetch = scoredResults\n  .slice(0, maxSources)\n  .map(r => r.url)\n  .filter(u => u && u.startsWith('http'));\n\nlog('fetch', `Fetching ${urlsToFetch.length} top sources in parallel`);\n\nconst fetchedContent = await parallelFetch(urlsToFetch);\nconst fetchedCount = Object.keys(fetchedContent).length;\n\nlog('fetch', `Successfully read ${fetchedCount} pages`);\n\n// Build source context\nfor (const r of scoredResults.slice(0, maxSources)) {\n  const content = fetchedContent[r.url];\n  allSources.push({\n    title: r.title,\n    url: r.url,\n    snippet: r.snippet,\n    content: content ? content.substring(0, 3000) : null,\n    query: r.query,\n    score: r.score,\n  });\n}\n\n// ================================================================\n// PHASE 4: ANALYZE — Identify gaps (if not quick mode)\n// ================================================================\nlet followUpResults = [];\n\nif (doFollowUp && allSources.length > 0) {\n  log('analyze', 'Analyzing for gaps and follow-up queries');\n\n  const sourcesSummary = allSources\n    .slice(0, 8)\n    .map((s, i) => `${i + 1}. \"${s.title}\" — ${s.snippet?.substring(0, 200) || 'No snippet'}`)\n    .join('\\n');\n\n  const gapPrompt = `You are a research analyst. Given a topic and initial search results, identify what's MISSING and generate follow-up queries.\n\nTopic: ${topic}${focus ? `\\nFocus: ${focus}` : ''}\n\nInitial results found:\n${sourcesSummary}\n\nWhat important aspects are NOT covered? Generate 3-4 follow-up search queries to fill gaps.\nFocus on: missing perspectives, contradicting viewpoints, recent data/statistics, primary sources, expert opinions.\n\nRespond with ONLY the queries, one per line.`;\n\n  const gapResponse = await askAI(gapPrompt, FAST_MODEL, 512);\n  const followUpQueries = gapResponse\n    .split('\\n')\n    .map(q => q.replace(/^\\d+[\\.\\)\\-]\\s*/, '').trim())\n    .filter(q => q.length > 5 && q.length < 200)\n    .slice(0, 4);\n\n  if (followUpQueries.length > 0) {\n    log('search_2', `Executing ${followUpQueries.length} follow-up searches`);\n\n    // ================================================================\n    // PHASE 5: SEARCH II — Follow-up queries\n    // ================================================================\n    followUpResults = await parallelSearch(followUpQueries);\n    const newResults = dedup([...followUpResults]).filter(\n      r => !allSources.some(s => s.url === r.url)\n    );\n\n    log('search_2', `Found ${newResults.length} new results`);\n\n    // ================================================================\n    // PHASE 6: FETCH II — Read new sources\n    // ================================================================\n    if (newResults.length > 0) {\n      const newUrls = newResults\n        .slice(0, 5)\n        .map(r => r.url)\n        .filter(u => u && u.startsWith('http'));\n\n      log('fetch_2', `Fetching ${newUrls.length} follow-up sources`);\n\n      const newContent = await parallelFetch(newUrls);\n      const newFetchedCount = Object.keys(newContent).length;\n\n      log('fetch_2', `Read ${newFetchedCount} additional pages`);\n\n      for (const r of newResults.slice(0, 5)) {\n        const content = newContent[r.url];\n        allSources.push({\n          title: r.title,\n          url: r.url,\n          snippet: r.snippet,\n          content: content ? content.substring(0, 3000) : null,\n          query: r.query,\n          score: 0,\n          is_followup: true,\n        });\n      }\n    }\n  }\n}\n\n// ================================================================\n// PHASE 7: SYNTHESIZE — Write the research report\n// ================================================================\nlog('synthesize', 'Generating research report');\n\n// Build the knowledge context from all sources\nconst knowledgeContext = allSources\n  .filter(s => s.content || s.snippet)\n  .slice(0, 15)\n  .map((s, i) => {\n    const body = s.content\n      ? s.content.substring(0, 2000)\n      : s.snippet || '';\n    return `[Source ${i + 1}: \"${s.title}\" — ${s.url}]\\n${body}`;\n  })\n  .join('\\n\\n---\\n\\n');\n\nconst synthesizePrompt = `You are an expert research analyst. Write a comprehensive, well-structured research report based on the sources provided.\n\nTOPIC: ${topic}${focus ? `\\nFOCUS: ${focus}` : ''}\n\nSOURCES:\n${knowledgeContext}\n\nWrite a thorough report that:\n1. Opens with a clear executive summary (2-3 sentences)\n2. Covers all major aspects found in the sources\n3. Notes areas of consensus and disagreement\n4. Includes specific data, statistics, and quotes where available\n5. Identifies limitations — what we couldn't find or verify\n6. Ends with key takeaways\n\nFormat with clear section headers using ##.\nCite sources inline as [Source N].\nBe factual, specific, and avoid vague generalities.\nLength: ${depth === 'deep' ? '800-1200' : depth === 'quick' ? '300-500' : '500-800'} words.`;\n\nconst report = await askAI(synthesizePrompt, RESEARCH_MODEL, depth === 'deep' ? 8192 : 4096);\n\nlog('synthesize', `Report generated: ${report.length} chars`);\n\n// ================================================================\n// BUILD RESPONSE\n// ================================================================\nconst sourcesFormatted = allSources\n  .filter(s => s.title && s.url)\n  .slice(0, 20)\n  .map((s, i) => ({\n    index: i + 1,\n    title: s.title,\n    url: s.url,\n    query: s.query,\n    is_followup: s.is_followup || false,\n  }));\n\nconst response = {\n  success: report.length > 100,\n  topic: topic,\n  focus: focus || null,\n  depth: depth,\n  report: report,\n\n  // Metadata\n  sources: sourcesFormatted,\n  source_count: sourcesFormatted.length,\n  total_searches: totalSearches,\n  total_fetches: totalFetches,\n  queries_used: queries,\n  follow_up_queries: followUpResults.length > 0 ? followUpResults.map(r => r.query).filter((v, i, a) => a.indexOf(v) === i) : [],\n\n  // Timeline for debugging\n  timeline: timeline,\n  total_time_ms: Date.now() - new Date(timeline[0]?.time || Date.now()).getTime(),\n};\n\nreturn { json: response };\n"
+      },
+      "id": "research-engine-001",
+      "name": "Research Engine",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [280, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "respond-dr-001",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [520, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Research Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Research Engine": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "instanceId": "8b2744b25d8fe68d00c317ba7b31c1c81c0700ffcbf23c75eff0ee6ed4acf22f"
+  },
+  "tags": [
+    {
+      "name": "hyprchat"
+    }
+  ]
+}
