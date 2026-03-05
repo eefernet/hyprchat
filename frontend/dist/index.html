@@ -901,6 +901,9 @@ function HyprChat(){
   const [modelInfoCache,setModelInfoCache]=useState({});
   const [modelInfoLoading,setModelInfoLoading]=useState(false);
   const [showModelfile,setShowModelfile]=useState(false);
+  const [fixTemplateFamily,setFixTemplateFamily]=useState("chatml");
+  const [fixingTemplate,setFixingTemplate]=useState(false);
+  const [fixTemplateMsg,setFixTemplateMsg]=useState(null);
   const [hfInstalledTab,setHfInstalledTab]=useState(false);
   const [makingToolModel,setMakingToolModel]=useState(null); // model name currently being processed
   const [sq,setSq]=useState("");
@@ -2337,7 +2340,7 @@ function HyprChat(){
                 const quant=(md.details?.quantization_level||"").toUpperCase();
                 const paramSz=md.details?.parameter_size||"";
                 const diskSz=md.size?fmtSize(md.size):"";
-                return <div key={m} onClick={()=>{const newSel=sel?null:m;setModelParamsOpen(newSel);setShowModelfile(false);if(newSel&&!modelInfoCache[newSel]){setModelInfoLoading(true);fetch(`${API}/api/models/${encodeURIComponent(newSel)}/info`).then(r=>r.json()).then(d=>setModelInfoCache(p=>({...p,[newSel]:d}))).catch(()=>{}).finally(()=>setModelInfoLoading(false));}}}
+                return <div key={m} onClick={()=>{const newSel=sel?null:m;setModelParamsOpen(newSel);setShowModelfile(false);setFixTemplateMsg(null);setFixTemplateFamily("");if(newSel&&!modelInfoCache[newSel]){setModelInfoLoading(true);fetch(`${API}/api/models/${encodeURIComponent(newSel)}/info`).then(r=>r.json()).then(d=>setModelInfoCache(p=>({...p,[newSel]:d}))).catch(()=>{}).finally(()=>setModelInfoLoading(false));}}}
                   style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",borderRadius:8,marginBottom:2,cursor:"pointer",background:sel?`${t.acc}12`:`${t.surface}44`,border:`1px solid ${sel?t.acc:t.brd}${sel?"44":"18"}`,transition:"all .15s"}}>
                   <span style={{fontSize:15,flexShrink:0}}>{icon(name)}</span>
                   <div style={{flex:1,minWidth:0}}>
@@ -2420,6 +2423,20 @@ function HyprChat(){
             const format=(det.format||"").toUpperCase();
             const modifiedAt=md.modified_at?(()=>{try{return new Date(md.modified_at).toLocaleDateString();}catch{return md.modified_at;}})():"";
             const info=modelInfoCache[m]||{};
+            const TEMPLATE_OPTIONS=[["chatml","ChatML (Qwen / most instruct)"],["llama3","Llama 3.x"],["mistral","Mistral / Mixtral"],["gemma","Gemma 2 / 3"]];
+            // Auto-detect template family whenever selected model changes
+            const detectedFamily=(()=>{const b=m.toLowerCase();if(b.includes("qwen")||b.includes("chatml"))return"chatml";if(b.includes("llama")||b.includes("hermes"))return"llama3";if(b.includes("mistral")||b.includes("mixtral"))return"mistral";if(b.includes("gemma"))return"gemma";return"chatml";})();
+            const effectiveFamily=fixTemplateFamily||detectedFamily;
+            const applyTemplate=async()=>{
+              setFixingTemplate(true);setFixTemplateMsg(null);
+              try{
+                const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}/fix-template`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({family:effectiveFamily})});
+                const d=await r.json();
+                if(!r.ok)throw new Error(d.detail||"Unknown error");
+                setFixTemplateMsg({ok:true,text:`Template applied (${effectiveFamily}). Model recreated — tool calling should now work.`});
+              }catch(e){setFixTemplateMsg({ok:false,text:`Failed: ${e.message}`});}
+              setFixingTemplate(false);
+            };
             return <div style={{maxWidth:520,animation:"fadeIn .2s"}}>
               {/* Model header */}
               <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16,paddingBottom:14,borderBottom:`1px solid ${t.brd}22`}}>
@@ -2436,6 +2453,22 @@ function HyprChat(){
                   <button onClick={()=>uConv(actId,{model:m})} style={{...btnS(t.acc),padding:"5px 12px"}}>Use</button>
                   <button onClick={async()=>{if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}setModels(p=>p.filter(x=>x!==m));setModelDetails(p=>{const n={...p};delete n[m];return n;});setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}} style={{...btnS(t.err),padding:"5px 8px"}}><IC.Trash/></button>
                 </div>
+              </div>
+              {/* Tool calling template fix */}
+              <div style={{marginBottom:16,padding:"12px 14px",background:`${t.warm}08`,border:`1px solid ${t.warm}22`,borderRadius:10}}>
+                <div style={{fontSize:10,fontWeight:700,color:t.warm,marginBottom:8,display:"flex",alignItems:"center",gap:6}}>🔧 Fix Tool Calling Template</div>
+                <div style={{fontSize:9,color:t.mut,marginBottom:10}}>Apply a chat template so this model can use tools. Only needed for custom GGUF models — standard Ollama models already have the right template.</div>
+                <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginBottom:fixTemplateMsg?8:0}}>
+                  <select value={effectiveFamily} onChange={e=>setFixTemplateFamily(e.target.value)}
+                    style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"5px 8px",borderRadius:6,fontFamily:font,fontSize:10,flex:1,minWidth:140,outline:"none",cursor:"pointer"}}>
+                    {TEMPLATE_OPTIONS.map(([k,l])=><option key={k} value={k}>{l}</option>)}
+                  </select>
+                  <button onClick={applyTemplate} disabled={fixingTemplate}
+                    style={{...btnS(t.warm),padding:"5px 12px",flexShrink:0,opacity:fixingTemplate?.6:1}}>
+                    {fixingTemplate?"Applying...":"Apply Template"}
+                  </button>
+                </div>
+                {fixTemplateMsg&&<div style={{fontSize:9,color:fixTemplateMsg.ok?t.ok:t.err,padding:"4px 8px",background:fixTemplateMsg.ok?`${t.ok}12`:`${t.err}12`,borderRadius:6,border:`1px solid ${fixTemplateMsg.ok?t.ok:t.err}33`}}>{fixTemplateMsg.text}</div>}
               </div>
               {/* Info strip */}
               {(paramSz||diskSz||family||modifiedAt)&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:16,padding:"10px 14px",background:`${t.surface}44`,borderRadius:10,border:`1px solid ${t.brd}18`}}>

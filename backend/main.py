@@ -2100,13 +2100,6 @@ async def chat_stream(req: ChatRequest):
 
         print(f"[CHAT] {len(ollama_tools)} native Ollama tools, available: {available_tool_names}")
 
-        # Ensure sufficient context window when tools are active (tool defs alone can be 3000+ tokens)
-        # conspiracy_research returns large dossiers — needs 32k+ context
-        if ollama_tools and not model_options.get("num_ctx"):
-            if "conspiracy_research" in available_tool_names or "deep_research" in available_tool_names:
-                model_options["num_ctx"] = 32768
-            else:
-                model_options["num_ctx"] = 16384
 
         # Inject CodeAgent environment context when code tools are active
         CODEAGENT_TOOLS_SET = {"execute_code", "run_shell", "write_file", "read_file",
@@ -2122,14 +2115,19 @@ async def chat_stream(req: ChatRequest):
                 "• Python: python3 or python — use execute_code with language='python' for scripts\n"
                 f"• Python venv: {venv_python} (use it for isolated package installs)\n"
                 f"• Venv pip: {venv_pip}\n"
-                "• Install Python packages: run_shell with command='pip3 install <pkg>' or '/root/venv/bin/pip install <pkg>'\n"
+                "• Install Python packages: run_shell with command='pip3 install <pkg>'\n"
                 "• Install system packages: run_shell with command='apt-get install -y <pkg>'\n"
                 "• Build tools available: gcc, g++, make, cmake, cargo, go, node, npm, java, javac\n"
                 "• For multi-file projects: write_file each file, then execute_code or run_shell to build\n"
                 "• To give the user a file: ALWAYS call download_file or download_project at the end\n"
-                "• ALWAYS run code you write — never just show it. Execute → fix errors → iterate.\n"
                 "• Use list_files to verify files exist before trying to execute or download them.\n"
-                "=== END SANDBOX INFO ===\n"
+                "=== END SANDBOX INFO ===\n\n"
+                "CRITICAL RULES — YOU MUST FOLLOW THESE:\n"
+                "1. NEVER describe what you are going to do. JUST DO IT by calling a tool immediately.\n"
+                "2. Your FIRST response must be a tool call, not text.\n"
+                "3. NEVER write code in your response text — write it to a file or execute it via tool.\n"
+                "4. ALWAYS execute code after writing it. Execute → check output → fix → iterate.\n"
+                "5. Keep going with tool calls until the task is fully complete.\n"
             )
             if messages and messages[0]["role"] == "system":
                 messages[0]["content"] += codeagent_ctx
@@ -2167,6 +2165,21 @@ async def chat_stream(req: ChatRequest):
                             chunk = json.loads(line)
                         except json.JSONDecodeError:
                             continue
+
+                        # Surface Ollama errors immediately
+                        if chunk.get("error"):
+                            err_msg = chunk["error"]
+                            print(f"[CHAT]   Ollama stream error: {err_msg}")
+                            # Model doesn't support native tool calling — strip tools and retry
+                            if "does not support tools" in err_msg.lower():
+                                print(f"[CHAT]   Model does not support tools — retrying without tool definitions")
+                                await events.emit(conv_id, "tool_start", {"tool": "notice", "icon": "info", "status": f"⚠️ {req.model} doesn't support native tools — use 'Fix Tool Calling Template' in Model Manager. Retrying without tools..."})
+                                ollama_tools = []
+                                payload.pop("tools", None)
+                                break  # break inner for-loop to retry the round without tools
+                            await events.emit(conv_id, "error", {"status": f"Ollama: {err_msg[:200]}"})
+                            yield f"data: {json.dumps({'type': 'error', 'error': err_msg})}\n\n"
+                            return
 
                         msg_chunk = chunk.get("message", {})
 
@@ -2259,7 +2272,7 @@ async def chat_stream(req: ChatRequest):
                     ).strip()
                     msg["content"] = content
 
-            print(f"[CHAT] Round {round_num}: content={len(content)} thinking={len(thinking)} tool_calls={len(tool_calls)}")
+            print(f"[CHAT] Round {round_num}: content={len(content)} thinking={len(thinking)} tool_calls={len(tool_calls)} gen_tokens={gen_tokens} prompt_tokens={prompt_tokens}")
             if thinking:
                 print(f"[CHAT]   thinking: {thinking[:200]!r}")
             if content:
@@ -2375,14 +2388,17 @@ async def chat_stream(req: ChatRequest):
                             "Do not output an empty response."
                         )
                     else:
-                        nudge = "Please respond to my previous message."
+                        nudge = "Please respond to my previous message with a direct answer."
                     messages.append({"role": "user", "content": nudge})
                     continue
                 elif round_num == 1 and ollama_tools:
                     # Tools may be confusing the model — strip them and try for a plain response
                     print(f"[CHAT]   Retrying without tools for plain response...")
                     ollama_tools = []
-                    payload["tools"] = []
+                    # Keep system prompt + last 4 messages to avoid context overflow
+                    sys_msgs = [m for m in messages if m["role"] == "system"]
+                    non_sys = [m for m in messages if m["role"] != "system"]
+                    messages = sys_msgs + non_sys[-4:]
                     continue
                 await events.emit(conv_id, "complete", {"status": "Complete"})
                 yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
@@ -3146,6 +3162,129 @@ async def model_info(model_name: str):
         return r.json()
     except Exception as e:
         raise HTTPException(502, f"Failed to get model info: {e}")
+
+
+# Tool-calling templates keyed by family
+_TOOL_TEMPLATES = {
+    "chatml": {
+        "label": "ChatML (Qwen2.5 / Qwen3 / most instruct models)",
+        "template": (
+            '{{- if .System }}<|im_start|>system\n{{- .System }}<|im_end|>\n{{ end }}'
+            '{{- range $i, $_ := .Messages }}'
+            '{{- $last := eq (len (slice $.Messages $i)) 1 }}'
+            '{{- if eq .Role "user" }}<|im_start|>user\n{{- .Content }}<|im_end|>\n'
+            '{{- if $last }}<|im_start|>assistant\n{{ end }}'
+            '{{- else if eq .Role "assistant" }}<|im_start|>assistant\n'
+            '{{- if .Content }}{{ .Content }}'
+            '{{- else if .ToolCalls }}<tool_call>\n'
+            '{{ range .ToolCalls }}{"name": "{{ .Function.Name }}", "arguments": {{ .Function.Arguments }}}\n{{ end }}'
+            '</tool_call>{{ end }}'
+            '{{- if not $last }}<|im_end|>\n{{ end }}'
+            '{{- else if eq .Role "tool" }}<|im_start|>tool\n{{- .Content }}<|im_end|>\n'
+            '{{- if $last }}<|im_start|>assistant\n{{ end }}{{ end }}{{- end }}'
+        ),
+        "stops": ["<|im_start|>", "<|im_end|>"],
+    },
+    "llama3": {
+        "label": "Llama 3 / 3.1 / 3.2 / 3.3",
+        "template": (
+            '{{- if .System }}<|start_header_id|>system<|end_header_id|>\n\n{{- .System }}<|eot_id|>{{ end }}'
+            '{{- range $i, $_ := .Messages }}'
+            '{{- $last := eq (len (slice $.Messages $i)) 1 }}'
+            '{{- if eq .Role "user" }}<|start_header_id|>user<|end_header_id|>\n\n{{- .Content }}<|eot_id|>'
+            '{{- if $last }}<|start_header_id|>assistant<|end_header_id|>\n\n{{ end }}'
+            '{{- else if eq .Role "assistant" }}<|start_header_id|>assistant<|end_header_id|>\n\n'
+            '{{- if .Content }}{{ .Content }}'
+            '{{- else if .ToolCalls }}{"name": "{{ (index .ToolCalls 0).Function.Name }}", "parameters": {{ (index .ToolCalls 0).Function.Arguments }}}{{ end }}'
+            '{{- if not $last }}<|eot_id|>{{ end }}'
+            '{{- else if eq .Role "tool" }}<|start_header_id|>ipython<|end_header_id|>\n\n{{- .Content }}<|eot_id|>'
+            '{{- if $last }}<|start_header_id|>assistant<|end_header_id|>\n\n{{ end }}{{ end }}{{- end }}'
+        ),
+        "stops": ["<|start_header_id|>", "<|end_header_id|>", "<|eot_id|>"],
+    },
+    "mistral": {
+        "label": "Mistral / Mixtral",
+        "template": (
+            '{{- if .System }}[INST] {{ .System }} [/INST]\n{{ end }}'
+            '{{- range $i, $_ := .Messages }}'
+            '{{- $last := eq (len (slice $.Messages $i)) 1 }}'
+            '{{- if eq .Role "user" }}[INST] {{ .Content }} [/INST]{{ if $last }} {{ end }}'
+            '{{- else if eq .Role "assistant" }} {{ .Content }}'
+            '{{- if .ToolCalls }} [TOOL_CALLS] [{"name": "{{ (index .ToolCalls 0).Function.Name }}", "arguments": {{ (index .ToolCalls 0).Function.Arguments }}}]{{ end }}'
+            '{{- if not $last }}</s>{{ end }}'
+            '{{- else if eq .Role "tool" }} [TOOL_RESULTS] {"content": {{ .Content }}} [/TOOL_RESULTS]{{ end }}{{- end }}'
+        ),
+        "stops": ["[INST]", "[/INST]", "</s>"],
+    },
+    "gemma": {
+        "label": "Gemma 2 / 3",
+        "template": (
+            '{{- if .System }}<start_of_turn>user\n{{- .System }}<end_of_turn>\n{{ end }}'
+            '{{- range $i, $_ := .Messages }}'
+            '{{- $last := eq (len (slice $.Messages $i)) 1 }}'
+            '{{- if eq .Role "user" }}<start_of_turn>user\n{{- .Content }}<end_of_turn>\n'
+            '{{- if $last }}<start_of_turn>model\n{{ end }}'
+            '{{- else if eq .Role "assistant" }}<start_of_turn>model\n{{- .Content }}'
+            '{{- if not $last }}<end_of_turn>\n{{ end }}{{ end }}{{- end }}'
+        ),
+        "stops": ["<start_of_turn>", "<end_of_turn>"],
+    },
+}
+
+def _detect_template_family(model_name: str) -> str:
+    b = model_name.lower()
+    if any(x in b for x in ("qwen", "chatml")):
+        return "chatml"
+    if any(x in b for x in ("llama", "hermes", "dolphin", "openhermes", "nous")):
+        return "llama3"
+    if any(x in b for x in ("mistral", "mixtral", "codestral")):
+        return "mistral"
+    if "gemma" in b:
+        return "gemma"
+    return "chatml"  # safest default
+
+
+@app.get("/api/models/{model_name:path}/template-info")
+async def get_template_info(model_name: str):
+    detected = _detect_template_family(model_name)
+    return {
+        "detected": detected,
+        "templates": {k: {"label": v["label"]} for k, v in _TOOL_TEMPLATES.items()},
+    }
+
+
+@app.post("/api/models/{model_name:path}/fix-template")
+async def fix_model_template(model_name: str, body: dict = Body(default={})):
+    """Patch a model's Modelfile to add a tool-calling template and recreate it in Ollama."""
+    family = body.get("family") or _detect_template_family(model_name)
+    tpl = _TOOL_TEMPLATES.get(family)
+    if not tpl:
+        raise HTTPException(400, f"Unknown template family: {family}")
+
+    # Use new Ollama 0.6+ API: from + template + parameters
+    # (The old `modelfile` field is deprecated and rejected by newer Ollama builds)
+    stop_list = tpl["stops"]
+    create_payload = {
+        "model": model_name,
+        "from": model_name,
+        "template": tpl["template"],
+        "parameters": {"stop": stop_list},
+    }
+
+    try:
+        create_r = await http.post(
+            f"{config.OLLAMA_URL}/api/create",
+            json=create_payload,
+            timeout=120,
+        )
+        if create_r.status_code not in (200, 201):
+            raise HTTPException(502, f"Ollama create failed: {create_r.text[:300]}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Failed to recreate model: {e}")
+
+    return {"ok": True, "family": family, "model": model_name}
 
 
 # ============================================================
