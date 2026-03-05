@@ -497,6 +497,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
   const [addPanel,setAddPanel]=React.useState(false);
   const [addSearch,setAddSearch]=React.useState("");
   const [analyzing,setAnalyzing]=React.useState(false);
+  const [analyzeMsg,setAnalyzeMsg]=React.useState(null);
   const [creatingKb,setCreatingKb]=React.useState(false);
   React.useEffect(()=>{if(ws){setWsName(ws.name||"");setWsDesc(ws.description||"");};},[ws?.id]);
   if(wsLoading)return<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.mut}}><div style={{textAlign:"center"}}><div style={{fontSize:24,marginBottom:8}}>⏳</div>Loading workspace...</div></div>;
@@ -515,14 +516,21 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
     setEditMode(false);
   };
   const analyzeTopics=async()=>{
-    setAnalyzing(true);
+    const convTitles=(ws.conversations||[]).filter(c=>c.title&&c.title.trim());
+    if(!convTitles.length){setAnalyzeMsg({ok:false,text:"No conversation titles to analyze. Add chats with titles first."});setTimeout(()=>setAnalyzeMsg(null),4000);return;}
+    setAnalyzing(true);setAnalyzeMsg(null);
+    const useModel=wsModel||models[0]||"llama3.2:3b";
     try{
-      const r=await fetch(`${API}/api/workspaces/${ws.id}/analyze`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||"qwen2.5:7b"})});
+      const r=await fetch(`${API}/api/workspaces/${ws.id}/analyze`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:useModel})});
+      if(!r.ok)throw new Error(`Server error ${r.status}`);
       const d=await r.json();
-      setWsDetail(prev=>({...prev,topics:d.topics||[]}));
-      setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,topics:d.topics||[]}:w));
-    }catch{}
+      const newTopics=d.topics||[];
+      setWsDetail(prev=>({...prev,topics:newTopics}));
+      setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,topics:newTopics}:w));
+      setAnalyzeMsg(newTopics.length?{ok:true,text:`Found ${newTopics.length} topic${newTopics.length>1?"s":""}`}:{ok:false,text:"No topics detected. Try adding more varied conversations."});
+    }catch(e){setAnalyzeMsg({ok:false,text:`Analysis failed: ${e.message}. Check that model "${useModel}" is installed.`});}
     setAnalyzing(false);
+    setTimeout(()=>setAnalyzeMsg(null),5000);
   };
   const createPersona=async()=>{
     setCreatingKb(true);
@@ -577,7 +585,8 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
               <button onClick={deleteWs} style={btnS(t.err)}>🗑</button></>}
         </div>
       </div>
-      {topics.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+      {analyzeMsg&&<div style={{fontSize:10,color:analyzeMsg.ok?t.ok:t.err,marginTop:4,padding:"4px 8px",background:analyzeMsg.ok?`${t.ok}15`:`${t.err}15`,borderRadius:6,border:`1px solid ${analyzeMsg.ok?t.ok:t.err}33`}}>{analyzeMsg.text}</div>}
+      {topics.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:analyzeMsg?4:0}}>
         {topics.map((tp,i)=><span key={i} style={{fontSize:10,padding:"3px 8px",borderRadius:12,background:tp.color+"22",color:tp.color,border:`1px solid ${tp.color}44`,fontWeight:600}}>{tp.label}</span>)}
       </div>}
     </div>
@@ -699,9 +708,14 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
   const [open,setOpen]=useState(false);
   const [dropPos,setDropPos]=useState({top:0,left:0,width:220});
   const triggerRef=useRef(null);
+  const dropRef=useRef(null);
   useEffect(()=>{
     if(!open)return;
-    const handler=(e)=>{if(triggerRef.current&&!triggerRef.current.contains(e.target))setOpen(false);};
+    const handler=(e)=>{
+      if(triggerRef.current&&triggerRef.current.contains(e.target))return;
+      if(dropRef.current&&dropRef.current.contains(e.target))return;
+      setOpen(false);
+    };
     document.addEventListener("mousedown",handler);
     return()=>document.removeEventListener("mousedown",handler);
   },[open]);
@@ -766,7 +780,7 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
         if(a==="Other")return 1;if(b==="Other")return-1;
         return a.localeCompare(b);
       });
-      return ReactDOM.createPortal(<div style={{position:"fixed",top:dropPos.top,left:dropPos.left,minWidth:dropPos.width,maxWidth:380,background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:10,boxShadow:`0 8px 32px #00000077`,zIndex:99999,maxHeight:360,overflowY:"auto",padding:"4px"}}>
+      return ReactDOM.createPortal(<div ref={dropRef} style={{position:"fixed",top:dropPos.top,left:dropPos.left,minWidth:dropPos.width,maxWidth:380,background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:10,boxShadow:`0 8px 32px #00000077`,zIndex:99999,maxHeight:360,overflowY:"auto",padding:"4px",fontFamily:font}}>
         {sortedMakers.map(maker=><div key={maker}>
           <div style={{padding:"5px 10px 3px",fontSize:8,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.8,borderTop:maker===sortedMakers[0]?"none":`1px solid ${t.brd}22`,marginTop:maker===sortedMakers[0]?0:4,paddingTop:maker===sortedMakers[0]?5:7}}>{maker}</div>
           {grouped[maker].map(m=>{
@@ -1427,7 +1441,7 @@ function HyprChat(){
     }).join("");
   };
   const hfSelectModel=async(model)=>{
-    setHfSelected(model);setHfModelInfo(null);setHfReadme(null);setHfSelectedFiles([]);setHfDownloadError(null);setHfDownloadProg(null);setHfDownloadPct(0);
+    setHfSelected(model);setHfModelInfo(null);setHfReadme(null);setHfSelectedFiles([]);
     const repoId=model.id;
     const defaultName=repoId.split("/").pop().toLowerCase().replace(/[^a-z0-9\-:.]/g,"-").slice(0,60);
     setHfDownloadName(defaultName);
@@ -2684,7 +2698,11 @@ function HyprChat(){
               <div style={{fontSize:9,color:t.mut}}>{hfSelected.id.split("/")[0]}/</div>
               <div style={{fontSize:14,fontWeight:700,color:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{hfSelected.id.split("/")[1]||hfSelected.id}</div>
             </div>
-            <div style={{display:"flex",gap:12,fontSize:10,color:t.mut,flexShrink:0}}>
+            <div style={{display:"flex",gap:12,fontSize:10,color:t.mut,flexShrink:0,alignItems:"center"}}>
+              {hfModelInfo?.gguf_files?.length>0&&(()=>{
+                const total=hfModelInfo.gguf_files.reduce((a,f)=>a+(f.size||0),0);
+                return total>0?<span style={{fontWeight:700,color:t.warm,fontSize:11}}>{fmtSize(total)}</span>:null;
+              })()}
               <span>⬇ {hfSelected.downloads>999?`${(hfSelected.downloads/1000).toFixed(1)}k`:hfSelected.downloads}</span>
               <span>♥ {hfSelected.likes}</span>
             </div>

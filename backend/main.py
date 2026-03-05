@@ -448,6 +448,127 @@ async def _search_searxng(query: str, count: int = 10) -> list:
     except Exception:
         return []
 
+async def _search_wikileaks(query: str, count: int = 15) -> list:
+    """Search WikiLeaks directly via their search API, with SearXNG fallback."""
+    results = []
+    try:
+        # WikiLeaks search API (Elasticsearch-backed JSON endpoint)
+        params = urllib.parse.urlencode({"query": query, "include_onion": "false"})
+        r = await http.get(
+            f"https://search.wikileaks.org/?{params}",
+            timeout=15,
+            headers={"Accept": "application/json, text/html", "User-Agent": "Mozilla/5.0"},
+        )
+        if r.status_code == 200:
+            try:
+                data = r.json()
+                # Handle Elasticsearch nested hits format
+                hits = data.get("hits", {})
+                items = hits.get("hits", []) if isinstance(hits, dict) else (hits if isinstance(hits, list) else [])
+                if not items:
+                    items = data.get("results", [])
+                for item in items[:count]:
+                    src = item.get("_source", item)
+                    title = (src.get("title") or src.get("subject") or src.get("from") or
+                             src.get("filename") or "WikiLeaks Document")
+                    url = src.get("url") or src.get("link") or src.get("permalink") or ""
+                    body = (src.get("description") or src.get("content") or src.get("body") or
+                            src.get("text") or src.get("summary") or "")
+                    if not url:
+                        continue
+                    results.append({
+                        "title": f"🔓 {title}",
+                        "url": url,
+                        "content": body[:500],
+                        "engine": "wikileaks",
+                        "score": item.get("_score", 0),
+                        "thumbnail": "",
+                        "type": "web",
+                    })
+            except Exception:
+                # HTML fallback — parse search result links from page
+                text = r.text
+                import re as _re2
+                for m in _re2.finditer(r'href="(https?://wikileaks\.org/[^"]+)"[^>]*>([^<]{5,200})<', text):
+                    url, title = m.group(1), m.group(2).strip()
+                    if url not in [x["url"] for x in results]:
+                        results.append({
+                            "title": f"🔓 {title}",
+                            "url": url,
+                            "content": "",
+                            "engine": "wikileaks",
+                            "score": 0,
+                            "thumbnail": "",
+                            "type": "web",
+                        })
+                    if len(results) >= count:
+                        break
+    except Exception:
+        pass
+
+    # SearXNG fallback/supplement — search wikileaks.org directly
+    if len(results) < 8:
+        try:
+            wl_srx = await _search_searxng(f"{query} site:wikileaks.org", min(count, 10))
+            for r in wl_srx:
+                if r.get("url") and r["url"] not in [x["url"] for x in results]:
+                    r["title"] = f"🔓 {r['title']}"
+                    results.append(r)
+        except Exception:
+            pass
+
+    return results[:count]
+
+
+# WikiLeaks collection URLs — used for targeted collection fetching
+_WL_COLLECTIONS = {
+    "plusd":        ("US Diplomatic Cables",       "https://wikileaks.org/plusd/"),
+    "vault7":       ("CIA Vault 7 — Cyber Tools",  "https://wikileaks.org/vault7/"),
+    "gifiles":      ("Stratfor Global Intel Files","https://wikileaks.org/gifiles/"),
+    "dnc":          ("DNC Email Archive",          "https://wikileaks.org/dnc-emails/"),
+    "podesta":      ("Podesta Email Archive",       "https://wikileaks.org/podesta-emails/"),
+    "nsa":          ("NSA/GCHQ Surveillance Docs", "https://wikileaks.org/nsa-aff/"),
+    "spyfiles":     ("Spy Files — Surveillance Tech","https://wikileaks.org/spyfiles/"),
+    "saudi":        ("Saudi Cables",               "https://wikileaks.org/saudi-cables/"),
+    "syria":        ("Syria Files",                "https://wikileaks.org/syria-files/"),
+    "hbgary":       ("HBGary Email Leak",          "https://wikileaks.org/hbgary-emails/"),
+    "sony":         ("Sony Email Archive",         "https://wikileaks.org/sony/emails/"),
+    "tpp":          ("Trans-Pacific Partnership",  "https://wikileaks.org/tpp/"),
+    "ttip":         ("TTIP Trade Docs",            "https://wikileaks.org/ttip/"),
+    "collateral":   ("Collateral Murder Video",    "https://collateralmurder.wikileaks.org/"),
+    "afghanistan":  ("Afghanistan War Diary",      "https://wikileaks.org/afg/"),
+    "iraq":         ("Iraq War Logs",              "https://wikileaks.org/iraq/"),
+    "guantanamo":   ("Guantanamo Files",           "https://wikileaks.org/gitmo/"),
+}
+
+def _wikileaks_collections_for_topic(topic_lower: str) -> list[str]:
+    """Return relevant WikiLeaks collection keys for a given topic."""
+    cols = []
+    kw = {
+        "plusd":       ["diplomat", "cable", "state department", "embassy", "foreign policy", "cia", "nsa", "saudi", "iran", "israel", "russia", "china"],
+        "vault7":      ["cia", "hacking", "cyber", "malware", "exploit", "surveillance", "tool", "weeping angel", "marble", "vault 7", "vault7"],
+        "gifiles":     ["stratfor", "intelligence", "corporate spy", "global intel", "bhopal", "occupy", "cartel"],
+        "dnc":         ["dnc", "democrat", "clinton", "hillary", "bernie sanders", "election", "primary", "debbie wasserman"],
+        "podesta":     ["podesta", "clinton", "hillary", "pizza", "comet", "spirit cooking", "election", "campaign", "email"],
+        "nsa":         ["nsa", "gchq", "prism", "five eyes", "surveillance", "snowden", "xkeyscore", "spy"],
+        "spyfiles":    ["surveillance", "spy", "imsi", "stingray", "finspy", "finfisher", "hack team", "hacking team", "gamma group"],
+        "saudi":       ["saudi", "bin salman", "mbs", "oil", "opec", "khashoggi", "aramco", "middle east"],
+        "syria":       ["syria", "assad", "aleppo", "rebel", "isis", "isil", "middle east"],
+        "hbgary":      ["hbgary", "aaron barr", "anonymous", "nsa", "cia contractor", "cyber"],
+        "sony":        ["sony", "hack", "nk", "north korea", "email"],
+        "tpp":         ["tpp", "trade", "pacific", "corporate", "secret trade"],
+        "ttip":        ["ttip", "trade", "europe", "corporate"],
+        "collateral":  ["iraq", "war", "helicopter", "murder", "civilian", "military", "apache"],
+        "afghanistan": ["afghanistan", "afghan", "war diary", "military", "ied", "taliban"],
+        "iraq":        ["iraq", "war", "baghdad", "military", "civilian", "mosul"],
+        "guantanamo":  ["guantanamo", "gitmo", "detainee", "prisoner", "torture", "enhanced"],
+    }
+    for col, keywords in kw.items():
+        if any(k in topic_lower for k in keywords):
+            cols.append(col)
+    return cols
+
+
 async def _fetch_page(url: str) -> dict | None:
     """Fetch and clean a web page."""
     skip = ["youtube.com", "twitter.com", "x.com", "facebook.com", "instagram.com",
@@ -1226,7 +1347,6 @@ async def chat_stream(req: ChatRequest):
                     f"{topic} cover up suppressed hidden truth",
                     f"{topic} independent investigation expose proof",
                     f'"{topic}" classified secret confidential',
-                    f"{topic} site:wikileaks.org OR site:wikileaks.org/plusd",
                     f"{topic} site:cryptome.org",
                     f"{topic} site:theblackvault.com",
                     f"{topic} site:muckrock.com",
@@ -1368,6 +1488,76 @@ async def chat_stream(req: ChatRequest):
                     if isinstance(r, dict) and r:
                         full_pages.append(r)
                         stats["pages_read"] += 1
+
+                # ── WikiLeaks Wave ──
+                await events.emit(conv_id, "tool_start", {
+                    "tool": "conspiracy_research", "icon": "search",
+                    "status": "🔓 WikiLeaks: searching cables, leaks, and classified archives...",
+                })
+                # Direct WikiLeaks search API
+                wl_queries = [topic]
+                if len(topic.split()) > 1:
+                    wl_queries.append(" ".join(topic.split()[:3]))  # shorter variant
+                if angle == "documents":
+                    wl_queries += [f"{topic} cable", f"{topic} memo", f"{topic} classified"]
+                elif angle == "key_players":
+                    wl_queries += [f"{topic} persons named", f"{topic} individuals involved"]
+                elif angle == "connections":
+                    wl_queries += [f"{topic} network", f"{topic} financial"]
+                else:
+                    wl_queries += [f"{topic} leaked", f"{topic} secret", f"{topic} classified"]
+
+                wl_tasks = [_search_wikileaks(q, 12) for q in wl_queries]
+                wl_results = await asyncio.gather(*wl_tasks, return_exceptions=True)
+                wl_count = 0
+                for res in wl_results:
+                    if isinstance(res, list):
+                        all_findings.extend(res)
+                        wl_count += len(res)
+
+                # Targeted WikiLeaks collection access based on topic
+                relevant_cols = _wikileaks_collections_for_topic(topic_lower)
+                wl_col_urls = []
+                for col in relevant_cols[:6]:
+                    info = _WL_COLLECTIONS.get(col)
+                    if info:
+                        col_name, col_url = info
+                        wl_col_urls.append(col_url)
+                        all_findings.append({
+                            "title": f"🔓 WikiLeaks: {col_name}",
+                            "url": col_url,
+                            "content": f"WikiLeaks {col_name} archive — direct collection relevant to {topic}",
+                            "engine": "wikileaks",
+                            "type": "web",
+                        })
+
+                # Fetch the relevant collection pages
+                wl_fetch_urls = [u for u in wl_col_urls if u not in fetched][:4]
+                wl_fetch_tasks = [_fetch_page(u) for u in wl_fetch_urls]
+                wl_fetch_results = await asyncio.gather(*wl_fetch_tasks, return_exceptions=True)
+                for u, r in zip(wl_fetch_urls, wl_fetch_results):
+                    fetched.add(u)
+                    if isinstance(r, dict) and r:
+                        full_pages.append(r)
+                        stats["pages_read"] += 1
+
+                # Also fetch top WikiLeaks document URLs from search results
+                wl_doc_urls = [
+                    f["url"] for f in all_findings
+                    if "wikileaks.org" in f.get("url", "") and f["url"] not in fetched
+                ][:8]
+                wl_doc_tasks = [_fetch_page(u) for u in wl_doc_urls]
+                wl_doc_results = await asyncio.gather(*wl_doc_tasks, return_exceptions=True)
+                for u, r in zip(wl_doc_urls, wl_doc_results):
+                    fetched.add(u)
+                    if isinstance(r, dict) and r:
+                        full_pages.append(r)
+                        stats["pages_read"] += 1
+
+                await events.emit(conv_id, "tool_start", {
+                    "tool": "conspiracy_research", "icon": "search",
+                    "status": f"🔓 WikiLeaks: {wl_count} documents found, {len(relevant_cols)} collections matched",
+                })
 
                 # ── Wave 3: specialized archives & primary sources ──
                 await events.emit(conv_id, "tool_start", {
@@ -3063,6 +3253,9 @@ async def analyze_workspace_topics(ws_id: str, body: dict = Body(default={})):
             timeout=30
         )
         raw = r.json().get("response", "[]")
+        # Strip <think>...</think> blocks before parsing JSON
+        import re as _re
+        raw = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL).strip()
         start, end = raw.find("["), raw.rfind("]")
         topics = json.loads(raw[start:end + 1]) if start != -1 else []
     except Exception as e:
@@ -3577,7 +3770,8 @@ async def hf_model_info(repo_id: str):
         r.raise_for_status()
         data = r.json()
         gguf_files = [
-            {"name": s.get("rfilename", ""), "size": s.get("size", 0)}
+            {"name": s.get("rfilename", ""),
+             "size": s.get("lfs", {}).get("size") or s.get("size") or 0}
             for s in data.get("siblings", [])
             if (s.get("rfilename", "") or "").lower().endswith(".gguf")
         ]
