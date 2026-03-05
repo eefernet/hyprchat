@@ -537,6 +537,21 @@ function HyprChat(){
   const [pasteCode,setPasteCode]=useState("");
   const [pasteToolName,setPasteToolName]=useState("");
   const [pasteToolDesc,setPasteToolDesc]=useState("");
+  // Models page state
+  const [modelsTab,setModelsTab]=useState("ollama"); // "ollama"|"hf"
+  const [hfSearch,setHfSearch]=useState("");
+  const [hfResults,setHfResults]=useState([]);
+  const [hfLoading,setHfLoading]=useState(false);
+  const [hfSelected,setHfSelected]=useState(null); // model object from search
+  const [hfModelInfo,setHfModelInfo]=useState(null); // detailed info + files
+  const [hfReadme,setHfReadme]=useState(null);
+  const [hfReadmeLoading,setHfReadmeLoading]=useState(false);
+  const [hfDownloading,setHfDownloading]=useState(false);
+  const [hfDownloadProg,setHfDownloadProg]=useState(null);
+  const [hfDownloadError,setHfDownloadError]=useState(null);
+  const [hfDownloadName,setHfDownloadName]=useState("");
+  const [hfSelectedFiles,setHfSelectedFiles]=useState([]); // filenames to download
+  const [hfGgufOnly,setHfGgufOnly]=useState(true);
   const t=THEMES[tm], font=FONTS[fi].v;
 
   useEffect(()=>{try{localStorage.setItem("hc-theme",tm);}catch{}},[tm]);
@@ -1049,6 +1064,62 @@ function HyprChat(){
     }catch(e){setPullProg(`Error: ${e.message}`);setTimeout(()=>setPullProg(null),3000);}
   };
 
+  // HuggingFace helpers
+  const hfDoSearch=async(q,ggufOnly=hfGgufOnly)=>{
+    if(!q.trim())return;
+    setHfLoading(true);setHfResults([]);setHfSelected(null);setHfModelInfo(null);setHfReadme(null);
+    try{
+      const r=await fetch(`${API}/api/hf/search?${new URLSearchParams({q,gguf_only:ggufOnly,limit:24})}`);
+      const d=await r.json();setHfResults(Array.isArray(d)?d:[]);
+    }catch{setHfResults([]);}
+    setHfLoading(false);
+  };
+  const hfSelectModel=async(model)=>{
+    setHfSelected(model);setHfModelInfo(null);setHfReadme(null);setHfSelectedFiles([]);setHfDownloadError(null);setHfDownloadProg(null);
+    const repoId=model.id;
+    // derive a default model name from repo id
+    const defaultName=repoId.split("/").pop().toLowerCase().replace(/[^a-z0-9\-:.]/g,"-").slice(0,60);
+    setHfDownloadName(defaultName);
+    try{const r=await fetch(`${API}/api/hf/model?repo_id=${encodeURIComponent(repoId)}`);const d=await r.json();setHfModelInfo(d);}catch{}
+    setHfReadmeLoading(true);
+    try{const r=await fetch(`${API}/api/hf/readme?repo_id=${encodeURIComponent(repoId)}`);const d=await r.json();setHfReadme(d.content||"");}catch{}
+    setHfReadmeLoading(false);
+  };
+  const hfDownload=async()=>{
+    if(!hfSelected||!hfSelectedFiles.length)return;
+    setHfDownloading(true);setHfDownloadProg("Starting...");setHfDownloadError(null);
+    try{
+      const res=await fetch(`${API}/api/hf/download`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({repo_id:hfSelected.id,filenames:hfSelectedFiles,model_name:hfDownloadName.trim()})});
+      const rdr=res.body.getReader(),dec=new TextDecoder();let buf="";
+      while(true){
+        const{done,value}=await rdr.read();if(done)break;
+        buf+=dec.decode(value,{stream:true});
+        const lines=buf.split("\n");buf=lines.pop()||"";
+        for(const ln of lines){
+          if(!ln.startsWith("data: "))continue;
+          try{
+            const d=JSON.parse(ln.slice(6));
+            if(d.status==="error"){setHfDownloadError(d.message);setHfDownloadProg(null);}
+            else if(d.status==="done"){setHfDownloadProg("✓ "+d.message);fetch(`${API}/api/models`).then(r=>r.json()).then(d=>setModels(d.models||[])).catch(()=>{});}
+            else if(d.message)setHfDownloadProg(d.message);
+          }catch{}
+        }
+      }
+    }catch(e){setHfDownloadError(e.message);}
+    setHfDownloading(false);
+  };
+  const fmtSize=(bytes)=>{if(!bytes)return"?";if(bytes>1e9)return`${(bytes/1e9).toFixed(1)} GB`;if(bytes>1e6)return`${(bytes/1e6).toFixed(0)} MB`;return`${(bytes/1e3).toFixed(0)} KB`;};
+  const isMultiPart=(files)=>files.some(f=>/\d{5}-of-\d{5}\.gguf$/i.test(f.name));
+  const getPartGroups=(files)=>{
+    const groups={};
+    files.forEach(f=>{
+      const m=f.name.match(/^(.+)-(\d{5})-of-(\d{5})\.gguf$/i);
+      if(m){const key=`${m[1]}(${m[3]} parts)`;if(!groups[key])groups[key]=[];groups[key].push(f);}
+      else{groups[f.name]=[f];}
+    });
+    return groups;
+  };
+
   // Markdown
   const inlineParse=(text)=>{
     if(!text)return null;
@@ -1167,6 +1238,7 @@ function HyprChat(){
         {nb("personas",<IC.Cube/>,"Personas")}
         {nb("prompts",<IC.Zap/>,"Prompt Library")}
         {nb("council",<IC.Council/>,"Council of AI")}
+        {nb("models",<IC.Layers/>,"Model Manager")}
         {nb("settings",<IC.Settings/>,"Settings")}
       </div>
       <div style={{padding:"7px 7px 3px",display:"flex",flexDirection:"column",gap:4}}>
@@ -1757,6 +1829,229 @@ function HyprChat(){
     </div>
   </div>
 
+      :panel==="models"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+    {/* Models Page Header */}
+    <div style={{padding:"14px 20px 0",flexShrink:0}}>
+      <h3 style={{fontSize:13,fontWeight:700,color:t.acc,letterSpacing:1,textTransform:"uppercase",margin:"0 0 12px"}}>Model Manager</h3>
+      <div style={{display:"flex",gap:4,marginBottom:0}}>
+        {[["ollama","🦙 Ollama Models"],["hf","🤗 HuggingFace"]].map(([key,label])=>
+          <button key={key} onClick={()=>setModelsTab(key)} style={{padding:"7px 16px",borderRadius:"8px 8px 0 0",border:`1px solid ${modelsTab===key?t.acc:t.brd}44`,borderBottom:"none",background:modelsTab===key?`${t.acc}15`:t.bgDeep,color:modelsTab===key?t.acc:t.mut,fontFamily:font,fontSize:11,cursor:"pointer",fontWeight:modelsTab===key?700:400}}>
+            {label}
+          </button>
+        )}
+      </div>
+      <div style={{height:1,background:`${t.acc}30`,marginBottom:0}}/>
+    </div>
+
+    {/* Ollama Tab */}
+    {modelsTab==="ollama"&&<div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
+      <div style={{maxWidth:680}}>
+        <div style={{marginBottom:16}}>
+          <label style={labelS}>Installed Models</label>
+          <div style={{display:"flex",flexDirection:"column",gap:4}}>
+            {(()=>{
+              const families={};
+              models.forEach(m=>{
+                const [name,tag="latest"]=m.split(":");
+                const base=name.toLowerCase();
+                let family="Other";
+                if(base.includes("qwen"))family="Qwen";
+                else if(base.includes("llama"))family="Llama";
+                else if(base.includes("mistral")||base.includes("mixtral"))family="Mistral";
+                else if(base.includes("gemma"))family="Gemma";
+                else if(base.includes("phi"))family="Phi";
+                else if(base.includes("deepseek"))family="DeepSeek";
+                else if(base.includes("command"))family="Command";
+                else if(base.includes("vicuna")||base.includes("wizard"))family="WizardLM";
+                else if(base.includes("openhermes")||base.includes("hermes"))family="Hermes";
+                if(!families[family])families[family]=[];
+                families[family].push({m,name,tag});
+              });
+              const szCol=(tag)=>{
+                const l=(tag||"").toLowerCase();
+                if(l.match(/70b|65b|72b/))return t.err;
+                if(l.match(/30b|32b|34b/))return t.warm;
+                if(l.match(/13b|14b|27b/))return t.acc;
+                if(l.match(/7b|8b/))return t.ok;
+                if(l.match(/1b|3b|4b/))return t.f1;
+                return t.mut;
+              };
+              const modelIcon=(name)=>{
+                const n=name.toLowerCase();
+                if(n.includes("qwen"))return"🌸";if(n.includes("llama"))return"🦙";
+                if(n.includes("mistral")||n.includes("mixtral"))return"💨";if(n.includes("gemma"))return"💎";
+                if(n.includes("phi"))return"φ";if(n.includes("deepseek"))return"🔍";
+                if(n.includes("coder")||n.includes("code"))return"💻";if(n.includes("wizard"))return"🧙";
+                return"🤖";
+              };
+              const familyEmoji={Qwen:"🌸",Llama:"🦙",Mistral:"💨",Gemma:"💎",Phi:"φ",DeepSeek:"🔍",Command:"⚡",WizardLM:"🧙",Hermes:"🏛",Other:"🤖"};
+              return Object.entries(families).map(([fam,items])=><div key={fam} style={{marginBottom:8}}>
+                <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:4,paddingLeft:4,display:"flex",alignItems:"center",gap:5}}>
+                  <span>{familyEmoji[fam]||"🤖"}</span><span>{fam} ({items.length})</span>
+                </div>
+                {items.map(({m,name,tag})=>{
+                  const sc=szCol(tag);
+                  return <div key={m} style={{display:"flex",alignItems:"center",gap:8,background:`${t.surface}66`,padding:"9px 12px",borderRadius:8,border:`1px solid ${t.brd}22`,marginBottom:2}}>
+                    <span style={{fontSize:16,flexShrink:0}}>{modelIcon(name)}</span>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:12,fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name}</div>
+                    </div>
+                    <span style={{fontSize:10,fontWeight:700,color:sc,background:`${sc}18`,padding:"2px 8px",borderRadius:10,border:`1px solid ${sc}33`,flexShrink:0}}>{tag}</span>
+                    <button onClick={()=>uConv(actId,{model:m})} style={{background:"none",border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",padding:"3px 8px",borderRadius:5,fontSize:9,opacity:.8}}>Use</button>
+                    <button onClick={async()=>{try{await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});setModels(p=>p.filter(x=>x!==m));}catch{}}} style={{background:"none",border:`1px solid ${t.err}33`,color:t.err,cursor:"pointer",padding:"3px 6px",borderRadius:5,display:"flex",alignItems:"center",gap:3,fontSize:9,opacity:.7}}>
+                      <IC.Trash/>Remove
+                    </button>
+                  </div>;
+                })}
+              </div>);
+            })()}
+            {!models.length&&<div style={{fontSize:11,color:t.mut,fontStyle:"italic",padding:8}}>No Ollama models found.</div>}
+          </div>
+        </div>
+
+        <div style={{marginBottom:16}}><label style={labelS}>Pull from Ollama Library</label>
+          <div style={{fontSize:10,color:t.mut,marginBottom:6}}>Enter a model name from <a href="https://ollama.com/library" target="_blank" rel="noopener" style={{color:t.acc}}>ollama.com/library</a> (e.g. <code style={{color:t.warm}}>llama3.1:8b</code>)</div>
+          <div style={{display:"flex",gap:6}}>
+            <input value={pullName} onChange={e=>setPullName(e.target.value)} placeholder="e.g. llama3.1:8b, mistral:7b-instruct" onKeyDown={e=>e.key==="Enter"&&pullModel()} style={{...inputS,flex:1}}/>
+            <button onClick={pullModel} disabled={!pullName.trim()||!!pullProg} style={btnS(t.ok)}>
+              <IC.Download/>{pullProg?"Pulling...":"Pull"}
+            </button>
+          </div>
+          {pullProg&&<div style={{marginTop:6,padding:"8px 12px",background:`${t.surface}66`,borderRadius:8,border:`1px solid ${t.brd}22`,fontSize:11,color:t.acc,display:"flex",alignItems:"center",gap:6}}>
+            <div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
+            {pullProg}
+          </div>}
+        </div>
+      </div>
+    </div>}
+
+    {/* HuggingFace Tab */}
+    {modelsTab==="hf"&&<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      {!hfSelected?<>
+        {/* Search bar */}
+        <div style={{padding:"12px 20px",flexShrink:0,borderBottom:`1px solid ${t.brd}15`}}>
+          <div style={{display:"flex",gap:6,maxWidth:680}}>
+            <input value={hfSearch} onChange={e=>setHfSearch(e.target.value)} onKeyDown={e=>e.key==="Enter"&&hfDoSearch(hfSearch)}
+              placeholder="Search HuggingFace models (e.g. Llama, Mistral, Qwen)..." style={{...inputS,flex:1}}/>
+            <button onClick={()=>hfDoSearch(hfSearch)} disabled={hfLoading||!hfSearch.trim()} style={btnS(t.acc)}>
+              <IC.Search/>{hfLoading?"Searching...":"Search"}
+            </button>
+          </div>
+          <div style={{display:"flex",gap:8,marginTop:6,alignItems:"center"}}>
+            <label style={{...labelS,margin:0,display:"flex",alignItems:"center",gap:5,cursor:"pointer",fontSize:10}}>
+              <input type="checkbox" checked={hfGgufOnly} onChange={e=>{setHfGgufOnly(e.target.checked);}} style={{accentColor:t.acc}}/>
+              GGUF format only (compatible with Ollama)
+            </label>
+            {hfResults.length>0&&<span style={{fontSize:9,color:t.mut,marginLeft:"auto"}}>{hfResults.length} models</span>}
+          </div>
+          {!hfResults.length&&!hfLoading&&<div style={{fontSize:10,color:t.mut,marginTop:6}}>
+            Search for GGUF models you can run locally with Ollama. Try: <span style={{color:t.acc,cursor:"pointer"}} onClick={()=>{setHfSearch("Llama 3");hfDoSearch("Llama 3");}}>Llama 3</span>{" · "}<span style={{color:t.acc,cursor:"pointer"}} onClick={()=>{setHfSearch("Qwen2");hfDoSearch("Qwen2");}}>Qwen2</span>{" · "}<span style={{color:t.acc,cursor:"pointer"}} onClick={()=>{setHfSearch("Mistral");hfDoSearch("Mistral");}}>Mistral</span>
+          </div>}
+        </div>
+        {/* Results grid */}
+        <div style={{flex:1,overflowY:"auto",padding:"12px 20px"}}>
+          {hfLoading&&<div style={{display:"flex",justifyContent:"center",padding:40,color:t.mut,gap:6,alignItems:"center"}}>
+            <div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
+            Searching HuggingFace...
+          </div>}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:10,maxWidth:680}}>
+            {hfResults.map(m=>{
+              const parts=m.id.split("/");const author=parts[0],name=parts[1]||parts[0];
+              return <div key={m.id} onClick={()=>hfSelectModel(m)} style={{background:`${t.surface}88`,border:`1px solid ${t.brd}44`,borderRadius:10,padding:14,cursor:"pointer",transition:"all .15s"}}
+                onMouseEnter={e=>{e.currentTarget.style.borderColor=`${t.acc}66`;e.currentTarget.style.background=`${t.surface}CC`;}}
+                onMouseLeave={e=>{e.currentTarget.style.borderColor=`${t.brd}44`;e.currentTarget.style.background=`${t.surface}88`;}}>
+                <div style={{fontSize:9,color:t.mut,marginBottom:2}}>{author}/</div>
+                <div style={{fontSize:12,fontWeight:700,color:t.text,marginBottom:6,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name}</div>
+                <div style={{display:"flex",gap:8,fontSize:9,color:t.mut}}>
+                  <span>⬇ {m.downloads>1000?`${(m.downloads/1000).toFixed(1)}k`:m.downloads}</span>
+                  <span>♥ {m.likes}</span>
+                  {m.pipeline_tag&&<span style={{color:t.f1}}>{m.pipeline_tag}</span>}
+                </div>
+                {m.tags&&m.tags.slice(0,3).filter(tg=>tg!=="gguf").map(tg=><span key={tg} style={{display:"inline-block",fontSize:8,padding:"1px 5px",borderRadius:6,background:`${t.acc}12`,color:t.mut,border:`1px solid ${t.brd}22`,marginTop:4,marginRight:3}}>{tg}</span>)}
+              </div>;
+            })}
+          </div>
+        </div>
+      </>:
+      /* Model detail view */
+      <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        {/* Detail header */}
+        <div style={{padding:"12px 20px",flexShrink:0,borderBottom:`1px solid ${t.brd}15`,display:"flex",alignItems:"center",gap:10}}>
+          <button onClick={()=>{setHfSelected(null);setHfModelInfo(null);setHfReadme(null);}} style={{...btnS(t.mut),padding:"4px 8px",fontSize:10}}>← Back</button>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:9,color:t.mut}}>{hfSelected.id.split("/")[0]}/</div>
+            <div style={{fontSize:13,fontWeight:700,color:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{hfSelected.id.split("/")[1]||hfSelected.id}</div>
+          </div>
+          <div style={{display:"flex",gap:10,fontSize:10,color:t.mut,flexShrink:0}}>
+            <span>⬇ {hfSelected.downloads>1000?`${(hfSelected.downloads/1000).toFixed(1)}k`:hfSelected.downloads}</span>
+            <span>♥ {hfSelected.likes}</span>
+          </div>
+        </div>
+
+        <div style={{flex:1,overflowY:"auto",padding:"14px 20px",display:"flex",flexDirection:"column",gap:14,maxWidth:720}}>
+
+          {/* GGUF Files + Download */}
+          <div style={{background:`${t.surface}88`,border:`1px solid ${t.brd}44`,borderRadius:10,padding:14}}>
+            <label style={{...labelS,marginBottom:8}}>GGUF Files</label>
+            {!hfModelInfo?<div style={{color:t.mut,fontSize:11,fontStyle:"italic"}}>Loading files...</div>:
+            hfModelInfo.gguf_files.length===0?<div style={{color:t.mut,fontSize:11,fontStyle:"italic"}}>No GGUF files found for this model.</div>:
+            <div>
+              {(()=>{
+                const groups=getPartGroups(hfModelInfo.gguf_files);
+                return Object.entries(groups).map(([groupKey,files])=>{
+                  const isGroup=files.length>1;
+                  const totalSize=files.reduce((acc,f)=>acc+f.size,0);
+                  const allSelected=files.every(f=>hfSelectedFiles.includes(f.name));
+                  const toggle=()=>{
+                    if(allSelected)setHfSelectedFiles(p=>p.filter(n=>!files.map(f=>f.name).includes(n)));
+                    else setHfSelectedFiles(p=>[...new Set([...p,...files.map(f=>f.name)])]);
+                  };
+                  return <div key={groupKey} onClick={toggle} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",borderRadius:8,background:allSelected?`${t.acc}12`:`${t.surface}44`,border:`1px solid ${allSelected?t.acc:t.brd}33`,marginBottom:4,cursor:"pointer"}}>
+                    <input type="checkbox" checked={allSelected} onChange={toggle} onClick={e=>e.stopPropagation()} style={{accentColor:t.acc,flexShrink:0}}/>
+                    <div style={{flex:1,minWidth:0}}>
+                      {isGroup?<>
+                        <div style={{fontSize:11,fontWeight:600,color:allSelected?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{groupKey}</div>
+                        <div style={{fontSize:9,color:t.mut}}>{files.length} parts · {fmtSize(totalSize)} total</div>
+                      </>:<>
+                        <div style={{fontSize:11,fontWeight:600,color:allSelected?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{files[0].name}</div>
+                        <div style={{fontSize:9,color:t.mut}}>{fmtSize(files[0].size)}</div>
+                      </>}
+                    </div>
+                    {allSelected&&<span style={{fontSize:9,padding:"2px 6px",borderRadius:6,background:`${t.acc}22`,color:t.acc,border:`1px solid ${t.acc}33`,flexShrink:0}}>selected</span>}
+                  </div>;
+                });
+              })()}
+
+              {hfSelectedFiles.length>0&&<div style={{marginTop:10,display:"flex",flexDirection:"column",gap:6}}>
+                <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                  <input value={hfDownloadName} onChange={e=>setHfDownloadName(e.target.value)} placeholder="Model name in Ollama" style={{...inputS,flex:1,fontSize:11}}/>
+                  <button onClick={hfDownload} disabled={hfDownloading||!hfDownloadName.trim()} style={{...btnS(t.ok),flexShrink:0}}>
+                    <IC.Download/>{hfDownloading?"Downloading...":"Download"}
+                  </button>
+                </div>
+                <div style={{fontSize:9,color:t.mut}}>Name to register in Ollama ({hfSelectedFiles.length} file{hfSelectedFiles.length>1?"s":""}, {fmtSize(hfModelInfo.gguf_files.filter(f=>hfSelectedFiles.includes(f.name)).reduce((a,f)=>a+f.size,0))} total)</div>
+                {hfDownloadProg&&<div style={{padding:"7px 12px",background:`${t.surface}66`,borderRadius:8,border:`1px solid ${t.brd}22`,fontSize:11,color:hfDownloadProg.startsWith("✓")?t.ok:t.acc,display:"flex",alignItems:"center",gap:6}}>
+                  {!hfDownloadProg.startsWith("✓")&&<div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
+                  {hfDownloadProg}
+                </div>}
+                {hfDownloadError&&<div style={{padding:"7px 12px",background:`${t.err}10`,borderRadius:8,border:`1px solid ${t.err}44`,fontSize:11,color:t.err}}>{hfDownloadError}</div>}
+              </div>}
+            </div>}
+          </div>
+
+          {/* README */}
+          <div style={{background:`${t.surface}88`,border:`1px solid ${t.brd}44`,borderRadius:10,padding:14}}>
+            <label style={{...labelS,marginBottom:8}}>README</label>
+            {hfReadmeLoading?<div style={{color:t.mut,fontSize:11,fontStyle:"italic"}}>Loading README...</div>:
+            hfReadme?<div style={{fontSize:12,lineHeight:1.6,color:t.dim}}>{md(hfReadme)}</div>:
+            <div style={{color:t.mut,fontSize:11,fontStyle:"italic"}}>No README loaded.</div>}
+          </div>
+
+        </div>
+      </div>}
+    </div>}
+  </div>
+
       :panel==="settings"?<div style={{flex:1,overflowY:"auto",padding:20}}>
     <div style={{maxWidth:650}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
@@ -1911,67 +2206,15 @@ function HyprChat(){
         <div style={{fontSize:10,color:t.mut,marginTop:4}}>Used for auto-detecting topics in workspaces. A small fast model works well.</div>
       </div>
 
-      <div style={{marginBottom:20}}><label style={labelS}>Ollama Models</label>
-        <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:8}}>
-          {(()=>{
-            // Group models by family
-            const families={};
-            models.forEach(m=>{
-              const [name,tag="latest"]=m.split(":");
-              const family=name.replace(/-\d+b$/i,"").replace(/:\w+$/,"").split("-").slice(0,2).join("-");
-              if(!families[family])families[family]=[];
-              families[family].push({m,name,tag});
-            });
-            const getSizeColor=(tag)=>{
-              const lower=(tag||"").toLowerCase();
-              if(lower.includes("70b")||lower.includes("65b")||lower.includes("72b"))return t.err;
-              if(lower.includes("30b")||lower.includes("32b")||lower.includes("34b"))return t.warm;
-              if(lower.includes("13b")||lower.includes("14b")||lower.includes("27b"))return t.acc;
-              if(lower.includes("7b")||lower.includes("8b"))return t.ok;
-              if(lower.includes("1b")||lower.includes("3b")||lower.includes("4b"))return t.f1;
-              return t.mut;
-            };
-            const getModelIcon=(name)=>{
-              const n=name.toLowerCase();
-              if(n.includes("qwen"))return "🌸";
-              if(n.includes("llama"))return "🦙";
-              if(n.includes("mistral")||n.includes("mixtral"))return "💨";
-              if(n.includes("gemma"))return "💎";
-              if(n.includes("phi"))return "φ";
-              if(n.includes("deepseek"))return "🔍";
-              if(n.includes("coder")||n.includes("code"))return "💻";
-              if(n.includes("wizard"))return "🧙";
-              return "🤖";
-            };
-            return Object.entries(families).map(([fam,items])=><div key={fam} style={{marginBottom:4}}>
-              {Object.keys(families).length>1&&<div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:3,paddingLeft:4}}>{fam}</div>}
-              {items.map(({m,name,tag})=>{
-                const szCol=getSizeColor(tag);
-                return <div key={m} style={{display:"flex",alignItems:"center",gap:8,background:`${t.surface}66`,padding:"8px 12px",borderRadius:8,border:`1px solid ${t.brd}22`,marginBottom:2}}>
-                  <span style={{fontSize:14,flexShrink:0}}>{getModelIcon(name)}</span>
-                  <span style={{fontSize:12,fontWeight:600,color:t.text}}>{name}</span>
-                  <span style={{fontSize:10,fontWeight:700,color:szCol,background:`${szCol}18`,padding:"1px 7px",borderRadius:10,border:`1px solid ${szCol}33`,flexShrink:0}}>{tag}</span>
-                  <span style={{marginLeft:"auto"}}/>
-                  <button onClick={()=>uConv(actId,{model:m})} style={{background:"none",border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",padding:"3px 6px",borderRadius:5,fontSize:9,opacity:.8}}>Use</button>
-                  <button onClick={async()=>{try{await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});setModels(p=>p.filter(x=>x!==m));}catch{}}} style={{background:"none",border:`1px solid ${t.err}33`,color:t.err,cursor:"pointer",padding:"3px 6px",borderRadius:5,display:"flex",alignItems:"center",gap:3,fontSize:9,opacity:.7}}>
-                    <IC.Trash/> Remove
-                  </button>
-                </div>;
-              })}
-            </div>);
-          })()}
-          {!models.length&&<div style={{fontSize:11,color:t.mut,fontStyle:"italic",padding:8}}>No models loaded</div>}
+      <div style={{marginBottom:20}}>
+        <label style={labelS}>Model Manager</label>
+        <div style={{padding:14,background:`${t.surface}66`,borderRadius:10,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:12}}>
+          <div style={{flex:1}}>
+            <div style={{fontSize:12,fontWeight:600,color:t.text,marginBottom:2}}>🦙 Ollama + 🤗 HuggingFace Models</div>
+            <div style={{fontSize:10,color:t.mut}}>Manage installed models, browse and download from HuggingFace, pull from Ollama library.</div>
+          </div>
+          <button onClick={()=>setPanel("models")} style={{...btnS(t.acc),flexShrink:0}}>Open Manager →</button>
         </div>
-        <div style={{display:"flex",gap:6}}>
-          <input value={pullName} onChange={e=>setPullName(e.target.value)} placeholder="Pull model (e.g. llama3.1:8b)" onKeyDown={e=>e.key==="Enter"&&pullModel()} style={{...inputS,flex:1}}/>
-          <button onClick={pullModel} disabled={!pullName.trim()||!!pullProg} style={btnS(t.ok)}>
-            <IC.Download/>{pullProg?"Pulling...":"Pull"}
-          </button>
-        </div>
-        {pullProg&&<div style={{marginTop:6,padding:"8px 12px",background:`${t.surface}66`,borderRadius:8,border:`1px solid ${t.brd}22`,fontSize:11,color:t.acc,display:"flex",alignItems:"center",gap:6}}>
-          <div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
-          {pullProg}
-        </div>}
       </div>
 
       <div><label style={labelS}>Service Health</label>
@@ -2340,19 +2583,11 @@ function HyprChat(){
           <span style={{fontSize:14,fontWeight:700,color:t.acc,flex:1}}>HyprChat Changelog</span>
           <button onClick={()=>setShowChangelog(false)} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:18,padding:"0 4px",lineHeight:1}}>✕</button>
         </div>
-        <div style={{flex:1,overflowY:"auto",padding:24,lineHeight:1.7}}>
-          {!changelogContent?<div style={{textAlign:"center",padding:40,color:t.mut}}>Loading...</div>
-          :changelogContent.split(/(```[\s\S]*?```)/g).map((p,i)=>{
-            if(p.startsWith("```")){const m=p.match(/```(\w*)\n?([\s\S]*?)```/);const code=m?.[2]||p.slice(3,-3);return <pre key={i} style={{margin:"8px 0",padding:10,background:`${t.surface}88`,borderRadius:6,overflowX:"auto",fontSize:11,color:t.warm,border:`1px solid ${t.brd}33`}}>{code}</pre>;}
-            return <span key={i} style={{whiteSpace:"pre-wrap"}}>{p.split("\n").map((ln,j)=>{
-              if(ln.match(/^---+$/))return <hr key={j} style={{border:"none",borderTop:`1px solid ${t.brd}44`,margin:"16px 0"}}/>;
-              if(ln.match(/^### /))return <div key={j} style={{fontSize:13,fontWeight:700,color:t.f1,margin:"14px 0 5px"}}>{ln.slice(4)}</div>;
-              if(ln.match(/^## /))return <div key={j} style={{fontSize:15,fontWeight:700,color:t.acc,margin:"16px 0 6px"}}>{ln.slice(3)}</div>;
-              if(ln.match(/^# /))return <div key={j} style={{fontSize:18,fontWeight:700,color:t.acc,margin:"18px 0 8px"}}>{ln.slice(2)}</div>;
-              if(ln.match(/^[-*+]\s+/))return <div key={j} style={{display:"flex",gap:7,paddingLeft:4,margin:"2px 0"}}><span style={{color:t.acc,flexShrink:0}}>•</span><span style={{flex:1}}>{ln.replace(/^[-*+]\s+/,"")}</span></div>;
-              return <div key={j} style={{minHeight:ln===""?8:"auto",fontSize:12,color:t.dim}}>{ln}</div>;
-            })}</span>;
-          })}
+        <div style={{flex:1,overflowY:"auto",padding:"20px 28px",lineHeight:1.7,fontSize:13,color:t.text}}>
+          {!changelogContent?<div style={{textAlign:"center",padding:40,color:t.mut,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+            <div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
+            Loading changelog...
+          </div>:md(changelogContent)}
         </div>
       </div>
     </div>}

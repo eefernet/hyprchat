@@ -3051,13 +3051,156 @@ async def cleanup_now():
 @app.get("/api/changelog")
 async def get_changelog():
     """Return the CHANGELOG.md content."""
-    changelog_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "CHANGELOG.md")
+    changelog_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "..", "CHANGELOG.md")
     try:
         with open(changelog_path, "r") as f:
             content = f.read()
         return {"content": content}
     except FileNotFoundError:
         return {"content": "# Changelog\n\nNo changelog available."}
+
+
+# ============================================================
+# HUGGINGFACE MODEL BROWSER
+# ============================================================
+HF_MODELS_DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), "..", "hf_models")
+
+
+@app.get("/api/hf/search")
+async def hf_search(q: str = "", limit: int = 20, gguf_only: bool = True):
+    """Search HuggingFace models."""
+    try:
+        params: dict = {"search": q, "limit": limit, "sort": "downloads", "direction": -1}
+        if gguf_only:
+            params["filter"] = "gguf"
+        r = await http.get("https://huggingface.co/api/models", params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        return [
+            {
+                "id": m.get("id", ""),
+                "downloads": m.get("downloads", 0),
+                "likes": m.get("likes", 0),
+                "lastModified": m.get("lastModified", ""),
+                "tags": (m.get("tags") or [])[:10],
+                "pipeline_tag": m.get("pipeline_tag", ""),
+            }
+            for m in data
+        ]
+    except Exception as e:
+        raise HTTPException(502, f"HuggingFace search failed: {e}")
+
+
+@app.get("/api/hf/model")
+async def hf_model_info(repo_id: str):
+    """Get HuggingFace model details including GGUF file listing."""
+    try:
+        r = await http.get(f"https://huggingface.co/api/models/{repo_id}", timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        gguf_files = [
+            {"name": s.get("rfilename", ""), "size": s.get("size", 0)}
+            for s in data.get("siblings", [])
+            if (s.get("rfilename", "") or "").lower().endswith(".gguf")
+        ]
+        return {
+            "id": data.get("id", ""),
+            "downloads": data.get("downloads", 0),
+            "likes": data.get("likes", 0),
+            "lastModified": data.get("lastModified", ""),
+            "tags": data.get("tags", []),
+            "gguf_files": gguf_files,
+        }
+    except Exception as e:
+        raise HTTPException(502, f"HuggingFace model info failed: {e}")
+
+
+@app.get("/api/hf/readme")
+async def hf_readme(repo_id: str):
+    """Fetch model README from HuggingFace, stripping YAML front matter."""
+    try:
+        r = await http.get(f"https://huggingface.co/{repo_id}/raw/main/README.md", timeout=15)
+        if r.status_code == 200:
+            content = r.text
+            if content.startswith("---"):
+                parts = content.split("---", 2)
+                if len(parts) >= 3:
+                    content = parts[2].strip()
+            return {"content": content[:20000]}
+        return {"content": "No README available for this model."}
+    except Exception as e:
+        return {"content": f"Failed to fetch README: {e}"}
+
+
+@app.post("/api/hf/download")
+async def hf_download(request: Request):
+    """Download GGUF file(s) from HuggingFace and register as an Ollama model. SSE stream."""
+    body = await request.json()
+    repo_id = body.get("repo_id", "")
+    filenames = body.get("filenames", [])
+    model_name = body.get("model_name", "")
+
+    if not repo_id or not filenames:
+        raise HTTPException(400, "repo_id and filenames required")
+
+    # Validate filenames — no path traversal
+    for fn in filenames:
+        safe = os.path.basename(fn)
+        if not safe.lower().endswith(".gguf") or safe != fn:
+            raise HTTPException(400, f"Invalid filename: {fn}")
+
+    # Derive model name if not provided
+    if not model_name:
+        base = filenames[0].replace(".gguf", "").lower()
+        base = re.sub(r"-\d{5}-of-\d{5}$", "", base)
+        model_name = re.sub(r"[^a-z0-9\-:.]", "-", base)[:60].strip("-")
+    model_name = re.sub(r"[^a-z0-9\-:.]", "-", model_name.lower())[:60].strip("-")
+    if not model_name:
+        raise HTTPException(400, "Invalid model name")
+
+    os.makedirs(HF_MODELS_DIR, exist_ok=True)
+    local_paths = [os.path.join(HF_MODELS_DIR, fn) for fn in filenames]
+
+    async def generate():
+        try:
+            for i, (filename, local_path) in enumerate(zip(filenames, local_paths)):
+                url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
+                part_label = f"Part {i+1}/{len(filenames)}" if len(filenames) > 1 else filename
+                yield f"data: {json.dumps({'status': 'downloading', 'part': i+1, 'total_parts': len(filenames), 'message': f'Downloading {part_label}...'})}\n\n"
+
+                async with http.stream("GET", url, timeout=None, follow_redirects=True) as resp:
+                    if resp.status_code != 200:
+                        yield f"data: {json.dumps({'status': 'error', 'message': f'HTTP {resp.status_code} for {filename}'})}\n\n"
+                        return
+                    total = int(resp.headers.get("content-length", 0))
+                    downloaded = 0
+                    with open(local_path, "wb") as f:
+                        async for chunk in resp.aiter_bytes(chunk_size=2 * 1024 * 1024):
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total:
+                                pct = int(downloaded / total * 100)
+                                mb_done = downloaded / 1048576
+                                mb_total = total / 1048576
+                                yield f"data: {json.dumps({'status': 'downloading', 'pct': pct, 'part': i+1, 'total_parts': len(filenames), 'message': f'{part_label}: {mb_done:.0f}/{mb_total:.0f} MB ({pct}%)'})}\n\n"
+
+            yield f"data: {json.dumps({'status': 'creating', 'message': f'Registering model {model_name} with Ollama...'})}\n\n"
+
+            modelfile = f"FROM {local_paths[0]}\n"
+            async with http.stream(
+                "POST", f"{config.OLLAMA_URL}/api/create",
+                json={"name": model_name, "modelfile": modelfile, "stream": True},
+                timeout=600,
+            ) as resp:
+                async for line in resp.aiter_lines():
+                    if line:
+                        yield f"data: {line}\n\n"
+
+            yield f"data: {json.dumps({'status': 'done', 'message': f'Model {model_name} is ready!', 'model_name': model_name})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'status': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 # ============================================================
