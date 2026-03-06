@@ -284,6 +284,7 @@ class ConversationUpdate(BaseModel):
     persona_avatar: Optional[str] = None
     is_council: Optional[str] = None
     council_config_id: Optional[str] = None
+    model_config_id: Optional[str] = None
 
 class CouncilCreate(BaseModel):
     name: str = "My Council"
@@ -629,6 +630,71 @@ async def _fetch_gov_doc_index(url: str) -> dict | None:
         for lnk in doc_links[:10]:
             full = lnk if lnk.startswith("http") else base + lnk
             result["doc_links"].append(full)
+        return result
+    except Exception:
+        return None
+
+
+async def _fetch_wikileaks_page(url: str) -> dict | None:
+    """Fetch a WikiLeaks page, extracting article text and document/PDF links."""
+    # For binary files we can't read, return a stub with the download URL
+    lower = url.lower()
+    if any(lower.endswith(ext) for ext in (".zip", ".tar", ".gz", ".rar", ".7z")):
+        return {"url": url, "content": f"[Archive file — direct download: {url}]"}
+    # PDFs: note the link but don't try to parse binary
+    if ".pdf" in lower:
+        return {"url": url, "content": f"[PDF document — direct download: {url}]"}
+    try:
+        r = await http.get(url, timeout=15, follow_redirects=True,
+                           headers={"User-Agent": "Mozilla/5.0 (compatible; research-bot)"})
+        if r.status_code != 200:
+            return None
+        ct = r.headers.get("content-type", "")
+        if "text" not in ct and "html" not in ct:
+            return None
+        text = r.text
+        base = "/".join(url.split("/")[:3])
+
+        # Extract WikiLeaks internal document/article links and PDF links
+        wl_links = re.findall(r'href=["\']((https?://(?:www\.)?wikileaks\.org)?(/[^"\'#?][^"\']*?))["\']', text, re.IGNORECASE)
+        pdf_links = re.findall(r'href=["\']([^"\']*\.pdf[^"\']*)["\']', text, re.IGNORECASE)
+
+        doc_links = []
+        for match in wl_links[:30]:
+            full = match[0] if match[0].startswith("http") else base + match[2]
+            if full != url and full not in doc_links:
+                doc_links.append(full)
+        pdf_full = []
+        for lnk in pdf_links[:15]:
+            full = lnk if lnk.startswith("http") else base + "/" + lnk.lstrip("/")
+            pdf_full.append(full)
+
+        # Clean HTML
+        for tag in ["script", "style", "nav", "header", "footer", "aside", "noscript"]:
+            text = re.sub(rf"<{tag}[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<h[1-3][^>]*>(.*?)</h[1-3]>", r"\n## \1\n", text, flags=re.IGNORECASE)
+        text = re.sub(r"<li[^>]*>(.*?)</li>", r"\n• \1", text, flags=re.IGNORECASE | re.DOTALL)
+        text = re.sub(r"<p[^>]*>", "\n", text, flags=re.IGNORECASE)
+        text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"&amp;", "&", text)
+        text = re.sub(r"&lt;", "<", text)
+        text = re.sub(r"&gt;", ">", text)
+        text = re.sub(r"&nbsp;", " ", text)
+        text = re.sub(r"&\w+;", " ", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text).strip()
+
+        if len(text) < 100:
+            return None
+
+        result: dict = {"url": url, "content": text[:6000]}
+        if doc_links:
+            result["doc_links"] = doc_links
+        if pdf_full:
+            result["pdf_links"] = pdf_full
+            # Surface PDFs as individual findings stubs
+            result["content"] += "\n\n**PDF documents found:**\n" + "\n".join(f"• {p}" for p in pdf_full[:10])
         return result
     except Exception:
         return None
@@ -1531,22 +1597,40 @@ async def chat_stream(req: ChatRequest):
                             "type": "web",
                         })
 
-                # Fetch the relevant collection pages
+                # Fetch the relevant collection pages with WikiLeaks-aware scraper
                 wl_fetch_urls = [u for u in wl_col_urls if u not in fetched][:4]
-                wl_fetch_tasks = [_fetch_page(u) for u in wl_fetch_urls]
+                wl_fetch_tasks = [_fetch_wikileaks_page(u) for u in wl_fetch_urls]
                 wl_fetch_results = await asyncio.gather(*wl_fetch_tasks, return_exceptions=True)
+                extra_wl_links: list[str] = []
                 for u, r in zip(wl_fetch_urls, wl_fetch_results):
                     fetched.add(u)
                     if isinstance(r, dict) and r:
                         full_pages.append(r)
                         stats["pages_read"] += 1
+                        # Collect doc links found inside collection pages
+                        for lnk in r.get("doc_links", [])[:8]:
+                            if lnk not in fetched and lnk not in extra_wl_links:
+                                extra_wl_links.append(lnk)
+                        # Surface PDF stubs as findings
+                        for pdf in r.get("pdf_links", [])[:5]:
+                            all_findings.append({
+                                "title": f"🔓 WikiLeaks PDF: {pdf.split('/')[-1]}",
+                                "url": pdf,
+                                "content": f"PDF document from WikiLeaks collection: {pdf}",
+                                "engine": "wikileaks",
+                                "type": "web",
+                            })
 
                 # Also fetch top WikiLeaks document URLs from search results
                 wl_doc_urls = [
                     f["url"] for f in all_findings
                     if "wikileaks.org" in f.get("url", "") and f["url"] not in fetched
                 ][:8]
-                wl_doc_tasks = [_fetch_page(u) for u in wl_doc_urls]
+                # Add any extra doc links found from collection pages
+                for lnk in extra_wl_links:
+                    if lnk not in wl_doc_urls and len(wl_doc_urls) < 12:
+                        wl_doc_urls.append(lnk)
+                wl_doc_tasks = [_fetch_wikileaks_page(u) for u in wl_doc_urls]
                 wl_doc_results = await asyncio.gather(*wl_doc_tasks, return_exceptions=True)
                 for u, r in zip(wl_doc_urls, wl_doc_results):
                     fetched.add(u)
@@ -1805,6 +1889,21 @@ async def chat_stream(req: ChatRequest):
                     parts.append("\n## 📚 SOURCE INDEX\n")
                     parts.extend(srcs)
 
+                # Emit source_links event so frontend can render preview buttons
+                source_links = []
+                seen_sl = set()
+                for f in all_findings:
+                    u = f.get("url", "")
+                    if u and u not in seen_sl:
+                        seen_sl.add(u)
+                        source_links.append({"title": f.get("title", ""), "url": u})
+                    if len(source_links) >= 30:
+                        break
+                await events.emit(conv_id, "source_links", {
+                    "tool": "conspiracy_research",
+                    "links": source_links,
+                })
+
                 await events.emit(conv_id, "tool_end", {
                     "tool": "conspiracy_research", "icon": "search",
                     "status": f"🕵️ Dossier ready: {len(seen2)} sources, {stats['searches']} searches, {stats['pages_read']} pages",
@@ -1857,10 +1956,13 @@ async def chat_stream(req: ChatRequest):
         # Resolve persona (model config) if provided — apply parameters and KB
         model_options = {}
         kb_context = ""
+        persona_system_prompt = None
         if req.persona_id:
             all_configs = await db.get_model_configs()
             mc = next((c for c in all_configs if c["id"] == req.persona_id), None)
             if mc:
+                # Use persona's live system prompt from DB (not stale req.system_prompt)
+                persona_system_prompt = mc.get("system_prompt") or None
                 # Apply Ollama generation parameters
                 params = mc.get("parameters", {})
                 for key in ("temperature", "num_ctx", "top_p", "top_k"):
@@ -1908,7 +2010,7 @@ async def chat_stream(req: ChatRequest):
             model_options["repeat_penalty"] = req.repeat_penalty
 
         messages = []
-        effective_system = req.system_prompt
+        effective_system = persona_system_prompt if persona_system_prompt is not None else req.system_prompt
         if kb_context:
             effective_system += (
                 "\n\n=== KNOWLEDGE BASE CONTEXT ===\n"
@@ -2136,12 +2238,16 @@ async def chat_stream(req: ChatRequest):
 
         # ── Tool calling loop ──
         MAX_ROUNDS = 10
+        # Force tool call on round 0 when conspiracy_research is available (model tends to ignore it)
+        _force_first_tool = "conspiracy_research" in available_tool_names
         for round_num in range(MAX_ROUNDS):
             payload = {"model": req.model, "messages": messages, "stream": True}
             if model_options:
                 payload["options"] = model_options
             if ollama_tools:
                 payload["tools"] = ollama_tools
+                if _force_first_tool and round_num == 0:
+                    payload["tool_choice"] = "required"
 
             # Keepalive ping to prevent browser timeout
             if round_num > 0:
@@ -2732,6 +2838,46 @@ async def fetch_url(req: FetchUrlRequest):
     except Exception as e:
         await events.emit(conv_id, "tool_error", {"tool": "fetch_url", "status": str(e), "icon": "globe"})
         raise HTTPException(502, f"Fetch error: {e}")
+
+
+@app.get("/api/proxy-preview")
+async def proxy_preview(url: str):
+    """Fetch an external URL and return raw content for preview iframe.
+    Returns HTML content wrapped for safe viewing, or plain text for non-HTML."""
+    from starlette.responses import Response as StarletteResponse
+    if not url or not url.startswith("http"):
+        raise HTTPException(400, "Invalid URL")
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        }
+        r = await http.get(url, timeout=20, follow_redirects=True, headers=headers)
+        r.raise_for_status()
+        ct = r.headers.get("content-type", "")
+        # PDF — return raw bytes
+        if "pdf" in ct or url.lower().endswith(".pdf"):
+            return StarletteResponse(content=r.content, media_type="application/pdf")
+        # Images — pass through
+        if any(mt in ct for mt in ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg"]):
+            return StarletteResponse(content=r.content, media_type=ct.split(";")[0])
+        # HTML — inject <base> tag so relative links and assets resolve correctly
+        if "html" in ct:
+            html = r.text
+            from html import escape as html_escape
+            base_tag = f'<base href="{html_escape(url, quote=True)}" target="_blank">'
+            if "<head" in html.lower():
+                html = re.sub(r'(<head[^>]*>)', r'\1' + base_tag, html, count=1, flags=re.IGNORECASE)
+            else:
+                html = base_tag + html
+            return StarletteResponse(content=html, media_type="text/html; charset=utf-8")
+        # Plain text / JSON / etc
+        return StarletteResponse(content=r.text, media_type="text/plain; charset=utf-8")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(e.response.status_code, f"Upstream returned {e.response.status_code}")
+    except Exception as e:
+        raise HTTPException(502, f"Proxy error: {e}")
 
 
 # ============================================================

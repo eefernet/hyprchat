@@ -351,7 +351,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
   const thinkingEvts = evts.filter(e=>e.type==="thinking"||e.type==="thought_done");
   const toolEvts = evts.filter(e=>e.type==="tool_start"||e.type==="tool_end"||e.type==="tool_error");
   const streamEvts = evts.filter(e=>e.type==="streaming"||e.type==="complete");
-  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_end","tool_error","streaming","complete","code_output","file_ready","search_results"].includes(e.type));
+  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_end","tool_error","streaming","complete","code_output","file_ready","search_results","source_links"].includes(e.type));
 
   // Thinking: collapse to just the final state
   if(thinkingEvts.length){
@@ -387,6 +387,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
   const codeOutputEvts = evts.filter(e=>e.type==="code_output");
   const fileReadyEvts = evts.filter(e=>e.type==="file_ready");
   const searchResultEvts = evts.filter(e=>e.type==="search_results");
+  const sourceLinkEvts = evts.filter(e=>e.type==="source_links");
 
   const CodeOutputCards = ()=><>{codeOutputEvts.map((e,i)=>{
     const d=e.data||{};
@@ -453,6 +454,36 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
     </div>;
   })}</>;
 
+  const SourceLinkCards = ()=>{
+    const allLinks=sourceLinkEvts.flatMap(e=>(e.data?.links||[]));
+    if(!allLinks.length)return null;
+    const [slExpanded,setSlExpanded]=useState(false);
+    const shown=slExpanded?allLinks:allLinks.slice(0,8);
+    return <div style={{marginTop:10}}>
+      <div style={{fontSize:9,color:t.warm,textTransform:"uppercase",letterSpacing:.5,marginBottom:6,display:"flex",alignItems:"center",gap:4}}>
+        <span>🔗</span><span>Sources ({allLinks.length})</span>
+      </div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+        {shown.map((lnk,i)=>{
+          const hn=(()=>{try{return new URL(lnk.url).hostname.replace("www.","");}catch{return "";}})();
+          const isPdf=lnk.url.toLowerCase().endsWith(".pdf");
+          const title=(lnk.title||hn||lnk.url).slice(0,60);
+          return <div key={i} style={{display:"inline-flex",alignItems:"center",gap:0}}>
+            <a href={lnk.url} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"5px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:10,fontWeight:600,maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",cursor:"pointer",transition:"all .15s"}}
+              onMouseEnter={e=>e.currentTarget.style.background=`${t.warm}20`} onMouseLeave={e=>e.currentTarget.style.background=`${t.warm}10`}>
+              {isPdf?<span>📄</span>:<img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=16`} style={{width:12,height:12,borderRadius:2}} alt="" onError={e=>e.target.style.display="none"}/>}
+              <span>{title}</span>
+            </a>
+            {onPreview&&<button onClick={()=>onPreview(title,lnk.url)} title="Preview in panel"
+              style={{padding:"5px 8px",background:`${t.acc}12`,border:`1px solid ${t.acc}33`,borderRadius:"0 8px 8px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:11,display:"flex",alignItems:"center",transition:"all .15s"}}
+              onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}25`} onMouseLeave={e=>e.currentTarget.style.background=`${t.acc}12`}>👁</button>}
+          </div>;
+        })}
+      </div>
+      {allLinks.length>8&&<button onClick={()=>setSlExpanded(p=>!p)} style={{background:`${t.surface}60`,border:`1px solid ${t.brd}22`,color:t.mut,padding:"2px 8px",borderRadius:10,fontSize:9,cursor:"pointer",fontFamily:"inherit",marginTop:4}}>{slExpanded?`Show less ▴`:`+${allLinks.length-8} more ▾`}</button>}
+    </div>;
+  };
+
 
   if(!showAll){
     const activeThinking = merged.find(e=>e.type==="thinking");
@@ -468,6 +499,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
       <CodeOutputCards/>
       <FileReadyButtons/>
       <SearchResultCards/>
+      <SourceLinkCards/>
     </div>;
   }
 
@@ -481,6 +513,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
     <CodeOutputCards/>
     <FileReadyButtons/>
     <SearchResultCards/>
+    <SourceLinkCards/>
   </div>;
 };
 
@@ -1068,7 +1101,7 @@ function HyprChat(){
       if(c.id!==id)return c;
       const updated=typeof u==="function"?u(c):{...c,...u};
       const patch={};
-      for(const k of ["title","model","system_prompt","tool_ids","persona_name","persona_avatar","is_council","council_config_id"]){
+      for(const k of ["title","model","system_prompt","tool_ids","persona_name","persona_avatar","is_council","council_config_id","model_config_id"]){
         if(JSON.stringify(updated[k])!==JSON.stringify(c[k])&&updated[k]!==undefined)patch[k]=updated[k];
       }
       if(Object.keys(patch).length&&!id.startsWith("l-")){
@@ -1333,17 +1366,34 @@ function HyprChat(){
   const stop=()=>{abortR.current?.abort();setStreaming(false);};
 
   const openPreview=async(filename,url)=>{
-    const ext=(filename||"").split(".").pop().toLowerCase();
-    setPreviewFile({filename,url,type:ext});
+    const isExternal=url.startsWith("http://") || url.startsWith("https://");
+    const ext=isExternal
+      ?(()=>{const u=url.toLowerCase();if(u.endsWith(".pdf"))return"pdf";if(u.match(/\.(png|jpg|jpeg|gif|webp|svg)/))return u.match(/\.(png|jpg|jpeg|gif|webp|svg)/)[1];if(u.endsWith(".md"))return"md";return"html";})()
+      :(filename||"").split(".").pop().toLowerCase();
+    setPreviewFile({filename:filename||url,url,type:ext,isExternal});
     setPreviewContent(null);
     setPreviewError(null);
-    if(["md","txt","html","py","js","ts","json","css","sh","rs","go","java","c","cpp","yaml","toml","xml","csv","log","conf","ini","env"].includes(ext)){
+    if(isExternal){
+      // External URL — use proxy for HTML/text content, direct proxy URL for PDF/images
+      if(ext==="pdf"||["png","jpg","jpeg","gif","webp","svg"].includes(ext)){
+        // Handled by proxy URL in the preview panel renderer
+        return;
+      }
       try{
-        const r=await fetch(`${API}${url}`);
-        if(!r.ok){setPreviewError(`File unavailable (HTTP ${r.status}). It may have been cleaned up.`);return;}
+        const r=await fetch(`${API}/api/proxy-preview?url=${encodeURIComponent(url)}`);
+        if(!r.ok){setPreviewError(`Source unavailable (HTTP ${r.status}).`);return;}
         const text=await r.text();
         setPreviewContent(text);
-      }catch(e){setPreviewError("Failed to load file: "+e.message);}
+      }catch(e){setPreviewError("Failed to load source: "+e.message);}
+    } else {
+      if(["md","txt","html","py","js","ts","json","css","sh","rs","go","java","c","cpp","yaml","toml","xml","csv","log","conf","ini","env"].includes(ext)){
+        try{
+          const r=await fetch(`${API}${url}`);
+          if(!r.ok){setPreviewError(`File unavailable (HTTP ${r.status}). It may have been cleaned up.`);return;}
+          const text=await r.text();
+          setPreviewContent(text);
+        }catch(e){setPreviewError("Failed to load file: "+e.message);}
+      }
     }
   };
   const closePreview=()=>{setPreviewFile(null);setPreviewContent(null);setPreviewError(null);};
@@ -1519,8 +1569,8 @@ function HyprChat(){
   // Markdown
   const inlineParse=(text)=>{
     if(!text)return null;
-    // Split by: inline-code, bold+link, bold, italic(*), italic(_), link
-    return text.split(/(`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\))/g).map((s,k)=>{
+    // Split by: inline-code, bold+link, bold, italic(*), italic(_), link, double-quoted strings (10+ chars = likely verbatim source)
+    return text.split(/(`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\)|"[^"\n]{10,}")/g).map((s,k)=>{
       if(!s)return null;
       const imgMatch=s.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
       if(imgMatch){const[,alt,src]=imgMatch;return <img key={k} src={src} alt={alt||""} style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`}} onError={e=>e.target.style.display="none"}/>;}
@@ -1536,6 +1586,16 @@ function HyprChat(){
               <span style={{fontSize:18}}>📁</span><span>{fn}</span><span style={{fontSize:10,opacity:.6,marginLeft:4}}>⬇</span>
             </a>
             <button onClick={()=>openPreview(fn,lu)} style={{padding:"8px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:14,fontFamily:font}}>👁</button>
+          </span>;
+        }
+        if(lu.startsWith("http://") || lu.startsWith("https://")){
+          const hn=(()=>{try{return new URL(lu).hostname.replace("www.","");}catch{return "";}})();
+          return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"2px 0",verticalAlign:"middle"}}>
+            <a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:11,fontWeight:700,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+              <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=16`} style={{width:12,height:12,borderRadius:2,flexShrink:0}} alt="" onError={e=>e.target.style.display="none"}/>
+              <span>{lt.length>45?lt.slice(0,45)+"...":lt}</span>
+            </a>
+            <button onClick={()=>openPreview(lt,lu)} title="Preview" style={{padding:"4px 7px",background:`${t.acc}12`,border:`1px solid ${t.acc}33`,borderRadius:"0 8px 8px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:11,display:"flex",alignItems:"center"}}>👁</button>
           </span>;
         }
         return <a key={k} href={lu} target="_blank" rel="noopener" style={{color:t.acc,textDecoration:"none",borderBottom:`1px solid ${t.acc}40`,fontWeight:700}}>{lt}</a>;
@@ -1555,8 +1615,21 @@ function HyprChat(){
             <button onClick={()=>openPreview(fn,lu)} style={{padding:"8px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:14,fontFamily:font}}>👁</button>
           </span>;
         }
+        if(lu.startsWith("http://") || lu.startsWith("https://")){
+          const hn=(()=>{try{return new URL(lu).hostname.replace("www.","");}catch{return "";}})();
+          return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"2px 0",verticalAlign:"middle"}}>
+            <a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:11,fontWeight:600,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+              <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=16`} style={{width:12,height:12,borderRadius:2,flexShrink:0}} alt="" onError={e=>e.target.style.display="none"}/>
+              <span>{lt.length>45?lt.slice(0,45)+"...":lt}</span>
+            </a>
+            <button onClick={()=>openPreview(lt,lu)} title="Preview" style={{padding:"4px 7px",background:`${t.acc}12`,border:`1px solid ${t.acc}33`,borderRadius:"0 8px 8px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:11,display:"flex",alignItems:"center"}}>👁</button>
+          </span>;
+        }
         return <a key={k} href={lu} target="_blank" rel="noopener" style={{color:t.acc,textDecoration:"none",borderBottom:`1px solid ${t.acc}40`}}>{lt}</a>;
       }
+      // Inline verbatim quote: "text 10+ chars" — highlight as word-for-word source
+      if(s.startsWith('"')&&s.endsWith('"')&&s.length>11)
+        return <span key={k} style={{color:t.warm,background:`${t.warm}15`,padding:"1px 4px",borderRadius:3,fontStyle:"italic",borderBottom:`1px dashed ${t.warm}66`}} title="Verbatim quote">{s}</span>;
       return s;
     });
   };
@@ -1588,7 +1661,10 @@ function HyprChat(){
         if(ln.match(/^### /))return <div key={j} style={{fontSize:14,fontWeight:700,color:t.acc,margin:"12px 0 5px"}}>{inlineParse(ln.slice(4))}</div>;
         if(ln.match(/^## /))return <div key={j} style={{fontSize:15,fontWeight:700,color:t.acc,margin:"14px 0 6px"}}>{inlineParse(ln.slice(3))}</div>;
         if(ln.match(/^# /))return <div key={j} style={{fontSize:17,fontWeight:700,color:t.acc,margin:"16px 0 7px"}}>{inlineParse(ln.slice(2))}</div>;
-        if(ln.match(/^>\s?/))return <div key={j} style={{borderLeft:`3px solid ${t.acc}44`,paddingLeft:10,margin:"2px 0",color:t.mut,fontStyle:"italic"}}>{inlineParse(ln.replace(/^>\s?/,""))}</div>;
+        if(ln.match(/^>\s?/))return <div key={j} style={{borderLeft:`3px solid ${t.warm}`,paddingLeft:12,margin:"6px 0",background:`${t.warm}0D`,borderRadius:"0 6px 6px 0",padding:"8px 12px",borderLeftWidth:3,borderLeftStyle:"solid",borderLeftColor:t.warm}}>
+          <div style={{display:"flex",alignItems:"flex-start",gap:6}}><span style={{color:t.warm,fontSize:16,lineHeight:1,flexShrink:0,marginTop:1}}>"</span><span style={{color:t.text,fontStyle:"italic",fontSize:"0.95em",lineHeight:1.6,flex:1}}>{inlineParse(ln.replace(/^>\s?/,""))}</span><span style={{color:t.warm,fontSize:16,lineHeight:1,flexShrink:0,alignSelf:"flex-end"}}>"</span></div>
+          <div style={{marginTop:4,fontSize:9,color:t.warm,opacity:0.7,textTransform:"uppercase",letterSpacing:1}}>quoted source</div>
+        </div>;
         if(ln.match(/^[-*+]\s+/))return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:t.acc,marginTop:"0.25em",fontSize:"0.7em",flexShrink:0}}>●</span><span style={{flex:1}}>{inlineParse(ln.replace(/^[-*+]\s+/,""))}</span></div>;
         if(ln.match(/^\d+\.\s+/)){const num=ln.match(/^(\d+)\./)[1];return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:t.acc,minWidth:18,flexShrink:0,fontWeight:600,fontSize:"0.9em"}}>{num}.</span><span style={{flex:1}}>{inlineParse(ln.replace(/^\d+\.\s+/,""))}</span></div>;}
         if(ln.match(/^\|.+\|/)){
@@ -3149,18 +3225,26 @@ function HyprChat(){
             <div onMouseDown={startPreviewDrag} style={{position:"absolute",left:0,top:0,bottom:0,width:5,cursor:"col-resize",zIndex:10,background:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}44`} onMouseLeave={e=>e.currentTarget.style.background="transparent"}/>
             {/* Header */}
             <div style={{padding:"9px 12px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:7,flexShrink:0,background:`${t.surface}88`}}>
-              <span style={{fontSize:11,fontWeight:700,color:t.text,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{previewFile.filename}</span>
-              <span style={{fontSize:9,color:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:4,flexShrink:0}}>.{previewFile.type}</span>
-              <a href={`${API}${previewFile.url}`} download={previewFile.filename} style={{color:t.ok,fontSize:10,textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.ok}44`,borderRadius:4,flexShrink:0}}>⬇</a>
+              <span style={{fontSize:11,fontWeight:700,color:t.text,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{previewFile.isExternal?(()=>{try{return new URL(previewFile.url).hostname.replace("www.","");}catch{return previewFile.filename;}})():previewFile.filename}</span>
+              <span style={{fontSize:9,color:previewFile.isExternal?t.warm:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:4,flexShrink:0}}>{previewFile.isExternal?"web":`.${previewFile.type}`}</span>
+              {previewFile.isExternal
+                ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:10,textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.acc}44`,borderRadius:4,flexShrink:0}}>↗ open</a>
+                :<a href={`${API}${previewFile.url}`} download={previewFile.filename} style={{color:t.ok,fontSize:10,textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.ok}44`,borderRadius:4,flexShrink:0}}>⬇</a>}
               <button onClick={closePreview} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:16,padding:"0 2px",flexShrink:0,lineHeight:1}}>✕</button>
             </div>
             {/* Content */}
             <div style={{flex:1,overflowY:"auto",padding:14}}>
               {previewError?<div style={{display:"flex",flexDirection:"column",gap:10,padding:16,background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:10,color:t.err}}>
                 <div style={{fontWeight:700,fontSize:12}}>⚠ {previewError}</div>
-                <a href={`${API}${previewFile.url}`} download={previewFile.filename} style={{color:t.ok,fontSize:11,textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.ok}44`,borderRadius:6,display:"inline-flex",alignItems:"center",gap:4}}>⬇ Download anyway</a>
+                {previewFile.isExternal
+                  ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:11,textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.acc}44`,borderRadius:6,display:"inline-flex",alignItems:"center",gap:4}}>↗ Open in new tab</a>
+                  :<a href={`${API}${previewFile.url}`} download={previewFile.filename} style={{color:t.ok,fontSize:11,textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.ok}44`,borderRadius:6,display:"inline-flex",alignItems:"center",gap:4}}>⬇ Download anyway</a>}
               </div>
-              :["png","jpg","jpeg","gif","webp","svg"].includes(previewFile.type)
+              :previewFile.isExternal&&previewFile.type==="pdf"
+                ?<iframe src={`${API}/api/proxy-preview?url=${encodeURIComponent(previewFile.url)}`} style={{width:"100%",height:"100%",border:"none",borderRadius:6,minHeight:500}} title={previewFile.filename}/>
+              :previewFile.isExternal&&["png","jpg","jpeg","gif","webp","svg"].includes(previewFile.type)
+                ?<img src={`${API}/api/proxy-preview?url=${encodeURIComponent(previewFile.url)}`} style={{maxWidth:"100%",borderRadius:6,display:"block"}} alt={previewFile.filename}/>
+              :["png","jpg","jpeg","gif","webp","svg"].includes(previewFile.type)&&!previewFile.isExternal
                 ?<img src={`${API}${previewFile.url}`} style={{maxWidth:"100%",borderRadius:6,display:"block"}} alt={previewFile.filename}/>
                 :previewFile.type==="html"&&previewContent
                 ?<iframe sandbox="allow-scripts allow-same-origin" srcDoc={previewContent} style={{width:"100%",height:"100%",border:"none",borderRadius:6,background:"#fff",minHeight:400}} title={previewFile.filename}/>
