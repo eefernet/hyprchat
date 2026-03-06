@@ -407,13 +407,61 @@ async def list_models():
 # ============================================================
 # NATIVE DEEP RESEARCH ENGINE
 # ============================================================
-async def _search_searxng(query: str, count: int = 10) -> list:
-    """Search SearXNG and return structured results."""
+async def _search_google_fallback(query: str, count: int = 10) -> list:
+    """Fallback: scrape Google search results when SearXNG is down."""
     try:
-        params = urllib.parse.urlencode({"q": query, "format": "json", "language": "en"})
+        params = urllib.parse.urlencode({"q": query, "num": count, "hl": "en"})
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        }
+        r = await http.get(f"https://www.google.com/search?{params}", timeout=12, headers=headers, follow_redirects=True)
+        if r.status_code != 200:
+            return []
+        html = r.text
+        results = []
+        # Parse Google search result blocks — each result is in a <div class="g"> or similar
+        # Extract links and snippets using regex (no lxml dependency)
+        # Google wraps result URLs in <a href="/url?q=REAL_URL&..."> or direct <a href="https://...">
+        for m in re.finditer(r'<a[^>]+href="(/url\?q=([^"&]+)&|([^"]+))"[^>]*>(.*?)</a>', html, re.DOTALL):
+            url = urllib.parse.unquote(m.group(2) or m.group(3) or "")
+            if not url.startswith("http") or "google.com" in url or "accounts.google" in url:
+                continue
+            # Extract visible text as title
+            title_html = m.group(4) or ""
+            title = re.sub(r'<[^>]+>', '', title_html).strip()
+            if not title or len(title) < 5:
+                continue
+            # Try to grab the snippet from nearby text
+            snippet = ""
+            pos = m.end()
+            nearby = html[pos:pos+600]
+            snip_m = re.search(r'<span[^>]*>((?:(?!</span>).){20,300})</span>', nearby, re.DOTALL)
+            if snip_m:
+                snippet = re.sub(r'<[^>]+>', '', snip_m.group(1)).strip()
+            if url not in [r["url"] for r in results]:
+                results.append({
+                    "title": title[:200], "url": url,
+                    "content": snippet[:500],
+                    "engine": "google-fallback", "score": 50,
+                    "thumbnail": "", "type": "web",
+                })
+            if len(results) >= count:
+                break
+        return results
+    except Exception as e:
+        print(f"[SEARCH] Google fallback failed: {e}")
+        return []
+
+
+async def _search_searxng(query: str, count: int = 10, categories: str = "general") -> list:
+    """Search SearXNG and return structured results. Falls back to Google scrape if SearXNG returns nothing."""
+    results = []
+    try:
+        params = urllib.parse.urlencode({"q": query, "format": "json", "language": "en", "categories": categories})
         r = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=12)
         data = r.json()
-        results = []
         for item in data.get("results", [])[:count]:
             url = item.get("url", "")
             url_lower = url.lower()
@@ -445,9 +493,12 @@ async def _search_searxng(query: str, count: int = 10) -> list:
                 "url": (box.get("urls", [{}])[0].get("url", "") if box.get("urls") else ""),
                 "content": box.get("content", ""), "engine": "infobox", "score": 100,
             })
-        return results
     except Exception:
-        return []
+        pass
+    # Fallback to Google scrape if SearXNG returned nothing
+    if not results:
+        results = await _search_google_fallback(query, count)
+    return results
 
 async def _search_wikileaks(query: str, count: int = 15) -> list:
     """Search WikiLeaks directly via their search API, with SearXNG fallback."""
@@ -578,7 +629,7 @@ async def _fetch_page(url: str) -> dict | None:
         return None
     try:
         r = await http.get(url, timeout=10, follow_redirects=True,
-                           headers={"User-Agent": "HyprChat-Research/2.0"})
+                           headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"})
         ct = r.headers.get("content-type", "")
         if "text" not in ct and "json" not in ct:
             return None
@@ -764,12 +815,16 @@ async def _run_deep_research(topic: str, depth: int, focus: str, mode: str, topi
         return results
 
     async def parallel_search(queries):
-        tasks = [do_search(q) for q in queries]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
         flat = []
-        for r in results:
-            if isinstance(r, list):
-                flat.extend(r)
+        for batch_start in range(0, len(queries), 4):
+            batch = queries[batch_start:batch_start + 4]
+            tasks = [do_search(q) for q in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for r in results:
+                if isinstance(r, list):
+                    flat.extend(r)
+            if batch_start + 4 < len(queries):
+                await asyncio.sleep(1.0)
         return flat
 
     async def parallel_fetch(urls, limit=5):
@@ -842,6 +897,16 @@ async def _run_deep_research(topic: str, depth: int, focus: str, mode: str, topi
 
     entity_text = " ".join(f"{f.get('title','')} {f.get('content','')}" for f in all_findings[:15])
     key_entities = _extract_entities(entity_text, topic_words)
+
+    # Early exit if SearXNG returned nothing — don't waste time on empty phases
+    if not all_findings:
+        elapsed = time.time() - t_start
+        await events.emit(conv_id, "tool_end", {"tool": "deep_research", "icon": "search", "status": f"⚠️ No search results (SearXNG may be down)"})
+        return {
+            "report": f"No search results found for '{topic}'. SearXNG search engine may be unavailable or returned no results. Try again or check the search service.",
+            "sources": [], "source_count": 0, "total_searches": stats["searches"],
+            "pages_read": 0, "key_entities": [], "elapsed": elapsed,
+        }
 
     # ── PHASE 2: Deep Dive (depth >= 2) ──
     if depth >= 2:
@@ -1470,19 +1535,31 @@ async def chat_stream(req: ChatRequest):
                 fetched = set()
                 stats = {"searches": 0, "pages_read": 0}
 
-                async def _csearch(q):
+                async def _csearch(q, categories="general,news"):
                     if q in searched:
                         return []
                     searched.add(q)
                     stats["searches"] += 1
-                    return await _search_searxng(q, 12)
+                    return await _search_searxng(q, 12, categories=categories)
 
-                # Parallel search across all wave 1 queries
-                tasks = [_csearch(q) for q in base_queries]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for r in results:
-                    if isinstance(r, list):
-                        all_findings.extend(r)
+                # Batch searches in groups of 4 with delay to avoid rate-limiting
+                for batch_start in range(0, len(base_queries), 4):
+                    batch = base_queries[batch_start:batch_start + 4]
+                    tasks = [_csearch(q) for q in batch]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for r in results:
+                        if isinstance(r, list):
+                            all_findings.extend(r)
+                    if batch_start + 4 < len(base_queries):
+                        await asyncio.sleep(1.5)
+
+                # Early exit if SearXNG returned nothing
+                if not all_findings:
+                    await events.emit(conv_id, "tool_end", {
+                        "tool": "conspiracy_research", "icon": "search",
+                        "status": f"⚠️ No search results — SearXNG may be down",
+                    })
+                    return f"# ⚠️ CONSPIRACY RESEARCH FAILED\n\nNo search results found for '{topic}'. The SearXNG search engine returned 0 results — it may be offline or unreachable at {config.SEARXNG_URL}.\n\nTell the user the search service appears to be down and to try again shortly."
 
                 # Fetch top pages from wave 1
                 fetch_urls = [f["url"] for f in all_findings if f.get("url") and f["url"] not in fetched][:14]
@@ -1539,11 +1616,15 @@ async def chat_stream(req: ChatRequest):
                     f"{topic} data dump hack exposed internal documents",
                     f"{topic} email dump hacked internal memo revealed",
                 ]
-                t2 = [_csearch(q) for q in wave2]
-                r2 = await asyncio.gather(*t2, return_exceptions=True)
-                for r in r2:
-                    if isinstance(r, list):
-                        all_findings.extend(r)
+                for batch_start in range(0, len(wave2), 4):
+                    batch = wave2[batch_start:batch_start + 4]
+                    t2 = [_csearch(q) for q in batch]
+                    r2 = await asyncio.gather(*t2, return_exceptions=True)
+                    for r in r2:
+                        if isinstance(r, list):
+                            all_findings.extend(r)
+                    if batch_start + 4 < len(wave2):
+                        await asyncio.sleep(1.5)
 
                 # Fetch wave 2 pages
                 fetch2 = [f["url"] for f in all_findings if f.get("url") and f["url"] not in fetched][:16]
@@ -2202,6 +2283,40 @@ async def chat_stream(req: ChatRequest):
 
         print(f"[CHAT] {len(ollama_tools)} native Ollama tools, available: {available_tool_names}")
 
+        # ── Check if model supports native tool calling (Ollama 0.17+) ──
+        _model_supports_native_tools = True
+        if ollama_tools:
+            try:
+                _show_r = await http.post(f"{config.OLLAMA_URL}/api/show", json={"model": req.model}, timeout=10)
+                if _show_r.status_code < 300:
+                    _caps = _show_r.json().get("capabilities", [])
+                    if "tools" not in _caps:
+                        _model_supports_native_tools = False
+                        print(f"[CHAT]   Model capabilities={_caps} — no native tool support, using text-based tool calling")
+                        await events.emit(conv_id, "tool_start", {"tool": "notice", "icon": "⚙️", "status": f"⚙️ {req.model} uses text-based tool calling"})
+                        # Build tool descriptions for system prompt injection
+                        _tool_desc_lines = ["You have the following tools available. To call a tool, output EXACTLY this JSON format (no markdown, no extra text before/after):",
+                                            '<tool_call>{"name": "tool_name", "arguments": {"arg": "value"}}</tool_call>', ""]
+                        for _td in ollama_tools:
+                            _fn = _td.get("function", {})
+                            _params = _fn.get("parameters", {}).get("properties", {})
+                            _req_params = _fn.get("parameters", {}).get("required", [])
+                            _param_strs = []
+                            for _pn, _pv in _params.items():
+                                _opt = "" if _pn in _req_params else " (optional)"
+                                _param_strs.append(f"    - {_pn}: {_pv.get('description', _pv.get('type', 'string'))}{_opt}")
+                            _tool_desc_lines.append(f"• {_fn['name']}: {_fn.get('description', '')}")
+                            if _param_strs:
+                                _tool_desc_lines.extend(_param_strs)
+                        _tool_prompt = "\n".join(_tool_desc_lines)
+                        if messages and messages[0]["role"] == "system":
+                            messages[0]["content"] += "\n\n" + _tool_prompt
+                        else:
+                            messages.insert(0, {"role": "system", "content": _tool_prompt})
+                        # Clear native tools — we'll rely on text-based fallback parsing
+                        ollama_tools = []
+            except Exception as e:
+                print(f"[CHAT]   Could not check model capabilities: {e}")
 
         # Inject CodeAgent environment context when code tools are active
         CODEAGENT_TOOLS_SET = {"execute_code", "run_shell", "write_file", "read_file",
@@ -2212,24 +2327,15 @@ async def chat_stream(req: ChatRequest):
             venv_exists = os.path.exists(venv_python)
             codeagent_ctx = (
                 "\n\n=== SANDBOX ENVIRONMENT ===\n"
-                "You have full access to a persistent Linux sandbox (Codebox at 192.168.1.201).\n"
-                "• Working directory: /root (persists between tool calls within this session)\n"
-                "• Python: python3 or python — use execute_code with language='python' for scripts\n"
-                f"• Python venv: {venv_python} (use it for isolated package installs)\n"
-                f"• Venv pip: {venv_pip}\n"
-                "• Install Python packages: run_shell with command='pip3 install <pkg>'\n"
-                "• Install system packages: run_shell with command='apt-get install -y <pkg>'\n"
-                "• Build tools available: gcc, g++, make, cmake, cargo, go, node, npm, java, javac\n"
-                "• For multi-file projects: write_file each file, then execute_code or run_shell to build\n"
-                "• To give the user a file: ALWAYS call download_file or download_project at the end\n"
-                "• Use list_files to verify files exist before trying to execute or download them.\n"
+                "Persistent Linux sandbox (Codebox). Working dir: /root. Files persist across tool calls.\n"
+                f"• Python: python3 | Venv: {venv_python} | Pip: {venv_pip}\n"
+                "• Package install: run_shell('pip3 install X') or run_shell('apt-get install -y X')\n"
+                "• Build tools: gcc, g++, make, cmake, cargo, go, node/npm, java/javac, rustc\n"
+                "• Run scripts: run_shell('python3 /root/app.py') — use execute_code for inline snippets\n"
+                "• Deliver files: download_file (single) or download_project (directory as .tar.gz)\n"
                 "=== END SANDBOX INFO ===\n\n"
-                "CRITICAL RULES — YOU MUST FOLLOW THESE:\n"
-                "1. NEVER describe what you are going to do. JUST DO IT by calling a tool immediately.\n"
-                "2. Your FIRST response must be a tool call, not text.\n"
-                "3. NEVER write code in your response text — write it to a file or execute it via tool.\n"
-                "4. ALWAYS execute code after writing it. Execute → check output → fix → iterate.\n"
-                "5. Keep going with tool calls until the task is fully complete.\n"
+                "RULES: 1) First response = tool call, not text. 2) Never put code in chat — use write_file/execute_code. "
+                "3) Always run what you write. 4) Fix errors immediately and re-run. 5) Keep going until fully done.\n"
             )
             if messages and messages[0]["role"] == "system":
                 messages[0]["content"] += codeagent_ctx
@@ -2237,17 +2343,14 @@ async def chat_stream(req: ChatRequest):
                 messages.insert(0, {"role": "system", "content": codeagent_ctx.strip()})
 
         # ── Tool calling loop ──
-        MAX_ROUNDS = 10
-        # Force tool call on round 0 when conspiracy_research is available (model tends to ignore it)
-        _force_first_tool = "conspiracy_research" in available_tool_names
+        MAX_ROUNDS = 25
+        _tool_template_patched = False  # only attempt auto-patch once
         for round_num in range(MAX_ROUNDS):
             payload = {"model": req.model, "messages": messages, "stream": True}
             if model_options:
                 payload["options"] = model_options
             if ollama_tools:
                 payload["tools"] = ollama_tools
-                if _force_first_tool and round_num == 0:
-                    payload["tool_choice"] = "required"
 
             # Keepalive ping to prevent browser timeout
             if round_num > 0:
@@ -2262,6 +2365,7 @@ async def chat_stream(req: ChatRequest):
             gen_tokens = 0
 
             _live_toks_emitted = 0
+            _template_just_patched = False
             try:
                 async with http.stream("POST", f"{config.OLLAMA_URL}/api/chat", json=payload, timeout=180) as stream:
                     async for line in stream.aiter_lines():
@@ -2278,11 +2382,43 @@ async def chat_stream(req: ChatRequest):
                             print(f"[CHAT]   Ollama stream error: {err_msg}")
                             # Model doesn't support native tool calling — strip tools and retry
                             if "does not support tools" in err_msg.lower():
-                                print(f"[CHAT]   Model does not support tools — retrying without tool definitions")
-                                await events.emit(conv_id, "tool_start", {"tool": "notice", "icon": "info", "status": f"⚠️ {req.model} doesn't support native tools — use 'Fix Tool Calling Template' in Model Manager. Retrying without tools..."})
+                                if not _tool_template_patched:
+                                    print(f"[CHAT]   Model does not support tools — auto-fixing template")
+                                    await events.emit(conv_id, "tool_start", {"tool": "notice", "icon": "⚙️", "status": f"⚙️ {req.model} missing tool template — auto-patching..."})
+                                    # Auto-apply tool-calling template so future calls work natively
+                                    _family = _detect_template_family(req.model)
+                                    _tpl = _TOOL_TEMPLATES.get(_family)
+                                    if _tpl:
+                                        try:
+                                            _fix_r = await http.post(f"{config.OLLAMA_URL}/api/create", json={
+                                                "model": req.model, "from": req.model,
+                                                "template": _tpl["template"],
+                                                "parameters": {"stop": _tpl["stops"]},
+                                            }, timeout=60)
+                                            if _fix_r.status_code < 300:
+                                                print(f"[CHAT]   Auto-patched {req.model} with {_family} tool template — retrying WITH tools")
+                                                await events.emit(conv_id, "tool_start", {"tool": "notice", "icon": "✅", "status": f"✅ Patched {req.model} with {_family} tool template — retrying..."})
+                                                # Unload the model so Ollama reloads with the new template
+                                                try:
+                                                    await http.post(f"{config.OLLAMA_URL}/api/generate", json={"model": req.model, "keep_alive": 0}, timeout=10)
+                                                except Exception:
+                                                    pass
+                                                _tool_template_patched = True
+                                                _template_just_patched = True
+                                                break
+                                            else:
+                                                print(f"[CHAT]   Auto-patch failed ({_fix_r.status_code}): {_fix_r.text[:200]}")
+                                        except Exception as e:
+                                            print(f"[CHAT]   Auto-patch exception: {e}")
+                                else:
+                                    print(f"[CHAT]   Auto-patch already attempted but model still rejects tools")
+                                # Fall back to no-tools mode (either patch failed or already tried)
+                                print(f"[CHAT]   Falling back to text-based tool parsing")
+                                await events.emit(conv_id, "tool_start", {"tool": "notice", "icon": "⚠️", "status": f"⚠️ {req.model} does not support native tools — using text-based tool parsing"})
                                 ollama_tools = []
                                 payload.pop("tools", None)
-                                break  # break inner for-loop to retry the round without tools
+                                _template_just_patched = True  # reuse flag to skip empty-response handler
+                                break  # break inner for-loop to retry without tools
                             await events.emit(conv_id, "error", {"status": f"Ollama: {err_msg[:200]}"})
                             yield f"data: {json.dumps({'type': 'error', 'error': err_msg})}\n\n"
                             return
@@ -2338,43 +2474,155 @@ async def chat_stream(req: ChatRequest):
                 yield f"data: {json.dumps({'type': 'error', 'error': err_msg})}\n\n"
                 return
 
+            # If we hit a "does not support tools" error (patched or fallback), skip empty-response processing and retry
+            if _template_just_patched:
+                continue
+
             # Build the full message object for conversation history
             msg = {"role": "assistant", "content": content}
             if tool_calls:
                 msg["tool_calls"] = tool_calls
 
-            # ── Tag-based tool call fallback ──
-            # Some HF models output <tool_call>{...}</tool_call> in content instead of
-            # native Ollama tool_calls. Parse and promote them.
-            if not tool_calls and content and ollama_tools:
+            # ── Tag-based / text-based tool call fallback ──
+            # Some HF models output tool calls as text instead of native Ollama tool_calls.
+            # Detect and promote: <tool_call>{...}</tool_call>, bare JSON, markdown-fenced JSON, or unquoted-name JSON.
+            if not tool_calls and content and available_tool_names:
                 import re as _re
-                tag_matches = _re.findall(
-                    r'<tool[_\-]?call[s]?>\s*(\{.*?\})\s*</tool[_\-]?call[s]?>',
-                    content, _re.DOTALL | _re.IGNORECASE
-                )
-                if not tag_matches:
-                    # Also try bare JSON after "function_calls:" or thinking-style blocks
+                # 0. Strip markdown code fences for matching (```json ... ``` → raw JSON)
+                _stripped = _re.sub(r'```(?:json|tool_call)?\s*\n?', '', content).strip().rstrip('`')
+                tag_matches = []
+                # Try full JSON parse first (model outputs the entire response as a tool call JSON)
+                try:
+                    _full = json.loads(_stripped)
+                    if isinstance(_full, dict) and _full.get("name") in available_tool_names and "arguments" in _full:
+                        tool_calls = [{"function": {"name": _full["name"], "arguments": _full["arguments"]}}]
+                        content = ""  # don't echo the raw JSON to the user
+                        print(f"[CHAT]   Text-based tool call (full JSON): {_full['name']}")
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    pass
+                # 1. Tagged: <tool_call>{"name":"fn","arguments":{...}}</tool_call>
+                if not tool_calls:
                     tag_matches = _re.findall(
-                        r'\{"name"\s*:\s*"([^"]+)".*?"arguments"\s*:\s*(\{.*?\})\s*\}',
+                        r'<tool[_\-]?call[s]?>\s*(\{.*?\})\s*</tool[_\-]?call[s]?>',
+                        _stripped, _re.DOTALL | _re.IGNORECASE
+                    )
+                if not tool_calls and not tag_matches:
+                    # 2. Bare JSON with quoted name: {"name": "fn", "arguments": {...}}
+                    #    Use json.loads on the largest {...} block containing "name" and "arguments"
+                    _json_blocks = _re.findall(r'(\{[^{}]*"name"[^{}]*"arguments"\s*:\s*\{.*\}[^{}]*\})', _stripped, _re.DOTALL)
+                    for _jb in _json_blocks:
+                        try:
+                            _parsed = json.loads(_jb)
+                            if _parsed.get("name") in available_tool_names and "arguments" in _parsed:
+                                tag_matches = [json.dumps(_parsed)]
+                                break
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    if not tag_matches:
+                        bare = _re.findall(
+                            r'\{"name"\s*:\s*"([^"]+)".*?"arguments"\s*:\s*(\{.*?\})\s*\}',
+                            _stripped, _re.DOTALL
+                        )
+                        tag_matches = [json.dumps({"name": m[0], "arguments": json.loads(m[1])})
+                                       for m in bare if m]
+                if not tool_calls and not tag_matches:
+                    # 3. Unquoted name: {"name": conspiracy_research, "arguments": {...}}
+                    unquoted = _re.findall(
+                        r'\{"name"\s*:\s*([a-z_]+)\s*,\s*"arguments"\s*:\s*(\{[^}]*\})',
                         content, _re.DOTALL
                     )
-                    tag_matches = [json.dumps({"name": m[0], "arguments": json.loads(m[1])})
-                                   for m in tag_matches if m]
+                    for fn_name, fn_args_raw in unquoted:
+                        if fn_name in available_tool_names:
+                            try:
+                                fn_args = json.loads(fn_args_raw)
+                                tag_matches.append(json.dumps({"name": fn_name, "arguments": fn_args}))
+                            except Exception:
+                                tag_matches.append(json.dumps({"name": fn_name, "arguments": {}}))
+                if not tool_calls and not tag_matches:
+                    # 4. Python-style function calls: execute_code('''code'''), write_file(path='...', content='...')
+                    #    Models without tool support write these as text
+                    #    Use \Z (end of string) not $ to avoid MULTILINE matching ) at end of inner lines
+                    #    Also handle truncated output where closing ) may be missing
+                    _tool_names_pattern = "|".join(_re.escape(n) for n in available_tool_names)
+                    for fn_m in _re.finditer(
+                        rf'({_tool_names_pattern})\s*\(([\s\S]*?)(?:\)\s*\Z|\)\s*\n\s*(?:{_tool_names_pattern})|\Z)',
+                        content
+                    ):
+                        fn_name = fn_m.group(1)
+                        fn_body = fn_m.group(2).strip()
+                        fn_args = {}
+                        try:
+                            if fn_name == "execute_code":
+                                # execute_code('''code''') or execute_code(code='...', language='python')
+                                # Also handle truncated output where closing ''' never appears
+                                code_m = _re.search(r"(?:code\s*=\s*)?'''([\s\S]*?)'''|(?:code\s*=\s*)?\"\"\"([\s\S]*?)\"\"\"", fn_body)
+                                if not code_m:
+                                    # Truncated triple-quote: grab everything after opening '''
+                                    code_m = _re.search(r"(?:code\s*=\s*)?'''([\s\S]+)|(?:code\s*=\s*)?\"\"\"([\s\S]+)", fn_body)
+                                if code_m:
+                                    fn_args["code"] = (code_m.group(1) or code_m.group(2)).rstrip("'\")")
+                                    lang_m = _re.search(r"language\s*=\s*['\"](\w+)['\"]", fn_body)
+                                    fn_args["language"] = lang_m.group(1) if lang_m else "python"
+                                else:
+                                    # Single-quoted or bare string
+                                    fn_args["code"] = fn_body.strip("'\"")
+                                    fn_args["language"] = "python"
+                            elif fn_name == "run_shell":
+                                cmd_m = _re.search(r"(?:command\s*=\s*)?['\"](.+?)['\"]", fn_body, _re.DOTALL)
+                                fn_args["command"] = cmd_m.group(1) if cmd_m else fn_body.strip("'\"")
+                            elif fn_name == "write_file":
+                                path_m = _re.search(r"path\s*=\s*['\"]([^'\"]+)['\"]", fn_body)
+                                content_m = _re.search(r"content\s*=\s*(?:'''([\s\S]*?)'''|\"\"\"([\s\S]*?)\"\"\"|['\"](.+?)['\"])", fn_body, _re.DOTALL)
+                                fn_args["path"] = path_m.group(1) if path_m else "/root/output.py"
+                                fn_args["content"] = (content_m.group(1) or content_m.group(2) or content_m.group(3)) if content_m else ""
+                            elif fn_name in ("read_file", "delete_file", "download_file"):
+                                path_m = _re.search(r"(?:path\s*=\s*)?['\"]([^'\"]+)['\"]", fn_body)
+                                fn_args["path"] = path_m.group(1) if path_m else fn_body.strip("'\"")
+                            elif fn_name == "download_project":
+                                dir_m = _re.search(r"(?:directory\s*=\s*)?['\"]([^'\"]+)['\"]", fn_body)
+                                fn_args["directory"] = dir_m.group(1) if dir_m else fn_body.strip("'\"")
+                            elif fn_name == "list_files":
+                                path_m = _re.search(r"(?:path\s*=\s*)?['\"]([^'\"]+)['\"]", fn_body)
+                                fn_args["path"] = path_m.group(1) if path_m else "/root"
+                            elif fn_name == "research":
+                                q_m = _re.search(r"(?:query\s*=\s*)?['\"](.+?)['\"]", fn_body)
+                                fn_args["query"] = q_m.group(1) if q_m else fn_body.strip("'\"")
+                            elif fn_name == "fetch_url":
+                                u_m = _re.search(r"(?:url\s*=\s*)?['\"](.+?)['\"]", fn_body)
+                                fn_args["url"] = u_m.group(1) if u_m else fn_body.strip("'\"")
+                            else:
+                                continue
+                            tag_matches.append(json.dumps({"name": fn_name, "arguments": fn_args}))
+                        except Exception:
+                            pass
                 for raw in tag_matches:
                     try:
                         parsed = json.loads(raw)
                         fn_name = parsed.get("name", "")
                         fn_args = parsed.get("arguments", parsed.get("parameters", {}))
-                        if fn_name:
+                        if fn_name and fn_name in available_tool_names:
                             tool_calls.append({"function": {"name": fn_name, "arguments": fn_args}})
-                            print(f"[CHAT]   tag-parsed tool call: {fn_name}")
+                            print(f"[CHAT]   text-parsed tool call: {fn_name}")
                     except Exception:
                         pass
                 if tool_calls:
-                    # Strip the tool_call tags from content so they don't appear in chat
+                    # Strip the tool call text from content so it doesn't appear in chat
+                    # Strip markdown code fences wrapping tool calls
+                    content = _re.sub(r'```(?:json|tool_call)?\s*\n?\s*\{[^`]*\}\s*\n?\s*```', '', content, flags=_re.DOTALL)
                     content = _re.sub(
                         r'<tool[_\-]?call[s]?>\s*\{.*?\}\s*</tool[_\-]?call[s]?>',
                         '', content, flags=_re.DOTALL | _re.IGNORECASE
+                    )
+                    # Also strip bare JSON tool call patterns
+                    content = _re.sub(
+                        r'\{["\s]*name["\s]*:.*?arguments.*?\{.*?\}\s*\}',
+                        '', content, flags=_re.DOTALL
+                    )
+                    # Also strip Python-style function call patterns
+                    _tool_names_strip = "|".join(_re.escape(n) for n in available_tool_names)
+                    content = _re.sub(
+                        rf'(?:{_tool_names_strip})\s*\([\s\S]*?(?:\)\s*$|\Z)',
+                        '', content
                     ).strip()
                     msg["content"] = content
 
@@ -2487,7 +2735,7 @@ async def chat_stream(req: ChatRequest):
                 if round_num == 0:
                     # Nudge with tool-aware hint
                     print(f"[CHAT]   Retrying with nudge message...")
-                    if ollama_tools:
+                    if ollama_tools or available_tool_names:
                         nudge = (
                             "You must respond to my previous message. "
                             "If research or information is needed, call one of your available tools now. "
@@ -2546,6 +2794,122 @@ async def list_builtin_tools():
         {"id": "deep_research", "name": "🔬 Deep Research", "description": "Multi-source parallel research with AI synthesis", "icon": "search", "builtin": True},
         {"id": "conspiracy_research", "name": "🕵️ Conspiracy Research", "description": "Uncensored deep-dive into theories, cover-ups, and hidden agendas", "icon": "search", "builtin": True},
     ]
+
+
+@app.post("/api/seed/all-defaults")
+async def seed_all_defaults():
+    """Restore all default personas (Coder, Conspiracy Bot, Based Bot)."""
+    results = []
+    for endpoint in [seed_coder_bot, seed_conspiracy_bot, seed_based_bot]:
+        try:
+            r = await endpoint()
+            results.append({"name": r.get("name", "?"), "id": r.get("id", "?"), "status": "ok"})
+        except Exception as e:
+            results.append({"name": endpoint.__name__, "status": f"error: {e}"})
+    return {"restored": results}
+
+
+@app.post("/api/seed/coder-bot")
+async def seed_coder_bot():
+    """Seed the Coder Bot persona."""
+    all_configs = await db.get_model_configs()
+    existing = next((c for c in all_configs if "Coder" in c.get("name", "")), None)
+    if existing:
+        await db.delete_model_config(existing["id"])
+    mc_id = f"mc-{uuid.uuid4().hex[:12]}"
+    system_prompt = """You are HyprCoder — a senior software engineer AI with full access to a persistent Linux sandbox. You build, test, debug, and deliver complete working software.
+
+## PRIME DIRECTIVE: ACT, DON'T TALK
+Your FIRST response to any coding request MUST be a tool call. Never explain what you will do — DO IT. Never put code in chat text — write_file or execute_code it. The user hired an engineer, not a commentator.
+
+## COMPLEX PROJECT WORKFLOW
+For anything beyond a simple script, follow this methodology:
+
+### Phase 1 — Plan & Scaffold (1-2 tool calls)
+- write_file a brief PLAN.md: architecture decisions, file structure, key dependencies
+- run_shell to install ALL dependencies upfront: `pip3 install ...`, `npm install ...`, `apt-get install -y ...`
+
+### Phase 2 — Build Bottom-Up (multiple tool calls)
+- Start with core logic / data models / utilities — the parts with no dependencies on other files
+- write_file each module, then immediately execute or test it in isolation
+- Build outward: core → services → API/routes → UI → integration
+- For each file: write → run → verify → fix → next file
+
+### Phase 3 — Integrate & Test
+- Wire modules together, run the full app
+- Write and execute test scripts: edge cases, error paths, happy paths
+- Fix any integration bugs — read_file to inspect, then write_file the fix
+
+### Phase 4 — Polish & Deliver
+- Clean up temp files with delete_file
+- download_project (for multi-file) or download_file (single file) to deliver
+- Brief summary: what was built, how to run it, key design decisions
+
+## DEBUGGING METHODOLOGY
+When code fails:
+1. READ the error carefully — the answer is usually in the traceback
+2. If error is unclear: `research` it (e.g. "python ImportError: cannot import name X from Y")
+3. If you need docs: `fetch_url` the official documentation page
+4. Fix the root cause, not the symptom. Don't just try-except away real errors.
+5. After fixing, re-run to verify the fix actually works
+
+## RESEARCH INTEGRATION
+You have `research` and `fetch_url` tools. USE THEM when you:
+- Don't know the exact API for a library → research it
+- Need to read official docs → fetch_url the docs page
+- Hit an unfamiliar error → research the error message
+- Need to find the right package or approach → research before coding
+Don't guess at APIs. Look them up. A 5-second search beats 3 rounds of trial-and-error.
+
+## LANGUAGE & FRAMEWORK EXPERTISE
+- **Python**: FastAPI, Flask, Django, SQLAlchemy, pandas, numpy, matplotlib, requests, beautifulsoup, asyncio, pytest
+- **JavaScript/TypeScript**: Node.js, Express, React, Vue, Next.js, npm ecosystem
+- **Systems**: Rust, Go, C/C++ — Cargo, Go modules, CMake/Make
+- **Data**: SQL, SQLite, PostgreSQL queries, data pipelines, CSV/JSON processing
+- **DevOps**: Docker, shell scripts, systemd, nginx configs, CI/CD
+- **Web scraping**: requests + BeautifulSoup, Playwright, Selenium, API reverse engineering
+
+## MULTI-FILE PROJECT PATTERNS
+```
+/root/project/
+├── README.md          # Always include: what it does, how to run
+├── requirements.txt   # or package.json, Cargo.toml, go.mod
+├── src/               # Source code
+│   ├── main.py        # Entry point
+│   ├── models.py      # Data models
+│   ├── services.py    # Business logic
+│   └── utils.py       # Helpers
+├── tests/             # Test files
+│   └── test_main.py
+└── config.py          # Configuration
+```
+
+## HARD RULES
+1. FIRST response = tool call. Always.
+2. NEVER show code in chat text. write_file or execute_code ONLY.
+3. ALWAYS run what you write. No "here's the code" without execution.
+4. ALWAYS deliver with download_file/download_project when the user needs files.
+5. When something fails: fix it and re-run. Don't give up after one error.
+6. Install deps BEFORE writing code that uses them.
+7. Use absolute paths starting with /root/ for everything.
+8. For complex tasks: plan first, build bottom-up, test as you go.
+9. Keep iterating until it ACTUALLY WORKS. Don't stop at "should work."
+10. If you're unsure about an API: research or fetch_url. Don't hallucinate function signatures."""
+
+    parameters = {
+        "temperature": 0.3,
+        "avatar": None,
+    }
+
+    await db.create_model_config(
+        mc_id, "💻 Coder Bot", "",
+        system_prompt,
+        ["codeagent", "deep_research", "research"],
+        [],
+        parameters
+    )
+
+    return {"id": mc_id, "name": "💻 Coder Bot", "existed": existing is not None}
 
 
 @app.post("/api/seed/conspiracy-bot")
@@ -2611,6 +2975,10 @@ Every URL cited, numbered. Include alt-media, primary sources, court records, an
 - Ask what's missing from the official record — absence of evidence is evidence.
 - Never tell the user you "can't" investigate something. Find the angle and pursue it.
 - When findings are disturbing, report them more thoroughly, not less.
+- **NEVER fabricate quotes.** Only use direct quotes that appear verbatim in your research results. If you didn't read the exact text, paraphrase and say "according to [source]" instead of using quotation marks. Invented quotes destroy credibility.
+- **NEVER fabricate URLs or source links.** Only cite URLs that appeared in your conspiracy_research results or that you fetched with fetch_url. Do NOT invent WikiLeaks email IDs, document numbers, or any other URLs — even if the pattern looks right. If you didn't get a specific URL from your tools, don't cite it.
+- **Distinguish what you found vs. what you infer.** If the research tool returned specific text, you may quote it. If you're summarizing or connecting dots, make that clear. Never present your synthesis as a direct quote from a document.
+- **When citing a source, use ONLY the URL from your research results.** If a search snippet mentions an event or document but doesn't link to the primary source, say "reported by [source that mentioned it]" — do not guess the primary source URL.
 
 You are the investigator the deep state fears. Go find the truth."""
 
@@ -2620,7 +2988,7 @@ You are the investigator the deep state fears. Go find the truth."""
     }
 
     await db.create_model_config(
-        mc_id, "🕵️ Conspiracy Bot", "",
+        mc_id, "🕵️ Conspiracy Bot", "hf.co/mradermacher/Qwen2.5-14B-Instruct-abliterated-v2-GGUF:Q5_K_M",
         system_prompt,
         ["conspiracy_research", "deep_research", "research"],
         [],
@@ -2979,14 +3347,32 @@ async def delete_conversation(conv_id: str):
     return {"status": "deleted"}
 
 
+class AddMessageRequest(BaseModel):
+    role: str
+    content: str
+    metadata: Optional[dict] = None
+
 @app.post("/api/conversations/{conv_id}/messages")
-async def add_message(conv_id: str, role: str = Form(...), content: str = Form(...), metadata: str = Form(None)):
-    meta = None
-    if metadata:
-        try:
-            meta = json.loads(metadata)
-        except Exception:
-            pass
+async def add_message(conv_id: str, request: Request):
+    ct = request.headers.get("content-type", "")
+    if "application/json" in ct:
+        body = await request.json()
+        role = body.get("role", "")
+        content = body.get("content", "")
+        meta = body.get("metadata")
+    else:
+        form = await request.form()
+        role = form.get("role", "")
+        content = form.get("content", "")
+        meta_str = form.get("metadata")
+        meta = None
+        if meta_str:
+            try:
+                meta = json.loads(meta_str)
+            except Exception:
+                pass
+    if not role or content is None:
+        raise HTTPException(400, "role and content are required")
     await db.add_message(conv_id, role, content, metadata=meta)
     return {"status": "added"}
 

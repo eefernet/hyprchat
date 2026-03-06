@@ -55,7 +55,7 @@ DEFAULT_SETTINGS = {
 # EXECUTION
 # ============================================================
 EXECUTION_TIMEOUT = int(os.getenv("EXECUTION_TIMEOUT", "60"))
-SEARCH_RESULTS_COUNT = int(os.getenv("SEARCH_RESULTS_COUNT", "8"))
+SEARCH_RESULTS_COUNT = int(os.getenv("SEARCH_RESULTS_COUNT", "15"))
 MAX_FETCH_CHARS = int(os.getenv("MAX_FETCH_CHARS", "8000"))
 
 # ============================================================

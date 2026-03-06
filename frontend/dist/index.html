@@ -946,6 +946,7 @@ function HyprChat(){
   const [sessionTokens,setSessionTokens]=useState(0);
   const [panel,setPanel]=useState("chat");
   const [evts,setEvts]=useState([]);
+  const evtsRef=useRef([]);
   const [kbs,setKbs]=useState([]);
   const [tools,setTools]=useState([]);
   const [mcs,setMcs]=useState([]);
@@ -1065,6 +1066,7 @@ function HyprChat(){
   useEffect(()=>{
     if(autoExpandThink&&evts.some(e=>e.type==="thinking")){setExpandedPill("thinking");}
   },[evts,autoExpandThink]);
+  useEffect(()=>{evtsRef.current=evts;},[evts]);
 
   // Load conversation messages from backend when switching chats
   const loadConversation = useCallback(async (id) => {
@@ -1162,7 +1164,7 @@ function HyprChat(){
     setQuickResults(qResults);
     // Add user message to UI
     uConv(cid,c=>({...c,messages:[...(c.messages||[]),{role:"user",content:userMsg,metadata:{}}]}));
-    fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",body:new URLSearchParams({role:"user",content:userMsg})}).catch(()=>{});
+    fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"user",content:userMsg})}).catch(()=>{});
     // Title generation
     if(!(cv.messages||[]).length){const title=userMsg.slice(0,40)+(userMsg.length>40?"...":"");uConv(cid,{title});fetch(`${API}/api/conversations/${cid}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({title})}).catch(()=>{});}
     // Start council streaming
@@ -1292,8 +1294,11 @@ function HyprChat(){
       }
       uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={role:"assistant",content:full,isS:false};return{...c,messages:m};});
       // Save to DB
-      if(appendUser) fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",body:new URLSearchParams({role:"user",content:appendUser})}).catch(()=>{});
-      fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",body:new URLSearchParams({role:"assistant",content:full})}).catch(()=>{});
+      if(appendUser) fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"user",content:appendUser})}).catch(()=>{});
+      // Capture source_links and search_results events into metadata for persistence
+      const _savedEvts = evtsRef.current.filter(e=>e.type==="source_links"||e.type==="search_results");
+      const _msgMeta = _savedEvts.length ? {saved_events: _savedEvts} : undefined;
+      fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:full,metadata:_msgMeta})}).catch(()=>{});
     }catch(e){if(e.name!=="AbortError")uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={role:"assistant",content:`\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false};return{...c,messages:m};});}
     setStreaming(false);setAttachments([]);
   };
@@ -1569,8 +1574,8 @@ function HyprChat(){
   // Markdown
   const inlineParse=(text)=>{
     if(!text)return null;
-    // Split by: inline-code, bold+link, bold, italic(*), italic(_), link, double-quoted strings (10+ chars = likely verbatim source)
-    return text.split(/(`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\)|"[^"\n]{10,}")/g).map((s,k)=>{
+    // Split by: inline-code, images, bold+link, bold, italic(*), italic(_), markdown link, bare URL, double-quoted strings (10+ chars)
+    return text.split(/(`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s"'<>\])\},]+|"[^"\n]{10,}")/g).map((s,k)=>{
       if(!s)return null;
       const imgMatch=s.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
       if(imgMatch){const[,alt,src]=imgMatch;return <img key={k} src={src} alt={alt||""} style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`}} onError={e=>e.target.style.display="none"}/>;}
@@ -1626,6 +1631,16 @@ function HyprChat(){
           </span>;
         }
         return <a key={k} href={lu} target="_blank" rel="noopener" style={{color:t.acc,textDecoration:"none",borderBottom:`1px solid ${t.acc}40`}}>{lt}</a>;
+      }
+      // Bare URL — render as clickable link with favicon
+      if(s.match(/^https?:\/\//)){
+        const lu=s.replace(/[.,;:!?)]+$/,"");const trail=s.slice(lu.length);
+        const hn=(()=>{try{return new URL(lu).hostname.replace("www.","");}catch{return "";}})();
+        const display=lu.length>60?lu.slice(0,57)+"...":lu;
+        return <span key={k}><a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 8px",background:`${t.warm}10`,border:`1px solid ${t.warm}28`,borderRadius:6,color:t.warm,textDecoration:"none",fontSize:11,maxWidth:340,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",verticalAlign:"middle"}}>
+          <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=16`} style={{width:11,height:11,borderRadius:2,flexShrink:0}} alt="" onError={e=>e.target.style.display="none"}/>
+          <span>{display}</span>
+        </a>{trail}</span>;
       }
       // Inline verbatim quote: "text 10+ chars" — highlight as word-for-word source
       if(s.startsWith('"')&&s.endsWith('"')&&s.length>11)
@@ -2214,20 +2229,13 @@ function HyprChat(){
       <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
         <button onClick={async()=>{
           try{
-            const r=await fetch(`${API}/api/seed/conspiracy-bot`,{method:"POST"});
+            const r=await fetch(`${API}/api/seed/all-defaults`,{method:"POST"});
             const d=await r.json();
-            if(!d.existed){const mc2=await fetch(`${API}/api/model-configs`).then(r=>r.json());setMcs(mc2);}
-            alert(d.existed?"Conspiracy Bot already exists! Look for '🕵️ Conspiracy Bot' in the list.":"✅ Conspiracy Bot persona created! Select it and use 'Use' to activate.");
-          }catch(e){alert("Failed to create conspiracy bot: "+e.message);}
-        }} style={{...btnS(t.err),fontSize:10}}>🕵️ Seed Conspiracy Bot</button>
-        <button onClick={async()=>{
-          try{
-            const r=await fetch(`${API}/api/seed/based-bot`,{method:"POST"});
-            const d=await r.json();
-            if(!d.existed){const mc2=await fetch(`${API}/api/model-configs`).then(r=>r.json());setMcs(mc2);}
-            alert(d.existed?"Based Bot already exists! Look for '🤖 Based Bot' in the list.":"✅ Based Bot persona created! Select it and use 'Use' to activate.");
-          }catch(e){alert("Failed to create based bot: "+e.message);}
-        }} style={{...btnS(t.warm),fontSize:10}}>🤖 Seed Based Bot</button>
+            const mc2=await fetch(`${API}/api/model-configs`).then(r=>r.json());setMcs(mc2);
+            const names=(d.restored||[]).filter(x=>x.status==="ok").map(x=>x.name).join(", ");
+            alert(`Restored: ${names||"none"}`);
+          }catch(e){alert("Failed: "+e.message);}
+        }} style={{...btnS(t.acc),fontSize:10}}>Restore Defaults</button>
         <button onClick={async()=>{
           const mc={name:"New Persona",base_model:models[0]||"",system_prompt:"You are a helpful assistant.",tool_ids:[],kb_ids:[],parameters:{}};
           try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});const d=await r.json();setMcs(p=>[...p,d]);setEditMc(d.id);}
@@ -3201,6 +3209,7 @@ function HyprChat(){
                   </div>
                   {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:null;})()}
                   {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:null;})()}
+                  {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>;})()}
                   {!msg.isS&&!isEditing&&<div style={{display:"flex",gap:3,marginTop:3}}>
                     {!isU&&msg.content&&<button onClick={()=>cp(msg.content,mid)} style={{background:"none",border:`1px solid ${t.brd}18`,color:copied===mid?t.ok:t.mut,cursor:"pointer",padding:"2px 6px",borderRadius:4,fontFamily:font,fontSize:9,display:"flex",alignItems:"center",gap:3}}>
                       {copied===mid?<><IC.Check/> copied</>:<><IC.Copy/> copy</>}
