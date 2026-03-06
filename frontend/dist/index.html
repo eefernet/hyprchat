@@ -338,6 +338,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
   if(!evts.length) return null;
 
   // Stable string key for expandedPill — avoids collapse when new events arrive
+  // Guard: if evts only has source_links/search_results (no tool/thinking/streaming), merged will be empty
   const getPillKey = (ev) => {
     if(ev.type==="thinking"||ev.type==="thought_done") return "thinking";
     if(ev.type==="streaming"||ev.type==="complete") return "streaming";
@@ -380,7 +381,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
   // Other events pass through
   merged.push(...otherEvts);
 
-  const latest = merged[merged.length-1];
+  const latest = merged.length ? merged[merged.length-1] : null;
   const completedCount = merged.filter(e=>e.type==="tool_end"||e.type==="complete"||e.type==="thought_done").length;
   const totalSteps = merged.length;
 
@@ -489,13 +490,13 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
     const activeThinking = merged.find(e=>e.type==="thinking");
     const primaryPill = activeThinking || latest;
     return <div style={{padding:"4px 0"}}>
-      <div style={{display:"flex",flexDirection:"column",gap:3}}>
+      {primaryPill&&<div style={{display:"flex",flexDirection:"column",gap:3}}>
         <Pill ev={primaryPill} t={t} expanded={expandedPill===getPillKey(primaryPill)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(primaryPill)?null:getPillKey(primaryPill))}/>
-        {primaryPill!==latest&&<Pill ev={latest} t={t} expanded={expandedPill===getPillKey(latest)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(latest)?null:getPillKey(latest))}/>}
+        {primaryPill!==latest&&latest&&<Pill ev={latest} t={t} expanded={expandedPill===getPillKey(latest)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(latest)?null:getPillKey(latest))}/>}
         {totalSteps>1&&<button onClick={()=>setShowAll(true)} style={{background:`${t.surface}60`,border:`1px solid ${t.brd}22`,color:t.mut,padding:"2px 8px",borderRadius:10,fontSize:10,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",alignSelf:"flex-start",marginTop:1}}>
           {completedCount} step{completedCount!==1?"s":""} ▾
         </button>}
-      </div>
+      </div>}
       <CodeOutputCards/>
       <FileReadyButtons/>
       <SearchResultCards/>
