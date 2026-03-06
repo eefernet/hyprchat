@@ -1,3 +1,4 @@
+## 📝 This program is still very much under construction with missing features, bad code and more. Check releases for a "stable" alpha build
 # 🧠 HyprChat
 
 **Self-hosted AI chat platform** with tool calling, deep research, model management, and a council of AI mode.
