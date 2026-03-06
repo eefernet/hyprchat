@@ -1,7 +1,7 @@
 # HyprChat
 
 Self-hosted AI chat platform with tool calling, deep research, model management, and a council of AI mode.
-Built with FastAPI + single-file React SPA. No build step required.
+Built with FastAPI + single-file React SPA. No build step required. Note n8n functionality is not yet implemented.
 
 ## Architecture
 
@@ -12,7 +12,7 @@ User → HyprChat server (<YOUR_SERVER_IP>:8000)
          ├── Ollama    (<OLLAMA_IP>:11434)  — local LLM inference
          ├── Codebox   (<CODEBOX_IP>:8585)  — sandboxed code execution
          ├── SearXNG   (<SEARXNG_IP>:8888)  — web search
-         └── n8n       (<N8N_IP>:5678)      — workflow automation (optional)
+         └── n8n       (<N8N_IP>:5678)      — workflow automation (optional) 
 ```
 
 ## Configuration
