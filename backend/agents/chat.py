@@ -9,6 +9,7 @@ import re
 
 import config
 import database as db
+import rag
 from tools import CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls, strip_tool_calls
 from events import inject_text_tool_prompt, parse_tool_params
 
@@ -131,28 +132,49 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             if kb_ids:
                 await events.emit(conv_id, "tool_start", {
                     "tool": "kb", "icon": "database",
-                    "status": f"Loading {len(kb_ids)} knowledge base(s)...",
+                    "status": f"Searching {len(kb_ids)} knowledge base(s)...",
                 })
-                kb_files = await db.get_kb_files_for_kbs(kb_ids)
-                parts = []
-                total_kb_chars = 0
-                MAX_KB_TOTAL = 40000
-                for kf in kb_files:
-                    if total_kb_chars >= MAX_KB_TOTAL:
+                # Extract latest user message for RAG query
+                user_query = ""
+                for m in reversed(req.messages):
+                    if m.get("role") == "user" and m.get("content"):
+                        user_query = m["content"]
                         break
-                    fp = kf.get("filepath", "")
-                    if os.path.exists(fp):
-                        try:
-                            with open(fp, "r", encoding="utf-8", errors="replace") as fh:
-                                chunk = fh.read(20000)
-                            parts.append(
-                                f"--- KB: {kf.get('kb_name', 'KB')} / {kf.get('filename', '')} ---\n{chunk}"
-                            )
-                            total_kb_chars += len(chunk)
-                        except Exception as e:
-                            print(f"[KB] Failed to read {fp}: {e}")
-                if parts:
-                    kb_context = "\n\n".join(parts)
+
+                if user_query:
+                    try:
+                        chunks = await rag.query(kb_ids, user_query, top_k=6)
+                        if chunks:
+                            kb_context = rag.format_context(chunks, max_chars=6000)
+                            filenames = list(set(c["filename"] for c in chunks))
+                            avg_score = sum(c["score"] for c in chunks) / len(chunks)
+                            await events.emit(conv_id, "tool_done", {
+                                "tool": "kb", "icon": "database",
+                                "status": f"Found {len(chunks)} relevant chunks from {', '.join(filenames[:3])} ({avg_score:.0%} avg relevance)",
+                            })
+                            print(f"[RAG] Retrieved {len(chunks)} chunks (avg score {avg_score:.2f}) for query: {user_query[:80]!r}")
+                        else:
+                            print(f"[RAG] No chunks found for query: {user_query[:80]!r}")
+                    except Exception as e:
+                        print(f"[RAG] Query failed, falling back to raw injection: {e}")
+                        # Fallback: raw file injection (old behavior)
+                        kb_files = await db.get_kb_files_for_kbs(kb_ids)
+                        parts = []
+                        total_kb_chars = 0
+                        for kf in kb_files:
+                            if total_kb_chars >= 8000:
+                                break
+                            fp = kf.get("filepath", "")
+                            if os.path.exists(fp):
+                                try:
+                                    with open(fp, "r", encoding="utf-8", errors="replace") as fh:
+                                        txt = fh.read(4000)
+                                    parts.append(f"--- {kf.get('filename', '')} ---\n{txt}")
+                                    total_kb_chars += len(txt)
+                                except Exception:
+                                    pass
+                        if parts:
+                            kb_context = "\n\n".join(parts)
 
     # Apply global overrides from request (when no persona overrides them)
     if req.num_ctx and "num_ctx" not in model_options:
@@ -170,9 +192,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     effective_system = persona_system_prompt if persona_system_prompt is not None else req.system_prompt
     if kb_context:
         effective_system += (
-            "\n\n=== KNOWLEDGE BASE CONTEXT ===\n"
-            "The following documents are part of your knowledge base. "
-            "Use them to accurately answer questions.\n\n"
+            "\n\n=== RELEVANT KNOWLEDGE BASE CONTEXT ===\n"
+            "The following excerpts were retrieved from your knowledge base based on "
+            "the user's query. Use them to accurately answer questions. "
+            "Each excerpt shows its source file and relevance score.\n\n"
             + kb_context
         )
     if effective_system:

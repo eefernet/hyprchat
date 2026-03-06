@@ -33,6 +33,7 @@ from events import EventBus, parse_tool_params
 from agents.chat import chat_stream_generate, TOOL_TEMPLATES, detect_template_family
 from agents.personas import seed_coder_bot as _seed_coder_bot, seed_conspiracy_bot as _seed_conspiracy_bot, seed_based_bot as _seed_based_bot, seed_all_defaults as _seed_all_defaults
 import hf as hf_module
+import rag
 
 # ============================================================
 # SETTINGS — persistent JSON file
@@ -147,6 +148,8 @@ async def lifespan(app: FastAPI):
     _run_cleanup_sync()
     # Start background cleanup loop
     _cleanup_task_ref = asyncio.create_task(_cleanup_loop())
+    # Ensure RAG embedding model is available (non-blocking pull)
+    asyncio.create_task(rag.ensure_embed_model())
     yield
     if _cleanup_task_ref:
         _cleanup_task_ref.cancel()
@@ -757,6 +760,11 @@ async def delete_kb(kb_id: str):
     if os.path.exists(kb_dir):
         shutil.rmtree(kb_dir)
     await db.delete_kb(kb_id)
+    # Remove RAG index for this KB
+    try:
+        await rag.delete_kb_index(kb_id)
+    except Exception as e:
+        print(f"[RAG] Error deleting KB index: {e}")
     return {"status": "deleted"}
 
 
@@ -780,13 +788,64 @@ async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
         f.write(content)
 
     await db.add_kb_file(kb_id, safe_name, filepath, len(content), file.content_type or "")
-    return {"filename": safe_name, "size": len(content)}
+
+    # Index file in RAG pipeline (chunk + embed + store in ChromaDB)
+    try:
+        index_result = await rag.index_file(kb_id, safe_name, filepath)
+    except Exception as e:
+        print(f"[RAG] Indexing failed for {safe_name}: {e}")
+        index_result = {"error": str(e)}
+
+    return {"filename": safe_name, "size": len(content), "rag": index_result}
 
 
 @app.delete("/api/knowledge-bases/files/{file_id}")
 async def delete_kb_file(file_id: int):
+    # Get file info before deleting so we can remove from RAG index
+    _db = await db.get_db()
+    try:
+        cursor = await _db.execute("SELECT kb_id, filename FROM kb_files WHERE id = ?", (file_id,))
+        row = await cursor.fetchone()
+    finally:
+        await _db.close()
+
     await db.delete_kb_file(file_id)
+
+    # Remove from RAG index
+    if row:
+        try:
+            await rag.remove_file(row["kb_id"], row["filename"])
+        except Exception as e:
+            print(f"[RAG] Error removing file from index: {e}")
+
     return {"status": "deleted"}
+
+
+@app.post("/api/knowledge-bases/{kb_id}/reindex")
+async def reindex_kb(kb_id: str):
+    """Reindex all files in a KB — useful for migration or after changing embed model."""
+    kbs = await db.get_kbs()
+    kb = next((k for k in kbs if k["id"] == kb_id), None)
+    if not kb:
+        raise HTTPException(404, "KB not found")
+    files = kb.get("files", [])
+    if not files:
+        return {"status": "no files to index"}
+    results = await rag.reindex_kb(kb_id, files)
+    return {"status": "reindexed", "results": results}
+
+
+@app.post("/api/knowledge-bases/reindex-all")
+async def reindex_all_kbs():
+    """Reindex all knowledge bases — one-time migration to RAG."""
+    kbs = await db.get_kbs()
+    all_results = []
+    for kb in kbs:
+        files = kb.get("files", [])
+        if files:
+            results = await rag.reindex_kb(kb["id"], files)
+            all_results.append({"kb_id": kb["id"], "name": kb["name"], "results": results})
+    return {"status": "reindexed", "kbs": all_results}
 
 
 # ============================================================
