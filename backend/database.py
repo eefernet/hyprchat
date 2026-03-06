@@ -273,6 +273,8 @@ async def get_conversation(id: str):
 
 
 async def update_conversation(id: str, **kwargs):
+    if not kwargs:
+        return
     db = await get_db()
     try:
         # Serialize list/dict fields

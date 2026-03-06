@@ -269,7 +269,179 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
                 except (json.JSONDecodeError, TypeError):
                     pass
 
+    # 5. Python function call syntax: run_shell("cmd"), write_file("path", "content"), etc.
+    #    Models sometimes write tool calls as Python code instead of using the protocol.
+    if not calls:
+        calls = _parse_python_tool_calls(content, available_names)
+
     return calls
+
+
+def _parse_python_tool_calls(content: str, available_names: set) -> list[dict]:
+    """Parse Python-style function calls from model output.
+    Catches patterns like: run_shell("pip install foo"), write_file("/root/app.py", '''code'''), etc."""
+    calls = []
+
+    # Extract all code blocks, or use full content if no code blocks
+    code_blocks = re.findall(r'```(?:\w*)\n(.*?)\n\s*```', content, re.DOTALL)
+    texts_to_scan = code_blocks if code_blocks else [content]
+
+    for text in texts_to_scan:
+        for name in available_names:
+            # Match tool_name( ... ) — find the opening paren after the tool name
+            pattern = rf'\b{re.escape(name)}\s*\('
+            for m in re.finditer(pattern, text):
+                start = m.end()  # position after opening (
+                args = _extract_balanced_parens(text, start)
+                if args is None:
+                    continue
+                parsed = _parse_python_args(name, args)
+                if parsed:
+                    calls.append({"function": {"name": name, "arguments": parsed}})
+    return calls
+
+
+def _extract_balanced_parens(text: str, start: int) -> str | None:
+    """Extract content between balanced parentheses starting at position after opening paren."""
+    depth = 1
+    i = start
+    in_str = False
+    str_char = None
+    in_triple = False
+    esc = False
+    while i < len(text):
+        c = text[i]
+        if esc:
+            esc = False
+            i += 1
+            continue
+        if c == '\\' and in_str and not in_triple:
+            esc = True
+            i += 1
+            continue
+        # Triple-quote detection
+        if not in_str and i + 2 < len(text) and text[i:i+3] in ("'''", '"""'):
+            in_str = True
+            in_triple = True
+            str_char = text[i:i+3]
+            i += 3
+            continue
+        if in_triple and i + 2 < len(text) and text[i:i+3] == str_char:
+            in_str = False
+            in_triple = False
+            str_char = None
+            i += 3
+            continue
+        if not in_str and c in ('"', "'"):
+            in_str = True
+            str_char = c
+            i += 1
+            continue
+        if in_str and not in_triple and c == str_char:
+            in_str = False
+            str_char = None
+            i += 1
+            continue
+        if not in_str:
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+                if depth == 0:
+                    return text[start:i]
+        i += 1
+    return None
+
+
+def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
+    """Parse Python function arguments into a tool arguments dict."""
+    raw_args = raw_args.strip()
+    if not raw_args:
+        return {}
+
+    # Try to evaluate string literals safely
+    # We'll extract quoted string arguments
+    args_list = []
+    i = 0
+    while i < len(raw_args):
+        c = raw_args[i]
+        if c in (' ', ',', '\n', '\t'):
+            i += 1
+            continue
+        # Triple-quoted string
+        if i + 2 < len(raw_args) and raw_args[i:i+3] in ("'''", '"""'):
+            q = raw_args[i:i+3]
+            end = raw_args.find(q, i + 3)
+            if end == -1:
+                return None
+            args_list.append(raw_args[i+3:end])
+            i = end + 3
+            continue
+        # Single/double quoted string
+        if c in ('"', "'"):
+            j = i + 1
+            esc = False
+            while j < len(raw_args):
+                if esc:
+                    esc = False
+                elif raw_args[j] == '\\':
+                    esc = True
+                elif raw_args[j] == c:
+                    break
+                j += 1
+            if j < len(raw_args):
+                # Unescape basic escape sequences
+                s = raw_args[i+1:j].replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"').replace("\\'", "'").replace('\\\\', '\\')
+                args_list.append(s)
+                i = j + 1
+                continue
+            return None
+        # f-string — skip
+        if c == 'f' and i + 1 < len(raw_args) and raw_args[i+1] in ('"', "'"):
+            return None
+        # Bare word or number — skip to next comma
+        j = i
+        depth = 0
+        while j < len(raw_args):
+            if raw_args[j] == ',' and depth == 0:
+                break
+            if raw_args[j] in ('(', '[', '{'):
+                depth += 1
+            elif raw_args[j] in (')', ']', '}'):
+                depth -= 1
+            j += 1
+        token = raw_args[i:j].strip()
+        if token:
+            args_list.append(token)
+        i = j + 1
+
+    if not args_list:
+        return None
+
+    # Map positional args to known tool parameter names
+    TOOL_PARAMS = {
+        "execute_code": ["code", "language"],
+        "run_shell": ["command"],
+        "write_file": ["path", "content"],
+        "read_file": ["path"],
+        "list_files": ["path"],
+        "download_file": ["filename"],
+        "download_project": ["filenames", "project_name"],
+        "delete_file": ["path"],
+        "research": ["query"],
+        "fetch_url": ["url"],
+    }
+
+    param_names = TOOL_PARAMS.get(tool_name)
+    if not param_names:
+        # Unknown tool — use first arg as "input"
+        return {"input": args_list[0]} if args_list else None
+
+    result = {}
+    for idx, val in enumerate(args_list):
+        if idx < len(param_names):
+            result[param_names[idx]] = val
+    return result if result else None
 
 
 def strip_tool_calls(content: str) -> str:
