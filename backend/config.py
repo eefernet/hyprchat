@@ -73,6 +73,8 @@ MAX_FETCH_CHARS = int(os.getenv("MAX_FETCH_CHARS", "8000"))
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen3.5:27b")
 WORKSPACE_MODEL = os.getenv("WORKSPACE_MODEL", "qwen2.5:7b")
 CODER_MODEL = os.getenv("CODER_MODEL", "")
+OPENHANDS_ENABLED = os.getenv("OPENHANDS_ENABLED", "true").lower() == "true"
+OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "8"))
 DEFAULT_SYSTEM_PROMPT = """You are CodeAgent, an autonomous coding assistant with a sandboxed Linux environment (CodeBox).
 
 ## Sandbox Environment

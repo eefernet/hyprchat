@@ -1,5 +1,25 @@
 # HyprChat Changelog
 
+## Alpha v11 — March 2026
+
+### New Features
+- **OpenHands SDK Integration** — The `generate_code` tool now uses an OpenHands agentic coding agent that writes, tests, and fixes code automatically before returning results. Runs inside the CodeBox LXC sandbox for full isolation.
+  - Agent has `terminal` and `file_editor` tools — writes code, runs it, reads errors, fixes, and retries
+  - Uses the configured coder model via Ollama as the LLM backend
+  - Falls back to the legacy single-shot code generator if the OpenHands worker is unavailable
+- **`generate_code` Sub-Agent Tool** — Orchestrator models can delegate code writing to a specialized coder model. Configurable via the Coder Model dropdown in Model Manager settings.
+- **OpenHands Worker Service** — New FastAPI microservice (`openhands_worker.py`) running on CodeBox LXC port 8586. Receives coding tasks, runs a full OpenHands agent loop (plan → write → test → fix → iterate), and returns tested code.
+
+### Improvements
+- **Coder Model selector** — Dropdown in Model Manager Global Defaults to pick which model handles code generation (or "Same as chat model")
+- **OpenHands settings** — `openhands_enabled` toggle and `openhands_max_rounds` configurable via Settings API
+- **Tool pill updates** — generate_code pill now shows "Agent Coding" during execution, "Code Ready" when done
+- **Code-block rescue hardening** — Minimum 30 chars + code keyword check to prevent ASCII art from being mistaken for code
+- **Repetition detector fix** — Skip whitespace-only patterns to avoid killing ASCII art output
+- **Coder Bot English-only rule** — Added rule 11 to Coder Bot persona ensuring all output is in English
+
+---
+
 ## Alpha v10 — March 2026
 
 ### New Features

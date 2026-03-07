@@ -147,6 +147,12 @@ async def lifespan(app: FastAPI):
     if _settings.get("coder_model"):
         config.CODER_MODEL = _settings["coder_model"]
         print(f"[Config] Loaded Coder Model from settings: {config.CODER_MODEL}")
+    if "openhands_enabled" in _settings:
+        config.OPENHANDS_ENABLED = _settings["openhands_enabled"]
+        print(f"[Config] Loaded OpenHands enabled: {config.OPENHANDS_ENABLED}")
+    if "openhands_max_rounds" in _settings:
+        config.OPENHANDS_MAX_ROUNDS = int(_settings["openhands_max_rounds"])
+        print(f"[Config] Loaded OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
     # Run cleanup once on startup to clear any stale files
     _run_cleanup_sync()
     # Start background cleanup loop
@@ -1593,6 +1599,8 @@ async def get_app_settings():
         **settings,
         "current_ollama_url": config.OLLAMA_URL,
         "current_coder_model": config.CODER_MODEL,
+        "openhands_enabled": config.OPENHANDS_ENABLED,
+        "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
         "sandbox_size_bytes": size,
@@ -1604,7 +1612,7 @@ async def get_app_settings():
 @app.patch("/api/settings")
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
-    allowed = {"file_cleanup_days", "ollama_url", "rag", "coder_model"}
+    allowed = {"file_cleanup_days", "ollama_url", "rag", "coder_model", "openhands_enabled", "openhands_max_rounds"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
@@ -1626,6 +1634,12 @@ async def update_app_settings(body: dict = Body(...)):
     if "coder_model" in body:
         config.CODER_MODEL = body["coder_model"] or ""
         print(f"[Config] Updated Coder Model to: {config.CODER_MODEL or '(use orchestrator model)'}")
+    if "openhands_enabled" in body:
+        config.OPENHANDS_ENABLED = bool(body["openhands_enabled"])
+        print(f"[Config] OpenHands enabled: {config.OPENHANDS_ENABLED}")
+    if "openhands_max_rounds" in body:
+        config.OPENHANDS_MAX_ROUNDS = int(body["openhands_max_rounds"])
+        print(f"[Config] OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
     save_settings(settings)
     return {**settings, "current_ollama_url": config.OLLAMA_URL, "current_coder_model": config.CODER_MODEL}
 

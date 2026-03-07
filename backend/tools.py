@@ -960,12 +960,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             language = args.get("language", "python")
             context = args.get("context", "")
             filename = args.get("filename", "")
-            await events.emit(conv_id, "tool_start", {
-                "tool": "generate_code", "icon": "code",
-                "status": f"Generating {language} code...",
-            })
             coder_model = config.CODER_MODEL or conv_model or config.DEFAULT_MODEL
-            print(f"[CODEGEN] model={coder_model} lang={language} task={task[:100]!r}")
 
             # Auto-generate filename if not provided
             if not filename:
@@ -975,11 +970,75 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             "ruby": "rb", "php": "php"}
                 ext = _ext_map.get(language.lower(), language.lower()[:3])
                 filename = f"generated_{uuid.uuid4().hex[:6]}.{ext}"
-            # Strip leading path if model provided a full path as filename
             filename = filename.lstrip("/")
             if filename.startswith("root/"):
                 filename = filename[5:]
             filepath = f"/root/{filename}"
+
+            # Try OpenHands worker first (agentic: write → test → fix → iterate)
+            openhands_url = config.CODEBOX_URL.rsplit(":", 1)[0] + ":8586"
+            use_openhands = getattr(config, "OPENHANDS_ENABLED", True)
+
+            if use_openhands:
+                await events.emit(conv_id, "tool_start", {
+                    "tool": "generate_code", "icon": "code",
+                    "status": f"OpenHands agent: writing {language} code...",
+                })
+                print(f"[CODEGEN:OH] model={coder_model} lang={language} task={task[:100]!r}")
+                try:
+                    oh_resp = await http.post(
+                        f"{openhands_url}/run",
+                        json={
+                            "task": task,
+                            "model": coder_model,
+                            "ollama_url": config.OLLAMA_URL,
+                            "max_rounds": getattr(config, "OPENHANDS_MAX_ROUNDS", 8),
+                            "language": language,
+                            "filename": filename,
+                            "context": context,
+                        },
+                        timeout=300,
+                    )
+                    if oh_resp.status_code == 200:
+                        result = oh_resp.json()
+                        if result.get("status") == "ok":
+                            files = result.get("files_created", [filepath])
+                            main_file = files[0] if files else filepath
+                            duration = result.get("duration_seconds", 0)
+                            summary = result.get("summary", "")
+                            _lang = language.lower()
+                            if _lang in ("python", "python3", "py"):
+                                run_cmd = f"python3 {main_file}"
+                            elif _lang in ("javascript", "js"):
+                                run_cmd = f"node {main_file}"
+                            elif _lang in ("bash", "sh"):
+                                run_cmd = f"bash {main_file}"
+                            else:
+                                run_cmd = main_file
+                            await events.emit(conv_id, "tool_end", {
+                                "tool": "generate_code", "icon": "code",
+                                "status": f"OpenHands: code written & tested → {main_file} ({duration}s)",
+                            })
+                            print(f"[CODEGEN:OH] Done: {main_file} in {duration}s")
+                            return (
+                                f"OpenHands agent wrote and tested code → **{main_file}** "
+                                f"(model: {coder_model}, {duration}s).\n"
+                                f"Run it with: run_shell(command=\"{run_cmd}\")"
+                            )
+                        else:
+                            oh_error = result.get("error", "unknown error")
+                            print(f"[CODEGEN:OH] Agent error: {oh_error[:200]}")
+                            # Fall through to legacy codegen
+                except Exception as oh_e:
+                    print(f"[CODEGEN:OH] Worker unreachable: {oh_e}")
+                    # Fall through to legacy codegen
+
+            # Legacy fallback: single-shot code generation
+            await events.emit(conv_id, "tool_start", {
+                "tool": "generate_code", "icon": "code",
+                "status": f"Generating {language} code (single-shot)...",
+            })
+            print(f"[CODEGEN:LEGACY] model={coder_model} lang={language} task={task[:100]!r}")
 
             sys_prompt = (
                 f"You are an expert code generator. Output ONLY {language} code. "
@@ -1044,7 +1103,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             _imports.add(mod)
                 if _imports:
                     pip_pkgs = " ".join(sorted(_imports))
-                    print(f"[CODEGEN] Auto-installing dependencies: {pip_pkgs}")
+                    print(f"[CODEGEN:LEGACY] Auto-installing: {pip_pkgs}")
                     await events.emit(conv_id, "tool_start", {
                         "tool": "generate_code", "icon": "code",
                         "status": f"Installing: {pip_pkgs}...",
@@ -1055,9 +1114,9 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             "timeout": 60
                         }, timeout=65)
                     except Exception as pip_e:
-                        print(f"[CODEGEN] pip install warning: {pip_e}")
+                        print(f"[CODEGEN:LEGACY] pip install warning: {pip_e}")
 
-                # Write code to sandbox automatically
+                # Write code to sandbox
                 b64_code = base64.b64encode(code.encode()).decode()
                 qpath = shlex.quote(filepath)
                 write_cmd = f"mkdir -p $(dirname {qpath}) && printf '%s' {shlex.quote(b64_code)} | base64 -d > {qpath} && echo OK"
@@ -1067,15 +1126,13 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     write_ok = "OK" in wr.json().get("stdout", "")
                 except Exception as we:
                     write_ok = False
-                    print(f"[CODEGEN] Write failed: {we}")
+                    print(f"[CODEGEN:LEGACY] Write failed: {we}")
 
                 if write_ok:
                     await events.emit(conv_id, "tool_end", {
                         "tool": "generate_code", "icon": "code",
                         "status": f"Generated {line_count} lines → {filepath} (model: {coder_model})",
                     })
-                    print(f"[CODEGEN] Done: {line_count} lines, {len(code)} chars → {filepath}")
-                    # Determine run command
                     _lang = language.lower()
                     if _lang in ("python", "python3", "py"):
                         run_cmd = f"python3 {filepath}"
