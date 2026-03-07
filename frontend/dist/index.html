@@ -878,6 +878,7 @@ function HyprChat(){
   const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"14");}catch{return 14;}});
   const [chatWidth,setChatWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-w")||"880");}catch{return 880;}});
   const [wsModel,setWsModel]=useState(()=>{try{return localStorage.getItem("hc-ws-model")||"qwen2.5:7b";}catch{return "qwen2.5:7b";}});
+  const [coderModel,setCoderModel]=useState(()=>{try{return localStorage.getItem("hc-coder-model")||"";}catch{return "";}});
   const [ctxTokens,setCtxTokens]=useState(0);
   const [genTokens,setGenTokens]=useState(0);
   const [previewFile,setPreviewFile]=useState(null);
@@ -940,6 +941,7 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
   useEffect(()=>{try{localStorage.setItem("hc-custom-quotes",JSON.stringify(customQuotes));}catch{}},[customQuotes]);
   useEffect(()=>{try{localStorage.setItem("hc-ws-model",wsModel);}catch{}},[wsModel]);
+  useEffect(()=>{try{localStorage.setItem("hc-coder-model",coderModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({coder_model:coderModel})}).catch(()=>{});}catch{}},[coderModel]);
   useEffect(()=>{try{localStorage.setItem("hc-model-params",JSON.stringify(modelParams));}catch{}},[modelParams]);
   useEffect(()=>{try{localStorage.setItem("hc-prompts",JSON.stringify(prompts));}catch{}},[prompts]);
   useEffect(()=>{try{localStorage.setItem("hc-conv-tags",JSON.stringify(convTags));}catch{}},[convTags]);
@@ -1055,7 +1057,7 @@ function HyprChat(){
     fetch(`${API}/api/tools`).then(r=>r.json()).then(setTools).catch(()=>{});
     fetch(`${API}/api/model-configs`).then(r=>r.json()).then(setMcs).catch(()=>{});
     fetch(`${API}/api/health`).then(r=>r.json()).then(d=>setHealth(d.services||{})).catch(()=>{});
-    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));}).catch(()=>{});
+    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));if(d.current_coder_model!=null)setCoderModel(d.current_coder_model);}).catch(()=>{});
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
     fetch(`${API}/api/workspaces`).then(r=>r.json()).then(setWorkspaces).catch(()=>{});
     fetch(`${API}/api/councils`).then(r=>r.json()).then(setCouncils).catch(()=>{});
@@ -2523,6 +2525,17 @@ function HyprChat(){
             <div style={{marginBottom:24}}><label style={{fontSize:12,color:t.dim,textTransform:"uppercase",letterSpacing:.5,display:"block",marginBottom:8,fontWeight:600}}>Workspace Analysis Model</label>
               <ModelPicker value={wsModel} onChange={setWsModel} models={models} modelDetails={modelDetails} t={t} font={font}/>
               <div style={{fontSize:10,color:t.mut,marginTop:6}}>Small, fast model for workspace topic auto-detection.</div>
+            </div>
+            <div style={{marginBottom:24}}><label style={{fontSize:12,color:t.dim,textTransform:"uppercase",letterSpacing:.5,display:"block",marginBottom:8,fontWeight:600}}>Code Generator Model</label>
+              {coderModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <div style={{flex:1}}><ModelPicker value={coderModel} onChange={setCoderModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
+                <button onClick={()=>setCoderModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>✕ Reset</button>
+              </div>:<div onClick={()=>setCoderModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+                <span style={{fontSize:14}}>🧬</span>
+                <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Same as chat model</div><div style={{fontSize:9,color:t.dim}}>Click to select a dedicated coder model</div></div>
+                <span style={{fontSize:9,color:t.mut}}>▾</span>
+              </div>}
+              <div style={{fontSize:10,color:t.mut,marginTop:6}}>Dedicated model for the generate_code sub-agent. Empty = uses the active chat model.</div>
             </div>
           </div>
         :

@@ -90,7 +90,8 @@ Don't guess at APIs. Look them up. A 5-second search beats 3 rounds of trial-and
 7. Use absolute paths starting with /root/ for everything.
 8. For complex tasks: plan first, build bottom-up, test as you go.
 9. Keep iterating until it ACTUALLY WORKS. Don't stop at "should work."
-10. If you're unsure about an API: research or fetch_url. Don't hallucinate function signatures."""
+10. If you're unsure about an API: research or fetch_url. Don't hallucinate function signatures.
+11. ALWAYS respond in English. All explanations, comments, and output must be in English."""
 
     parameters = {
         "temperature": 0.3,

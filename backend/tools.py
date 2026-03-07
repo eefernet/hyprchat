@@ -161,10 +161,11 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "generate_code",
-            "description": "Generate code by delegating to a code-specialized model. Use for substantial code generation tasks. Returns clean code ready to write_file or execute_code.",
+            "description": "Generate code using a code-specialized sub-agent. Writes the code to a file in the sandbox automatically. Returns the file path — use run_shell to execute it.",
             "parameters": {"type": "object", "properties": {
                 "task": {"type": "string", "description": "What the code should do — be specific about requirements, inputs, outputs"},
                 "language": {"type": "string", "description": "Programming language: python, javascript, rust, go, etc."},
+                "filename": {"type": "string", "description": "Filename to save as in /root/, e.g. app.py, server.js. Auto-generated if omitted."},
                 "context": {"type": "string", "description": "Optional context: error messages to fix, existing code to modify, constraints"},
             }, "required": ["task", "language"]},
         },
@@ -475,7 +476,7 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
         "delete_file": ["path"],
         "research": ["query"],
         "fetch_url": ["url"],
-        "generate_code": ["task", "language", "context"],
+        "generate_code": ["task", "language", "filename", "context"],
     }
 
     param_names = TOOL_PARAMS.get(tool_name)
@@ -958,6 +959,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             task = args.get("task", "")
             language = args.get("language", "python")
             context = args.get("context", "")
+            filename = args.get("filename", "")
             await events.emit(conv_id, "tool_start", {
                 "tool": "generate_code", "icon": "code",
                 "status": f"Generating {language} code...",
@@ -965,10 +967,33 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             coder_model = config.CODER_MODEL or conv_model or config.DEFAULT_MODEL
             print(f"[CODEGEN] model={coder_model} lang={language} task={task[:100]!r}")
 
+            # Auto-generate filename if not provided
+            if not filename:
+                _ext_map = {"python": "py", "python3": "py", "py": "py", "javascript": "js",
+                            "js": "js", "typescript": "ts", "ts": "ts", "bash": "sh", "sh": "sh",
+                            "rust": "rs", "go": "go", "java": "java", "c": "c", "cpp": "cpp",
+                            "ruby": "rb", "php": "php"}
+                ext = _ext_map.get(language.lower(), language.lower()[:3])
+                filename = f"generated_{uuid.uuid4().hex[:6]}.{ext}"
+            # Strip leading path if model provided a full path as filename
+            filename = filename.lstrip("/")
+            if filename.startswith("root/"):
+                filename = filename[5:]
+            filepath = f"/root/{filename}"
+
             sys_prompt = (
-                f"You are a code generator. Output ONLY {language} code. "
+                f"You are an expert code generator. Output ONLY {language} code. "
                 "No markdown fences. No explanations before or after. No commentary. "
-                "Write clean, working code with error handling and helpful inline comments."
+                "Write clean, production-quality code with error handling and helpful inline comments. "
+                "ALWAYS prefer well-known libraries over reinventing functionality "
+                "(e.g. pyfiglet for ASCII art, pandas for data, requests for HTTP, pillow for images). "
+                "CRITICAL RULES:\n"
+                "- NEVER use input() or stdin — the code runs in a non-interactive sandbox.\n"
+                "- The script MUST work when run with NO arguments: `python3 script.py`\n"
+                "- Use hardcoded demo values that showcase ALL features when no args given.\n"
+                "- sys.argv is optional for customization, but defaults must produce full demo output.\n"
+                "- The script must be SELF-CONTAINED and print meaningful output on its own.\n"
+                "- If external packages are needed, add a comment at the very top: # pip install pkg1 pkg2"
             )
             user_prompt = f"Write {language} code for: {task}"
             if context:
@@ -998,12 +1023,82 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 raw_code = resp.get("message", {}).get("content", "")
                 code = _strip_code_fences(raw_code)
                 line_count = code.count("\n") + 1
-                await events.emit(conv_id, "tool_end", {
-                    "tool": "generate_code", "icon": "code",
-                    "status": f"Generated {line_count} lines of {language} (model: {coder_model})",
-                })
-                print(f"[CODEGEN] Done: {line_count} lines, {len(code)} chars")
-                return f"**Generated {language} code** ({line_count} lines, model: {coder_model}):\n```{language}\n{code}\n```"
+
+                # Auto-detect and install pip dependencies
+                _stdlib = {"os", "sys", "re", "json", "math", "random", "time", "datetime",
+                           "collections", "itertools", "functools", "pathlib", "typing",
+                           "subprocess", "shutil", "argparse", "hashlib", "base64", "uuid",
+                           "io", "csv", "string", "textwrap", "copy", "threading", "asyncio",
+                           "socket", "http", "urllib", "xml", "html", "logging", "unittest",
+                           "struct", "ctypes", "abc", "enum", "dataclasses", "statistics"}
+                _imports = set()
+                for line in code.splitlines():
+                    line = line.strip()
+                    if line.startswith("import "):
+                        mod = line.split()[1].split(".")[0].split(",")[0]
+                        if mod not in _stdlib:
+                            _imports.add(mod)
+                    elif line.startswith("from "):
+                        mod = line.split()[1].split(".")[0]
+                        if mod not in _stdlib:
+                            _imports.add(mod)
+                if _imports:
+                    pip_pkgs = " ".join(sorted(_imports))
+                    print(f"[CODEGEN] Auto-installing dependencies: {pip_pkgs}")
+                    await events.emit(conv_id, "tool_start", {
+                        "tool": "generate_code", "icon": "code",
+                        "status": f"Installing: {pip_pkgs}...",
+                    })
+                    try:
+                        await http.post(f"{config.CODEBOX_URL}/command", json={
+                            "command": f"export PATH=/root/venv/bin:$PATH && pip3 install -q {shlex.quote(pip_pkgs)} 2>&1 | tail -3",
+                            "timeout": 60
+                        }, timeout=65)
+                    except Exception as pip_e:
+                        print(f"[CODEGEN] pip install warning: {pip_e}")
+
+                # Write code to sandbox automatically
+                b64_code = base64.b64encode(code.encode()).decode()
+                qpath = shlex.quote(filepath)
+                write_cmd = f"mkdir -p $(dirname {qpath}) && printf '%s' {shlex.quote(b64_code)} | base64 -d > {qpath} && echo OK"
+                try:
+                    wr = await http.post(f"{config.CODEBOX_URL}/command",
+                                         json={"command": write_cmd, "timeout": 15}, timeout=20)
+                    write_ok = "OK" in wr.json().get("stdout", "")
+                except Exception as we:
+                    write_ok = False
+                    print(f"[CODEGEN] Write failed: {we}")
+
+                if write_ok:
+                    await events.emit(conv_id, "tool_end", {
+                        "tool": "generate_code", "icon": "code",
+                        "status": f"Generated {line_count} lines → {filepath} (model: {coder_model})",
+                    })
+                    print(f"[CODEGEN] Done: {line_count} lines, {len(code)} chars → {filepath}")
+                    # Determine run command
+                    _lang = language.lower()
+                    if _lang in ("python", "python3", "py"):
+                        run_cmd = f"python3 {filepath}"
+                    elif _lang in ("javascript", "js"):
+                        run_cmd = f"node {filepath}"
+                    elif _lang in ("bash", "sh"):
+                        run_cmd = f"bash {filepath}"
+                    else:
+                        run_cmd = filepath
+                    return (
+                        f"Code generated and saved to **{filepath}** ({line_count} lines, model: {coder_model}).\n"
+                        f"Run it with: run_shell(command=\"{run_cmd}\")"
+                    )
+                else:
+                    await events.emit(conv_id, "tool_end", {
+                        "tool": "generate_code", "icon": "code",
+                        "status": f"Generated {line_count} lines (write failed, code in result)",
+                    })
+                    return (
+                        f"**Generated {language} code** ({line_count} lines, model: {coder_model}):\n"
+                        f"```{language}\n{code}\n```\n\n"
+                        "NOTE: Failed to write to sandbox. Use write_file to save this code, then run_shell to execute."
+                    )
             except Exception as gen_e:
                 await events.emit(conv_id, "tool_end", {
                     "tool": "generate_code", "icon": "code",

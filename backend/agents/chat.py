@@ -305,6 +305,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             "7. Deliver output files to the user with download_file.\n"
             "8. After each tool result, decide: fix and retry, or provide final answer.\n"
         )
+        if "generate_code" in available_tool_names:
+            tool_sys += (
+                "9. For ANY task that requires writing more than a few lines of code, "
+                "call generate_code FIRST — it generates code AND saves it to the sandbox automatically. "
+                "Then call run_shell to execute the file it created. Do NOT write code yourself.\n"
+            )
         if messages and messages[0]["role"] == "system":
             messages[0]["content"] += tool_sys
         else:
@@ -455,6 +461,9 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                 if len(_repeat_window) >= 120:
                                     for plen in range(2, 25):
                                         pat = _repeat_window[-plen:]
+                                        # Skip whitespace-only patterns (common in ASCII art, tables, formatted output)
+                                        if not pat.strip():
+                                            continue
                                         count = _repeat_window.count(pat)
                                         if count >= 8 and count * plen > len(_repeat_window) * 0.5:
                                             print(f"[CHAT]   Repetition detected: {pat!r} x{count} — stopping generation")
@@ -535,7 +544,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 # Model wrote code blocks without making tool calls — rescue by executing
                 for lang, code in code_blocks:
                     code = code.strip()
-                    if not code or len(code) < 5:
+                    if not code or len(code) < 30:
+                        continue
+                    # Skip if it looks like ASCII art or output, not real code
+                    if not any(kw in code for kw in ("import ", "def ", "class ", "print(", "return ", "function ", "const ", "let ", "var ", "for ", "while ", "if ", "#!", "from ")):
                         continue
                     # Determine language
                     exec_lang = lang.lower() if lang else "python"
