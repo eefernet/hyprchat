@@ -527,6 +527,41 @@ async def download_file_endpoint(filename: str):
     return JSONResponse({"error": "File not found"}, status_code=404)
 
 
+@app.get("/api/downloads/{filename}/contents")
+async def archive_contents(filename: str):
+    """List files inside a .tar.gz or .zip archive for preview."""
+    import tarfile
+    import zipfile
+    safe_name = os.path.basename(filename)
+    if not safe_name or safe_name != filename:
+        raise HTTPException(400, "Invalid filename")
+    filepath = None
+    for search_dir in [config.SANDBOX_OUTPUTS_DIR, config.UPLOAD_DIR]:
+        candidate = os.path.join(search_dir, safe_name)
+        if os.path.exists(candidate):
+            filepath = candidate
+            break
+    if not filepath:
+        return JSONResponse({"error": "File not found"}, status_code=404)
+    try:
+        entries = []
+        if tarfile.is_tarfile(filepath):
+            with tarfile.open(filepath, "r:*") as tf:
+                for m in tf.getmembers():
+                    entries.append({"name": m.name, "size": m.size, "is_dir": m.isdir()})
+        elif zipfile.is_zipfile(filepath):
+            with zipfile.ZipFile(filepath) as zf:
+                for info in zf.infolist():
+                    entries.append({"name": info.filename, "size": info.file_size, "is_dir": info.is_dir()})
+        else:
+            return JSONResponse({"error": "Not a supported archive"}, status_code=400)
+        # Sort: directories first, then files
+        entries.sort(key=lambda e: (not e["is_dir"], e["name"]))
+        return {"filename": safe_name, "file_count": len([e for e in entries if not e["is_dir"]]), "entries": entries}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ============================================================
 # BUILT-IN TOOL LIST (for frontend)
 # ============================================================
