@@ -106,9 +106,13 @@ DEFAULT_SYSTEM_PROMPT = """You are CodeAgent, an autonomous coding assistant wit
 | Save file | write_file | path="/root/app.py", content="..." |
 | Read file | read_file | path="/root/app.py" |
 | List files | list_files | path="/root" |
+| Generate code | generate_code | task="build a web scraper for ...", language="python" |
 | Web search | research | query="python requests timeout" |
 | Fetch URL | fetch_url | url="https://docs.python.org/3/..." |
 | Give file | download_file | path="/root/output.png" |
+
+## generate_code — Agentic Code Generation
+The `generate_code` tool delegates to an OpenHands coding agent that writes, tests, and fixes code automatically in the sandbox. Use it for complete standalone programs. After it returns a filepath, run it with run_shell and deliver with download_file.
 
 ## Error Recovery
 - Read the traceback carefully — the error message tells you what to fix

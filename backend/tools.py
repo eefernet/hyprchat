@@ -398,6 +398,21 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
     if not raw_args:
         return {}
 
+    # ── Handle keyword arguments first: tool(key="value", key2="value2") ──
+    # Match patterns like: command="...", path="/root/...", task="..."
+    kw_pattern = re.findall(r'(\w+)\s*=\s*(?:"""(.*?)"""|\'\'\'(.*?)\'\'\'|"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\')', raw_args, re.DOTALL)
+    if kw_pattern:
+        result = {}
+        for kw_match in kw_pattern:
+            key = kw_match[0]
+            # Pick the first non-empty capture group (triple-double, triple-single, double, single)
+            val = kw_match[1] or kw_match[2] or kw_match[3] or kw_match[4]
+            val = val.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"').replace("\\'", "'").replace('\\\\', '\\')
+            result[key] = val
+        if result:
+            return result
+
+    # ── Positional arguments fallback ──
     # Try to evaluate string literals safely
     # We'll extract quoted string arguments
     args_list = []
@@ -845,7 +860,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             qdir = shlex.quote(directory)
             qtarname = shlex.quote(f"/tmp/{tarname}")
             r = await http.post(f"{config.CODEBOX_URL}/command", json={
-                "command": f"cd {qdir} && tar czf {qtarname} . 2>&1 && base64 -w0 {qtarname}",
+                "command": f"cd {qdir} && tar czf {qtarname} --exclude='node_modules' --exclude='.git' --exclude='__pycache__' --exclude='venv' --exclude='.cache' --exclude='.npm' --exclude='package-lock.json' . 2>&1 && base64 -w0 {qtarname}",
                 "timeout": 60
             }, timeout=70)
             result = r.json()
@@ -970,7 +985,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 return "ERROR: OpenHands is disabled in settings. Enable it or use write_file + run_shell directly."
 
             openhands_url = config.CODEBOX_URL.rsplit(":", 1)[0] + ":8586"
-            max_rounds = getattr(config, "OPENHANDS_MAX_ROUNDS", 6)
+            max_rounds = getattr(config, "OPENHANDS_MAX_ROUNDS", 12)
 
             # Health check (3s) before committing to the long request
             try:
@@ -1067,14 +1082,26 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 download_result = ""
                 if files:
                     try:
-                        await events.emit(conv_id, "tool_start", {
-                            "tool": "download_project", "icon": "package",
-                            "status": f"📦 Packaging project for download...",
-                        })
-                        download_result = await exec_tool(
-                            http, events, "download_project",
-                            {"directory": project_dir}, conv_id, {}, conv_model=conv_model
-                        )
+                        if len(files) == 1:
+                            # Single file — use download_file
+                            await events.emit(conv_id, "tool_start", {
+                                "tool": "download_file", "icon": "code",
+                                "status": f"Preparing: {files[0]}",
+                            })
+                            download_result = await exec_tool(
+                                http, events, "download_file",
+                                {"path": files[0]}, conv_id, {}, conv_model=conv_model
+                            )
+                        else:
+                            # Multi-file — package as tar.gz
+                            await events.emit(conv_id, "tool_start", {
+                                "tool": "download_project", "icon": "package",
+                                "status": "Packaging project for download...",
+                            })
+                            download_result = await exec_tool(
+                                http, events, "download_project",
+                                {"directory": project_dir}, conv_id, {}, conv_model=conv_model
+                            )
                         print(f"[CODEGEN:OH] Auto-download: {download_result[:100]}")
                     except Exception as dl_e:
                         print(f"[CODEGEN:OH] Auto-download failed: {dl_e}")

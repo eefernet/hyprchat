@@ -141,8 +141,8 @@ def run_task(req: RunRequest):
 
         # ── Detect files created/modified ──
         files_created = _diff_snapshot(work_dir, pre_snapshot)
-        summary = _extract_summary(conversation)
 
+        summary = _extract_summary(conversation)
         duration = time.time() - start
         print(f"[OH-Worker] Done in {duration:.1f}s — {len(files_created)} files, {len(progress_log)} steps, stuck={stuck}")
 
@@ -200,7 +200,8 @@ All files go under /root/. Create a project subdirectory if building a multi-fil
 4. Build/compile the project if needed
 5. TEST by running the code — if errors occur, read them carefully and FIX immediately
 6. Verify the fix works before moving on
-7. When everything works, you're DONE — do not start dev servers or interactive processes
+7. When everything works, create a README.md with setup and run instructions
+8. You're DONE — do not start dev servers or interactive processes
 
 ## RULES
 - NO interactive input: no input(), no readline, no prompts — use hardcoded demo values
@@ -208,6 +209,8 @@ All files go under /root/. Create a project subdirectory if building a multi-fil
 - Create self-contained code that demonstrates all features when run
 - Write clean, production-quality code with proper error handling
 - If a test fails, fix the root cause — don't just suppress the error
+- Pick ONE language variant (e.g. .jsx OR .tsx, not both; vite.config.js OR .ts, not both)
+- For web projects: include index.html where the framework expects it
 """
 
     if req.context:

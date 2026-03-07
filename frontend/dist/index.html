@@ -173,7 +173,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
-<script type="text/babel">
+<script type="text/babel" data-presets="react" data-type="module">
 const { useState, useEffect, useRef, useCallback } = React;
 
 const API = window.HYPRCHAT_API || "";
@@ -1003,13 +1003,13 @@ function HyprChat(){
   const [editMember,setEditMember]=useState(null); // member id being edited
   const [editMemberForm,setEditMemberForm]=useState({system_prompt:"",persona_name:""});
 
-  // Quick search — derived from active conversation's tool_ids
-  const quickSearch = (act?.tool_ids||[]).includes("quick_search");
   const [quickResults,setQuickResults]=useState([]); // per send
   const [searchLoading,setSearchLoading]=useState(false);
 
   const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0),chatScrollRef=useRef(null);
   const act = convs.find(c=>c.id===actId);
+  // Quick search — derived from active conversation's tool_ids
+  const quickSearch = (act?.tool_ids||[]).includes("quick_search");
 
   // Save helpers — persist to backend
   const saveTool=(tl)=>{fetch(`${API}/api/tools/${tl.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:tl.name,description:tl.description,code:tl.code})}).catch(()=>{});};
