@@ -22,9 +22,9 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "execute_code",
-            "description": "Execute source code in a sandboxed environment. Supports Python, JavaScript, Bash, C, C++, Rust, Go, Java, Ruby, PHP and 20+ more. Pass actual source code — not shell commands or filenames.",
+            "description": "Execute source code directly in the sandbox. Pass complete source code with hardcoded test values. Working directory is /root/. Do NOT use input() or sys.argv — they will fail. For scripts needing arguments, use write_file + run_shell instead.",
             "parameters": {"type": "object", "properties": {
-                "code": {"type": "string", "description": "Source code to execute"},
+                "code": {"type": "string", "description": "Complete source code to execute (must be self-contained with hardcoded test values)"},
                 "language": {"type": "string", "description": "Language: python, javascript, bash, c, cpp, rust, go, java, ruby, php, etc."},
             }, "required": ["code", "language"]},
         },
@@ -33,7 +33,7 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "run_shell",
-            "description": "Run a shell command in the sandbox terminal. Use for: pip install, apt-get, running saved scripts (python3 /root/app.py), git, make, npm, cargo build.",
+            "description": "Run a shell command in /root/. Use for: pip install, running saved scripts with args (python3 /root/app.py arg1 arg2), git, make, npm, cargo build. Preferred way to test scripts that take arguments.",
             "parameters": {"type": "object", "properties": {
                 "command": {"type": "string", "description": "Shell command to execute"},
             }, "required": ["command"]},
@@ -157,6 +157,18 @@ CODEAGENT_TOOLS = {
             }, "required": ["topic"]},
         },
     },
+    "generate_code": {
+        "type": "function",
+        "function": {
+            "name": "generate_code",
+            "description": "Generate code by delegating to a code-specialized model. Use for substantial code generation tasks. Returns clean code ready to write_file or execute_code.",
+            "parameters": {"type": "object", "properties": {
+                "task": {"type": "string", "description": "What the code should do — be specific about requirements, inputs, outputs"},
+                "language": {"type": "string", "description": "Programming language: python, javascript, rust, go, etc."},
+                "context": {"type": "string", "description": "Optional context: error messages to fix, existing code to modify, constraints"},
+            }, "required": ["task", "language"]},
+        },
+    },
 }
 
 
@@ -210,6 +222,36 @@ def _normalize_tool_args(args):
     return args
 
 
+def _fix_json_newlines(text: str) -> str:
+    """Fix JSON with unescaped newlines inside string values.
+    Models often output JSON with real newlines in 'code' fields."""
+    result = []
+    in_str = False
+    esc = False
+    for i, c in enumerate(text):
+        if esc:
+            result.append(c)
+            esc = False
+            continue
+        if c == '\\':
+            result.append(c)
+            if in_str:
+                esc = True
+            continue
+        if c == '"' and not esc:
+            in_str = not in_str
+            result.append(c)
+            continue
+        if in_str and c == '\n':
+            result.append('\\n')
+            continue
+        if in_str and c == '\t':
+            result.append('\\t')
+            continue
+        result.append(c)
+    return ''.join(result)
+
+
 def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
     """Parse tool calls from model text when native Ollama tool protocol fails.
     Handles: raw JSON, <tool_call> tags, JSON in code blocks, bare JSON objects."""
@@ -219,12 +261,13 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
     stripped = re.sub(r'```(?:json|tool_call|tool)?\s*\n?', '', content).strip().rstrip('`')
 
     # 1. Entire response is a single JSON tool call
-    try:
-        obj = json.loads(stripped)
-        if isinstance(obj, dict) and obj.get("name") in available_names and "arguments" in obj:
-            return [{"function": {"name": obj["name"], "arguments": _normalize_tool_args(obj["arguments"])}}]
-    except (json.JSONDecodeError, TypeError, KeyError):
-        pass
+    for _try_str in (stripped, _fix_json_newlines(stripped)):
+        try:
+            obj = json.loads(_try_str)
+            if isinstance(obj, dict) and obj.get("name") in available_names and "arguments" in obj:
+                return [{"function": {"name": obj["name"], "arguments": _normalize_tool_args(obj["arguments"])}}]
+        except (json.JSONDecodeError, TypeError, KeyError):
+            pass
 
     # 2. <tool_call>JSON</tool_call> tags (Qwen native format)
     tag_matches = re.findall(
@@ -260,14 +303,16 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
         code_blocks = re.findall(r'```(?:json|tool_call|tool)?\s*\n(.*?)\n\s*```', content, re.DOTALL)
         for block in code_blocks:
             for json_str in _extract_json_objects(block.strip()):
-                try:
-                    obj = json.loads(json_str)
-                    if isinstance(obj, dict) and obj.get("name") in available_names:
-                        args = obj.get("arguments", obj.get("parameters", {}))
-                        if args is not None:
-                            calls.append({"function": {"name": obj["name"], "arguments": _normalize_tool_args(args)}})
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                for _try in (json_str, _fix_json_newlines(json_str)):
+                    try:
+                        obj = json.loads(_try)
+                        if isinstance(obj, dict) and obj.get("name") in available_names:
+                            args = obj.get("arguments", obj.get("parameters", {}))
+                            if args is not None:
+                                calls.append({"function": {"name": obj["name"], "arguments": _normalize_tool_args(args)}})
+                                break
+                    except (json.JSONDecodeError, TypeError):
+                        pass
 
     # 5. Python function call syntax: run_shell("cmd"), write_file("path", "content"), etc.
     #    Models sometimes write tool calls as Python code instead of using the protocol.
@@ -430,6 +475,7 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
         "delete_file": ["path"],
         "research": ["query"],
         "fetch_url": ["url"],
+        "generate_code": ["task", "language", "context"],
     }
 
     param_names = TOOL_PARAMS.get(tool_name)
@@ -491,9 +537,22 @@ async def _ensure_venv(http):
     return False
 
 
+def _strip_code_fences(text: str) -> str:
+    """Strip markdown code fences from model output, returning clean code."""
+    text = text.strip()
+    # Remove ```lang ... ``` wrapper
+    m = re.match(r'^```\w*\s*\n(.*?)```\s*$', text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    # Remove leading ```lang and trailing ```
+    text = re.sub(r'^```\w*\s*\n?', '', text)
+    text = re.sub(r'\n?```\s*$', '', text)
+    return text.strip()
+
+
 # ── Tool execution dispatcher ──
 
-async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_tool_map: dict = None) -> str:
+async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_tool_map: dict = None, conv_model: str = "") -> str:
     """Execute a built-in or custom tool and return the result string."""
     custom_tool_map = custom_tool_map or {}
     try:
@@ -506,24 +565,32 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             })
             start_time = time.time()
 
-            # Python: use venv for isolation; other languages: use /execute directly
-            use_venv = language.lower() in ("python", "python3", "py")
-            if use_venv:
+            # All execution goes through /command for consistent CWD at /root/
+            b64_code = base64.b64encode(code.encode()).decode()
+            lang_lower = language.lower()
+            if lang_lower in ("python", "python3", "py"):
                 await _ensure_venv(http)
-                b64_code = base64.b64encode(code.encode()).decode()
-                venv_cmd = (
-                    f"printf '%s' {shlex.quote(b64_code)} | base64 -d > /tmp/_hc_exec.py && "
+                exec_cmd = (
+                    f"cd /root && printf '%s' {shlex.quote(b64_code)} | base64 -d > /tmp/_hc_exec.py && "
                     f"/root/venv/bin/python3 /tmp/_hc_exec.py"
                 )
-                exec_task = asyncio.create_task(http.post(
-                    f"{config.CODEBOX_URL}/command",
-                    json={"command": venv_cmd, "timeout": config.EXECUTION_TIMEOUT},
-                    timeout=config.EXECUTION_TIMEOUT + 15,
-                ))
+            elif lang_lower in ("bash", "sh", "zsh"):
+                exec_cmd = f"cd /root && printf '%s' {shlex.quote(b64_code)} | base64 -d | bash"
+            elif lang_lower in ("javascript", "js", "node"):
+                exec_cmd = f"cd /root && printf '%s' {shlex.quote(b64_code)} | base64 -d > /tmp/_hc_exec.js && node /tmp/_hc_exec.js"
             else:
+                # Fallback: use /execute endpoint for compiled languages
                 exec_task = asyncio.create_task(http.post(
                     f"{config.CODEBOX_URL}/execute",
                     json={"code": code, "language": language, "timeout": config.EXECUTION_TIMEOUT},
+                    timeout=config.EXECUTION_TIMEOUT + 15,
+                ))
+                exec_cmd = None
+
+            if exec_cmd:
+                exec_task = asyncio.create_task(http.post(
+                    f"{config.CODEBOX_URL}/command",
+                    json={"command": exec_cmd, "timeout": config.EXECUTION_TIMEOUT},
                     timeout=config.EXECUTION_TIMEOUT + 15,
                 ))
             while not exec_task.done():
@@ -575,9 +642,19 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             if stderr and not success:
                 parts.append(f"\nstderr:\n```\n{stderr[:3000]}\n```")
 
-            # Action hints for the model
+            # Action hints — give specific guidance for common errors
             if not success:
-                parts.append("\n---\nEXECUTION FAILED. Read the error above carefully. Fix the code and call execute_code again.")
+                combined_err = (stderr + stdout).lower()
+                if "eoferror" in combined_err or "eof when reading" in combined_err:
+                    parts.append("\n---\n⚠️ input() does NOT work in this sandbox (no stdin). Remove all input() calls. Use hardcoded test values, function parameters, or sys.argv with write_file + run_shell.")
+                elif "indexerror" in combined_err and "argv" in combined_err:
+                    parts.append("\n---\n⚠️ sys.argv has no arguments in execute_code. To test scripts with arguments: 1) write_file to save the script, 2) run_shell to execute it with args (e.g., python3 /root/script.py arg1 arg2).")
+                elif "no such file" in combined_err or "not found" in combined_err and "command" not in combined_err:
+                    parts.append("\n---\n⚠️ File not found. Working directory is /root/. Use absolute paths (/root/filename) or save files with write_file first.")
+                elif "modulenotfounderror" in combined_err or "no module named" in combined_err:
+                    parts.append("\n---\n⚠️ Missing package. Install it first: run_shell(command='pip3 install <package>'), then retry.")
+                else:
+                    parts.append("\n---\nEXECUTION FAILED. Read the error above. Fix the root cause (do NOT retry the same code).")
             elif not stdout.strip():
                 parts.append("\n---\nCode ran successfully with no output. Add print() statements if you need to verify results.")
 
@@ -876,6 +953,63 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             angle = args.get("angle", "evidence")
             depth = max(3, min(5, int(args.get("depth", 4))))
             return await run_conspiracy_research(http, config.OLLAMA_URL, config.DEFAULT_MODEL, config.SEARXNG_URL, events, topic, angle, depth, conv_id)
+
+        elif name == "generate_code":
+            task = args.get("task", "")
+            language = args.get("language", "python")
+            context = args.get("context", "")
+            await events.emit(conv_id, "tool_start", {
+                "tool": "generate_code", "icon": "code",
+                "status": f"Generating {language} code...",
+            })
+            coder_model = config.CODER_MODEL or conv_model or config.DEFAULT_MODEL
+            print(f"[CODEGEN] model={coder_model} lang={language} task={task[:100]!r}")
+
+            sys_prompt = (
+                f"You are a code generator. Output ONLY {language} code. "
+                "No markdown fences. No explanations before or after. No commentary. "
+                "Write clean, working code with error handling and helpful inline comments."
+            )
+            user_prompt = f"Write {language} code for: {task}"
+            if context:
+                user_prompt += f"\n\nContext:\n{context}"
+
+            try:
+                r = await http.post(
+                    f"{config.OLLAMA_URL}/api/chat",
+                    json={
+                        "model": coder_model,
+                        "messages": [
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        "stream": False,
+                        "options": {"temperature": 0.2, "num_ctx": 8192, "num_predict": 4096},
+                    },
+                    timeout=180,
+                )
+                if r.status_code != 200:
+                    await events.emit(conv_id, "tool_end", {
+                        "tool": "generate_code", "icon": "code",
+                        "status": f"Coder model error (HTTP {r.status_code})",
+                    })
+                    return f"ERROR: Code generation failed — coder model returned HTTP {r.status_code}: {r.text[:200]}"
+                resp = r.json()
+                raw_code = resp.get("message", {}).get("content", "")
+                code = _strip_code_fences(raw_code)
+                line_count = code.count("\n") + 1
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "generate_code", "icon": "code",
+                    "status": f"Generated {line_count} lines of {language} (model: {coder_model})",
+                })
+                print(f"[CODEGEN] Done: {line_count} lines, {len(code)} chars")
+                return f"**Generated {language} code** ({line_count} lines, model: {coder_model}):\n```{language}\n{code}\n```"
+            except Exception as gen_e:
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "generate_code", "icon": "code",
+                    "status": f"Code generation failed: {str(gen_e)[:80]}",
+                })
+                return f"ERROR: Code generation failed: {gen_e}"
 
         elif name in custom_tool_map:
             ct = custom_tool_map[name]

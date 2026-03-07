@@ -412,6 +412,134 @@ async def ensure_embed_model():
         return False
 
 
+# ── Research Auto-Indexing ──
+
+RESEARCH_TOOLS = {"research", "deep_research", "conspiracy_research", "fetch_url"}
+
+
+def _research_collection_name(persona_id: str) -> str:
+    """Collection name for a persona's auto-indexed research."""
+    # "mc-23ed6b99d765" → "research-mc-23ed6b99d765"
+    return f"research-{persona_id}"
+
+
+def _get_research_collection(persona_id: str):
+    """Get or create a ChromaDB collection for a persona's research memory."""
+    client = get_chroma()
+    return client.get_or_create_collection(
+        name=_research_collection_name(persona_id),
+        metadata={"hnsw:space": "cosine"},
+    )
+
+
+async def index_research(persona_id: str, tool_name: str, query: str,
+                         result_text: str, conv_id: str = "") -> dict:
+    """Auto-index a research tool result into the persona's research memory.
+
+    Args:
+        persona_id: The persona that ran the research
+        tool_name: Which tool produced the result (research, fetch_url, etc.)
+        query: The original query/URL that was researched
+        result_text: The tool's output text
+        conv_id: Conversation ID for metadata
+
+    Returns:
+        Stats about the indexing operation
+    """
+    if not result_text or len(result_text.strip()) < 50:
+        return {"indexed": False, "reason": "result too short"}
+
+    # Chunk the research result
+    source_label = f"{tool_name}:{query[:80]}"
+    chunks = chunk_text(result_text, source_label)
+    if not chunks:
+        return {"indexed": False, "reason": "no chunks"}
+
+    # Generate IDs — use hash of content for deduplication
+    ids = []
+    texts = []
+    metadatas = []
+    for chunk in chunks:
+        content_hash = hashlib.md5(chunk["text"].encode()).hexdigest()
+        ids.append(content_hash)
+        texts.append(chunk["text"])
+        metadatas.append({
+            "filename": source_label,
+            "tool": tool_name,
+            "query": query[:200],
+            "conv_id": conv_id,
+            "chunk_index": chunk["chunk_index"],
+            "persona_id": persona_id,
+            "char_count": len(chunk["text"]),
+        })
+
+    # Embed
+    embeddings = await embed_texts(texts)
+    valid = [(i, t, m, e) for i, t, m, e in zip(ids, texts, metadatas, embeddings) if e is not None]
+    if not valid:
+        return {"indexed": False, "reason": "embedding failed"}
+
+    v_ids, v_texts, v_metas, v_embeds = zip(*valid)
+
+    collection = _get_research_collection(persona_id)
+    collection.upsert(
+        ids=list(v_ids),
+        documents=list(v_texts),
+        metadatas=list(v_metas),
+        embeddings=list(v_embeds),
+    )
+
+    print(f"[RAG] Auto-indexed {len(v_ids)} research chunks for {persona_id} from {tool_name}")
+    return {"indexed": True, "chunks": len(v_ids), "tool": tool_name}
+
+
+async def query_research(persona_id: str, query_text: str, top_k: int = 4) -> list[dict]:
+    """Query a persona's research memory for relevant past findings.
+
+    Returns:
+        List of dicts with keys: text, filename, score, tool, query
+    """
+    if not query_text.strip():
+        return []
+
+    query_embedding = await embed_single(query_text)
+    if query_embedding is None:
+        return []
+
+    try:
+        collection = _get_research_collection(persona_id)
+        count = collection.count()
+        if count == 0:
+            return []
+
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(top_k, count),
+            include=["documents", "metadatas", "distances"],
+        )
+
+        if not results["documents"] or not results["documents"][0]:
+            return []
+
+        out = []
+        for doc, meta, dist in zip(
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0],
+        ):
+            out.append({
+                "text": doc,
+                "filename": meta.get("filename", "research"),
+                "tool": meta.get("tool", ""),
+                "query": meta.get("query", ""),
+                "score": 1 - dist,
+            })
+        return out
+    except Exception as e:
+        print(f"[RAG] Research query error for {persona_id}: {e}")
+        return []
+
+
 async def reindex_kb(kb_id: str, files: list[dict]) -> list[dict]:
     """Reindex all files in a KB. Used for initial migration or manual reindex.
 

@@ -132,7 +132,7 @@ _cleanup_task_ref = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _cleanup_task_ref
+    global _cleanup_task_ref, _health_task_ref
     await db.init_db()
     os.makedirs(config.UPLOAD_DIR, exist_ok=True)
     os.makedirs(config.TOOLS_DIR, exist_ok=True)
@@ -144,16 +144,30 @@ async def lifespan(app: FastAPI):
     if _settings.get("ollama_url"):
         config.OLLAMA_URL = _settings["ollama_url"]
         print(f"[Config] Loaded Ollama URL from settings: {config.OLLAMA_URL}")
+    if _settings.get("coder_model"):
+        config.CODER_MODEL = _settings["coder_model"]
+        print(f"[Config] Loaded Coder Model from settings: {config.CODER_MODEL}")
     # Run cleanup once on startup to clear any stale files
     _run_cleanup_sync()
     # Start background cleanup loop
     _cleanup_task_ref = asyncio.create_task(_cleanup_loop())
+    # Start health check loop (every 5 min)
+    _health_task_ref = asyncio.create_task(_health_check_loop())
+    # Load RAG settings from persistent config
+    _rag_cfg = _settings.get("rag", {})
+    if _rag_cfg.get("embed_model"):
+        rag.EMBED_MODEL = _rag_cfg["embed_model"]
+    if _rag_cfg.get("chunk_size"):
+        rag.CHUNK_SIZE = int(_rag_cfg["chunk_size"])
+    if _rag_cfg.get("chunk_overlap") is not None:
+        rag.CHUNK_OVERLAP = int(_rag_cfg["chunk_overlap"])
     # Ensure RAG embedding model is available (non-blocking pull)
     asyncio.create_task(rag.ensure_embed_model())
     yield
-    if _cleanup_task_ref:
-        _cleanup_task_ref.cancel()
-        await asyncio.gather(_cleanup_task_ref, return_exceptions=True)
+    for task in [_cleanup_task_ref, _health_task_ref]:
+        if task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 app = FastAPI(title="HyprChat", version="2.0.0", lifespan=lifespan)
 
@@ -296,34 +310,162 @@ class ModelConfigUpdate(BaseModel):
 # ============================================================
 # HEALTH & INFO
 # ============================================================
+async def _check_service(name: str, url: str, timeout: float = 8) -> dict:
+    """Check a single service, return status + response time."""
+    t0 = time.time()
+    try:
+        r = await http.get(url, timeout=timeout)
+        ms = int((time.time() - t0) * 1000)
+        if r.status_code < 400:
+            # Degraded if response > 3s
+            status = "degraded" if ms > 3000 else "ok"
+            return {"status": status, "response_ms": ms}
+        return {"status": "error", "response_ms": ms, "error": f"HTTP {r.status_code}"}
+    except Exception as e:
+        ms = int((time.time() - t0) * 1000)
+        return {"status": "error", "response_ms": ms, "error": str(e)[:200]}
+
+
+async def _check_searxng() -> dict:
+    """Check SearXNG: healthz for uptime, then a test search for rate-limit detection."""
+    t0 = time.time()
+    try:
+        r = await http.get(f"{config.SEARXNG_URL}/healthz", timeout=8)
+        ms = int((time.time() - t0) * 1000)
+        if r.status_code >= 400:
+            return {"status": "error", "response_ms": ms, "error": f"HTTP {r.status_code}"}
+    except Exception as e:
+        ms = int((time.time() - t0) * 1000)
+        return {"status": "error", "response_ms": ms, "error": str(e)[:200]}
+    # Service is up — now check if rate-limited by doing a real search
+    try:
+        r2 = await http.get(
+            f"{config.SEARXNG_URL}/search",
+            params={"q": "test", "format": "json"},
+            timeout=10,
+        )
+        if r2.status_code == 429:
+            return {"status": "degraded", "response_ms": ms, "rate_limited": True}
+        # Some SearXNG instances return 200 but with empty results when rate-limited
+        data = r2.json()
+        results = data.get("results", [])
+        # If we get a 200 with an error about rate limiting or no results + unresponsive_engines
+        unresponsive = data.get("unresponsive_engines", [])
+        if not results and len(unresponsive) > 0:
+            return {"status": "degraded", "response_ms": ms, "rate_limited": True}
+        return {"status": "ok", "response_ms": ms, "rate_limited": False}
+    except Exception:
+        # Search failed but healthz was ok — mark as degraded
+        return {"status": "degraded", "response_ms": ms, "rate_limited": True}
+
+
+_HEALTH_ENDPOINTS = {
+    "ollama": lambda: f"{config.OLLAMA_URL}/api/tags",
+    "codebox": lambda: f"{config.CODEBOX_URL}/health",
+    "n8n": lambda: f"{config.N8N_URL}/healthz",
+}
+
+
+async def _run_health_checks() -> dict:
+    """Run all health checks and log to DB."""
+    checks = {}
+    for name, url_fn in _HEALTH_ENDPOINTS.items():
+        result = await _check_service(name, url_fn())
+        checks[name] = result
+    # SearXNG gets its own special check (rate-limit detection)
+    checks["searxng"] = await _check_searxng()
+    # Log to DB (non-blocking)
+    try:
+        conn = await db.get_db()
+        try:
+            for name, result in checks.items():
+                await conn.execute(
+                    "INSERT INTO service_health_log (service, status, response_ms, error) VALUES (?, ?, ?, ?)",
+                    (name, result["status"], result.get("response_ms", 0), result.get("error", ""))
+                )
+            await conn.commit()
+        finally:
+            await conn.close()
+    except Exception as e:
+        print(f"[Health] DB log error: {e}")
+    return checks
+
+
+_health_task_ref = None
+
+async def _health_check_loop():
+    """Background: check all services every 5 minutes."""
+    while True:
+        try:
+            await _run_health_checks()
+        except Exception as e:
+            print(f"[Health] Loop error: {e}")
+        await asyncio.sleep(300)  # 5 minutes
+
+
 @app.get("/api/health")
 async def health():
-    checks = {}
-    try:
-        r = await http.get(f"{config.OLLAMA_URL}/api/tags", timeout=5)
-        checks["ollama"] = {"status": "ok", "models": len(r.json().get("models", []))}
-    except Exception as e:
-        checks["ollama"] = {"status": "error", "error": str(e)}
-
-    try:
-        r = await http.get(f"{config.CODEBOX_URL}/health", timeout=5)
-        checks["codebox"] = {"status": "ok", "data": r.json()}
-    except Exception as e:
-        checks["codebox"] = {"status": "error", "error": str(e)}
-
-    try:
-        r = await http.get(f"{config.SEARXNG_URL}/search", params={"q": "test", "format": "json"}, timeout=5)
-        checks["searxng"] = {"status": "ok"}
-    except Exception as e:
-        checks["searxng"] = {"status": "error", "error": str(e)}
-
-    try:
-        r = await http.get(f"{config.N8N_URL}/healthz", timeout=5)
-        checks["n8n"] = {"status": "ok"}
-    except Exception as e:
-        checks["n8n"] = {"status": "error", "error": str(e)}
-
+    checks = await _run_health_checks()
     return {"status": "ok", "version": "2.0.0", "services": checks}
+
+
+@app.get("/api/health/history")
+async def health_history(days: int = Query(default=90, ge=1, le=365)):
+    """Return daily uptime aggregates per service for the last N days."""
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            """SELECT service, date(checked_at) as day,
+                      COUNT(*) as total,
+                      SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) as ok_count,
+                      SUM(CASE WHEN status='degraded' THEN 1 ELSE 0 END) as degraded_count,
+                      SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) as error_count,
+                      AVG(response_ms) as avg_ms
+               FROM service_health_log
+               WHERE checked_at >= datetime('now', ?)
+               GROUP BY service, day
+               ORDER BY service, day""",
+            (f"-{days} days",)
+        )
+        # Organize by service
+        services = {}
+        for row in rows:
+            svc = row["service"]
+            if svc not in services:
+                services[svc] = []
+            total = row["total"]
+            ok_pct = round((row["ok_count"] / total) * 100, 1) if total else 0
+            degraded_pct = round((row["degraded_count"] / total) * 100, 1) if total else 0
+            error_pct = round((row["error_count"] / total) * 100, 1) if total else 0
+            services[svc].append({
+                "day": row["day"],
+                "total_checks": total,
+                "ok_pct": ok_pct,
+                "degraded_pct": degraded_pct,
+                "error_pct": error_pct,
+                "avg_ms": round(row["avg_ms"] or 0),
+            })
+        # Calculate overall uptime per service
+        summary = {}
+        for svc, days_data in services.items():
+            total_checks = sum(d["total_checks"] for d in days_data)
+            total_ok = sum(d["ok_pct"] * d["total_checks"] / 100 for d in days_data)
+            uptime = round((total_ok / total_checks) * 100, 2) if total_checks else 0
+            # Current status from most recent check
+            last_row = await conn.execute_fetchall(
+                "SELECT status, response_ms FROM service_health_log WHERE service=? ORDER BY checked_at DESC LIMIT 1",
+                (svc,)
+            )
+            current = last_row[0]["status"] if last_row else "unknown"
+            summary[svc] = {
+                "uptime_pct": uptime,
+                "current_status": current,
+                "avg_response_ms": round(sum(d["avg_ms"] for d in days_data) / len(days_data)) if days_data else 0,
+                "days": days_data,
+            }
+        return {"services": summary, "period_days": days}
+    finally:
+        await conn.close()
 
 
 # ============================================================
@@ -389,6 +531,7 @@ async def list_builtin_tools():
         {"id": "codeagent", "name": "⚡ CodeAgent", "description": "Code execution, shell, file management, downloads", "icon": "cpu", "builtin": True},
         {"id": "deep_research", "name": "🔬 Deep Research", "description": "Multi-source parallel research with AI synthesis", "icon": "search", "builtin": True},
         {"id": "conspiracy_research", "name": "🕵️ Conspiracy Research", "description": "Uncensored deep-dive into theories, cover-ups, and hidden agendas", "icon": "search", "builtin": True},
+        {"id": "generate_code", "name": "🧬 Code Generator", "description": "Delegate code writing to a code-specialized model sub-agent", "icon": "code", "builtin": True},
     ]
 
 
@@ -972,18 +1115,32 @@ async def pull_model(request: Request):
 
 @app.delete("/api/models/{model_name:path}")
 async def delete_model(model_name: str):
-    """Delete a model from Ollama."""
-    try:
-        import json as _json
-        r = await http.request("DELETE", f"{config.OLLAMA_URL}/api/delete", data=_json.dumps({"name": model_name}), headers={"Content-Type": "application/json"})
-        if r.status_code not in (200, 204):
-            err = r.text[:400]
-            raise HTTPException(r.status_code, f"Ollama refused delete: {err}")
-        return {"status": "deleted", "model": model_name}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(502, f"Failed to delete model: {e}")
+    """Delete a model from Ollama. Tries alternate name formats if not found."""
+    import json as _json
+    # Build list of name variants to try
+    names_to_try = [model_name]
+    if not model_name.startswith("hf.co/") and "/" in model_name:
+        names_to_try.append(f"hf.co/{model_name}")
+    if model_name.startswith("hf.co/"):
+        names_to_try.append(model_name[len("hf.co/"):])
+    last_err = None
+    for name in names_to_try:
+        try:
+            r = await http.request("DELETE", f"{config.OLLAMA_URL}/api/delete",
+                                   data=_json.dumps({"name": name}),
+                                   headers={"Content-Type": "application/json"})
+            if r.status_code in (200, 204):
+                return {"status": "deleted", "model": model_name}
+            err_text = r.text[:400]
+            if "not found" in err_text.lower() and name != names_to_try[-1]:
+                continue  # Try next variant
+            last_err = err_text
+        except Exception as e:
+            last_err = str(e)
+    # If all variants returned "not found", the model is already gone — treat as success
+    if last_err and "not found" in last_err.lower():
+        return {"status": "deleted", "model": model_name, "note": "already removed from Ollama"}
+    raise HTTPException(502, f"Failed to delete model: {last_err}")
 
 
 @app.post("/api/models/{model_name:path}/create-tool-model")
@@ -1435,6 +1592,7 @@ async def get_app_settings():
     return {
         **settings,
         "current_ollama_url": config.OLLAMA_URL,
+        "current_coder_model": config.CODER_MODEL,
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
         "sandbox_size_bytes": size,
@@ -1446,24 +1604,86 @@ async def get_app_settings():
 @app.patch("/api/settings")
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
-    allowed = {"file_cleanup_days", "ollama_url"}
+    allowed = {"file_cleanup_days", "ollama_url", "rag", "coder_model"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
+    # Apply RAG settings to rag module at runtime
+    if "rag" in body and isinstance(body["rag"], dict):
+        rag_cfg = body["rag"]
+        if rag_cfg.get("embed_model"):
+            rag.EMBED_MODEL = rag_cfg["embed_model"]
+        if rag_cfg.get("chunk_size"):
+            rag.CHUNK_SIZE = int(rag_cfg["chunk_size"])
+        if rag_cfg.get("chunk_overlap") is not None:
+            rag.CHUNK_OVERLAP = int(rag_cfg["chunk_overlap"])
+        print(f"[Config] Updated RAG settings: model={rag.EMBED_MODEL} chunk={rag.CHUNK_SIZE}/{rag.CHUNK_OVERLAP}")
     if "ollama_url" in body and body["ollama_url"]:
         config.OLLAMA_URL = body["ollama_url"]
         print(f"[Config] Updated Ollama URL to: {config.OLLAMA_URL}")
     elif "ollama_url" in body and not body["ollama_url"]:
         config.OLLAMA_URL = os.getenv("OLLAMA_URL", "http://192.168.1.110:11434")
+    if "coder_model" in body:
+        config.CODER_MODEL = body["coder_model"] or ""
+        print(f"[Config] Updated Coder Model to: {config.CODER_MODEL or '(use orchestrator model)'}")
     save_settings(settings)
-    return {**settings, "current_ollama_url": config.OLLAMA_URL}
+    return {**settings, "current_ollama_url": config.OLLAMA_URL, "current_coder_model": config.CODER_MODEL}
+
+
+@app.get("/api/rag/stats")
+async def get_rag_stats():
+    """Return ChromaDB collection stats and disk usage."""
+    try:
+        client = rag.get_chroma()
+        collections = client.list_collections()
+        coll_stats = []
+        total_chunks = 0
+        for c in collections:
+            count = c.count()
+            total_chunks += count
+            coll_stats.append({"name": c.name, "count": count})
+        # Disk usage
+        disk = "—"
+        if os.path.exists(rag.CHROMA_DIR):
+            total_bytes = sum(
+                os.path.getsize(os.path.join(dp, f))
+                for dp, _, fns in os.walk(rag.CHROMA_DIR) for f in fns
+            )
+            if total_bytes < 1024 * 1024:
+                disk = f"{total_bytes / 1024:.0f}KB"
+            else:
+                disk = f"{total_bytes / 1024 / 1024:.1f}MB"
+        return {
+            "total_collections": len(coll_stats),
+            "total_chunks": total_chunks,
+            "disk_usage": disk,
+            "collections": sorted(coll_stats, key=lambda x: -x["count"]),
+            "embed_model": rag.EMBED_MODEL,
+            "chunk_size": rag.CHUNK_SIZE,
+            "chunk_overlap": rag.CHUNK_OVERLAP,
+        }
+    except Exception as e:
+        return {"error": str(e), "total_collections": 0, "total_chunks": 0, "disk_usage": "—", "collections": []}
 
 
 @app.post("/api/settings/cleanup-now")
 async def cleanup_now():
-    """Immediately delete expired sandbox output files."""
-    result = _run_cleanup_sync()
-    return result
+    """Immediately delete ALL sandbox output files (ignores cleanup_days age check)."""
+    deleted, freed = 0, 0
+    try:
+        for entry in os.scandir(config.SANDBOX_OUTPUTS_DIR):
+            if entry.is_file(follow_symlinks=False):
+                try:
+                    freed += entry.stat().st_size
+                    os.remove(entry.path)
+                    deleted += 1
+                except Exception as e:
+                    print(f"[Cleanup] Could not remove {entry.path}: {e}")
+    except Exception:
+        pass
+    if deleted:
+        print(f"[Cleanup] Manual clean: removed {deleted} files, freed {freed // 1024} KB")
+    return {"deleted": deleted, "freed_bytes": freed}
 
 
 @app.get("/api/changelog")

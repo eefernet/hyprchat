@@ -128,6 +128,16 @@ CREATE TABLE IF NOT EXISTS memories (
     source_conv_id TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS service_health_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    service TEXT NOT NULL,
+    status TEXT NOT NULL,
+    response_ms INTEGER DEFAULT 0,
+    error TEXT DEFAULT '',
+    checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_health_service_time ON service_health_log(service, checked_at);
 """
 
 

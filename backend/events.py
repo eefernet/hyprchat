@@ -38,22 +38,36 @@ def inject_text_tool_prompt(messages: list, available_tool_names: set):
     tool_names = ", ".join(sorted(available_tool_names))
     text_tool_prompt = (
         "\n\n## TOOL CALLING FORMAT\n"
-        "Your model does not support native tool calls. To use tools, output them as JSON:\n"
-        "<tool_call>\n"
-        '{"name": "TOOL_NAME", "arguments": {"param": "value"}}\n'
-        "</tool_call>\n\n"
+        "To use tools, output ONLY a <tool_call> tag with JSON. One tool call per response.\n\n"
         "Available tools: " + tool_names + "\n\n"
-        "Examples:\n"
+        "## CORRECT WORKFLOW\n"
+        "1. Install packages:\n"
         "<tool_call>\n"
-        '{"name": "execute_code", "arguments": {"code": "print(2+2)", "language": "python"}}\n'
+        '{"name": "run_shell", "arguments": {"command": "pip3 install requests"}}\n'
         "</tool_call>\n\n"
+        "2. Test code with hardcoded values (NO input(), NO sys.argv):\n"
         "<tool_call>\n"
-        '{"name": "run_shell", "arguments": {"command": "pip3 install pandas"}}\n'
+        '{"name": "execute_code", "arguments": {"code": "from art import text2art\\nprint(text2art(\'Hello\', font=\'block\'))", "language": "python"}}\n'
         "</tool_call>\n\n"
+        "3. Save the final script:\n"
         "<tool_call>\n"
-        '{"name": "write_file", "arguments": {"path": "/root/app.py", "content": "print(42)"}}\n'
+        '{"name": "write_file", "arguments": {"path": "/root/app.py", "content": "#!/usr/bin/env python3\\nimport sys\\n..."}}\n'
         "</tool_call>\n\n"
-        "IMPORTANT: Always use <tool_call> tags. Never put code directly in your response.\n"
+        "4. Test the script with arguments:\n"
+        "<tool_call>\n"
+        '{"name": "run_shell", "arguments": {"command": "python3 /root/app.py Hello block"}}\n'
+        "</tool_call>\n\n"
+        "5. Deliver the file to the user (call download_file ONCE only):\n"
+        "<tool_call>\n"
+        '{"name": "download_file", "arguments": {"path": "/root/app.py"}}\n'
+        "</tool_call>\n\n"
+        "## RULES\n"
+        "- ALWAYS use <tool_call> tags. Never put raw code in your response.\n"
+        "- execute_code has NO stdin (input() crashes) and NO arguments (sys.argv is empty).\n"
+        "- For scripts needing args: write_file first, then run_shell with arguments.\n"
+        "- Call download_file ONCE per file. Do NOT repeat the same download.\n"
+        "- If code fails, read the error, fix the root cause, and retry with a DIFFERENT approach.\n"
+        "- After delivering files, write a brief summary for the user. Do NOT call more tools.\n"
     )
     if messages and messages[0]["role"] == "system":
         messages[0]["content"] += text_tool_prompt
