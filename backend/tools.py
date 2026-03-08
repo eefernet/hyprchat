@@ -856,6 +856,9 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             directory = args.get("directory", "/root")
             await events.emit(conv_id, "tool_start", {"tool": "download_project", "icon": "code", "status": f"Packaging: {directory}"})
             dirname = directory.rstrip("/").split("/")[-1] or "project"
+            # Clean up auto-generated UUIDs from directory names (project-abc12345 → project)
+            if re.match(r'^project-[a-f0-9]{8}$', dirname):
+                dirname = "project"
             tarname = f"{dirname}.tar.gz"
             qdir = shlex.quote(directory)
             qtarname = shlex.quote(f"/tmp/{tarname}")

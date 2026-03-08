@@ -88,12 +88,15 @@ def run_task(req: RunRequest):
 
         agent = _Agent(llm=llm, tools=tools)
 
-        # ── Expert system prompt tailored to the task ──
-        full_task = _build_task_prompt(req)
-
-        # Create workspace
-        work_dir = Path("/root")
+        # Create isolated workspace per run (avoids stale files from previous tasks)
+        import uuid
+        run_id = uuid.uuid4().hex[:8]
+        work_dir = Path(f"/root/project-{run_id}")
         work_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[OH-Worker] Workspace: {work_dir}")
+
+        # ── Expert system prompt tailored to the task ──
+        full_task = _build_task_prompt(req, str(work_dir))
 
         # Snapshot filesystem before run
         pre_snapshot = _snapshot_workspace(work_dir)
@@ -167,7 +170,7 @@ def run_task(req: RunRequest):
         )
 
 
-def _build_task_prompt(req: RunRequest) -> str:
+def _build_task_prompt(req: RunRequest, work_dir: str = "/root") -> str:
     """Build an expert-level task prompt for the OpenHands agent."""
 
     # Language-specific setup hints
@@ -191,17 +194,20 @@ def _build_task_prompt(req: RunRequest) -> str:
 {req.task}
 
 ## WORKSPACE
-All files go under /root/. Create a project subdirectory if building a multi-file project.
+Your workspace is: {work_dir}
+ALL files MUST go in this directory. cd into it first: `cd {work_dir}`
+Do NOT create files in /root/ directly or any other location.
 
 ## INSTRUCTIONS
-1. PLAN first: decide the file structure before writing any code
-2. Create ALL necessary files: source code, config files, package manifests, etc.
-3. Install dependencies: {lang_hint}
-4. Build/compile the project if needed
-5. TEST by running the code — if errors occur, read them carefully and FIX immediately
-6. Verify the fix works before moving on
-7. When everything works, create a README.md with setup and run instructions
-8. You're DONE — do not start dev servers or interactive processes
+1. First: `cd {work_dir}`
+2. PLAN: decide the file structure before writing any code
+3. Create ALL necessary files: source code, config files, package manifests, etc.
+4. Install ALL dependencies mentioned or implied by the task: {lang_hint}
+5. Build/compile the project if needed
+6. TEST by running the code — if errors occur, read them carefully and FIX immediately
+7. Verify the fix works before moving on
+8. When everything works, create a README.md with setup and run instructions
+9. You're DONE — do not start dev servers or interactive processes
 
 ## RULES
 - NO interactive input: no input(), no readline, no prompts — use hardcoded demo values
@@ -209,6 +215,7 @@ All files go under /root/. Create a project subdirectory if building a multi-fil
 - Create self-contained code that demonstrates all features when run
 - Write clean, production-quality code with proper error handling
 - If a test fails, fix the root cause — don't just suppress the error
+- Install EVERY dependency the code uses (e.g., if using Tailwind CSS, install tailwindcss)
 - Pick ONE language variant (e.g. .jsx OR .tsx, not both; vite.config.js OR .ts, not both)
 - For web projects: include index.html where the framework expects it
 """
