@@ -965,6 +965,10 @@ async def delete_kb(kb_id: str):
     return {"status": "deleted"}
 
 
+# Track background indexing status per file
+_indexing_status: dict[str, dict] = {}  # key: "kb_id:filename" → status dict
+
+
 @app.post("/api/knowledge-bases/{kb_id}/files")
 async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
     kb_dir = os.path.join(config.KB_DIR, kb_id)
@@ -984,16 +988,33 @@ async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
     with open(filepath, "wb") as f:
         f.write(content)
 
-    await db.add_kb_file(kb_id, safe_name, filepath, len(content), file.content_type or "")
+    file_id = await db.add_kb_file(kb_id, safe_name, filepath, len(content), file.content_type or "")
 
-    # Index file in RAG pipeline (chunk + embed + store in ChromaDB)
-    try:
-        index_result = await rag.index_file(kb_id, safe_name, filepath)
-    except Exception as e:
-        print(f"[RAG] Indexing failed for {safe_name}: {e}")
-        index_result = {"error": str(e)}
+    # Start background RAG indexing so the upload response returns immediately
+    status_key = f"{kb_id}:{safe_name}"
+    _indexing_status[status_key] = {"status": "indexing", "filename": safe_name}
 
-    return {"filename": safe_name, "size": len(content), "rag": index_result}
+    async def _bg_index():
+        try:
+            result = await rag.index_file(kb_id, safe_name, filepath)
+            _indexing_status[status_key] = {"status": "done", "filename": safe_name, **result}
+        except Exception as e:
+            print(f"[RAG] Indexing failed for {safe_name}: {e}")
+            _indexing_status[status_key] = {"status": "error", "filename": safe_name, "error": str(e)}
+
+    asyncio.create_task(_bg_index())
+
+    return {"id": file_id, "filename": safe_name, "file_size": len(content), "indexing": True}
+
+
+@app.get("/api/knowledge-bases/{kb_id}/files/{filename}/status")
+async def get_file_index_status(kb_id: str, filename: str):
+    """Check background indexing status for a file."""
+    status_key = f"{kb_id}:{filename}"
+    status = _indexing_status.get(status_key)
+    if status:
+        return status
+    return {"status": "unknown", "filename": filename}
 
 
 @app.delete("/api/knowledge-bases/files/{file_id}")

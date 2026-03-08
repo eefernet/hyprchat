@@ -1,1 +1,37 @@
 node_modules/
+__pycache__/
+*.pyc
+*.pyo
+
+# Deploy config (contains server credentials)
+.deploy_config.json
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Data directories
+data/
+chroma_db/
+*.db
+*.db-journal
+
+# Python
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

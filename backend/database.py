@@ -359,15 +359,17 @@ async def get_kbs():
         await db.close()
 
 
-async def add_kb_file(kb_id: str, filename: str, filepath: str, file_size: int, file_type: str):
+async def add_kb_file(kb_id: str, filename: str, filepath: str, file_size: int, file_type: str) -> int:
     db = await get_db()
     try:
-        await db.execute(
+        cursor = await db.execute(
             "INSERT INTO kb_files (kb_id, filename, filepath, file_size, file_type) VALUES (?, ?, ?, ?, ?)",
             (kb_id, filename, filepath, file_size, file_type)
         )
+        file_id = cursor.lastrowid
         await db.execute("UPDATE knowledge_bases SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (kb_id,))
         await db.commit()
+        return file_id
     finally:
         await db.close()
 

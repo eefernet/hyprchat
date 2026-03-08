@@ -970,6 +970,7 @@ function HyprChat(){
   const [evts,setEvts]=useState([]);
   const evtsRef=useRef([]);
   const [kbs,setKbs]=useState([]);
+  const [uploadProgress,setUploadProgress]=useState({});  // {kbId: {filename, progress, status, error}}
   const [tools,setTools]=useState([]);
   const [mcs,setMcs]=useState([]);
   const [health,setHealth]=useState({});
@@ -2050,15 +2051,66 @@ function HyprChat(){
             onX={()=>{if(f.id)fetch(`${API}/api/knowledge-bases/files/${f.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:(k.files||[]).filter((_,j)=>j!==i)}:k));}}/>)}
           {!(kb.files||[]).length&&<span style={{fontSize:11,color:t.mut,fontStyle:"italic"}}>No files uploaded</span>}
         </div>
+        {/* Upload progress bars */}
+        {Object.entries(uploadProgress).filter(([k])=>k.startsWith(kb.id+":")).map(([key,info])=>(
+          <div key={key} style={{marginBottom:8,padding:"6px 10px",background:`${t.surface||t.bg}`,borderRadius:6,border:`1px solid ${t.brd}22`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:10,marginBottom:4}}>
+              <span style={{color:t.text,fontWeight:600}}>{info.filename}</span>
+              <span style={{color:info.status==="error"?t.err:info.status==="done"?"#4caf50":t.mut,fontWeight:500}}>
+                {info.status==="uploading"?`Uploading ${info.progress}%`:info.status==="indexing"?"Indexing...":info.status==="done"?"Complete":info.status==="error"?(info.error||"Failed"):""}
+              </span>
+            </div>
+            <div style={{height:4,borderRadius:2,background:`${t.mut}22`,overflow:"hidden"}}>
+              <div style={{height:"100%",borderRadius:2,background:info.status==="error"?t.err:info.status==="done"?"#4caf50":t.f1,width:`${info.status==="done"?100:info.status==="indexing"?90:info.progress||0}%`,transition:"width 0.3s ease"}}/>
+            </div>
+          </div>
+        ))}
         <label style={{display:"flex",alignItems:"center",gap:6,padding:"8px 14px",background:`${t.f1}10`,border:`1px dashed ${t.f1}44`,borderRadius:8,cursor:"pointer",fontSize:11,color:t.f1}}>
           <IC.Upload/> Upload files
-          <input type="file" multiple accept=".pdf,.md,.txt,.json,.csv,.docx,.html,.py,.js,.ts,.yaml,.yml" style={{display:"none"}} onChange={async e=>{
-            for(const f of e.target.files){
+          <input type="file" multiple accept=".pdf,.md,.txt,.json,.csv,.docx,.html,.py,.js,.ts,.yaml,.yml" style={{display:"none"}} onChange={e=>{
+            const files=[...e.target.files];e.target.value="";if(!files.length)return;
+            const kbId=kb.id;
+            const uploadOne=f=>{
+              const pKey=`${kbId}:${f.name}:${Date.now()}`;
+              setUploadProgress(p=>({...p,[pKey]:{filename:f.name,progress:0,status:"uploading"}}));
               const fd=new FormData();fd.append("file",f);
-              try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files`,{method:"POST",body:fd});const d=await r.json();
-                setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:[...(k.files||[]),{filename:d.filename||f.name,file_size:d.size||f.size}]}:k));
-              }catch{setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:[...(k.files||[]),{name:f.name,size:f.size}]}:k));}
-            }e.target.value="";
+              const xhr=new XMLHttpRequest();
+              xhr.upload.onprogress=ev=>{if(ev.lengthComputable){const pct=Math.round(ev.loaded/ev.total*100);setUploadProgress(p=>({...p,[pKey]:{...p[pKey],progress:pct}}));}};
+              xhr.onload=()=>{
+                if(xhr.status>=200&&xhr.status<300){
+                  let d;try{d=JSON.parse(xhr.responseText);}catch{d={};}
+                  setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"indexing",progress:100}}));
+                  // Add file to KB state immediately with server-returned id
+                  setKbs(p=>p.map(k=>k.id===kbId?{...k,files:[...(k.files||[]),{id:d.id,filename:d.filename||f.name,file_size:d.file_size||f.size}]}:k));
+                  // Poll indexing status then auto-dismiss
+                  const poll=async()=>{
+                    for(let i=0;i<60;i++){
+                      await new Promise(r=>setTimeout(r,2000));
+                      try{
+                        const sr=await fetch(`${API}/api/knowledge-bases/${kbId}/files/${encodeURIComponent(d.filename||f.name)}/status`);
+                        const st=await sr.json();
+                        if(st.status==="done"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"done"}}));setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),3000);return;}
+                        if(st.status==="error"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:st.error||"indexing failed"}}));setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),6000);return;}
+                      }catch{}
+                    }
+                    setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"done"}}));setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),3000);
+                  };
+                  poll();
+                }else{
+                  let msg="Upload failed";try{msg=JSON.parse(xhr.responseText).detail||msg;}catch{}
+                  setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:msg}}));
+                  setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),6000);
+                }
+              };
+              xhr.onerror=()=>{
+                setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:"Network error"}}));
+                setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),6000);
+              };
+              xhr.open("POST",`${API}/api/knowledge-bases/${kbId}/files`);
+              xhr.send(fd);
+            };
+            // Fire all uploads in parallel
+            files.forEach(uploadOne);
           }}/>
         </label>
       </div>)}
