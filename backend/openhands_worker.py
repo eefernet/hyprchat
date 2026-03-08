@@ -145,6 +145,29 @@ def run_task(req: RunRequest):
         # ── Detect files created/modified ──
         files_created = _diff_snapshot(work_dir, pre_snapshot)
 
+        # Debug: list ALL files in workspace (helps diagnose detection issues)
+        all_workspace_files = _list_all_files(work_dir)
+        print(f"[OH-Worker] All files in workspace ({len(all_workspace_files)}):")
+        for wf in all_workspace_files[:30]:
+            in_detected = "✓" if wf in files_created else "✗"
+            print(f"[OH-Worker]   {in_detected} {wf}")
+        if len(all_workspace_files) > 30:
+            print(f"[OH-Worker]   ... and {len(all_workspace_files) - 30} more")
+
+        # Fallback: if diff found very few files but workspace has more,
+        # use the full listing (something went wrong with mtime detection)
+        if len(files_created) <= 1 and len(all_workspace_files) > len(files_created):
+            print(f"[OH-Worker] Diff found {len(files_created)} but workspace has {len(all_workspace_files)} — using full listing as fallback")
+            files_created = all_workspace_files
+
+        # Second fallback: if workspace is empty, scan /root/ for files
+        # the agent may have created (ignored cd instruction)
+        if not files_created:
+            root_files = _list_all_files(Path("/root"), exclude_dir=work_dir)
+            if root_files:
+                print(f"[OH-Worker] Workspace empty but found {len(root_files)} files in /root/")
+                files_created = root_files
+
         summary = _extract_summary(conversation)
         duration = time.time() - start
         print(f"[OH-Worker] Done in {duration:.1f}s — {len(files_created)} files, {len(progress_log)} steps, stuck={stuck}")
@@ -170,54 +193,181 @@ def run_task(req: RunRequest):
         )
 
 
+_AGENT_SYSTEM_PROMPT = """\
+You are CodeBot — an elite software engineer agent. You write production-quality code, \
+test it, fix errors, and deliver complete working projects. You never explain what you \
+will do — you just do it. You never put code in chat — you use the file editor and terminal.
+
+## METHODOLOGY
+1. PLAN the file structure first (mentally — don't waste a step writing plans)
+2. WRITE all source files using the file editor — every single file the project needs
+3. Create config/manifest files (package.json, Cargo.toml, go.mod, etc.)
+4. Install dependencies ONLY AFTER all source files exist
+5. Build/compile the project
+6. TEST by running it — read errors carefully, fix root causes, re-test
+7. Create a README.md with setup and run instructions
+8. DONE — never start dev servers or long-running processes
+
+## LANGUAGE REFERENCE
+
+### Python
+```
+project/
+├── main.py              # Entry point
+├── requirements.txt     # pip dependencies
+├── src/
+│   ├── __init__.py
+│   ├── models.py
+│   └── utils.py
+└── tests/
+    └── test_main.py
+```
+- Install: `pip3 install -r requirements.txt`
+- Test: `python3 main.py` or `pytest`
+- For Flask/FastAPI: write the app but do NOT run the server
+- For CLI tools: use argparse with sensible defaults, demo with hardcoded args
+
+### JavaScript (Node.js / React / Vue)
+```
+project/
+├── package.json         # MUST include all deps + scripts
+├── vite.config.js       # Vite config with framework plugin
+├── index.html           # MUST have <script type="module" src="/src/main.jsx">
+├── src/
+│   ├── main.jsx         # REQUIRED: ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+│   ├── App.jsx          # Root component
+│   ├── App.css          # Styles (or use Tailwind via CDN/PostCSS)
+│   └── components/
+│       └── Widget.jsx
+└── public/              # Static assets
+```
+- **React entry point is MANDATORY**: `src/main.jsx` must import React, ReactDOM, and App, then mount it
+- **index.html script tag is MANDATORY**: `<script type="module" src="/src/main.jsx"></script>` inside `<body>`
+- Install: `npm install`
+- Build: `npm run build`
+- Do NOT use `npm create`, `npx create-react-app`, or any scaffolding — write every file yourself
+- Do NOT start dev servers (`npm run dev`, `npm start`)
+- For vanilla JS (no framework): use a single HTML file with `<script>` tags, no bundler needed
+
+### TypeScript
+```
+project/
+├── package.json
+├── tsconfig.json        # strict: true, jsx: react-jsx, module: ESNext
+├── vite.config.ts
+├── index.html           # <script type="module" src="/src/main.tsx">
+├── src/
+│   ├── main.tsx         # REQUIRED: mount React
+│   ├── App.tsx
+│   └── components/
+└── public/
+```
+- Same rules as JavaScript but with .tsx/.ts extensions
+- Include @types/react and @types/react-dom in devDependencies
+- Pick ONE extension set: .ts/.tsx everywhere (never mix .js and .ts)
+
+### Rust
+```
+project/
+├── Cargo.toml
+├── src/
+│   ├── main.rs          # Entry point (fn main)
+│   ├── lib.rs           # Library code (optional)
+│   └── models.rs
+└── tests/
+    └── integration.rs
+```
+- Init: `cargo init` (creates Cargo.toml + src/main.rs)
+- Add deps: edit Cargo.toml `[dependencies]` section
+- Build: `cargo build`
+- Test: `cargo run` then `cargo test`
+
+### Go
+```
+project/
+├── go.mod
+├── main.go              # package main, func main()
+├── internal/
+│   └── handler.go
+└── pkg/
+    └── utils.go
+```
+- Init: `go mod init project`
+- Add deps: `go get <package>` or they auto-resolve
+- Build: `go build -o app .`
+- Test: `go run .` then `go test ./...`
+
+### C
+```
+project/
+├── Makefile
+├── src/
+│   ├── main.c
+│   ├── utils.c
+│   └── utils.h
+└── include/
+    └── project.h
+```
+- Compile: `gcc -o app src/*.c -I include -Wall -Wextra`
+- Or use Makefile: `make`
+- Test: `./app`
+- Link math: add `-lm`, pthreads: add `-lpthread`
+
+### C++
+```
+project/
+├── CMakeLists.txt       # Or Makefile
+├── src/
+│   ├── main.cpp
+│   ├── app.cpp
+│   └── app.hpp
+└── include/
+    └── project.hpp
+```
+- Compile: `g++ -o app src/*.cpp -I include -std=c++17 -Wall`
+- Or CMake: `cmake -B build && cmake --build build`
+- Test: `./app` or `./build/app`
+
+### Java
+```
+project/
+├── pom.xml              # Or build.gradle
+├── src/main/java/
+│   └── com/app/
+│       ├── Main.java    # public static void main
+│       └── Service.java
+└── src/test/java/
+```
+- Simple: `javac src/main/java/com/app/*.java -d out && java -cp out com.app.Main`
+- Maven: `mvn compile exec:java`
+- Keep it simple — single-dir compilation unless Maven/Gradle is needed
+
+## HARD RULES
+1. NEVER use interactive scaffolding tools (npm create, create-react-app, cargo-generate, cookiecutter)
+2. NEVER start long-running servers or processes
+3. NEVER use interactive input (input(), readline, stdin prompts) — use hardcoded demo values
+4. NEVER skip entry point files — every app needs a main (main.py, main.jsx, main.rs, main.go, Main.java, main.c)
+5. ALWAYS install every dependency the code imports
+6. ALWAYS test by running the code — if it fails, fix and re-test until it works
+7. ALWAYS write files using the file editor, never echo/cat into files
+8. Pick ONE language variant per project (.jsx OR .tsx, not both; .js config OR .ts config, not both)
+9. For web apps: verify the build succeeds (`npm run build`, `cargo build`, `go build`) before finishing
+10. Fix root causes — don't suppress errors with try/except or empty catch blocks
+"""
+
+
 def _build_task_prompt(req: RunRequest, work_dir: str = "/root") -> str:
-    """Build an expert-level task prompt for the OpenHands agent."""
+    """Build the full prompt: system persona + task-specific instructions."""
 
-    # Language-specific setup hints
-    _LANG_HINTS = {
-        "python": "Use pip3 to install packages. Use /root/venv if available. Test with: python3 <file>.",
-        "javascript": "Use npm init -y, then npm install deps. For React: use Vite (npm create vite@latest). Build with: npm run build. Do NOT start dev servers.",
-        "typescript": "Use npm init -y, add typescript + ts-node. Compile with tsc. For React: Vite + @vitejs/plugin-react.",
-        "rust": "Use cargo init. Build with: cargo build. Test with: cargo run.",
-        "go": "Use go mod init. Build with: go build. Test with: go run .",
-        "java": "Create .java files. Compile: javac *.java. Run: java Main.",
-        "c": "Write .c files. Compile: gcc -o output file.c. Run: ./output.",
-        "cpp": "Write .cpp files. Compile: g++ -o output file.cpp -std=c++17. Run: ./output.",
-    }
+    full_task = f"""{_AGENT_SYSTEM_PROMPT}
 
-    lang = req.language.lower()
-    lang_hint = _LANG_HINTS.get(lang, f"Use standard {req.language} tools to build and test.")
-
-    full_task = f"""You are an expert {req.language} developer building a project from scratch.
-
-## TASK
+## YOUR TASK
 {req.task}
 
 ## WORKSPACE
 Your workspace is: {work_dir}
-ALL files MUST go in this directory. cd into it first: `cd {work_dir}`
-Do NOT create files in /root/ directly or any other location.
-
-## INSTRUCTIONS
-1. First: `cd {work_dir}`
-2. PLAN: decide the file structure before writing any code
-3. Create ALL necessary files: source code, config files, package manifests, etc.
-4. Install ALL dependencies mentioned or implied by the task: {lang_hint}
-5. Build/compile the project if needed
-6. TEST by running the code — if errors occur, read them carefully and FIX immediately
-7. Verify the fix works before moving on
-8. When everything works, create a README.md with setup and run instructions
-9. You're DONE — do not start dev servers or interactive processes
-
-## RULES
-- NO interactive input: no input(), no readline, no prompts — use hardcoded demo values
-- NO long-running servers: do NOT run npm start, npm run dev, flask run, uvicorn, etc.
-- Create self-contained code that demonstrates all features when run
-- Write clean, production-quality code with proper error handling
-- If a test fails, fix the root cause — don't just suppress the error
-- Install EVERY dependency the code uses (e.g., if using Tailwind CSS, install tailwindcss)
-- Pick ONE language variant (e.g. .jsx OR .tsx, not both; vite.config.js OR .ts, not both)
-- For web projects: include index.html where the framework expects it
+ALL files MUST go in this directory. `cd {work_dir}` first.
+Language: {req.language}
 """
 
     if req.context:
@@ -331,6 +481,28 @@ def _diff_snapshot(work_dir: Path, pre_snapshot: dict[str, float]) -> list[str]:
     except Exception as e:
         print(f"[OH-Worker] Diff error: {e}")
     return sorted(new_files)
+
+
+def _list_all_files(scan_dir: Path, exclude_dir: Path | None = None) -> list[str]:
+    """List all non-ignored files in a directory (ignores node_modules, .git, etc.)."""
+    files = []
+    try:
+        for item in scan_dir.rglob("*"):
+            if not item.is_file():
+                continue
+            # Skip files in the exclude directory
+            if exclude_dir and str(item).startswith(str(exclude_dir)):
+                continue
+            try:
+                parts = item.relative_to(scan_dir).parts
+            except ValueError:
+                continue
+            if not parts or _should_ignore(parts, item.name):
+                continue
+            files.append(str(item))
+    except Exception as e:
+        print(f"[OH-Worker] List files error: {e}")
+    return sorted(files)
 
 
 def _extract_summary(conversation) -> str:

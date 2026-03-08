@@ -994,6 +994,7 @@ function HyprChat(){
 
   // Council state
   const [councils,setCouncils]=useState([]);
+  const [councilPresets,setCouncilPresets]=useState([]);
   const [activeCouncilId,setActiveCouncilId]=useState(null);
   const [councilRunning,setCouncilRunning]=useState(false);
   const [councilResponses,setCouncilResponses]=useState({}); // {memberId: {model,content,done}}
@@ -1061,6 +1062,7 @@ function HyprChat(){
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
     fetch(`${API}/api/workspaces`).then(r=>r.json()).then(setWorkspaces).catch(()=>{});
     fetch(`${API}/api/councils`).then(r=>r.json()).then(setCouncils).catch(()=>{});
+    fetch(`${API}/api/council-presets`).then(r=>r.json()).then(setCouncilPresets).catch(()=>{});
     const quickSearchEntry={id:"quick_search",name:"⚡ Quick Search",description:"SearXNG instant search with inline YouTube, image & web previews",icon:"flash"};
     fetch(`${API}/api/builtin-tools`).then(r=>r.json()).then(d=>{if(Array.isArray(d))setBuiltinTools([...d,quickSearchEntry]);}).catch(()=>{
       setBuiltinTools([
@@ -1121,6 +1123,14 @@ function HyprChat(){
     const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<200;
     if(nearBottom)el.scrollTop=el.scrollHeight;
   },[act?.messages]);
+  // Auto-scroll during council streaming
+  useEffect(()=>{
+    if(!councilRunning)return;
+    const el=chatScrollRef.current;
+    if(!el)return;
+    const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<300;
+    if(nearBottom)el.scrollTop=el.scrollHeight;
+  },[councilResponses,councilHostContent,councilVotes,councilVoting]);
   useEffect(()=>{if(panel==="chat")inpRef.current?.focus();},[actId,panel]);
 
   const uConv=useCallback((id,u)=>{
@@ -2166,7 +2176,19 @@ function HyprChat(){
       }} style={btnS(t.pink)}><IC.Plus/> New Council</button>
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
-      {!councils.length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No councils yet.<br/>Create one to debate with multiple AIs.</div>}
+      {/* Preset council buttons */}
+      {councilPresets.length>0&&<div style={{marginBottom:16,padding:14,background:`${t.surface}66`,border:`1px solid ${t.brd}28`,borderRadius:14}}>
+        <div style={{fontSize:10,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:10}}>Quick Start Presets</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:8}}>
+          {councilPresets.map(p=><button key={p.id} onClick={async()=>{
+            try{const r=await fetch(`${API}/api/seed/council-preset/${p.id}`,{method:"POST"});const c=await r.json();setCouncils(prev=>[...prev,c]);setActiveCouncilId(c.id);}catch(e){console.error("Preset error:",e);}
+          }} style={{...cardS,cursor:"pointer",padding:"10px 12px",border:`1px solid ${t.pink}28`,background:`${t.pink}06`,textAlign:"left",transition:"all .2s",display:"flex",flexDirection:"column",gap:4}} onMouseOver={e=>e.currentTarget.style.borderColor=t.pink+"66"} onMouseOut={e=>e.currentTarget.style.borderColor=t.pink+"28"}>
+            <span style={{fontSize:13,fontWeight:700,color:t.text}}>{p.name}</span>
+            <span style={{fontSize:10,color:t.mut}}>{p.members.join(" · ")}</span>
+          </button>)}
+        </div>
+      </div>}
+      {!councils.length&&!councilPresets.length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No councils yet.<br/>Create one to debate with multiple AIs.</div>}
       {councils.map(council=>{
         const isActive=activeCouncilId===council.id;
         return <div key={council.id} style={{...cardS,border:`1px solid ${isActive?t.pink:t.brd}33`,background:isActive?`${t.pink}08`:`${t.surface}88`}}>
@@ -3303,7 +3325,7 @@ function HyprChat(){
                           <span style={{fontSize:11,fontWeight:700,color:t.acc,flex:1}}>{member.persona_name||resp.model?.split(":")[0]||mid}</span>
                           {!resp.done?<div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>:<span style={{color:t.ok,fontSize:11}}>✓</span>}
                         </div>
-                        <div style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:320,overflowY:"auto"}}>
+                        <div ref={el=>{if(el&&!resp.done)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:320,overflowY:"auto"}}>
                           {md(resp.content||"")}
                           {!resp.done&&<span style={{display:"inline-block",width:2,height:13,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
                         </div>
@@ -3335,7 +3357,7 @@ function HyprChat(){
                       {councilCfg?.host_model&&<span style={{fontSize:9,color:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:4}}>{councilCfg.host_model}</span>}
                       {councilRunning&&isLastTurn(ti)&&!turn.host&&<div style={{display:"flex",gap:3,marginLeft:"auto"}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.warm,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
                     </div>
-                    <div style={{fontSize:fontSize-1,lineHeight:1.6,color:t.dim}}>
+                    <div ref={el=>{if(el&&councilRunning&&isLastTurn(ti)&&!turn.host)el.scrollTop=el.scrollHeight;}} style={{fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:400,overflowY:"auto"}}>
                       {md(turn.host?.content||councilHostContent)}
                       {councilRunning&&isLastTurn(ti)&&councilHostContent&&!turn.host&&<span style={{display:"inline-block",width:2,height:13,background:t.warm,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
                     </div>
@@ -3350,7 +3372,7 @@ function HyprChat(){
                     <span style={{fontSize:11,fontWeight:700,color:t.acc}}>{resp.model?.split(":")[0]||mid}</span>
                     {!resp.done&&<div style={{display:"flex",gap:3,marginLeft:"auto"}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
                   </div>
-                  <div style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim}}>{md(resp.content||"")}</div>
+                  <div ref={el=>{if(el&&!resp.done)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:320,overflowY:"auto"}}>{md(resp.content||"")}</div>
                 </div>)}
               </div>}
               <div ref={chatEnd}/>
