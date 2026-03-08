@@ -259,6 +259,7 @@ class CouncilUpdate(BaseModel):
     name: Optional[str] = None
     host_model: Optional[str] = None
     host_system_prompt: Optional[str] = None
+    debate_rounds: Optional[int] = None
 
 class CouncilMemberCreate(BaseModel):
     model: str
