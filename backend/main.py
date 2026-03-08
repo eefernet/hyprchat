@@ -1839,6 +1839,112 @@ async def list_council_presets():
     ]
 
 
+@app.get("/api/councils/{council_id}/analyze")
+async def analyze_council(council_id: str):
+    """Generate a performance report for a council by scanning all its conversation history."""
+    council = await db.get_council(council_id)
+    if not council:
+        raise HTTPException(status_code=404, detail="Council not found")
+
+    members = council.get("members", [])
+    member_map = {m["id"]: m for m in members}
+
+    # Stats per member
+    stats = {}
+    for m in members:
+        stats[m["id"]] = {
+            "id": m["id"],
+            "persona_name": m.get("persona_name") or m["model"].split(":")[0],
+            "model": m["model"],
+            "points": m.get("points", 0),
+            "votes_received": 0,
+            "votes_cast": 0,
+            "times_chosen_best": 0,  # manual +5 best clicks
+            "responses": 0,
+            "total_response_length": 0,
+            "avg_response_length": 0,
+            "vote_sources": {},  # who voted for this member
+        }
+
+    # Find all conversations for this council
+    all_convs = await db.get_conversations()
+    council_convs = [c for c in all_convs if c.get("council_config_id") == council_id]
+    total_debates = 0
+
+    for conv_summary in council_convs:
+        conv = await db.get_conversation(conv_summary["id"])
+        if not conv or not conv.get("messages"):
+            continue
+
+        for msg in conv["messages"]:
+            meta = msg.get("metadata") or {}
+            mid = meta.get("council_member_id")
+
+            # Count member responses
+            if mid and mid in stats:
+                stats[mid]["responses"] += 1
+                content_len = len(msg.get("content", ""))
+                stats[mid]["total_response_length"] += content_len
+
+            # Count votes from host messages
+            if meta.get("council_host") and meta.get("votes"):
+                total_debates += 1
+                votes = meta["votes"]
+                for vote in votes:
+                    voted_for = vote.get("voted_for")
+                    voter_id = vote.get("voter_id")
+                    voter_name = vote.get("voter_name", "")
+                    if voted_for and voted_for in stats:
+                        stats[voted_for]["votes_received"] += 1
+                        stats[voted_for]["vote_sources"][voter_name] = stats[voted_for]["vote_sources"].get(voter_name, 0) + 1
+                    if voter_id and voter_id in stats:
+                        stats[voter_id]["votes_cast"] += 1
+
+    # Compute averages and rankings
+    for mid, s in stats.items():
+        if s["responses"] > 0:
+            s["avg_response_length"] = round(s["total_response_length"] / s["responses"])
+        # Win rate: votes received / total debates (if any)
+        s["win_rate"] = round(s["votes_received"] / max(total_debates, 1) * 100, 1)
+
+    # Sort by votes received (primary), then points
+    ranked = sorted(stats.values(), key=lambda x: (x["votes_received"], x["points"]), reverse=True)
+
+    # Generate recommendations
+    recommendations = []
+    if ranked:
+        top = ranked[0]
+        bottom = ranked[-1]
+        if top["votes_received"] > 0:
+            recommendations.append(f"{top['persona_name']} is the strongest performer with {top['votes_received']} peer votes ({top['win_rate']}% win rate).")
+        if len(ranked) > 1 and bottom["votes_received"] == 0 and bottom["responses"] > 0:
+            recommendations.append(f"{bottom['persona_name']} has never received a peer vote — consider changing their model or refining their prompt.")
+        if total_debates < 3:
+            recommendations.append("More debates needed for reliable analysis (minimum 3 recommended).")
+
+        # Check for model diversity
+        models_used = set(s["model"] for s in ranked)
+        if len(models_used) == 1:
+            recommendations.append("All members use the same model — try different models for more diverse perspectives.")
+
+        # Check for verbose vs concise
+        avg_lengths = [(s["persona_name"], s["avg_response_length"]) for s in ranked if s["responses"] > 0]
+        if avg_lengths:
+            most_verbose = max(avg_lengths, key=lambda x: x[1])
+            most_concise = min(avg_lengths, key=lambda x: x[1])
+            if most_verbose[1] > most_concise[1] * 3 and most_concise[1] > 0:
+                recommendations.append(f"{most_verbose[0]} writes ~{most_verbose[1]} chars avg vs {most_concise[0]} at ~{most_concise[1]} — large disparity in response length.")
+
+    return {
+        "council_id": council_id,
+        "council_name": council.get("name", ""),
+        "total_debates": total_debates,
+        "total_conversations": len(council_convs),
+        "members": ranked,
+        "recommendations": recommendations,
+    }
+
+
 # ============================================================
 # COUNCIL — CHAT STREAM (multi-model parallel)
 # ============================================================

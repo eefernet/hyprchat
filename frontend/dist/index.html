@@ -996,6 +996,8 @@ function HyprChat(){
   const [councils,setCouncils]=useState([]);
   const [councilPresets,setCouncilPresets]=useState([]);
   const [activeCouncilId,setActiveCouncilId]=useState(null);
+  const [councilReport,setCouncilReport]=useState(null); // {council_id, ...analysis data}
+  const [councilReportLoading,setCouncilReportLoading]=useState(false);
   const [councilRunning,setCouncilRunning]=useState(false);
   const [councilResponses,setCouncilResponses]=useState({}); // {memberId: {model,content,done}}
   const [councilHostContent,setCouncilHostContent]=useState("");
@@ -2264,11 +2266,72 @@ function HyprChat(){
                 {!(council.members||[]).length&&<div style={{gridColumn:"1/-1",textAlign:"center",padding:"20px 0",color:t.mut,fontSize:11,fontStyle:"italic"}}>Add models to the council to debate your questions.</div>}
               </div>
             </div>
-            {/* Start council chat button */}
-            <button onClick={()=>startCouncilChat(council.id)} disabled={!(council.members||[]).length}
-              style={{...btnS(t.pink),width:"100%",justifyContent:"center",padding:"9px 14px",fontSize:12,fontWeight:700,opacity:!(council.members||[]).length?.4:1}}>
-              <IC.Council/> Start Council Chat
-            </button>
+            {/* Analyze + Start buttons */}
+            <div style={{display:"flex",gap:8,marginBottom:councilReport?.council_id===council.id?10:0}}>
+              <button onClick={async()=>{
+                if(councilReport?.council_id===council.id){setCouncilReport(null);return;}
+                setCouncilReportLoading(true);
+                try{const r=await fetch(`${API}/api/councils/${council.id}/analyze`);const d=await r.json();setCouncilReport(d);}catch(e){console.error(e);}
+                setCouncilReportLoading(false);
+              }} style={{...btnS(t.acc),flex:1,justifyContent:"center",padding:"9px 14px",fontSize:12,fontWeight:700}}>
+                {councilReportLoading?"Analyzing...":councilReport?.council_id===council.id?"▲ Hide Report":"📊 Analyze Performance"}
+              </button>
+              <button onClick={()=>startCouncilChat(council.id)} disabled={!(council.members||[]).length}
+                style={{...btnS(t.pink),flex:1,justifyContent:"center",padding:"9px 14px",fontSize:12,fontWeight:700,opacity:!(council.members||[]).length?.4:1}}>
+                <IC.Council/> Start Council Chat
+              </button>
+            </div>
+            {/* Performance Report */}
+            {councilReport?.council_id===council.id&&<div style={{background:`${t.surface}88`,border:`1px solid ${t.acc}33`,borderRadius:12,padding:16,animation:"fadeIn .3s"}}>
+              <div style={{fontSize:12,fontWeight:700,color:t.acc,marginBottom:12,display:"flex",alignItems:"center",gap:6}}>📊 Performance Report</div>
+              <div style={{display:"flex",gap:16,marginBottom:14,flexWrap:"wrap"}}>
+                <div style={{background:`${t.bg}`,border:`1px solid ${t.brd}33`,borderRadius:10,padding:"10px 16px",textAlign:"center"}}>
+                  <div style={{fontSize:20,fontWeight:700,color:t.text}}>{councilReport.total_debates}</div>
+                  <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Debates</div>
+                </div>
+                <div style={{background:`${t.bg}`,border:`1px solid ${t.brd}33`,borderRadius:10,padding:"10px 16px",textAlign:"center"}}>
+                  <div style={{fontSize:20,fontWeight:700,color:t.text}}>{councilReport.total_conversations}</div>
+                  <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Conversations</div>
+                </div>
+              </div>
+              {/* Member rankings */}
+              <div style={{fontSize:10,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>Member Rankings</div>
+              <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:14}}>
+                {(councilReport.members||[]).map((m,i)=>{
+                  const barWidth=councilReport.total_debates>0?Math.max(m.votes_received/councilReport.total_debates*100,4):4;
+                  const medal=i===0?"🥇":i===1?"🥈":i===2?"🥉":"";
+                  return <div key={m.id} style={{background:`${t.bg}`,border:`1px solid ${t.brd}33`,borderRadius:10,padding:"10px 12px"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
+                      <span style={{fontSize:14}}>{medal||`#${i+1}`}</span>
+                      <span style={{fontSize:12,fontWeight:700,color:t.text,flex:1}}>{m.persona_name}</span>
+                      <span style={{fontSize:10,color:t.mut}}>{m.model}</span>
+                    </div>
+                    {/* Vote bar */}
+                    <div style={{background:`${t.brd}22`,borderRadius:6,height:14,marginBottom:6,overflow:"hidden",position:"relative"}}>
+                      <div style={{background:i===0?t.ok:i===1?t.acc:t.mut,height:"100%",width:`${barWidth}%`,borderRadius:6,transition:"width .5s",minWidth:20}}/>
+                      <span style={{position:"absolute",left:6,top:0,fontSize:9,fontWeight:700,color:"#fff",lineHeight:"14px"}}>{m.win_rate}% win rate</span>
+                    </div>
+                    <div style={{display:"flex",gap:10,flexWrap:"wrap",fontSize:10,color:t.dim}}>
+                      <span>🗳 <b style={{color:t.text}}>{m.votes_received}</b> votes received</span>
+                      <span>💬 <b style={{color:t.text}}>{m.responses}</b> responses</span>
+                      <span>📏 <b style={{color:t.text}}>{m.avg_response_length}</b> avg chars</span>
+                      <span style={{color:m.points>0?t.ok:m.points<0?t.err:t.mut}}>⭐ <b>{m.points>0?"+":""}{m.points}</b> pts</span>
+                    </div>
+                    {/* Who voted for this member */}
+                    {Object.keys(m.vote_sources||{}).length>0&&<div style={{marginTop:6,fontSize:10,color:t.mut}}>
+                      Voted by: {Object.entries(m.vote_sources).map(([name,count],vi)=><span key={vi} style={{background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:8,padding:"1px 6px",marginLeft:vi?4:0,fontSize:9,color:t.pink}}>{name} ({count})</span>)}
+                    </div>}
+                  </div>;
+                })}
+              </div>
+              {/* Recommendations */}
+              {(councilReport.recommendations||[]).length>0&&<div>
+                <div style={{fontSize:10,fontWeight:700,color:t.warm,textTransform:"uppercase",letterSpacing:.5,marginBottom:6}}>Recommendations</div>
+                {councilReport.recommendations.map((r,ri)=><div key={ri} style={{fontSize:11,color:t.dim,padding:"4px 0",display:"flex",gap:6,alignItems:"baseline"}}>
+                  <span style={{color:t.warm,flexShrink:0}}>→</span>{r}
+                </div>)}
+              </div>}
+            </div>}
           </>}
         </div>;
       })}
