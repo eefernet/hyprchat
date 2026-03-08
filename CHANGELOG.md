@@ -1,5 +1,54 @@
 # HyprChat Changelog
 
+## Alpha v12 — March 2026
+
+### New Features
+- **Council Preset Templates** — One-click preset councils with curated members and detailed persona prompts:
+  - **Philosophers** — Socrates, Aristotle, Nietzsche, Confucius, Simone de Beauvoir
+  - **Visionaries** — Leonardo da Vinci, Nikola Tesla, Marie Curie, Steve Jobs, Sun Tzu
+  - **Scientists** — Einstein, Darwin, Ada Lovelace, Feynman, Carl Sagan
+  - **Debaters** — The Pragmatist, Devil's Advocate, Futurist, Ethicist, Historian
+- **Debate Rounds** — Configurable rebuttal rounds (0-5) where council members read each other's responses and argue back. Each round streams in parallel with labeled headers.
+- **Council Performance Analytics** — "Analyze Performance" button per council generates a report with:
+  - Debate count, session count
+  - Member rankings with win rate bars, vote counts, avg response length
+  - "Voted by" breakdown showing which members voted for whom
+  - Auto-generated recommendations (strongest/weakest performer, model diversity, response length disparity)
+- **Expandable Debate Rounds in Chat** — Historical council responses grouped by round with collapsible sections. Latest round expanded by default, earlier rounds collapsed with response counts.
+- **Delete All Chats** — Danger zone button in Settings to wipe all conversations
+- **Purge All RAG Collections** — Button in RAG Pipeline settings to clear all ChromaDB indices
+
+### Improvements
+- **Council English enforcement** — All council members and host moderator now always respond in English (fixes Qwen models defaulting to Chinese)
+- **New Chat carries context** — Clicking "+ New Chat" while in a council or persona chat creates a new chat with the same council/persona applied
+- **Leave Persona / Leave Council** — Dedicated exit buttons in the top bar header. Removed old inline ✕ and sidebar persona tag.
+- **Sidebar chat labels** — Council chats show pink left border + council icon; persona chats show warm border + avatar/bot icon
+- **Auto-scroll council responses** — Individual member cards and host synthesis auto-scroll during streaming
+- **Input bar polish** — Centered alignment, larger padding, "What's on your mind?" placeholder
+- **Alpha badge** — Version label replaced with styled "ALPHA" badge next to HyprChat logo
+
+---
+
+## Alpha v11 — March 2026
+
+### New Features
+- **OpenHands SDK Integration** — The `generate_code` tool now uses an OpenHands agentic coding agent that writes, tests, and fixes code automatically before returning results. Runs inside the CodeBox LXC sandbox for full isolation.
+  - Agent has `terminal` and `file_editor` tools — writes code, runs it, reads errors, fixes, and retries
+  - Uses the configured coder model via Ollama as the LLM backend
+  - Falls back to the legacy single-shot code generator if the OpenHands worker is unavailable
+- **`generate_code` Sub-Agent Tool** — Orchestrator models can delegate code writing to a specialized coder model. Configurable via the Coder Model dropdown in Model Manager settings.
+- **OpenHands Worker Service** — New FastAPI microservice (`openhands_worker.py`) running on CodeBox LXC port 8586. Receives coding tasks, runs a full OpenHands agent loop (plan → write → test → fix → iterate), and returns tested code.
+
+### Improvements
+- **Coder Model selector** — Dropdown in Model Manager Global Defaults to pick which model handles code generation (or "Same as chat model")
+- **OpenHands settings** — `openhands_enabled` toggle and `openhands_max_rounds` configurable via Settings API
+- **Tool pill updates** — generate_code pill now shows "Agent Coding" during execution, "Code Ready" when done
+- **Code-block rescue hardening** — Minimum 30 chars + code keyword check to prevent ASCII art from being mistaken for code
+- **Repetition detector fix** — Skip whitespace-only patterns to avoid killing ASCII art output
+- **Coder Bot English-only rule** — Added rule 11 to Coder Bot persona ensuring all output is in English
+
+---
+
 ## Alpha v10 — March 2026
 
 ### New Features

@@ -14,6 +14,11 @@ import config
 import database as db
 from research import run_deep_research, run_conspiracy_research
 
+# Strip ANSI escape codes from terminal output before feeding back to the model
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub('', text)
+
 
 # ── Ollama-native tool definitions ──
 # Keep descriptions SHORT and CLEAR. Models perform better with concise tool docs.
@@ -22,9 +27,9 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "execute_code",
-            "description": "Execute source code in a sandboxed environment. Supports Python, JavaScript, Bash, C, C++, Rust, Go, Java, Ruby, PHP and 20+ more. Pass actual source code — not shell commands or filenames.",
+            "description": "Execute source code directly in the sandbox. Pass complete source code with hardcoded test values. Working directory is /root/. Do NOT use input() or sys.argv — they will fail. For scripts needing arguments, use write_file + run_shell instead.",
             "parameters": {"type": "object", "properties": {
-                "code": {"type": "string", "description": "Source code to execute"},
+                "code": {"type": "string", "description": "Complete source code to execute (must be self-contained with hardcoded test values)"},
                 "language": {"type": "string", "description": "Language: python, javascript, bash, c, cpp, rust, go, java, ruby, php, etc."},
             }, "required": ["code", "language"]},
         },
@@ -33,7 +38,7 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "run_shell",
-            "description": "Run a shell command in the sandbox terminal. Use for: pip install, apt-get, running saved scripts (python3 /root/app.py), git, make, npm, cargo build.",
+            "description": "Run a shell command in /root/. Use for: pip install, running saved scripts with args (python3 /root/app.py arg1 arg2), git, make, npm, cargo build. Preferred way to test scripts that take arguments.",
             "parameters": {"type": "object", "properties": {
                 "command": {"type": "string", "description": "Shell command to execute"},
             }, "required": ["command"]},
@@ -88,17 +93,6 @@ CODEAGENT_TOOLS = {
             "parameters": {"type": "object", "properties": {
                 "url": {"type": "string", "description": "URL to fetch"},
             }, "required": ["url"]},
-        },
-    },
-    "research_error": {
-        "type": "function",
-        "function": {
-            "name": "research_error",
-            "description": "Search the web for help with a specific error message.",
-            "parameters": {"type": "object", "properties": {
-                "error_message": {"type": "string", "description": "Error message or traceback"},
-                "language": {"type": "string", "description": "Programming language"},
-            }, "required": ["error_message"]},
         },
     },
     "download_file": {
@@ -157,6 +151,18 @@ CODEAGENT_TOOLS = {
             }, "required": ["topic"]},
         },
     },
+    "generate_code": {
+        "type": "function",
+        "function": {
+            "name": "generate_code",
+            "description": "Generate code using an autonomous coding agent (OpenHands). Handles entire projects: creates all files, installs dependencies, builds, and tests. Use for ANY coding task — single scripts or multi-file projects. Returns paths of all files created.",
+            "parameters": {"type": "object", "properties": {
+                "task": {"type": "string", "description": "Complete project description: what to build, all features, file structure if multi-file. Be thorough — the agent works autonomously."},
+                "language": {"type": "string", "description": "Primary language: python, javascript, typescript, rust, go, etc."},
+                "context": {"type": "string", "description": "Optional: error messages to fix, existing code to modify, constraints, dependencies"},
+            }, "required": ["task", "language"]},
+        },
+    },
 }
 
 
@@ -210,6 +216,36 @@ def _normalize_tool_args(args):
     return args
 
 
+def _fix_json_newlines(text: str) -> str:
+    """Fix JSON with unescaped newlines inside string values.
+    Models often output JSON with real newlines in 'code' fields."""
+    result = []
+    in_str = False
+    esc = False
+    for i, c in enumerate(text):
+        if esc:
+            result.append(c)
+            esc = False
+            continue
+        if c == '\\':
+            result.append(c)
+            if in_str:
+                esc = True
+            continue
+        if c == '"' and not esc:
+            in_str = not in_str
+            result.append(c)
+            continue
+        if in_str and c == '\n':
+            result.append('\\n')
+            continue
+        if in_str and c == '\t':
+            result.append('\\t')
+            continue
+        result.append(c)
+    return ''.join(result)
+
+
 def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
     """Parse tool calls from model text when native Ollama tool protocol fails.
     Handles: raw JSON, <tool_call> tags, JSON in code blocks, bare JSON objects."""
@@ -219,12 +255,13 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
     stripped = re.sub(r'```(?:json|tool_call|tool)?\s*\n?', '', content).strip().rstrip('`')
 
     # 1. Entire response is a single JSON tool call
-    try:
-        obj = json.loads(stripped)
-        if isinstance(obj, dict) and obj.get("name") in available_names and "arguments" in obj:
-            return [{"function": {"name": obj["name"], "arguments": _normalize_tool_args(obj["arguments"])}}]
-    except (json.JSONDecodeError, TypeError, KeyError):
-        pass
+    for _try_str in (stripped, _fix_json_newlines(stripped)):
+        try:
+            obj = json.loads(_try_str)
+            if isinstance(obj, dict) and obj.get("name") in available_names and "arguments" in obj:
+                return [{"function": {"name": obj["name"], "arguments": _normalize_tool_args(obj["arguments"])}}]
+        except (json.JSONDecodeError, TypeError, KeyError):
+            pass
 
     # 2. <tool_call>JSON</tool_call> tags (Qwen native format)
     tag_matches = re.findall(
@@ -260,14 +297,16 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
         code_blocks = re.findall(r'```(?:json|tool_call|tool)?\s*\n(.*?)\n\s*```', content, re.DOTALL)
         for block in code_blocks:
             for json_str in _extract_json_objects(block.strip()):
-                try:
-                    obj = json.loads(json_str)
-                    if isinstance(obj, dict) and obj.get("name") in available_names:
-                        args = obj.get("arguments", obj.get("parameters", {}))
-                        if args is not None:
-                            calls.append({"function": {"name": obj["name"], "arguments": _normalize_tool_args(args)}})
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                for _try in (json_str, _fix_json_newlines(json_str)):
+                    try:
+                        obj = json.loads(_try)
+                        if isinstance(obj, dict) and obj.get("name") in available_names:
+                            args = obj.get("arguments", obj.get("parameters", {}))
+                            if args is not None:
+                                calls.append({"function": {"name": obj["name"], "arguments": _normalize_tool_args(args)}})
+                                break
+                    except (json.JSONDecodeError, TypeError):
+                        pass
 
     # 5. Python function call syntax: run_shell("cmd"), write_file("path", "content"), etc.
     #    Models sometimes write tool calls as Python code instead of using the protocol.
@@ -359,6 +398,21 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
     if not raw_args:
         return {}
 
+    # ── Handle keyword arguments first: tool(key="value", key2="value2") ──
+    # Match patterns like: command="...", path="/root/...", task="..."
+    kw_pattern = re.findall(r'(\w+)\s*=\s*(?:"""(.*?)"""|\'\'\'(.*?)\'\'\'|"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\')', raw_args, re.DOTALL)
+    if kw_pattern:
+        result = {}
+        for kw_match in kw_pattern:
+            key = kw_match[0]
+            # Pick the first non-empty capture group (triple-double, triple-single, double, single)
+            val = kw_match[1] or kw_match[2] or kw_match[3] or kw_match[4]
+            val = val.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"').replace("\\'", "'").replace('\\\\', '\\')
+            result[key] = val
+        if result:
+            return result
+
+    # ── Positional arguments fallback ──
     # Try to evaluate string literals safely
     # We'll extract quoted string arguments
     args_list = []
@@ -430,6 +484,7 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
         "delete_file": ["path"],
         "research": ["query"],
         "fetch_url": ["url"],
+        "generate_code": ["task", "language", "context"],
     }
 
     param_names = TOOL_PARAMS.get(tool_name)
@@ -491,9 +546,31 @@ async def _ensure_venv(http):
     return False
 
 
+def _get_run_cmd(language: str, filepath: str) -> str:
+    """Return the shell command to run a file for the given language."""
+    lang = language.lower()
+    if lang in ("python", "python3", "py"):
+        return f"python3 {filepath}"
+    elif lang in ("javascript", "js"):
+        return f"node {filepath}"
+    elif lang in ("bash", "sh"):
+        return f"bash {filepath}"
+    elif lang in ("typescript", "ts"):
+        return f"npx ts-node {filepath}"
+    elif lang in ("rust", "rs"):
+        return f"rustc {filepath} -o /tmp/_hc_bin && /tmp/_hc_bin"
+    elif lang in ("go",):
+        return f"go run {filepath}"
+    elif lang in ("c",):
+        return f"gcc {filepath} -o /tmp/_hc_bin -lm && /tmp/_hc_bin"
+    elif lang in ("cpp", "c++"):
+        return f"g++ {filepath} -o /tmp/_hc_bin && /tmp/_hc_bin"
+    return filepath
+
+
 # ── Tool execution dispatcher ──
 
-async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_tool_map: dict = None) -> str:
+async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_tool_map: dict = None, conv_model: str = "") -> str:
     """Execute a built-in or custom tool and return the result string."""
     custom_tool_map = custom_tool_map or {}
     try:
@@ -506,24 +583,32 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             })
             start_time = time.time()
 
-            # Python: use venv for isolation; other languages: use /execute directly
-            use_venv = language.lower() in ("python", "python3", "py")
-            if use_venv:
+            # All execution goes through /command for consistent CWD at /root/
+            b64_code = base64.b64encode(code.encode()).decode()
+            lang_lower = language.lower()
+            if lang_lower in ("python", "python3", "py"):
                 await _ensure_venv(http)
-                b64_code = base64.b64encode(code.encode()).decode()
-                venv_cmd = (
-                    f"printf '%s' {shlex.quote(b64_code)} | base64 -d > /tmp/_hc_exec.py && "
+                exec_cmd = (
+                    f"cd /root && printf '%s' {shlex.quote(b64_code)} | base64 -d > /tmp/_hc_exec.py && "
                     f"/root/venv/bin/python3 /tmp/_hc_exec.py"
                 )
-                exec_task = asyncio.create_task(http.post(
-                    f"{config.CODEBOX_URL}/command",
-                    json={"command": venv_cmd, "timeout": config.EXECUTION_TIMEOUT},
-                    timeout=config.EXECUTION_TIMEOUT + 15,
-                ))
+            elif lang_lower in ("bash", "sh", "zsh"):
+                exec_cmd = f"cd /root && printf '%s' {shlex.quote(b64_code)} | base64 -d | bash"
+            elif lang_lower in ("javascript", "js", "node"):
+                exec_cmd = f"cd /root && printf '%s' {shlex.quote(b64_code)} | base64 -d > /tmp/_hc_exec.js && node /tmp/_hc_exec.js"
             else:
+                # Fallback: use /execute endpoint for compiled languages
                 exec_task = asyncio.create_task(http.post(
                     f"{config.CODEBOX_URL}/execute",
                     json={"code": code, "language": language, "timeout": config.EXECUTION_TIMEOUT},
+                    timeout=config.EXECUTION_TIMEOUT + 15,
+                ))
+                exec_cmd = None
+
+            if exec_cmd:
+                exec_task = asyncio.create_task(http.post(
+                    f"{config.CODEBOX_URL}/command",
+                    json={"command": exec_cmd, "timeout": config.EXECUTION_TIMEOUT},
                     timeout=config.EXECUTION_TIMEOUT + 15,
                 ))
             while not exec_task.done():
@@ -544,8 +629,8 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 })
                 return f"ERROR: CodeBox connection failed: {ce}\nMake sure CodeBox is running at {config.CODEBOX_URL}"
             success = result.get("exit_code", -1) == 0 or result.get("success", False)
-            stdout = result.get("stdout", "").strip()
-            stderr = result.get("stderr", "").strip()
+            stdout = _strip_ansi(result.get("stdout", "")).strip()
+            stderr = _strip_ansi(result.get("stderr", "")).strip()
             exec_time = result.get("execution_time", 0)
             exit_code = result.get("exit_code", -1)
 
@@ -575,9 +660,19 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             if stderr and not success:
                 parts.append(f"\nstderr:\n```\n{stderr[:3000]}\n```")
 
-            # Action hints for the model
+            # Action hints — give specific guidance for common errors
             if not success:
-                parts.append("\n---\nEXECUTION FAILED. Read the error above carefully. Fix the code and call execute_code again.")
+                combined_err = (stderr + stdout).lower()
+                if "eoferror" in combined_err or "eof when reading" in combined_err:
+                    parts.append("\n---\n⚠️ input() does NOT work in this sandbox (no stdin). Remove all input() calls. Use hardcoded test values, function parameters, or sys.argv with write_file + run_shell.")
+                elif "indexerror" in combined_err and "argv" in combined_err:
+                    parts.append("\n---\n⚠️ sys.argv has no arguments in execute_code. To test scripts with arguments: 1) write_file to save the script, 2) run_shell to execute it with args (e.g., python3 /root/script.py arg1 arg2).")
+                elif "no such file" in combined_err or "not found" in combined_err and "command" not in combined_err:
+                    parts.append("\n---\n⚠️ File not found. Working directory is /root/. Use absolute paths (/root/filename) or save files with write_file first.")
+                elif "modulenotfounderror" in combined_err or "no module named" in combined_err:
+                    parts.append("\n---\n⚠️ Missing package. Install it first: run_shell(command='pip3 install <package>'), then retry.")
+                else:
+                    parts.append("\n---\nEXECUTION FAILED. Read the error above. Fix the root cause (do NOT retry the same code).")
             elif not stdout.strip():
                 parts.append("\n---\nCode ran successfully with no output. Add print() statements if you need to verify results.")
 
@@ -659,8 +754,8 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 timeout=shell_timeout + 10,
             )
             result = r.json()
-            stdout = result.get("stdout", "").strip()
-            stderr = result.get("stderr", "").strip()
+            stdout = _strip_ansi(result.get("stdout", "")).strip()
+            stderr = _strip_ansi(result.get("stderr", "")).strip()
             exit_code = result.get("exit_code", result.get("returncode", 0))
             success = exit_code == 0
             status_icon = "OK" if success else "FAILED"
@@ -674,6 +769,15 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             result_text = f"exit code: {exit_code}\n{out}{err}" or f"(exit code: {exit_code}, no output)"
             if not success:
                 result_text += "\n---\nCommand failed. Check the error above and try a different approach or fix the command."
+
+            # Detect dev server commands that time out — warn the model not to retry
+            _dev_server_cmds = ("npm start", "npm run dev", "npm run serve", "npx vite", "yarn dev", "yarn start", "python3 -m http.server", "python -m http.server", "flask run", "uvicorn")
+            if any(ds in cmd_stripped for ds in _dev_server_cmds) and (not stdout.strip() or len(stdout.strip()) < 50):
+                result_text += (
+                    "\n---\n⚠️ This looks like a dev server command. Dev servers run forever and WILL time out in this sandbox. "
+                    "Do NOT retry this command. The project files are already built and ready — "
+                    "use download_project to deliver them to the user instead."
+                )
             return result_text
 
         elif name == "write_file":
@@ -706,12 +810,6 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             result = r.json()
             await events.emit(conv_id, "tool_end", {"tool": "list_files", "icon": "terminal", "status": f"Listed: {path}"})
             return f"```\n{result.get('stdout', '(empty)')}\n```"
-
-        elif name == "research_error":
-            error_msg = args.get("error_message", "")
-            language = args.get("language", "python")
-            query = f"{language} {error_msg[:200]}"
-            return await exec_tool(http, events, "research", {"query": query}, conv_id, custom_tool_map)
 
         elif name == "download_file":
             path = args.get("path", "")
@@ -758,11 +856,14 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             directory = args.get("directory", "/root")
             await events.emit(conv_id, "tool_start", {"tool": "download_project", "icon": "code", "status": f"Packaging: {directory}"})
             dirname = directory.rstrip("/").split("/")[-1] or "project"
+            # Clean up auto-generated UUIDs from directory names (project-abc12345 → project)
+            if re.match(r'^project-[a-f0-9]{8}$', dirname):
+                dirname = "project"
             tarname = f"{dirname}.tar.gz"
             qdir = shlex.quote(directory)
             qtarname = shlex.quote(f"/tmp/{tarname}")
             r = await http.post(f"{config.CODEBOX_URL}/command", json={
-                "command": f"cd {qdir} && tar czf {qtarname} . 2>&1 && base64 -w0 {qtarname}",
+                "command": f"cd {qdir} && tar czf {qtarname} --exclude='node_modules' --exclude='.git' --exclude='__pycache__' --exclude='venv' --exclude='.cache' --exclude='.npm' --exclude='package-lock.json' . 2>&1 && base64 -w0 {qtarname}",
                 "timeout": 60
             }, timeout=70)
             result = r.json()
@@ -876,6 +977,184 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             angle = args.get("angle", "evidence")
             depth = max(3, min(5, int(args.get("depth", 4))))
             return await run_conspiracy_research(http, config.OLLAMA_URL, config.DEFAULT_MODEL, config.SEARXNG_URL, events, topic, angle, depth, conv_id)
+
+        elif name == "generate_code":
+            task = args.get("task", "")
+            language = args.get("language", "python")
+            context = args.get("context", "")
+            coder_model = config.CODER_MODEL or conv_model or config.DEFAULT_MODEL
+
+            if not getattr(config, "OPENHANDS_ENABLED", True):
+                return "ERROR: OpenHands is disabled in settings. Enable it or use write_file + run_shell directly."
+
+            openhands_url = config.CODEBOX_URL.rsplit(":", 1)[0] + ":8586"
+            max_rounds = getattr(config, "OPENHANDS_MAX_ROUNDS", 12)
+
+            # Health check (3s) before committing to the long request
+            try:
+                health = await http.get(f"{openhands_url}/health", timeout=3)
+                if health.status_code != 200:
+                    raise ConnectionError(f"Health check HTTP {health.status_code}")
+            except Exception as oh_e:
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "generate_code", "icon": "code",
+                    "status": f"OpenHands unavailable: {oh_e}",
+                })
+                return (
+                    f"ERROR: OpenHands worker is unavailable ({oh_e}). "
+                    "You can still write code directly using write_file + run_shell to test it."
+                )
+
+            await events.emit(conv_id, "tool_start", {
+                "tool": "generate_code", "icon": "wand",
+                "status": f"🤖 OpenHands agent building {language} project...",
+            })
+            print(f"[CODEGEN:OH] model={coder_model} lang={language} task={task[:100]!r}")
+
+            try:
+                oh_resp = await http.post(
+                    f"{openhands_url}/run",
+                    json={
+                        "task": task, "model": coder_model,
+                        "ollama_url": config.OLLAMA_URL,
+                        "max_rounds": max_rounds,
+                        "language": language,
+                        "context": context,
+                    },
+                    timeout=600,
+                )
+            except Exception as oh_e:
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "generate_code", "icon": "code",
+                    "status": f"OpenHands request failed: {oh_e}",
+                })
+                return f"ERROR: OpenHands request failed: {oh_e}. Try write_file + run_shell instead."
+
+            if oh_resp.status_code != 200:
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "generate_code", "icon": "code",
+                    "status": f"OpenHands HTTP {oh_resp.status_code}",
+                })
+                return f"ERROR: OpenHands returned HTTP {oh_resp.status_code}: {oh_resp.text[:200]}"
+
+            result = oh_resp.json()
+            if result.get("status") == "ok":
+                files = result.get("files_created", [])
+                duration = result.get("duration_seconds", 0)
+                summary = result.get("summary", "")
+
+                # If OpenHands returned 0 files, scan CodeBox filesystem as fallback
+                if not files:
+                    try:
+                        scan_r = await http.post(f"{config.CODEBOX_URL}/command", json={
+                            "command": "find /root/ -maxdepth 5 -type f -mmin -10 "
+                                       "! -path '*/node_modules/*' ! -path '*/.git/*' "
+                                       "! -path '*/__pycache__/*' ! -path '*/.cache/*' "
+                                       "! -path '*/.npm/*' ! -path '*/venv/*' "
+                                       "! -path '*/.openhands/*' ! -path '*/.bash_history' "
+                                       "! -name '*.pyc' ! -name 'package-lock.json' "
+                                       "2>/dev/null | sort",
+                            "timeout": 10
+                        }, timeout=15)
+                        scan_out = scan_r.json().get("stdout", "").strip()
+                        if scan_out:
+                            files = [f for f in scan_out.splitlines() if f.strip()]
+                            print(f"[CODEGEN:OH] Filesystem fallback found {len(files)} files")
+                    except Exception as scan_e:
+                        print(f"[CODEGEN:OH] Filesystem scan failed: {scan_e}")
+
+                # Determine project directory from files
+                project_dir = "/root"
+                if files:
+                    dirs = set()
+                    for f in files:
+                        parts = f.split("/")
+                        if len(parts) >= 3:  # /root/project-name/...
+                            dirs.add("/".join(parts[:3]))
+                    if len(dirs) == 1:
+                        project_dir = dirs.pop()
+
+                file_list = "\n".join(f"  - {f}" for f in files) if files else "  (no files detected)"
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "generate_code", "icon": "wand",
+                    "status": f"🤖 OpenHands: {len(files)} file(s) built ({duration}s)",
+                })
+                print(f"[CODEGEN:OH] Done: {len(files)} files in {duration}s, project_dir={project_dir}")
+
+                # Auto-package project for download
+                download_result = ""
+                if files:
+                    try:
+                        if len(files) == 1:
+                            # Single file — use download_file
+                            await events.emit(conv_id, "tool_start", {
+                                "tool": "download_file", "icon": "code",
+                                "status": f"Preparing: {files[0]}",
+                            })
+                            download_result = await exec_tool(
+                                http, events, "download_file",
+                                {"path": files[0]}, conv_id, {}, conv_model=conv_model
+                            )
+                        else:
+                            # Multi-file — package as tar.gz
+                            await events.emit(conv_id, "tool_start", {
+                                "tool": "download_project", "icon": "package",
+                                "status": "Packaging project for download...",
+                            })
+                            download_result = await exec_tool(
+                                http, events, "download_project",
+                                {"directory": project_dir}, conv_id, {}, conv_model=conv_model
+                            )
+                        print(f"[CODEGEN:OH] Auto-download: {download_result[:100]}")
+                    except Exception as dl_e:
+                        print(f"[CODEGEN:OH] Auto-download failed: {dl_e}")
+
+                # Format progress steps from OpenHands
+                steps = result.get("steps", [])
+                steps_summary = ""
+                if steps:
+                    step_lines = []
+                    for i, s in enumerate(steps[-10:], 1):  # Last 10 steps
+                        action = s.get("action", "unknown")
+                        detail = s.get("detail", "")[:100]
+                        step_lines.append(f"  {i}. [{action}] {detail}")
+                    steps_summary = "\n".join(step_lines)
+
+                resp = (
+                    f"PROJECT COMPLETE. OpenHands agent autonomously built and tested the project "
+                    f"(model: {coder_model}, {duration}s, {len(steps)} steps).\n\n"
+                    f"**Files created ({len(files)}):**\n{file_list}\n"
+                )
+                if steps_summary:
+                    resp += f"\n**Agent activity (last steps):**\n{steps_summary}\n"
+                if download_result and "Download" in download_result:
+                    resp += f"\n{download_result}\n"
+                if summary:
+                    resp += f"\n**Agent summary:** {summary[:300]}\n"
+                resp += (
+                    f"\nThe project is COMPLETE and TESTED. Do NOT inspect or modify any files. "
+                    f"Do NOT call any more tools. Respond to the user with:\n"
+                    f"1. What was built and its features\n"
+                    f"2. The download link above\n"
+                    f"3. How to run it locally (npm install && npm run dev, or python3 main.py, etc.)\n"
+                    f"4. Brief deployment tips (Vercel/Netlify for React, etc.)\n"
+                )
+                return resp
+            else:
+                error = result.get("error", "Unknown error")[:300]
+                status = result.get("status", "error")
+                steps = result.get("steps", [])
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "generate_code", "icon": "wand",
+                    "status": f"🤖 OpenHands agent {status}",
+                })
+                print(f"[CODEGEN:OH] Agent {status}: {error}")
+                err_resp = f"ERROR: OpenHands agent {status}: {error}."
+                if steps:
+                    last_steps = [f"  - [{s.get('action','')}] {s.get('detail','')[:80]}" for s in steps[-5:]]
+                    err_resp += f"\nLast agent steps:\n" + "\n".join(last_steps)
+                err_resp += "\nYou can still write code directly using write_file + run_shell to test it."
+                return err_resp
 
         elif name in custom_tool_map:
             ct = custom_tool_map[name]

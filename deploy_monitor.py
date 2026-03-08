@@ -32,6 +32,8 @@ WATCHED_FILES = {
     "Backend Main": "backend/main.py",
     "Backend Config": "backend/config.py",
     "Backend Database": "backend/database.py",
+    "Backend Tools": "backend/tools.py",
+    "Chat Agent": "backend/agents/chat.py",
     "Frontend Index": "frontend/dist/index.html",
 }
 

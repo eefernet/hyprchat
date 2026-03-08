@@ -23,6 +23,7 @@ Built with FastAPI + a single-file React SPA — no build step required.
 | Tool | Description |
 |------|-------------|
 | **CodeAgent** | Sandboxed code execution in 30+ languages, shell commands, file I/O, package installs |
+| **generate_code** | Agentic code generation via OpenHands SDK — writes, tests, and fixes code automatically in the sandbox |
 | **Deep Research** | Multi-phase parallel web research with 5 depth levels, compare mode, cross-referencing |
 | **Quick Search** | Instant SearXNG-backed search with inline card grid, thumbnails & YouTube previews |
 | **Conspiracy Research** | Alt-source deep dive — FOIA vaults, whistleblower sites, CIA reading room, FBI vault |
@@ -36,9 +37,13 @@ Built with FastAPI + a single-file React SPA — no build step required.
 
 ### 🏛️ Council of AI
 - Run multiple models in parallel on the same prompt
-- AI peer voting — members vote for the best answer
+- **Preset councils** — Philosophers, Visionaries, Scientists, Debaters — one-click setup with curated persona prompts
+- **Debate rounds** — Configurable rebuttal rounds where members read and respond to each other's arguments
+- AI peer voting — members vote for the best answer after debate concludes
 - Points system tracks model quality over time
-- Host model synthesizes all responses with vote context
+- **Performance analytics** — Per-council reports with win rates, vote breakdowns, and recommendations
+- Host model synthesizes all responses with full debate history and vote context
+- Expandable round-by-round history in chat view
 
 ### 📚 Knowledge Bases
 Upload documents (PDF, Markdown, text, code) and attach them to personas for automatic system prompt injection.
@@ -54,6 +59,7 @@ Group related conversations, track files across chats, analyze topics, and gener
 - Font size, chat width, UI size sliders
 - Per-model parameters (temperature, top_p, top_k, num_ctx, repeat_penalty)
 - Runtime Ollama URL override
+- Danger zone: bulk delete all chats, purge all RAG collections
 
 ---
 
@@ -65,6 +71,7 @@ User → HyprChat server (<SERVER_IP>:8000)
          ├── Backend:  FastAPI + SSE streaming (backend/main.py)
          ├── Ollama    (<OLLAMA_IP>:11434)  — local LLM inference
          ├── Codebox   (<CODEBOX_IP>:8585)  — sandboxed code execution
+         │     └── OpenHands Worker (:8586) — agentic code generation (OpenHands SDK)
          ├── SearXNG   (<SEARXNG_IP>:8888)  — web search
          └── n8n       (<N8N_IP>:5678)      — workflow automation (optional)
 ```
@@ -78,9 +85,12 @@ OLLAMA_URL   = "http://<OLLAMA_IP>:11434"
 CODEBOX_URL  = "http://<CODEBOX_IP>:8585"
 SEARXNG_URL  = "http://<SEARXNG_IP>:8888"
 N8N_URL      = "http://<N8N_IP>:5678"
+CODER_MODEL  = ""                          # empty = use chat model
+OPENHANDS_ENABLED = True                   # toggle agentic code generation
+OPENHANDS_MAX_ROUNDS = 8                   # max agent iterations per task
 ```
 
-The Ollama URL can also be changed at runtime from the Settings panel.
+The Ollama URL, coder model, and OpenHands settings can also be changed at runtime from the Settings panel.
 
 ---
 
@@ -132,4 +142,5 @@ systemctl status hyprchat        # status
 | **Frontend** | React 18 (Babel in-browser), zero build step |
 | **LLM** | Ollama (native tool calling protocol) |
 | **Search** | SearXNG |
-| **Sandbox** | Codebox API |
+| **Sandbox** | Codebox API (LXC container) |
+| **Agentic Coding** | OpenHands SDK v1.12 (runs inside Codebox LXC) |

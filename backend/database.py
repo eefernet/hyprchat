@@ -128,6 +128,16 @@ CREATE TABLE IF NOT EXISTS memories (
     source_conv_id TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS service_health_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    service TEXT NOT NULL,
+    status TEXT NOT NULL,
+    response_ms INTEGER DEFAULT 0,
+    error TEXT DEFAULT '',
+    checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_health_service_time ON service_health_log(service, checked_at);
 """
 
 
@@ -146,9 +156,17 @@ async def init_db():
         await db.executescript(DB_SCHEMA)
         # Migrate: add new columns to existing tables if missing
         for col, default in [("tool_ids", "'[]'"), ("persona_name", "''"), ("persona_avatar", "''"),
-                              ("is_council", "0"), ("council_config_id", "NULL"), ("use_memories", "0")]:
+                              ("is_council", "0"), ("council_config_id", "NULL"), ("use_memories", "0"),
+                              ]:
             try:
                 await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} TEXT DEFAULT {default}")
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    print(f"[DB MIGRATION] Warning: {e}")
+        # Migrate council_configs: add debate_rounds column
+        for col, default in [("debate_rounds", "0")]:
+            try:
+                await db.execute(f"ALTER TABLE council_configs ADD COLUMN {col} INTEGER DEFAULT {default}")
             except Exception as e:
                 if "duplicate column" not in str(e).lower():
                     print(f"[DB MIGRATION] Warning: {e}")
@@ -672,7 +690,7 @@ async def get_council(council_id: str):
 
 
 async def update_council(council_id: str, **kwargs):
-    allowed = {"name", "host_model", "host_system_prompt"}
+    allowed = {"name", "host_model", "host_system_prompt", "debate_rounds"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return

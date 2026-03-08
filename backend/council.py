@@ -1,5 +1,5 @@
 """
-Council chat — multi-model parallel streaming with AI peer voting.
+Council chat — multi-model parallel streaming with AI peer voting and debate rounds.
 """
 import asyncio
 import json
@@ -15,6 +15,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
     members = council.get("members", [])
     host_model = council.get("host_model", config.DEFAULT_MODEL)
     host_sys = council.get("host_system_prompt", "")
+    debate_rounds = council.get("debate_rounds", 0) or 0
     messages = req_messages
 
     # Quick search augmentation
@@ -38,72 +39,99 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             except Exception:
                 pass
 
-    member_responses = {}
+    member_responses = {}  # mid -> latest response
+    all_round_responses = {}  # mid -> [round0, round1, ...]
     last_user_msg = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
 
     if last_user_msg and conv_id:
         await db.add_message(conv_id, "user", last_user_msg)
 
-    output_q: asyncio.Queue = asyncio.Queue()
+    # ── Helper: stream one round of member responses ──
+    async def run_round(round_num: int, extra_context_fn=None):
+        """Query all members in parallel for a given round. extra_context_fn(member) returns additional context."""
+        output_q: asyncio.Queue = asyncio.Queue()
+        round_responses = {}
 
-    async def query_member(member: dict):
-        mid = member["id"]
-        model = member["model"]
-        sys_p = member.get("system_prompt", "")
-        if search_context:
-            sys_p = (sys_p + search_context) if sys_p else search_context
+        async def query_member(member: dict):
+            mid = member["id"]
+            model = member["model"]
+            sys_p = member.get("system_prompt", "")
+            if search_context:
+                sys_p = (sys_p + search_context) if sys_p else search_context
+            if sys_p:
+                sys_p += " Always respond in English."
+            else:
+                sys_p = "Always respond in English."
 
-        msgs = [{"role": m["role"], "content": m["content"]} for m in messages]
-        payload = {
-            "model": model,
-            "messages": ([{"role": "system", "content": sys_p}] if sys_p else []) + msgs,
-            "stream": True,
-            "options": {}
-        }
-        full = ""
-        try:
-            async with http.stream("POST", f"{config.OLLAMA_URL}/api/chat",
-                                   json=payload, timeout=180) as resp:
-                async for line in resp.aiter_lines():
-                    if not line.strip():
-                        continue
-                    try:
-                        chunk = json.loads(line)
-                    except Exception:
-                        continue
-                    content = chunk.get("message", {}).get("content", "")
-                    if content:
-                        full += content
-                        await output_q.put({"type": "council_token",
-                                            "member_id": mid, "model": model,
-                                            "content": content})
-                    if chunk.get("done"):
-                        break
-        except Exception as e:
-            await output_q.put({"type": "council_token", "member_id": mid,
-                                "model": model, "content": f"\n[Error: {e}]"})
-        member_responses[mid] = full
-        await output_q.put({"type": "council_done", "member_id": mid, "model": model})
+            msgs = [{"role": m["role"], "content": m["content"]} for m in messages]
 
-    # Launch all member tasks
-    tasks = [asyncio.create_task(query_member(m)) for m in members]
+            # Add debate context from previous rounds
+            if extra_context_fn:
+                extra = extra_context_fn(member)
+                if extra:
+                    msgs.append({"role": "user", "content": extra})
 
-    # Yield tokens as they arrive from output_q
-    done_count = 0
-    total = len(members)
-    while done_count < total or not output_q.empty():
-        try:
-            item = await asyncio.wait_for(output_q.get(), timeout=0.05)
-            if item["type"] == "council_done":
-                done_count += 1
-            yield f"data: {json.dumps(item)}\n\n"
-        except asyncio.TimeoutError:
-            if done_count >= total:
-                break
+            payload = {
+                "model": model,
+                "messages": [{"role": "system", "content": sys_p}] + msgs,
+                "stream": True,
+                "options": {}
+            }
+            full = ""
+            try:
+                async with http.stream("POST", f"{config.OLLAMA_URL}/api/chat",
+                                       json=payload, timeout=180) as resp:
+                    async for line in resp.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                        except Exception:
+                            continue
+                        content = chunk.get("message", {}).get("content", "")
+                        if content:
+                            full += content
+                            await output_q.put({"type": "council_token",
+                                                "member_id": mid, "model": model,
+                                                "content": content, "round": round_num})
+                        if chunk.get("done"):
+                            break
+            except Exception as e:
+                await output_q.put({"type": "council_token", "member_id": mid,
+                                    "model": model, "content": f"\n[Error: {e}]", "round": round_num})
+            round_responses[mid] = full
+            await output_q.put({"type": "council_done", "member_id": mid, "model": model, "round": round_num})
 
-    await asyncio.gather(*tasks, return_exceptions=True)
+        tasks = [asyncio.create_task(query_member(m)) for m in members]
 
-    # Persist member responses to DB
+        done_count = 0
+        total = len(members)
+        while done_count < total or not output_q.empty():
+            try:
+                item = await asyncio.wait_for(output_q.get(), timeout=0.05)
+                if item["type"] == "council_done":
+                    done_count += 1
+                yield item
+            except asyncio.TimeoutError:
+                if done_count >= total:
+                    break
+
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Update tracking
+        for mid, content in round_responses.items():
+            member_responses[mid] = content
+            if mid not in all_round_responses:
+                all_round_responses[mid] = []
+            all_round_responses[mid].append(content)
+
+    # ── Round 0: Initial responses ──
+    yield f"data: {json.dumps({'type': 'council_round', 'round': 0, 'total_rounds': debate_rounds + 1, 'label': 'Opening Statements'})}\n\n"
+
+    async for item in run_round(0):
+        yield f"data: {json.dumps(item)}\n\n"
+
+    # Persist round 0 responses
     for member in members:
         mid = member["id"]
         content = member_responses.get(mid, "")
@@ -111,7 +139,50 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             await db.add_message(conv_id, "assistant", content,
                                  metadata={"council_member_id": mid,
                                            "council_model": member["model"],
-                                           "council_persona": member.get("persona_name", "")})
+                                           "council_persona": member.get("persona_name", ""),
+                                           "debate_round": 0})
+
+    # ── Debate rounds ──
+    for rnd in range(1, debate_rounds + 1):
+        round_label = f"Rebuttal Round {rnd}" if debate_rounds > 1 else "Rebuttal Round"
+        yield f"data: {json.dumps({'type': 'council_round', 'round': rnd, 'total_rounds': debate_rounds + 1, 'label': round_label})}\n\n"
+
+        def make_debate_context(member):
+            mid = member["id"]
+            member_name = member.get("persona_name") or member["model"].split(":")[0]
+            others_text = []
+            for m in members:
+                if m["id"] == mid:
+                    continue
+                name = m.get("persona_name") or m["model"].split(":")[0]
+                prev = member_responses.get(m["id"], "")
+                if prev:
+                    others_text.append(f'[{name}]: {prev[:800]}')
+            if not others_text:
+                return None
+            your_prev = member_responses.get(mid, "")[:500]
+            return (
+                f"This is debate round {rnd}. The other council members have responded.\n\n"
+                f"Their responses:\n" + "\n\n".join(others_text) + "\n\n"
+                f"Your previous response was:\n{your_prev}\n\n"
+                f"Now respond to the other members' arguments. Challenge weak points, "
+                f"defend your position, acknowledge good arguments, and refine your answer. "
+                f"Be direct and engage specifically with what others said. Keep it concise."
+            )
+
+        async for item in run_round(rnd, extra_context_fn=make_debate_context):
+            yield f"data: {json.dumps(item)}\n\n"
+
+        # Persist debate round responses
+        for member in members:
+            mid = member["id"]
+            content = member_responses.get(mid, "")
+            if content:
+                await db.add_message(conv_id, "assistant", content,
+                                     metadata={"council_member_id": mid,
+                                               "council_model": member["model"],
+                                               "council_persona": member.get("persona_name", ""),
+                                               "debate_round": rnd})
 
     # ── AI Peer Voting Phase ──
     vote_details = []
@@ -136,12 +207,13 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                 f'"{m.get("persona_name") or m["model"].split(":")[0]}":\n{content[:600]}'
                 for m, content in others
             )
+            round_info = f" after {debate_rounds + 1} rounds of debate" if debate_rounds > 0 else ""
             vote_prompt = (
                 f'The council was asked: "{last_user_msg[:300]}"\n\n'
-                f'Your response: "{member_responses.get(mid, "")[:300]}"\n\n'
+                f'Your final response{round_info}: "{member_responses.get(mid, "")[:300]}"\n\n'
                 f'Now vote for the BEST response from the other council members. '
                 f'You CANNOT vote for yourself.\n\n'
-                f'Other responses:\n{options_text}\n\n'
+                f'Other final responses:\n{options_text}\n\n'
                 f'Reply in EXACTLY this format (nothing else):\n'
                 f'VOTE: [exact name from above]\n'
                 f'REASON: [one sentence explaining your choice]'
@@ -205,10 +277,26 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
 
     # Host synthesis
     if host_model and member_responses:
-        all_resp = "\n\n".join(
-            f"[{member.get('persona_name') or member['model']}]: {member_responses.get(member['id'], '')}"
-            for member in members if member_responses.get(member["id"])
-        )
+        # Include debate history if there were rounds
+        if debate_rounds > 0:
+            rounds_text = []
+            for rnd_idx in range(debate_rounds + 1):
+                rnd_label = "Opening Statements" if rnd_idx == 0 else f"Rebuttal Round {rnd_idx}"
+                round_entries = []
+                for member in members:
+                    mid = member["id"]
+                    rounds = all_round_responses.get(mid, [])
+                    if rnd_idx < len(rounds) and rounds[rnd_idx]:
+                        name = member.get("persona_name") or member["model"]
+                        round_entries.append(f"[{name}]: {rounds[rnd_idx][:600]}")
+                if round_entries:
+                    rounds_text.append(f"── {rnd_label} ──\n" + "\n\n".join(round_entries))
+            all_resp = "\n\n".join(rounds_text)
+        else:
+            all_resp = "\n\n".join(
+                f"[{member.get('persona_name') or member['model']}]: {member_responses.get(member['id'], '')}"
+                for member in members if member_responses.get(member["id"])
+            )
         vote_summary = ""
         if vote_details:
             vote_lines = [
@@ -216,9 +304,10 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                 for v in vote_details
             ]
             vote_summary = "\n\nPeer vote results:\n" + "\n".join(vote_lines)
+        debate_note = f" The council debated for {debate_rounds + 1} rounds." if debate_rounds > 0 else ""
         host_msgs = [
-            {"role": "system", "content": host_sys or "You are the council moderator. Synthesize the council responses and provide a final verdict or summary."},
-            {"role": "user", "content": f"Question: {last_user_msg}\n\nCouncil responses:\n{all_resp}{vote_summary}\n\nProvide a synthesis and final verdict. Reference the peer votes if relevant."}
+            {"role": "system", "content": (host_sys or "You are the council moderator. Synthesize the council responses and provide a final verdict or summary.") + " Always respond in English."},
+            {"role": "user", "content": f"Question: {last_user_msg}\n\n{debate_note}Council responses:\n{all_resp}{vote_summary}\n\nProvide a synthesis and final verdict in English. Reference the peer votes and how positions evolved during the debate if relevant."}
         ]
         payload = {"model": host_model, "messages": host_msgs, "stream": True, "options": {}}
         host_full = ""
@@ -244,6 +333,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             council_id = council.get("id", "")
             await db.add_message(conv_id, "assistant", host_full,
                                  metadata={"council_host": True, "council_id": council_id,
-                                           "votes": vote_details, "tally": vote_tally})
+                                           "votes": vote_details, "tally": vote_tally,
+                                           "debate_rounds": debate_rounds})
 
     yield f"data: {json.dumps({'type': 'council_complete'})}\n\n"

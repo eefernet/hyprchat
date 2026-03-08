@@ -33,6 +33,7 @@ from events import EventBus, parse_tool_params
 from agents.chat import chat_stream_generate, TOOL_TEMPLATES, detect_template_family
 from agents.personas import seed_coder_bot as _seed_coder_bot, seed_conspiracy_bot as _seed_conspiracy_bot, seed_based_bot as _seed_based_bot, seed_all_defaults as _seed_all_defaults
 import hf as hf_module
+import rag
 
 # ============================================================
 # SETTINGS — persistent JSON file
@@ -131,7 +132,7 @@ _cleanup_task_ref = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _cleanup_task_ref
+    global _cleanup_task_ref, _health_task_ref
     await db.init_db()
     os.makedirs(config.UPLOAD_DIR, exist_ok=True)
     os.makedirs(config.TOOLS_DIR, exist_ok=True)
@@ -143,14 +144,36 @@ async def lifespan(app: FastAPI):
     if _settings.get("ollama_url"):
         config.OLLAMA_URL = _settings["ollama_url"]
         print(f"[Config] Loaded Ollama URL from settings: {config.OLLAMA_URL}")
+    if _settings.get("coder_model"):
+        config.CODER_MODEL = _settings["coder_model"]
+        print(f"[Config] Loaded Coder Model from settings: {config.CODER_MODEL}")
+    if "openhands_enabled" in _settings:
+        config.OPENHANDS_ENABLED = _settings["openhands_enabled"]
+        print(f"[Config] Loaded OpenHands enabled: {config.OPENHANDS_ENABLED}")
+    if "openhands_max_rounds" in _settings:
+        config.OPENHANDS_MAX_ROUNDS = int(_settings["openhands_max_rounds"])
+        print(f"[Config] Loaded OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
     # Run cleanup once on startup to clear any stale files
     _run_cleanup_sync()
     # Start background cleanup loop
     _cleanup_task_ref = asyncio.create_task(_cleanup_loop())
+    # Start health check loop (every 5 min)
+    _health_task_ref = asyncio.create_task(_health_check_loop())
+    # Load RAG settings from persistent config
+    _rag_cfg = _settings.get("rag", {})
+    if _rag_cfg.get("embed_model"):
+        rag.EMBED_MODEL = _rag_cfg["embed_model"]
+    if _rag_cfg.get("chunk_size"):
+        rag.CHUNK_SIZE = int(_rag_cfg["chunk_size"])
+    if _rag_cfg.get("chunk_overlap") is not None:
+        rag.CHUNK_OVERLAP = int(_rag_cfg["chunk_overlap"])
+    # Ensure RAG embedding model is available (non-blocking pull)
+    asyncio.create_task(rag.ensure_embed_model())
     yield
-    if _cleanup_task_ref:
-        _cleanup_task_ref.cancel()
-        await asyncio.gather(_cleanup_task_ref, return_exceptions=True)
+    for task in [_cleanup_task_ref, _health_task_ref]:
+        if task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 app = FastAPI(title="HyprChat", version="2.0.0", lifespan=lifespan)
 
@@ -236,6 +259,7 @@ class CouncilUpdate(BaseModel):
     name: Optional[str] = None
     host_model: Optional[str] = None
     host_system_prompt: Optional[str] = None
+    debate_rounds: Optional[int] = None
 
 class CouncilMemberCreate(BaseModel):
     model: str
@@ -293,34 +317,162 @@ class ModelConfigUpdate(BaseModel):
 # ============================================================
 # HEALTH & INFO
 # ============================================================
+async def _check_service(name: str, url: str, timeout: float = 8) -> dict:
+    """Check a single service, return status + response time."""
+    t0 = time.time()
+    try:
+        r = await http.get(url, timeout=timeout)
+        ms = int((time.time() - t0) * 1000)
+        if r.status_code < 400:
+            # Degraded if response > 3s
+            status = "degraded" if ms > 3000 else "ok"
+            return {"status": status, "response_ms": ms}
+        return {"status": "error", "response_ms": ms, "error": f"HTTP {r.status_code}"}
+    except Exception as e:
+        ms = int((time.time() - t0) * 1000)
+        return {"status": "error", "response_ms": ms, "error": str(e)[:200]}
+
+
+async def _check_searxng() -> dict:
+    """Check SearXNG: healthz for uptime, then a test search for rate-limit detection."""
+    t0 = time.time()
+    try:
+        r = await http.get(f"{config.SEARXNG_URL}/healthz", timeout=8)
+        ms = int((time.time() - t0) * 1000)
+        if r.status_code >= 400:
+            return {"status": "error", "response_ms": ms, "error": f"HTTP {r.status_code}"}
+    except Exception as e:
+        ms = int((time.time() - t0) * 1000)
+        return {"status": "error", "response_ms": ms, "error": str(e)[:200]}
+    # Service is up — now check if rate-limited by doing a real search
+    try:
+        r2 = await http.get(
+            f"{config.SEARXNG_URL}/search",
+            params={"q": "test", "format": "json"},
+            timeout=10,
+        )
+        if r2.status_code == 429:
+            return {"status": "degraded", "response_ms": ms, "rate_limited": True}
+        # Some SearXNG instances return 200 but with empty results when rate-limited
+        data = r2.json()
+        results = data.get("results", [])
+        # If we get a 200 with an error about rate limiting or no results + unresponsive_engines
+        unresponsive = data.get("unresponsive_engines", [])
+        if not results and len(unresponsive) > 0:
+            return {"status": "degraded", "response_ms": ms, "rate_limited": True}
+        return {"status": "ok", "response_ms": ms, "rate_limited": False}
+    except Exception:
+        # Search failed but healthz was ok — mark as degraded
+        return {"status": "degraded", "response_ms": ms, "rate_limited": True}
+
+
+_HEALTH_ENDPOINTS = {
+    "ollama": lambda: f"{config.OLLAMA_URL}/api/tags",
+    "codebox": lambda: f"{config.CODEBOX_URL}/health",
+    "n8n": lambda: f"{config.N8N_URL}/healthz",
+}
+
+
+async def _run_health_checks() -> dict:
+    """Run all health checks and log to DB."""
+    checks = {}
+    for name, url_fn in _HEALTH_ENDPOINTS.items():
+        result = await _check_service(name, url_fn())
+        checks[name] = result
+    # SearXNG gets its own special check (rate-limit detection)
+    checks["searxng"] = await _check_searxng()
+    # Log to DB (non-blocking)
+    try:
+        conn = await db.get_db()
+        try:
+            for name, result in checks.items():
+                await conn.execute(
+                    "INSERT INTO service_health_log (service, status, response_ms, error) VALUES (?, ?, ?, ?)",
+                    (name, result["status"], result.get("response_ms", 0), result.get("error", ""))
+                )
+            await conn.commit()
+        finally:
+            await conn.close()
+    except Exception as e:
+        print(f"[Health] DB log error: {e}")
+    return checks
+
+
+_health_task_ref = None
+
+async def _health_check_loop():
+    """Background: check all services every 5 minutes."""
+    while True:
+        try:
+            await _run_health_checks()
+        except Exception as e:
+            print(f"[Health] Loop error: {e}")
+        await asyncio.sleep(300)  # 5 minutes
+
+
 @app.get("/api/health")
 async def health():
-    checks = {}
-    try:
-        r = await http.get(f"{config.OLLAMA_URL}/api/tags", timeout=5)
-        checks["ollama"] = {"status": "ok", "models": len(r.json().get("models", []))}
-    except Exception as e:
-        checks["ollama"] = {"status": "error", "error": str(e)}
-
-    try:
-        r = await http.get(f"{config.CODEBOX_URL}/health", timeout=5)
-        checks["codebox"] = {"status": "ok", "data": r.json()}
-    except Exception as e:
-        checks["codebox"] = {"status": "error", "error": str(e)}
-
-    try:
-        r = await http.get(f"{config.SEARXNG_URL}/search", params={"q": "test", "format": "json"}, timeout=5)
-        checks["searxng"] = {"status": "ok"}
-    except Exception as e:
-        checks["searxng"] = {"status": "error", "error": str(e)}
-
-    try:
-        r = await http.get(f"{config.N8N_URL}/healthz", timeout=5)
-        checks["n8n"] = {"status": "ok"}
-    except Exception as e:
-        checks["n8n"] = {"status": "error", "error": str(e)}
-
+    checks = await _run_health_checks()
     return {"status": "ok", "version": "2.0.0", "services": checks}
+
+
+@app.get("/api/health/history")
+async def health_history(days: int = Query(default=90, ge=1, le=365)):
+    """Return daily uptime aggregates per service for the last N days."""
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            """SELECT service, date(checked_at) as day,
+                      COUNT(*) as total,
+                      SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) as ok_count,
+                      SUM(CASE WHEN status='degraded' THEN 1 ELSE 0 END) as degraded_count,
+                      SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) as error_count,
+                      AVG(response_ms) as avg_ms
+               FROM service_health_log
+               WHERE checked_at >= datetime('now', ?)
+               GROUP BY service, day
+               ORDER BY service, day""",
+            (f"-{days} days",)
+        )
+        # Organize by service
+        services = {}
+        for row in rows:
+            svc = row["service"]
+            if svc not in services:
+                services[svc] = []
+            total = row["total"]
+            ok_pct = round((row["ok_count"] / total) * 100, 1) if total else 0
+            degraded_pct = round((row["degraded_count"] / total) * 100, 1) if total else 0
+            error_pct = round((row["error_count"] / total) * 100, 1) if total else 0
+            services[svc].append({
+                "day": row["day"],
+                "total_checks": total,
+                "ok_pct": ok_pct,
+                "degraded_pct": degraded_pct,
+                "error_pct": error_pct,
+                "avg_ms": round(row["avg_ms"] or 0),
+            })
+        # Calculate overall uptime per service
+        summary = {}
+        for svc, days_data in services.items():
+            total_checks = sum(d["total_checks"] for d in days_data)
+            total_ok = sum(d["ok_pct"] * d["total_checks"] / 100 for d in days_data)
+            uptime = round((total_ok / total_checks) * 100, 2) if total_checks else 0
+            # Current status from most recent check
+            last_row = await conn.execute_fetchall(
+                "SELECT status, response_ms FROM service_health_log WHERE service=? ORDER BY checked_at DESC LIMIT 1",
+                (svc,)
+            )
+            current = last_row[0]["status"] if last_row else "unknown"
+            summary[svc] = {
+                "uptime_pct": uptime,
+                "current_status": current,
+                "avg_response_ms": round(sum(d["avg_ms"] for d in days_data) / len(days_data)) if days_data else 0,
+                "days": days_data,
+            }
+        return {"services": summary, "period_days": days}
+    finally:
+        await conn.close()
 
 
 # ============================================================
@@ -376,6 +528,41 @@ async def download_file_endpoint(filename: str):
     return JSONResponse({"error": "File not found"}, status_code=404)
 
 
+@app.get("/api/downloads/{filename}/contents")
+async def archive_contents(filename: str):
+    """List files inside a .tar.gz or .zip archive for preview."""
+    import tarfile
+    import zipfile
+    safe_name = os.path.basename(filename)
+    if not safe_name or safe_name != filename:
+        raise HTTPException(400, "Invalid filename")
+    filepath = None
+    for search_dir in [config.SANDBOX_OUTPUTS_DIR, config.UPLOAD_DIR]:
+        candidate = os.path.join(search_dir, safe_name)
+        if os.path.exists(candidate):
+            filepath = candidate
+            break
+    if not filepath:
+        return JSONResponse({"error": "File not found"}, status_code=404)
+    try:
+        entries = []
+        if tarfile.is_tarfile(filepath):
+            with tarfile.open(filepath, "r:*") as tf:
+                for m in tf.getmembers():
+                    entries.append({"name": m.name, "size": m.size, "is_dir": m.isdir()})
+        elif zipfile.is_zipfile(filepath):
+            with zipfile.ZipFile(filepath) as zf:
+                for info in zf.infolist():
+                    entries.append({"name": info.filename, "size": info.file_size, "is_dir": info.is_dir()})
+        else:
+            return JSONResponse({"error": "Not a supported archive"}, status_code=400)
+        # Sort: directories first, then files
+        entries.sort(key=lambda e: (not e["is_dir"], e["name"]))
+        return {"filename": safe_name, "file_count": len([e for e in entries if not e["is_dir"]]), "entries": entries}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ============================================================
 # BUILT-IN TOOL LIST (for frontend)
 # ============================================================
@@ -386,6 +573,7 @@ async def list_builtin_tools():
         {"id": "codeagent", "name": "⚡ CodeAgent", "description": "Code execution, shell, file management, downloads", "icon": "cpu", "builtin": True},
         {"id": "deep_research", "name": "🔬 Deep Research", "description": "Multi-source parallel research with AI synthesis", "icon": "search", "builtin": True},
         {"id": "conspiracy_research", "name": "🕵️ Conspiracy Research", "description": "Uncensored deep-dive into theories, cover-ups, and hidden agendas", "icon": "search", "builtin": True},
+        {"id": "generate_code", "name": "🧬 Code Generator", "description": "Delegate code writing to a code-specialized model sub-agent", "icon": "code", "builtin": True},
     ]
 
 
@@ -700,6 +888,18 @@ async def delete_conversation(conv_id: str):
     return {"status": "deleted"}
 
 
+@app.delete("/api/conversations")
+async def delete_all_conversations():
+    """Delete ALL conversations and their messages."""
+    convs = await db.get_conversations()
+    count = 0
+    for c in convs:
+        await db.delete_conversation(c["id"])
+        count += 1
+    print(f"[Cleanup] Deleted all {count} conversations")
+    return {"deleted": count}
+
+
 class AddMessageRequest(BaseModel):
     role: str
     content: str
@@ -757,6 +957,11 @@ async def delete_kb(kb_id: str):
     if os.path.exists(kb_dir):
         shutil.rmtree(kb_dir)
     await db.delete_kb(kb_id)
+    # Remove RAG index for this KB
+    try:
+        await rag.delete_kb_index(kb_id)
+    except Exception as e:
+        print(f"[RAG] Error deleting KB index: {e}")
     return {"status": "deleted"}
 
 
@@ -780,13 +985,64 @@ async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
         f.write(content)
 
     await db.add_kb_file(kb_id, safe_name, filepath, len(content), file.content_type or "")
-    return {"filename": safe_name, "size": len(content)}
+
+    # Index file in RAG pipeline (chunk + embed + store in ChromaDB)
+    try:
+        index_result = await rag.index_file(kb_id, safe_name, filepath)
+    except Exception as e:
+        print(f"[RAG] Indexing failed for {safe_name}: {e}")
+        index_result = {"error": str(e)}
+
+    return {"filename": safe_name, "size": len(content), "rag": index_result}
 
 
 @app.delete("/api/knowledge-bases/files/{file_id}")
 async def delete_kb_file(file_id: int):
+    # Get file info before deleting so we can remove from RAG index
+    _db = await db.get_db()
+    try:
+        cursor = await _db.execute("SELECT kb_id, filename FROM kb_files WHERE id = ?", (file_id,))
+        row = await cursor.fetchone()
+    finally:
+        await _db.close()
+
     await db.delete_kb_file(file_id)
+
+    # Remove from RAG index
+    if row:
+        try:
+            await rag.remove_file(row["kb_id"], row["filename"])
+        except Exception as e:
+            print(f"[RAG] Error removing file from index: {e}")
+
     return {"status": "deleted"}
+
+
+@app.post("/api/knowledge-bases/{kb_id}/reindex")
+async def reindex_kb(kb_id: str):
+    """Reindex all files in a KB — useful for migration or after changing embed model."""
+    kbs = await db.get_kbs()
+    kb = next((k for k in kbs if k["id"] == kb_id), None)
+    if not kb:
+        raise HTTPException(404, "KB not found")
+    files = kb.get("files", [])
+    if not files:
+        return {"status": "no files to index"}
+    results = await rag.reindex_kb(kb_id, files)
+    return {"status": "reindexed", "results": results}
+
+
+@app.post("/api/knowledge-bases/reindex-all")
+async def reindex_all_kbs():
+    """Reindex all knowledge bases — one-time migration to RAG."""
+    kbs = await db.get_kbs()
+    all_results = []
+    for kb in kbs:
+        files = kb.get("files", [])
+        if files:
+            results = await rag.reindex_kb(kb["id"], files)
+            all_results.append({"kb_id": kb["id"], "name": kb["name"], "results": results})
+    return {"status": "reindexed", "kbs": all_results}
 
 
 # ============================================================
@@ -913,18 +1169,32 @@ async def pull_model(request: Request):
 
 @app.delete("/api/models/{model_name:path}")
 async def delete_model(model_name: str):
-    """Delete a model from Ollama."""
-    try:
-        import json as _json
-        r = await http.request("DELETE", f"{config.OLLAMA_URL}/api/delete", data=_json.dumps({"name": model_name}), headers={"Content-Type": "application/json"})
-        if r.status_code not in (200, 204):
-            err = r.text[:400]
-            raise HTTPException(r.status_code, f"Ollama refused delete: {err}")
-        return {"status": "deleted", "model": model_name}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(502, f"Failed to delete model: {e}")
+    """Delete a model from Ollama. Tries alternate name formats if not found."""
+    import json as _json
+    # Build list of name variants to try
+    names_to_try = [model_name]
+    if not model_name.startswith("hf.co/") and "/" in model_name:
+        names_to_try.append(f"hf.co/{model_name}")
+    if model_name.startswith("hf.co/"):
+        names_to_try.append(model_name[len("hf.co/"):])
+    last_err = None
+    for name in names_to_try:
+        try:
+            r = await http.request("DELETE", f"{config.OLLAMA_URL}/api/delete",
+                                   data=_json.dumps({"name": name}),
+                                   headers={"Content-Type": "application/json"})
+            if r.status_code in (200, 204):
+                return {"status": "deleted", "model": model_name}
+            err_text = r.text[:400]
+            if "not found" in err_text.lower() and name != names_to_try[-1]:
+                continue  # Try next variant
+            last_err = err_text
+        except Exception as e:
+            last_err = str(e)
+    # If all variants returned "not found", the model is already gone — treat as success
+    if last_err and "not found" in last_err.lower():
+        return {"status": "deleted", "model": model_name, "note": "already removed from Ollama"}
+    raise HTTPException(502, f"Failed to delete model: {last_err}")
 
 
 @app.post("/api/models/{model_name:path}/create-tool-model")
@@ -1290,6 +1560,446 @@ async def delete_council_member(member_id: str):
     return {"ok": True}
 
 
+# ── Council Presets ──
+
+COUNCIL_PRESETS = {
+    "philosophers": {
+        "name": "⚖️ Council of Philosophers",
+        "host_system_prompt": (
+            "You are the moderator of a philosophical council. Synthesize the diverse philosophical perspectives "
+            "presented by the council members. Identify points of agreement and tension between the thinkers. "
+            "Highlight which arguments are strongest and why. Present a balanced final verdict that honors the "
+            "depth of each philosophical tradition while giving the user a clear, actionable answer."
+        ),
+        "members": [
+            {
+                "persona_name": "Socrates",
+                "system_prompt": (
+                    "You are Socrates, the father of Western philosophy. You NEVER give direct answers — instead you "
+                    "use the Socratic method: ask probing questions that expose assumptions and contradictions. "
+                    "You believe true wisdom comes from knowing that you know nothing. Challenge the premise of every "
+                    "question. Be humble but relentless in your pursuit of truth. Use simple language and analogies "
+                    "from everyday Athenian life. End with a question that pushes the discussion deeper."
+                ),
+            },
+            {
+                "persona_name": "Aristotle",
+                "system_prompt": (
+                    "You are Aristotle, the systematic philosopher and father of logic. You approach every question "
+                    "with rigorous categorization and empirical reasoning. You believe in the golden mean — virtue lies "
+                    "between extremes. Classify the problem, identify causes (material, formal, efficient, final), and "
+                    "build your argument step by step. Reference your works on ethics, politics, and metaphysics. "
+                    "Be practical — philosophy must serve human flourishing (eudaimonia)."
+                ),
+            },
+            {
+                "persona_name": "Nietzsche",
+                "system_prompt": (
+                    "You are Friedrich Nietzsche, the iconoclast philosopher. You challenge all moral assumptions and "
+                    "conventional wisdom. You believe in the will to power, the Übermensch, and the eternal recurrence. "
+                    "You despise herd morality and slave mentality. Be provocative, passionate, and aphoristic. "
+                    "Use dramatic language and metaphor. Question whether the asker's values are truly their own or "
+                    "inherited from weak traditions. Push them toward self-overcoming and authentic creation of values."
+                ),
+            },
+            {
+                "persona_name": "Confucius",
+                "system_prompt": (
+                    "You are Confucius (Kong Qiu), the sage of Chinese philosophy. You emphasize social harmony, "
+                    "filial piety, ritual propriety (li), and benevolence (ren). You believe a well-ordered society "
+                    "starts with self-cultivation. Answer with wisdom drawn from the Analerta. Use concise proverbs "
+                    "and practical moral guidance. Consider relationships, duties, and the role of the junzi "
+                    "(exemplary person). Balance tradition with the practical needs of governance and daily life."
+                ),
+            },
+            {
+                "persona_name": "Simone de Beauvoir",
+                "system_prompt": (
+                    "You are Simone de Beauvoir, existentialist philosopher and feminist thinker. You believe existence "
+                    "precedes essence and that freedom is both a gift and a burden. You analyze how power structures, "
+                    "gender, and social conditioning shape human experience. You insist on radical freedom and "
+                    "responsibility. Challenge any answer that ignores the lived experience of marginalized people. "
+                    "Draw from existentialist ethics — ambiguity is not a problem to solve but a condition to embrace. "
+                    "Be intellectually rigorous and unapologetically direct."
+                ),
+            },
+        ],
+    },
+    "visionaries": {
+        "name": "🌟 Council of Visionaries",
+        "host_system_prompt": (
+            "You are the moderator of a council of history's most influential visionaries and innovators. "
+            "Synthesize their diverse perspectives — from scientific method to entrepreneurial thinking to artistic "
+            "genius. Identify which approaches are most applicable to the question at hand. Present a final verdict "
+            "that combines the best insights from each visionary into practical, actionable guidance."
+        ),
+        "members": [
+            {
+                "persona_name": "Leonardo da Vinci",
+                "system_prompt": (
+                    "You are Leonardo da Vinci, the ultimate Renaissance polymath. You see no boundary between art, "
+                    "science, and engineering — they are all expressions of curiosity about nature. You think in "
+                    "sketches and diagrams. Approach every problem by observing nature first, then designing elegant "
+                    "solutions inspired by what you see. You are endlessly curious, often go on tangents exploring "
+                    "related phenomena, and believe that understanding anatomy, optics, and mechanics illuminates "
+                    "everything. Propose creative, interdisciplinary solutions. Think visually."
+                ),
+            },
+            {
+                "persona_name": "Nikola Tesla",
+                "system_prompt": (
+                    "You are Nikola Tesla, the visionary electrical engineer and inventor. You think in terms of "
+                    "energy, frequency, and vibration. You visualize complete systems in your mind before building "
+                    "them. You believe in harnessing natural forces for the benefit of all humanity, not just profit. "
+                    "You are frustrated by those who prioritize business over science. Be brilliant but eccentric. "
+                    "Propose bold, sometimes impractical solutions that push the boundaries of what's possible. "
+                    "Think about systems, efficiency, and the interconnectedness of all energy."
+                ),
+            },
+            {
+                "persona_name": "Marie Curie",
+                "system_prompt": (
+                    "You are Marie Curie, pioneering physicist and chemist, the only person to win Nobel Prizes in "
+                    "two different sciences. You believe in rigorous experimentation, meticulous data collection, and "
+                    "perseverance against all odds. You faced enormous prejudice as a woman in science and overcame it "
+                    "through sheer excellence. Be methodical and evidence-based. Insist on proper scientific rigor. "
+                    "Warn against rushing to conclusions without data. Your dedication to pure research is unwavering — "
+                    "knowledge itself is the goal, applications follow naturally."
+                ),
+            },
+            {
+                "persona_name": "Steve Jobs",
+                "system_prompt": (
+                    "You are Steve Jobs, co-founder of Apple and master of product vision. You believe in the "
+                    "intersection of technology and liberal arts. You obsess over simplicity, user experience, and "
+                    "design. You think most people don't know what they want until you show it to them. Be direct, "
+                    "opinionated, and occasionally blunt. Focus on what to REMOVE, not what to add. Challenge "
+                    "complexity. Ask 'why?' five times. You believe in A-players and have zero tolerance for mediocrity. "
+                    "Think about the end-user experience above all else."
+                ),
+            },
+            {
+                "persona_name": "Sun Tzu",
+                "system_prompt": (
+                    "You are Sun Tzu, ancient Chinese military strategist and author of The Art of War. You think "
+                    "in terms of strategy, positioning, and understanding your environment before acting. You believe "
+                    "the supreme art of war is to subdue the enemy without fighting. Apply strategic thinking to any "
+                    "problem: know yourself, know your opponent, choose your battles wisely. Be concise and use "
+                    "metaphors of terrain, timing, and force. Every problem is a campaign — assess strengths, "
+                    "weaknesses, opportunities, and threats before committing resources."
+                ),
+            },
+        ],
+    },
+    "scientists": {
+        "name": "🔬 Council of Scientists",
+        "host_system_prompt": (
+            "You are the moderator of a council of history's greatest scientific minds. Synthesize their approaches — "
+            "from theoretical physics to evolutionary biology to mathematical logic. Identify where their methods "
+            "converge and diverge. Present a final analysis that leverages the strongest scientific reasoning from "
+            "each member while remaining accessible to the questioner."
+        ),
+        "members": [
+            {
+                "persona_name": "Albert Einstein",
+                "system_prompt": (
+                    "You are Albert Einstein, theoretical physicist who revolutionized our understanding of space, "
+                    "time, and energy. You think in thought experiments and visual analogies. You believe imagination "
+                    "is more important than knowledge. Approach problems by simplifying them to their essence — if you "
+                    "can't explain it simply, you don't understand it well enough. Be playful and humble. Use analogies "
+                    "involving trains, elevators, and light beams. Question fundamental assumptions that everyone "
+                    "else takes for granted. Think about the elegant, unifying principle beneath the surface."
+                ),
+            },
+            {
+                "persona_name": "Charles Darwin",
+                "system_prompt": (
+                    "You are Charles Darwin, naturalist and father of evolutionary theory. You think in terms of "
+                    "variation, selection, and adaptation over time. You are patient, methodical, and willing to "
+                    "spend years gathering evidence before drawing conclusions. Approach every problem by asking: "
+                    "what are the environmental pressures? What variations exist? What gets selected for? Apply "
+                    "evolutionary thinking to any domain — ideas, businesses, technologies all evolve. Be cautious "
+                    "about bold claims. Emphasize observation and evidence above theory."
+                ),
+            },
+            {
+                "persona_name": "Ada Lovelace",
+                "system_prompt": (
+                    "You are Ada Lovelace, the world's first computer programmer and visionary of computational "
+                    "thinking. You see the potential for machines to go beyond mere calculation — to create music, art, "
+                    "and solve problems humans haven't imagined yet. You think algorithmically and in terms of patterns "
+                    "and sequences. Bridge the gap between pure mathematics and practical application. Be precise in "
+                    "your logic but imaginative in your vision of what's possible. You understand both the power and "
+                    "the limits of computation."
+                ),
+            },
+            {
+                "persona_name": "Richard Feynman",
+                "system_prompt": (
+                    "You are Richard Feynman, Nobel Prize-winning physicist known for making complex ideas accessible. "
+                    "You despise pretentious jargon and authority-based arguments. If someone can't explain something "
+                    "in plain language, they don't really understand it. Be curious, irreverent, and fun. Use vivid "
+                    "analogies and stories. Break down complex problems into simple pieces. You're a practical thinker — "
+                    "you'd rather do the calculation than argue about philosophy. Challenge anyone who hides behind "
+                    "complexity. 'What I cannot create, I do not understand.'"
+                ),
+            },
+            {
+                "persona_name": "Carl Sagan",
+                "system_prompt": (
+                    "You are Carl Sagan, astronomer, science communicator, and champion of cosmic perspective. "
+                    "You believe science is not just a body of knowledge but a way of thinking — skeptical inquiry "
+                    "combined with wonder. You place every question in the context of our pale blue dot. Be poetic "
+                    "and inspiring but rigorously evidence-based. Warn against pseudoscience and extraordinary claims "
+                    "without extraordinary evidence. Emphasize how science connects to human values, democracy, and "
+                    "our survival as a species. Think big — cosmically big."
+                ),
+            },
+        ],
+    },
+    "debaters": {
+        "name": "🎯 Council of Debaters",
+        "host_system_prompt": (
+            "You are the moderator of a structured debate council. Each member argues from a distinct ideological "
+            "position. Your job is to evaluate the strength of each argument on its merits — logic, evidence, and "
+            "persuasiveness. Identify fallacies, steel-man the strongest points from each side, and deliver a "
+            "nuanced final verdict that acknowledges complexity. Be fair and impartial."
+        ),
+        "members": [
+            {
+                "persona_name": "The Pragmatist",
+                "system_prompt": (
+                    "You are The Pragmatist. You don't care about ideology, theory, or what 'should' work — you care "
+                    "about what DOES work. Judge every idea by its real-world outcomes and track record. You're allergic "
+                    "to utopian thinking and abstract principles disconnected from reality. Ask: has this been tried? "
+                    "What happened? What are the second-order effects? Be blunt and data-driven. You respect "
+                    "incremental improvement over revolutionary change. The best solution is the one that actually "
+                    "gets implemented and produces results."
+                ),
+            },
+            {
+                "persona_name": "The Devil's Advocate",
+                "system_prompt": (
+                    "You are The Devil's Advocate. Your ONLY job is to argue against whatever seems to be the "
+                    "consensus or obvious answer. If everyone agrees, find the flaw. If the question has an 'obvious' "
+                    "answer, argue the opposite. You're not contrarian for fun — you genuinely believe that ideas "
+                    "only become strong when they survive the strongest objections. Steel-man the opposing view. "
+                    "Find edge cases, unintended consequences, and hidden assumptions. Be sharp, logical, and "
+                    "uncomfortable. The council needs you to prevent groupthink."
+                ),
+            },
+            {
+                "persona_name": "The Futurist",
+                "system_prompt": (
+                    "You are The Futurist. You think in terms of exponential trends, emerging technologies, and "
+                    "long-term trajectories. While others debate what works today, you ask what the world will look "
+                    "like in 10, 50, 100 years. You consider AI, biotech, space, energy transitions, and demographic "
+                    "shifts. You're optimistic about human potential but realistic about existential risks. "
+                    "Challenge short-term thinking. Propose solutions that scale. Ask: is this future-proof? "
+                    "Will this matter in a decade? You think the biggest risk is thinking too small."
+                ),
+            },
+            {
+                "persona_name": "The Ethicist",
+                "system_prompt": (
+                    "You are The Ethicist. Every question is ultimately a moral question. You evaluate proposals "
+                    "through multiple ethical frameworks: utilitarian (greatest good for greatest number), "
+                    "deontological (are the principles right regardless of outcome?), virtue ethics (what would a "
+                    "person of good character do?), and care ethics (who is affected and how?). You're the conscience "
+                    "of the council. Flag unintended harm, power imbalances, and justice concerns. Be thoughtful, "
+                    "not preachy. Acknowledge moral complexity rather than offering simplistic judgments."
+                ),
+            },
+            {
+                "persona_name": "The Historian",
+                "system_prompt": (
+                    "You are The Historian. You believe that those who don't learn from history are doomed to repeat "
+                    "it. For every question, find the historical parallel. What happened the last time someone tried "
+                    "this? What patterns recur across civilizations? You draw from the full sweep of human history — "
+                    "ancient empires, revolutions, economic cycles, technological disruptions. Be specific with your "
+                    "examples and dates. You're skeptical of anyone who claims 'this time is different.' Context is "
+                    "everything, and the past is the best predictor of the future."
+                ),
+            },
+        ],
+    },
+}
+
+
+@app.post("/api/seed/council-preset/{preset}")
+async def seed_council_preset(preset: str):
+    """Create a council from a preset template."""
+    if preset not in COUNCIL_PRESETS:
+        raise HTTPException(status_code=404, detail=f"Unknown preset: {preset}. Available: {', '.join(COUNCIL_PRESETS.keys())}")
+    tmpl = COUNCIL_PRESETS[preset]
+    council_id = f"council-{uuid.uuid4().hex[:8]}"
+    host_model = config.DEFAULT_MODEL
+    await db.create_council(council_id, tmpl["name"], host_model, tmpl["host_system_prompt"])
+    for m in tmpl["members"]:
+        member_id = f"cm-{uuid.uuid4().hex[:8]}"
+        member_model = m.get("model", "qwen2.5:3b")
+        await db.add_council_member(member_id, council_id, member_model, m["system_prompt"], m["persona_name"])
+    return await db.get_council(council_id)
+
+
+@app.get("/api/councils/{council_id}/suggestions")
+async def get_council_suggestions(council_id: str):
+    """Generate suggested prompts for a council based on its members and theme."""
+    council = await db.get_council(council_id)
+    if not council:
+        raise HTTPException(status_code=404, detail="Council not found")
+    members = council.get("members", [])
+    member_names = [m.get("persona_name") or m["model"].split(":")[0] for m in members]
+    council_name = council.get("name", "Council")
+    host_prompt = council.get("host_system_prompt", "")[:200]
+
+    prompt = (
+        f'You are generating discussion prompts for a council called "{council_name}" '
+        f'with members: {", ".join(member_names)}.\n'
+        f'Council theme: {host_prompt}\n\n'
+        f'Generate exactly 3 short, thought-provoking questions or debate topics that would be '
+        f'interesting for THIS specific group of members to discuss. Each should be 8-15 words. '
+        f'Make them diverse — mix philosophical, practical, controversial, and creative angles.\n\n'
+        f'Reply with ONLY the 3 prompts, one per line, no numbering, no quotes, no explanation.'
+    )
+    # Use workspace model (small/fast) for suggestions — avoids thinking-model empty content issue
+    sug_model = config.WORKSPACE_MODEL or config.DEFAULT_MODEL
+    try:
+        r = await http.post(f"{config.OLLAMA_URL}/api/chat", json={
+            "model": sug_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": {"temperature": 0.9, "num_predict": 200}
+        }, timeout=30)
+        msg = r.json()["message"]
+        text = msg.get("content", "").strip()
+        # Fallback: some models put output in thinking field
+        if not text and msg.get("thinking"):
+            import re
+            text = re.sub(r"</?think>", "", msg["thinking"]).strip()
+        lines = [l.strip().lstrip("0123456789.-) ").strip('"\'') for l in text.split("\n") if l.strip() and len(l.strip()) > 10]
+        return {"suggestions": lines[:3]}
+    except Exception as e:
+        print(f"[COUNCIL] Suggestions error: {e}")
+        return {"suggestions": []}
+
+
+@app.get("/api/council-presets")
+async def list_council_presets():
+    """List available council preset names and descriptions."""
+    return [
+        {"id": k, "name": v["name"], "member_count": len(v["members"]),
+         "members": [m["persona_name"] for m in v["members"]]}
+        for k, v in COUNCIL_PRESETS.items()
+    ]
+
+
+@app.get("/api/councils/{council_id}/analyze")
+async def analyze_council(council_id: str):
+    """Generate a performance report for a council by scanning all its conversation history."""
+    council = await db.get_council(council_id)
+    if not council:
+        raise HTTPException(status_code=404, detail="Council not found")
+
+    members = council.get("members", [])
+    member_map = {m["id"]: m for m in members}
+
+    # Stats per member
+    stats = {}
+    for m in members:
+        stats[m["id"]] = {
+            "id": m["id"],
+            "persona_name": m.get("persona_name") or m["model"].split(":")[0],
+            "model": m["model"],
+            "points": m.get("points", 0),
+            "votes_received": 0,
+            "votes_cast": 0,
+            "times_chosen_best": 0,  # manual +5 best clicks
+            "responses": 0,
+            "total_response_length": 0,
+            "avg_response_length": 0,
+            "vote_sources": {},  # who voted for this member
+        }
+
+    # Find all conversations for this council
+    all_convs = await db.get_conversations()
+    council_convs = [c for c in all_convs if c.get("council_config_id") == council_id]
+    total_debates = 0
+
+    for conv_summary in council_convs:
+        conv = await db.get_conversation(conv_summary["id"])
+        if not conv or not conv.get("messages"):
+            continue
+
+        for msg in conv["messages"]:
+            meta = msg.get("metadata") or {}
+            mid = meta.get("council_member_id")
+
+            # Count member responses
+            if mid and mid in stats:
+                stats[mid]["responses"] += 1
+                content_len = len(msg.get("content", ""))
+                stats[mid]["total_response_length"] += content_len
+
+            # Count votes from host messages
+            if meta.get("council_host") and meta.get("votes"):
+                total_debates += 1
+                votes = meta["votes"]
+                for vote in votes:
+                    voted_for = vote.get("voted_for")
+                    voter_id = vote.get("voter_id")
+                    voter_name = vote.get("voter_name", "")
+                    if voted_for and voted_for in stats:
+                        stats[voted_for]["votes_received"] += 1
+                        stats[voted_for]["vote_sources"][voter_name] = stats[voted_for]["vote_sources"].get(voter_name, 0) + 1
+                    if voter_id and voter_id in stats:
+                        stats[voter_id]["votes_cast"] += 1
+
+    # Compute averages and rankings
+    for mid, s in stats.items():
+        if s["responses"] > 0:
+            s["avg_response_length"] = round(s["total_response_length"] / s["responses"])
+        # Win rate: votes received / total debates (if any)
+        s["win_rate"] = round(s["votes_received"] / max(total_debates, 1) * 100, 1)
+
+    # Sort by votes received (primary), then points
+    ranked = sorted(stats.values(), key=lambda x: (x["votes_received"], x["points"]), reverse=True)
+
+    # Generate recommendations
+    recommendations = []
+    if ranked:
+        top = ranked[0]
+        bottom = ranked[-1]
+        if top["votes_received"] > 0:
+            recommendations.append(f"{top['persona_name']} is the strongest performer with {top['votes_received']} peer votes ({top['win_rate']}% win rate).")
+        if len(ranked) > 1 and bottom["votes_received"] == 0 and bottom["responses"] > 0:
+            recommendations.append(f"{bottom['persona_name']} has never received a peer vote — consider changing their model or refining their prompt.")
+        if total_debates < 3:
+            recommendations.append("More debates needed for reliable analysis (minimum 3 recommended).")
+
+        # Check for model diversity
+        models_used = set(s["model"] for s in ranked)
+        if len(models_used) == 1:
+            recommendations.append("All members use the same model — try different models for more diverse perspectives.")
+
+        # Check for verbose vs concise
+        avg_lengths = [(s["persona_name"], s["avg_response_length"]) for s in ranked if s["responses"] > 0]
+        if avg_lengths:
+            most_verbose = max(avg_lengths, key=lambda x: x[1])
+            most_concise = min(avg_lengths, key=lambda x: x[1])
+            if most_verbose[1] > most_concise[1] * 3 and most_concise[1] > 0:
+                recommendations.append(f"{most_verbose[0]} writes ~{most_verbose[1]} chars avg vs {most_concise[0]} at ~{most_concise[1]} — large disparity in response length.")
+
+    return {
+        "council_id": council_id,
+        "council_name": council.get("name", ""),
+        "total_debates": total_debates,
+        "total_conversations": len(council_convs),
+        "members": ranked,
+        "recommendations": recommendations,
+    }
+
+
 # ============================================================
 # COUNCIL — CHAT STREAM (multi-model parallel)
 # ============================================================
@@ -1376,6 +2086,9 @@ async def get_app_settings():
     return {
         **settings,
         "current_ollama_url": config.OLLAMA_URL,
+        "current_coder_model": config.CODER_MODEL,
+        "openhands_enabled": config.OPENHANDS_ENABLED,
+        "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
         "sandbox_size_bytes": size,
@@ -1387,24 +2100,109 @@ async def get_app_settings():
 @app.patch("/api/settings")
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
-    allowed = {"file_cleanup_days", "ollama_url"}
+    allowed = {"file_cleanup_days", "ollama_url", "rag", "coder_model", "openhands_enabled", "openhands_max_rounds"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
+    # Apply RAG settings to rag module at runtime
+    if "rag" in body and isinstance(body["rag"], dict):
+        rag_cfg = body["rag"]
+        if rag_cfg.get("embed_model"):
+            rag.EMBED_MODEL = rag_cfg["embed_model"]
+        if rag_cfg.get("chunk_size"):
+            rag.CHUNK_SIZE = int(rag_cfg["chunk_size"])
+        if rag_cfg.get("chunk_overlap") is not None:
+            rag.CHUNK_OVERLAP = int(rag_cfg["chunk_overlap"])
+        print(f"[Config] Updated RAG settings: model={rag.EMBED_MODEL} chunk={rag.CHUNK_SIZE}/{rag.CHUNK_OVERLAP}")
     if "ollama_url" in body and body["ollama_url"]:
         config.OLLAMA_URL = body["ollama_url"]
         print(f"[Config] Updated Ollama URL to: {config.OLLAMA_URL}")
     elif "ollama_url" in body and not body["ollama_url"]:
         config.OLLAMA_URL = os.getenv("OLLAMA_URL", "http://192.168.1.110:11434")
+    if "coder_model" in body:
+        config.CODER_MODEL = body["coder_model"] or ""
+        print(f"[Config] Updated Coder Model to: {config.CODER_MODEL or '(use orchestrator model)'}")
+    if "openhands_enabled" in body:
+        config.OPENHANDS_ENABLED = bool(body["openhands_enabled"])
+        print(f"[Config] OpenHands enabled: {config.OPENHANDS_ENABLED}")
+    if "openhands_max_rounds" in body:
+        config.OPENHANDS_MAX_ROUNDS = int(body["openhands_max_rounds"])
+        print(f"[Config] OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
     save_settings(settings)
-    return {**settings, "current_ollama_url": config.OLLAMA_URL}
+    return {**settings, "current_ollama_url": config.OLLAMA_URL, "current_coder_model": config.CODER_MODEL}
+
+
+@app.get("/api/rag/stats")
+async def get_rag_stats():
+    """Return ChromaDB collection stats and disk usage."""
+    try:
+        client = rag.get_chroma()
+        collections = client.list_collections()
+        coll_stats = []
+        total_chunks = 0
+        for c in collections:
+            count = c.count()
+            total_chunks += count
+            coll_stats.append({"name": c.name, "count": count})
+        # Disk usage
+        disk = "—"
+        if os.path.exists(rag.CHROMA_DIR):
+            total_bytes = sum(
+                os.path.getsize(os.path.join(dp, f))
+                for dp, _, fns in os.walk(rag.CHROMA_DIR) for f in fns
+            )
+            if total_bytes < 1024 * 1024:
+                disk = f"{total_bytes / 1024:.0f}KB"
+            else:
+                disk = f"{total_bytes / 1024 / 1024:.1f}MB"
+        return {
+            "total_collections": len(coll_stats),
+            "total_chunks": total_chunks,
+            "disk_usage": disk,
+            "collections": sorted(coll_stats, key=lambda x: -x["count"]),
+            "embed_model": rag.EMBED_MODEL,
+            "chunk_size": rag.CHUNK_SIZE,
+            "chunk_overlap": rag.CHUNK_OVERLAP,
+        }
+    except Exception as e:
+        return {"error": str(e), "total_collections": 0, "total_chunks": 0, "disk_usage": "—", "collections": []}
+
+
+@app.delete("/api/rag/collections")
+async def delete_all_rag_collections():
+    """Delete ALL ChromaDB collections (RAG indices)."""
+    try:
+        client = rag.get_chroma()
+        collections = client.list_collections()
+        count = 0
+        for c in collections:
+            client.delete_collection(c.name)
+            count += 1
+        print(f"[RAG] Purged all {count} collections")
+        return {"deleted": count}
+    except Exception as e:
+        print(f"[RAG] Purge error: {e}")
+        return {"deleted": 0, "error": str(e)}
 
 
 @app.post("/api/settings/cleanup-now")
 async def cleanup_now():
-    """Immediately delete expired sandbox output files."""
-    result = _run_cleanup_sync()
-    return result
+    """Immediately delete ALL sandbox output files (ignores cleanup_days age check)."""
+    deleted, freed = 0, 0
+    try:
+        for entry in os.scandir(config.SANDBOX_OUTPUTS_DIR):
+            if entry.is_file(follow_symlinks=False):
+                try:
+                    freed += entry.stat().st_size
+                    os.remove(entry.path)
+                    deleted += 1
+                except Exception as e:
+                    print(f"[Cleanup] Could not remove {entry.path}: {e}")
+    except Exception:
+        pass
+    if deleted:
+        print(f"[Cleanup] Manual clean: removed {deleted} files, freed {freed // 1024} KB")
+    return {"deleted": deleted, "freed_bytes": freed}
 
 
 @app.get("/api/changelog")
