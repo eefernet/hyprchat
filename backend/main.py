@@ -1842,6 +1842,48 @@ async def seed_council_preset(preset: str):
     return await db.get_council(council_id)
 
 
+@app.get("/api/councils/{council_id}/suggestions")
+async def get_council_suggestions(council_id: str):
+    """Generate suggested prompts for a council based on its members and theme."""
+    council = await db.get_council(council_id)
+    if not council:
+        raise HTTPException(status_code=404, detail="Council not found")
+    members = council.get("members", [])
+    member_names = [m.get("persona_name") or m["model"].split(":")[0] for m in members]
+    council_name = council.get("name", "Council")
+    host_prompt = council.get("host_system_prompt", "")[:200]
+
+    prompt = (
+        f'You are generating discussion prompts for a council called "{council_name}" '
+        f'with members: {", ".join(member_names)}.\n'
+        f'Council theme: {host_prompt}\n\n'
+        f'Generate exactly 3 short, thought-provoking questions or debate topics that would be '
+        f'interesting for THIS specific group of members to discuss. Each should be 8-15 words. '
+        f'Make them diverse — mix philosophical, practical, controversial, and creative angles.\n\n'
+        f'Reply with ONLY the 3 prompts, one per line, no numbering, no quotes, no explanation.'
+    )
+    # Use workspace model (small/fast) for suggestions — avoids thinking-model empty content issue
+    sug_model = config.WORKSPACE_MODEL or config.DEFAULT_MODEL
+    try:
+        r = await http.post(f"{config.OLLAMA_URL}/api/chat", json={
+            "model": sug_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": {"temperature": 0.9, "num_predict": 200}
+        }, timeout=30)
+        msg = r.json()["message"]
+        text = msg.get("content", "").strip()
+        # Fallback: some models put output in thinking field
+        if not text and msg.get("thinking"):
+            import re
+            text = re.sub(r"</?think>", "", msg["thinking"]).strip()
+        lines = [l.strip().lstrip("0123456789.-) ").strip('"\'') for l in text.split("\n") if l.strip() and len(l.strip()) > 10]
+        return {"suggestions": lines[:3]}
+    except Exception as e:
+        print(f"[COUNCIL] Suggestions error: {e}")
+        return {"suggestions": []}
+
+
 @app.get("/api/council-presets")
 async def list_council_presets():
     """List available council preset names and descriptions."""

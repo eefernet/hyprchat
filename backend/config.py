@@ -71,7 +71,7 @@ MAX_FETCH_CHARS = int(os.getenv("MAX_FETCH_CHARS", "8000"))
 # DEFAULTS
 # ============================================================
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen3.5:27b")
-WORKSPACE_MODEL = os.getenv("WORKSPACE_MODEL", "qwen2.5:7b")
+WORKSPACE_MODEL = os.getenv("WORKSPACE_MODEL", "qwen2.5:3b")
 CODER_MODEL = os.getenv("CODER_MODEL", "")
 OPENHANDS_ENABLED = os.getenv("OPENHANDS_ENABLED", "true").lower() == "true"  # Toggle OpenHands for generate_code tool
 OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "12"))

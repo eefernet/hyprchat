@@ -1005,6 +1005,8 @@ function HyprChat(){
   const [councilVoting,setCouncilVoting]=useState(false); // voting phase active
   const [councilRound,setCouncilRound]=useState(null); // {round, total_rounds, label}
   const [expandedRounds,setExpandedRounds]=useState({}); // {"turnIdx-roundNum": true/false}
+  const [councilSuggestions,setCouncilSuggestions]=useState([]); // suggested prompts for council
+  const [councilSugLoading,setCouncilSugLoading]=useState(false);
   const [editMember,setEditMember]=useState(null); // member id being edited
   const [editMemberForm,setEditMemberForm]=useState({system_prompt:"",persona_name:""});
 
@@ -1115,6 +1117,10 @@ function HyprChat(){
         const parseMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
         const isCouncil=v=>v==="1"||v===1||v===true;
         setConvs(prev=>prev.map(c=>c.id===id ? {...c, messages: full.messages.map(m=>({role:m.role,content:m.content,metadata:parseMeta(m)})), model: full.model||c.model, system_prompt: full.system_prompt||c.system_prompt, tool_ids: full.tool_ids||c.tool_ids||[], model_config_id: full.model_config_id||null, is_council: isCouncil(full.is_council), council_config_id: full.council_config_id||null} : c));
+        // Fetch suggestions for council chats with no messages yet
+        if(isCouncil(full.is_council)&&full.council_config_id&&!(full.messages||[]).length){
+          fetchCouncilSuggestions(full.council_config_id);
+        }
       }
     } catch(e) { console.error("Failed to load conversation:", e); }
     if(reqId===loadReqRef.current) setLoadingConv(false);
@@ -1136,6 +1142,14 @@ function HyprChat(){
     if(nearBottom)el.scrollTop=el.scrollHeight;
   },[councilResponses,councilHostContent,councilVotes,councilVoting]);
   useEffect(()=>{if(panel==="chat")inpRef.current?.focus();},[actId,panel]);
+  // Fetch council suggestions
+  const fetchCouncilSuggestions=(cfgId)=>{
+    if(!cfgId)return;
+    setCouncilSugLoading(true);setCouncilSuggestions([]);
+    fetch(`${API}/api/councils/${cfgId}/suggestions`).then(r=>r.json()).then(d=>{
+      setCouncilSuggestions(d.suggestions||[]);setCouncilSugLoading(false);
+    }).catch(()=>{setCouncilSugLoading(false);});
+  };
 
   const uConv=useCallback((id,u)=>{
     setConvs(p=>p.map(c=>{
@@ -1208,6 +1222,7 @@ function HyprChat(){
       await fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({is_council:"1",council_config_id:councilId})}).catch(()=>{});
       c.messages=[];c.is_council=true;c.council_config_id=councilId;
       setConvs(p=>[c,...p]);setActId(c.id);setPanel("chat");setEvts([]);setQuickResults([]);
+      fetchCouncilSuggestions(councilId);
     }catch(err){console.error("Council chat start failed",err);}
   };
 
@@ -1216,7 +1231,7 @@ function HyprChat(){
     if(!inp.trim()||councilRunning)return;
     const cid=actId;const cv=convs.find(c=>c.id===cid);
     if(!cv?.council_config_id)return;
-    const userMsg=inp.trim();setInp("");if(inpRef.current){inpRef.current.style.height="auto";}
+    const userMsg=inp.trim();setInp("");setCouncilSuggestions([]);if(inpRef.current){inpRef.current.style.height="auto";}
     // Quick search first if enabled
     let qResults=[];
     if(quickSearch&&userMsg){
@@ -3696,6 +3711,19 @@ function HyprChat(){
         {/* INPUT */}
         <div style={{padding:"6px 18px 14px",flexShrink:0}}>
           {/* Attachment chips */}
+          {/* Council suggested prompts */}
+          {act?.is_council&&!councilRunning&&(councilSuggestions.length>0||councilSugLoading)&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 0 6px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+              {councilSugLoading?<div style={{display:"flex",alignItems:"center",gap:5,padding:"4px 0",width:"100%"}}>
+                <div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
+                <span style={{fontSize:10,color:t.mut}}>Generating suggestions...</span>
+              </div>:councilSuggestions.map((s,i)=><button key={i} onClick={()=>{setInp(s);setCouncilSuggestions([]);setTimeout(()=>inpRef.current?.focus(),50);}}
+                style={{background:`${t.pink}08`,border:`1px solid ${t.pink}25`,borderRadius:20,padding:"5px 12px",fontSize:11,color:t.dim,cursor:"pointer",fontFamily:font,transition:"all .15s",maxWidth:"100%",textAlign:"left",lineHeight:1.4}}
+                onMouseOver={e=>{e.currentTarget.style.background=`${t.pink}18`;e.currentTarget.style.borderColor=`${t.pink}44`;e.currentTarget.style.color=t.text;}}
+                onMouseOut={e=>{e.currentTarget.style.background=`${t.pink}08`;e.currentTarget.style.borderColor=`${t.pink}25`;e.currentTarget.style.color=t.dim;}}>
+                {s}
+              </button>)}
+              {!councilSugLoading&&<button onClick={()=>fetchCouncilSuggestions(act?.council_config_id)} title="Regenerate suggestions" style={{background:"none",border:`1px solid ${t.brd}33`,borderRadius:"50%",width:24,height:24,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:11,flexShrink:0}}>↻</button>}
+            </div>}
           {attachments.length>0&&<div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",flexWrap:"wrap",gap:4,padding:"4px 0"}}>
             {attachments.map((a,i)=><Chip key={i} l={`📎 ${a.name}`} c={t.f1} bg={`${t.f1}15`} onX={()=>setAttachments(p=>p.filter((_,j)=>j!==i))}/>)}
           </div>}
@@ -3722,7 +3750,7 @@ function HyprChat(){
             </div>}
             </>}
             <textarea ref={inpRef} value={inp} onChange={e=>setInp(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
-              placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Ask the council a question...":"What's on your mind?"}`} rows={1}
+              placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":"What's on your mind?"}`} rows={1}
               disabled={streaming||councilRunning}
               style={{flex:1,background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:14,outline:"none",resize:"none",padding:"8px 0",maxHeight:140,lineHeight:1.6}}
               onInput={e=>{e.target.style.height="auto";e.target.style.height=Math.min(e.target.scrollHeight,120)+"px";}}
