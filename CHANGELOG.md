@@ -1,5 +1,34 @@
 # HyprChat Changelog
 
+## Alpha v12 — March 2026
+
+### New Features
+- **Council Preset Templates** — One-click preset councils with curated members and detailed persona prompts:
+  - **Philosophers** — Socrates, Aristotle, Nietzsche, Confucius, Simone de Beauvoir
+  - **Visionaries** — Leonardo da Vinci, Nikola Tesla, Marie Curie, Steve Jobs, Sun Tzu
+  - **Scientists** — Einstein, Darwin, Ada Lovelace, Feynman, Carl Sagan
+  - **Debaters** — The Pragmatist, Devil's Advocate, Futurist, Ethicist, Historian
+- **Debate Rounds** — Configurable rebuttal rounds (0-5) where council members read each other's responses and argue back. Each round streams in parallel with labeled headers.
+- **Council Performance Analytics** — "Analyze Performance" button per council generates a report with:
+  - Debate count, session count
+  - Member rankings with win rate bars, vote counts, avg response length
+  - "Voted by" breakdown showing which members voted for whom
+  - Auto-generated recommendations (strongest/weakest performer, model diversity, response length disparity)
+- **Expandable Debate Rounds in Chat** — Historical council responses grouped by round with collapsible sections. Latest round expanded by default, earlier rounds collapsed with response counts.
+- **Delete All Chats** — Danger zone button in Settings to wipe all conversations
+- **Purge All RAG Collections** — Button in RAG Pipeline settings to clear all ChromaDB indices
+
+### Improvements
+- **Council English enforcement** — All council members and host moderator now always respond in English (fixes Qwen models defaulting to Chinese)
+- **New Chat carries context** — Clicking "+ New Chat" while in a council or persona chat creates a new chat with the same council/persona applied
+- **Leave Persona / Leave Council** — Dedicated exit buttons in the top bar header. Removed old inline ✕ and sidebar persona tag.
+- **Sidebar chat labels** — Council chats show pink left border + council icon; persona chats show warm border + avatar/bot icon
+- **Auto-scroll council responses** — Individual member cards and host synthesis auto-scroll during streaming
+- **Input bar polish** — Centered alignment, larger padding, "What's on your mind?" placeholder
+- **Alpha badge** — Version label replaced with styled "ALPHA" badge next to HyprChat logo
+
+---
+
 ## Alpha v11 — March 2026
 
 ### New Features

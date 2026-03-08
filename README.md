@@ -37,9 +37,13 @@ Built with FastAPI + a single-file React SPA — no build step required.
 
 ### 🏛️ Council of AI
 - Run multiple models in parallel on the same prompt
-- AI peer voting — members vote for the best answer
+- **Preset councils** — Philosophers, Visionaries, Scientists, Debaters — one-click setup with curated persona prompts
+- **Debate rounds** — Configurable rebuttal rounds where members read and respond to each other's arguments
+- AI peer voting — members vote for the best answer after debate concludes
 - Points system tracks model quality over time
-- Host model synthesizes all responses with vote context
+- **Performance analytics** — Per-council reports with win rates, vote breakdowns, and recommendations
+- Host model synthesizes all responses with full debate history and vote context
+- Expandable round-by-round history in chat view
 
 ### 📚 Knowledge Bases
 Upload documents (PDF, Markdown, text, code) and attach them to personas for automatic system prompt injection.
@@ -55,6 +59,7 @@ Group related conversations, track files across chats, analyze topics, and gener
 - Font size, chat width, UI size sliders
 - Per-model parameters (temperature, top_p, top_k, num_ctx, repeat_penalty)
 - Runtime Ollama URL override
+- Danger zone: bulk delete all chats, purge all RAG collections
 
 ---
 

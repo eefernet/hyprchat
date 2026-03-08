@@ -1153,7 +1153,6 @@ function HyprChat(){
   },[]);
 
   const newChat=async(forceBlank=false)=>{
-    let newId=null;
     const curConv=convs.find(c=>c.id===actId);
 
     if(!forceBlank){
@@ -1165,25 +1164,32 @@ function HyprChat(){
       }
     }
 
-    try{
-      const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:"New Chat",model:models[0]||"qwen3.5:27b"})});
-      const c=await r.json();c.messages=[];setConvs(p=>[c,...p]);setActId(c.id);newId=c.id;
-    }catch{newId=`l-${Date.now()}`;setConvs(p=>[{id:newId,title:"New Chat",messages:[],model:models[0]||"",system_prompt:""},...p]);setActId(newId);}
-    setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
-
-    if(!forceBlank&&newId){
-      // Carry over persona from current conversation if it has one
+    // Figure out persona to carry over
+    let persona=null;
+    if(!forceBlank){
       if(curConv?.persona_name){
-        setTimeout(()=>uConv(newId,{model:curConv.model,system_prompt:curConv.system_prompt||"",tool_ids:curConv.tool_ids||[],model_config_id:curConv.model_config_id,persona_name:curConv.persona_name,persona_avatar:curConv.persona_avatar}),50);
-      }
-      // Fallback: carry over lastPersonaId if no persona on current conv
-      else if(lastPersonaId){
+        persona={model:curConv.model,system_prompt:curConv.system_prompt||"",tool_ids:curConv.tool_ids||[],model_config_id:curConv.model_config_id,persona_name:curConv.persona_name,persona_avatar:curConv.persona_avatar};
+      }else if(lastPersonaId){
         const mc=mcs.find(m=>m.id===lastPersonaId);
-        if(mc){
-          setTimeout(()=>uConv(newId,{model:mc.base_model||models[0]||"",system_prompt:mc.system_prompt||"",tool_ids:mc.tool_ids||[],model_config_id:mc.id,persona_name:mc.name,persona_avatar:mc.parameters?.avatar}),50);
-        }
+        if(mc)persona={model:mc.base_model||models[0]||"",system_prompt:mc.system_prompt||"",tool_ids:mc.tool_ids||[],model_config_id:mc.id,persona_name:mc.name,persona_avatar:mc.parameters?.avatar};
       }
     }
+
+    try{
+      const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:"New Chat",model:persona?.model||models[0]||"qwen3.5:27b"})});
+      const c=await r.json();c.messages=[];
+      // Apply persona directly to the conv object before adding to state
+      if(persona){
+        Object.assign(c,persona);
+        fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(persona)}).catch(()=>{});
+      }
+      setConvs(p=>[c,...p]);setActId(c.id);
+    }catch{
+      const newId=`l-${Date.now()}`;
+      const c={id:newId,title:"New Chat",messages:[],model:persona?.model||models[0]||"",system_prompt:persona?.system_prompt||"",...(persona||{})};
+      setConvs(p=>[c,...p]);setActId(newId);
+    }
+    setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
   };
 
   const delChat=async id=>{
@@ -1812,15 +1818,11 @@ function HyprChat(){
     {/* CONVERSATION LIST */}
     <div style={{width:sidebar?252:0,minWidth:sidebar?252:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",display:"flex",flexDirection:"column",borderRight:`1px solid ${t.brd}28`,overflow:"hidden",background:`${t.bgDeep}DD`,backdropFilter:"blur(24px)"}}>
       <div style={{padding:"12px 10px 6px",flexShrink:0}}>
-        <div style={{fontSize:11,fontWeight:700,letterSpacing:3,textTransform:"uppercase",color:t.mut,marginBottom:8,paddingLeft:2}}>HyprChat <span style={{fontSize:8,color:t.mut,opacity:.5,fontWeight:400}}>v9</span></div>
+        <div style={{fontSize:11,fontWeight:700,letterSpacing:3,textTransform:"uppercase",color:t.mut,marginBottom:8,paddingLeft:2}}>HyprChat <span style={{fontSize:8,fontWeight:700,letterSpacing:1,color:t.pink,opacity:.8,padding:"1px 5px",background:`${t.pink}15`,border:`1px solid ${t.pink}30`,borderRadius:4}}>ALPHA</span></div>
       </div>
       <div style={{padding:"0 8px 6px",display:"flex",flexDirection:"column",gap:4,flexShrink:0}}>
-        {lastPersonaId&&mcs.find(m=>m.id===lastPersonaId)&&<div style={{display:"flex",alignItems:"center",gap:5,padding:"4px 8px",background:`${t.pink}10`,border:`1px solid ${t.pink}28`,borderRadius:6,fontSize:10}}>
-          <span style={{color:t.pink,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>🎭 {mcs.find(m=>m.id===lastPersonaId).name}</span>
-          <span onClick={()=>{setLastPersonaId(null);localStorage.removeItem("hc-last-persona");}} style={{cursor:"pointer",color:t.mut,opacity:.7}}>✕</span>
-        </div>}
         <div style={{display:"flex",gap:4}}>
-          <button onClick={newChat} style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,background:`${t.acc}18`,border:`1px solid ${t.acc}38`,color:t.acc,padding:"8px 10px",borderRadius:9,cursor:"pointer",fontFamily:font,fontSize:12,fontWeight:600,boxShadow:`0 0 8px ${t.acc}18`}}><IC.Plus/> New Chat</button>
+          <button onClick={()=>newChat()} style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,background:`${t.acc}18`,border:`1px solid ${t.acc}38`,color:t.acc,padding:"8px 10px",borderRadius:9,cursor:"pointer",fontFamily:font,fontSize:12,fontWeight:600,boxShadow:`0 0 8px ${t.acc}18`}}><IC.Plus/> New Chat</button>
           <button onClick={()=>{setWsPanel(p=>!p);setActiveWs(null);setWsDetail(null);}} style={{...btnS(wsPanel?t.acc:t.mut),padding:"5px 8px",fontSize:11}} title="Workspaces">🗂</button>
         </div>
         {!wsPanel&&<>
@@ -3223,10 +3225,22 @@ function HyprChat(){
             <div style={{width:1,height:24,background:`${t.brd}33`}}/>
             <div style={{textAlign:"center"}}><div style={{fontSize:20,fontWeight:700,color:t.ok}}>{ragStats.disk_usage||"—"}</div><div style={{fontSize:10,color:t.mut,textTransform:"uppercase"}}>Disk</div></div>
           </div>
-          {ragStats.collections&&ragStats.collections.length>0&&<div style={{flex:1,minWidth:200,background:`${t.bgDeep}`,borderRadius:8,padding:8,border:`1px solid ${t.brd}22`,display:"flex",flexWrap:"wrap",gap:4,alignContent:"flex-start"}}>
-            {ragStats.collections.map((c,i)=><span key={i} style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 8px",borderRadius:6,background:`${c.name.startsWith("research-")?t.pink:t.acc}12`,border:`1px solid ${c.name.startsWith("research-")?t.pink:t.acc}22`,fontSize:11,color:c.name.startsWith("research-")?t.pink:t.acc}}>
-              {c.name.startsWith("research-")?"🧠":"📚"} {c.name.replace("research-","").slice(0,16)} <span style={{color:t.mut,fontWeight:700}}>{c.count}</span>
-            </span>)}
+          {ragStats.collections&&ragStats.collections.length>0&&<div style={{flex:1,minWidth:200,display:"flex",flexDirection:"column",gap:6}}>
+            <div style={{display:"flex",alignItems:"center",gap:6}}>
+              <span style={{fontSize:10,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.5,flex:1}}>Collections</span>
+              <button onClick={async()=>{
+                if(!confirm(`Delete all ${ragStats.collections.length} RAG collections? This removes all indexed chunks. You can reindex later.`))return;
+                try{const r=await fetch(`${API}/api/rag/collections`,{method:"DELETE"});const d=await r.json();
+                  setRagStats(p=>({...p,total_collections:0,total_chunks:0,collections:[]}));
+                  alert(`Purged ${d.deleted} collections.`);
+                }catch(e){alert("Error: "+e);}
+              }} style={{...btnS(t.err),padding:"3px 10px",fontSize:10}}>🗑 Purge All</button>
+            </div>
+            <div style={{background:`${t.bgDeep}`,borderRadius:8,padding:8,border:`1px solid ${t.brd}22`,display:"flex",flexWrap:"wrap",gap:4,alignContent:"flex-start"}}>
+              {ragStats.collections.map((c,i)=><span key={i} style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 8px",borderRadius:6,background:`${c.name.startsWith("research-")?t.pink:t.acc}12`,border:`1px solid ${c.name.startsWith("research-")?t.pink:t.acc}22`,fontSize:11,color:c.name.startsWith("research-")?t.pink:t.acc}}>
+                {c.name.startsWith("research-")?"🧠":"📚"} {c.name.replace("research-","").slice(0,16)} <span style={{color:t.mut,fontWeight:700}}>{c.count}</span>
+              </span>)}
+            </div>
           </div>}
         </div>}
       </div>
@@ -3253,6 +3267,22 @@ function HyprChat(){
       <div style={{background:`${t.surface}33`,border:`1px solid ${t.brd}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
         <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:10,display:"flex",alignItems:"center",gap:8}}>🗃️ Sandbox & Cleanup</div>
         <SandboxSection t={t} btnS={btnS} labelS={labelS}/>
+      </div>
+
+      {/* TILE: Danger Zone */}
+      <div style={{background:`${t.err}06`,border:`1px solid ${t.err}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
+        <div style={{fontSize:14,fontWeight:700,color:t.err,letterSpacing:.5,marginBottom:12,display:"flex",alignItems:"center",gap:8}}>⚠️ Danger Zone</div>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+          <button onClick={async()=>{
+            if(!confirm("Delete ALL conversations? This cannot be undone."))return;
+            try{const r=await fetch(`${API}/api/conversations`,{method:"DELETE"});const d=await r.json();
+              setConvs([]);setActId(null);
+              alert(`Deleted ${d.deleted} conversations.`);
+            }catch(e){alert("Error: "+e);}
+          }} style={{...btnS(t.err),padding:"10px 16px",fontSize:12,fontWeight:700,flex:1,justifyContent:"center",minWidth:160}}>
+            🗑 Delete All Chats
+          </button>
+        </div>
       </div>
 
     </div>

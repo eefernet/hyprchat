@@ -888,6 +888,18 @@ async def delete_conversation(conv_id: str):
     return {"status": "deleted"}
 
 
+@app.delete("/api/conversations")
+async def delete_all_conversations():
+    """Delete ALL conversations and their messages."""
+    convs = await db.get_conversations()
+    count = 0
+    for c in convs:
+        await db.delete_conversation(c["id"])
+        count += 1
+    print(f"[Cleanup] Deleted all {count} conversations")
+    return {"deleted": count}
+
+
 class AddMessageRequest(BaseModel):
     role: str
     content: str
@@ -2112,6 +2124,23 @@ async def get_rag_stats():
         }
     except Exception as e:
         return {"error": str(e), "total_collections": 0, "total_chunks": 0, "disk_usage": "—", "collections": []}
+
+
+@app.delete("/api/rag/collections")
+async def delete_all_rag_collections():
+    """Delete ALL ChromaDB collections (RAG indices)."""
+    try:
+        client = rag.get_chroma()
+        collections = client.list_collections()
+        count = 0
+        for c in collections:
+            client.delete_collection(c.name)
+            count += 1
+        print(f"[RAG] Purged all {count} collections")
+        return {"deleted": count}
+    except Exception as e:
+        print(f"[RAG] Purge error: {e}")
+        return {"deleted": 0, "error": str(e)}
 
 
 @app.post("/api/settings/cleanup-now")
