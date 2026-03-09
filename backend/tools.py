@@ -12,7 +12,7 @@ import uuid
 
 import config
 import database as db
-from research import run_deep_research, run_conspiracy_research
+from research import run_deep_research, run_conspiracy_research, _fetch_page
 
 # Strip ANSI escape codes from terminal output before feeding back to the model
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
@@ -79,9 +79,9 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "research",
-            "description": "Search the web for documentation, APIs, error solutions, or current information.",
+            "description": "Search the web and read top results. Returns actual page content from the best matches, not just snippets. Use for any factual, current, or real-world question.",
             "parameters": {"type": "object", "properties": {
-                "query": {"type": "string", "description": "Search query"},
+                "query": {"type": "string", "description": "Search query — be specific and detailed for best results"},
             }, "required": ["query"]},
         },
     },
@@ -711,12 +711,42 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                  "thumbnail": thumbnail, "type": r_type})
             if sr_cards:
                 await events.emit(conv_id, "search_results", {"query": query, "results": sr_cards})
-            await events.emit(conv_id, "tool_end", {"tool": "research", "icon": "search", "status": f'{len(results)} results',
+
+            # ── Fetch top 3 pages in parallel for actual content ──
+            fetch_urls = []
+            for item in results:
+                u = item.get("url", "")
+                if u and len(fetch_urls) < 3:
+                    fetch_urls.append(u)
+
+            pages = []
+            if fetch_urls:
+                await events.emit(conv_id, "tool_status", {"tool": "research", "icon": "search", "status": f"Reading {len(fetch_urls)} pages..."})
+                fetch_tasks = [_fetch_page(http, u) for u in fetch_urls]
+                fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+                for u, fr in zip(fetch_urls, fetch_results):
+                    if isinstance(fr, dict) and fr.get("content"):
+                        pages.append(fr)
+
+            await events.emit(conv_id, "tool_end", {"tool": "research", "icon": "search", "status": f'{len(results)} results, {len(pages)} pages read',
                 "detail": json.dumps({"query": query, "results": [{"title": r.get("title",""), "url": r.get("url","")} for r in results[:5]]}),
             })
-            parts = [f"**Search: {query}**\n"]
+
+            # Build result: search listing + actual page content
+            parts = [f"**Web Search: {query}**\n"]
+            parts.append("## Search Results\n")
             for i, res in enumerate(results, 1):
                 parts.append(f"{i}. **[{res.get('title', '')}]({res.get('url', '')})**\n   {res.get('content', '')}\n")
+
+            if pages:
+                parts.append("\n## Page Content (read from top results)\n")
+                for pg in pages:
+                    # Limit each page to 4000 chars to stay within context budget
+                    content = pg["content"][:4000]
+                    parts.append(f"### Source: {pg['url']}\n{content}\n\n---\n")
+            else:
+                parts.append("\n*(Could not fetch any page content — use the snippets above.)*\n")
+
             return "\n".join(parts)
 
         elif name == "fetch_url":
@@ -1087,12 +1117,15 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
 
             # Try SSE streaming first, fall back to blocking /run
             result = None
+            _sse_first_event = False
             try:
                 import httpx
+                print(f"[CODEGEN:OH] Attempting SSE stream to {openhands_url}/run-stream", flush=True)
                 async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=600, write=10, pool=10)) as stream_client:
                     async with stream_client.stream("POST", f"{openhands_url}/run-stream", json=oh_payload) as sse_resp:
                         if sse_resp.status_code != 200:
                             raise ConnectionError(f"SSE HTTP {sse_resp.status_code}")
+                        print(f"[CODEGEN:OH] SSE connected (HTTP {sse_resp.status_code})", flush=True)
                         async for line in sse_resp.aiter_lines():
                             if not line.startswith("data: "):
                                 continue
@@ -1100,6 +1133,13 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                 evt = json.loads(line[6:])
                             except (json.JSONDecodeError, ValueError):
                                 continue
+                            if not _sse_first_event:
+                                _sse_first_event = True
+                                print(f"[CODEGEN:OH] First SSE event received: type={evt.get('type')}", flush=True)
+                                await events.emit(conv_id, "tool_progress", {
+                                    "tool": "generate_code", "icon": "wand",
+                                    "status": f"Step 0/{max_rounds}: 🚀 Connected to agent stream",
+                                })
                             if evt.get("type") == "step":
                                 step_num = evt.get("step", 0)
                                 action = evt.get("action", "")
@@ -1116,7 +1156,11 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                 result = evt
                                 break
             except Exception as sse_err:
-                print(f"[CODEGEN:OH] SSE stream failed ({sse_err}), falling back to /run")
+                print(f"[CODEGEN:OH] SSE stream failed ({type(sse_err).__name__}: {sse_err}), falling back to /run", flush=True)
+                await events.emit(conv_id, "tool_progress", {
+                    "tool": "generate_code", "icon": "wand",
+                    "status": "⚡ Running agent (non-streaming)...",
+                })
                 try:
                     oh_resp = await http.post(
                         f"{openhands_url}/run", json=oh_payload, timeout=600,

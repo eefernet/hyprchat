@@ -460,15 +460,18 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
           const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();
           const isYT=r.type==="youtube";
           const isImg=r.type==="image";
+          const hasThumbnail=!!r.thumbnail;
           return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:10,overflow:"hidden",cursor:"pointer",minWidth:155,maxWidth:190,flexShrink:0,transition:"border-color .15s"}}
             onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
-            <div style={{width:"100%",height:88,background:isYT?"#0a0a0a":`${t.acc}06`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-              {r.thumbnail
-                ?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>e.target.style.display="none"}/>
-                :hn?<img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:36,height:36,borderRadius:8,opacity:.8}} alt="" onError={e=>e.target.style.opacity="0"}/>
-                :<span style={{fontSize:24,opacity:.3}}>🌐</span>}
+            <div style={{width:"100%",height:88,background:hasThumbnail?(isYT?"#0a0a0a":"transparent"):`linear-gradient(135deg,${t.bgDeep},${t.surface})`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+              {hasThumbnail
+                ?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
+                :<span style={{fontSize:24,opacity:.15}}>🔗</span>}
               {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
                 <div style={{width:28,height:28,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:"#fff",boxShadow:"0 2px 8px rgba(0,0,0,.5)"}}>▶</div>
+              </div>}
+              {hn&&<div style={{position:"absolute",top:5,right:5,background:`${t.bg}CC`,backdropFilter:"blur(6px)",borderRadius:5,padding:3,display:"flex",alignItems:"center",justifyContent:"center",border:`1px solid ${t.brd}33`}}>
+                <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=32`} style={{width:16,height:16,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
               </div>}
             </div>
             <div style={{padding:"6px 8px",flex:1,display:"flex",flexDirection:"column",gap:2}}>
@@ -1266,14 +1269,11 @@ function HyprChat(){
     const cid=actId;const cv=convs.find(c=>c.id===cid);
     if(!cv?.council_config_id)return;
     const userMsg=inp.trim();setInp("");setCouncilSuggestions([]);if(inpRef.current){inpRef.current.style.height="auto";}
-    // Quick search first if enabled
-    let qResults=[];
+    // Quick search fires in parallel — don't block council
     if(quickSearch&&userMsg){
-      setSearchLoading(true);
-      try{const sr=await fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:userMsg,count:6})});const sd=await sr.json();qResults=sd.results||[];}catch{}
-      setSearchLoading(false);
-    }
-    setQuickResults(qResults);
+      setSearchLoading(true);setQuickResults([]);
+      fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:userMsg,count:6})}).then(r=>r.json()).then(d=>{setQuickResults(d.results||[]);setSearchLoading(false);}).catch(()=>{setQuickResults([]);setSearchLoading(false);});
+    }else{setQuickResults([]);}
     // Add user message to UI
     uConv(cid,c=>({...c,messages:[...(c.messages||[]),{role:"user",content:userMsg,metadata:{}}]}));
     fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"user",content:userMsg})}).catch(()=>{});
@@ -1433,11 +1433,10 @@ function HyprChat(){
       const fileCtx = attachments.map(a=>`📎 **${a.name}**:\n\`\`\`\n${a.content}\n\`\`\``).join("\n\n");
       content = content ? `${content}\n\n${fileCtx}` : fileCtx;
     }
-    // Quick search for regular chats
+    // Quick search fires in parallel — don't block the chat
     if(quickSearch&&content.trim()){
-      setSearchLoading(true);
-      try{const sr=await fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:content.trim().slice(0,200),count:6})});const sd=await sr.json();setQuickResults(sd.results||[]);}catch{setQuickResults([]);}
-      setSearchLoading(false);
+      setSearchLoading(true);setQuickResults([]);
+      fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:content.trim().slice(0,200),count:6})}).then(r=>r.json()).then(d=>{setQuickResults(d.results||[]);setSearchLoading(false);}).catch(()=>{setQuickResults([]);setSearchLoading(false);});
     }else{setQuickResults([]);}
     const um={role:"user",content};
     uConv(cid,c=>({...c,title:(!c.messages||!c.messages.length)?content.slice(0,40):c.title,messages:[...(c.messages||[]),um,{role:"assistant",content:"",isS:true}]}));
@@ -3504,31 +3503,6 @@ function HyprChat(){
             for(const turn of turns){turn.responses=Object.values(turn.rounds).flat();}
             const isLastTurn=(ti)=>ti===turns.length-1;
             return <div style={{maxWidth:"100%",padding:"0 20px",overflowY:"auto"}}>
-              {/* Quick search results inline */}
-              {quickResults.length>0&&<div style={{marginBottom:16,animation:"fadeIn .3s"}}>
-                <div style={{fontSize:10,fontWeight:700,color:t.f1,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,display:"flex",alignItems:"center",gap:4}}>
-                  <IC.Flash/> Quick Search Results
-                  <button onClick={()=>setQuickResults([])} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"0 4px",fontSize:10,marginLeft:"auto"}}>✕</button>
-                </div>
-                <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:6}}>
-                  {quickResults.map((r,ri)=>{const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();const isYT=r.type==="youtube";const isImg=r.type==="image";
-                    return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:12,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}>
-                      <div style={{width:"100%",height:110,background:isYT?"#0a0a0a":`${t.acc}06`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                        {r.thumbnail?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>e.target.style.display="none"}/>:
-                          hn?<img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:40,height:40,borderRadius:8}} alt="" onError={e=>e.target.style.opacity="0"}/>:
-                          <span style={{fontSize:28,opacity:.4}}>🌐</span>}
-                        {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
-                          <div style={{width:34,height:34,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#fff",boxShadow:"0 2px 10px rgba(0,0,0,.5)"}}>▶</div>
-                        </div>}
-                      </div>
-                      <div style={{padding:"8px 10px",display:"flex",flexDirection:"column",gap:3}}>
-                        <div style={{fontSize:11,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.title}</div>
-                        {r.snippet&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
-                        <div style={{fontSize:9,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
-                      </div>
-                    </a>;})}
-                </div>
-              </div>}
               {turns.map((turn,ti)=><div key={ti} style={{marginBottom:28,animation:`fadeIn .3s both`}}>
                 {/* User message */}
                 <div style={{display:"flex",gap:9,alignItems:"flex-start",marginBottom:12}}>
@@ -3538,6 +3512,34 @@ function HyprChat(){
                     <div style={{background:`${t.surface}50`,padding:"8px 12px",borderRadius:9,border:`1px solid ${t.brd}18`,lineHeight:1.6,fontSize:fontSize,color:t.dim}}>{md(turn.user.content)}</div>
                   </div>
                 </div>
+                {/* Quick search results — show before last turn's responses */}
+                {quickResults.length>0&&isLastTurn(ti)&&<div style={{marginBottom:16,marginLeft:36,animation:"fadeIn .3s"}}>
+                  <div style={{fontSize:10,fontWeight:700,color:t.f1,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,display:"flex",alignItems:"center",gap:4}}>
+                    <IC.Flash/> Quick Search Results
+                    <button onClick={()=>setQuickResults([])} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"0 4px",fontSize:10,marginLeft:"auto"}}>✕</button>
+                  </div>
+                  <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:6}}>
+                    {quickResults.map((r,ri)=>{const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();const isYT=r.type==="youtube";const isImg=r.type==="image";const hasTh=!!r.thumbnail;
+                      return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:12,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}
+                        onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
+                        <div style={{width:"100%",height:110,background:hasTh?(isYT?"#0a0a0a":"transparent"):`linear-gradient(135deg,${t.bgDeep},${t.surface})`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                          {hasTh?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
+                            :<span style={{fontSize:28,opacity:.15}}>🔗</span>}
+                          {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
+                            <div style={{width:34,height:34,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#fff",boxShadow:"0 2px 10px rgba(0,0,0,.5)"}}>▶</div>
+                          </div>}
+                          {hn&&<div style={{position:"absolute",top:6,right:6,background:`${t.bg}CC`,backdropFilter:"blur(6px)",borderRadius:6,padding:3,display:"flex",alignItems:"center",justifyContent:"center",border:`1px solid ${t.brd}33`}}>
+                            <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=32`} style={{width:18,height:18,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
+                          </div>}
+                        </div>
+                        <div style={{padding:"8px 10px",display:"flex",flexDirection:"column",gap:3}}>
+                          <div style={{fontSize:11,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.title}</div>
+                          {r.snippet&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
+                          <div style={{fontSize:9,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
+                        </div>
+                      </a>;})}
+                  </div>
+                </div>}
                 {/* Council response cards — grouped by round */}
                 <div style={{marginLeft:36}}>
                   {(()=>{
@@ -3668,36 +3670,44 @@ function HyprChat(){
               <div ref={chatEnd}/>
             </div>;
           })():<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 16px"}}>
-            {/* Quick search results for regular chats */}
-            {quickResults.length>0&&<div style={{marginBottom:16,animation:"fadeIn .3s"}}>
-              <div style={{fontSize:10,fontWeight:700,color:t.f1,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,display:"flex",alignItems:"center",gap:4}}>
-                <IC.Flash/> Quick Search Results
-                <button onClick={()=>setQuickResults([])} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"0 4px",fontSize:10,marginLeft:"auto"}}>✕</button>
-              </div>
-              <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:6}}>
-                {quickResults.map((r,ri)=>{const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();const isYT=r.type==="youtube";const isImg=r.type==="image";
-                  return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:12,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}>
-                    <div style={{width:"100%",height:110,background:isYT?"#0a0a0a":`${t.acc}06`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                      {r.thumbnail?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>e.target.style.display="none"}/>:
-                        hn?<img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:40,height:40,borderRadius:8}} alt="" onError={e=>e.target.style.opacity="0"}/>:
-                        <span style={{fontSize:28,opacity:.4}}>🌐</span>}
-                      {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
-                        <div style={{width:34,height:34,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#fff",boxShadow:"0 2px 10px rgba(0,0,0,.5)"}}>▶</div>
-                      </div>}
-                    </div>
-                    <div style={{padding:"8px 10px",display:"flex",flexDirection:"column",gap:3}}>
-                      <div style={{fontSize:11,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.title}</div>
-                      {r.snippet&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
-                      <div style={{fontSize:9,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
-                    </div>
-                  </a>;})}
-              </div>
-            </div>}
-            {(act.messages||[]).filter(msg=>msg.role==="user"||msg.role==="assistant").map((msg,i)=>{const isU=msg.role==="user";const mid=`m${i}`;const isEditing=editingMsg?.index===i;
+            {(()=>{const filteredMsgs=(act.messages||[]).filter(msg=>msg.role==="user"||msg.role==="assistant");
+              // Find the index of the last assistant message to place quick search results before it
+              let lastAssistantFilteredIdx=-1;
+              filteredMsgs.forEach((m,idx)=>{if(m.role==="assistant")lastAssistantFilteredIdx=idx;});
+              return filteredMsgs.map((msg,i)=>{const isU=msg.role==="user";const mid=`m${i}`;const isEditing=editingMsg?.index===i;
+              const showQS=quickResults.length>0&&i===lastAssistantFilteredIdx&&!isU;
               const personaAvatar=!isU&&act?.persona_avatar;
               const personaName=!isU&&act?.persona_name;
               const personaColor=!isU&&act?.persona_name?t.pink:t.acc;
-              return <div key={i} style={{marginBottom:compactMode?8:20,display:"flex",gap:12,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(i*.04,.2)}s both`}}>
+              return <React.Fragment key={i}>
+              {showQS&&<div style={{marginBottom:16,animation:"fadeIn .3s"}}>
+                <div style={{fontSize:10,fontWeight:700,color:t.f1,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,display:"flex",alignItems:"center",gap:4}}>
+                  <IC.Flash/> Quick Search Results
+                  <button onClick={()=>setQuickResults([])} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"0 4px",fontSize:10,marginLeft:"auto"}}>✕</button>
+                </div>
+                <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:6}}>
+                  {quickResults.map((r,ri)=>{const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();const isYT=r.type==="youtube";const isImg=r.type==="image";const hasTh=!!r.thumbnail;
+                    return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:12,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}
+                      onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
+                      <div style={{width:"100%",height:110,background:hasTh?(isYT?"#0a0a0a":"transparent"):`linear-gradient(135deg,${t.bgDeep},${t.surface})`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                        {hasTh?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
+                          :<span style={{fontSize:28,opacity:.15}}>🔗</span>}
+                        {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
+                          <div style={{width:34,height:34,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#fff",boxShadow:"0 2px 10px rgba(0,0,0,.5)"}}>▶</div>
+                        </div>}
+                        {hn&&<div style={{position:"absolute",top:6,right:6,background:`${t.bg}CC`,backdropFilter:"blur(6px)",borderRadius:6,padding:3,display:"flex",alignItems:"center",justifyContent:"center",border:`1px solid ${t.brd}33`}}>
+                          <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=32`} style={{width:18,height:18,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
+                        </div>}
+                      </div>
+                      <div style={{padding:"8px 10px",display:"flex",flexDirection:"column",gap:3}}>
+                        <div style={{fontSize:11,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.title}</div>
+                        {r.snippet&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
+                        <div style={{fontSize:9,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
+                      </div>
+                    </a>;})}
+                </div>
+              </div>}
+              <div style={{marginBottom:compactMode?8:20,display:"flex",gap:12,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(i*.04,.2)}s both`}}>
                 <div style={{width:32,height:32,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",background:isU?`${t.f4}20`:`${personaColor}18`,border:`1px solid ${isU?t.f4:personaColor}33`,color:isU?t.f4:personaColor,flexShrink:0,marginTop:2,overflow:"hidden",boxShadow:`0 0 8px ${isU?t.f4:personaColor}22`}}>
                   {isU?<IC.User/>:personaAvatar?<img src={`${API}${personaAvatar}`} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
                 </div>
@@ -3738,8 +3748,8 @@ function HyprChat(){
                     </button>}
                   </div>}
                 </div>
-              </div>;
-            })}
+              </div></React.Fragment>;
+            });})()}
             {evts.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}><ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/></div>}
             <div ref={chatEnd}/>
           </div>}

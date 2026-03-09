@@ -2095,6 +2095,42 @@ async def quick_search(req: QuickSearchRequest):
             "type": result_type,
         })
 
+    # ── Fetch OG images for results missing thumbnails (parallel, fast timeout) ──
+    async def _fetch_og_image(idx: int, page_url: str):
+        skip = ["youtube.com", "twitter.com", "x.com", "facebook.com", "instagram.com",
+                "linkedin.com", "tiktok.com", ".pdf"]
+        if any(s in page_url.lower() for s in skip):
+            return idx, ""
+        try:
+            resp = await http.get(page_url, timeout=4, follow_redirects=True,
+                                  headers={"User-Agent": "Mozilla/5.0 (compatible; HyprChat/1.0)"})
+            html = resp.text[:15000]  # only need the <head>
+            # Try og:image first, then twitter:image
+            for pattern in [
+                r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+                r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
+            ]:
+                m = re.search(pattern, html, re.IGNORECASE)
+                if m:
+                    img = m.group(1).strip()
+                    if img.startswith("//"):
+                        img = "https:" + img
+                    if img.startswith("http"):
+                        return idx, img
+            return idx, ""
+        except Exception:
+            return idx, ""
+
+    needs_og = [(i, r["url"]) for i, r in enumerate(results) if not r["thumbnail"] and r["type"] == "web"]
+    if needs_og:
+        tasks = [_fetch_og_image(i, u) for i, u in needs_og[:6]]
+        og_results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in og_results:
+            if isinstance(res, tuple) and res[1]:
+                results[res[0]]["thumbnail"] = res[1]
+
     return {"results": results, "query": req.query}
 
 
