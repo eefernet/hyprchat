@@ -46,8 +46,8 @@ Built with FastAPI + a single-file React SPA — no build step required.
 - Host model synthesizes all responses with full debate history and vote context
 - Expandable round-by-round history in chat view
 
-### 📚 Knowledge Bases
-Upload documents (PDF, Markdown, text, code) and attach them to personas for automatic system prompt injection.
+### 📚 Knowledge Bases & RAG Pipeline
+Upload documents (PDF, Markdown, text, code) and attach them to personas. Files are chunked, embedded via Ollama (`nomic-embed-text`), and stored in ChromaDB. At query time, only the most relevant chunks are retrieved and injected into context — not the entire file. Research tool results are automatically indexed into per-persona memory for future recall. Configurable chunk size, overlap, top_k, and embed model via Settings.
 
 ### 🎭 Personas
 Named AI personalities with avatars, model config, system prompts, temperature/context settings, and linked KBs & tools.
@@ -139,7 +139,7 @@ systemctl status hyprchat        # status
 
 | Layer | Tech |
 |-------|------|
-| **Backend** | Python 3.11+, FastAPI, httpx, SQLite (aiosqlite) |
+| **Backend** | Python 3.11+, FastAPI, httpx, SQLite (aiosqlite), ChromaDB |
 | **Frontend** | React 18 (Babel in-browser), zero build step |
 | **LLM** | Ollama (native tool calling protocol) |
 | **Search** | SearXNG |
