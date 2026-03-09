@@ -25,7 +25,8 @@ Built with FastAPI + a single-file React SPA — no build step required.
 | **CodeAgent** | Sandboxed code execution in 30+ languages, shell commands, file I/O, package installs |
 | **generate_code** | Agentic code generation via OpenHands SDK — writes, tests, and fixes code automatically in the sandbox |
 | **Deep Research** | Multi-phase parallel web research with 5 depth levels, compare mode, cross-referencing |
-| **Quick Search** | Instant SearXNG-backed search with inline card grid, thumbnails & YouTube previews |
+| **Quick Search** | Instant SearXNG search with OG image cards, favicon badges & YouTube previews |
+| **Research** | Web search + full page reading — fetches and reads top results for grounded answers |
 | **Conspiracy Research** | Alt-source deep dive — FOIA vaults, whistleblower sites, CIA reading room, FBI vault |
 | **fetch_url** | Fetch and read any URL directly |
 

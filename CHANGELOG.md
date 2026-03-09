@@ -1,5 +1,23 @@
 # HyprChat Changelog
 
+## Alpha v13 — March 2026
+
+### New Features
+- **Smart Research Tool** — The `research` tool now fetches and reads full page content from the top 3 search results (in parallel), giving the AI actual web content to work with instead of just search snippets. Responses are now grounded in real, current information.
+- **OG Image Thumbnails** — Quick Search and research result cards now display actual article images (extracted from `og:image` / `twitter:image` meta tags) instead of just site favicons. Images are fetched in parallel with a fast 4s timeout.
+- **Redesigned Search Result Cards** — New card layout across all search panels:
+  - Thumbnail/article image fills the top area of each card
+  - Small favicon badge in a frosted-glass pill, top-right corner
+  - Gradient background fallback when no image is available
+  - Hover highlight effect on all cards
+
+### Improvements
+- **Non-blocking Quick Search** — Quick Search now fires in parallel with the chat request instead of blocking before it. Messages send instantly while search results load in the background.
+- **Search results positioned correctly** — Quick Search result cards now render directly above the AI response instead of above the user's message at the top of the chat area. Applies to both regular chat and council views.
+- **Reduced page fetch count** — Research tool fetches 3 pages instead of 5 for better latency balance.
+
+---
+
 ## Alpha v12 — March 2026
 
 ### New Features
