@@ -2275,7 +2275,7 @@ async def cleanup_now():
 @app.post("/api/settings/cleanup-codebox")
 async def cleanup_codebox():
     """Delete all project files on the CodeBox sandbox."""
-    openhands_url = config.CODEBOX_URL.rsplit(":", 1)[0] + ":8586"
+    openhands_url = config.OPENHANDS_URL
     try:
         r = await http.post(f"{openhands_url}/clean", timeout=30)
         r.raise_for_status()

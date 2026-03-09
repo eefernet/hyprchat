@@ -329,13 +329,19 @@ const Pill = ({ev,t,expanded,onToggle})=>{
         {detail.stderr&&<><div style={{color:t.err,marginTop:6,fontWeight:600,fontSize:10}}>⚠️ stderr:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.err,fontSize:11,background:`${t.err}08`,borderRadius:4,marginTop:2}}>{detail.stderr}</pre></>}
       </div>
       :detail.results?<div>{detail.results.map((r,i)=><div key={i} style={{marginBottom:4}}><a href={r.url} target="_blank" style={{color:t.acc,textDecoration:"none",fontSize:11}}>🔗 {r.title}</a></div>)}</div>
-      :detail.steps?<div style={{display:"flex",flexDirection:"column",gap:3}}>
-        {detail.steps.map((s,i)=><div key={i} style={{display:"flex",gap:6,alignItems:"flex-start",padding:"3px 0",borderBottom:i<detail.steps.length-1?`1px solid ${t.brd}15`:"none"}}>
-          <span style={{flexShrink:0,fontSize:11,width:18,textAlign:"center"}}>{s.icon}</span>
-          <span style={{color:t.mut,fontSize:10,flexShrink:0,minWidth:16,fontWeight:600}}>#{s.step}</span>
-          <span style={{color:t.acc,fontSize:10,fontWeight:600,flexShrink:0,minWidth:60}}>{s.label}</span>
-          <span style={{color:t.dim,fontSize:10,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.detail}</span>
-        </div>)}
+      :detail.steps?<div>
+        <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+          <span style={{fontSize:10,fontWeight:700,color:t.acc}}>Agent Timeline</span>
+          <span style={{fontSize:9,color:t.mut,background:`${t.surface}88`,padding:"1px 6px",borderRadius:8}}>{detail.steps.length} step{detail.steps.length!==1?"s":""}</span>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:0,maxHeight:180,overflowY:"auto",paddingLeft:8,borderLeft:`2px solid ${t.acc}22`}}>
+          {detail.steps.map((s,i)=><div key={i} style={{display:"flex",gap:6,alignItems:"flex-start",padding:"3px 0",position:"relative"}}>
+            <span style={{position:"absolute",left:-13,top:6,width:6,height:6,borderRadius:"50%",background:i===detail.steps.length-1?t.acc:`${t.acc}55`}}/>
+            <span style={{flexShrink:0,fontSize:11,width:18,textAlign:"center"}}>{s.icon}</span>
+            <span style={{color:t.acc,fontSize:10,fontWeight:600,flexShrink:0,minWidth:55}}>{s.label}</span>
+            <span style={{color:t.dim,fontSize:10,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{s.detail}</span>
+          </div>)}
+        </div>
       </div>
       :detail.method?<div>
         <div style={{color:t.mut,fontSize:10,marginBottom:4}}>⚙️ <span style={{color:t.acc}}>{detail.method}</span></div>
@@ -3847,6 +3853,7 @@ function HyprChat(){
               <IC.Paperclip/>
             </button>
             <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>{if(e.target.files?.length)handleFileUpload(Array.from(e.target.files));e.target.value="";}}/>
+            {(()=>{const coderMc=mcs.find(m=>m.name&&m.name.includes("Coder"));const isCoderActive=act?.persona_name&&act.persona_name.includes("Coder");return coderMc?<button onClick={()=>{if(isCoderActive)return;uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:coderMc.parameters?.avatar});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} title={isCoderActive?"Coder Bot active":"Activate Coder Bot"} style={{background:isCoderActive?`${t.ok}20`:"none",border:isCoderActive?`1px solid ${t.ok}44`:"none",color:isCoderActive?t.ok:t.mut,cursor:isCoderActive?"default":"pointer",padding:"4px 5px",display:"flex",alignItems:"center",flexShrink:0,fontSize:13,opacity:isCoderActive?1:.7,borderRadius:6}}>&lt;/&gt;</button>:null;})()}
             {prompts.length>0&&<div style={{position:"relative"}}>
               <button onClick={()=>{setShowPromptPicker(p=>!p);setPromptSearch("");}} title="Prompt Library (⚡)" style={{background:showPromptPicker?`${t.f1}15`:"none",border:"none",color:showPromptPicker?t.f1:t.mut,cursor:"pointer",padding:"4px 5px",display:"flex",alignItems:"center",flexShrink:0,fontSize:13,opacity:showPromptPicker?1:.7}}>⚡</button>
               {showPromptPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:50,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8}}>

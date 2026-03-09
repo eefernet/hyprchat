@@ -81,9 +81,10 @@ class RunRequest(BaseModel):
     model: str = "qwen2.5:14b"
     ollama_url: str = "http://192.168.1.110:11434"
     max_rounds: int = 20
-    num_ctx: int = 8192
+    num_ctx: int = 16384
     language: str = "python"
     context: str = ""
+    project_id: str = ""
 
 
 class RunResponse(BaseModel):
@@ -93,9 +94,28 @@ class RunResponse(BaseModel):
     error: str = ""
     duration_seconds: float = 0.0
     steps: list[dict] = []
+    project_id: str = ""
 
 
+CACHE_PATH = Path("/opt/openhands-worker/.tool_cache.json")
 _tool_support_cache: dict[str, bool] = {}
+
+# Load persisted cache on startup
+try:
+    if CACHE_PATH.exists():
+        _tool_support_cache = json.loads(CACHE_PATH.read_text())
+        print(f"[OH-Worker] Loaded {len(_tool_support_cache)} cached tool support entries")
+except Exception as e:
+    print(f"[OH-Worker] Failed to load tool cache: {e}")
+
+
+def _persist_tool_cache():
+    """Write tool support cache to disk."""
+    try:
+        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CACHE_PATH.write_text(json.dumps(_tool_support_cache))
+    except Exception as e:
+        print(f"[OH-Worker] Failed to persist tool cache: {e}")
 
 
 def _check_tool_support(ollama_base: str, model: str) -> bool:
@@ -123,10 +143,12 @@ def _check_tool_support(ollama_base: str, model: str) -> bool:
             if ".Tools" not in template:
                 print(f"[OH-Worker] {model}: no .Tools in template → prompt-based")
                 _tool_support_cache[cache_key] = False
+                _persist_tool_cache()
                 return False
     except Exception as e:
         print(f"[OH-Worker] Template check failed for {model}: {e}")
         _tool_support_cache[cache_key] = False
+        _persist_tool_cache()
         return False
 
     # Live test: send a trivial tool call and check for structured response
@@ -155,17 +177,23 @@ def _check_tool_support(ollama_base: str, model: str) -> bool:
             print(f"[OH-Worker] {model}: live tool test → "
                   f"{'structured tool_calls' if has_tool_calls else 'text JSON (no tool_calls)'}")
             _tool_support_cache[cache_key] = has_tool_calls
+            _persist_tool_cache()
             return has_tool_calls
     except Exception as e:
         print(f"[OH-Worker] Live tool test failed for {model}: {e}")
 
     _tool_support_cache[cache_key] = False
+    _persist_tool_cache()
     return False
 
 
 @app.post("/run", response_model=RunResponse)
 def run_task(req: RunRequest):
     """Run an OpenHands coding agent on a task inside the sandbox."""
+    global _run_counter
+    _run_counter += 1
+    if _run_counter % 10 == 0:
+        _auto_cleanup_stale()
     _ensure_sdk()
     start = time.time()
     progress_log = []
@@ -203,16 +231,23 @@ def run_task(req: RunRequest):
 
         # ── Workspace setup ──
         import uuid
-        project_name = _derive_project_name(req.task, req.language)
         PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-        work_dir = PROJECTS_DIR / project_name
-        if work_dir.exists():
-            work_dir = PROJECTS_DIR / f"{project_name}-{uuid.uuid4().hex[:4]}"
-        work_dir.mkdir(parents=True, exist_ok=True)
-        print(f"[OH-Worker] Workspace: {work_dir} (project: {project_name})")
+        _reusing = False
+        if req.project_id and (PROJECTS_DIR / req.project_id).is_dir():
+            work_dir = PROJECTS_DIR / req.project_id
+            project_name = req.project_id
+            _reusing = True
+            print(f"[OH-Worker] Reusing existing workspace: {work_dir}")
+        else:
+            project_name = _derive_project_name(req.task, req.language)
+            work_dir = PROJECTS_DIR / project_name
+            if work_dir.exists():
+                work_dir = PROJECTS_DIR / f"{project_name}-{uuid.uuid4().hex[:4]}"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            print(f"[OH-Worker] Workspace: {work_dir} (project: {project_name})")
 
         # ── Build task prompt (concise — SDK provides its own system prompt) ──
-        full_task = _build_task_prompt(req, str(work_dir))
+        full_task = _build_task_prompt(req, str(work_dir), continuing=_reusing)
 
         # Snapshot filesystem before run
         pre_snapshot = _snapshot_workspace(work_dir)
@@ -273,8 +308,8 @@ def run_task(req: RunRequest):
                     stuck_reason = getattr(conversation.stuck_detector, 'reason',
                                            'Agent detected stuck pattern')
                     print(f"[OH-Worker] Agent got STUCK: {stuck_reason}")
-            except Exception:
-                pass
+            except Exception as stuck_e:
+                print(f"[OH-Worker] Stuck detection check failed: {stuck_e}")
 
         # ── Detect files created/modified ──
         files_created = _diff_snapshot(work_dir, pre_snapshot)
@@ -325,6 +360,7 @@ def run_task(req: RunRequest):
             error=stuck_reason if stuck else "",
             duration_seconds=round(duration, 1),
             steps=progress_log[-20:],
+            project_id=project_name,
         )
 
     except Exception as e:
@@ -342,6 +378,10 @@ def run_task(req: RunRequest):
 @app.post("/run-stream")
 async def run_task_stream(req: RunRequest):
     """SSE streaming version of /run — emits real-time progress events."""
+    global _run_counter
+    _run_counter += 1
+    if _run_counter % 10 == 0:
+        _auto_cleanup_stale()
 
     _ensure_sdk()
     start = time.time()
@@ -385,14 +425,20 @@ async def run_task_stream(req: RunRequest):
             agent = _Agent(llm=llm, tools=tools)
 
             import uuid
-            project_name = _derive_project_name(req.task, req.language)
             PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-            work_dir = PROJECTS_DIR / project_name
-            if work_dir.exists():
-                work_dir = PROJECTS_DIR / f"{project_name}-{uuid.uuid4().hex[:4]}"
-            work_dir.mkdir(parents=True, exist_ok=True)
+            _reusing = False
+            if req.project_id and (PROJECTS_DIR / req.project_id).is_dir():
+                work_dir = PROJECTS_DIR / req.project_id
+                project_name = req.project_id
+                _reusing = True
+            else:
+                project_name = _derive_project_name(req.task, req.language)
+                work_dir = PROJECTS_DIR / project_name
+                if work_dir.exists():
+                    work_dir = PROJECTS_DIR / f"{project_name}-{uuid.uuid4().hex[:4]}"
+                work_dir.mkdir(parents=True, exist_ok=True)
 
-            full_task = _build_task_prompt(req, str(work_dir))
+            full_task = _build_task_prompt(req, str(work_dir), continuing=_reusing)
             pre_snapshot = _snapshot_workspace(work_dir)
 
             def on_event(event):
@@ -486,6 +532,7 @@ async def run_task_stream(req: RunRequest):
                 "error": stuck_reason if stuck else "",
                 "duration_seconds": round(duration, 1),
                 "steps": progress_log[-20:],
+                "project_id": project_name,
             }
 
         except Exception as e:
@@ -529,12 +576,27 @@ async def run_task_stream(req: RunRequest):
     )
 
 
-def _build_task_prompt(req: RunRequest, work_dir: str = "/root") -> str:
-    """Build the task prompt. Keep it concise — the SDK's own system prompt
-    already covers general coding methodology. We only add task-specific info."""
+def _build_task_prompt(req: RunRequest, work_dir: str = "/root", continuing: bool = False) -> str:
+    """Build the task prompt with verification requirements."""
+
+    lang = req.language.lower()
+
+    # Language-specific build/check commands
+    _VERIFY_CMDS = {
+        "java": "If using Maven: `mvn compile`. If plain javac: `javac -d out $(find . -name '*.java')`. Ensure pom.xml includes all needed dependencies with correct versions and native classifiers where required (e.g. LWJGL needs platform-specific natives).",
+        "python": "`python -c \"import py_compile; import glob; [py_compile.compile(f, doraise=True) for f in glob.glob('**/*.py', recursive=True)]\"` to syntax-check all files. Then run the entry point or tests if present.",
+        "javascript": "`node --check *.js` for syntax. If package.json exists: `npm install && npm run build` (or `npm test` if tests exist).",
+        "typescript": "`npx tsc --noEmit` to type-check. If package.json exists: `npm install && npm run build`.",
+        "c": "`gcc -Wall -Wextra -fsyntax-only *.c` to check, then `make` or compile and run.",
+        "cpp": "`g++ -Wall -Wextra -fsyntax-only *.cpp` to check, then `make` or compile and run.",
+        "rust": "`cargo check` (or `cargo build` if no Cargo.toml, use `rustc --edition 2021 *.rs`).",
+        "go": "`go build ./...` to compile all packages.",
+    }
+
+    verify_cmd = _VERIFY_CMDS.get(lang, f"Run the appropriate syntax check / compiler for {lang}.")
 
     prompt = f"""## WORKSPACE
-Working directory: `{work_dir}` — create ALL files here. Language: {req.language}
+Working directory: `{work_dir}` — {'continue working on existing files here' if continuing else 'create ALL files here'}. Language: {req.language}
 """
 
     if req.context:
@@ -543,6 +605,18 @@ Working directory: `{work_dir}` — create ALL files here. Language: {req.langua
     prompt += f"""
 ## TASK
 {req.task}
+
+## VERIFICATION (MANDATORY — do ALL of these before finishing)
+
+After writing all code, you MUST verify it actually works:
+
+1. **Build / compile**: {verify_cmd}
+2. **Fix all errors**: If compilation fails, read the errors, fix the code, and re-compile until it succeeds. Do NOT finish with broken code.
+3. **Cross-file consistency**: After writing all files, grep for every public method/function/class you defined and verify that all call sites use the correct signature (argument count, types, return type). Fix any mismatches.
+4. **Dependency check**: Verify that every import/include references either a standard library, a declared dependency, or a file you created. Do NOT use APIs you are unsure exist — check documentation or test with a minimal snippet first.
+5. **Smoke test**: If the project has a main entry point, run it (briefly) to confirm it starts without immediate crashes. If it requires a display/GUI, at least verify compilation succeeds.
+
+Only call `finish` after steps 1-4 pass with zero errors.
 """
 
     return prompt
@@ -696,6 +770,38 @@ def _extract_summary(conversation) -> str:
     except Exception:
         pass
     return "Code generated and tested."
+
+
+_run_counter = 0
+
+
+def _auto_cleanup_stale():
+    """Delete project directories older than 24 hours."""
+    import shutil
+    cutoff = time.time() - 86400  # 24 hours
+    deleted = 0
+    try:
+        if PROJECTS_DIR.exists():
+            for item in PROJECTS_DIR.iterdir():
+                if item.is_dir():
+                    try:
+                        if item.stat().st_mtime < cutoff:
+                            shutil.rmtree(item)
+                            deleted += 1
+                    except Exception as e:
+                        print(f"[OH-Worker] Stale cleanup error for {item.name}: {e}")
+    except Exception as e:
+        print(f"[OH-Worker] Stale cleanup scan error: {e}")
+    if deleted:
+        print(f"[OH-Worker] Auto-cleaned {deleted} stale project(s)")
+    return deleted
+
+
+@app.post("/clean-stale")
+def clean_stale():
+    """Delete projects older than 24 hours."""
+    deleted = _auto_cleanup_stale()
+    return {"deleted": deleted}
 
 
 @app.get("/health")

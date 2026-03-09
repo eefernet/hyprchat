@@ -1,5 +1,41 @@
 # HyprChat Changelog
 
+## Alpha v14 — March 2026
+
+### Coder Bot Deep Improvement
+
+#### System Prompt Overhaul
+- **Streamlined Coder Bot persona** — Replaced ~95-line system prompt with a focused ~30-line version. Shorter prompts reduce competing instruction noise with local models. Keeps PRIME DIRECTIVE, workflow, and hard rules.
+- **Simplified CODING AGENT PROTOCOL injection** — Reduced from ~33 lines to ~15 lines in the chat agent loop. Removes redundancy with the persona prompt.
+
+#### Agent Loop Improvements
+- **Smarter code-block rescue** — When the model dumps code in chat instead of using tools, rescued code now routes through `write_file` + `run_shell` instead of `execute_code`, avoiding stdin/sys.argv issues. Limited to 1 rescue per session with feedback message to teach the model.
+- **Error-specific recovery hints** — First-occurrence guidance for `ConnectionRefusedError`, `FileNotFoundError`, `SyntaxError`, and `PermissionError` errors, in addition to existing repeated-error handling.
+- **Configurable MAX_ROUNDS** — Agent loop rounds now configurable via `MAX_AGENT_ROUNDS` env var (default 12).
+
+#### Infrastructure & Configuration
+- **`OPENHANDS_URL` config variable** — Eliminates fragile `CODEBOX_URL.rsplit(":", 1)[0] + ":8586"` URL derivation pattern. Now a proper config with env var override.
+- **Health check retry** — OpenHands health check now retries 3 times with 1s delay between attempts before failing.
+- **Increased default `OPENHANDS_NUM_CTX`** — Default bumped from 8192 to 16384 for better context handling in coding models.
+- **Improved `generate_code` tool description** — Task parameter description now guides models toward thorough specifications.
+
+#### OpenHands Worker Improvements
+- **Persistent tool support cache** — Model tool-calling capability checks are now cached to disk (`/opt/openhands-worker/.tool_cache.json`), surviving worker restarts.
+- **Project continuity** — New `project_id` field allows reusing an existing workspace directory for iterative work on the same project.
+- **Auto-cleanup stale projects** — Projects older than 24 hours are automatically cleaned up every 10th request. New `/clean-stale` endpoint for manual cleanup.
+- **Stuck detection logging** — Silent `pass` in stuck detection `except` block replaced with actual logging.
+
+#### Frontend
+- **Agent Timeline** — Enhanced `generate_code` step display with timeline dots, step count header, and scrollable container.
+- **Coder Bot quick-activate button** — `</>` button in the input bar next to prompt library. One click to apply Coder Bot persona. Glows green when active.
+
+#### Deploy Monitor
+- **Smart routing** — `openhands_worker.py` now deploys to the Codebox server instead of the HyprChat server, with automatic `systemctl restart openhands-worker`.
+- **Server labels** — Deploy results show which server each file was sent to.
+- **Configurable SSH timeout** — Service restart timeout increased to 90s to accommodate slow restarts.
+
+---
+
 ## Alpha v13 — March 2026
 
 ### New Features

@@ -16,14 +16,15 @@ Built with FastAPI + a single-file React SPA — no build step required.
 - Conversation tags & sidebar filtering
 - File attachments & paste-to-attach
 - Prompt library with quick-insert ⚡
+- Coder Bot quick-activate `</>` button in input bar
 - Export conversation as Markdown
 
 ### 🛠️ Tool Suites
 
 | Tool | Description |
 |------|-------------|
-| **CodeAgent** | Sandboxed code execution in 30+ languages, shell commands, file I/O, package installs |
-| **generate_code** | Agentic code generation via OpenHands SDK — writes, tests, and fixes code automatically in the sandbox |
+| **CodeAgent** | Sandboxed code execution in 30+ languages, shell commands, file I/O, package installs. Streamlined system prompt with code-block rescue and error-specific recovery hints. |
+| **generate_code** | Agentic code generation via OpenHands SDK — writes, tests, and fixes code automatically in the sandbox. Health check retry, project continuity, and stale project cleanup. |
 | **Deep Research** | Multi-phase parallel web research with 5 depth levels, compare mode, cross-referencing |
 | **Quick Search** | Instant SearXNG search with OG image cards, favicon badges & YouTube previews |
 | **Research** | Web search + full page reading — fetches and reads top results for grounded answers |
@@ -84,11 +85,14 @@ Edit `backend/config.py` or set environment variables:
 ```python
 OLLAMA_URL   = "http://<OLLAMA_IP>:11434"
 CODEBOX_URL  = "http://<CODEBOX_IP>:8585"
+OPENHANDS_URL = "http://<CODEBOX_IP>:8586" # OpenHands worker endpoint
 SEARXNG_URL  = "http://<SEARXNG_IP>:8888"
 N8N_URL      = "http://<N8N_IP>:5678"
 CODER_MODEL  = ""                          # empty = use chat model
 OPENHANDS_ENABLED = True                   # toggle agentic code generation
-OPENHANDS_MAX_ROUNDS = 8                   # max agent iterations per task
+OPENHANDS_MAX_ROUNDS = 20                  # max agent iterations per task
+OPENHANDS_NUM_CTX = 16384                  # context window for coding models
+MAX_AGENT_ROUNDS = 12                      # max chat agent tool-calling rounds
 ```
 
 The Ollama URL, coder model, and OpenHands settings can also be changed at runtime from the Settings panel.
@@ -109,10 +113,10 @@ cp backend/hyprchat.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now hyprchat
 ```
 
-Or use the included deploy script:
+Or use the deploy monitor (watches for file changes, auto-deploys):
 
 ```bash
-bash scripts/deploy.sh
+python3 deploy_monitor.py
 ```
 
 ### Updating
