@@ -254,12 +254,14 @@ class CouncilCreate(BaseModel):
     name: str = "My Council"
     host_model: str = config.DEFAULT_MODEL
     host_system_prompt: str = ""
+    kb_ids: list[str] = []
 
 class CouncilUpdate(BaseModel):
     name: Optional[str] = None
     host_model: Optional[str] = None
     host_system_prompt: Optional[str] = None
     debate_rounds: Optional[int] = None
+    kb_ids: Optional[list[str]] = None
 
 class CouncilMemberCreate(BaseModel):
     model: str
@@ -277,6 +279,7 @@ class CouncilChatRequest(BaseModel):
     council_id: str
     messages: list[dict]
     quick_search: bool = False
+    kb_ids: list[str] = []
 
 class QuickSearchRequest(BaseModel):
     query: str
@@ -965,6 +968,10 @@ async def delete_kb(kb_id: str):
     return {"status": "deleted"}
 
 
+# Track background indexing status per file
+_indexing_status: dict[str, dict] = {}  # key: "kb_id:filename" → status dict
+
+
 @app.post("/api/knowledge-bases/{kb_id}/files")
 async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
     kb_dir = os.path.join(config.KB_DIR, kb_id)
@@ -984,16 +991,33 @@ async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
     with open(filepath, "wb") as f:
         f.write(content)
 
-    await db.add_kb_file(kb_id, safe_name, filepath, len(content), file.content_type or "")
+    file_id = await db.add_kb_file(kb_id, safe_name, filepath, len(content), file.content_type or "")
 
-    # Index file in RAG pipeline (chunk + embed + store in ChromaDB)
-    try:
-        index_result = await rag.index_file(kb_id, safe_name, filepath)
-    except Exception as e:
-        print(f"[RAG] Indexing failed for {safe_name}: {e}")
-        index_result = {"error": str(e)}
+    # Start background RAG indexing so the upload response returns immediately
+    status_key = f"{kb_id}:{safe_name}"
+    _indexing_status[status_key] = {"status": "indexing", "filename": safe_name}
 
-    return {"filename": safe_name, "size": len(content), "rag": index_result}
+    async def _bg_index():
+        try:
+            result = await rag.index_file(kb_id, safe_name, filepath)
+            _indexing_status[status_key] = {"status": "done", "filename": safe_name, **result}
+        except Exception as e:
+            print(f"[RAG] Indexing failed for {safe_name}: {e}")
+            _indexing_status[status_key] = {"status": "error", "filename": safe_name, "error": str(e)}
+
+    asyncio.create_task(_bg_index())
+
+    return {"id": file_id, "filename": safe_name, "file_size": len(content), "indexing": True}
+
+
+@app.get("/api/knowledge-bases/{kb_id}/files/{filename}/status")
+async def get_file_index_status(kb_id: str, filename: str):
+    """Check background indexing status for a file."""
+    status_key = f"{kb_id}:{filename}"
+    status = _indexing_status.get(status_key)
+    if status:
+        return status
+    return {"status": "unknown", "filename": filename}
 
 
 @app.delete("/api/knowledge-bases/files/{file_id}")
@@ -1514,7 +1538,7 @@ async def get_councils():
 @app.post("/api/councils")
 async def create_council(req: CouncilCreate):
     council_id = f"council-{uuid.uuid4().hex[:8]}"
-    await db.create_council(council_id, req.name, req.host_model, req.host_system_prompt)
+    await db.create_council(council_id, req.name, req.host_model, req.host_system_prompt, kb_ids=req.kb_ids)
     return await db.get_council(council_id)
 
 
@@ -2010,8 +2034,11 @@ async def council_chat_stream_ep(req: CouncilChatRequest):
     if not council:
         raise HTTPException(status_code=404, detail="Council not found")
 
+    # Merge kb_ids from council config and request
+    kb_ids = list(set((council.get("kb_ids") or []) + (req.kb_ids or [])))
+
     return StreamingResponse(
-        stream_council_chat(http, events, council, req.messages, req.conversation_id, req.quick_search),
+        stream_council_chat(http, events, council, req.messages, req.conversation_id, req.quick_search, kb_ids=kb_ids),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
@@ -2068,6 +2095,42 @@ async def quick_search(req: QuickSearchRequest):
             "type": result_type,
         })
 
+    # ── Fetch OG images for results missing thumbnails (parallel, fast timeout) ──
+    async def _fetch_og_image(idx: int, page_url: str):
+        skip = ["youtube.com", "twitter.com", "x.com", "facebook.com", "instagram.com",
+                "linkedin.com", "tiktok.com", ".pdf"]
+        if any(s in page_url.lower() for s in skip):
+            return idx, ""
+        try:
+            resp = await http.get(page_url, timeout=4, follow_redirects=True,
+                                  headers={"User-Agent": "Mozilla/5.0 (compatible; HyprChat/1.0)"})
+            html = resp.text[:15000]  # only need the <head>
+            # Try og:image first, then twitter:image
+            for pattern in [
+                r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+                r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
+            ]:
+                m = re.search(pattern, html, re.IGNORECASE)
+                if m:
+                    img = m.group(1).strip()
+                    if img.startswith("//"):
+                        img = "https:" + img
+                    if img.startswith("http"):
+                        return idx, img
+            return idx, ""
+        except Exception:
+            return idx, ""
+
+    needs_og = [(i, r["url"]) for i, r in enumerate(results) if not r["thumbnail"] and r["type"] == "web"]
+    if needs_og:
+        tasks = [_fetch_og_image(i, u) for i, u in needs_og[:6]]
+        og_results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in og_results:
+            if isinstance(res, tuple) and res[1]:
+                results[res[0]]["thumbnail"] = res[1]
+
     return {"results": results, "query": req.query}
 
 
@@ -2089,6 +2152,7 @@ async def get_app_settings():
         "current_coder_model": config.CODER_MODEL,
         "openhands_enabled": config.OPENHANDS_ENABLED,
         "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
+        "openhands_num_ctx": config.OPENHANDS_NUM_CTX,
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
         "sandbox_size_bytes": size,
@@ -2100,7 +2164,7 @@ async def get_app_settings():
 @app.patch("/api/settings")
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
-    allowed = {"file_cleanup_days", "ollama_url", "rag", "coder_model", "openhands_enabled", "openhands_max_rounds"}
+    allowed = {"file_cleanup_days", "ollama_url", "rag", "coder_model", "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
@@ -2128,6 +2192,9 @@ async def update_app_settings(body: dict = Body(...)):
     if "openhands_max_rounds" in body:
         config.OPENHANDS_MAX_ROUNDS = int(body["openhands_max_rounds"])
         print(f"[Config] OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
+    if "openhands_num_ctx" in body:
+        config.OPENHANDS_NUM_CTX = int(body["openhands_num_ctx"])
+        print(f"[Config] OpenHands num_ctx: {config.OPENHANDS_NUM_CTX}")
     save_settings(settings)
     return {**settings, "current_ollama_url": config.OLLAMA_URL, "current_coder_model": config.CODER_MODEL}
 
@@ -2203,6 +2270,19 @@ async def cleanup_now():
     if deleted:
         print(f"[Cleanup] Manual clean: removed {deleted} files, freed {freed // 1024} KB")
     return {"deleted": deleted, "freed_bytes": freed}
+
+
+@app.post("/api/settings/cleanup-codebox")
+async def cleanup_codebox():
+    """Delete all project files on the CodeBox sandbox."""
+    openhands_url = config.CODEBOX_URL.rsplit(":", 1)[0] + ":8586"
+    try:
+        r = await http.post(f"{openhands_url}/clean", timeout=30)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"[Cleanup] Codebox clean failed: {e}")
+        return {"deleted": 0, "error": str(e)}
 
 
 @app.get("/api/changelog")

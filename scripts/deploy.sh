@@ -1,71 +1,93 @@
 #!/bin/bash
 # ============================================================
-# HyprChat — Deploy script
+# HyprChat — Server Deploy Script
 # Run as root INSIDE the LXC container
 # ============================================================
 set -e
 
-echo "╔══════════════════════════════════════╗"
-echo "║       HyprChat Deploy Script         ║"
-echo "║   Hyprland-themed AI Chat Platform   ║"
-echo "╚══════════════════════════════════════╝"
+clear
+
+echo ""
+echo "  ╔══════════════════════════════════════════╗"
+echo "  ║      HyprChat Server Deploy Script       ║"
+echo "  ║    Hyprland-themed AI Chat Platform       ║"
+echo "  ╚══════════════════════════════════════════╝"
 echo ""
 
-# ---- System packages ----
-echo "[1/4] Installing system packages..."
-apt update -qq
+# ── Helpers ──
+OK="  \033[32m✓\033[0m"
+FAIL="  \033[31m✗\033[0m"
+INFO="  \033[33m▶\033[0m"
+DIM="\033[2m"
+RST="\033[0m"
+BLD="\033[1m"
+GRN="\033[32m"
+CYN="\033[36m"
+
+step() {
+    echo -e "${INFO} ${BLD}$1${RST}"
+}
+
+pass() {
+    echo -e "${OK} $1"
+}
+
+fail() {
+    echo -e "${FAIL} $1"
+}
+
+# ── [1/5] System packages ──
+step "Installing system packages..."
+apt update -qq > /dev/null 2>&1
 apt install -y -qq python3-pip curl > /dev/null 2>&1
-echo "  ✓ System packages ready"
+pass "System packages ready"
 
-# ---- Create directories ----
-echo "[2/4] Creating directories..."
+# ── [2/5] Create directories ──
+step "Creating directories..."
 mkdir -p /opt/hyprchat/data/{uploads/avatars,tools,knowledge_bases}
-echo "  ✓ Directories created"
+mkdir -p /opt/hyprchat/backend/agents
+pass "Directories created"
 
-# ---- Install Python deps ----
-echo "[3/4] Installing Python dependencies..."
+# ── [3/5] Install Python deps ──
+step "Installing Python dependencies..."
 cd /opt/hyprchat/backend
-pip install -r requirements.txt --break-system-packages -q
-echo "  ✓ Python deps installed"
+pip install -r requirements.txt --break-system-packages -q 2>&1 | tail -1
+pass "Python deps installed (incl. pypdf, chromadb)"
 
-# ---- Verify frontend exists ----
+# ── [4/5] Verify frontend ──
+step "Checking frontend..."
 if [ ! -f /opt/hyprchat/frontend/dist/index.html ]; then
-    echo "  ⚠ Frontend not found at /opt/hyprchat/frontend/dist/index.html"
-    echo "  Make sure the project was extracted correctly."
+    fail "Frontend not found at /opt/hyprchat/frontend/dist/index.html"
+    echo "     Make sure the project was extracted correctly."
     exit 1
 fi
-echo "  ✓ Frontend found"
+pass "Frontend found"
 
-# ---- Install systemd service ----
-echo "[4/4] Installing systemd service..."
-cp /opt/hyprchat/backend/hyprchat.service /etc/systemd/system/
+# ── [5/5] Install & start service ──
+step "Installing systemd service..."
+cp /opt/hyprchat/backend/hyprchat.service /etc/systemd/system/ 2>/dev/null || true
 systemctl daemon-reload
-systemctl enable hyprchat
-systemctl start hyprchat
-echo "  ✓ Service started"
+systemctl enable hyprchat > /dev/null 2>&1
+systemctl restart hyprchat
+pass "Service started"
 
 sleep 2
 
 echo ""
 if systemctl is-active --quiet hyprchat; then
     IP=$(hostname -I | awk '{print $1}')
-    echo "════════════════════════════════════════"
-    echo "  ✅ HyprChat is running!"
+    echo -e "  ${GRN}══════════════════════════════════════════${RST}"
+    echo -e "  ${BLD}${GRN}HyprChat is running!${RST}"
     echo ""
-    echo "  UI:          http://${IP}:8000"
-    echo "  API docs:    http://${IP}:8000/docs"
-    echo "  Health:      http://${IP}:8000/api/health"
+    echo -e "  UI:          ${CYN}http://${IP}:8000${RST}"
+    echo -e "  API docs:    ${CYN}http://${IP}:8000/docs${RST}"
+    echo -e "  Health:      ${CYN}http://${IP}:8000/api/health${RST}"
     echo ""
-    echo "  Logs:        journalctl -u hyprchat -f"
-    echo "  Restart:     systemctl restart hyprchat"
-    echo ""
-    echo "  Your services:"
-    echo "    Ollama:    192.168.1.110:11434"
-    echo "    Codebox:   192.168.1.201:8585"
-    echo "    SearXNG:   192.168.1.141:8888"
-    echo "    n8n:       192.168.1.114:5678"
-    echo "════════════════════════════════════════"
+    echo -e "  ${DIM}Logs:        journalctl -u hyprchat -f${RST}"
+    echo -e "  ${DIM}Restart:     systemctl restart hyprchat${RST}"
+    echo -e "  ${GRN}══════════════════════════════════════════${RST}"
 else
-    echo "  ❌ Service failed to start!"
-    echo "  Check logs: journalctl -u hyprchat -n 50"
+    fail "Service failed to start!"
+    echo "     Check logs: journalctl -u hyprchat -n 50"
 fi
+echo ""

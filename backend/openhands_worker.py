@@ -5,6 +5,7 @@ and returns results with real-time progress. Listens on port 8586.
 
 Deploy to CodeBox LXC at /opt/openhands-worker/openhands_worker.py
 """
+import asyncio
 import json
 import os
 import time
@@ -12,6 +13,7 @@ import traceback
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 app = FastAPI(title="OpenHands Worker")
@@ -30,6 +32,8 @@ def _ensure_sdk():
         return
     import openhands.tools.terminal.definition  # noqa: F401
     import openhands.tools.file_editor.definition  # noqa: F401
+    import openhands.tools.glob.definition  # noqa: F401
+    import openhands.tools.grep.definition  # noqa: F401
     from openhands.sdk import LLM, Agent, Conversation, Tool
     _LLM = LLM
     _Agent = Agent
@@ -38,11 +42,46 @@ def _ensure_sdk():
     _sdk_loaded = True
 
 
+PROJECTS_DIR = Path("/root/projects")
+
+
+def _derive_project_name(task: str, language: str) -> str:
+    """Derive a clean project folder name from the task description."""
+    import re as _re
+    text = task.lower()
+
+    name_match = _re.search(r'''(?:called|named|titled)\s+['\"]?([a-z][a-z0-9_-]{1,30})['\"]?''', text)
+    if name_match:
+        return name_match.group(1).strip("-_")
+
+    thing_match = _re.search(
+        r'(?:build|create|make|write|develop)\s+(?:a|an)\s+'
+        r'([a-z][a-z0-9 _-]{1,40}?)\s*'
+        r'(?:tool|app|application|site|website|dashboard|bot|game|cli|script|program|api|server|service|library|package)',
+        text,
+    )
+    if thing_match:
+        name = thing_match.group(1).strip()
+        words = name.split()[-3:]
+        return "-".join(words).replace("_", "-").strip("-")[:30]
+
+    words = _re.findall(r'[a-z]+', text[:80])
+    skip = {"build", "create", "make", "write", "develop", "a", "an", "the", "that",
+            "which", "using", "with", "for", "and", "python", "javascript", "typescript",
+            "rust", "go", "java"}
+    meaningful = [w for w in words if w not in skip and len(w) > 2][:3]
+    if meaningful:
+        return "-".join(meaningful)[:30]
+
+    return f"{language}-project"
+
+
 class RunRequest(BaseModel):
     task: str
     model: str = "qwen2.5:14b"
     ollama_url: str = "http://192.168.1.110:11434"
-    max_rounds: int = 12
+    max_rounds: int = 20
+    num_ctx: int = 8192
     language: str = "python"
     context: str = ""
 
@@ -53,7 +92,75 @@ class RunResponse(BaseModel):
     summary: str = ""
     error: str = ""
     duration_seconds: float = 0.0
-    steps: list[dict] = []  # Live progress log: [{step, action, detail}]
+    steps: list[dict] = []
+
+
+_tool_support_cache: dict[str, bool] = {}
+
+
+def _check_tool_support(ollama_base: str, model: str) -> bool:
+    """Check if an Ollama model actually returns structured tool_calls.
+
+    Sends a minimal test request with a dummy tool. If the response contains
+    a 'tool_calls' field, native tool calling works. If the model puts the
+    tool call as JSON text in 'content' instead, it doesn't truly support
+    structured tool calls and we fall back to prompt-based.
+    Results are cached per model so the live test only runs once.
+    """
+    import requests
+
+    cache_key = f"{ollama_base}:{model}"
+    if cache_key in _tool_support_cache:
+        cached = _tool_support_cache[cache_key]
+        print(f"[OH-Worker] {model}: native_tool_calling={cached} (cached)")
+        return cached
+
+    # Quick template check first — skip the live test if no .Tools at all
+    try:
+        r = requests.post(f"{ollama_base}/api/show", json={"name": model}, timeout=5)
+        if r.ok:
+            template = r.json().get("template", "")
+            if ".Tools" not in template:
+                print(f"[OH-Worker] {model}: no .Tools in template → prompt-based")
+                _tool_support_cache[cache_key] = False
+                return False
+    except Exception as e:
+        print(f"[OH-Worker] Template check failed for {model}: {e}")
+        _tool_support_cache[cache_key] = False
+        return False
+
+    # Live test: send a trivial tool call and check for structured response
+    try:
+        test_payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "Say hello"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "say",
+                    "description": "Say a message",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
+                    },
+                },
+            }],
+            "stream": False,
+        }
+        r = requests.post(f"{ollama_base}/api/chat", json=test_payload, timeout=30)
+        if r.ok:
+            msg = r.json().get("message", {})
+            has_tool_calls = bool(msg.get("tool_calls"))
+            print(f"[OH-Worker] {model}: live tool test → "
+                  f"{'structured tool_calls' if has_tool_calls else 'text JSON (no tool_calls)'}")
+            _tool_support_cache[cache_key] = has_tool_calls
+            return has_tool_calls
+    except Exception as e:
+        print(f"[OH-Worker] Live tool test failed for {model}: {e}")
+
+    _tool_support_cache[cache_key] = False
+    return False
 
 
 @app.post("/run", response_model=RunResponse)
@@ -61,41 +168,50 @@ def run_task(req: RunRequest):
     """Run an OpenHands coding agent on a task inside the sandbox."""
     _ensure_sdk()
     start = time.time()
-    progress_log = []  # Accumulate agent steps for the response
+    progress_log = []
 
     try:
-        # ── LLM with tuned parameters for code generation ──
+        ollama_base = req.ollama_url.rstrip("/")
+
+        # ── Detect native tool support via live test ──
+        # Some models (qwen3) return structured tool_calls → use native mode.
+        # Others (qwen2.5-coder) put JSON in content text → use prompt-based.
+        native_tc = _check_tool_support(ollama_base, req.model)
+
+        # ── LLM config ──
         llm = _LLM(
-            model=f"openai/{req.model}",
+            model=f"ollama_chat/{req.model}",
             api_key="ollama",
-            base_url=f"{req.ollama_url}/v1",
-            temperature=0.15,       # Low for deterministic code
+            base_url=ollama_base,
+            temperature=0.15,
             timeout=180,
             num_retries=2,
             drop_params=True,
+            native_tool_calling=native_tc,
+            litellm_extra_body={"num_ctx": req.num_ctx},
         )
 
-        # ── Agent with all available tools ──
+        # ── Agent with core tools ──
         tools = [
             _Tool(name="terminal"),
             _Tool(name="file_editor"),
+            _Tool(name="glob"),
+            _Tool(name="grep"),
         ]
-        # Try to add task tracker if available
-        try:
-            tools.append(_Tool(name="task_tracker"))
-        except Exception:
-            pass
 
         agent = _Agent(llm=llm, tools=tools)
 
-        # Create isolated workspace per run (avoids stale files from previous tasks)
+        # ── Workspace setup ──
         import uuid
-        run_id = uuid.uuid4().hex[:8]
-        work_dir = Path(f"/root/project-{run_id}")
+        project_name = _derive_project_name(req.task, req.language)
+        PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+        work_dir = PROJECTS_DIR / project_name
+        if work_dir.exists():
+            work_dir = PROJECTS_DIR / f"{project_name}-{uuid.uuid4().hex[:4]}"
         work_dir.mkdir(parents=True, exist_ok=True)
-        print(f"[OH-Worker] Workspace: {work_dir}")
+        print(f"[OH-Worker] Workspace: {work_dir} (project: {project_name})")
 
-        # ── Expert system prompt tailored to the task ──
+        # ── Build task prompt (concise — SDK provides its own system prompt) ──
         full_task = _build_task_prompt(req, str(work_dir))
 
         # Snapshot filesystem before run
@@ -113,31 +229,49 @@ def run_task(req: RunRequest):
             except Exception:
                 pass
 
+        # ── Stuck detection — relaxed for slow local models ──
+        _stuck_thresholds = None
+        try:
+            from openhands.sdk.conversation.types import StuckDetectionThresholds
+            _stuck_thresholds = StuckDetectionThresholds(
+                action_observation=5,
+                action_error=4,
+                monologue=5,
+                alternating_pattern=8,
+            )
+        except ImportError:
+            pass  # Older SDK version without threshold support
+
         # ── Run conversation ──
         conv_kwargs = dict(
             agent=agent,
             workspace=str(work_dir),
             max_iteration_per_run=req.max_rounds,
             stuck_detection=True,
+            callbacks=[on_event],
+            visualizer=None,
         )
-
+        if _stuck_thresholds is not None:
+            conv_kwargs["stuck_detection_thresholds"] = _stuck_thresholds
         conversation = _Conversation(**conv_kwargs)
 
-        # Register event callback if supported
-        if hasattr(conversation, 'register_event_callback'):
-            conversation.register_event_callback(on_event)
-
         conversation.send_message(full_task)
+        print(f"[OH-Worker] Starting run (max_rounds={req.max_rounds}, num_ctx={req.num_ctx})...")
         conversation.run()
 
-        # ── Check if agent got stuck ──
+        status_str = str(conversation.state.execution_status)
+        event_count = len(list(conversation.state.events))
+        print(f"[OH-Worker] Run finished. Status: {status_str}, Events: {event_count}")
+
+        # ── Check stuck ──
         stuck = False
         stuck_reason = ""
-        if hasattr(conversation, 'stuck_detector') and conversation.stuck_detector:
+        if conversation.stuck_detector:
             try:
                 if conversation.stuck_detector.is_stuck():
                     stuck = True
-                    stuck_reason = getattr(conversation.stuck_detector, 'reason', 'Agent detected stuck pattern')
+                    stuck_reason = getattr(conversation.stuck_detector, 'reason',
+                                           'Agent detected stuck pattern')
                     print(f"[OH-Worker] Agent got STUCK: {stuck_reason}")
             except Exception:
                 pass
@@ -145,32 +279,44 @@ def run_task(req: RunRequest):
         # ── Detect files created/modified ──
         files_created = _diff_snapshot(work_dir, pre_snapshot)
 
-        # Debug: list ALL files in workspace (helps diagnose detection issues)
         all_workspace_files = _list_all_files(work_dir)
         print(f"[OH-Worker] All files in workspace ({len(all_workspace_files)}):")
         for wf in all_workspace_files[:30]:
             in_detected = "✓" if wf in files_created else "✗"
             print(f"[OH-Worker]   {in_detected} {wf}")
-        if len(all_workspace_files) > 30:
-            print(f"[OH-Worker]   ... and {len(all_workspace_files) - 30} more")
 
-        # Fallback: if diff found very few files but workspace has more,
-        # use the full listing (something went wrong with mtime detection)
+        # Fallback: use full listing if diff missed files
         if len(files_created) <= 1 and len(all_workspace_files) > len(files_created):
-            print(f"[OH-Worker] Diff found {len(files_created)} but workspace has {len(all_workspace_files)} — using full listing as fallback")
+            print(f"[OH-Worker] Diff found {len(files_created)} but workspace has "
+                  f"{len(all_workspace_files)} — using full listing")
             files_created = all_workspace_files
 
-        # Second fallback: if workspace is empty, scan /root/ for files
-        # the agent may have created (ignored cd instruction)
+        # Second fallback: move stray files from /root/ into workspace
         if not files_created:
-            root_files = _list_all_files(Path("/root"), exclude_dir=work_dir)
+            import shutil
+            root_files = []
+            cutoff = start - 5
+            for item in Path("/root").iterdir():
+                if item.is_file() and not item.name.startswith("."):
+                    try:
+                        if item.stat().st_mtime >= cutoff:
+                            root_files.append(item)
+                    except OSError:
+                        pass
             if root_files:
-                print(f"[OH-Worker] Workspace empty but found {len(root_files)} files in /root/")
-                files_created = root_files
+                print(f"[OH-Worker] Moving {len(root_files)} stray file(s) into {work_dir}")
+                moved = []
+                for rf in root_files:
+                    dest = work_dir / rf.name
+                    shutil.move(str(rf), str(dest))
+                    moved.append(str(dest))
+                    print(f"[OH-Worker]   Moved: {rf.name}")
+                files_created = moved
 
         summary = _extract_summary(conversation)
         duration = time.time() - start
-        print(f"[OH-Worker] Done in {duration:.1f}s — {len(files_created)} files, {len(progress_log)} steps, stuck={stuck}")
+        print(f"[OH-Worker] Done in {duration:.1f}s — {len(files_created)} files, "
+              f"{len(progress_log)} steps, stuck={stuck}")
 
         return RunResponse(
             status="stuck" if stuck and not files_created else "ok",
@@ -178,7 +324,7 @@ def run_task(req: RunRequest):
             summary=summary,
             error=stuck_reason if stuck else "",
             duration_seconds=round(duration, 1),
-            steps=progress_log[-20:],  # Last 20 steps
+            steps=progress_log[-20:],
         )
 
     except Exception as e:
@@ -193,219 +339,258 @@ def run_task(req: RunRequest):
         )
 
 
-_AGENT_SYSTEM_PROMPT = """\
-You are CodeBot — an elite software engineer agent. You write production-quality code, \
-test it, fix errors, and deliver complete working projects. You never explain what you \
-will do — you just do it. You never put code in chat — you use the file editor and terminal.
+@app.post("/run-stream")
+async def run_task_stream(req: RunRequest):
+    """SSE streaming version of /run — emits real-time progress events."""
 
-## METHODOLOGY
-1. PLAN the file structure first (mentally — don't waste a step writing plans)
-2. WRITE all source files using the file editor — every single file the project needs
-3. Create config/manifest files (package.json, Cargo.toml, go.mod, etc.)
-4. Install dependencies ONLY AFTER all source files exist
-5. Build/compile the project
-6. TEST by running it — read errors carefully, fix root causes, re-test
-7. Create a README.md with setup and run instructions
-8. DONE — never start dev servers or long-running processes
+    _ensure_sdk()
+    start = time.time()
+    progress_log = []
+    step_counter = [0]
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_event_loop()
 
-## LANGUAGE REFERENCE
+    def _send_sse(data):
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, data)
+        except Exception:
+            pass
 
-### Python
-```
-project/
-├── main.py              # Entry point
-├── requirements.txt     # pip dependencies
-├── src/
-│   ├── __init__.py
-│   ├── models.py
-│   └── utils.py
-└── tests/
-    └── test_main.py
-```
-- Install: `pip3 install -r requirements.txt`
-- Test: `python3 main.py` or `pytest`
-- For Flask/FastAPI: write the app but do NOT run the server
-- For CLI tools: use argparse with sensible defaults, demo with hardcoded args
+    result_holder = [None]
 
-### JavaScript (Node.js / React / Vue)
-```
-project/
-├── package.json         # MUST include all deps + scripts
-├── vite.config.js       # Vite config with framework plugin
-├── index.html           # MUST have <script type="module" src="/src/main.jsx">
-├── src/
-│   ├── main.jsx         # REQUIRED: ReactDOM.createRoot(document.getElementById('root')).render(<App />)
-│   ├── App.jsx          # Root component
-│   ├── App.css          # Styles (or use Tailwind via CDN/PostCSS)
-│   └── components/
-│       └── Widget.jsx
-└── public/              # Static assets
-```
-- **React entry point is MANDATORY**: `src/main.jsx` must import React, ReactDOM, and App, then mount it
-- **index.html script tag is MANDATORY**: `<script type="module" src="/src/main.jsx"></script>` inside `<body>`
-- Install: `npm install`
-- Build: `npm run build`
-- Do NOT use `npm create`, `npx create-react-app`, or any scaffolding — write every file yourself
-- Do NOT start dev servers (`npm run dev`, `npm start`)
-- For vanilla JS (no framework): use a single HTML file with `<script>` tags, no bundler needed
+    def _run_sync():
+        """Synchronous function that runs in a thread."""
+        try:
+            ollama_base = req.ollama_url.rstrip("/")
+            native_tc = _check_tool_support(ollama_base, req.model)
 
-### TypeScript
-```
-project/
-├── package.json
-├── tsconfig.json        # strict: true, jsx: react-jsx, module: ESNext
-├── vite.config.ts
-├── index.html           # <script type="module" src="/src/main.tsx">
-├── src/
-│   ├── main.tsx         # REQUIRED: mount React
-│   ├── App.tsx
-│   └── components/
-└── public/
-```
-- Same rules as JavaScript but with .tsx/.ts extensions
-- Include @types/react and @types/react-dom in devDependencies
-- Pick ONE extension set: .ts/.tsx everywhere (never mix .js and .ts)
+            llm = _LLM(
+                model=f"ollama_chat/{req.model}",
+                api_key="ollama",
+                base_url=ollama_base,
+                temperature=0.15,
+                timeout=180,
+                num_retries=2,
+                drop_params=True,
+                native_tool_calling=native_tc,
+                litellm_extra_body={"num_ctx": req.num_ctx},
+            )
 
-### Rust
-```
-project/
-├── Cargo.toml
-├── src/
-│   ├── main.rs          # Entry point (fn main)
-│   ├── lib.rs           # Library code (optional)
-│   └── models.rs
-└── tests/
-    └── integration.rs
-```
-- Init: `cargo init` (creates Cargo.toml + src/main.rs)
-- Add deps: edit Cargo.toml `[dependencies]` section
-- Build: `cargo build`
-- Test: `cargo run` then `cargo test`
+            tools = [
+                _Tool(name="terminal"),
+                _Tool(name="file_editor"),
+                _Tool(name="glob"),
+                _Tool(name="grep"),
+            ]
+            agent = _Agent(llm=llm, tools=tools)
 
-### Go
-```
-project/
-├── go.mod
-├── main.go              # package main, func main()
-├── internal/
-│   └── handler.go
-└── pkg/
-    └── utils.go
-```
-- Init: `go mod init project`
-- Add deps: `go get <package>` or they auto-resolve
-- Build: `go build -o app .`
-- Test: `go run .` then `go test ./...`
+            import uuid
+            project_name = _derive_project_name(req.task, req.language)
+            PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+            work_dir = PROJECTS_DIR / project_name
+            if work_dir.exists():
+                work_dir = PROJECTS_DIR / f"{project_name}-{uuid.uuid4().hex[:4]}"
+            work_dir.mkdir(parents=True, exist_ok=True)
 
-### C
-```
-project/
-├── Makefile
-├── src/
-│   ├── main.c
-│   ├── utils.c
-│   └── utils.h
-└── include/
-    └── project.h
-```
-- Compile: `gcc -o app src/*.c -I include -Wall -Wextra`
-- Or use Makefile: `make`
-- Test: `./app`
-- Link math: add `-lm`, pthreads: add `-lpthread`
+            full_task = _build_task_prompt(req, str(work_dir))
+            pre_snapshot = _snapshot_workspace(work_dir)
 
-### C++
-```
-project/
-├── CMakeLists.txt       # Or Makefile
-├── src/
-│   ├── main.cpp
-│   ├── app.cpp
-│   └── app.hpp
-└── include/
-    └── project.hpp
-```
-- Compile: `g++ -o app src/*.cpp -I include -std=c++17 -Wall`
-- Or CMake: `cmake -B build && cmake --build build`
-- Test: `./app` or `./build/app`
+            def on_event(event):
+                try:
+                    step_info = _parse_event(event)
+                    if step_info:
+                        step_counter[0] += 1
+                        step_info["step"] = step_counter[0]
+                        progress_log.append(step_info)
+                        _send_sse({
+                            "type": "step",
+                            "action": step_info.get("action", ""),
+                            "detail": step_info.get("detail", "")[:120],
+                            "step": step_counter[0],
+                        })
+                except Exception:
+                    pass
 
-### Java
-```
-project/
-├── pom.xml              # Or build.gradle
-├── src/main/java/
-│   └── com/app/
-│       ├── Main.java    # public static void main
-│       └── Service.java
-└── src/test/java/
-```
-- Simple: `javac src/main/java/com/app/*.java -d out && java -cp out com.app.Main`
-- Maven: `mvn compile exec:java`
-- Keep it simple — single-dir compilation unless Maven/Gradle is needed
+            _stuck_thresholds = None
+            try:
+                from openhands.sdk.conversation.types import StuckDetectionThresholds
+                _stuck_thresholds = StuckDetectionThresholds(
+                    action_observation=5, action_error=4,
+                    monologue=5, alternating_pattern=8,
+                )
+            except ImportError:
+                pass
 
-## HARD RULES
-1. NEVER use interactive scaffolding tools (npm create, create-react-app, cargo-generate, cookiecutter)
-2. NEVER start long-running servers or processes
-3. NEVER use interactive input (input(), readline, stdin prompts) — use hardcoded demo values
-4. NEVER skip entry point files — every app needs a main (main.py, main.jsx, main.rs, main.go, Main.java, main.c)
-5. ALWAYS install every dependency the code imports
-6. ALWAYS test by running the code — if it fails, fix and re-test until it works
-7. ALWAYS write files using the file editor, never echo/cat into files
-8. Pick ONE language variant per project (.jsx OR .tsx, not both; .js config OR .ts config, not both)
-9. For web apps: verify the build succeeds (`npm run build`, `cargo build`, `go build`) before finishing
-10. Fix root causes — don't suppress errors with try/except or empty catch blocks
-"""
+            conv_kwargs = dict(
+                agent=agent,
+                workspace=str(work_dir),
+                max_iteration_per_run=req.max_rounds,
+                stuck_detection=True,
+                callbacks=[on_event],
+                visualizer=None,
+            )
+            if _stuck_thresholds is not None:
+                conv_kwargs["stuck_detection_thresholds"] = _stuck_thresholds
+            conversation = _Conversation(**conv_kwargs)
+
+            conversation.send_message(full_task)
+            _send_sse({"type": "step", "action": "starting", "detail": f"Agent starting (max {req.max_rounds} rounds)...", "step": 0})
+
+            print(f"[OH-Worker] Starting streamed run (max_rounds={req.max_rounds}, num_ctx={req.num_ctx})...")
+            conversation.run()
+
+            # Post-run processing
+            stuck = False
+            stuck_reason = ""
+            if conversation.stuck_detector:
+                try:
+                    if conversation.stuck_detector.is_stuck():
+                        stuck = True
+                        stuck_reason = getattr(conversation.stuck_detector, 'reason',
+                                               'Agent detected stuck pattern')
+                except Exception:
+                    pass
+
+            files_created = _diff_snapshot(work_dir, pre_snapshot)
+            all_workspace_files = _list_all_files(work_dir)
+            if len(files_created) <= 1 and len(all_workspace_files) > len(files_created):
+                files_created = all_workspace_files
+
+            if not files_created:
+                import shutil
+                root_files = []
+                cutoff = start - 5
+                for item in Path("/root").iterdir():
+                    if item.is_file() and not item.name.startswith("."):
+                        try:
+                            if item.stat().st_mtime >= cutoff:
+                                root_files.append(item)
+                        except OSError:
+                            pass
+                if root_files:
+                    moved = []
+                    for rf in root_files:
+                        dest = work_dir / rf.name
+                        shutil.move(str(rf), str(dest))
+                        moved.append(str(dest))
+                    files_created = moved
+
+            summary = _extract_summary(conversation)
+            duration = time.time() - start
+
+            result_holder[0] = {
+                "type": "done",
+                "status": "stuck" if stuck and not files_created else "ok",
+                "files_created": files_created,
+                "summary": summary,
+                "error": stuck_reason if stuck else "",
+                "duration_seconds": round(duration, 1),
+                "steps": progress_log[-20:],
+            }
+
+        except Exception as e:
+            duration = time.time() - start
+            result_holder[0] = {
+                "type": "error",
+                "error": f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
+                "duration_seconds": round(duration, 1),
+                "steps": progress_log[-20:],
+            }
+
+        # Signal completion
+        _send_sse(None)
+
+    async def generate():
+        # Start the blocking run in a background thread
+        run_future = loop.run_in_executor(None, _run_sync)
+
+        # Stream events as they arrive
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                continue
+
+            if item is None:
+                break
+
+            yield f"data: {json.dumps(item)}\n\n"
+
+        await run_future
+
+        if result_holder[0]:
+            yield f"data: {json.dumps(result_holder[0])}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def _build_task_prompt(req: RunRequest, work_dir: str = "/root") -> str:
-    """Build the full prompt: system persona + task-specific instructions."""
+    """Build the task prompt. Keep it concise — the SDK's own system prompt
+    already covers general coding methodology. We only add task-specific info."""
 
-    full_task = f"""{_AGENT_SYSTEM_PROMPT}
-
-## YOUR TASK
-{req.task}
-
-## WORKSPACE
-Your workspace is: {work_dir}
-ALL files MUST go in this directory. `cd {work_dir}` first.
-Language: {req.language}
+    prompt = f"""## WORKSPACE
+Working directory: `{work_dir}` — create ALL files here. Language: {req.language}
 """
 
     if req.context:
-        full_task += f"\n## ADDITIONAL CONTEXT\n{req.context}\n"
+        prompt += f"\n## CONTEXT\n{req.context}\n"
 
-    return full_task
+    prompt += f"""
+## TASK
+{req.task}
+"""
+
+    return prompt
 
 
 def _parse_event(event) -> dict | None:
     """Parse an OpenHands event into a progress step dict."""
     info = {}
 
-    # Terminal tool calls
-    if hasattr(event, 'tool_name'):
-        if event.tool_name in ("TerminalTool", "terminal"):
-            args = event.arguments if hasattr(event, 'arguments') and isinstance(event.arguments, dict) else {}
-            cmd = args.get("command", "")
-            info = {"action": "terminal", "detail": cmd[:200]}
-        elif event.tool_name in ("FileEditorTool", "file_editor"):
-            args = event.arguments if hasattr(event, 'arguments') and isinstance(event.arguments, dict) else {}
-            path = args.get("path", "")
-            command = args.get("command", "create")
-            info = {"action": f"file_{command}", "detail": path}
-        else:
-            info = {"action": event.tool_name, "detail": str(getattr(event, 'arguments', ''))[:200]}
+    if hasattr(event, 'tool_name') and event.tool_name:
+        tool = event.tool_name
+        if hasattr(event, 'action') and event.action:
+            # ActionEvent — tool call being made
+            action_obj = event.action
+            if tool in ("TerminalTool", "terminal"):
+                cmd = getattr(action_obj, 'command', '') or ''
+                info = {"action": "terminal", "detail": cmd[:200]}
+            elif tool in ("FileEditorTool", "file_editor"):
+                path = getattr(action_obj, 'path', '') or ''
+                command = getattr(action_obj, 'command', 'create') or 'create'
+                info = {"action": f"file_{command}", "detail": str(path)}
+            elif tool in ("GlobTool", "glob"):
+                pattern = getattr(action_obj, 'pattern', '') or ''
+                info = {"action": "glob", "detail": pattern[:200]}
+            elif tool in ("GrepTool", "grep"):
+                pattern = getattr(action_obj, 'pattern', '') or ''
+                info = {"action": "grep", "detail": pattern[:200]}
+            elif tool in ("finish",):
+                msg = getattr(action_obj, 'message', '') or ''
+                info = {"action": "finish", "detail": msg[:200]}
+            else:
+                info = {"action": tool, "detail": str(action_obj)[:200]}
+        elif hasattr(event, 'observation') and event.observation:
+            # ObservationEvent — tool result
+            obs = event.observation
+            text = getattr(obs, 'text', '') or str(obs)
+            info = {"action": f"{tool}_result", "detail": text[:200]}
 
-    # LLM messages (agent thinking)
     elif hasattr(event, 'llm_message'):
         try:
             content = event.llm_message.content
             if content:
-                text = ""
                 for block in content:
                     if hasattr(block, 'text') and block.text:
                         text = block.text[:200]
+                        if text.strip():
+                            info = {"action": "thinking", "detail": text}
                         break
-                if text:
-                    info = {"action": "thinking", "detail": text}
         except Exception:
             pass
 
@@ -429,12 +614,10 @@ _IGNORE_NAMES = (".bash_history", ".lesshst", ".wget-hsts", ".selected_editor",
 
 
 def _should_ignore(parts: tuple[str, ...], name: str) -> bool:
-    """Check if a file path should be ignored in scanning."""
     if any(p in _IGNORE_DIRS for p in parts):
         return True
     if any(p.endswith(".dist-info") for p in parts):
         return True
-    # Ignore top-level hidden files and pip-installed packages
     if parts and parts[0].startswith("."):
         return True
     if any(name.endswith(s) for s in _IGNORE_SUFFIXES):
@@ -445,7 +628,6 @@ def _should_ignore(parts: tuple[str, ...], name: str) -> bool:
 
 
 def _snapshot_workspace(work_dir: Path) -> dict[str, float]:
-    """Take a snapshot of file modification times in the workspace."""
     snapshot = {}
     try:
         for item in work_dir.rglob("*"):
@@ -463,7 +645,6 @@ def _snapshot_workspace(work_dir: Path) -> dict[str, float]:
 
 
 def _diff_snapshot(work_dir: Path, pre_snapshot: dict[str, float]) -> list[str]:
-    """Find files that were created or modified since the pre-snapshot."""
     new_files = []
     try:
         for item in work_dir.rglob("*"):
@@ -484,13 +665,11 @@ def _diff_snapshot(work_dir: Path, pre_snapshot: dict[str, float]) -> list[str]:
 
 
 def _list_all_files(scan_dir: Path, exclude_dir: Path | None = None) -> list[str]:
-    """List all non-ignored files in a directory (ignores node_modules, .git, etc.)."""
     files = []
     try:
         for item in scan_dir.rglob("*"):
             if not item.is_file():
                 continue
-            # Skip files in the exclude directory
             if exclude_dir and str(item).startswith(str(exclude_dir)):
                 continue
             try:
@@ -506,7 +685,6 @@ def _list_all_files(scan_dir: Path, exclude_dir: Path | None = None) -> list[str
 
 
 def _extract_summary(conversation) -> str:
-    """Extract a brief summary from the last agent message."""
     try:
         for event in reversed(list(conversation.state.events)):
             if hasattr(event, "llm_message") and hasattr(event.llm_message, "content"):
@@ -523,6 +701,37 @@ def _extract_summary(conversation) -> str:
 @app.get("/health")
 def health():
     return {"status": "ok", "sdk_loaded": _sdk_loaded}
+
+
+@app.post("/clean")
+def clean_workspace():
+    """Delete all project directories from /root/projects/."""
+    import shutil
+    deleted = 0
+    freed = 0
+    errors = []
+    try:
+        if PROJECTS_DIR.exists():
+            for item in PROJECTS_DIR.iterdir():
+                if item.is_dir():
+                    try:
+                        size = sum(f.stat().st_size for f in item.rglob("*") if f.is_file())
+                        shutil.rmtree(item)
+                        deleted += 1
+                        freed += size
+                    except Exception as e:
+                        errors.append(f"{item.name}: {e}")
+                elif item.is_file():
+                    try:
+                        freed += item.stat().st_size
+                        item.unlink()
+                        deleted += 1
+                    except Exception as e:
+                        errors.append(f"{item.name}: {e}")
+    except Exception as e:
+        errors.append(str(e))
+    print(f"[OH-Worker] Clean complete: {deleted} items, freed {freed // 1024} KB")
+    return {"deleted": deleted, "freed_bytes": freed, "errors": errors}
 
 
 if __name__ == "__main__":

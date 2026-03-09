@@ -249,7 +249,7 @@ const TIC = {code:IC.Code,search:IC.Search,terminal:IC.Terminal,globe:IC.Globe,w
 
 // Status pill - inline with chat, expressive and geeky
 const Pill = ({ev,t,expanded,onToggle})=>{
-  const isS = ev.type==="tool_start"||ev.type==="thinking"||ev.type==="streaming";
+  const isS = ev.type==="tool_start"||ev.type==="tool_progress"||ev.type==="thinking"||ev.type==="streaming";
   const isE = ev.type==="tool_error"||ev.type==="error";
   const isD = ev.type==="tool_end"||ev.type==="tool_done"||ev.type==="complete"||ev.type==="thought_done";
   const isThink = ev.type==="thinking"||ev.type==="thought_done";
@@ -329,6 +329,14 @@ const Pill = ({ev,t,expanded,onToggle})=>{
         {detail.stderr&&<><div style={{color:t.err,marginTop:6,fontWeight:600,fontSize:10}}>⚠️ stderr:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.err,fontSize:11,background:`${t.err}08`,borderRadius:4,marginTop:2}}>{detail.stderr}</pre></>}
       </div>
       :detail.results?<div>{detail.results.map((r,i)=><div key={i} style={{marginBottom:4}}><a href={r.url} target="_blank" style={{color:t.acc,textDecoration:"none",fontSize:11}}>🔗 {r.title}</a></div>)}</div>
+      :detail.steps?<div style={{display:"flex",flexDirection:"column",gap:3}}>
+        {detail.steps.map((s,i)=><div key={i} style={{display:"flex",gap:6,alignItems:"flex-start",padding:"3px 0",borderBottom:i<detail.steps.length-1?`1px solid ${t.brd}15`:"none"}}>
+          <span style={{flexShrink:0,fontSize:11,width:18,textAlign:"center"}}>{s.icon}</span>
+          <span style={{color:t.mut,fontSize:10,flexShrink:0,minWidth:16,fontWeight:600}}>#{s.step}</span>
+          <span style={{color:t.acc,fontSize:10,fontWeight:600,flexShrink:0,minWidth:60}}>{s.label}</span>
+          <span style={{color:t.dim,fontSize:10,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.detail}</span>
+        </div>)}
+      </div>
       :detail.method?<div>
         <div style={{color:t.mut,fontSize:10,marginBottom:4}}>⚙️ <span style={{color:t.acc}}>{detail.method}</span></div>
         {detail.args&&<pre style={{margin:0,padding:6,background:`${t.surface}66`,borderRadius:4,whiteSpace:"pre-wrap",color:t.dim,fontSize:10,maxHeight:60,overflow:"auto"}}>{JSON.stringify(detail.args,null,2)}</pre>}
@@ -357,9 +365,9 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
 
   // First pass: group by category
   const thinkingEvts = evts.filter(e=>e.type==="thinking"||e.type==="thought_done");
-  const toolEvts = evts.filter(e=>e.type==="tool_start"||e.type==="tool_end"||e.type==="tool_done"||e.type==="tool_error");
+  const toolEvts = evts.filter(e=>e.type==="tool_start"||e.type==="tool_progress"||e.type==="tool_end"||e.type==="tool_done"||e.type==="tool_error");
   const streamEvts = evts.filter(e=>e.type==="streaming"||e.type==="complete");
-  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_end","tool_done","tool_error","streaming","complete","code_output","file_ready","search_results","source_links"].includes(e.type));
+  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_progress","tool_end","tool_done","tool_error","streaming","complete","code_output","file_ready","search_results","source_links"].includes(e.type));
 
   // Thinking: collapse to just the final state
   if(thinkingEvts.length){
@@ -367,7 +375,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
     merged.push(done || thinkingEvts[thinkingEvts.length-1]);
   }
 
-  // Tools: pair start→end by tool name, keep unpaired starts
+  // Tools: pair start→end by tool name, keep unpaired starts. tool_progress updates replace start status.
   const toolPairs = {};
   for(const e of toolEvts){
     const key = e.data?.tool||"unknown";
@@ -376,7 +384,11 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
   }
   for(const [key, group] of Object.entries(toolPairs)){
     const end = group.find(e=>e.type==="tool_end"||e.type==="tool_done"||e.type==="tool_error");
-    merged.push(end || group[group.length-1]);
+    if(end){merged.push(end);}else{
+      // Show latest progress event if available, otherwise latest start
+      const progress = [...group].reverse().find(e=>e.type==="tool_progress");
+      merged.push(progress || group[group.length-1]);
+    }
   }
 
   // Streaming: collapse to final state
@@ -448,15 +460,18 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
           const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();
           const isYT=r.type==="youtube";
           const isImg=r.type==="image";
+          const hasThumbnail=!!r.thumbnail;
           return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:10,overflow:"hidden",cursor:"pointer",minWidth:155,maxWidth:190,flexShrink:0,transition:"border-color .15s"}}
             onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
-            <div style={{width:"100%",height:88,background:isYT?"#0a0a0a":`${t.acc}06`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-              {r.thumbnail
-                ?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>e.target.style.display="none"}/>
-                :hn?<img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:36,height:36,borderRadius:8,opacity:.8}} alt="" onError={e=>e.target.style.opacity="0"}/>
-                :<span style={{fontSize:24,opacity:.3}}>🌐</span>}
+            <div style={{width:"100%",height:88,background:hasThumbnail?(isYT?"#0a0a0a":"transparent"):`linear-gradient(135deg,${t.bgDeep},${t.surface})`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+              {hasThumbnail
+                ?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
+                :<span style={{fontSize:24,opacity:.15}}>🔗</span>}
               {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
                 <div style={{width:28,height:28,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:"#fff",boxShadow:"0 2px 8px rgba(0,0,0,.5)"}}>▶</div>
+              </div>}
+              {hn&&<div style={{position:"absolute",top:5,right:5,background:`${t.bg}CC`,backdropFilter:"blur(6px)",borderRadius:5,padding:3,display:"flex",alignItems:"center",justifyContent:"center",border:`1px solid ${t.brd}33`}}>
+                <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=32`} style={{width:16,height:16,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
               </div>}
             </div>
             <div style={{padding:"6px 8px",flex:1,display:"flex",flexDirection:"column",gap:2}}>
@@ -689,6 +704,8 @@ function SandboxSection({t,btnS,labelS}){
   const [cleanupDays,setCleanupDays]=useState(30);
   const [cleaning,setCleaning]=useState(false);
   const [cleanResult,setCleanResult]=useState(null);
+  const [cbCleaning,setCbCleaning]=useState(false);
+  const [cbResult,setCbResult]=useState(null);
   const fmtBytes=(b)=>{if(!b)return"0 B";if(b<1024)return`${b} B`;if(b<1048576)return`${(b/1024).toFixed(1)} KB`;return`${(b/1048576).toFixed(1)} MB`;};
   useEffect(()=>{
     fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{setSbInfo(d);setCleanupDays(d.file_cleanup_days??30);}).catch(()=>{});
@@ -703,6 +720,12 @@ function SandboxSection({t,btnS,labelS}){
       const r2=await fetch(`${API}/api/settings`);const d2=await r2.json();setSbInfo(d2);
     }catch{setCleanResult({error:"Failed"});}
     setCleaning(false);
+  };
+  const cleanCodebox=async()=>{
+    setCbCleaning(true);setCbResult(null);
+    try{const r=await fetch(`${API}/api/settings/cleanup-codebox`,{method:"POST"});const d=await r.json();setCbResult(d);
+    }catch{setCbResult({error:"Failed"});}
+    setCbCleaning(false);
   };
   const INTERVALS=[
     {label:"Every week",days:7},{label:"Every 2 weeks",days:14},
@@ -737,13 +760,20 @@ function SandboxSection({t,btnS,labelS}){
     </div>
     <div style={{display:"flex",alignItems:"center",gap:8}}>
       <button onClick={cleanNow} disabled={cleaning} style={{...btnS(t.err),opacity:cleaning?.6:1}}>
-        {cleaning?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span> Cleaning...</>:"🗑 Clean Now"}
+        {cleaning?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span> Cleaning...</>:"🗑 Clean Sandbox"}
+      </button>
+      <button onClick={cleanCodebox} disabled={cbCleaning} style={{...btnS(t.warm||"#e89b3e"),opacity:cbCleaning?.6:1}}>
+        {cbCleaning?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span> Cleaning...</>:"🗑 Clean Codebox"}
       </button>
       {cleanResult&&!cleanResult.error&&<span style={{fontSize:11,color:t.ok}}>
-        ✓ Removed {cleanResult.deleted} file{cleanResult.deleted!==1?"s":""}{cleanResult.freed_bytes>0?`, freed ${fmtBytes(cleanResult.freed_bytes)}`:""}
+        ✓ Sandbox: {cleanResult.deleted} file{cleanResult.deleted!==1?"s":""}{cleanResult.freed_bytes>0?`, freed ${fmtBytes(cleanResult.freed_bytes)}`:""}
+      </span>}
+      {cbResult&&!cbResult.error&&<span style={{fontSize:11,color:t.ok}}>
+        ✓ Codebox: {cbResult.deleted} item{cbResult.deleted!==1?"s":""}{cbResult.freed_bytes>0?`, freed ${fmtBytes(cbResult.freed_bytes)}`:""}
       </span>}
       {cleanResult?.skipped&&<span style={{fontSize:11,color:t.mut}}>↷ {cleanResult.skipped}</span>}
       {cleanResult?.error&&<span style={{fontSize:11,color:t.err}}>✕ {cleanResult.error}</span>}
+      {cbResult?.error&&<span style={{fontSize:11,color:t.err}}>✕ Codebox: {cbResult.error}</span>}
     </div>
     <div style={{fontSize:10,color:t.mut,marginTop:6,lineHeight:1.5}}>
       Tool-generated files (code outputs, downloads) are stored in <code style={{background:`${t.surface}`,padding:"1px 5px",borderRadius:3,fontSize:9}}>{sbInfo?.sandbox_outputs_dir||"sandbox/outputs/"}</code> and cleaned automatically. User uploads and knowledge base files are never auto-deleted.
@@ -879,6 +909,9 @@ function HyprChat(){
   const [chatWidth,setChatWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-w")||"880");}catch{return 880;}});
   const [wsModel,setWsModel]=useState(()=>{try{return localStorage.getItem("hc-ws-model")||"qwen2.5:7b";}catch{return "qwen2.5:7b";}});
   const [coderModel,setCoderModel]=useState(()=>{try{return localStorage.getItem("hc-coder-model")||"";}catch{return "";}});
+  const [coderNumCtx,setCoderNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-coder-num-ctx")||"8192");}catch{return 8192;}});
+  const [openhandsEnabled,setOpenhandsEnabled]=useState(()=>{try{return localStorage.getItem("hc-openhands-enabled")!=="false";}catch{return true;}});
+  const [openhandsMaxRounds,setOpenhandsMaxRounds]=useState(()=>{try{return parseInt(localStorage.getItem("hc-openhands-max-rounds")||"20");}catch{return 20;}});
   const [ctxTokens,setCtxTokens]=useState(0);
   const [genTokens,setGenTokens]=useState(0);
   const [previewFile,setPreviewFile]=useState(null);
@@ -942,6 +975,9 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-custom-quotes",JSON.stringify(customQuotes));}catch{}},[customQuotes]);
   useEffect(()=>{try{localStorage.setItem("hc-ws-model",wsModel);}catch{}},[wsModel]);
   useEffect(()=>{try{localStorage.setItem("hc-coder-model",coderModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({coder_model:coderModel})}).catch(()=>{});}catch{}},[coderModel]);
+  useEffect(()=>{try{localStorage.setItem("hc-coder-num-ctx",coderNumCtx);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_num_ctx:coderNumCtx})}).catch(()=>{});}catch{}},[coderNumCtx]);
+  useEffect(()=>{try{localStorage.setItem("hc-openhands-enabled",openhandsEnabled);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_enabled:openhandsEnabled})}).catch(()=>{});}catch{}},[openhandsEnabled]);
+  useEffect(()=>{try{localStorage.setItem("hc-openhands-max-rounds",openhandsMaxRounds);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_max_rounds:openhandsMaxRounds})}).catch(()=>{});}catch{}},[openhandsMaxRounds]);
   useEffect(()=>{try{localStorage.setItem("hc-model-params",JSON.stringify(modelParams));}catch{}},[modelParams]);
   useEffect(()=>{try{localStorage.setItem("hc-prompts",JSON.stringify(prompts));}catch{}},[prompts]);
   useEffect(()=>{try{localStorage.setItem("hc-conv-tags",JSON.stringify(convTags));}catch{}},[convTags]);
@@ -970,6 +1006,7 @@ function HyprChat(){
   const [evts,setEvts]=useState([]);
   const evtsRef=useRef([]);
   const [kbs,setKbs]=useState([]);
+  const [uploadProgress,setUploadProgress]=useState({});  // {kbId: {filename, progress, status, error}}
   const [tools,setTools]=useState([]);
   const [mcs,setMcs]=useState([]);
   const [health,setHealth]=useState({});
@@ -1064,7 +1101,7 @@ function HyprChat(){
     fetch(`${API}/api/tools`).then(r=>r.json()).then(setTools).catch(()=>{});
     fetch(`${API}/api/model-configs`).then(r=>r.json()).then(setMcs).catch(()=>{});
     fetch(`${API}/api/health`).then(r=>r.json()).then(d=>setHealth(d.services||{})).catch(()=>{});
-    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));if(d.current_coder_model!=null)setCoderModel(d.current_coder_model);}).catch(()=>{});
+    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));if(d.current_coder_model!=null)setCoderModel(d.current_coder_model);if(d.openhands_num_ctx!=null)setCoderNumCtx(d.openhands_num_ctx);if(d.openhands_enabled!=null)setOpenhandsEnabled(d.openhands_enabled);if(d.openhands_max_rounds!=null)setOpenhandsMaxRounds(d.openhands_max_rounds);}).catch(()=>{});
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
     fetch(`${API}/api/workspaces`).then(r=>r.json()).then(setWorkspaces).catch(()=>{});
     fetch(`${API}/api/councils`).then(r=>r.json()).then(setCouncils).catch(()=>{});
@@ -1232,14 +1269,11 @@ function HyprChat(){
     const cid=actId;const cv=convs.find(c=>c.id===cid);
     if(!cv?.council_config_id)return;
     const userMsg=inp.trim();setInp("");setCouncilSuggestions([]);if(inpRef.current){inpRef.current.style.height="auto";}
-    // Quick search first if enabled
-    let qResults=[];
+    // Quick search fires in parallel — don't block council
     if(quickSearch&&userMsg){
-      setSearchLoading(true);
-      try{const sr=await fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:userMsg,count:6})});const sd=await sr.json();qResults=sd.results||[];}catch{}
-      setSearchLoading(false);
-    }
-    setQuickResults(qResults);
+      setSearchLoading(true);setQuickResults([]);
+      fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:userMsg,count:6})}).then(r=>r.json()).then(d=>{setQuickResults(d.results||[]);setSearchLoading(false);}).catch(()=>{setQuickResults([]);setSearchLoading(false);});
+    }else{setQuickResults([]);}
     // Add user message to UI
     uConv(cid,c=>({...c,messages:[...(c.messages||[]),{role:"user",content:userMsg,metadata:{}}]}));
     fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"user",content:userMsg})}).catch(()=>{});
@@ -1399,11 +1433,10 @@ function HyprChat(){
       const fileCtx = attachments.map(a=>`📎 **${a.name}**:\n\`\`\`\n${a.content}\n\`\`\``).join("\n\n");
       content = content ? `${content}\n\n${fileCtx}` : fileCtx;
     }
-    // Quick search for regular chats
+    // Quick search fires in parallel — don't block the chat
     if(quickSearch&&content.trim()){
-      setSearchLoading(true);
-      try{const sr=await fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:content.trim().slice(0,200),count:6})});const sd=await sr.json();setQuickResults(sd.results||[]);}catch{setQuickResults([]);}
-      setSearchLoading(false);
+      setSearchLoading(true);setQuickResults([]);
+      fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:content.trim().slice(0,200),count:6})}).then(r=>r.json()).then(d=>{setQuickResults(d.results||[]);setSearchLoading(false);}).catch(()=>{setQuickResults([]);setSearchLoading(false);});
     }else{setQuickResults([]);}
     const um={role:"user",content};
     uConv(cid,c=>({...c,title:(!c.messages||!c.messages.length)?content.slice(0,40):c.title,messages:[...(c.messages||[]),um,{role:"assistant",content:"",isS:true}]}));
@@ -2050,15 +2083,66 @@ function HyprChat(){
             onX={()=>{if(f.id)fetch(`${API}/api/knowledge-bases/files/${f.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:(k.files||[]).filter((_,j)=>j!==i)}:k));}}/>)}
           {!(kb.files||[]).length&&<span style={{fontSize:11,color:t.mut,fontStyle:"italic"}}>No files uploaded</span>}
         </div>
+        {/* Upload progress bars */}
+        {Object.entries(uploadProgress).filter(([k])=>k.startsWith(kb.id+":")).map(([key,info])=>(
+          <div key={key} style={{marginBottom:8,padding:"6px 10px",background:`${t.surface||t.bg}`,borderRadius:6,border:`1px solid ${t.brd}22`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:10,marginBottom:4}}>
+              <span style={{color:t.text,fontWeight:600}}>{info.filename}</span>
+              <span style={{color:info.status==="error"?t.err:info.status==="done"?"#4caf50":t.mut,fontWeight:500}}>
+                {info.status==="uploading"?`Uploading ${info.progress}%`:info.status==="indexing"?"Indexing...":info.status==="done"?"Complete":info.status==="error"?(info.error||"Failed"):""}
+              </span>
+            </div>
+            <div style={{height:4,borderRadius:2,background:`${t.mut}22`,overflow:"hidden"}}>
+              <div style={{height:"100%",borderRadius:2,background:info.status==="error"?t.err:info.status==="done"?"#4caf50":t.f1,width:`${info.status==="done"?100:info.status==="indexing"?90:info.progress||0}%`,transition:"width 0.3s ease"}}/>
+            </div>
+          </div>
+        ))}
         <label style={{display:"flex",alignItems:"center",gap:6,padding:"8px 14px",background:`${t.f1}10`,border:`1px dashed ${t.f1}44`,borderRadius:8,cursor:"pointer",fontSize:11,color:t.f1}}>
           <IC.Upload/> Upload files
-          <input type="file" multiple accept=".pdf,.md,.txt,.json,.csv,.docx,.html,.py,.js,.ts,.yaml,.yml" style={{display:"none"}} onChange={async e=>{
-            for(const f of e.target.files){
+          <input type="file" multiple accept=".pdf,.md,.txt,.json,.csv,.docx,.html,.py,.js,.ts,.yaml,.yml" style={{display:"none"}} onChange={e=>{
+            const files=[...e.target.files];e.target.value="";if(!files.length)return;
+            const kbId=kb.id;
+            const uploadOne=f=>{
+              const pKey=`${kbId}:${f.name}:${Date.now()}`;
+              setUploadProgress(p=>({...p,[pKey]:{filename:f.name,progress:0,status:"uploading"}}));
               const fd=new FormData();fd.append("file",f);
-              try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files`,{method:"POST",body:fd});const d=await r.json();
-                setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:[...(k.files||[]),{filename:d.filename||f.name,file_size:d.size||f.size}]}:k));
-              }catch{setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:[...(k.files||[]),{name:f.name,size:f.size}]}:k));}
-            }e.target.value="";
+              const xhr=new XMLHttpRequest();
+              xhr.upload.onprogress=ev=>{if(ev.lengthComputable){const pct=Math.round(ev.loaded/ev.total*100);setUploadProgress(p=>({...p,[pKey]:{...p[pKey],progress:pct}}));}};
+              xhr.onload=()=>{
+                if(xhr.status>=200&&xhr.status<300){
+                  let d;try{d=JSON.parse(xhr.responseText);}catch{d={};}
+                  setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"indexing",progress:100}}));
+                  // Add file to KB state immediately with server-returned id
+                  setKbs(p=>p.map(k=>k.id===kbId?{...k,files:[...(k.files||[]),{id:d.id,filename:d.filename||f.name,file_size:d.file_size||f.size}]}:k));
+                  // Poll indexing status then auto-dismiss
+                  const poll=async()=>{
+                    for(let i=0;i<60;i++){
+                      await new Promise(r=>setTimeout(r,2000));
+                      try{
+                        const sr=await fetch(`${API}/api/knowledge-bases/${kbId}/files/${encodeURIComponent(d.filename||f.name)}/status`);
+                        const st=await sr.json();
+                        if(st.status==="done"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"done"}}));setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),3000);return;}
+                        if(st.status==="error"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:st.error||"indexing failed"}}));setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),6000);return;}
+                      }catch{}
+                    }
+                    setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"done"}}));setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),3000);
+                  };
+                  poll();
+                }else{
+                  let msg="Upload failed";try{msg=JSON.parse(xhr.responseText).detail||msg;}catch{}
+                  setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:msg}}));
+                  setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),6000);
+                }
+              };
+              xhr.onerror=()=>{
+                setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:"Network error"}}));
+                setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),6000);
+              };
+              xhr.open("POST",`${API}/api/knowledge-bases/${kbId}/files`);
+              xhr.send(fd);
+            };
+            // Fire all uploads in parallel
+            files.forEach(uploadOne);
           }}/>
         </label>
       </div>)}
@@ -2679,6 +2763,26 @@ function HyprChat(){
                 <span style={{fontSize:9,color:t.mut}}>▾</span>
               </div>}
               <div style={{fontSize:10,color:t.mut,marginTop:6}}>Dedicated model for the generate_code sub-agent. Empty = uses the active chat model.</div>
+            </div>
+
+            <div style={{marginBottom:20,display:"flex",alignItems:"center",gap:10}}>
+              <label style={{fontSize:12,color:t.dim,fontWeight:600,whiteSpace:"nowrap"}}>OpenHands Enabled</label>
+              <div onClick={()=>setOpenhandsEnabled(!openhandsEnabled)} style={{width:36,height:20,borderRadius:10,background:openhandsEnabled?t.acc:`${t.mut}44`,cursor:"pointer",position:"relative",transition:"all .2s"}}>
+                <div style={{width:16,height:16,borderRadius:8,background:t.fg,position:"absolute",top:2,left:openhandsEnabled?18:2,transition:"all .2s"}}/>
+              </div>
+              <span style={{fontSize:10,color:t.mut}}>{openhandsEnabled?"On":"Off"}</span>
+            </div>
+
+            <div style={{marginBottom:20}}>
+              <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Coder Context Window: <span style={{color:t.acc}}>{coderNumCtx.toLocaleString()}</span></label>
+              <input type="range" min="2048" max="32768" step="1024" value={coderNumCtx} onChange={e=>setCoderNumCtx(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>2048</span><span>32768</span></div>
+            </div>
+
+            <div style={{marginBottom:20}}>
+              <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Max Agent Rounds: <span style={{color:t.acc}}>{openhandsMaxRounds}</span></label>
+              <input type="range" min="5" max="40" step="1" value={openhandsMaxRounds} onChange={e=>setOpenhandsMaxRounds(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>5</span><span>40</span></div>
             </div>
           </div>
         :
@@ -3399,31 +3503,6 @@ function HyprChat(){
             for(const turn of turns){turn.responses=Object.values(turn.rounds).flat();}
             const isLastTurn=(ti)=>ti===turns.length-1;
             return <div style={{maxWidth:"100%",padding:"0 20px",overflowY:"auto"}}>
-              {/* Quick search results inline */}
-              {quickResults.length>0&&<div style={{marginBottom:16,animation:"fadeIn .3s"}}>
-                <div style={{fontSize:10,fontWeight:700,color:t.f1,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,display:"flex",alignItems:"center",gap:4}}>
-                  <IC.Flash/> Quick Search Results
-                  <button onClick={()=>setQuickResults([])} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"0 4px",fontSize:10,marginLeft:"auto"}}>✕</button>
-                </div>
-                <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:6}}>
-                  {quickResults.map((r,ri)=>{const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();const isYT=r.type==="youtube";const isImg=r.type==="image";
-                    return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:12,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}>
-                      <div style={{width:"100%",height:110,background:isYT?"#0a0a0a":`${t.acc}06`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                        {r.thumbnail?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>e.target.style.display="none"}/>:
-                          hn?<img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:40,height:40,borderRadius:8}} alt="" onError={e=>e.target.style.opacity="0"}/>:
-                          <span style={{fontSize:28,opacity:.4}}>🌐</span>}
-                        {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
-                          <div style={{width:34,height:34,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#fff",boxShadow:"0 2px 10px rgba(0,0,0,.5)"}}>▶</div>
-                        </div>}
-                      </div>
-                      <div style={{padding:"8px 10px",display:"flex",flexDirection:"column",gap:3}}>
-                        <div style={{fontSize:11,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.title}</div>
-                        {r.snippet&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
-                        <div style={{fontSize:9,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
-                      </div>
-                    </a>;})}
-                </div>
-              </div>}
               {turns.map((turn,ti)=><div key={ti} style={{marginBottom:28,animation:`fadeIn .3s both`}}>
                 {/* User message */}
                 <div style={{display:"flex",gap:9,alignItems:"flex-start",marginBottom:12}}>
@@ -3433,6 +3512,34 @@ function HyprChat(){
                     <div style={{background:`${t.surface}50`,padding:"8px 12px",borderRadius:9,border:`1px solid ${t.brd}18`,lineHeight:1.6,fontSize:fontSize,color:t.dim}}>{md(turn.user.content)}</div>
                   </div>
                 </div>
+                {/* Quick search results — show before last turn's responses */}
+                {quickResults.length>0&&isLastTurn(ti)&&<div style={{marginBottom:16,marginLeft:36,animation:"fadeIn .3s"}}>
+                  <div style={{fontSize:10,fontWeight:700,color:t.f1,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,display:"flex",alignItems:"center",gap:4}}>
+                    <IC.Flash/> Quick Search Results
+                    <button onClick={()=>setQuickResults([])} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"0 4px",fontSize:10,marginLeft:"auto"}}>✕</button>
+                  </div>
+                  <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:6}}>
+                    {quickResults.map((r,ri)=>{const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();const isYT=r.type==="youtube";const isImg=r.type==="image";const hasTh=!!r.thumbnail;
+                      return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:12,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}
+                        onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
+                        <div style={{width:"100%",height:110,background:hasTh?(isYT?"#0a0a0a":"transparent"):`linear-gradient(135deg,${t.bgDeep},${t.surface})`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                          {hasTh?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
+                            :<span style={{fontSize:28,opacity:.15}}>🔗</span>}
+                          {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
+                            <div style={{width:34,height:34,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#fff",boxShadow:"0 2px 10px rgba(0,0,0,.5)"}}>▶</div>
+                          </div>}
+                          {hn&&<div style={{position:"absolute",top:6,right:6,background:`${t.bg}CC`,backdropFilter:"blur(6px)",borderRadius:6,padding:3,display:"flex",alignItems:"center",justifyContent:"center",border:`1px solid ${t.brd}33`}}>
+                            <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=32`} style={{width:18,height:18,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
+                          </div>}
+                        </div>
+                        <div style={{padding:"8px 10px",display:"flex",flexDirection:"column",gap:3}}>
+                          <div style={{fontSize:11,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.title}</div>
+                          {r.snippet&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
+                          <div style={{fontSize:9,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
+                        </div>
+                      </a>;})}
+                  </div>
+                </div>}
                 {/* Council response cards — grouped by round */}
                 <div style={{marginLeft:36}}>
                   {(()=>{
@@ -3563,36 +3670,44 @@ function HyprChat(){
               <div ref={chatEnd}/>
             </div>;
           })():<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 16px"}}>
-            {/* Quick search results for regular chats */}
-            {quickResults.length>0&&<div style={{marginBottom:16,animation:"fadeIn .3s"}}>
-              <div style={{fontSize:10,fontWeight:700,color:t.f1,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,display:"flex",alignItems:"center",gap:4}}>
-                <IC.Flash/> Quick Search Results
-                <button onClick={()=>setQuickResults([])} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"0 4px",fontSize:10,marginLeft:"auto"}}>✕</button>
-              </div>
-              <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:6}}>
-                {quickResults.map((r,ri)=>{const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();const isYT=r.type==="youtube";const isImg=r.type==="image";
-                  return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:12,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}>
-                    <div style={{width:"100%",height:110,background:isYT?"#0a0a0a":`${t.acc}06`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                      {r.thumbnail?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>e.target.style.display="none"}/>:
-                        hn?<img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:40,height:40,borderRadius:8}} alt="" onError={e=>e.target.style.opacity="0"}/>:
-                        <span style={{fontSize:28,opacity:.4}}>🌐</span>}
-                      {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
-                        <div style={{width:34,height:34,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#fff",boxShadow:"0 2px 10px rgba(0,0,0,.5)"}}>▶</div>
-                      </div>}
-                    </div>
-                    <div style={{padding:"8px 10px",display:"flex",flexDirection:"column",gap:3}}>
-                      <div style={{fontSize:11,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.title}</div>
-                      {r.snippet&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
-                      <div style={{fontSize:9,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
-                    </div>
-                  </a>;})}
-              </div>
-            </div>}
-            {(act.messages||[]).filter(msg=>msg.role==="user"||msg.role==="assistant").map((msg,i)=>{const isU=msg.role==="user";const mid=`m${i}`;const isEditing=editingMsg?.index===i;
+            {(()=>{const filteredMsgs=(act.messages||[]).filter(msg=>msg.role==="user"||msg.role==="assistant");
+              // Find the index of the last assistant message to place quick search results before it
+              let lastAssistantFilteredIdx=-1;
+              filteredMsgs.forEach((m,idx)=>{if(m.role==="assistant")lastAssistantFilteredIdx=idx;});
+              return filteredMsgs.map((msg,i)=>{const isU=msg.role==="user";const mid=`m${i}`;const isEditing=editingMsg?.index===i;
+              const showQS=quickResults.length>0&&i===lastAssistantFilteredIdx&&!isU;
               const personaAvatar=!isU&&act?.persona_avatar;
               const personaName=!isU&&act?.persona_name;
               const personaColor=!isU&&act?.persona_name?t.pink:t.acc;
-              return <div key={i} style={{marginBottom:compactMode?8:20,display:"flex",gap:12,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(i*.04,.2)}s both`}}>
+              return <React.Fragment key={i}>
+              {showQS&&<div style={{marginBottom:16,animation:"fadeIn .3s"}}>
+                <div style={{fontSize:10,fontWeight:700,color:t.f1,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,display:"flex",alignItems:"center",gap:4}}>
+                  <IC.Flash/> Quick Search Results
+                  <button onClick={()=>setQuickResults([])} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"0 4px",fontSize:10,marginLeft:"auto"}}>✕</button>
+                </div>
+                <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:6}}>
+                  {quickResults.map((r,ri)=>{const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();const isYT=r.type==="youtube";const isImg=r.type==="image";const hasTh=!!r.thumbnail;
+                    return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:12,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}
+                      onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
+                      <div style={{width:"100%",height:110,background:hasTh?(isYT?"#0a0a0a":"transparent"):`linear-gradient(135deg,${t.bgDeep},${t.surface})`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                        {hasTh?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
+                          :<span style={{fontSize:28,opacity:.15}}>🔗</span>}
+                        {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
+                          <div style={{width:34,height:34,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#fff",boxShadow:"0 2px 10px rgba(0,0,0,.5)"}}>▶</div>
+                        </div>}
+                        {hn&&<div style={{position:"absolute",top:6,right:6,background:`${t.bg}CC`,backdropFilter:"blur(6px)",borderRadius:6,padding:3,display:"flex",alignItems:"center",justifyContent:"center",border:`1px solid ${t.brd}33`}}>
+                          <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=32`} style={{width:18,height:18,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
+                        </div>}
+                      </div>
+                      <div style={{padding:"8px 10px",display:"flex",flexDirection:"column",gap:3}}>
+                        <div style={{fontSize:11,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.title}</div>
+                        {r.snippet&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
+                        <div style={{fontSize:9,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
+                      </div>
+                    </a>;})}
+                </div>
+              </div>}
+              <div style={{marginBottom:compactMode?8:20,display:"flex",gap:12,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(i*.04,.2)}s both`}}>
                 <div style={{width:32,height:32,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",background:isU?`${t.f4}20`:`${personaColor}18`,border:`1px solid ${isU?t.f4:personaColor}33`,color:isU?t.f4:personaColor,flexShrink:0,marginTop:2,overflow:"hidden",boxShadow:`0 0 8px ${isU?t.f4:personaColor}22`}}>
                   {isU?<IC.User/>:personaAvatar?<img src={`${API}${personaAvatar}`} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
                 </div>
@@ -3633,8 +3748,8 @@ function HyprChat(){
                     </button>}
                   </div>}
                 </div>
-              </div>;
-            })}
+              </div></React.Fragment>;
+            });})()}
             {evts.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}><ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/></div>}
             <div ref={chatEnd}/>
           </div>}

@@ -163,10 +163,10 @@ async def init_db():
             except Exception as e:
                 if "duplicate column" not in str(e).lower():
                     print(f"[DB MIGRATION] Warning: {e}")
-        # Migrate council_configs: add debate_rounds column
-        for col, default in [("debate_rounds", "0")]:
+        # Migrate council_configs: add debate_rounds and kb_ids columns
+        for col, coltype, default in [("debate_rounds", "INTEGER", "0"), ("kb_ids", "TEXT", "'[]'")]:
             try:
-                await db.execute(f"ALTER TABLE council_configs ADD COLUMN {col} INTEGER DEFAULT {default}")
+                await db.execute(f"ALTER TABLE council_configs ADD COLUMN {col} {coltype} DEFAULT {default}")
             except Exception as e:
                 if "duplicate column" not in str(e).lower():
                     print(f"[DB MIGRATION] Warning: {e}")
@@ -359,15 +359,17 @@ async def get_kbs():
         await db.close()
 
 
-async def add_kb_file(kb_id: str, filename: str, filepath: str, file_size: int, file_type: str):
+async def add_kb_file(kb_id: str, filename: str, filepath: str, file_size: int, file_type: str) -> int:
     db = await get_db()
     try:
-        await db.execute(
+        cursor = await db.execute(
             "INSERT INTO kb_files (kb_id, filename, filepath, file_size, file_type) VALUES (?, ?, ?, ?, ?)",
             (kb_id, filename, filepath, file_size, file_type)
         )
+        file_id = cursor.lastrowid
         await db.execute("UPDATE knowledge_bases SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (kb_id,))
         await db.commit()
+        return file_id
     finally:
         await db.close()
 
@@ -643,13 +645,13 @@ async def add_conversation_file(id: str, conv_id: str, filename: str, url: str):
 # ============================================================
 # COUNCIL CRUD
 # ============================================================
-async def create_council(id: str, name: str, host_model: str, host_system_prompt: str = ""):
+async def create_council(id: str, name: str, host_model: str, host_system_prompt: str = "", kb_ids: list = None):
     db = await get_db()
     try:
         now = datetime.utcnow().isoformat()
         await db.execute(
-            "INSERT INTO council_configs(id,name,host_model,host_system_prompt,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-            (id, name, host_model, host_system_prompt, now, now)
+            "INSERT INTO council_configs(id,name,host_model,host_system_prompt,kb_ids,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+            (id, name, host_model, host_system_prompt, json.dumps(kb_ids or []), now, now)
         )
         await db.commit()
     finally:
@@ -663,6 +665,10 @@ async def get_councils():
         result = []
         for r in rows:
             c = dict(r)
+            try:
+                c["kb_ids"] = json.loads(c.get("kb_ids") or "[]")
+            except Exception:
+                c["kb_ids"] = []
             members = await db.execute_fetchall(
                 "SELECT * FROM council_members WHERE council_id=? ORDER BY rowid ASC", (c["id"],)
             )
@@ -680,6 +686,10 @@ async def get_council(council_id: str):
         if not rows:
             return None
         c = dict(rows[0])
+        try:
+            c["kb_ids"] = json.loads(c.get("kb_ids") or "[]")
+        except Exception:
+            c["kb_ids"] = []
         members = await db.execute_fetchall(
             "SELECT * FROM council_members WHERE council_id=? ORDER BY rowid ASC", (council_id,)
         )
@@ -690,8 +700,10 @@ async def get_council(council_id: str):
 
 
 async def update_council(council_id: str, **kwargs):
-    allowed = {"name", "host_model", "host_system_prompt", "debate_rounds"}
+    allowed = {"name", "host_model", "host_system_prompt", "debate_rounds", "kb_ids"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if "kb_ids" in fields:
+        fields["kb_ids"] = json.dumps(fields["kb_ids"] if isinstance(fields["kb_ids"], list) else [])
     if not fields:
         return
     fields["updated_at"] = datetime.utcnow().isoformat()

@@ -25,7 +25,8 @@ Built with FastAPI + a single-file React SPA — no build step required.
 | **CodeAgent** | Sandboxed code execution in 30+ languages, shell commands, file I/O, package installs |
 | **generate_code** | Agentic code generation via OpenHands SDK — writes, tests, and fixes code automatically in the sandbox |
 | **Deep Research** | Multi-phase parallel web research with 5 depth levels, compare mode, cross-referencing |
-| **Quick Search** | Instant SearXNG-backed search with inline card grid, thumbnails & YouTube previews |
+| **Quick Search** | Instant SearXNG search with OG image cards, favicon badges & YouTube previews |
+| **Research** | Web search + full page reading — fetches and reads top results for grounded answers |
 | **Conspiracy Research** | Alt-source deep dive — FOIA vaults, whistleblower sites, CIA reading room, FBI vault |
 | **fetch_url** | Fetch and read any URL directly |
 
@@ -45,8 +46,8 @@ Built with FastAPI + a single-file React SPA — no build step required.
 - Host model synthesizes all responses with full debate history and vote context
 - Expandable round-by-round history in chat view
 
-### 📚 Knowledge Bases
-Upload documents (PDF, Markdown, text, code) and attach them to personas for automatic system prompt injection.
+### 📚 Knowledge Bases & RAG Pipeline
+Upload documents (PDF, Markdown, text, code) and attach them to personas. Files are chunked, embedded via Ollama (`nomic-embed-text`), and stored in ChromaDB. At query time, only the most relevant chunks are retrieved and injected into context — not the entire file. Research tool results are automatically indexed into per-persona memory for future recall. Configurable chunk size, overlap, top_k, and embed model via Settings.
 
 ### 🎭 Personas
 Named AI personalities with avatars, model config, system prompts, temperature/context settings, and linked KBs & tools.
@@ -138,7 +139,7 @@ systemctl status hyprchat        # status
 
 | Layer | Tech |
 |-------|------|
-| **Backend** | Python 3.11+, FastAPI, httpx, SQLite (aiosqlite) |
+| **Backend** | Python 3.11+, FastAPI, httpx, SQLite (aiosqlite), ChromaDB |
 | **Frontend** | React 18 (Babel in-browser), zero build step |
 | **LLM** | Ollama (native tool calling protocol) |
 | **Search** | SearXNG |

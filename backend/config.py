@@ -74,7 +74,8 @@ DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen3.5:27b")
 WORKSPACE_MODEL = os.getenv("WORKSPACE_MODEL", "qwen2.5:3b")
 CODER_MODEL = os.getenv("CODER_MODEL", "")
 OPENHANDS_ENABLED = os.getenv("OPENHANDS_ENABLED", "true").lower() == "true"  # Toggle OpenHands for generate_code tool
-OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "12"))
+OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "20"))
+OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", "8192"))
 DEFAULT_SYSTEM_PROMPT = """You are CodeAgent, an autonomous coding assistant with a sandboxed Linux environment (CodeBox).
 
 ## Sandbox Environment

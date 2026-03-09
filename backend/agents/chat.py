@@ -118,6 +118,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     model_options = {}
     kb_context = ""
     persona_system_prompt = None
+    persona_kb_ids = []
     if req.persona_id:
         all_configs = await db.get_model_configs()
         mc = next((c for c in all_configs if c["id"] == req.persona_id), None)
@@ -136,6 +137,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     break
 
             kb_ids = mc.get("kb_ids", [])
+            persona_kb_ids = kb_ids
 
             # ── RAG config defaults (used by both KB and research memory queries) ──
             _rag_research_top_k = 4
@@ -621,13 +623,24 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             # ── Duplicate / near-duplicate detection ──
             if tool_calls:
                 _tool_key = json.dumps([(tc.get("function", {}).get("name"), json.dumps(tc.get("function", {}).get("arguments", {}), sort_keys=True)) for tc in tool_calls], sort_keys=True)
+                _tc_names_dup = [tc.get("function", {}).get("name", "") for tc in tool_calls]
 
-                # Exact duplicate: same as previous round
+                # Exact duplicate: same as immediately previous round
                 _is_dup = _tool_key == _prev_tool_key
                 # Near-duplicate: same tool key seen in last 3 rounds
+                # BUT: allow re-running test commands (run_shell/execute_code)
+                # if a write_file happened in between (file was modified)
                 if not _is_dup and _tool_key in _tool_history:
-                    _is_dup = True
-                    print(f"[CHAT]   Near-duplicate detected (seen in last 3 rounds)")
+                    _is_test_rerun = all(n in ("run_shell", "execute_code") for n in _tc_names_dup)
+                    _had_write_since = _prev_tool_key != _tool_key and any(
+                        '"write_file"' in h or '"file_editor"' in h
+                        for h in _tool_history[_tool_history.index(_tool_key)+1:]
+                    ) if _tool_key in _tool_history else False
+                    if _is_test_rerun and _had_write_since:
+                        print(f"[CHAT]   Allowing re-test after file modification")
+                    else:
+                        _is_dup = True
+                        print(f"[CHAT]   Near-duplicate detected (seen in last 3 rounds)")
 
                 if _is_dup:
                     _dup_break_count += 1
@@ -640,7 +653,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
                 _prev_tool_key = _tool_key
                 _tool_history.append(_tool_key)
-                if len(_tool_history) > 3:
+                if len(_tool_history) > 5:
                     _tool_history.pop(0)
 
             if content:
@@ -705,9 +718,9 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 # Execute via integrated CodeAgent — with keepalive loop
                 _tf = asyncio.get_event_loop().create_future()
                 _tool_chars = [0]  # mutable counter for live progress
-                async def _run_tool_bg(_n=tool_name, _a=tool_args, _c=conv_id, _f=_tf, _tc=_tool_chars):
+                async def _run_tool_bg(_n=tool_name, _a=tool_args, _c=conv_id, _f=_tf, _tc=_tool_chars, _kb=persona_kb_ids):
                     try:
-                        r = await exec_tool(http, events, _n, _a, _c, custom_tool_map, conv_model=req.model)
+                        r = await exec_tool(http, events, _n, _a, _c, custom_tool_map, conv_model=req.model, kb_ids=_kb)
                         _tc[0] = len(r) if r else 0
                         if not _f.done(): _f.set_result(r)
                     except Exception as _e:
