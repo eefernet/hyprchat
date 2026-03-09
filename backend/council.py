@@ -10,13 +10,40 @@ import config
 import database as db
 
 
-async def stream_council_chat(http, events, council, req_messages, conv_id, quick_search: bool = False):
+async def stream_council_chat(http, events, council, req_messages, conv_id, quick_search: bool = False, kb_ids: list = None):
     """Async generator that streams council member responses, voting, and host synthesis."""
     members = council.get("members", [])
     host_model = council.get("host_model", config.DEFAULT_MODEL)
     host_sys = council.get("host_system_prompt", "")
     debate_rounds = council.get("debate_rounds", 0) or 0
     messages = req_messages
+
+    # ── RAG: Query attached knowledge bases for council context ──
+    kb_context = ""
+    if kb_ids:
+        last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+        if last_user:
+            try:
+                import rag
+                _rag_cfg = config.DEFAULT_SETTINGS.get("rag", {})
+                try:
+                    import json as _json
+                    with open(config.SETTINGS_PATH, "r") as _sf:
+                        _rag_cfg = {**_rag_cfg, **_json.load(_sf).get("rag", {})}
+                except Exception:
+                    pass
+                _top_k = int(_rag_cfg.get("top_k", 6))
+                _max_chars = int(_rag_cfg.get("max_context_chars", 6000))
+
+                chunks = await rag.query(kb_ids, last_user, top_k=_top_k)
+                if chunks:
+                    kb_context = rag.format_context(chunks, max_chars=_max_chars)
+                    filenames = list(set(c["filename"] for c in chunks))
+                    avg_score = sum(c["score"] for c in chunks) / len(chunks)
+                    yield f"data: {json.dumps({'type': 'council_kb', 'status': f'Retrieved {len(chunks)} KB chunks from {', '.join(filenames[:3])} ({avg_score:.0%} relevance)'})}\n\n"
+                    print(f"[COUNCIL RAG] Retrieved {len(chunks)} chunks (avg {avg_score:.2f}) for: {last_user[:80]!r}")
+            except Exception as e:
+                print(f"[COUNCIL RAG] KB query failed: {e}")
 
     # Quick search augmentation
     search_context = ""
@@ -56,6 +83,13 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             mid = member["id"]
             model = member["model"]
             sys_p = member.get("system_prompt", "")
+            if kb_context:
+                kb_section = (
+                    "\n\n=== RELEVANT KNOWLEDGE BASE CONTEXT ===\n"
+                    "The following excerpts were retrieved from attached knowledge bases. "
+                    "Use them to inform your response.\n\n" + kb_context
+                )
+                sys_p = (sys_p + kb_section) if sys_p else kb_section
             if search_context:
                 sys_p = (sys_p + search_context) if sys_p else search_context
             if sys_p:
@@ -305,8 +339,15 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             ]
             vote_summary = "\n\nPeer vote results:\n" + "\n".join(vote_lines)
         debate_note = f" The council debated for {debate_rounds + 1} rounds." if debate_rounds > 0 else ""
+        host_system = (host_sys or "You are the council moderator. Synthesize the council responses and provide a final verdict or summary.") + " Always respond in English."
+        if kb_context:
+            host_system += (
+                "\n\n=== RELEVANT KNOWLEDGE BASE CONTEXT ===\n"
+                "The following excerpts were retrieved from attached knowledge bases. "
+                "Use them to ground your synthesis.\n\n" + kb_context
+            )
         host_msgs = [
-            {"role": "system", "content": (host_sys or "You are the council moderator. Synthesize the council responses and provide a final verdict or summary.") + " Always respond in English."},
+            {"role": "system", "content": host_system},
             {"role": "user", "content": f"Question: {last_user_msg}\n\n{debate_note}Council responses:\n{all_resp}{vote_summary}\n\nProvide a synthesis and final verdict in English. Reference the peer votes and how positions evolved during the debate if relevant."}
         ]
         payload = {"model": host_model, "messages": host_msgs, "stream": True, "options": {}}

@@ -249,7 +249,7 @@ const TIC = {code:IC.Code,search:IC.Search,terminal:IC.Terminal,globe:IC.Globe,w
 
 // Status pill - inline with chat, expressive and geeky
 const Pill = ({ev,t,expanded,onToggle})=>{
-  const isS = ev.type==="tool_start"||ev.type==="thinking"||ev.type==="streaming";
+  const isS = ev.type==="tool_start"||ev.type==="tool_progress"||ev.type==="thinking"||ev.type==="streaming";
   const isE = ev.type==="tool_error"||ev.type==="error";
   const isD = ev.type==="tool_end"||ev.type==="tool_done"||ev.type==="complete"||ev.type==="thought_done";
   const isThink = ev.type==="thinking"||ev.type==="thought_done";
@@ -329,6 +329,14 @@ const Pill = ({ev,t,expanded,onToggle})=>{
         {detail.stderr&&<><div style={{color:t.err,marginTop:6,fontWeight:600,fontSize:10}}>⚠️ stderr:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.err,fontSize:11,background:`${t.err}08`,borderRadius:4,marginTop:2}}>{detail.stderr}</pre></>}
       </div>
       :detail.results?<div>{detail.results.map((r,i)=><div key={i} style={{marginBottom:4}}><a href={r.url} target="_blank" style={{color:t.acc,textDecoration:"none",fontSize:11}}>🔗 {r.title}</a></div>)}</div>
+      :detail.steps?<div style={{display:"flex",flexDirection:"column",gap:3}}>
+        {detail.steps.map((s,i)=><div key={i} style={{display:"flex",gap:6,alignItems:"flex-start",padding:"3px 0",borderBottom:i<detail.steps.length-1?`1px solid ${t.brd}15`:"none"}}>
+          <span style={{flexShrink:0,fontSize:11,width:18,textAlign:"center"}}>{s.icon}</span>
+          <span style={{color:t.mut,fontSize:10,flexShrink:0,minWidth:16,fontWeight:600}}>#{s.step}</span>
+          <span style={{color:t.acc,fontSize:10,fontWeight:600,flexShrink:0,minWidth:60}}>{s.label}</span>
+          <span style={{color:t.dim,fontSize:10,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.detail}</span>
+        </div>)}
+      </div>
       :detail.method?<div>
         <div style={{color:t.mut,fontSize:10,marginBottom:4}}>⚙️ <span style={{color:t.acc}}>{detail.method}</span></div>
         {detail.args&&<pre style={{margin:0,padding:6,background:`${t.surface}66`,borderRadius:4,whiteSpace:"pre-wrap",color:t.dim,fontSize:10,maxHeight:60,overflow:"auto"}}>{JSON.stringify(detail.args,null,2)}</pre>}
@@ -357,9 +365,9 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
 
   // First pass: group by category
   const thinkingEvts = evts.filter(e=>e.type==="thinking"||e.type==="thought_done");
-  const toolEvts = evts.filter(e=>e.type==="tool_start"||e.type==="tool_end"||e.type==="tool_done"||e.type==="tool_error");
+  const toolEvts = evts.filter(e=>e.type==="tool_start"||e.type==="tool_progress"||e.type==="tool_end"||e.type==="tool_done"||e.type==="tool_error");
   const streamEvts = evts.filter(e=>e.type==="streaming"||e.type==="complete");
-  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_end","tool_done","tool_error","streaming","complete","code_output","file_ready","search_results","source_links"].includes(e.type));
+  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_progress","tool_end","tool_done","tool_error","streaming","complete","code_output","file_ready","search_results","source_links"].includes(e.type));
 
   // Thinking: collapse to just the final state
   if(thinkingEvts.length){
@@ -367,7 +375,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
     merged.push(done || thinkingEvts[thinkingEvts.length-1]);
   }
 
-  // Tools: pair start→end by tool name, keep unpaired starts
+  // Tools: pair start→end by tool name, keep unpaired starts. tool_progress updates replace start status.
   const toolPairs = {};
   for(const e of toolEvts){
     const key = e.data?.tool||"unknown";
@@ -376,7 +384,11 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
   }
   for(const [key, group] of Object.entries(toolPairs)){
     const end = group.find(e=>e.type==="tool_end"||e.type==="tool_done"||e.type==="tool_error");
-    merged.push(end || group[group.length-1]);
+    if(end){merged.push(end);}else{
+      // Show latest progress event if available, otherwise latest start
+      const progress = [...group].reverse().find(e=>e.type==="tool_progress");
+      merged.push(progress || group[group.length-1]);
+    }
   }
 
   // Streaming: collapse to final state
@@ -689,6 +701,8 @@ function SandboxSection({t,btnS,labelS}){
   const [cleanupDays,setCleanupDays]=useState(30);
   const [cleaning,setCleaning]=useState(false);
   const [cleanResult,setCleanResult]=useState(null);
+  const [cbCleaning,setCbCleaning]=useState(false);
+  const [cbResult,setCbResult]=useState(null);
   const fmtBytes=(b)=>{if(!b)return"0 B";if(b<1024)return`${b} B`;if(b<1048576)return`${(b/1024).toFixed(1)} KB`;return`${(b/1048576).toFixed(1)} MB`;};
   useEffect(()=>{
     fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{setSbInfo(d);setCleanupDays(d.file_cleanup_days??30);}).catch(()=>{});
@@ -703,6 +717,12 @@ function SandboxSection({t,btnS,labelS}){
       const r2=await fetch(`${API}/api/settings`);const d2=await r2.json();setSbInfo(d2);
     }catch{setCleanResult({error:"Failed"});}
     setCleaning(false);
+  };
+  const cleanCodebox=async()=>{
+    setCbCleaning(true);setCbResult(null);
+    try{const r=await fetch(`${API}/api/settings/cleanup-codebox`,{method:"POST"});const d=await r.json();setCbResult(d);
+    }catch{setCbResult({error:"Failed"});}
+    setCbCleaning(false);
   };
   const INTERVALS=[
     {label:"Every week",days:7},{label:"Every 2 weeks",days:14},
@@ -737,13 +757,20 @@ function SandboxSection({t,btnS,labelS}){
     </div>
     <div style={{display:"flex",alignItems:"center",gap:8}}>
       <button onClick={cleanNow} disabled={cleaning} style={{...btnS(t.err),opacity:cleaning?.6:1}}>
-        {cleaning?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span> Cleaning...</>:"🗑 Clean Now"}
+        {cleaning?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span> Cleaning...</>:"🗑 Clean Sandbox"}
+      </button>
+      <button onClick={cleanCodebox} disabled={cbCleaning} style={{...btnS(t.warm||"#e89b3e"),opacity:cbCleaning?.6:1}}>
+        {cbCleaning?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span> Cleaning...</>:"🗑 Clean Codebox"}
       </button>
       {cleanResult&&!cleanResult.error&&<span style={{fontSize:11,color:t.ok}}>
-        ✓ Removed {cleanResult.deleted} file{cleanResult.deleted!==1?"s":""}{cleanResult.freed_bytes>0?`, freed ${fmtBytes(cleanResult.freed_bytes)}`:""}
+        ✓ Sandbox: {cleanResult.deleted} file{cleanResult.deleted!==1?"s":""}{cleanResult.freed_bytes>0?`, freed ${fmtBytes(cleanResult.freed_bytes)}`:""}
+      </span>}
+      {cbResult&&!cbResult.error&&<span style={{fontSize:11,color:t.ok}}>
+        ✓ Codebox: {cbResult.deleted} item{cbResult.deleted!==1?"s":""}{cbResult.freed_bytes>0?`, freed ${fmtBytes(cbResult.freed_bytes)}`:""}
       </span>}
       {cleanResult?.skipped&&<span style={{fontSize:11,color:t.mut}}>↷ {cleanResult.skipped}</span>}
       {cleanResult?.error&&<span style={{fontSize:11,color:t.err}}>✕ {cleanResult.error}</span>}
+      {cbResult?.error&&<span style={{fontSize:11,color:t.err}}>✕ Codebox: {cbResult.error}</span>}
     </div>
     <div style={{fontSize:10,color:t.mut,marginTop:6,lineHeight:1.5}}>
       Tool-generated files (code outputs, downloads) are stored in <code style={{background:`${t.surface}`,padding:"1px 5px",borderRadius:3,fontSize:9}}>{sbInfo?.sandbox_outputs_dir||"sandbox/outputs/"}</code> and cleaned automatically. User uploads and knowledge base files are never auto-deleted.
@@ -879,6 +906,9 @@ function HyprChat(){
   const [chatWidth,setChatWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-w")||"880");}catch{return 880;}});
   const [wsModel,setWsModel]=useState(()=>{try{return localStorage.getItem("hc-ws-model")||"qwen2.5:7b";}catch{return "qwen2.5:7b";}});
   const [coderModel,setCoderModel]=useState(()=>{try{return localStorage.getItem("hc-coder-model")||"";}catch{return "";}});
+  const [coderNumCtx,setCoderNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-coder-num-ctx")||"8192");}catch{return 8192;}});
+  const [openhandsEnabled,setOpenhandsEnabled]=useState(()=>{try{return localStorage.getItem("hc-openhands-enabled")!=="false";}catch{return true;}});
+  const [openhandsMaxRounds,setOpenhandsMaxRounds]=useState(()=>{try{return parseInt(localStorage.getItem("hc-openhands-max-rounds")||"20");}catch{return 20;}});
   const [ctxTokens,setCtxTokens]=useState(0);
   const [genTokens,setGenTokens]=useState(0);
   const [previewFile,setPreviewFile]=useState(null);
@@ -942,6 +972,9 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-custom-quotes",JSON.stringify(customQuotes));}catch{}},[customQuotes]);
   useEffect(()=>{try{localStorage.setItem("hc-ws-model",wsModel);}catch{}},[wsModel]);
   useEffect(()=>{try{localStorage.setItem("hc-coder-model",coderModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({coder_model:coderModel})}).catch(()=>{});}catch{}},[coderModel]);
+  useEffect(()=>{try{localStorage.setItem("hc-coder-num-ctx",coderNumCtx);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_num_ctx:coderNumCtx})}).catch(()=>{});}catch{}},[coderNumCtx]);
+  useEffect(()=>{try{localStorage.setItem("hc-openhands-enabled",openhandsEnabled);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_enabled:openhandsEnabled})}).catch(()=>{});}catch{}},[openhandsEnabled]);
+  useEffect(()=>{try{localStorage.setItem("hc-openhands-max-rounds",openhandsMaxRounds);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_max_rounds:openhandsMaxRounds})}).catch(()=>{});}catch{}},[openhandsMaxRounds]);
   useEffect(()=>{try{localStorage.setItem("hc-model-params",JSON.stringify(modelParams));}catch{}},[modelParams]);
   useEffect(()=>{try{localStorage.setItem("hc-prompts",JSON.stringify(prompts));}catch{}},[prompts]);
   useEffect(()=>{try{localStorage.setItem("hc-conv-tags",JSON.stringify(convTags));}catch{}},[convTags]);
@@ -1065,7 +1098,7 @@ function HyprChat(){
     fetch(`${API}/api/tools`).then(r=>r.json()).then(setTools).catch(()=>{});
     fetch(`${API}/api/model-configs`).then(r=>r.json()).then(setMcs).catch(()=>{});
     fetch(`${API}/api/health`).then(r=>r.json()).then(d=>setHealth(d.services||{})).catch(()=>{});
-    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));if(d.current_coder_model!=null)setCoderModel(d.current_coder_model);}).catch(()=>{});
+    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));if(d.current_coder_model!=null)setCoderModel(d.current_coder_model);if(d.openhands_num_ctx!=null)setCoderNumCtx(d.openhands_num_ctx);if(d.openhands_enabled!=null)setOpenhandsEnabled(d.openhands_enabled);if(d.openhands_max_rounds!=null)setOpenhandsMaxRounds(d.openhands_max_rounds);}).catch(()=>{});
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
     fetch(`${API}/api/workspaces`).then(r=>r.json()).then(setWorkspaces).catch(()=>{});
     fetch(`${API}/api/councils`).then(r=>r.json()).then(setCouncils).catch(()=>{});
@@ -2731,6 +2764,26 @@ function HyprChat(){
                 <span style={{fontSize:9,color:t.mut}}>▾</span>
               </div>}
               <div style={{fontSize:10,color:t.mut,marginTop:6}}>Dedicated model for the generate_code sub-agent. Empty = uses the active chat model.</div>
+            </div>
+
+            <div style={{marginBottom:20,display:"flex",alignItems:"center",gap:10}}>
+              <label style={{fontSize:12,color:t.dim,fontWeight:600,whiteSpace:"nowrap"}}>OpenHands Enabled</label>
+              <div onClick={()=>setOpenhandsEnabled(!openhandsEnabled)} style={{width:36,height:20,borderRadius:10,background:openhandsEnabled?t.acc:`${t.mut}44`,cursor:"pointer",position:"relative",transition:"all .2s"}}>
+                <div style={{width:16,height:16,borderRadius:8,background:t.fg,position:"absolute",top:2,left:openhandsEnabled?18:2,transition:"all .2s"}}/>
+              </div>
+              <span style={{fontSize:10,color:t.mut}}>{openhandsEnabled?"On":"Off"}</span>
+            </div>
+
+            <div style={{marginBottom:20}}>
+              <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Coder Context Window: <span style={{color:t.acc}}>{coderNumCtx.toLocaleString()}</span></label>
+              <input type="range" min="2048" max="32768" step="1024" value={coderNumCtx} onChange={e=>setCoderNumCtx(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>2048</span><span>32768</span></div>
+            </div>
+
+            <div style={{marginBottom:20}}>
+              <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Max Agent Rounds: <span style={{color:t.acc}}>{openhandsMaxRounds}</span></label>
+              <input type="range" min="5" max="40" step="1" value={openhandsMaxRounds} onChange={e=>setOpenhandsMaxRounds(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>5</span><span>40</span></div>
             </div>
           </div>
         :

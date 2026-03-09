@@ -570,7 +570,7 @@ def _get_run_cmd(language: str, filepath: str) -> str:
 
 # ── Tool execution dispatcher ──
 
-async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_tool_map: dict = None, conv_model: str = "") -> str:
+async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_tool_map: dict = None, conv_model: str = "", kb_ids: list = None) -> str:
     """Execute a built-in or custom tool and return the result string."""
     custom_tool_map = custom_tool_map or {}
     try:
@@ -857,7 +857,8 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             await events.emit(conv_id, "tool_start", {"tool": "download_project", "icon": "code", "status": f"Packaging: {directory}"})
             dirname = directory.rstrip("/").split("/")[-1] or "project"
             # Clean up auto-generated UUIDs from directory names (project-abc12345 → project)
-            if re.match(r'^project-[a-f0-9]{8}$', dirname):
+            # But keep meaningful names like "portscout" or "weather-dashboard"
+            if re.match(r'^project-[a-f0-9]{4,8}$', dirname):
                 dirname = "project"
             tarname = f"{dirname}.tar.gz"
             qdir = shlex.quote(directory)
@@ -920,6 +921,18 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             mode = args.get("mode", "research")
             topic_b = args.get("topic_b", "")
 
+            # Pre-query KB for existing knowledge on this topic
+            kb_prior = ""
+            if kb_ids and topic:
+                try:
+                    import rag
+                    chunks = await rag.query(kb_ids, topic, top_k=4)
+                    if chunks:
+                        kb_prior = rag.format_context(chunks, max_chars=3000)
+                        print(f"[RESEARCH RAG] Pre-loaded {len(chunks)} KB chunks for deep_research: {topic[:60]}")
+                except Exception as e:
+                    print(f"[RESEARCH RAG] KB pre-query failed: {e}")
+
             depth_labels = {1: "Quick", 2: "Overview", 3: "Deep dive", 4: "Comprehensive", 5: "Exhaustive"}
             label = depth_labels.get(depth, f"D{depth}")
 
@@ -935,7 +948,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             })
 
             try:
-                result = await run_deep_research(http, config.OLLAMA_URL, config.DEFAULT_MODEL, events, topic, depth, focus, mode, topic_b, conv_id)
+                result = await run_deep_research(http, config.OLLAMA_URL, config.DEFAULT_MODEL, events, topic, depth, focus, mode, topic_b, conv_id, kb_context=kb_prior)
             except Exception as e:
                 await events.emit(conv_id, "tool_end", {"tool": "deep_research", "icon": "search", "status": f"Failed: {str(e)}"})
                 return f"**Deep research failed:** {str(e)}"
@@ -976,19 +989,56 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             topic = args.get("topic", "")
             angle = args.get("angle", "evidence")
             depth = max(3, min(5, int(args.get("depth", 4))))
-            return await run_conspiracy_research(http, config.OLLAMA_URL, config.DEFAULT_MODEL, config.SEARXNG_URL, events, topic, angle, depth, conv_id)
+
+            # Pre-query KB for existing knowledge on this topic
+            kb_prior = ""
+            if kb_ids and topic:
+                try:
+                    import rag
+                    chunks = await rag.query(kb_ids, topic, top_k=4)
+                    if chunks:
+                        kb_prior = rag.format_context(chunks, max_chars=3000)
+                        print(f"[RESEARCH RAG] Pre-loaded {len(chunks)} KB chunks for conspiracy_research: {topic[:60]}")
+                except Exception as e:
+                    print(f"[RESEARCH RAG] KB pre-query failed: {e}")
+
+            return await run_conspiracy_research(http, config.OLLAMA_URL, config.DEFAULT_MODEL, config.SEARXNG_URL, events, topic, angle, depth, conv_id, kb_context=kb_prior)
 
         elif name == "generate_code":
-            task = args.get("task", "")
+            # Models sometimes use wrong arg names (description/code instead of task)
+            task = args.get("task", "") or args.get("description", "") or args.get("prompt", "")
             language = args.get("language", "python")
             context = args.get("context", "")
+            # If model stuffed actual code into args, append it as context
+            if not task and args.get("code"):
+                task = "Review, fix, and complete this code"
+                context = (context + "\n\n" + args["code"]).strip()
+            elif args.get("code") and task:
+                context = (context + "\n\nReference code:\n" + args["code"]).strip()
             coder_model = config.CODER_MODEL or conv_model or config.DEFAULT_MODEL
+
+            # Inject KB context so OpenHands agent has access to uploaded documentation
+            if kb_ids and task:
+                try:
+                    import rag
+                    chunks = await rag.query(kb_ids, task, top_k=4)
+                    if chunks:
+                        kb_prior = rag.format_context(chunks, max_chars=3000)
+                        kb_section = (
+                            "\n\n--- Knowledge Base (uploaded reference docs) ---\n"
+                            + kb_prior
+                        )
+                        context = (context + kb_section) if context else kb_section.strip()
+                        print(f"[CODEGEN RAG] Pre-loaded {len(chunks)} KB chunks for generate_code: {task[:60]}")
+                except Exception as e:
+                    print(f"[CODEGEN RAG] KB pre-query failed: {e}")
 
             if not getattr(config, "OPENHANDS_ENABLED", True):
                 return "ERROR: OpenHands is disabled in settings. Enable it or use write_file + run_shell directly."
 
             openhands_url = config.CODEBOX_URL.rsplit(":", 1)[0] + ":8586"
-            max_rounds = getattr(config, "OPENHANDS_MAX_ROUNDS", 12)
+            max_rounds = getattr(config, "OPENHANDS_MAX_ROUNDS", 20)
+            num_ctx = getattr(config, "OPENHANDS_NUM_CTX", 8192)
 
             # Health check (3s) before committing to the long request
             try:
@@ -1009,35 +1059,88 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 "tool": "generate_code", "icon": "wand",
                 "status": f"🤖 OpenHands agent building {language} project...",
             })
-            print(f"[CODEGEN:OH] model={coder_model} lang={language} task={task[:100]!r}")
+            print(f"[CODEGEN:OH] model={coder_model} lang={language} num_ctx={num_ctx} task={task[:100]!r}")
 
+            oh_payload = {
+                "task": task, "model": coder_model,
+                "ollama_url": config.OLLAMA_URL,
+                "max_rounds": max_rounds,
+                "num_ctx": num_ctx,
+                "language": language,
+                "context": context,
+            }
+
+            # Action → emoji mapping for progress pills
+            _ACTION_ICONS = {
+                "starting": "🚀", "terminal": "⚡", "terminal_result": "📤",
+                "file_create": "📁", "file_edit": "✏️", "file_view": "👁️",
+                "file_editor_result": "📄", "glob": "🔍", "glob_result": "🔍",
+                "grep": "🔎", "grep_result": "🔎", "thinking": "🧠", "finish": "✅",
+            }
+            _ACTION_LABELS = {
+                "starting": "Starting", "terminal": "Running", "terminal_result": "Output",
+                "file_create": "Creating", "file_edit": "Editing", "file_view": "Reading",
+                "file_editor_result": "File ready", "glob": "Searching", "grep": "Scanning",
+                "thinking": "Thinking", "finish": "Finishing",
+            }
+            _agent_steps = []  # Accumulate steps for expandable detail
+
+            # Try SSE streaming first, fall back to blocking /run
+            result = None
             try:
-                oh_resp = await http.post(
-                    f"{openhands_url}/run",
-                    json={
-                        "task": task, "model": coder_model,
-                        "ollama_url": config.OLLAMA_URL,
-                        "max_rounds": max_rounds,
-                        "language": language,
-                        "context": context,
-                    },
-                    timeout=600,
-                )
-            except Exception as oh_e:
+                import httpx
+                async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=600, write=10, pool=10)) as stream_client:
+                    async with stream_client.stream("POST", f"{openhands_url}/run-stream", json=oh_payload) as sse_resp:
+                        if sse_resp.status_code != 200:
+                            raise ConnectionError(f"SSE HTTP {sse_resp.status_code}")
+                        async for line in sse_resp.aiter_lines():
+                            if not line.startswith("data: "):
+                                continue
+                            try:
+                                evt = json.loads(line[6:])
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+                            if evt.get("type") == "step":
+                                step_num = evt.get("step", 0)
+                                action = evt.get("action", "")
+                                detail = evt.get("detail", "")[:80]
+                                icon = _ACTION_ICONS.get(action, "⏳")
+                                label = _ACTION_LABELS.get(action, action.replace("_", " ").title())
+                                _agent_steps.append({"step": step_num, "icon": icon, "label": label, "detail": detail})
+                                await events.emit(conv_id, "tool_progress", {
+                                    "tool": "generate_code", "icon": "wand",
+                                    "status": f"Step {step_num}/{max_rounds}: {icon} {label} — {detail}",
+                                    "detail": json.dumps({"steps": _agent_steps}),
+                                })
+                            elif evt.get("type") in ("done", "error"):
+                                result = evt
+                                break
+            except Exception as sse_err:
+                print(f"[CODEGEN:OH] SSE stream failed ({sse_err}), falling back to /run")
+                try:
+                    oh_resp = await http.post(
+                        f"{openhands_url}/run", json=oh_payload, timeout=600,
+                    )
+                    if oh_resp.status_code != 200:
+                        await events.emit(conv_id, "tool_end", {
+                            "tool": "generate_code", "icon": "code",
+                            "status": f"OpenHands HTTP {oh_resp.status_code}",
+                        })
+                        return f"ERROR: OpenHands returned HTTP {oh_resp.status_code}: {oh_resp.text[:200]}"
+                    result = oh_resp.json()
+                except Exception as oh_e:
+                    await events.emit(conv_id, "tool_end", {
+                        "tool": "generate_code", "icon": "code",
+                        "status": f"OpenHands request failed: {oh_e}",
+                    })
+                    return f"ERROR: OpenHands request failed: {oh_e}. Try write_file + run_shell instead."
+
+            if not result:
                 await events.emit(conv_id, "tool_end", {
                     "tool": "generate_code", "icon": "code",
-                    "status": f"OpenHands request failed: {oh_e}",
+                    "status": "OpenHands returned no result",
                 })
-                return f"ERROR: OpenHands request failed: {oh_e}. Try write_file + run_shell instead."
-
-            if oh_resp.status_code != 200:
-                await events.emit(conv_id, "tool_end", {
-                    "tool": "generate_code", "icon": "code",
-                    "status": f"OpenHands HTTP {oh_resp.status_code}",
-                })
-                return f"ERROR: OpenHands returned HTTP {oh_resp.status_code}: {oh_resp.text[:200]}"
-
-            result = oh_resp.json()
+                return "ERROR: OpenHands returned no result. Try write_file + run_shell instead."
             if result.get("status") == "ok":
                 files = result.get("files_created", [])
                 duration = result.get("duration_seconds", 0)
@@ -1064,14 +1167,30 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         print(f"[CODEGEN:OH] Filesystem scan failed: {scan_e}")
 
                 # Determine project directory from files
+                # Prefer /root/projects/{name} workspace, then project-*, then /root
                 project_dir = "/root"
                 if files:
                     dirs = set()
+                    workspace_dirs = set()
                     for f in files:
                         parts = f.split("/")
-                        if len(parts) >= 3:  # /root/project-name/...
+                        # /root/projects/{name}/... → ["", "root", "projects", "name", ...]
+                        if len(parts) >= 5 and parts[2] == "projects":
+                            workspace_dirs.add("/".join(parts[:4]))
+                        # Legacy: /root/project-{id}/... → ["", "root", "project-xxx", ...]
+                        elif len(parts) >= 4 and parts[2].startswith("project-"):
+                            workspace_dirs.add("/".join(parts[:3]))
+                        elif len(parts) >= 3:
                             dirs.add("/".join(parts[:3]))
-                    if len(dirs) == 1:
+                    if len(workspace_dirs) == 1:
+                        project_dir = workspace_dirs.pop()
+                        files = [f for f in files if f.startswith(project_dir)]
+                    elif len(workspace_dirs) > 1:
+                        # Multiple workspace dirs — pick the one with most files
+                        best = max(workspace_dirs, key=lambda d: sum(1 for f in files if f.startswith(d)))
+                        project_dir = best
+                        files = [f for f in files if f.startswith(project_dir)]
+                    elif len(dirs) == 1:
                         project_dir = dirs.pop()
 
                 file_list = "\n".join(f"  - {f}" for f in files) if files else "  (no files detected)"
@@ -1120,26 +1239,42 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         step_lines.append(f"  {i}. [{action}] {detail}")
                     steps_summary = "\n".join(step_lines)
 
-                resp = (
-                    f"PROJECT COMPLETE. OpenHands agent autonomously built and tested the project "
-                    f"(model: {coder_model}, {duration}s, {len(steps)} steps).\n\n"
-                    f"**Files created ({len(files)}):**\n{file_list}\n"
-                )
-                if steps_summary:
-                    resp += f"\n**Agent activity (last steps):**\n{steps_summary}\n"
-                if download_result and "Download" in download_result:
-                    resp += f"\n{download_result}\n"
-                if summary:
-                    resp += f"\n**Agent summary:** {summary[:300]}\n"
-                resp += (
-                    f"\nThe project is COMPLETE and TESTED. Do NOT inspect or modify any files. "
-                    f"Do NOT call any more tools. Respond to the user with:\n"
-                    f"1. What was built and its features\n"
-                    f"2. The download link above\n"
-                    f"3. How to run it locally (npm install && npm run dev, or python3 main.py, etc.)\n"
-                    f"4. Brief deployment tips (Vercel/Netlify for React, etc.)\n"
-                )
-                return resp
+                if files:
+                    resp = (
+                        f"PROJECT COMPLETE. OpenHands agent autonomously built and tested the project "
+                        f"(model: {coder_model}, {duration}s, {len(steps)} steps).\n\n"
+                        f"**Files created ({len(files)}):**\n{file_list}\n"
+                    )
+                    if steps_summary:
+                        resp += f"\n**Agent activity (last steps):**\n{steps_summary}\n"
+                    if download_result and "Download" in download_result:
+                        resp += f"\n{download_result}\n"
+                    if summary:
+                        resp += f"\n**Agent summary:** {summary[:300]}\n"
+                    resp += (
+                        f"\nThe project is COMPLETE and TESTED. Do NOT inspect or modify any files. "
+                        f"Do NOT call any more tools. Respond to the user with:\n"
+                        f"1. What was built and its features\n"
+                        f"2. The download link above\n"
+                        f"3. How to run it locally (npm install && npm run dev, or python3 main.py, etc.)\n"
+                        f"4. Brief deployment tips (Vercel/Netlify for React, etc.)\n"
+                    )
+                    return resp
+                else:
+                    # Agent ran but produced no files — treat as failure
+                    print(f"[CODEGEN:OH] Agent finished but created 0 files — reporting as error")
+                    await events.emit(conv_id, "tool_end", {
+                        "tool": "generate_code", "icon": "wand",
+                        "status": f"🤖 OpenHands: 0 files (model may not support tools)",
+                    })
+                    error_detail = summary[:200] if summary else "Agent completed but produced no files"
+                    return (
+                        f"ERROR: OpenHands agent finished but created 0 files "
+                        f"(model: {coder_model}, {duration}s). "
+                        f"The model may not support tool calling. "
+                        f"Detail: {error_detail}\n\n"
+                        f"Please write the code directly using the write_file tool instead."
+                    )
             else:
                 error = result.get("error", "Unknown error")[:300]
                 status = result.get("status", "error")

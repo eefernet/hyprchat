@@ -433,7 +433,7 @@ async def _ask_ollama_streamed(
 
 
 async def run_deep_research(http, ollama_url: str, default_model: str, events,
-                            topic: str, depth: int, focus: str, mode: str, topic_b: str, conv_id: str) -> dict:
+                            topic: str, depth: int, focus: str, mode: str, topic_b: str, conv_id: str, kb_context: str = "") -> dict:
     """Native deep research engine — runs in-process with httpx."""
     import config
     searxng_url = config.SEARXNG_URL
@@ -637,9 +637,14 @@ async def run_deep_research(http, ollama_url: str, default_model: str, events,
         if len(seen_urls) >= 40:
             break
 
+    # Prepend KB context if available (pre-existing knowledge from uploaded docs)
+    kb_section = ""
+    if kb_context:
+        kb_section = f"\n═══ KNOWLEDGE BASE (uploaded documents) ═══\n{kb_context}\n"
+
     length = "1000-1500" if depth >= 4 else "700-1000" if depth >= 3 else "500-700" if depth >= 2 else "300-500"
     prompt = f"""Write a comprehensive research report on: {topic}{f' (focus: {focus})' if focus else ''}
-
+{kb_section}
 Research data:
 {chr(10).join(ctx_parts)}
 
@@ -677,7 +682,7 @@ Target length: {length} words."""
 
 
 async def run_conspiracy_research(http, ollama_url: str, default_model: str, searxng_url: str, events,
-                                  topic: str, angle: str, depth: int, conv_id: str) -> str:
+                                  topic: str, angle: str, depth: int, conv_id: str, kb_context: str = "") -> str:
     """Run conspiracy research and return raw dossier text for the model."""
     await events.emit(conv_id, "tool_start", {
         "tool": "conspiracy_research", "icon": "search",
@@ -1130,6 +1135,12 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
     parts = [f"# 🕵️ CONSPIRACY DOSSIER: {topic}"]
     parts.append(f"**Angle:** {angle} | **Searches:** {stats['searches']} | **Pages read:** {stats['pages_read']}\n")
     parts.append("---")
+
+    # Prepend KB context (pre-existing knowledge from uploaded documents)
+    if kb_context:
+        parts.append("\n## 📚 KNOWLEDGE BASE (uploaded documents)\n")
+        parts.append(kb_context)
+        parts.append("\n---")
 
     if full_pages:
         parts.append("\n## 📄 PRIMARY SOURCE CONTENT\n")

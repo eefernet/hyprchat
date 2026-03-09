@@ -254,12 +254,14 @@ class CouncilCreate(BaseModel):
     name: str = "My Council"
     host_model: str = config.DEFAULT_MODEL
     host_system_prompt: str = ""
+    kb_ids: list[str] = []
 
 class CouncilUpdate(BaseModel):
     name: Optional[str] = None
     host_model: Optional[str] = None
     host_system_prompt: Optional[str] = None
     debate_rounds: Optional[int] = None
+    kb_ids: Optional[list[str]] = None
 
 class CouncilMemberCreate(BaseModel):
     model: str
@@ -277,6 +279,7 @@ class CouncilChatRequest(BaseModel):
     council_id: str
     messages: list[dict]
     quick_search: bool = False
+    kb_ids: list[str] = []
 
 class QuickSearchRequest(BaseModel):
     query: str
@@ -1535,7 +1538,7 @@ async def get_councils():
 @app.post("/api/councils")
 async def create_council(req: CouncilCreate):
     council_id = f"council-{uuid.uuid4().hex[:8]}"
-    await db.create_council(council_id, req.name, req.host_model, req.host_system_prompt)
+    await db.create_council(council_id, req.name, req.host_model, req.host_system_prompt, kb_ids=req.kb_ids)
     return await db.get_council(council_id)
 
 
@@ -2031,8 +2034,11 @@ async def council_chat_stream_ep(req: CouncilChatRequest):
     if not council:
         raise HTTPException(status_code=404, detail="Council not found")
 
+    # Merge kb_ids from council config and request
+    kb_ids = list(set((council.get("kb_ids") or []) + (req.kb_ids or [])))
+
     return StreamingResponse(
-        stream_council_chat(http, events, council, req.messages, req.conversation_id, req.quick_search),
+        stream_council_chat(http, events, council, req.messages, req.conversation_id, req.quick_search, kb_ids=kb_ids),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
@@ -2110,6 +2116,7 @@ async def get_app_settings():
         "current_coder_model": config.CODER_MODEL,
         "openhands_enabled": config.OPENHANDS_ENABLED,
         "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
+        "openhands_num_ctx": config.OPENHANDS_NUM_CTX,
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
         "sandbox_size_bytes": size,
@@ -2121,7 +2128,7 @@ async def get_app_settings():
 @app.patch("/api/settings")
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
-    allowed = {"file_cleanup_days", "ollama_url", "rag", "coder_model", "openhands_enabled", "openhands_max_rounds"}
+    allowed = {"file_cleanup_days", "ollama_url", "rag", "coder_model", "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
@@ -2149,6 +2156,9 @@ async def update_app_settings(body: dict = Body(...)):
     if "openhands_max_rounds" in body:
         config.OPENHANDS_MAX_ROUNDS = int(body["openhands_max_rounds"])
         print(f"[Config] OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
+    if "openhands_num_ctx" in body:
+        config.OPENHANDS_NUM_CTX = int(body["openhands_num_ctx"])
+        print(f"[Config] OpenHands num_ctx: {config.OPENHANDS_NUM_CTX}")
     save_settings(settings)
     return {**settings, "current_ollama_url": config.OLLAMA_URL, "current_coder_model": config.CODER_MODEL}
 
@@ -2224,6 +2234,19 @@ async def cleanup_now():
     if deleted:
         print(f"[Cleanup] Manual clean: removed {deleted} files, freed {freed // 1024} KB")
     return {"deleted": deleted, "freed_bytes": freed}
+
+
+@app.post("/api/settings/cleanup-codebox")
+async def cleanup_codebox():
+    """Delete all project files on the CodeBox sandbox."""
+    openhands_url = config.CODEBOX_URL.rsplit(":", 1)[0] + ":8586"
+    try:
+        r = await http.post(f"{openhands_url}/clean", timeout=30)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"[Cleanup] Codebox clean failed: {e}")
+        return {"deleted": 0, "error": str(e)}
 
 
 @app.get("/api/changelog")
