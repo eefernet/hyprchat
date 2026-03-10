@@ -909,6 +909,7 @@ function HyprChat(){
   const [defaultTopP,setDefaultTopP]=useState(()=>{try{return parseFloat(localStorage.getItem("hc-top-p")||"0.9");}catch{return 0.9;}});
   const [compactMode,setCompactMode]=useState(()=>{try{return localStorage.getItem("hc-compact")==="1";}catch{return false;}});
   const [autoExpandThink,setAutoExpandThink]=useState(()=>{try{return localStorage.getItem("hc-auto-expand-think")==="1";}catch{return false;}});
+  const [scanlineEffect,setScanlineEffect]=useState(()=>{try{return localStorage.getItem("hc-scanline")==="1";}catch{return false;}});
   const [lastPersonaId,setLastPersonaId]=useState(()=>{try{return localStorage.getItem("hc-last-persona")||null;}catch{return null;}});
   const [fontSize,setFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font-size")||"14");}catch{return 14;}});
   const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"14");}catch{return 14;}});
@@ -975,6 +976,7 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-top-p",String(defaultTopP));}catch{}},[defaultTopP]);
   useEffect(()=>{try{localStorage.setItem("hc-compact",compactMode?"1":"0");}catch{}},[compactMode]);
   useEffect(()=>{try{localStorage.setItem("hc-auto-expand-think",autoExpandThink?"1":"0");}catch{}},[autoExpandThink]);
+  useEffect(()=>{try{localStorage.setItem("hc-scanline",scanlineEffect?"1":"0");}catch{}},[scanlineEffect]);
   useEffect(()=>{try{localStorage.setItem("hc-font-size",fontSize);}catch{}},[fontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-ui-font-size",uiFontSize);}catch{}},[uiFontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
@@ -1882,7 +1884,7 @@ function HyprChat(){
   const _uiScale=uiFontSize/14;
   return <div style={{height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:`linear-gradient(135deg,${t.bgDeep} 0%,${t.bg} 50%,${t.bgDeep} 100%)`,color:t.text,overflow:"hidden",position:"relative"}}>
     <div style={{position:"absolute",inset:0,opacity:.025,zIndex:0,backgroundImage:`linear-gradient(${t.acc} 1px,transparent 1px),linear-gradient(90deg,${t.acc} 1px,transparent 1px)`,backgroundSize:"64px 64px"}}/>
-    <div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${t.acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:.4}}/>
+    {scanlineEffect&&<div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${t.acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:.4}}/>}
 
     {/* NAV RAIL */}
     <div style={{width:60,minWidth:60,display:"flex",flexDirection:"column",alignItems:"center",...glass,borderRight:`1px solid ${t.brd}33`,zIndex:11,padding:"12px 0",gap:3}}>
@@ -3310,6 +3312,7 @@ function HyprChat(){
           {[
             [compactMode,setCompactMode,"Compact"],
             [autoExpandThink,setAutoExpandThink,"Auto-think"],
+            [scanlineEffect,setScanlineEffect,"Scanlines"],
           ].map(([val,setter,label],idx)=><div key={idx} onClick={()=>setter(!val)} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${t.bgDeep}`,borderRadius:7,border:`1px solid ${val?t.acc:t.brd}33`,cursor:"pointer",fontSize:12}}>
             <span style={{color:val?t.acc:t.mut,fontSize:14}}>{val?<IC.ToggleOn/>:<IC.ToggleOff/>}</span>
             <span style={{color:val?t.acc:t.dim,fontWeight:600}}>{label}</span>
