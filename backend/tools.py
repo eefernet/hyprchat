@@ -143,11 +143,11 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "conspiracy_research",
-            "description": "Investigative research using leaked documents, FOIA, WikiLeaks, alt-media, and court records.",
+            "description": "Deep investigative research across WikiLeaks, FOIA vaults, court records, gov archives, alt-media, and leaked documents. Use for any topic where official narratives may be incomplete.",
             "parameters": {"type": "object", "properties": {
-                "topic": {"type": "string", "description": "Topic to investigate"},
-                "angle": {"type": "string", "description": "Angle: evidence, key_players, timeline, debunk, documents, connections"},
-                "depth": {"type": "integer", "description": "Depth 3-5 (default 4)"},
+                "topic": {"type": "string", "description": "What to investigate — a person, event, organization, or claim"},
+                "angle": {"type": "string", "description": "Focus: evidence (default), key_players, timeline, debunk, documents, connections"},
+                "depth": {"type": "integer", "description": "Search depth 3-5 (default 4). Higher = more sources searched"},
             }, "required": ["topic"]},
         },
     },

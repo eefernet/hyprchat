@@ -29,10 +29,18 @@
 - **Agent Timeline** — Enhanced `generate_code` step display with timeline dots, step count header, and scrollable container.
 - **Coder Bot quick-activate button** — `</>` button in the input bar next to prompt library. One click to apply Coder Bot persona. Glows green when active.
 
+#### Conspiracy Bot Overhaul
+- **Flexible output format** — Replaced rigid 9-section report template with adaptive output style. Simple questions get direct answers, deep investigations get structured reports, person/org inquiries get connection maps.
+- **Streamlined persona prompt** — 95 lines → 35 lines. Clearer investigative philosophy, same uncensored ATLAS identity.
+- **PRIME DIRECTIVE pattern** — Always calls `conspiracy_research` first before answering, matching the Coder Bot's "act don't talk" approach.
+- **Document drill-down** — Added `fetch_url` to the bot's tool list so it can read full documents from its research results instead of just summarizing search snippets.
+- **Better tool description** — Broader framing ("any topic where official narratives may be incomplete") with clearer parameter descriptions.
+
 #### Deploy Monitor
 - **Smart routing** — `openhands_worker.py` now deploys to the Codebox server instead of the HyprChat server, with automatic `systemctl restart openhands-worker`.
 - **Server labels** — Deploy results show which server each file was sent to.
 - **Configurable SSH timeout** — Service restart timeout increased to 90s to accommodate slow restarts.
+- **Watches CHANGELOG.md and README.md** — Now auto-deploys docs to `/opt/hyprchat/` when changed.
 
 ---
 
