@@ -12,7 +12,7 @@ import uuid
 
 import config
 import database as db
-from research import run_deep_research, run_conspiracy_research, _fetch_page
+from research import run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
 
 # Strip ANSI escape codes from terminal output before feeding back to the model
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
@@ -684,6 +684,12 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             import urllib.parse
             params = urllib.parse.urlencode({"q": query, "format": "json", "count": config.SEARCH_RESULTS_COUNT})
             r = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=15)
+            if r.status_code == 429:
+                await asyncio.sleep(3.0)
+                r = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=15)
+            if r.status_code >= 400:
+                await events.emit(conv_id, "tool_end", {"tool": "research", "icon": "search", "status": f"⚠️ Search returned HTTP {r.status_code} — may be rate limited"})
+                return f"**Web Search: {query}**\n\n⚠️ Search engine returned HTTP {r.status_code}. Upstream engines may be rate-limiting requests. Try again in a minute."
             data = r.json()
             results = data.get("results", [])[:config.SEARCH_RESULTS_COUNT]
             sr_cards = []
@@ -712,12 +718,14 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             if sr_cards:
                 await events.emit(conv_id, "search_results", {"query": query, "results": sr_cards})
 
-            # ── Fetch top 3 pages in parallel for actual content ──
+            # ── Fetch top 5 pages in parallel, prioritized by source tier ──
             fetch_urls = []
             for item in results:
                 u = item.get("url", "")
-                if u and len(fetch_urls) < 3:
+                if u:
                     fetch_urls.append(u)
+            fetch_urls.sort(key=_source_tier)
+            fetch_urls = fetch_urls[:5]
 
             pages = []
             if fetch_urls:

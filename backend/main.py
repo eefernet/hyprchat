@@ -348,21 +348,26 @@ async def _check_searxng() -> dict:
         ms = int((time.time() - t0) * 1000)
         return {"status": "error", "response_ms": ms, "error": str(e)[:200]}
     # Service is up — now check if rate-limited by doing a real search
+    # Use a specific-enough query that won't be trivially cached but should always have results
     try:
         r2 = await http.get(
             f"{config.SEARXNG_URL}/search",
-            params={"q": "test", "format": "json"},
+            params={"q": "united states population 2024", "format": "json"},
             timeout=10,
         )
         if r2.status_code == 429:
             return {"status": "degraded", "response_ms": ms, "rate_limited": True}
-        # Some SearXNG instances return 200 but with empty results when rate-limited
+        if r2.status_code >= 400:
+            return {"status": "degraded", "response_ms": ms, "rate_limited": True}
         data = r2.json()
         results = data.get("results", [])
-        # If we get a 200 with an error about rate limiting or no results + unresponsive_engines
         unresponsive = data.get("unresponsive_engines", [])
-        if not results and len(unresponsive) > 0:
+        # Rate-limited: no results at all, or most engines unresponsive
+        if not results:
             return {"status": "degraded", "response_ms": ms, "rate_limited": True}
+        if len(unresponsive) >= 2:
+            return {"status": "degraded", "response_ms": ms, "rate_limited": True,
+                    "unresponsive_engines": [e[0] if isinstance(e, (list, tuple)) else str(e) for e in unresponsive[:5]]}
         return {"status": "ok", "response_ms": ms, "rate_limited": False}
     except Exception:
         # Search failed but healthz was ok — mark as degraded

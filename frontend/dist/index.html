@@ -1570,13 +1570,21 @@ function HyprChat(){
     }
   };
 
-  // Pull model
+  // Refresh models from Ollama (single source of truth)
+  const refreshModels=async()=>{try{const r=await fetch(`${API}/api/models`);const d=await r.json();setModels(d.models||[]);setModelDetails(d.model_details||{});}catch{}};
+
+  // Pull model — uses shared downloads UI
   const pullModel=async()=>{
-    if(!pullName.trim())return;setPullProg("Starting...");
+    if(!pullName.trim())return;
+    const dlId=`pull-${Date.now()}`;const dlName=pullName.trim();
+    setDownloads(p=>[...p,{id:dlId,name:dlName,status:"creating",pct:0,message:"Pulling from Ollama...",error:null,completedBytes:0,totalBytes:0,startTime:Date.now(),speed:0,eta:0}]);
+    setDownloadsExpanded(true);setPullName("");setPullProg(null);
+    const updDl=upd=>setDownloads(p=>p.map(d=>d.id===dlId?{...d,...upd}:d));
     try{
-      const res=await fetch(`${API}/api/models/pull`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:pullName})});
-      if(!res.ok){setPullProg(`Error: ${res.status} ${res.statusText}`);setTimeout(()=>setPullProg(null),3000);return;}
+      const res=await fetch(`${API}/api/models/pull`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:dlName})});
+      if(!res.ok){updDl({status:"error",error:`Server error: ${res.status} ${res.statusText}`});return;}
       const rdr=res.body.getReader(),dec=new TextDecoder();let buf="";
+      let lastBytes=0,lastTime=Date.now(),lastSpeedUpdate=0,curSpeed=0,curEta=0;
       while(true){
         const{done,value}=await rdr.read();if(done)break;
         buf+=dec.decode(value,{stream:true});
@@ -1584,13 +1592,30 @@ function HyprChat(){
         for(const ln of lines){
           if(!ln.startsWith("data: "))continue;
           try{const d=JSON.parse(ln.slice(6));
-            if(d.status){let p=d.status;if(d.completed&&d.total)p+=` ${Math.round(d.completed/d.total*100)}%`;setPullProg(p);}
+            if(d.error){updDl({status:"error",error:d.error});continue;}
+            if(d.status==="success"){
+              updDl({status:"done",pct:100,message:"Done!"});
+              refreshModels();
+              setTimeout(()=>setDownloads(p=>p.filter(dl=>dl.id!==dlId)),10000);
+              continue;
+            }
+            const completed=d.completed||0,total=d.total||0;
+            const pct=total>0?Math.round(completed/total*100):0;
+            const now=Date.now();
+            // Throttle speed/ETA calc to every 3s
+            if(completed>0&&now-lastSpeedUpdate>=3000){
+              if(completed>lastBytes){
+                const dt=(now-lastTime)/1000;
+                curSpeed=dt>0?(completed-lastBytes)/dt:0;
+                if(curSpeed>0&&total>completed)curEta=Math.round((total-completed)/curSpeed);
+                else curEta=0;
+              }
+              lastBytes=completed;lastTime=now;lastSpeedUpdate=now;
+            }
+            updDl({status:"downloading",pct,message:d.status+(pct?` ${pct}%`:""),completedBytes:completed,totalBytes:total,speed:curSpeed,eta:curEta});
           }catch{}}
       }
-      setPullProg("Done!");setPullName("");
-      const r2=await fetch(`${API}/api/models`);const d2=await r2.json();setModels(d2.models||[]);setModelDetails(d2.model_details||{});
-      setTimeout(()=>setPullProg(null),2000);
-    }catch(e){setPullProg(`Error: ${e.message}`);setTimeout(()=>setPullProg(null),3000);}
+    }catch(e){updDl({status:"error",error:e.message});}
   };
 
   // HuggingFace helpers
@@ -1648,7 +1673,7 @@ function HyprChat(){
       const res=await fetch(`${API}/api/hf/download`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({repo_id:hfSelected.id,filenames:hfSelectedFiles,model_name:dlName})});
       if(!res.ok){updDl({status:"error",error:`Server error: ${res.status} ${res.statusText}`});setHfDownloading(false);return;}
       const rdr=res.body.getReader(),dec=new TextDecoder();let buf="";
-      let lastBytes=0,lastTime=Date.now();
+      let lastBytes=0,lastTime=Date.now(),lastSpeedUpdate=0,curSpeed=0,curEta=0;
       while(true){
         const{done,value}=await rdr.read();if(done)break;
         buf+=dec.decode(value,{stream:true});
@@ -1660,19 +1685,22 @@ function HyprChat(){
             if(d.status==="error"){updDl({status:"error",error:d.message});}
             else if(d.status==="done"){
               updDl({status:"done",pct:100,message:d.message||"Done!"});
-              fetch(`${API}/api/models`).then(r=>r.json()).then(d=>{setModels(d.models||[]);setModelDetails(d.model_details||{});}).catch(()=>{});
+              refreshModels();
               setTimeout(()=>setDownloads(p=>p.filter(dl=>dl.id!==dlId)),10000);
             }else if(d.status==="downloading"){
               const now=Date.now();
               const completed=d.completed||0,total=d.total||0;
-              let speed=0,eta=0;
-              if(completed>lastBytes&&now>lastTime){
-                const dt=(now-lastTime)/1000;
-                speed=(completed-lastBytes)/dt;
-                if(speed>0&&total>completed)eta=Math.round((total-completed)/speed);
+              // Throttle speed/ETA calc to every 3s
+              if(completed>0&&now-lastSpeedUpdate>=3000){
+                if(completed>lastBytes){
+                  const dt=(now-lastTime)/1000;
+                  curSpeed=dt>0?(completed-lastBytes)/dt:0;
+                  if(curSpeed>0&&total>completed)curEta=Math.round((total-completed)/curSpeed);
+                  else curEta=0;
+                }
+                lastBytes=completed;lastTime=now;lastSpeedUpdate=now;
               }
-              if(completed>0){lastBytes=completed;lastTime=now;}
-              updDl({status:"downloading",pct:d.pct||0,message:d.message,completedBytes:completed,totalBytes:total||totalSize,speed,eta});
+              updDl({status:"downloading",pct:d.pct||0,message:d.message,completedBytes:completed,totalBytes:total||totalSize,speed:curSpeed,eta:curEta});
             }else if(d.message)updDl({message:d.message,status:d.status||"creating"});
           }catch{}
         }
@@ -1800,10 +1828,17 @@ function HyprChat(){
         if(ln.match(/^### /))return <div key={j} style={{fontSize:14,fontWeight:700,color:t.acc,margin:"12px 0 5px"}}>{inlineParse(ln.slice(4))}</div>;
         if(ln.match(/^## /))return <div key={j} style={{fontSize:15,fontWeight:700,color:t.acc,margin:"14px 0 6px"}}>{inlineParse(ln.slice(3))}</div>;
         if(ln.match(/^# /))return <div key={j} style={{fontSize:17,fontWeight:700,color:t.acc,margin:"16px 0 7px"}}>{inlineParse(ln.slice(2))}</div>;
-        if(ln.match(/^>\s?/))return <div key={j} style={{borderLeft:`3px solid ${t.warm}`,paddingLeft:12,margin:"6px 0",background:`${t.warm}0D`,borderRadius:"0 6px 6px 0",padding:"8px 12px",borderLeftWidth:3,borderLeftStyle:"solid",borderLeftColor:t.warm}}>
-          <div style={{display:"flex",alignItems:"flex-start",gap:6}}><span style={{color:t.warm,fontSize:16,lineHeight:1,flexShrink:0,marginTop:1}}>"</span><span style={{color:t.text,fontStyle:"italic",fontSize:"0.95em",lineHeight:1.6,flex:1}}>{inlineParse(ln.replace(/^>\s?/,""))}</span><span style={{color:t.warm,fontSize:16,lineHeight:1,flexShrink:0,alignSelf:"flex-end"}}>"</span></div>
-          <div style={{marginTop:4,fontSize:9,color:t.warm,opacity:0.7,textTransform:"uppercase",letterSpacing:1}}>quoted source</div>
-        </div>;
+        if(ln.match(/^>\s?/)){const qRaw=ln.replace(/^>\s?/,"");
+        /* If this line is just an attribution (— Name...), skip — it was consumed by the previous quote line */
+        if(qRaw.match(/^[—–]\s/))return null;
+        /* Look ahead: if next line is "> — Attribution", grab it */
+        const allLines=p.split("\n");const nextLn=(j+1<allLines.length)?allLines[j+1]:"";
+        const nextAttr=nextLn.match(/^>\s?[—–]\s*(.+)/);
+        const attrLabel=nextAttr?nextAttr[1]:"quoted source";
+        return <div key={j} style={{borderLeft:`3px solid ${t.warm}`,paddingLeft:12,margin:"6px 0",background:`${t.warm}0D`,borderRadius:"0 6px 6px 0",padding:"8px 12px",borderLeftWidth:3,borderLeftStyle:"solid",borderLeftColor:t.warm}}>
+          <div style={{display:"flex",alignItems:"flex-start",gap:6}}><span style={{color:t.warm,fontSize:16,lineHeight:1,flexShrink:0,marginTop:1}}>"</span><span style={{color:t.text,fontStyle:"italic",fontSize:"0.95em",lineHeight:1.6,flex:1}}>{inlineParse(qRaw)}</span><span style={{color:t.warm,fontSize:16,lineHeight:1,flexShrink:0,alignSelf:"flex-end"}}>"</span></div>
+          <div style={{marginTop:4,fontSize:9,color:t.warm,opacity:0.7,textTransform:"uppercase",letterSpacing:1}}>{inlineParse(attrLabel)}</div>
+        </div>;}
         if(ln.match(/^[-*+]\s+/))return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:t.acc,marginTop:"0.25em",fontSize:"0.7em",flexShrink:0}}>●</span><span style={{flex:1}}>{inlineParse(ln.replace(/^[-*+]\s+/,""))}</span></div>;
         if(ln.match(/^\d+\.\s+/)){const num=ln.match(/^(\d+)\./)[1];return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:t.acc,minWidth:18,flexShrink:0,fontWeight:600,fontSize:"0.9em"}}>{num}.</span><span style={{flex:1}}>{inlineParse(ln.replace(/^\d+\.\s+/,""))}</span></div>;}
         if(ln.match(/^\|.+\|/)){
@@ -2706,7 +2741,7 @@ function HyprChat(){
                     </div>
                   </div>
                   {hasCustom&&<div style={{width:7,height:7,borderRadius:"50%",background:t.acc,flexShrink:0}}/>}
-                  <button onClick={async e=>{e.stopPropagation();if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}setModels(p=>p.filter(x=>x!==m));setModelDetails(p=>{const n={...p};delete n[m];return n;});if(modelParamsOpen===m)setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}}  style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"2px 4px",borderRadius:4,flexShrink:0,display:"flex",alignItems:"center",opacity:.4,transition:"opacity .15s"}} onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=.4}><IC.Trash/></button>
+                  <button onClick={async e=>{e.stopPropagation();if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}refreshModels();if(modelParamsOpen===m)setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}}  style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"2px 4px",borderRadius:4,flexShrink:0,display:"flex",alignItems:"center",opacity:.4,transition:"opacity .15s"}} onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=.4}><IC.Trash/></button>
                   <span style={{fontSize:11,color:t.mut,flexShrink:0,transition:"transform .2s",transform:sel?"rotate(90deg)":"none"}}>›</span>
                 </div>;
               })}
@@ -2722,11 +2757,8 @@ function HyprChat(){
           <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Pull from Ollama Library</div>
           <div style={{display:"flex",gap:8}}>
             <input value={pullName} onChange={e=>setPullName(e.target.value)} placeholder="llama3.1:8b" onKeyDown={e=>e.key==="Enter"&&pullModel()} style={{...inputS,flex:1,fontSize:13,padding:"8px 12px"}}/>
-            <button onClick={pullModel} disabled={!pullName.trim()||!!pullProg} style={{...btnS(t.ok),padding:"8px 14px",fontSize:12,flexShrink:0}}>Pull</button>
+            <button onClick={pullModel} disabled={!pullName.trim()} style={{...btnS(t.ok),padding:"8px 14px",fontSize:12,flexShrink:0}}>Pull</button>
           </div>
-          {pullProg&&<div style={{marginTop:8,fontSize:11,color:t.acc,display:"flex",alignItems:"center",gap:6}}>
-            <div style={{display:"flex",gap:2}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>{pullProg}
-          </div>}
         </div>
         {!modelParamsOpen?
           /* Global defaults shown when nothing is selected */
@@ -2835,7 +2867,7 @@ function HyprChat(){
                 </div>
                 <div style={{display:"flex",gap:8}}>
                   <button onClick={()=>uConv(actId,{model:m})} style={{...btnS(t.acc),padding:"7px 16px",fontSize:12}}>Use</button>
-                  <button onClick={async()=>{if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}setModels(p=>p.filter(x=>x!==m));setModelDetails(p=>{const n={...p};delete n[m];return n;});setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}} style={{...btnS(t.err),padding:"7px 10px",fontSize:12}}><IC.Trash/></button>
+                  <button onClick={async()=>{if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}refreshModels();setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}} style={{...btnS(t.err),padding:"7px 10px",fontSize:12}}><IC.Trash/></button>
                 </div>
               </div>
               {/* Tool calling template fix */}
@@ -2964,7 +2996,7 @@ function HyprChat(){
                 </div>
                 <div style={{display:"flex",flexDirection:"column",gap:3,flexShrink:0}}>
                   <button onClick={async e=>{e.stopPropagation();if(makingToolModel)return;setMakingToolModel(m);try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}/create-tool-model`,{method:"POST"});const d=await r.json();if(!r.ok){alert(`Failed: ${d.detail||r.statusText}`);return;}alert(`✅ Modelfile patched for tool calling!`);}catch(e){alert(`Error: ${e.message}`);}finally{setMakingToolModel(null);}}} disabled={!!makingToolModel} title="Patch modelfile to enable native tool calling" style={{background:makingToolModel===m?`${t.mut}15`:`${t.ok}22`,border:`1px solid ${makingToolModel===m?t.mut:t.ok}55`,color:makingToolModel===m?t.mut:t.ok,cursor:makingToolModel?"wait":"pointer",padding:"4px 8px",borderRadius:5,fontSize:9,fontWeight:700,whiteSpace:"nowrap",transition:"all .15s"}}>{makingToolModel===m?"⏳ Patching…":"🔧 Enable Tools"}</button>
-                  <button onClick={async e=>{e.stopPropagation();if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}setModels(p=>p.filter(x=>x!==m));setModelDetails(p=>{const n={...p};delete n[m];return n;});if(modelParamsOpen===m)setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}}  style={{background:"none",border:`1px solid ${t.err}33`,color:t.err,cursor:"pointer",padding:"3px 8px",borderRadius:5,fontSize:9,fontWeight:600,opacity:.6,transition:"opacity .15s"}} onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=.6}>🗑 Delete</button>
+                  <button onClick={async e=>{e.stopPropagation();if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}refreshModels();if(modelParamsOpen===m)setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}}  style={{background:"none",border:`1px solid ${t.err}33`,color:t.err,cursor:"pointer",padding:"3px 8px",borderRadius:5,fontSize:9,fontWeight:600,opacity:.6,transition:"opacity .15s"}} onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=.6}>🗑 Delete</button>
                 </div>
                 <span style={{fontSize:9,color:t.mut,flexShrink:0,transition:"transform .2s",transform:isSel?"rotate(90deg)":"none"}}>›</span>
               </div>;
@@ -3052,7 +3084,7 @@ function HyprChat(){
                   <div style={{display:"flex",flexDirection:"column",gap:5,alignItems:"flex-end"}}>
                     <div style={{display:"flex",gap:6}}>
                       <button onClick={()=>uConv(actId,{model:m})} style={{...btnS(t.acc),padding:"5px 12px"}}>Use</button>
-                      <button onClick={async()=>{if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}setModels(p=>p.filter(x=>x!==m));setModelDetails(p=>{const n={...p};delete n[m];return n;});setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}} style={{...btnS(t.err),padding:"5px 8px"}}><IC.Trash/></button>
+                      <button onClick={async()=>{if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}refreshModels();setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}} style={{...btnS(t.err),padding:"5px 8px"}}><IC.Trash/></button>
                     </div>
                     <button onClick={async e=>{e.stopPropagation();if(makingToolModel)return;setMakingToolModel(m);try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}/create-tool-model`,{method:"POST"});const d=await r.json();if(!r.ok){alert(`Failed: ${d.detail||r.statusText}`);return;}alert(`✅ Modelfile patched — this model can now use tools!`);}catch(e){alert(`Error: ${e.message}`);}finally{setMakingToolModel(null);}}} disabled={!!makingToolModel} style={{background:makingToolModel===m?`${t.mut}15`:`${t.ok}22`,border:`1px solid ${makingToolModel===m?t.mut:t.ok}66`,color:makingToolModel===m?t.mut:t.ok,cursor:makingToolModel?"wait":"pointer",padding:"5px 12px",borderRadius:7,fontSize:10,fontWeight:700,whiteSpace:"nowrap",letterSpacing:.3,transition:"all .15s"}}>{makingToolModel===m?"⏳ Patching…":"🔧 Enable Tool Calling"}</button>
                   </div>
@@ -3199,7 +3231,7 @@ function HyprChat(){
             <button disabled={ollamaUrlSaving} onClick={async()=>{
               setOllamaUrlSaving(true);
               try{await fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({ollama_url:ollamaUrl})});
-                const r2=await fetch(`${API}/api/models`);const d2=await r2.json();setModels(d2.models||[]);setModelDetails(d2.model_details||{});
+                await refreshModels();
               }catch{}
               setOllamaUrlSaving(false);
             }} style={{...btnS(t.ok),opacity:ollamaUrlSaving?.6:1,fontSize:12,padding:"8px 16px"}}>

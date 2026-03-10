@@ -8,6 +8,11 @@ import time
 import urllib.parse
 from datetime import datetime
 
+# ── Search rate-limit tuning ──
+_SEARCH_BATCH_SIZE = 3
+_SEARCH_BATCH_DELAY_DEEP = 2.0          # seconds between batches in deep research
+_SEARCH_BATCH_DELAY_CONSPIRACY = 2.5    # seconds between batches in conspiracy research
+
 
 async def _search_google_fallback(http, query: str, count: int = 10) -> list:
     """Fallback: scrape Google search results when SearXNG is down."""
@@ -58,6 +63,11 @@ async def _search_searxng(http, searxng_url: str, query: str, count: int = 10, c
     try:
         params = urllib.parse.urlencode({"q": query, "format": "json", "language": "en", "categories": categories})
         r = await http.get(f"{searxng_url}/search?{params}", timeout=12)
+        if r.status_code == 429:
+            await asyncio.sleep(3.0)
+            r = await http.get(f"{searxng_url}/search?{params}", timeout=12)
+        if r.status_code >= 400:
+            return []
         data = r.json()
         for item in data.get("results", [])[:count]:
             url = item.get("url", "")
@@ -218,12 +228,16 @@ def _wikileaks_collections_for_topic(topic_lower: str) -> list[str]:
 async def _fetch_page(http, url: str) -> dict | None:
     """Fetch and clean a web page."""
     skip = ["youtube.com", "twitter.com", "x.com", "facebook.com", "instagram.com",
-            ".pdf", "linkedin.com", "tiktok.com"]
+            ".pdf", "linkedin.com", "tiktok.com",
+            "snopes.com", "politifact.com", "factcheck.org", "leadstories.com",
+            "fullfact.org", "mediabiasfactcheck.com"]
     if any(p in url.lower() for p in skip):
         return None
     try:
-        r = await http.get(url, timeout=10, follow_redirects=True,
+        r = await http.get(url, timeout=15, follow_redirects=True,
                            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"})
+        if r.status_code >= 400:
+            return None
         ct = r.headers.get("content-type", "")
         if "text" not in ct and "json" not in ct:
             return None
@@ -240,6 +254,7 @@ async def _fetch_page(http, url: str) -> dict | None:
         text = re.sub(r"&gt;", ">", text)
         text = re.sub(r"&nbsp;", " ", text)
         text = re.sub(r"&\w+;", " ", text)
+        text = re.sub(r"-----BEGIN PGP [A-Z ]+-----.*?-----END PGP [A-Z ]+-----", "[PGP block removed]", text, flags=re.DOTALL)
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text).strip()
         if len(text) < 200:
@@ -276,6 +291,37 @@ async def _fetch_gov_doc_index(http, url: str) -> dict | None:
         return result
     except Exception:
         return None
+
+
+# ── Source tier scoring for evidence-first prioritization ──
+_TIER1_PRIMARY = [
+    "wikileaks.org", "archives.gov", "cia.gov/readingroom", "vault.fbi.gov",
+    "courtlistener.com", "documentcloud.org", "muckrock.com", "pacer.gov",
+    "sec.gov/edgar", "cryptome.org", "ddosecrets.com", "theblackvault.com",
+    "foia.state.gov",
+]
+_TIER2_INVESTIGATIVE = [
+    "theintercept.com", "bellingcat.com", "propublica.org", "archive.org",
+    "substack.com", "thegrayzone.com", "mintpressnews.com",
+]
+_TIER4_FACTCHECK = [
+    "snopes.com", "politifact.com", "factcheck.org", "leadstories.com",
+    "fullfact.org", "reuters.com/fact-check", "apnews.com/fact-check",
+    "mediabiasfactcheck.com", "usatoday.com/fact-check",
+    "washingtonpost.com/fact-checker",
+]
+
+
+def _source_tier(url: str) -> int:
+    """Score a URL by source tier: 0=primary evidence, 1=investigative, 2=general, 3=fact-checker."""
+    ul = url.lower()
+    if any(d in ul for d in _TIER1_PRIMARY):
+        return 0
+    if any(d in ul for d in _TIER2_INVESTIGATIVE):
+        return 1
+    if any(d in ul for d in _TIER4_FACTCHECK):
+        return 3
+    return 2
 
 
 async def _fetch_wikileaks_page(http, url: str) -> dict | None:
@@ -321,6 +367,7 @@ async def _fetch_wikileaks_page(http, url: str) -> dict | None:
         text = re.sub(r"&gt;", ">", text)
         text = re.sub(r"&nbsp;", " ", text)
         text = re.sub(r"&\w+;", " ", text)
+        text = re.sub(r"-----BEGIN PGP [A-Z ]+-----.*?-----END PGP [A-Z ]+-----", "[PGP block removed]", text, flags=re.DOTALL)
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text).strip()
 
@@ -459,15 +506,15 @@ async def run_deep_research(http, ollama_url: str, default_model: str, events,
 
     async def parallel_search(queries):
         flat = []
-        for batch_start in range(0, len(queries), 4):
-            batch = queries[batch_start:batch_start + 4]
+        for batch_start in range(0, len(queries), _SEARCH_BATCH_SIZE):
+            batch = queries[batch_start:batch_start + _SEARCH_BATCH_SIZE]
             tasks = [do_search(q) for q in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
                 if isinstance(r, list):
                     flat.extend(r)
-            if batch_start + 4 < len(queries):
-                await asyncio.sleep(1.0)
+            if batch_start + _SEARCH_BATCH_SIZE < len(queries):
+                await asyncio.sleep(_SEARCH_BATCH_DELAY_DEEP)
         return flat
 
     async def parallel_fetch(urls, limit=5):
@@ -764,15 +811,15 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
         stats["searches"] += 1
         return await _search_searxng(http, searxng_url, q, 12, categories=categories)
 
-    for batch_start in range(0, len(base_queries), 4):
-        batch = base_queries[batch_start:batch_start + 4]
+    for batch_start in range(0, len(base_queries), _SEARCH_BATCH_SIZE):
+        batch = base_queries[batch_start:batch_start + _SEARCH_BATCH_SIZE]
         tasks = [_csearch(q) for q in batch]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for r in results:
             if isinstance(r, list):
                 all_findings.extend(r)
-        if batch_start + 4 < len(base_queries):
-            await asyncio.sleep(1.5)
+        if batch_start + _SEARCH_BATCH_SIZE < len(base_queries):
+            await asyncio.sleep(_SEARCH_BATCH_DELAY_CONSPIRACY)
 
     if not all_findings:
         await events.emit(conv_id, "tool_end", {
@@ -781,7 +828,9 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
         })
         return f"# ⚠️ CONSPIRACY RESEARCH FAILED\n\nNo search results found for '{topic}'. The SearXNG search engine returned 0 results — it may be offline or unreachable at {searxng_url}.\n\nTell the user the search service appears to be down and to try again shortly."
 
-    fetch_urls = [f["url"] for f in all_findings if f.get("url") and f["url"] not in fetched][:14]
+    _candidate_urls = [f["url"] for f in all_findings if f.get("url") and f["url"] not in fetched]
+    _candidate_urls.sort(key=_source_tier)
+    fetch_urls = _candidate_urls[:14]
     fetch_tasks = [_fetch_page(http, u) for u in fetch_urls]
     fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
     for u, r in zip(fetch_urls, fetch_results):
@@ -826,17 +875,19 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
         f"{topic} data dump hack exposed internal documents",
         f"{topic} email dump hacked internal memo revealed",
     ]
-    for batch_start in range(0, len(wave2), 4):
-        batch = wave2[batch_start:batch_start + 4]
+    for batch_start in range(0, len(wave2), _SEARCH_BATCH_SIZE):
+        batch = wave2[batch_start:batch_start + _SEARCH_BATCH_SIZE]
         t2 = [_csearch(q) for q in batch]
         r2 = await asyncio.gather(*t2, return_exceptions=True)
         for r in r2:
             if isinstance(r, list):
                 all_findings.extend(r)
-        if batch_start + 4 < len(wave2):
-            await asyncio.sleep(1.5)
+        if batch_start + _SEARCH_BATCH_SIZE < len(wave2):
+            await asyncio.sleep(_SEARCH_BATCH_DELAY_CONSPIRACY)
 
-    fetch2 = [f["url"] for f in all_findings if f.get("url") and f["url"] not in fetched][:16]
+    _candidate_urls2 = [f["url"] for f in all_findings if f.get("url") and f["url"] not in fetched]
+    _candidate_urls2.sort(key=_source_tier)
+    fetch2 = _candidate_urls2[:16]
     ft2 = [_fetch_page(http, u) for u in fetch2]
     fr2 = await asyncio.gather(*ft2, return_exceptions=True)
     for u, r in zip(fetch2, fr2):
@@ -934,6 +985,8 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
 
     direct_urls = []
 
+    wave3_queries = []
+
     if any(k in topic_lower for k in ["epstein", "jeffrey", "maxwell", "trafficking", "lolita"]):
         direct_urls += [
             "https://www.courtlistener.com/?q=epstein&type=r&order_by=score+desc",
@@ -942,18 +995,15 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
             "https://muckrock.com/foi/list/?q=epstein",
             "https://www.justice.gov/usao-sdny/pr/jeffrey-epstein-indicted-federal-sex-trafficking-charges",
         ]
-        wave3_q = [
-            f"Epstein flight logs passengers names list",
-            f"Epstein island Little Saint James visitors",
-            f"Ghislaine Maxwell trial testimony deposition unsealed",
-            f"Epstein network financiers funders named",
-            f"Epstein blackmail intelligence operation Mossad CIA",
-            f"Epstein Wexner Les financial relationship",
-            f"Virginia Giuffre affidavit deposition names",
+        wave3_queries += [
+            "Epstein flight logs passengers names list",
+            "Epstein island Little Saint James visitors",
+            "Ghislaine Maxwell trial testimony deposition unsealed",
+            "Epstein network financiers funders named",
+            "Epstein blackmail intelligence operation Mossad CIA",
+            "Epstein Wexner Les financial relationship",
+            "Virginia Giuffre affidavit deposition names",
         ]
-        for wq in wave3_q:
-            if wq not in searched:
-                all_findings.extend(await _csearch(wq))
 
     if any(k in topic_lower for k in ["9/11", "nine eleven", "september 11", "wtc", "world trade", "twin towers"]):
         direct_urls += [
@@ -962,7 +1012,7 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
             "https://www.cia.gov/readingroom/search/site/9-11",
             "https://vault.fbi.gov/9-11-investigation",
         ]
-        wave3_q = [
+        wave3_queries += [
             "9/11 declassified 28 pages Saudi Arabia funding",
             "9/11 NORAD stand down order who gave",
             "9/11 insider trading put options before attack",
@@ -970,9 +1020,6 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
             "9/11 commission omissions suppressed evidence",
             "9/11 hijackers CIA asset connections",
         ]
-        for wq in wave3_q:
-            if wq not in searched:
-                all_findings.extend(await _csearch(wq))
 
     if any(k in topic_lower for k in ["jfk", "kennedy", "assassination", "warren commission", "oswald"]):
         direct_urls += [
@@ -981,16 +1028,13 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
             "https://www.cia.gov/readingroom/search/site/kennedy",
             "https://www.woodrowwilsoncenter.org/article/jfk-documents",
         ]
-        wave3_q = [
+        wave3_queries += [
             "JFK assassination declassified documents CIA withheld",
             "Lee Harvey Oswald CIA handler contact",
             "JFK magic bullet theory disputed forensics",
             "JFK assassination multiple shooters Grassy Knoll witnesses",
             "George HW Bush CIA Dallas 1963",
         ]
-        for wq in wave3_q:
-            if wq not in searched:
-                all_findings.extend(await _csearch(wq))
 
     if any(k in topic_lower for k in ["cia", "mkultra", "mk ultra", "mind control", "monarch"]):
         direct_urls += [
@@ -1006,34 +1050,28 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
             "https://vault.fbi.gov/unexplained-phenomenon",
             "https://www.aaro.mil/",
         ]
-        wave3_q = [
+        wave3_queries += [
             "UAP UFO congressional testimony 2023 2024 whistleblower",
             "David Grusch UAP non-human intelligence testimony",
             "UAP crash retrieval program secret Pentagon",
             "Skinwalker Ranch government program AAWSAP",
         ]
-        for wq in wave3_q:
-            if wq not in searched:
-                all_findings.extend(await _csearch(wq))
 
     if any(k in topic_lower for k in ["covid", "coronavirus", "pandemic", "lab leak", "wuhan", "vaccine", "mrna"]):
         direct_urls += [
             "https://www.documentcloud.org/app#search/q=fauci+covid",
             "https://muckrock.com/foi/list/?q=covid+lab+leak",
         ]
-        wave3_q = [
+        wave3_queries += [
             "COVID-19 lab leak Wuhan Institute Virology evidence",
             "Fauci NIH EcoHealth gain of function funding",
             "COVID pandemic preparedness simulation Event 201",
             "FOIA Fauci emails released EcoHealth",
             "mRNA vaccine adverse events VAERS suppressed data",
         ]
-        for wq in wave3_q:
-            if wq not in searched:
-                all_findings.extend(await _csearch(wq))
 
     if any(k in topic_lower for k in ["rothschild", "rockefeller", "bilderberg", "davos", "wef", "nwo", "new world order", "illuminati", "deep state"]):
-        wave3_q = [
+        wave3_queries += [
             "Bilderberg Group meeting attendees decisions leaked minutes",
             "World Economic Forum great reset agenda 2030 criticism exposed",
             "Council on Foreign Relations members influence policy media",
@@ -1041,51 +1079,39 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
             "Committee of 300 Club of Rome global governance",
             f"{topic} site:theblackvault.com OR site:cryptome.org",
         ]
-        for wq in wave3_q:
-            if wq not in searched:
-                all_findings.extend(await _csearch(wq))
 
     if any(k in topic_lower for k in ["great reset", "agenda 2030", "agenda 21", "depopulation", "georgia guidestones", "population control"]):
-        wave3_q = [
+        wave3_queries += [
             "UN Agenda 2030 sustainable development depopulation goals",
             "Great Reset WEF Schwab you will own nothing",
             "Agenda 21 local implementation land grab documents",
             "Gates Foundation depopulation vaccines funding eugenics",
             "Deagel population forecast 2025 depopulation prediction",
         ]
-        for wq in wave3_q:
-            if wq not in searched:
-                all_findings.extend(await _csearch(wq))
 
     if any(k in topic_lower for k in ["big pharma", "fda corruption", "cdc corruption", "pharmaceutical", "drug company", "sackler", "opioid"]):
         direct_urls += [
             "https://www.documentcloud.org/app#search/q=FDA+suppressed",
             "https://muckrock.com/foi/list/?q=FDA+CDC",
         ]
-        wave3_q = [
+        wave3_queries += [
             f"{topic} FDA approval corruption revolving door lobbying",
             f"{topic} clinical trial data suppressed hidden adverse events",
             f"{topic} whistleblower FDA CDC internal documents",
             "pharmaceutical company internal memo leaked suppressed data",
         ]
-        for wq in wave3_q:
-            if wq not in searched:
-                all_findings.extend(await _csearch(wq))
 
     if any(k in topic_lower for k in ["chemtrail", "geoengineering", "haarp", "weather modification", "cloud seeding"]):
         direct_urls += [
             "https://www.geoengineeringwatch.org",
             "https://patents.google.com/?q=weather+modification",
         ]
-        wave3_q = [
+        wave3_queries += [
             "geoengineering weather modification patent documents evidence",
             "HAARP ionosphere program declassified documents",
             "cloud seeding admitted government program",
             "stratospheric aerosol injection SAI program documents",
         ]
-        for wq in wave3_q:
-            if wq not in searched:
-                all_findings.extend(await _csearch(wq))
 
     if any(k in topic_lower for k in ["surveillance", "nsa", "prism", "snowden", "five eyes", "mass surveillance", "spying"]):
         direct_urls += [
@@ -1093,16 +1119,26 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
             "https://www.theguardian.com/us-news/the-nsa-files",
             "https://cryptome.org",
         ]
-        wave3_q = [
+        wave3_queries += [
             "NSA PRISM XKEYSCORE Snowden documents leaked",
             "Five Eyes intelligence sharing program documents",
             "GCHQ mass surveillance program Tempora documents",
             "NSA bulk collection program court ruled illegal",
             f"{topic} Snowden documents leaked NSA files",
         ]
-        for wq in wave3_q:
-            if wq not in searched:
-                all_findings.extend(await _csearch(wq))
+
+    # ── Execute wave 3 queries in batches ──
+    if wave3_queries:
+        for batch_start in range(0, len(wave3_queries), _SEARCH_BATCH_SIZE):
+            batch = wave3_queries[batch_start:batch_start + _SEARCH_BATCH_SIZE]
+            tasks = [_csearch(q) for q in batch if q not in searched]
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for r in results:
+                    if isinstance(r, list):
+                        all_findings.extend(r)
+            if batch_start + _SEARCH_BATCH_SIZE < len(wave3_queries):
+                await asyncio.sleep(_SEARCH_BATCH_DELAY_CONSPIRACY)
 
     direct_urls += [
         "https://vault.fbi.gov/",
@@ -1143,6 +1179,7 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
         parts.append("\n---")
 
     if full_pages:
+        full_pages.sort(key=lambda p: _source_tier(p['url']))
         parts.append("\n## 📄 PRIMARY SOURCE CONTENT\n")
         for p in full_pages[:14]:
             url_label = p['url']
