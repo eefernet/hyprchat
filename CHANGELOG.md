@@ -2,13 +2,39 @@
 
 ## Alpha v15 — March 2026
 
+### New Features
+- **Quick Search** — New `quick_search` tool option that fetches SearXNG results and injects them as context into the user message before the model responds. Lightweight alternative to the full `research` tool — no tool calling required, works with any model.
+- **Thinking Mode Control** — New frontend setting (Auto / On / Off) controls whether the model uses thinking tokens. Sends `think_budget` to the backend; Ollama payload now includes `think: true/false` when explicitly set.
+- **Scanline Effect Toggle** — CRT scanline overlay is now off by default and controllable via a toggle in Settings. Saved to `localStorage`.
+- **Coder Bot KB Seeder** — New `backend/seed_kb/seed_coder_kb.py` script fetches 60+ programming reference docs (Python, Rust, C/C++, Go, Java, JS/TS, Swift, Kotlin, React, Vue, Angular, Unity, Unreal, Docker, K8s, SQL, Redis, Terraform, and more) from GitHub, indexes them into RAG, and attaches to the Coder Bot persona.
+- **Source Tier Scoring** — New evidence-first prioritization system for conspiracy and research tools. URLs are scored by tier (primary evidence > investigative journalism > general > fact-checkers) and fetched in priority order.
+
+### Improvements
+- **Smarter text-based tool prompt** — `inject_text_tool_prompt` now generates context-aware examples based on which tools are actually enabled (research tools vs. code tools) instead of always showing the full coder workflow.
+- **Research tool fetches 5 pages** — Upgraded from 3 to 5 parallel page fetches, prioritized by source tier for better content quality.
+- **SearXNG rate-limit handling** — Search functions now retry once on HTTP 429 with a 3-second backoff. Research tool returns a clear error message on persistent rate limits.
+- **Conspiracy Bot streamlined** — Persona prompt reduced from ~95 lines to ~35 lines with adaptive output format (direct answers vs. structured reports vs. connection maps). Added `fetch_url` to tool list for drilling into documents.
+- **Conspiracy research batch pacing** — Wave 1/2/3 searches now use configurable batch sizes and delays (`_SEARCH_BATCH_SIZE=3`, tunable per-engine delays) to avoid overwhelming SearXNG.
+- **Wave 3 batched execution** — Topic-specific wave 3 queries (Epstein, 9/11, JFK, etc.) are now collected and executed in rate-limited batches instead of fired sequentially inline.
+- **Full pages sorted by source tier** — Primary source content in conspiracy dossiers is now ordered by evidence quality (WikiLeaks/FOIA first, fact-checkers last).
+- **Fact-checker sites filtered** — `_fetch_page` now skips Snopes, PolitiFact, FactCheck.org, and similar sites that add noise to investigative research results.
+- **PGP block stripping** — Page fetcher now removes PGP signature blocks from fetched content to reduce noise.
+- **Model pull uses shared downloads UI** — Ollama model pulls now display in the same downloads panel as HuggingFace downloads with progress bar, speed, and ETA instead of inline text.
+- **Centralized `refreshModels()`** — All model list refreshes (after pull, delete, URL change) now use a single shared function instead of duplicated fetch calls.
+- **Post-generate_code verification** — After OpenHands completes a project, the model can now run `execute_code` and `run_shell` for verification instead of being forced to stop immediately. Still blocks unnecessary `list_files`/`read_file` inspection.
+- **Improved SearXNG health check** — Uses a real search query instead of "test", checks for HTTP 4xx errors, and reports unresponsive engine details.
+- **Blockquote attribution** — Markdown renderer now detects `> — Author` lines following blockquotes and displays the attribution as a label instead of a separate quote block.
+- **Download speed/ETA throttling** — Both Ollama pull and HF download progress calculations now throttle speed/ETA updates to every 3 seconds for stable readings.
+- **New favicon** — Custom SVG favicon with "HC" monogram, Nord-themed gradient, and green status dot.
+
 ### Bug Fixes
 - **Hallucinated tool call guard** — When only `quick_search` is enabled (no codeagent tools), models would generate native tool calls (`run_shell`, `execute_code`) from training weights even though no tools were sent to Ollama. These are now silently dropped with a log message.
 - **Per-tool authorization check** — Each tool call is now verified against `available_tool_names` before execution. Blocks unauthorized tools even when some tools ARE enabled (e.g., model tries `run_shell` when only `research` is available). Returns an error message to the model so it can recover.
-- **Over-think loop fix** — When hallucinated tool calls are dropped and the model produces only thinking tokens with no content, the nudge message now explicitly tells the model it has no tools and must answer from the search results already in context. Previously the generic nudge caused infinite think-loops.
-
-### Improvements
-- **Stronger search context instruction** — Quick search result injection now tells the model to treat search results as its real-time data and not disclaim about lacking internet access. Models now summarize search snippets directly instead of deflecting.
+- **Over-think loop fix** — When hallucinated tool calls are dropped and the model produces only thinking tokens with no content, the nudge now explicitly tells the model it has no tools and must answer from search results. Previously the generic nudge caused infinite think-loops.
+- **Stronger search context instruction** — Quick search result injection now tells the model to treat search results as its real-time data and not disclaim about lacking internet access.
+- **Persona ID not cleared on leave** — "Leave Persona" button now also clears `model_config_id` from the conversation, preventing stale persona KB injection in subsequent chats.
+- **Persona not carried to new chats** — Removed automatic `lastPersonaId` carry-over that applied the previous persona to blank new conversations.
+- **Page fetch HTTP status check** — `_fetch_page` now returns `None` on HTTP 4xx/5xx instead of trying to parse error pages as content.
 
 ---
 
