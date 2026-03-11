@@ -1,5 +1,17 @@
 # HyprChat Changelog
 
+## Alpha v15 — March 2026
+
+### Bug Fixes
+- **Hallucinated tool call guard** — When only `quick_search` is enabled (no codeagent tools), models would generate native tool calls (`run_shell`, `execute_code`) from training weights even though no tools were sent to Ollama. These are now silently dropped with a log message.
+- **Per-tool authorization check** — Each tool call is now verified against `available_tool_names` before execution. Blocks unauthorized tools even when some tools ARE enabled (e.g., model tries `run_shell` when only `research` is available). Returns an error message to the model so it can recover.
+- **Over-think loop fix** — When hallucinated tool calls are dropped and the model produces only thinking tokens with no content, the nudge message now explicitly tells the model it has no tools and must answer from the search results already in context. Previously the generic nudge caused infinite think-loops.
+
+### Improvements
+- **Stronger search context instruction** — Quick search result injection now tells the model to treat search results as its real-time data and not disclaim about lacking internet access. Models now summarize search snippets directly instead of deflecting.
+
+---
+
 ## Alpha v14 — March 2026
 
 ### Coder Bot Deep Improvement
