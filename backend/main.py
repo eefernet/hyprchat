@@ -203,6 +203,7 @@ class ChatRequest(BaseModel):
     top_p: Optional[float] = None
     top_k: Optional[int] = None
     repeat_penalty: Optional[float] = None
+    think_budget: Optional[int] = None  # None=auto, 0=disable thinking, 1=enable thinking
 
 class ExecuteRequest(BaseModel):
     conversation_id: Optional[str] = None
@@ -348,21 +349,26 @@ async def _check_searxng() -> dict:
         ms = int((time.time() - t0) * 1000)
         return {"status": "error", "response_ms": ms, "error": str(e)[:200]}
     # Service is up — now check if rate-limited by doing a real search
+    # Use a specific-enough query that won't be trivially cached but should always have results
     try:
         r2 = await http.get(
             f"{config.SEARXNG_URL}/search",
-            params={"q": "test", "format": "json"},
+            params={"q": "united states population 2024", "format": "json"},
             timeout=10,
         )
         if r2.status_code == 429:
             return {"status": "degraded", "response_ms": ms, "rate_limited": True}
-        # Some SearXNG instances return 200 but with empty results when rate-limited
+        if r2.status_code >= 400:
+            return {"status": "degraded", "response_ms": ms, "rate_limited": True}
         data = r2.json()
         results = data.get("results", [])
-        # If we get a 200 with an error about rate limiting or no results + unresponsive_engines
         unresponsive = data.get("unresponsive_engines", [])
-        if not results and len(unresponsive) > 0:
+        # Rate-limited: no results at all, or most engines unresponsive
+        if not results:
             return {"status": "degraded", "response_ms": ms, "rate_limited": True}
+        if len(unresponsive) >= 2:
+            return {"status": "degraded", "response_ms": ms, "rate_limited": True,
+                    "unresponsive_engines": [e[0] if isinstance(e, (list, tuple)) else str(e) for e in unresponsive[:5]]}
         return {"status": "ok", "response_ms": ms, "rate_limited": False}
     except Exception:
         # Search failed but healthz was ok — mark as degraded
@@ -2275,7 +2281,7 @@ async def cleanup_now():
 @app.post("/api/settings/cleanup-codebox")
 async def cleanup_codebox():
     """Delete all project files on the CodeBox sandbox."""
-    openhands_url = config.CODEBOX_URL.rsplit(":", 1)[0] + ":8586"
+    openhands_url = config.OPENHANDS_URL
     try:
         r = await http.post(f"{openhands_url}/clean", timeout=30)
         r.raise_for_status()

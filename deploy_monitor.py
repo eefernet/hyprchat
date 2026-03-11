@@ -56,6 +56,8 @@ WATCHED = {
     "backend/requirements.txt":     ("Requirements",     REMOTE_BACKEND),
     "backend/hyprchat.service":     ("Systemd Service",  "/etc/systemd/system/"),
     "frontend/dist/index.html":     ("Frontend",         REMOTE_FRONTEND),
+    "CHANGELOG.md":                 ("Changelog",        "/opt/hyprchat/"),
+    "README.md":                    ("README",           "/opt/hyprchat/"),
 }
 
 CHECK_INTERVAL = 1
@@ -172,7 +174,7 @@ def scp(local, remote_host, remote_path, user, password):
         return False, str(e)
 
 
-def ssh_cmd(host, user, password, command):
+def ssh_cmd(host, user, password, command, timeout=30):
     """Run a command on remote via ssh. Returns (ok, stdout, stderr)."""
     cmd = [
         "sshpass", "-p", password,
@@ -180,11 +182,11 @@ def ssh_cmd(host, user, password, command):
         f"{user}@{host}", command
     ]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return r.returncode == 0, r.stdout.strip(), r.stderr.strip()
     except FileNotFoundError:
         cmd2 = ["ssh", "-o", "StrictHostKeyChecking=no", f"{user}@{host}", command]
-        r = subprocess.run(cmd2, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(cmd2, capture_output=True, text=True, timeout=timeout)
         return r.returncode == 0, r.stdout.strip(), r.stderr.strip()
     except Exception as e:
         return False, "", str(e)
@@ -199,13 +201,19 @@ def deploy_changes(changed, cfg):
     needs_pip = False
     results = []
 
+    cb = cfg["codebox"]
+
     for filepath, (label, remote_dir) in changed:
-        # Determine target server
-        target = hypr  # all files go to hyprchat server for now
+        # openhands_worker.py goes to codebox server
+        if filepath == "backend/openhands_worker.py":
+            target = cb
+            remote_dir = "/opt/openhands-worker/"
+        else:
+            target = hypr
 
         ok, err = scp(filepath, target["ip"], remote_dir, target["user"], target["pass"])
         status = f"{G}OK{RST}" if ok else f"{R}FAIL{RST}"
-        results.append((label, filepath, ok, err))
+        results.append((label, filepath, ok, err, target))
         needs_restart = True
 
         if filepath == "backend/requirements.txt":
@@ -213,9 +221,10 @@ def deploy_changes(changed, cfg):
 
     # Print results
     print()
-    for label, filepath, ok, err in results:
+    for label, filepath, ok, err, target in results:
         icon = f"{G}\u2713{RST}" if ok else f"{R}\u2717{RST}"
-        print(f"  {icon}  {BLD}{label:18}{RST} {DIM}{filepath}{RST}")
+        server_tag = f"{M}codebox{RST}" if target is cb else f"{C}hyprchat{RST}"
+        print(f"  {icon}  {BLD}{label:18}{RST} {DIM}{filepath}{RST}  → {server_tag}")
         if err:
             print(f"       {R}{err}{RST}")
 
@@ -243,7 +252,7 @@ def deploy_changes(changed, cfg):
         print()
         print(f"  {Y}\u25b6{RST} Restarting hyprchat service...")
         ok, out, err = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
-            "systemctl restart hyprchat 2>&1")
+            "systemctl restart hyprchat 2>&1", timeout=90)
         if ok:
             time.sleep(1)
             ok2, out2, _ = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
@@ -254,6 +263,23 @@ def deploy_changes(changed, cfg):
                 print(f"  {Y}!{RST} Service may not be active: {out2}")
         else:
             print(f"  {R}\u2717{RST} Restart failed: {err}")
+
+    # Restart openhands worker on codebox if it was deployed
+    if any(fp == "backend/openhands_worker.py" for fp, _ in changed):
+        print()
+        print(f"  {Y}\u25b6{RST} Restarting OpenHands worker on Codebox...")
+        ok, out, err = ssh_cmd(cb["ip"], cb["user"], cb["pass"],
+            "systemctl restart openhands-worker 2>&1", timeout=30)
+        if ok:
+            time.sleep(1)
+            ok2, out2, _ = ssh_cmd(cb["ip"], cb["user"], cb["pass"],
+                "systemctl is-active openhands-worker 2>&1")
+            if ok2 and "active" in out2:
+                print(f"  {G}\u2713{RST} OpenHands worker running")
+            else:
+                print(f"  {Y}!{RST} Worker may not be active: {out2}")
+        else:
+            print(f"  {R}\u2717{RST} Worker restart failed: {err}")
 
     print()
     print(f"  {bar('═', G)}")

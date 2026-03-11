@@ -9,6 +9,7 @@ import os
 # ============================================================
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://192.168.1.110:11434")
 CODEBOX_URL = os.getenv("CODEBOX_URL", "http://192.168.1.201:8585")
+OPENHANDS_URL = os.getenv("OPENHANDS_URL", "http://192.168.1.201:8586")
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://192.168.1.141:8888")
 N8N_URL = os.getenv("N8N_URL", "http://192.168.1.114:5678")
 N8N_WEBHOOK_PATH = os.getenv("N8N_WEBHOOK_PATH", "/webhook/execute-code")
@@ -75,7 +76,8 @@ WORKSPACE_MODEL = os.getenv("WORKSPACE_MODEL", "qwen2.5:3b")
 CODER_MODEL = os.getenv("CODER_MODEL", "")
 OPENHANDS_ENABLED = os.getenv("OPENHANDS_ENABLED", "true").lower() == "true"  # Toggle OpenHands for generate_code tool
 OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "20"))
-OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", "8192"))
+OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", "16384"))
+MAX_AGENT_ROUNDS = int(os.getenv("MAX_AGENT_ROUNDS", "12"))
 DEFAULT_SYSTEM_PROMPT = """You are CodeAgent, an autonomous coding assistant with a sandboxed Linux environment (CodeBox).
 
 ## Sandbox Environment

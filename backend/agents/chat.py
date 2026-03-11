@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import urllib.parse
 
 import config
 import database as db
@@ -284,40 +285,84 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
     print(f"[CHAT]   Tools: {sorted(available_tool_names)}")
 
+    # ── Quick Search: fetch SearXNG results and inject as context ──
+    if "quick_search" in req.tool_ids:
+        user_query = ""
+        for m in reversed(req.messages):
+            if m.get("role") == "user" and m.get("content"):
+                user_query = m["content"].strip()[:200]
+                break
+        if user_query:
+            try:
+                await events.emit(conv_id, "tool_start", {
+                    "tool": "quick_search", "status": f"Searching: {user_query[:60]}",
+                    "icon": "search"
+                })
+                params = urllib.parse.urlencode({
+                    "q": user_query, "format": "json",
+                    "language": "en", "safesearch": "0",
+                })
+                r = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=10)
+                data = r.json()
+                results = data.get("results", [])[:6]
+                if results:
+                    search_ctx = "\n\n=== WEB SEARCH RESULTS ===\n"
+                    search_ctx += f"Query: {user_query}\n\n"
+                    for i, item in enumerate(results, 1):
+                        title = item.get("title", "")
+                        url = item.get("url", "")
+                        snippet = item.get("content", "")
+                        search_ctx += f"{i}. **{title}**\n   URL: {url}\n   {snippet}\n\n"
+                    search_ctx += (
+                        "IMPORTANT: Use the search results above to answer the user's question. "
+                        "Summarize the information from these results as if you know it. "
+                        "Do NOT say you lack real-time data or cannot access the internet — "
+                        "these results ARE your real-time data. Cite sources when relevant.\n"
+                    )
+                    # Inject into the last user message so model sees it in context
+                    for m in reversed(messages):
+                        if m["role"] == "user":
+                            m["content"] += search_ctx
+                            break
+                    await events.emit(conv_id, "tool_done", {
+                        "tool": "quick_search", "icon": "search",
+                        "status": f"Found {len(results)} results",
+                    })
+                    print(f"[CHAT]   Quick search: {len(results)} results for {user_query[:60]!r}")
+                else:
+                    await events.emit(conv_id, "tool_done", {
+                        "tool": "quick_search", "icon": "search",
+                        "status": "No results found",
+                    })
+            except Exception as e:
+                print(f"[CHAT]   Quick search error: {e}")
+                await events.emit(conv_id, "tool_done", {
+                    "tool": "quick_search", "icon": "alert-circle",
+                    "status": f"Search failed: {e}",
+                })
+
     # Inject tool-use system prompt when tools are available
     if available_tool_names & CODEAGENT_TOOLS_SET:
         tool_sys = "\n\n## CODING AGENT PROTOCOL (MANDATORY)\n"
 
-        # Phase 1: If generate_code is available, it's the primary tool
         if "generate_code" in available_tool_names:
             tool_sys += (
                 "### PRIMARY WORKFLOW: generate_code\n"
-                "For ANY coding task (scripts, apps, projects), call generate_code FIRST with a COMPLETE description.\n"
-                "- generate_code builds entire projects autonomously: all files, dependencies, testing, packaging.\n"
-                "- Call it ONCE with everything needed. Do NOT call it multiple times for the same project.\n"
-                "- It auto-packages a download for the user. After it succeeds, just present the results.\n"
-                "- If generate_code fails, fall back to write_file + run_shell (see below).\n\n"
+                "For coding tasks, call generate_code FIRST with a COMPLETE task description.\n"
+                "It builds entire projects autonomously. Call it ONCE. If it fails, use write_file + run_shell.\n\n"
             )
 
         tool_sys += (
-            "### TOOL RULES\n"
-            "1. Your FIRST response MUST be a tool call — not a text explanation.\n"
-            "2. NEVER write code in chat text. ALL code goes through tools.\n"
-            "3. execute_code = run SOURCE CODE with hardcoded test values. No stdin, no sys.argv.\n"
-            "4. run_shell = run TERMINAL COMMANDS (pip3 install, python3 script.py, npm build, etc.).\n"
-            "5. write_file = save code to a file. Then run_shell to execute it.\n"
-            "6. When code fails: read the FULL error, fix the ROOT CAUSE, try a DIFFERENT approach.\n"
-            "7. Do NOT retry the exact same code/command — that will always fail again.\n"
-            "8. When a package is missing: run_shell(command='pip3 install PKG'), then retry.\n\n"
-            "### DELIVERING RESULTS\n"
-            "9. After code works: call download_file or download_project to give the user a download.\n"
-            "10. Then respond with: what was built, the download link, and how to run/deploy it.\n"
-            "11. After delivering results, STOP. Do not call more tools.\n\n"
-            "### COMMON MISTAKES TO AVOID\n"
-            "- Do NOT start dev servers (npm start, npm run dev, flask run) — they hang forever.\n"
-            "- Do NOT use input() or sys.argv in execute_code — use write_file + run_shell instead.\n"
-            "- Do NOT call read_file/list_files after generate_code succeeds — it already tested everything.\n"
-            "- Do NOT repeat a failed command — fix the error first, then try differently.\n"
+            "### RULES\n"
+            "1. FIRST response MUST be a tool call.\n"
+            "2. NEVER write code in chat text — use execute_code, write_file, or generate_code.\n"
+            "3. execute_code = run code directly (NO stdin, NO sys.argv). For scripts with args: write_file + run_shell.\n"
+            "4. When code fails: read the error, fix the ROOT CAUSE, try DIFFERENTLY.\n"
+            "5. After success: download_file/download_project, then summarize for user. STOP.\n\n"
+            "### AVOID\n"
+            "- Do NOT start dev servers (npm start, flask run) — they hang forever.\n"
+            "- Do NOT use input() — no stdin available.\n"
+            "- Do NOT repeat failed commands without changing something.\n"
         )
 
         if messages and messages[0]["role"] == "system":
@@ -336,7 +381,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     if "repeat_penalty" not in model_options and available_tool_names:
         model_options["repeat_penalty"] = 1.1
 
-    MAX_ROUNDS = 12
+    MAX_ROUNDS = getattr(config, "MAX_AGENT_ROUNDS", 12)
     MAX_CONTEXT_CHARS = 50000  # ~12.5k tokens — prune old tool results beyond this
     _text_fallback_done = False
     _prev_tool_key = None  # Track previous tool call to detect loops
@@ -346,6 +391,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     _error_repeat_count = 0  # Consecutive times we've seen the same error
     _generate_code_failed = False  # Guard: disable code-block-rescue after generate_code failure
     _generate_code_done = False    # Guard: stop tool calls after successful generate_code
+    _rescue_count = 0              # How many times we rescued code blocks
 
     for round_num in range(MAX_ROUNDS):
         content = ""
@@ -376,6 +422,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             "stream": True,
             "options": model_options,
         }
+        # Thinking control: None=model default, 0=disable, 1=enable
+        if hasattr(req, 'think_budget') and req.think_budget is not None:
+            if req.think_budget == 0:
+                payload["think"] = False
+            else:
+                payload["think"] = True
         if ollama_tools:
             payload["tools"] = ollama_tools
 
@@ -568,13 +620,20 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 for tc in tool_calls:
                     print(f"[CHAT]   text-parsed tool call: {tc['function']['name']}")
 
+        # ── Drop hallucinated tool calls when no tools are available ──
+        _hallucinated_dropped = False
+        if tool_calls and not available_tool_names:
+            print(f"[CHAT]   Ignoring {len(tool_calls)} hallucinated tool calls — no tools available")
+            tool_calls = []
+            _hallucinated_dropped = True
+
         # ── Code block rescue: when model dumps code in chat instead of using tools ──
         # Skip rescue if model was just told to stop looping, or if generate_code already failed
         # (prevents infinite loop: generate_code fails -> model dumps code -> rescue -> execute -> fail -> repeat)
-        if not tool_calls and content and (available_tool_names & CODEAGENT_TOOLS_SET) and _dup_break_count < 2 and not _generate_code_failed:
+        if not tool_calls and content and (available_tool_names & CODEAGENT_TOOLS_SET) and _rescue_count < 1 and not _generate_code_failed:
             code_blocks = re.findall(r'```(\w*)\n(.*?)```', content, re.DOTALL)
             if code_blocks and not any(cb[1].strip().startswith('{') for cb in code_blocks):
-                # Model wrote code blocks without making tool calls — rescue by executing
+                # Model wrote code blocks without making tool calls — rescue via write_file + run_shell
                 for lang, code in code_blocks:
                     code = code.strip()
                     if not code or len(code) < 30:
@@ -589,11 +648,44 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     # Only rescue if it looks like actual code (not prose)
                     if exec_lang in ("python", "python3", "py", "javascript", "js", "bash", "sh",
                                      "rust", "go", "java", "c", "cpp", "ruby", "php", "typescript", "ts"):
-                        tool_calls = [{"function": {"name": "execute_code", "arguments": {"code": code, "language": exec_lang}}}]
-                        print(f"[CHAT]   code-block-rescue: extracted {exec_lang} code ({len(code)} chars)")
+                        _ext_map = {"python": "py", "python3": "py", "py": "py", "javascript": "js", "js": "js",
+                                    "bash": "sh", "sh": "sh", "typescript": "ts", "ts": "ts",
+                                    "rust": "rs", "go": "go", "c": "c", "cpp": "cpp", "java": "java",
+                                    "ruby": "rb", "php": "php"}
+                        filepath = f"/root/_rescued_{round_num}.{_ext_map.get(exec_lang, 'py')}"
+                        if exec_lang in ("python", "python3", "py"):
+                            run_cmd = f"python3 {filepath}"
+                        elif exec_lang in ("bash", "sh"):
+                            run_cmd = f"bash {filepath}"
+                        elif exec_lang in ("javascript", "js"):
+                            run_cmd = f"node {filepath}"
+                        elif exec_lang in ("typescript", "ts"):
+                            run_cmd = f"npx ts-node {filepath}"
+                        elif exec_lang == "go":
+                            run_cmd = f"go run {filepath}"
+                        elif exec_lang == "rust":
+                            run_cmd = f"rustc {filepath} -o /root/_rescued_{round_num} && /root/_rescued_{round_num}"
+                        elif exec_lang in ("c", "cpp"):
+                            compiler = "gcc" if exec_lang == "c" else "g++"
+                            run_cmd = f"{compiler} {filepath} -o /root/_rescued_{round_num} && /root/_rescued_{round_num}"
+                        else:
+                            run_cmd = f"python3 {filepath}"
+                        tool_calls = [
+                            {"function": {"name": "write_file", "arguments": {"path": filepath, "content": code}}},
+                            {"function": {"name": "run_shell", "arguments": {"command": run_cmd}}},
+                        ]
+                        _rescue_count += 1
+                        print(f"[CHAT]   code-block-rescue: extracted {exec_lang} code ({len(code)} chars) → write_file + run_shell")
+                        # Inject feedback so the model learns to use tools directly
+                        messages.append({"role": "tool", "content": "SYSTEM: Your code was rescued from chat text. Use tools (write_file, execute_code, generate_code) directly — never put code in chat."})
                         content = ""
                         msg["content"] = ""
                         break
+                # Second rescue attempt → inject stern message instead
+                if not tool_calls and _rescue_count >= 1:
+                    messages.append({"role": "tool", "content": "SYSTEM: STOP writing code in chat text. You MUST use tools. Call write_file or execute_code for ALL code."})
+                    content = ""
+                    msg["content"] = ""
 
         print(f"[CHAT] Round {round_num}: content={len(content)} thinking={len(thinking)} tool_calls={len(tool_calls)} gen_tokens={gen_tokens} prompt_tokens={prompt_tokens}")
         if thinking:
@@ -611,14 +703,17 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             })
 
         if tool_calls:
-            # ── Guard: after successful generate_code, block further tool calls ──
+            # ── Guard: after successful generate_code, only allow verification tools ──
             if _generate_code_done:
+                _allowed_after_codegen = {"download_project", "execute_code", "run_shell"}
                 _tc_names = [tc.get("function", {}).get("name", "") for tc in tool_calls]
-                # Only allow download_project after generate_code success
-                if not any(n == "download_project" for n in _tc_names):
-                    print(f"[CHAT]   Blocking tool calls after generate_code success: {_tc_names}")
-                    tool_calls = []
-                    # Fall through to "no tool calls" path below
+                _filtered = [tc for tc in tool_calls if tc.get("function", {}).get("name", "") in _allowed_after_codegen]
+                if len(_filtered) < len(tool_calls):
+                    _blocked = [n for n in _tc_names if n not in _allowed_after_codegen]
+                    print(f"[CHAT]   Blocking non-verification tools after generate_code: {_blocked}")
+                tool_calls = _filtered
+                if not tool_calls:
+                    pass  # Fall through to "no tool calls" path below
 
             # ── Duplicate / near-duplicate detection ──
             if tool_calls:
@@ -680,6 +775,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     except (json.JSONDecodeError, ValueError):
                         print(f"[CHAT] Warning: failed to parse tool args JSON for {tool_name}: {tool_args[:200]!r}")
                         tool_args = {}
+
+                # Block unauthorized tools (model may hallucinate tools not in the enabled set)
+                if tool_name not in available_tool_names:
+                    print(f"[CHAT]   Blocked unauthorized tool: {tool_name} (allowed: {sorted(available_tool_names)})")
+                    messages.append({"role": "tool", "content": f"Error: tool '{tool_name}' is not available in this session."})
+                    continue
 
                 print(f"[CHAT]   Executing tool: {tool_name}({json.dumps(tool_args)[:200]})")
 
@@ -765,17 +866,16 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     _generate_code_failed = True
                     print("[CHAT]   generate_code failed — disabling code-block-rescue for this session")
 
-                # When generate_code succeeds (PROJECT COMPLETE), force the model to respond
-                # Don't let it waste rounds inspecting files that OpenHands already tested
+                # When generate_code succeeds (PROJECT COMPLETE), allow verification but block inspection
                 if tool_name == "generate_code" and "PROJECT COMPLETE" in tool_result:
                     _generate_code_done = True
-                    print("[CHAT]   generate_code succeeded — forcing final response (no more tool calls)")
+                    print("[CHAT]   generate_code succeeded — continuing for verification if needed")
                     messages.append({"role": "tool", "content": (
-                        "SYSTEM: The project is COMPLETE and TESTED by OpenHands. "
-                        "Do NOT call list_files, read_file, or any other tool. "
-                        "Respond to the user NOW with the project summary and download link."
+                        "SYSTEM: The project has been built and tested by OpenHands. "
+                        "You may now use run_shell or execute_code to verify it works if the user requested verification. "
+                        "Do NOT call list_files or read_file to re-inspect already-created files. "
+                        "If no verification was requested, respond with the project summary and download link."
                     )})
-                    break  # Exit the tool_calls loop, go to next round for final response
 
                 # Detect repeated errors — inject guidance, then force-stop if stuck
                 if tool_name in ("execute_code", "run_shell") and ("FAILED" in tool_result or "Error" in tool_result or "Traceback" in tool_result):
@@ -805,6 +905,16 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                             messages.append({"role": "tool", "content": "HINT: execute_code has no command-line arguments. Use write_file + run_shell instead for scripts that need sys.argv."})
                         elif "EOFError" in tool_result:
                             messages.append({"role": "tool", "content": "HINT: input() does not work in this sandbox. Use hardcoded values or sys.argv via write_file + run_shell."})
+                    elif _error_repeat_count == 1:
+                        # First occurrence — provide specific guidance
+                        if "ConnectionRefusedError" in tool_result or "ECONNREFUSED" in tool_result:
+                            messages.append({"role": "tool", "content": "HINT: Connection refused. The server isn't running. Start it first with run_shell, or check the host/port."})
+                        elif "FileNotFoundError" in tool_result:
+                            messages.append({"role": "tool", "content": "HINT: File doesn't exist. Check the path with list_files, or create it with write_file first."})
+                        elif "SyntaxError" in tool_result:
+                            messages.append({"role": "tool", "content": "HINT: Syntax error at the line shown. Fix the code with write_file and re-run."})
+                        elif "PermissionError" in tool_result:
+                            messages.append({"role": "tool", "content": "HINT: Permission denied. Check the file path and permissions. Try using /root/ for output files."})
                 else:
                     _last_error_sig = None
                     _error_repeat_count = 0
@@ -850,7 +960,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             if thinking and not content:
                 print(f"[CHAT]   Over-thought ({len(thinking)} chars thinking, 0 content) — nudging")
                 messages.append({"role": "assistant", "content": ""})
-                messages.append({"role": "user", "content": "You were thinking but didn't produce a response. Please answer concisely now."})
+                if _hallucinated_dropped:
+                    messages.append({"role": "user", "content": "You do NOT have any tools. Do NOT attempt to call functions or tools. Answer the question directly using the web search results already provided in the conversation. Summarize what the search results say. Do NOT claim you lack data — the search results ARE your data. Respond in plain text NOW."})
+                else:
+                    messages.append({"role": "user", "content": "You were thinking but didn't produce a response. Please answer concisely now."})
                 if "num_predict" not in model_options:
                     model_options["num_predict"] = 4096
                 continue

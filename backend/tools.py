@@ -12,7 +12,7 @@ import uuid
 
 import config
 import database as db
-from research import run_deep_research, run_conspiracy_research, _fetch_page
+from research import run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
 
 # Strip ANSI escape codes from terminal output before feeding back to the model
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
@@ -143,11 +143,11 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "conspiracy_research",
-            "description": "Investigative research using leaked documents, FOIA, WikiLeaks, alt-media, and court records.",
+            "description": "Deep investigative research across WikiLeaks, FOIA vaults, court records, gov archives, alt-media, and leaked documents. Use for any topic where official narratives may be incomplete.",
             "parameters": {"type": "object", "properties": {
-                "topic": {"type": "string", "description": "Topic to investigate"},
-                "angle": {"type": "string", "description": "Angle: evidence, key_players, timeline, debunk, documents, connections"},
-                "depth": {"type": "integer", "description": "Depth 3-5 (default 4)"},
+                "topic": {"type": "string", "description": "What to investigate — a person, event, organization, or claim"},
+                "angle": {"type": "string", "description": "Focus: evidence (default), key_players, timeline, debunk, documents, connections"},
+                "depth": {"type": "integer", "description": "Search depth 3-5 (default 4). Higher = more sources searched"},
             }, "required": ["topic"]},
         },
     },
@@ -157,7 +157,7 @@ CODEAGENT_TOOLS = {
             "name": "generate_code",
             "description": "Generate code using an autonomous coding agent (OpenHands). Handles entire projects: creates all files, installs dependencies, builds, and tests. Use for ANY coding task — single scripts or multi-file projects. Returns paths of all files created.",
             "parameters": {"type": "object", "properties": {
-                "task": {"type": "string", "description": "Complete project description: what to build, all features, file structure if multi-file. Be thorough — the agent works autonomously."},
+                "task": {"type": "string", "description": "Complete, detailed project specification. Include: what to build, features, input/output format, constraints. More detail = better results."},
                 "language": {"type": "string", "description": "Primary language: python, javascript, typescript, rust, go, etc."},
                 "context": {"type": "string", "description": "Optional: error messages to fix, existing code to modify, constraints, dependencies"},
             }, "required": ["task", "language"]},
@@ -684,6 +684,12 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             import urllib.parse
             params = urllib.parse.urlencode({"q": query, "format": "json", "count": config.SEARCH_RESULTS_COUNT})
             r = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=15)
+            if r.status_code == 429:
+                await asyncio.sleep(3.0)
+                r = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=15)
+            if r.status_code >= 400:
+                await events.emit(conv_id, "tool_end", {"tool": "research", "icon": "search", "status": f"⚠️ Search returned HTTP {r.status_code} — may be rate limited"})
+                return f"**Web Search: {query}**\n\n⚠️ Search engine returned HTTP {r.status_code}. Upstream engines may be rate-limiting requests. Try again in a minute."
             data = r.json()
             results = data.get("results", [])[:config.SEARCH_RESULTS_COUNT]
             sr_cards = []
@@ -712,12 +718,14 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             if sr_cards:
                 await events.emit(conv_id, "search_results", {"query": query, "results": sr_cards})
 
-            # ── Fetch top 3 pages in parallel for actual content ──
+            # ── Fetch top 5 pages in parallel, prioritized by source tier ──
             fetch_urls = []
             for item in results:
                 u = item.get("url", "")
-                if u and len(fetch_urls) < 3:
+                if u:
                     fetch_urls.append(u)
+            fetch_urls.sort(key=_source_tier)
+            fetch_urls = fetch_urls[:5]
 
             pages = []
             if fetch_urls:
@@ -1066,22 +1074,32 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             if not getattr(config, "OPENHANDS_ENABLED", True):
                 return "ERROR: OpenHands is disabled in settings. Enable it or use write_file + run_shell directly."
 
-            openhands_url = config.CODEBOX_URL.rsplit(":", 1)[0] + ":8586"
+            openhands_url = config.OPENHANDS_URL
             max_rounds = getattr(config, "OPENHANDS_MAX_ROUNDS", 20)
             num_ctx = getattr(config, "OPENHANDS_NUM_CTX", 8192)
 
-            # Health check (3s) before committing to the long request
-            try:
-                health = await http.get(f"{openhands_url}/health", timeout=3)
-                if health.status_code != 200:
-                    raise ConnectionError(f"Health check HTTP {health.status_code}")
-            except Exception as oh_e:
+            # Health check with retry (3 attempts, 1s between)
+            _oh_healthy = False
+            _oh_last_err = None
+            for _attempt in range(3):
+                try:
+                    health = await http.get(f"{openhands_url}/health", timeout=3)
+                    if health.status_code == 200:
+                        _oh_healthy = True
+                        break
+                    _oh_last_err = f"Health check HTTP {health.status_code}"
+                except Exception as oh_e:
+                    _oh_last_err = str(oh_e)
+                if _attempt < 2:
+                    print(f"[CODEGEN:OH] Health check attempt {_attempt + 1} failed: {_oh_last_err}, retrying...")
+                    await asyncio.sleep(1)
+            if not _oh_healthy:
                 await events.emit(conv_id, "tool_end", {
                     "tool": "generate_code", "icon": "code",
-                    "status": f"OpenHands unavailable: {oh_e}",
+                    "status": f"OpenHands unavailable: {_oh_last_err}",
                 })
                 return (
-                    f"ERROR: OpenHands worker is unavailable ({oh_e}). "
+                    f"ERROR: OpenHands worker is unavailable after 3 attempts ({_oh_last_err}). "
                     "You can still write code directly using write_file + run_shell to test it."
                 )
 
@@ -1098,6 +1116,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 "num_ctx": num_ctx,
                 "language": language,
                 "context": context,
+                "project_id": args.get("project_id", ""),
             }
 
             # Action → emoji mapping for progress pills
@@ -1237,12 +1256,13 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     elif len(dirs) == 1:
                         project_dir = dirs.pop()
 
+                _project_id = result.get("project_id", "")
                 file_list = "\n".join(f"  - {f}" for f in files) if files else "  (no files detected)"
                 await events.emit(conv_id, "tool_end", {
                     "tool": "generate_code", "icon": "wand",
                     "status": f"🤖 OpenHands: {len(files)} file(s) built ({duration}s)",
                 })
-                print(f"[CODEGEN:OH] Done: {len(files)} files in {duration}s, project_dir={project_dir}")
+                print(f"[CODEGEN:OH] Done: {len(files)} files in {duration}s, project_dir={project_dir}, project_id={_project_id}")
 
                 # Auto-package project for download
                 download_result = ""
@@ -1286,7 +1306,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 if files:
                     resp = (
                         f"PROJECT COMPLETE. OpenHands agent autonomously built and tested the project "
-                        f"(model: {coder_model}, {duration}s, {len(steps)} steps).\n\n"
+                        f"(model: {coder_model}, {duration}s, {len(steps)} steps, project_id: {_project_id}).\n\n"
                         f"**Files created ({len(files)}):**\n{file_list}\n"
                     )
                     if steps_summary:
