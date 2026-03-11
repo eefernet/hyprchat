@@ -23,6 +23,18 @@
 - **Prompt library quick insert** — Fixed race condition where clicking a prompt in the `⚡` picker would close the picker before setting the input text due to click propagation to the backdrop. Added `stopPropagation` and auto-resize of the textarea after insert.
 - **Downloads panel overlay** — Fixed downloads dropdown using a full-screen fixed backdrop that blocked all page interaction. Now uses a document mousedown listener to close on outside clicks without blocking.
 - **Settings white page crash** — Fixed React error #310 (too many re-renders) caused by `useState` hooks inside IIFEs in render. Theme and font preview state lifted to component level.
+- **Chat state preserved on same-conversation click** — Clicking the same conversation in the sidebar no longer reloads from the backend and clears all ephemeral state (events, tokens, streaming). Now just switches to the chat panel, preserving status pills, tool events, and token counters.
+- **Status pills persist across sessions** — Tool events (thinking, tool calls, code output, file downloads) are now saved to assistant message metadata alongside search results and source links. Status pills survive conversation reloads instead of disappearing.
+- **Council rounds render live during debate** — When a new debate round starts, the frontend reloads persisted messages from the backend so previous rounds appear as collapsible historical sections while the new round streams live. Previously only the current round was visible during streaming.
+- **Council completion shows all rounds immediately** — On `council_complete`, the conversation is reloaded from the backend (which has all rounds with correct `debate_round` metadata) instead of reconstructing from ephemeral state that only held the last round. Rebuttal round dropdowns now appear immediately without needing to switch away and back.
+- **Council voting phase shows final round** — When the voting phase begins, the last streaming round's responses are reloaded from the backend as persisted historical data instead of being lost.
+- **Duplicate council user messages** — Removed the frontend's redundant `POST` save of the user message for council chats, since `council.py` already persists it server-side.
+- **Search card thumbnails improved** — Backend OG image fetching upgraded: real browser User-Agent, 6s timeout (was 4s), scans 30KB of HTML (was 15KB), 5 additional meta tag patterns (`twitter:image:src`, `og:image:secure_url`, `link[rel=image_src]`), resolves relative image URLs.
+- **Search card fallback display** — Cards without thumbnails now show a larger favicon (32px) + domain name instead of a faint chain link emoji.
+- **Horizontal scrollbar visibility** — Scrollbar height increased to 10px (was 5px), added hover highlight with accent color, and increased padding below scroll containers for easier grabbing.
+- **Archive file preview** — Clicking the preview eye on `.tar.gz`, `.tgz`, `.zip`, and `.tar` files now shows a file tree in the preview panel with directory structure, file icons color-coded by type, and formatted file sizes. Previously showed an infinite "Loading..." spinner.
+- **Archive file tree sorting** — Archive entries now sort by full path so files appear directly under their parent directories. Previously all directories were grouped first, then all files, breaking the visual hierarchy.
+- **Council stream survives navigation** — Council streaming state (live responses, votes, host synthesis) now persists in a ref when you navigate away to another conversation. Returning to the council chat restores the live stream instead of showing an empty chat. Previously all live council output was lost on navigation.
 
 ---
 
