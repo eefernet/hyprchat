@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import urllib.parse
 
 import config
 import database as db
@@ -283,6 +284,60 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 available_tool_names.add(tname)
 
     print(f"[CHAT]   Tools: {sorted(available_tool_names)}")
+
+    # ── Quick Search: fetch SearXNG results and inject as context ──
+    if "quick_search" in req.tool_ids:
+        user_query = ""
+        for m in reversed(req.messages):
+            if m.get("role") == "user" and m.get("content"):
+                user_query = m["content"].strip()[:200]
+                break
+        if user_query:
+            try:
+                await events.emit(conv_id, "tool_start", {
+                    "tool": "quick_search", "status": f"Searching: {user_query[:60]}",
+                    "icon": "search"
+                })
+                params = urllib.parse.urlencode({
+                    "q": user_query, "format": "json",
+                    "language": "en", "safesearch": "0",
+                })
+                r = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=10)
+                data = r.json()
+                results = data.get("results", [])[:6]
+                if results:
+                    search_ctx = "\n\n=== WEB SEARCH RESULTS ===\n"
+                    search_ctx += f"Query: {user_query}\n\n"
+                    for i, item in enumerate(results, 1):
+                        title = item.get("title", "")
+                        url = item.get("url", "")
+                        snippet = item.get("content", "")
+                        search_ctx += f"{i}. **{title}**\n   URL: {url}\n   {snippet}\n\n"
+                    search_ctx += (
+                        "Use these search results to inform your answer. "
+                        "Cite sources when relevant.\n"
+                    )
+                    # Inject into the last user message so model sees it in context
+                    for m in reversed(messages):
+                        if m["role"] == "user":
+                            m["content"] += search_ctx
+                            break
+                    await events.emit(conv_id, "tool_done", {
+                        "tool": "quick_search", "icon": "search",
+                        "status": f"Found {len(results)} results",
+                    })
+                    print(f"[CHAT]   Quick search: {len(results)} results for {user_query[:60]!r}")
+                else:
+                    await events.emit(conv_id, "tool_done", {
+                        "tool": "quick_search", "icon": "search",
+                        "status": "No results found",
+                    })
+            except Exception as e:
+                print(f"[CHAT]   Quick search error: {e}")
+                await events.emit(conv_id, "tool_done", {
+                    "tool": "quick_search", "icon": "alert-circle",
+                    "status": f"Search failed: {e}",
+                })
 
     # Inject tool-use system prompt when tools are available
     if available_tool_names & CODEAGENT_TOOLS_SET:
@@ -563,6 +618,11 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 for tc in tool_calls:
                     print(f"[CHAT]   text-parsed tool call: {tc['function']['name']}")
 
+        # ── Drop hallucinated tool calls when no tools are available ──
+        if tool_calls and not available_tool_names:
+            print(f"[CHAT]   Ignoring {len(tool_calls)} hallucinated tool calls — no tools available")
+            tool_calls = []
+
         # ── Code block rescue: when model dumps code in chat instead of using tools ──
         # Skip rescue if model was just told to stop looping, or if generate_code already failed
         # (prevents infinite loop: generate_code fails -> model dumps code -> rescue -> execute -> fail -> repeat)
@@ -711,6 +771,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     except (json.JSONDecodeError, ValueError):
                         print(f"[CHAT] Warning: failed to parse tool args JSON for {tool_name}: {tool_args[:200]!r}")
                         tool_args = {}
+
+                # Block unauthorized tools (model may hallucinate tools not in the enabled set)
+                if tool_name not in available_tool_names:
+                    print(f"[CHAT]   Blocked unauthorized tool: {tool_name} (allowed: {sorted(available_tool_names)})")
+                    messages.append({"role": "tool", "content": f"Error: tool '{tool_name}' is not available in this session."})
+                    continue
 
                 print(f"[CHAT]   Executing tool: {tool_name}({json.dumps(tool_args)[:200]})")
 
