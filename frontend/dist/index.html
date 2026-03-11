@@ -556,6 +556,21 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
 
 const Chip=({l,c,bg,onX})=><span style={{display:"inline-flex",alignItems:"center",gap:4,background:bg,color:c,padding:"3px 8px",borderRadius:20,fontSize:10,fontWeight:600}}>{l}{onX&&<span onClick={onX} style={{cursor:"pointer",opacity:.7}}>&times;</span>}</span>;
 
+const TIPS={
+  chunk_size:"Characters per text chunk when indexing KB files. Smaller = more precise retrieval, larger = more context per chunk. Default: 500",
+  chunk_overlap:"Overlap between adjacent chunks in characters. Preserves context at boundaries. Default: 50",
+  max_context:"Maximum total characters injected into system prompt from retrieved KB chunks. Higher = more context but uses more tokens.",
+  top_k:"Number of most-similar chunks retrieved per query. Higher = broader but may include less relevant content. Default: 6",
+  embed_model:"Ollama model used for vector embeddings. Must be pulled first. nomic-embed-text recommended.",
+  temperature:"Controls randomness. 0 = deterministic, 2 = very creative. Default: 0.7",
+  top_p:"Nucleus sampling. Lower = more focused output. Default: 0.9",
+  num_ctx:"Context window in tokens. Determines how much history + prompt the model sees. Default: 4096",
+  repeat_penalty:"Penalizes repeated tokens. Higher = less repetition. 1.0 = no penalty. Default: 1.1",
+  research_top_k:"Number of chunks retrieved from research memory per query. Default: 4",
+  research_max_chars:"Maximum characters from research memory injected into context. Default: 3000",
+};
+const Tip=({k,t})=>{const [show,setShow]=React.useState(false);const txt=TIPS[k];if(!txt)return null;return <span style={{position:"relative",display:"inline-flex",alignItems:"center",cursor:"help",marginLeft:3}} onMouseEnter={()=>setShow(true)} onMouseLeave={()=>setShow(false)}><span style={{fontSize:10,color:t.mut,opacity:.6}}>&#9432;</span>{show&&<div style={{position:"absolute",bottom:"calc(100% + 6px)",left:"50%",transform:"translateX(-50%)",background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:8,padding:"8px 12px",fontSize:10,lineHeight:1.5,color:t.dim,boxShadow:"0 4px 16px #0006",zIndex:999,minWidth:200,maxWidth:280,whiteSpace:"normal",pointerEvents:"none"}}>{txt}</div>}</span>;};
+
 // ============================================================
 // WORKSPACE DETAIL COMPONENT
 // ============================================================
@@ -789,7 +804,7 @@ function SandboxSection({t,btnS,labelS}){
 
 // ============================================================
 // ModelPicker — custom dropdown replacing plain <select> for model selection
-function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact=false}){
+function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact=false,onRefresh}){
   const [open,setOpen]=useState(false);
   const [dropPos,setDropPos]=useState({top:0,left:0,width:220});
   const triggerRef=useRef(null);
@@ -809,7 +824,9 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
       const r=triggerRef.current.getBoundingClientRect();
       setDropPos({top:r.bottom+4,left:r.left,width:Math.max(r.width,240)});
     }
+    const willOpen=!open;
     setOpen(p=>!p);
+    if(willOpen&&onRefresh)onRefresh();
   };
   const famIcon=(n)=>{const b=(n||"").toLowerCase();if(b.includes("qwen"))return"🌸";if(b.includes("llama"))return"🦙";if(b.includes("mistral")||b.includes("mixtral"))return"💨";if(b.includes("gemma"))return"💎";if(b.includes("phi"))return"φ";if(b.includes("deepseek"))return"🔍";if(b.includes("coder")||b.includes("codestral"))return"💻";if(b.includes("wizard"))return"🧙";if(b.includes("hf.co"))return"🤗";return"🤖";};
   const szCol=(tag)=>{const l=(tag||"").toLowerCase();if(l.match(/70b|65b|72b/))return t.err;if(l.match(/30b|32b|34b/))return t.warm;if(l.match(/13b|14b|27b/))return t.acc;if(l.match(/7b|8b/))return t.ok;if(l.match(/1b|3b|4b/))return t.f1;return t.mut;};
@@ -836,6 +853,7 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
           {caps.map(c=><span key={c.label} style={{fontSize:7,padding:"0px 3px",borderRadius:3,background:`${c.color}20`,color:c.color,fontWeight:700,border:`1px solid ${c.color}33`}}>{c.emoji}</span>)}
         </div>}
       </div>
+      {onRefresh&&<span onClick={e=>{e.stopPropagation();onRefresh();}} style={{fontSize:12,color:t.mut,flexShrink:0,cursor:"pointer",opacity:.5,display:"flex",alignItems:"center",padding:"0 2px"}} title="Refresh models"><IC.Refresh/></span>}
       <span style={{fontSize:9,color:t.mut,flexShrink:0,transition:"transform .2s",transform:open?"rotate(180deg)":"none"}}>▾</span>
     </div>
     {open&&(()=>{
@@ -910,6 +928,7 @@ function HyprChat(){
   const [compactMode,setCompactMode]=useState(()=>{try{return localStorage.getItem("hc-compact")==="1";}catch{return false;}});
   const [autoExpandThink,setAutoExpandThink]=useState(()=>{try{return localStorage.getItem("hc-auto-expand-think")==="1";}catch{return false;}});
   const [scanlineEffect,setScanlineEffect]=useState(()=>{try{return localStorage.getItem("hc-scanline")==="1";}catch{return false;}});
+  const [showNavLabels,setShowNavLabels]=useState(()=>{try{return localStorage.getItem("hc-nav-labels")!=="0";}catch{return true;}});
   const [thinkMode,setThinkMode]=useState(()=>{try{return localStorage.getItem("hc-think-mode")||"auto";}catch{return "auto";}});
   const [lastPersonaId,setLastPersonaId]=useState(()=>{try{return localStorage.getItem("hc-last-persona")||null;}catch{return null;}});
   const [fontSize,setFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font-size")||"14");}catch{return 14;}});
@@ -926,6 +945,8 @@ function HyprChat(){
   const [previewContent,setPreviewContent]=useState(null);
   const [previewError,setPreviewError]=useState(null);
   const [showChangelog,setShowChangelog]=useState(false);
+  const [pendingTheme,setPendingTheme]=useState(null);
+  const [pendingFont,setPendingFont]=useState(null);
   const [customQuotes,setCustomQuotes]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-custom-quotes")||"[]");}catch{return [];}});
   const [newQuoteText,setNewQuoteText]=useState("");
   const [newQuoteAttr,setNewQuoteAttr]=useState("");
@@ -933,6 +954,7 @@ function HyprChat(){
   const [ollamaUrl,setOllamaUrl]=useState("");
   const [ollamaUrlSaving,setOllamaUrlSaving]=useState(false);
   const [ragSettings,setRagSettings]=useState({embed_model:"nomic-embed-text",chunk_size:500,chunk_overlap:50,top_k:6,max_context_chars:6000,research_top_k:4,research_max_chars:3000});
+  const [kbPreview,setKbPreview]=useState(null);
   const [ragSaving,setRagSaving]=useState(false);
   const [ragStats,setRagStats]=useState(null);
   const [modelParams,setModelParams]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-model-params")||"{}");}catch{return {};}});
@@ -978,6 +1000,7 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-compact",compactMode?"1":"0");}catch{}},[compactMode]);
   useEffect(()=>{try{localStorage.setItem("hc-auto-expand-think",autoExpandThink?"1":"0");}catch{}},[autoExpandThink]);
   useEffect(()=>{try{localStorage.setItem("hc-scanline",scanlineEffect?"1":"0");}catch{}},[scanlineEffect]);
+  useEffect(()=>{try{localStorage.setItem("hc-nav-labels",showNavLabels?"1":"0");}catch{}},[showNavLabels]);
   useEffect(()=>{try{localStorage.setItem("hc-think-mode",thinkMode);}catch{}},[thinkMode]);
   useEffect(()=>{try{localStorage.setItem("hc-font-size",fontSize);}catch{}},[fontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-ui-font-size",uiFontSize);}catch{}},[uiFontSize]);
@@ -1060,7 +1083,7 @@ function HyprChat(){
   const [quickResults,setQuickResults]=useState([]); // per send
   const [searchLoading,setSearchLoading]=useState(false);
 
-  const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0),chatScrollRef=useRef(null);
+  const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0),chatScrollRef=useRef(null),dlPanelRef=useRef(null);
   const act = convs.find(c=>c.id===actId);
   // Quick search — derived from active conversation's tool_ids
   const quickSearch = (act?.tool_ids||[]).includes("quick_search");
@@ -1188,7 +1211,13 @@ function HyprChat(){
     const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<300;
     if(nearBottom)el.scrollTop=el.scrollHeight;
   },[councilResponses,councilHostContent,councilVotes,councilVoting]);
-  useEffect(()=>{if(panel==="chat")inpRef.current?.focus();},[actId,panel]);
+  useEffect(()=>{if(panel==="chat")inpRef.current?.focus();if(panel==="models")refreshModels();},[actId,panel]);
+  useEffect(()=>{
+    if(!downloadsExpanded)return;
+    const handler=(e)=>{if(dlPanelRef.current&&!dlPanelRef.current.contains(e.target))setDownloadsExpanded(false);};
+    document.addEventListener("mousedown",handler);
+    return()=>document.removeEventListener("mousedown",handler);
+  },[downloadsExpanded]);
   // Fetch council suggestions
   const fetchCouncilSuggestions=(cfgId)=>{
     if(!cfgId)return;
@@ -1598,7 +1627,6 @@ function HyprChat(){
             if(d.status==="success"){
               updDl({status:"done",pct:100,message:"Done!"});
               refreshModels();
-              setTimeout(()=>setDownloads(p=>p.filter(dl=>dl.id!==dlId)),10000);
               continue;
             }
             const completed=d.completed||0,total=d.total||0;
@@ -1688,7 +1716,6 @@ function HyprChat(){
             else if(d.status==="done"){
               updDl({status:"done",pct:100,message:d.message||"Done!"});
               refreshModels();
-              setTimeout(()=>setDownloads(p=>p.filter(dl=>dl.id!==dlId)),10000);
             }else if(d.status==="downloading"){
               const now=Date.now();
               const completed=d.completed||0,total=d.total||0;
@@ -1857,7 +1884,8 @@ function HyprChat(){
   };
 
   const glass={background:`${t.surface}CC`,backdropFilter:"blur(24px)",border:`1px solid ${t.brd}44`};
-  const nb=(p,ico,lab)=><button onClick={()=>setPanel(p)} title={lab} style={{width:44,height:44,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:12,cursor:"pointer",border:"none",background:panel===p?`${t.acc}22`:"transparent",color:panel===p?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:panel===p?`0 0 10px ${t.acc}22`:"none"}}>{ico}{panel===p&&<div style={{position:"absolute",left:0,top:"18%",width:3,height:"64%",borderRadius:"0 3px 3px 0",background:t.acc,boxShadow:`0 0 6px ${t.acc}`}}/>}</button>;
+  const _navShort={Chat:"Chat","Knowledge Bases":"KB",Tools:"Tools",Personas:"Personas","Prompt Library":"Prompts","Council of AI":"Council","Model Manager":"Models",Settings:"Settings"};
+  const nb=(p,ico,lab)=><button onClick={()=>setPanel(p)} title={lab} style={{width:52,height:showNavLabels?50:48,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:12,cursor:"pointer",border:"none",background:panel===p?`${t.acc}22`:"transparent",color:panel===p?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:panel===p?`0 0 10px ${t.acc}22`:"none",padding:showNavLabels?"3px 0 1px":0}}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.7,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{panel===p&&<div style={{position:"absolute",left:0,top:"18%",width:3,height:"64%",borderRadius:"0 3px 3px 0",background:t.acc,boxShadow:`0 0 6px ${t.acc}`}}/>}</button>;
   const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?"#f0a030":t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${n}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
     const matchSearch=(c.title||"").toLowerCase().includes(sq.toLowerCase());
@@ -1887,21 +1915,21 @@ function HyprChat(){
     {scanlineEffect&&<div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${t.acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:.4}}/>}
 
     {/* NAV RAIL */}
-    <div style={{width:60,minWidth:60,display:"flex",flexDirection:"column",alignItems:"center",...glass,borderRight:`1px solid ${t.brd}33`,zIndex:11,padding:"12px 0",gap:3}}>
+    <div style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...glass,borderRight:`1px solid ${t.brd}33`,zIndex:11,padding:"12px 0",gap:3}}>
       {/* Logo dot */}
-      <div style={{width:44,height:44,display:"flex",alignItems:"center",justifyContent:"center",marginBottom:6}}>
-        <div style={{width:13,height:13,borderRadius:"50%",background:t.acc,boxShadow:`0 0 16px ${t.acc}DD,0 0 32px ${t.acc}55`,animation:"glow 3s ease-in-out infinite"}}/>
+      <div style={{width:52,height:48,display:"flex",alignItems:"center",justifyContent:"center",marginBottom:6}}>
+        <div style={{width:14,height:14,borderRadius:"50%",background:t.acc,boxShadow:`0 0 16px ${t.acc}DD,0 0 32px ${t.acc}55`,animation:"glow 3s ease-in-out infinite"}}/>
       </div>
       {nb("chat",<IC.Chat/>,"Chat")}
       {nb("kb",<IC.Database/>,"Knowledge Bases")}
       {nb("tools",<IC.Tool/>,"Tools")}
-      {nb("personas",<IC.Cube/>,"Personas")}
+      {nb("personas",<IC.User/>,"Personas")}
       {nb("prompts",<IC.Zap/>,"Prompt Library")}
       {nb("council",<IC.Council/>,"Council of AI")}
       {nb("models",<IC.Layers/>,"Model Manager")}
       <div style={{flex:1}}/>
       {nb("settings",<IC.Settings/>,"Settings")}
-      <button onClick={()=>setSidebar(p=>!p)} title={sidebar?"Hide conversations":"Show conversations"} style={{width:44,height:44,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:12,cursor:"pointer",border:"none",background:"transparent",color:t.mut,transition:"all .15s",marginTop:4}}>
+      <button onClick={()=>setSidebar(p=>!p)} title={sidebar?"Hide conversations":"Show conversations"} style={{width:52,height:48,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:12,cursor:"pointer",border:"none",background:"transparent",color:t.mut,transition:"all .15s",marginTop:4}}>
         <IC.Sidebar/>
       </button>
     </div>
@@ -2001,7 +2029,7 @@ function HyprChat(){
                 {councilRunning&&<div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
               </div>
               <button onClick={()=>newChat(true)} style={{display:"flex",alignItems:"center",gap:3,padding:"3px 9px",background:`${t.err}12`,border:`1px solid ${t.err}33`,borderRadius:16,cursor:"pointer",fontSize:10,fontWeight:600,color:t.err,fontFamily:font}}>✕ Leave Council</button></>;
-            })():<ModelPicker value={act.model||models[0]||""} onChange={v=>uConv(actId,{model:v})} models={models} modelDetails={modelDetails} t={t} font={font} compact={true}/>}
+            })():<ModelPicker value={act.model||models[0]||""} onChange={v=>uConv(actId,{model:v})} models={models} modelDetails={modelDetails} t={t} font={font} compact={true} onRefresh={refreshModels}/>}
             {!act.is_council&&act.persona_name&&<><div style={{display:"flex",alignItems:"center",gap:5,padding:"3px 10px",background:`${t.warm}15`,border:`1px solid ${t.warm}28`,borderRadius:20}}>
               {act.persona_avatar&&<img src={`${API}${act.persona_avatar}`} style={{width:16,height:16,borderRadius:5,objectFit:"cover"}} alt=""/>}
               <span style={{fontSize:10,fontWeight:600,color:t.warm}}>{act.persona_name}</span>
@@ -2017,15 +2045,13 @@ function HyprChat(){
             const fmtSpd=b=>{if(b>=1e6)return`${(b/1e6).toFixed(1)} MB/s`;if(b>=1e3)return`${(b/1e3).toFixed(0)} KB/s`;return`${b.toFixed(0)} B/s`;};
             const fmtEta=s=>{if(s>=3600)return`${Math.floor(s/3600)}h${Math.floor((s%3600)/60)}m`;if(s>=60)return`${Math.floor(s/60)}m${s%60}s`;return`${s}s`;};
             const pillColor=active.length?t.ok:t.mut;
-            return <div style={{position:"relative"}}>
+            return <div ref={dlPanelRef} style={{position:"relative"}}>
               <button onClick={()=>setDownloadsExpanded(p=>!p)} style={{display:"flex",alignItems:"center",gap:5,padding:"4px 10px",background:`${pillColor}15`,border:`1px solid ${pillColor}44`,borderRadius:10,color:pillColor,cursor:"pointer",fontSize:10,fontWeight:600,fontFamily:font}}>
                 <IC.Download/>
                 <span>{active.length?`${active.length} active`:"Done"}</span>
                 <span style={{fontSize:8,opacity:.6,display:"inline-block",transform:downloadsExpanded?"rotate(180deg)":"none",transition:"transform .2s"}}>▼</span>
               </button>
-              {downloadsExpanded&&<>
-                <div onClick={()=>setDownloadsExpanded(false)} style={{position:"fixed",inset:0,zIndex:99}}/>
-                <div style={{position:"absolute",top:"calc(100% + 8px)",right:0,zIndex:100,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:14,boxShadow:`0 6px 32px #0009`,width:340,padding:12,animation:"fadeIn .2s"}}>
+              {downloadsExpanded&&<div style={{position:"absolute",top:"calc(100% + 8px)",right:0,zIndex:200,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:14,boxShadow:`0 6px 32px #0009`,width:340,padding:12,animation:"fadeIn .2s"}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,paddingBottom:8,borderBottom:`1px solid ${t.brd}22`}}>
                     <span style={{fontSize:11,fontWeight:700,color:t.text}}>Downloads</span>
                     <button onClick={()=>{setDownloads(p=>p.filter(d=>d.status!=="done"&&d.status!=="error"));}} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:9,padding:"2px 6px"}}>Clear done</button>
@@ -2057,8 +2083,7 @@ function HyprChat(){
                       </div>;
                     })}
                   </div>
-                </div>
-              </>}
+                </div>}
             </div>;
           })()}
           {panel==="chat"&&act&&(act.messages||[]).length>0&&<button onClick={exportChat} title="Export conversation as Markdown" style={{background:"none",border:`1px solid ${t.brd}33`,color:t.mut,cursor:"pointer",padding:"4px 10px",borderRadius:8,fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:3}}><IC.Download/> export</button>}
@@ -2121,10 +2146,15 @@ function HyprChat(){
           </div>
           <button onClick={async()=>{fetch(`${API}/api/knowledge-bases/${kb.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.filter(k=>k.id!==kb.id));}} style={btnS(t.err)}><IC.Trash/></button>
         </div>
-        <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:10}}>
-          {(kb.files||[]).map((f,i)=><Chip key={i} l={`${f.filename||f.name} (${((f.file_size||f.size||0)/1024).toFixed(1)}KB)`} c={t.f1} bg={`${t.f1}22`}
-            onX={()=>{if(f.id)fetch(`${API}/api/knowledge-bases/files/${f.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:(k.files||[]).filter((_,j)=>j!==i)}:k));}}/>)}
-          {!(kb.files||[]).length&&<span style={{fontSize:11,color:t.mut,fontStyle:"italic"}}>No files uploaded</span>}
+        <div style={{maxHeight:240,overflowY:"auto",marginBottom:10,display:"flex",flexDirection:"column",gap:3}}>
+          {(kb.files||[]).map((f,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 10px",background:`${t.surface}44`,borderRadius:8,border:`1px solid ${t.brd}18`,fontSize:11}}>
+            <span style={{color:t.f1,flexShrink:0}}>📄</span>
+            <span style={{flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:500}}>{f.filename||f.name}</span>
+            <span style={{fontSize:9,color:t.mut,flexShrink:0}}>{((f.file_size||f.size||0)/1024).toFixed(1)}KB</span>
+            {f.id&&<button onClick={async()=>{setKbPreview({filename:f.filename||f.name,content:null,loading:true});try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/preview`);const d=await r.json();setKbPreview({filename:d.filename,content:d.content,truncated:d.truncated,total_lines:d.total_lines,loading:false});}catch(e){setKbPreview({filename:f.filename||f.name,content:"Failed to load preview: "+e.message,loading:false});}}} style={{background:`${t.acc}15`,border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",padding:"2px 8px",borderRadius:5,fontSize:9,fontWeight:600,flexShrink:0}}>Preview</button>}
+            <button onClick={()=>{if(f.id)fetch(`${API}/api/knowledge-bases/files/${f.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:(k.files||[]).filter((_,j)=>j!==i)}:k));}} style={{background:"none",border:"none",color:t.err,cursor:"pointer",padding:"2px 4px",fontSize:10,opacity:.6,flexShrink:0}} title="Delete file">✕</button>
+          </div>)}
+          {!(kb.files||[]).length&&<span style={{fontSize:11,color:t.mut,fontStyle:"italic",padding:"4px 0"}}>No files uploaded</span>}
         </div>
         {/* Upload progress bars */}
         {Object.entries(uploadProgress).filter(([k])=>k.startsWith(kb.id+":")).map(([key,info])=>(
@@ -2684,6 +2714,15 @@ function HyprChat(){
       )}
     </div>
 
+    {/* Pull / Search bar — sticky top */}
+    <div style={{padding:"8px 16px 6px",flexShrink:0,borderBottom:`1px solid ${t.brd}15`,background:`${t.bgDeep}EE`}}>
+      {modelsTab==="ollama"?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+        <span style={{fontSize:11,color:t.dim,fontWeight:600,flexShrink:0}}>Pull</span>
+        <input value={pullName} onChange={e=>setPullName(e.target.value)} placeholder="llama3.1:8b" onKeyDown={e=>e.key==="Enter"&&pullModel()} style={{...inputS,width:220,flex:"none",fontSize:12,padding:"6px 10px"}}/>
+        <button onClick={pullModel} disabled={!pullName.trim()} style={{...btnS(t.ok),padding:"6px 12px",fontSize:11,flexShrink:0}}>Pull</button>
+      </div>:null}
+    </div>
+
     {/* ── OLLAMA TAB ── */}
     {modelsTab==="ollama"&&<div style={{flex:1,display:"flex",overflow:"hidden"}}>
 
@@ -2754,26 +2793,18 @@ function HyprChat(){
 
       {/* Right: parameter detail */}
       <div style={{flex:1,overflowY:"auto",padding:"24px 28px"}}>
-        {/* Pull from Ollama — always visible at top */}
-        <div style={{maxWidth:580,marginBottom:20,padding:"14px 16px",background:`${t.surface}33`,border:`1px solid ${t.brd}22`,borderRadius:12}}>
-          <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Pull from Ollama Library</div>
-          <div style={{display:"flex",gap:8}}>
-            <input value={pullName} onChange={e=>setPullName(e.target.value)} placeholder="llama3.1:8b" onKeyDown={e=>e.key==="Enter"&&pullModel()} style={{...inputS,flex:1,fontSize:13,padding:"8px 12px"}}/>
-            <button onClick={pullModel} disabled={!pullName.trim()} style={{...btnS(t.ok),padding:"8px 14px",fontSize:12,flexShrink:0}}>Pull</button>
-          </div>
-        </div>
         {!modelParamsOpen?
           /* Global defaults shown when nothing is selected */
           <div style={{maxWidth:580}}>
             <div style={{fontSize:16,fontWeight:700,color:t.text,marginBottom:6}}>Global Defaults</div>
             <div style={{fontSize:12,color:t.mut,marginBottom:24}}>Applied to all models unless overridden. Select a model on the left to customize it individually.</div>
             {[
-              ["Default Temperature","range","0","2","0.05",defaultTemp,v=>setDefaultTemp(parseFloat(v)),v=>v.toFixed(2),"Precise","Balanced","Creative"],
-              ["Default Top-P","range","0.1","1","0.05",defaultTopP,v=>setDefaultTopP(parseFloat(v)),v=>v.toFixed(2),"Focused","Balanced","Diverse"],
-            ].map(([lbl,type,min,max,step,val,setter,fmt,l1,l2,l3])=>
+              ["Default Temperature","range","0","2","0.05",defaultTemp,v=>setDefaultTemp(parseFloat(v)),v=>v.toFixed(2),"Precise","Balanced","Creative","temperature"],
+              ["Default Top-P","range","0.1","1","0.05",defaultTopP,v=>setDefaultTopP(parseFloat(v)),v=>v.toFixed(2),"Focused","Balanced","Diverse","top_p"],
+            ].map(([lbl,type,min,max,step,val,setter,fmt,l1,l2,l3,tipKey])=>
               <div key={lbl} style={{marginBottom:24}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
-                  <span style={{fontSize:12,color:t.dim,textTransform:"uppercase",letterSpacing:.5,fontWeight:600}}>{lbl}</span>
+                  <span style={{fontSize:12,color:t.dim,textTransform:"uppercase",letterSpacing:.5,fontWeight:600}}>{lbl} {tipKey&&<Tip k={tipKey} t={t}/>}</span>
                   <span style={{fontSize:16,fontWeight:700,color:t.acc,fontVariantNumeric:"tabular-nums"}}>{fmt(val)}</span>
                 </div>
                 <input type="range" min={min} max={max} step={step} value={val} onChange={e=>setter(e.target.value)} style={{width:"100%",accentColor:t.acc,cursor:"pointer",height:6}}/>
@@ -2781,7 +2812,7 @@ function HyprChat(){
               </div>
             )}
             <div style={{marginBottom:24}}>
-              <div style={{fontSize:12,color:t.dim,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,fontWeight:600}}>Default Context Window</div>
+              <div style={{fontSize:12,color:t.dim,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,fontWeight:600}}>Default Context Window <Tip k="num_ctx" t={t}/></div>
               <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
                 {[0,4096,8192,16384,32768,65536,131072,262144].map(v=><button key={v} onClick={()=>setNumCtx(v)} style={{padding:"6px 14px",borderRadius:7,border:`1px solid ${numCtx===v?t.acc:t.brd}44`,background:numCtx===v?`${t.acc}22`:t.bgDeep,color:numCtx===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:numCtx===v?700:400}}>
                   {v===0?"Auto":v>=1024?`${(v/1024).toFixed(0)}K`:v}
@@ -3162,6 +3193,15 @@ function HyprChat(){
               <span>♥ {hfSelected.likes}</span>
             </div>
           </div>
+          {/* Download bar — sticky top */}
+          {hfSelectedFiles.length>0&&<div style={{padding:"8px 16px",flexShrink:0,borderBottom:`1px solid ${t.brd}18`,background:`${t.ok}06`,display:"flex",alignItems:"center",gap:8}}>
+            <input value={hfDownloadName} onChange={e=>setHfDownloadName(e.target.value)} placeholder="Model name, e.g. llama3-q5" style={{...inputS,fontSize:11,padding:"6px 10px",width:200,flex:"none"}}/>
+            <span style={{fontSize:9,color:t.mut,flexShrink:0}}>{hfSelectedFiles.length} file{hfSelectedFiles.length>1?"s":""} · {fmtSize((hfModelInfo?.gguf_files||[]).filter(f=>hfSelectedFiles.includes(f.name)).reduce((a,f)=>a+(f.size||0),0))}</span>
+            <div style={{flex:1}}/>
+            <button onClick={hfDownload} disabled={hfDownloading||!hfDownloadName.trim()} style={{...btnS(hfDownloading?t.mut:t.ok),padding:"6px 14px",fontSize:11,flexShrink:0,opacity:hfDownloading?.7:1}}>
+              <IC.Download/>{hfDownloading?"Queued":"Download"}
+            </button>
+          </div>}
           {/* Body: files left, readme right */}
           <div style={{flex:1,display:"flex",overflow:"hidden"}}>
             {/* Files + download */}
@@ -3191,15 +3231,6 @@ function HyprChat(){
                     </div>;
                   });
                 })()}
-                {hfSelectedFiles.length>0&&<div style={{marginTop:10,display:"flex",flexDirection:"column",gap:6,paddingTop:10,borderTop:`1px solid ${t.brd}18`}}>
-                  <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Ollama Model Name</div>
-                  <input value={hfDownloadName} onChange={e=>setHfDownloadName(e.target.value)} placeholder="e.g. llama3-q5" style={{...inputS,fontSize:11,padding:"6px 8px"}}/>
-                  <div style={{fontSize:9,color:t.mut}}>{hfSelectedFiles.length} file{hfSelectedFiles.length>1?"s":""} · {fmtSize((hfModelInfo?.gguf_files||[]).filter(f=>hfSelectedFiles.includes(f.name)).reduce((a,f)=>a+(f.size||0),0))}</div>
-                  <button onClick={hfDownload} disabled={hfDownloading||!hfDownloadName.trim()} style={{...btnS(hfDownloading?t.mut:t.ok),width:"100%",justifyContent:"center",padding:"8px",opacity:hfDownloading?.7:1}}>
-                    <IC.Download/>{hfDownloading?"Queued — see downloads bar":"Download & Register"}
-                  </button>
-                  {hfDownloading&&<div style={{fontSize:9,color:t.mut,textAlign:"center",paddingTop:4}}>Track progress in the downloads bar at the top right</div>}
-                </div>}
               </>}
             </div>
             {/* README */}
@@ -3251,6 +3282,13 @@ function HyprChat(){
           {numCtx>0&&<div style={{fontSize:11,color:t.acc,marginTop:4,fontWeight:600}}>{numCtx>=1024?`${(numCtx/1024).toFixed(0)}K`:numCtx} tokens</div>}
           <div style={{fontSize:10,color:t.mut,marginTop:4}}>Sets num_ctx for all chats. Per-model overrides in Model Manager.</div>
         </div>
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Thinking Mode</div>
+          <div style={{display:"flex",gap:4}}>
+            {["auto","on","off"].map(v=><button key={v} onClick={()=>setThinkMode(v)} style={{padding:"5px 12px",borderRadius:7,border:`1px solid ${thinkMode===v?t.acc:t.brd}44`,background:thinkMode===v?`${t.acc}22`:t.bgDeep,color:thinkMode===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:thinkMode===v?700:400}}>{v==="auto"?"Auto":v==="on"?"On":"Off"}</button>)}
+          </div>
+          <div style={{fontSize:10,color:t.mut,marginTop:4}}>Controls whether models use thinking tokens. Auto lets the model decide.</div>
+        </div>
         <div>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
             <div style={{fontSize:12,color:t.dim,fontWeight:600}}>Service Health</div>
@@ -3278,29 +3316,69 @@ function HyprChat(){
         <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:14,display:"flex",alignItems:"center",gap:8}}>🎨 Appearance</div>
         <div style={{marginBottom:12}}>
           <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Theme</div>
-          <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-            {Object.entries(THEMES).map(([k,th])=><button key={k} onClick={()=>setTm(k)} style={{background:tm===k?`${th.acc}20`:t.bgDeep,border:`1px solid ${tm===k?th.acc:t.brd}44`,color:tm===k?th.acc:t.dim,padding:"5px 10px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:12,display:"flex",alignItems:"center",gap:4}}>
-              <div style={{display:"flex",gap:2}}>{[th.acc,th.warm,th.ok].map((c,i)=><div key={i} style={{width:7,height:7,borderRadius:"50%",background:c}}/>)}</div>{th.name}
-            </button>)}
-          </div>
+          {(()=>{
+            const previewKey=pendingTheme||tm;
+            const pTh=THEMES[previewKey]||t;
+            return <div>
+              <select value={previewKey} onChange={e=>setPendingTheme(e.target.value)} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"8px 12px",borderRadius:8,fontFamily:font,fontSize:12,outline:"none",cursor:"pointer",marginBottom:8}}>
+                {Object.entries(THEMES).map(([k,th])=><option key={k} value={k}>{th.name}</option>)}
+              </select>
+              <div style={{padding:"10px 14px",background:pTh.bgDeep,border:`1px solid ${pTh.brd}44`,borderRadius:10,marginBottom:8}}>
+                <div style={{display:"flex",gap:4,marginBottom:8,flexWrap:"wrap"}}>
+                  {[["bg",pTh.bg],["surface",pTh.surface],["text",pTh.text],["accent",pTh.acc],["warm",pTh.warm],["ok",pTh.ok],["err",pTh.err],["pink",pTh.pink]].map(([label,c])=><div key={label} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+                    <div style={{width:18,height:18,borderRadius:4,background:c,border:`1px solid ${pTh.brd}66`}}/>
+                    <span style={{fontSize:7,color:pTh.mut}}>{label}</span>
+                  </div>)}
+                </div>
+                <div style={{borderRadius:8,overflow:"hidden",background:pTh.bg,padding:8}}>
+                  <div style={{display:"flex",gap:6,marginBottom:4}}>
+                    <div style={{flex:1,padding:"6px 10px",borderRadius:8,background:`${pTh.surface}CC`,fontSize:10,color:pTh.text}}>Hello!</div>
+                  </div>
+                  <div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
+                    <div style={{flex:1,maxWidth:"70%",padding:"6px 10px",borderRadius:8,background:`${pTh.acc}22`,border:`1px solid ${pTh.acc}33`,fontSize:10,color:pTh.acc}}>Response preview</div>
+                  </div>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:6}}>
+                {pendingTheme&&pendingTheme!==tm&&<><button onClick={()=>{setTm(pendingTheme);setPendingTheme(null);}} style={{flex:1,padding:"6px 12px",borderRadius:7,background:`${t.ok}22`,border:`1px solid ${t.ok}44`,color:t.ok,cursor:"pointer",fontFamily:font,fontSize:12,fontWeight:600}}>Apply</button>
+                <button onClick={()=>setPendingTheme(null)} style={{padding:"6px 12px",borderRadius:7,background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.dim,cursor:"pointer",fontFamily:font,fontSize:12}}>Cancel</button></>}
+              </div>
+            </div>;
+          })()}
         </div>
         <div style={{marginBottom:12}}>
           <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Font</div>
-          <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-            {FONTS.map((f,i)=><button key={i} onClick={()=>setFi(i)} style={{background:fi===i?`${t.acc}20`:t.bgDeep,border:`1px solid ${fi===i?t.acc:t.brd}44`,color:fi===i?t.acc:t.dim,padding:"5px 10px",borderRadius:7,cursor:"pointer",fontFamily:f.v,fontSize:12}}>{f.name}</button>)}
-          </div>
-        </div>
-        <div style={{marginBottom:12}}>
-          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>UI Size</div>
-          <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-            {[10,11,12,13,14,15,16,17,18,19,20,22,24].map(v=><button key={v} onClick={()=>setUiFontSize(v)} style={{padding:"5px 10px",borderRadius:7,border:`1px solid ${uiFontSize===v?t.acc:t.brd}44`,background:uiFontSize===v?`${t.acc}22`:t.bgDeep,color:uiFontSize===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:uiFontSize===v?700:400,minWidth:36,textAlign:"center"}}>{v}</button>)}
-          </div>
-        </div>
-        <div style={{marginBottom:12}}>
-          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Chat Font Size</div>
-          <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-            {[11,12,13,14,15,16,17,18,19,20,22,24].map(v=><button key={v} onClick={()=>setFontSize(v)} style={{padding:"5px 10px",borderRadius:7,border:`1px solid ${fontSize===v?t.acc:t.brd}44`,background:fontSize===v?`${t.acc}22`:t.bgDeep,color:fontSize===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:fontSize===v?700:400,minWidth:36,textAlign:"center"}}>{v}</button>)}
-          </div>
+          {(()=>{
+            const previewIdx=pendingFont!==null?pendingFont:fi;
+            const pF=FONTS[previewIdx]||FONTS[0];
+            return <div>
+              <select value={previewIdx} onChange={e=>setPendingFont(parseInt(e.target.value))} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"8px 12px",borderRadius:8,fontFamily:pF.v,fontSize:12,outline:"none",cursor:"pointer",marginBottom:8}}>
+                {FONTS.map((f,i)=><option key={i} value={i} style={{fontFamily:f.v}}>{f.name}</option>)}
+              </select>
+              <div style={{padding:"10px 14px",background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:10,marginBottom:8}}>
+                <div style={{fontFamily:pF.v,fontSize:14,color:t.text,marginBottom:6,lineHeight:1.6}}>The quick brown fox jumps over the lazy dog.</div>
+                <div style={{fontFamily:pF.v,fontSize:11,color:t.dim,lineHeight:1.5}}>{"const x = () => { return 42; };"}</div>
+                <div style={{display:"flex",gap:12,marginTop:8}}>
+                  <div style={{display:"flex",alignItems:"center",gap:6}}>
+                    <span style={{fontSize:10,color:t.mut}}>UI Size</span>
+                    <select value={uiFontSize} onChange={e=>setUiFontSize(parseInt(e.target.value))} style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"4px 8px",borderRadius:6,fontFamily:pF.v,fontSize:11,outline:"none",cursor:"pointer"}}>
+                      {[10,11,12,13,14,15,16,17,18,19,20,22,24].map(v=><option key={v} value={v}>{v}px</option>)}
+                    </select>
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:6}}>
+                    <span style={{fontSize:10,color:t.mut}}>Chat Size</span>
+                    <select value={fontSize} onChange={e=>setFontSize(parseInt(e.target.value))} style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"4px 8px",borderRadius:6,fontFamily:pF.v,fontSize:11,outline:"none",cursor:"pointer"}}>
+                      {[11,12,13,14,15,16,17,18,19,20,22,24].map(v=><option key={v} value={v}>{v}px</option>)}
+                    </select>
+                  </div>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:6}}>
+                {pendingFont!==null&&pendingFont!==fi&&<><button onClick={()=>{setFi(pendingFont);setPendingFont(null);}} style={{flex:1,padding:"6px 12px",borderRadius:7,background:`${t.ok}22`,border:`1px solid ${t.ok}44`,color:t.ok,cursor:"pointer",fontFamily:font,fontSize:12,fontWeight:600}}>Apply</button>
+                <button onClick={()=>setPendingFont(null)} style={{padding:"6px 12px",borderRadius:7,background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.dim,cursor:"pointer",fontFamily:font,fontSize:12}}>Cancel</button></>}
+              </div>
+            </div>;
+          })()}
         </div>
         <div style={{marginBottom:12}}>
           <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Chat Width</div>
@@ -3308,21 +3386,16 @@ function HyprChat(){
             {[560,640,720,800,880,960,1040,1120,1200].map(v=><button key={v} onClick={()=>setChatWidth(v)} style={{padding:"5px 10px",borderRadius:7,border:`1px solid ${chatWidth===v?t.acc:t.brd}44`,background:chatWidth===v?`${t.acc}22`:t.bgDeep,color:chatWidth===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:chatWidth===v?700:400}}>{v}</button>)}
           </div>
         </div>
-        <div style={{display:"flex",gap:8}}>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
           {[
             [compactMode,setCompactMode,"Compact"],
             [autoExpandThink,setAutoExpandThink,"Auto-think"],
             [scanlineEffect,setScanlineEffect,"Scanlines"],
+            [showNavLabels,setShowNavLabels,"Nav Labels"],
           ].map(([val,setter,label],idx)=><div key={idx} onClick={()=>setter(!val)} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${t.bgDeep}`,borderRadius:7,border:`1px solid ${val?t.acc:t.brd}33`,cursor:"pointer",fontSize:12}}>
             <span style={{color:val?t.acc:t.mut,fontSize:14}}>{val?<IC.ToggleOn/>:<IC.ToggleOff/>}</span>
             <span style={{color:val?t.acc:t.dim,fontWeight:600}}>{label}</span>
           </div>)}
-        </div>
-        <div style={{marginTop:10}}>
-          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Thinking Mode</div>
-          <div style={{display:"flex",gap:4}}>
-            {["auto","on","off"].map(v=><button key={v} onClick={()=>setThinkMode(v)} style={{padding:"5px 12px",borderRadius:7,border:`1px solid ${thinkMode===v?t.acc:t.brd}44`,background:thinkMode===v?`${t.acc}22`:t.bgDeep,color:thinkMode===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:thinkMode===v?700:400}}>{v==="auto"?"Auto":v==="on"?"On":"Off"}</button>)}
-          </div>
         </div>
       </div>
 
@@ -3346,24 +3419,24 @@ function HyprChat(){
           </div>
         </div>
         <div style={{marginBottom:10}}>
-          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Embedding Model</div>
+          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Embedding Model <Tip k="embed_model" t={t}/></div>
           <input value={ragSettings.embed_model} onChange={e=>setRagSettings(p=>({...p,embed_model:e.target.value}))} placeholder="nomic-embed-text" style={{...inputS,fontFamily:"monospace",fontSize:13,width:"100%",padding:"8px 12px"}}/>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:10}}>
           <div>
-            <div style={{fontSize:12,color:t.dim,marginBottom:5,fontWeight:600}}>Chunk Size</div>
+            <div style={{fontSize:12,color:t.dim,marginBottom:5,fontWeight:600}}>Chunk Size <Tip k="chunk_size" t={t}/></div>
             <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
               {[256,500,750,1000].map(v=><button key={v} onClick={()=>setRagSettings(p=>({...p,chunk_size:v}))} style={{padding:"5px 10px",borderRadius:6,border:`1px solid ${ragSettings.chunk_size===v?t.acc:t.brd}44`,background:ragSettings.chunk_size===v?`${t.acc}22`:t.bgDeep,color:ragSettings.chunk_size===v?t.acc:t.dim,fontSize:12,cursor:"pointer",fontFamily:font}}>{v}</button>)}
             </div>
           </div>
           <div>
-            <div style={{fontSize:12,color:t.dim,marginBottom:5,fontWeight:600}}>Overlap</div>
+            <div style={{fontSize:12,color:t.dim,marginBottom:5,fontWeight:600}}>Overlap <Tip k="chunk_overlap" t={t}/></div>
             <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
               {[0,25,50,100].map(v=><button key={v} onClick={()=>setRagSettings(p=>({...p,chunk_overlap:v}))} style={{padding:"5px 10px",borderRadius:6,border:`1px solid ${ragSettings.chunk_overlap===v?t.acc:t.brd}44`,background:ragSettings.chunk_overlap===v?`${t.acc}22`:t.bgDeep,color:ragSettings.chunk_overlap===v?t.acc:t.dim,fontSize:12,cursor:"pointer",fontFamily:font}}>{v}</button>)}
             </div>
           </div>
           <div>
-            <div style={{fontSize:12,color:t.dim,marginBottom:5,fontWeight:600}}>Max Context</div>
+            <div style={{fontSize:12,color:t.dim,marginBottom:5,fontWeight:600}}>Max Context <Tip k="max_context" t={t}/></div>
             <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
               {[3000,6000,10000,15000].map(v=><button key={v} onClick={()=>setRagSettings(p=>({...p,max_context_chars:v}))} style={{padding:"5px 10px",borderRadius:6,border:`1px solid ${ragSettings.max_context_chars===v?t.acc:t.brd}44`,background:ragSettings.max_context_chars===v?`${t.acc}22`:t.bgDeep,color:ragSettings.max_context_chars===v?t.acc:t.dim,fontSize:12,cursor:"pointer",fontFamily:font}}>{v>=1000?`${(v/1000).toFixed(0)}K`:v}</button>)}
             </div>
@@ -3371,13 +3444,13 @@ function HyprChat(){
         </div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
           <div>
-            <div style={{fontSize:12,color:t.dim,marginBottom:5,fontWeight:600}}>KB Retrieval (top-K)</div>
+            <div style={{fontSize:12,color:t.dim,marginBottom:5,fontWeight:600}}>KB Retrieval (top-K) <Tip k="top_k" t={t}/></div>
             <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
               {[3,4,6,8,10].map(v=><button key={v} onClick={()=>setRagSettings(p=>({...p,top_k:v}))} style={{padding:"5px 10px",borderRadius:6,border:`1px solid ${ragSettings.top_k===v?t.acc:t.brd}44`,background:ragSettings.top_k===v?`${t.acc}22`:t.bgDeep,color:ragSettings.top_k===v?t.acc:t.dim,fontSize:12,cursor:"pointer",fontFamily:font}}>{v}</button>)}
             </div>
           </div>
           <div>
-            <div style={{fontSize:12,color:t.dim,marginBottom:5,fontWeight:600}}>Research Memory (top-K)</div>
+            <div style={{fontSize:12,color:t.dim,marginBottom:5,fontWeight:600}}>Research Memory (top-K) <Tip k="research_top_k" t={t}/></div>
             <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
               {[2,4,6,8].map(v=><button key={v} onClick={()=>setRagSettings(p=>({...p,research_top_k:v}))} style={{padding:"5px 10px",borderRadius:6,border:`1px solid ${ragSettings.research_top_k===v?t.acc:t.brd}44`,background:ragSettings.research_top_k===v?`${t.acc}22`:t.bgDeep,color:ragSettings.research_top_k===v?t.acc:t.dim,fontSize:12,cursor:"pointer",fontFamily:font}}>{v}</button>)}
             </div>
@@ -3900,7 +3973,7 @@ function HyprChat(){
               {showPromptPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:50,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8}}>
                 <input value={promptSearch} onChange={e=>setPromptSearch(e.target.value)} placeholder="Search prompts..." style={{...inputS,marginBottom:6,padding:"5px 8px",fontSize:11}} autoFocus/>
                 <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
-                  {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={()=>{setInp(p.content);setShowPromptPicker(false);setTimeout(()=>inpRef.current?.focus(),50);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
+                  {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={(e)=>{e.stopPropagation();setInp(p.content);setShowPromptPicker(false);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
                     <div style={{fontSize:11,fontWeight:600,color:t.text}}>{p.title}</div>
                     <div style={{fontSize:9,color:t.f1,marginTop:1}}>{p.category||"General"}</div>
                   </div>)}
@@ -3928,6 +4001,22 @@ function HyprChat(){
 
     {/* Close prompt picker on outside click */}
     {showPromptPicker&&<div onClick={()=>setShowPromptPicker(false)} style={{position:"fixed",inset:0,zIndex:49}}/>}
+
+    {/* KB File Preview Modal */}
+    {kbPreview&&<div style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setKbPreview(null);}}>
+      <div style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,width:"min(720px,95vw)",maxHeight:"85vh",display:"flex",flexDirection:"column",boxShadow:`0 8px 48px #0008`,overflow:"hidden",animation:"fadeIn .25s"}}>
+        <div style={{padding:"12px 20px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:8,flexShrink:0,background:`${t.surface}88`}}>
+          <span style={{fontSize:14}}>📄</span>
+          <span style={{fontSize:13,fontWeight:700,color:t.acc,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{kbPreview.filename}</span>
+          {kbPreview.truncated&&<span style={{fontSize:9,color:t.warm,flexShrink:0}}>Showing first 200 of {kbPreview.total_lines} lines</span>}
+          <button onClick={()=>setKbPreview(null)} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:18,padding:"0 4px",lineHeight:1}}>✕</button>
+        </div>
+        <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
+          {kbPreview.loading?<div style={{textAlign:"center",padding:40,color:t.mut}}>Loading preview...</div>
+          :<pre style={{fontSize:11,lineHeight:1.6,color:t.text,fontFamily:font,whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{kbPreview.content}</pre>}
+        </div>
+      </div>
+    </div>}
 
     {/* Changelog Modal */}
     {showChangelog&&<div style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setShowChangelog(false);}}>

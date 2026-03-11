@@ -1026,6 +1026,34 @@ async def get_file_index_status(kb_id: str, filename: str):
     return {"status": "unknown", "filename": filename}
 
 
+@app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/preview")
+async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200):
+    """Preview first N lines of a KB file."""
+    _db = await db.get_db()
+    try:
+        cursor = await _db.execute("SELECT filename FROM kb_files WHERE id = ? AND kb_id = ?", (file_id, kb_id))
+        row = await cursor.fetchone()
+    finally:
+        await _db.close()
+    if not row:
+        raise HTTPException(404, "File not found")
+    filename = row["filename"]
+    kb_dir = os.path.join(config.KB_DIR, kb_id)
+    file_path = os.path.abspath(os.path.join(kb_dir, filename))
+    if not file_path.startswith(os.path.abspath(kb_dir)):
+        raise HTTPException(400, "Invalid path")
+    if not os.path.exists(file_path):
+        raise HTTPException(404, "File not found on disk")
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+        total = len(all_lines)
+        content = "".join(all_lines[:lines])
+        return {"filename": filename, "content": content, "truncated": total > lines, "total_lines": total}
+    except UnicodeDecodeError:
+        return {"filename": filename, "content": "Binary file — preview not available", "truncated": False, "total_lines": 0}
+
+
 @app.delete("/api/knowledge-bases/files/{file_id}")
 async def delete_kb_file(file_id: int):
     # Get file info before deleting so we can remove from RAG index

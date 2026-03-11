@@ -1,5 +1,25 @@
 # HyprChat Changelog
 
+## Alpha v15.1 — March 2026
+
+### New Features
+- **KB File Preview** — Preview uploaded knowledge base files directly in the browser. New backend endpoint returns the first 200 lines of any KB file. Files are displayed in a scrollable list with filename, size, Preview button, and Delete button. Preview opens in a modal overlay with syntax-friendly monospace rendering.
+- **Theme Preview & Apply** — Theme selector replaced with a dropdown that shows a live preview of any theme before applying. Preview includes color swatches (bg, surface, text, accent, warm, ok, err, pink) and a mini mock chat bubble. Click "Apply" to confirm or "Cancel" to revert.
+- **Nav Rail Labels** — Navigation icons now show text labels below each icon (Chat, Knowledge Bases, Tools, etc.). Configurable via Settings → Appearance → "Nav Labels" toggle. Saved to localStorage.
+- **Settings Tooltips** — Hover `ⓘ` icons next to RAG pipeline settings (chunk size, overlap, max context, top-K, embedding model) and model parameters (temperature, top-P, context window) for plain-English explanations of what each setting does.
+- **Model Pull Bar Repositioned** — "Pull from Ollama" input moved from the right detail pane to a sticky bar above the Ollama/HF tab content, always visible without scrolling.
+
+### Improvements
+- **Personas icon updated** — Nav rail icon changed from cube to person silhouette for better visual clarity.
+- **Model list auto-refresh** — Models refresh automatically when switching to the Model Manager panel and when opening the ModelPicker dropdown. Small refresh icon added inside the ModelPicker trigger bar.
+- **Downloads persist until cleared** — Completed downloads no longer auto-dismiss after 10 seconds. They remain in the downloads panel until manually cleared via "Clear done".
+- **KB file list redesign** — Knowledge base files now display as a scrollable vertical list (max 240px) with file icon, filename, size, Preview button, and Delete button instead of inline chips.
+
+### Bug Fixes
+- **Prompt library quick insert** — Fixed race condition where clicking a prompt in the `⚡` picker would close the picker before setting the input text due to click propagation to the backdrop. Added `stopPropagation` and auto-resize of the textarea after insert.
+
+---
+
 ## Alpha v15 — March 2026
 
 ### New Features
