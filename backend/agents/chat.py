@@ -365,6 +365,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             "stream": True,
             "options": model_options,
         }
+        # Thinking control: None=model default, 0=disable, 1=enable
+        if hasattr(req, 'think_budget') and req.think_budget is not None:
+            if req.think_budget == 0:
+                payload["think"] = False
+            else:
+                payload["think"] = True
         if ollama_tools:
             payload["tools"] = ollama_tools
 
@@ -633,14 +639,17 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             })
 
         if tool_calls:
-            # ── Guard: after successful generate_code, block further tool calls ──
+            # ── Guard: after successful generate_code, only allow verification tools ──
             if _generate_code_done:
+                _allowed_after_codegen = {"download_project", "execute_code", "run_shell"}
                 _tc_names = [tc.get("function", {}).get("name", "") for tc in tool_calls]
-                # Only allow download_project after generate_code success
-                if not any(n == "download_project" for n in _tc_names):
-                    print(f"[CHAT]   Blocking tool calls after generate_code success: {_tc_names}")
-                    tool_calls = []
-                    # Fall through to "no tool calls" path below
+                _filtered = [tc for tc in tool_calls if tc.get("function", {}).get("name", "") in _allowed_after_codegen]
+                if len(_filtered) < len(tool_calls):
+                    _blocked = [n for n in _tc_names if n not in _allowed_after_codegen]
+                    print(f"[CHAT]   Blocking non-verification tools after generate_code: {_blocked}")
+                tool_calls = _filtered
+                if not tool_calls:
+                    pass  # Fall through to "no tool calls" path below
 
             # ── Duplicate / near-duplicate detection ──
             if tool_calls:
@@ -787,17 +796,16 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     _generate_code_failed = True
                     print("[CHAT]   generate_code failed — disabling code-block-rescue for this session")
 
-                # When generate_code succeeds (PROJECT COMPLETE), force the model to respond
-                # Don't let it waste rounds inspecting files that OpenHands already tested
+                # When generate_code succeeds (PROJECT COMPLETE), allow verification but block inspection
                 if tool_name == "generate_code" and "PROJECT COMPLETE" in tool_result:
                     _generate_code_done = True
-                    print("[CHAT]   generate_code succeeded — forcing final response (no more tool calls)")
+                    print("[CHAT]   generate_code succeeded — continuing for verification if needed")
                     messages.append({"role": "tool", "content": (
-                        "SYSTEM: The project is COMPLETE and TESTED by OpenHands. "
-                        "Do NOT call list_files, read_file, or any other tool. "
-                        "Respond to the user NOW with the project summary and download link."
+                        "SYSTEM: The project has been built and tested by OpenHands. "
+                        "You may now use run_shell or execute_code to verify it works if the user requested verification. "
+                        "Do NOT call list_files or read_file to re-inspect already-created files. "
+                        "If no verification was requested, respond with the project summary and download link."
                     )})
-                    break  # Exit the tool_calls loop, go to next round for final response
 
                 # Detect repeated errors — inject guidance, then force-stop if stuck
                 if tool_name in ("execute_code", "run_shell") and ("FAILED" in tool_result or "Error" in tool_result or "Traceback" in tool_result):

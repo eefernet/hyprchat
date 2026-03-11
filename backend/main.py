@@ -203,6 +203,7 @@ class ChatRequest(BaseModel):
     top_p: Optional[float] = None
     top_k: Optional[int] = None
     repeat_penalty: Optional[float] = None
+    think_budget: Optional[int] = None  # None=auto, 0=disable thinking, 1=enable thinking
 
 class ExecuteRequest(BaseModel):
     conversation_id: Optional[str] = None

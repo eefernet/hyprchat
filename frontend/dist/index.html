@@ -910,6 +910,7 @@ function HyprChat(){
   const [compactMode,setCompactMode]=useState(()=>{try{return localStorage.getItem("hc-compact")==="1";}catch{return false;}});
   const [autoExpandThink,setAutoExpandThink]=useState(()=>{try{return localStorage.getItem("hc-auto-expand-think")==="1";}catch{return false;}});
   const [scanlineEffect,setScanlineEffect]=useState(()=>{try{return localStorage.getItem("hc-scanline")==="1";}catch{return false;}});
+  const [thinkMode,setThinkMode]=useState(()=>{try{return localStorage.getItem("hc-think-mode")||"auto";}catch{return "auto";}});
   const [lastPersonaId,setLastPersonaId]=useState(()=>{try{return localStorage.getItem("hc-last-persona")||null;}catch{return null;}});
   const [fontSize,setFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font-size")||"14");}catch{return 14;}});
   const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"14");}catch{return 14;}});
@@ -977,6 +978,7 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-compact",compactMode?"1":"0");}catch{}},[compactMode]);
   useEffect(()=>{try{localStorage.setItem("hc-auto-expand-think",autoExpandThink?"1":"0");}catch{}},[autoExpandThink]);
   useEffect(()=>{try{localStorage.setItem("hc-scanline",scanlineEffect?"1":"0");}catch{}},[scanlineEffect]);
+  useEffect(()=>{try{localStorage.setItem("hc-think-mode",thinkMode);}catch{}},[thinkMode]);
   useEffect(()=>{try{localStorage.setItem("hc-font-size",fontSize);}catch{}},[fontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-ui-font-size",uiFontSize);}catch{}},[uiFontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
@@ -1228,9 +1230,6 @@ function HyprChat(){
     if(!forceBlank){
       if(curConv?.persona_name){
         persona={model:curConv.model,system_prompt:curConv.system_prompt||"",tool_ids:curConv.tool_ids||[],model_config_id:curConv.model_config_id,persona_name:curConv.persona_name,persona_avatar:curConv.persona_avatar};
-      }else if(lastPersonaId){
-        const mc=mcs.find(m=>m.id===lastPersonaId);
-        if(mc)persona={model:mc.base_model||models[0]||"",system_prompt:mc.system_prompt||"",tool_ids:mc.tool_ids||[],model_config_id:mc.id,persona_name:mc.name,persona_avatar:mc.parameters?.avatar};
       }
     }
 
@@ -1399,6 +1398,7 @@ function HyprChat(){
       if(sendTopP!==undefined)body.top_p=sendTopP;
       if(sendTopK!==undefined)body.top_k=sendTopK;
       if(sendRepeatPenalty!==undefined)body.repeat_penalty=sendRepeatPenalty;
+      if(thinkMode!=="auto")body.think_budget=thinkMode==="off"?0:1;
       const res=await fetch(`${API}/api/chat/stream`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:ctrl.signal});
       if(!res.ok){const errText=await res.text().catch(()=>res.statusText);throw new Error(`HTTP ${res.status}: ${errText}`);}
       const rdr=res.body.getReader(),dec=new TextDecoder();
@@ -2006,7 +2006,7 @@ function HyprChat(){
               {act.persona_avatar&&<img src={`${API}${act.persona_avatar}`} style={{width:16,height:16,borderRadius:5,objectFit:"cover"}} alt=""/>}
               <span style={{fontSize:10,fontWeight:600,color:t.warm}}>{act.persona_name}</span>
             </div>
-            <button onClick={()=>{uConv(actId,{persona_name:null,persona_avatar:null,tool_ids:[],system_prompt:""});setLastPersonaId(null);localStorage.removeItem("hc-last-persona");newChat(true);}} style={{display:"flex",alignItems:"center",gap:3,padding:"3px 9px",background:`${t.err}12`,border:`1px solid ${t.err}33`,borderRadius:16,cursor:"pointer",fontSize:10,fontWeight:600,color:t.err,fontFamily:font}}>✕ Leave Persona</button></>}
+            <button onClick={()=>{uConv(actId,{persona_name:null,persona_avatar:null,tool_ids:[],system_prompt:"",model_config_id:null});setLastPersonaId(null);localStorage.removeItem("hc-last-persona");newChat(true);}} style={{display:"flex",alignItems:"center",gap:3,padding:"3px 9px",background:`${t.err}12`,border:`1px solid ${t.err}33`,borderRadius:16,cursor:"pointer",fontSize:10,fontWeight:600,color:t.err,fontFamily:font}}>✕ Leave Persona</button></>}
           </>}
         </div>
         {/* Token counter + export — persistent */}
@@ -3317,6 +3317,12 @@ function HyprChat(){
             <span style={{color:val?t.acc:t.mut,fontSize:14}}>{val?<IC.ToggleOn/>:<IC.ToggleOff/>}</span>
             <span style={{color:val?t.acc:t.dim,fontWeight:600}}>{label}</span>
           </div>)}
+        </div>
+        <div style={{marginTop:10}}>
+          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Thinking Mode</div>
+          <div style={{display:"flex",gap:4}}>
+            {["auto","on","off"].map(v=><button key={v} onClick={()=>setThinkMode(v)} style={{padding:"5px 12px",borderRadius:7,border:`1px solid ${thinkMode===v?t.acc:t.brd}44`,background:thinkMode===v?`${t.acc}22`:t.bgDeep,color:thinkMode===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:thinkMode===v?700:400}}>{v==="auto"?"Auto":v==="on"?"On":"Off"}</button>)}
+          </div>
         </div>
       </div>
 
