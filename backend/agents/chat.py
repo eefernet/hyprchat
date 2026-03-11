@@ -314,8 +314,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         snippet = item.get("content", "")
                         search_ctx += f"{i}. **{title}**\n   URL: {url}\n   {snippet}\n\n"
                     search_ctx += (
-                        "Use these search results to inform your answer. "
-                        "Cite sources when relevant.\n"
+                        "IMPORTANT: Use the search results above to answer the user's question. "
+                        "Summarize the information from these results as if you know it. "
+                        "Do NOT say you lack real-time data or cannot access the internet — "
+                        "these results ARE your real-time data. Cite sources when relevant.\n"
                     )
                     # Inject into the last user message so model sees it in context
                     for m in reversed(messages):
@@ -619,9 +621,11 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     print(f"[CHAT]   text-parsed tool call: {tc['function']['name']}")
 
         # ── Drop hallucinated tool calls when no tools are available ──
+        _hallucinated_dropped = False
         if tool_calls and not available_tool_names:
             print(f"[CHAT]   Ignoring {len(tool_calls)} hallucinated tool calls — no tools available")
             tool_calls = []
+            _hallucinated_dropped = True
 
         # ── Code block rescue: when model dumps code in chat instead of using tools ──
         # Skip rescue if model was just told to stop looping, or if generate_code already failed
@@ -956,7 +960,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             if thinking and not content:
                 print(f"[CHAT]   Over-thought ({len(thinking)} chars thinking, 0 content) — nudging")
                 messages.append({"role": "assistant", "content": ""})
-                messages.append({"role": "user", "content": "You were thinking but didn't produce a response. Please answer concisely now."})
+                if _hallucinated_dropped:
+                    messages.append({"role": "user", "content": "You do NOT have any tools. Do NOT attempt to call functions or tools. Answer the question directly using the web search results already provided in the conversation. Summarize what the search results say. Do NOT claim you lack data — the search results ARE your data. Respond in plain text NOW."})
+                else:
+                    messages.append({"role": "user", "content": "You were thinking but didn't produce a response. Please answer concisely now."})
                 if "num_predict" not in model_options:
                     model_options["num_predict"] = 4096
                 continue
