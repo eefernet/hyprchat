@@ -7,16 +7,22 @@
 - **Theme Preview & Apply** — Theme selector replaced with a dropdown that shows a live preview of any theme before applying. Preview includes color swatches (bg, surface, text, accent, warm, ok, err, pink) and a mini mock chat bubble. Click "Apply" to confirm or "Cancel" to revert.
 - **Nav Rail Labels** — Navigation icons now show text labels below each icon (Chat, Knowledge Bases, Tools, etc.). Configurable via Settings → Appearance → "Nav Labels" toggle. Saved to localStorage.
 - **Settings Tooltips** — Hover `ⓘ` icons next to RAG pipeline settings (chunk size, overlap, max context, top-K, embedding model) and model parameters (temperature, top-P, context window) for plain-English explanations of what each setting does.
-- **Model Pull Bar Repositioned** — "Pull from Ollama" input moved from the right detail pane to a sticky bar above the Ollama/HF tab content, always visible without scrolling.
+- **Model Pull Bar Repositioned** — "Pull from Ollama" input moved from the right detail pane to a compact sticky bar above the Ollama/HF tab content, always visible without scrolling.
+- **Font Preview & Apply** — Font selector replaced with a dropdown showing a live preview with sample text and code snippet. UI Size and Chat Font Size are now dropdowns inside the font preview panel. Apply/Cancel buttons confirm the change.
+- **HF Download Bar** — HuggingFace download controls (model name input, file count, Download button) moved from the bottom of the file list to a sticky bar at the top of the model detail area, always visible when files are selected.
 
 ### Improvements
 - **Personas icon updated** — Nav rail icon changed from cube to person silhouette for better visual clarity.
 - **Model list auto-refresh** — Models refresh automatically when switching to the Model Manager panel and when opening the ModelPicker dropdown. Small refresh icon added inside the ModelPicker trigger bar.
 - **Downloads persist until cleared** — Completed downloads no longer auto-dismiss after 10 seconds. They remain in the downloads panel until manually cleared via "Clear done".
 - **KB file list redesign** — Knowledge base files now display as a scrollable vertical list (max 240px) with file icon, filename, size, Preview button, and Delete button instead of inline chips.
+- **Wider nav rail** — Nav rail widened from 60px to 68px with larger icons and buttons for better readability.
+- **Thinking Mode moved** — Thinking Mode setting (Auto/On/Off) moved from Appearance tile to Connection tile, under Default Context Window.
 
 ### Bug Fixes
 - **Prompt library quick insert** — Fixed race condition where clicking a prompt in the `⚡` picker would close the picker before setting the input text due to click propagation to the backdrop. Added `stopPropagation` and auto-resize of the textarea after insert.
+- **Downloads panel overlay** — Fixed downloads dropdown using a full-screen fixed backdrop that blocked all page interaction. Now uses a document mousedown listener to close on outside clicks without blocking.
+- **Settings white page crash** — Fixed React error #310 (too many re-renders) caused by `useState` hooks inside IIFEs in render. Theme and font preview state lifted to component level.
 
 ---
 
