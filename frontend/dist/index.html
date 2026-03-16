@@ -906,11 +906,12 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
   const caps=modelCaps(value||"");
   const md=modelDetails?.[value]||{};
   const paramSz=md.details?.parameter_size||"";
+  const isMissing=value&&models.length>0&&!models.includes(value);
   return <div ref={triggerRef} style={{position:"relative",...style}}>
-    <div onClick={openDropdown} style={{display:"flex",alignItems:"center",gap:6,padding:compact?"3px 8px":"5px 10px",background:open?`${t.acc}15`:t.bgDeep,border:`1px solid ${open?t.acc:t.brd}${open?"55":"33"}`,borderRadius:8,cursor:"pointer",minWidth:compact?100:150,transition:"all .15s",userSelect:"none"}}>
-      <span style={{fontSize:compact?12:14,flexShrink:0}}>{famIcon(name)}</span>
+    <div onClick={openDropdown} style={{display:"flex",alignItems:"center",gap:6,padding:compact?"3px 8px":"5px 10px",background:isMissing?`${t.err}15`:open?`${t.acc}15`:t.bgDeep,border:`1px solid ${isMissing?t.err:open?t.acc:t.brd}${open||isMissing?"55":"33"}`,borderRadius:8,cursor:"pointer",minWidth:compact?100:150,transition:"all .15s",userSelect:"none"}}>
+      <span style={{fontSize:compact?12:14,flexShrink:0}}>{isMissing?"⚠️":famIcon(name)}</span>
       <div style={{flex:1,minWidth:0}}>
-        <div style={{fontSize:compact?10:11,fontWeight:600,color:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name||"Select model"}</div>
+        <div style={{fontSize:compact?10:11,fontWeight:600,color:isMissing?t.err:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{isMissing?`${name} (deleted)`:(name||"Select model")}</div>
         {!compact&&<div style={{display:"flex",gap:3,flexWrap:"wrap",marginTop:1}}>
           <span style={{fontSize:8,color:sc,fontWeight:700}}>{tag}</span>
           {paramSz&&<span style={{fontSize:8,color:t.mut}}>{paramSz}</span>}
@@ -1499,7 +1500,14 @@ function HyprChat(){
       const cv=convs.find(c=>c.id===cid);
       let am = messagesToSend.map(m=>({role:m.role,content:m.content}));
       // Get model-specific params, falling back to globals
-      const modelName=cv?.model||models[0]||"";
+      let modelName=cv?.model||models[0]||"";
+      // If the selected model is no longer available, fall back to first available
+      if(modelName&&models.length>0&&!models.includes(modelName)){
+        const fb=models[0]||"";
+        console.warn(`Model '${modelName}' no longer available, falling back to '${fb}'`);
+        modelName=fb;
+        if(fb)uConv(cid,{model:fb});
+      }
       const mp=modelParams[modelName]||{};
       const resolveParam=(mpVal,globalVal)=>{
         if(mpVal===undefined||mpVal===""||mpVal==="default")return globalVal||undefined;
@@ -1718,6 +1726,34 @@ function HyprChat(){
 
   // Refresh models from Ollama (single source of truth)
   const refreshModels=async()=>{try{const r=await fetch(`${API}/api/models`);const d=await r.json();setModels(d.models||[]);setModelDetails(d.model_details||{});}catch{}};
+
+  // Delete model and clean up all references (active conv, coder model, workspace model, etc.)
+  const deleteModel=async(m)=>{
+    if(!confirm(`Delete ${m}?`))return;
+    try{
+      const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});
+      if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}
+      // Refresh model list first to get updated available models
+      const mr=await fetch(`${API}/api/models`).catch(()=>null);
+      let newModels=[];
+      if(mr&&mr.ok){const md=await mr.json();newModels=md.models||[];setModels(newModels);setModelDetails(md.model_details||{});}
+      const fallback=newModels[0]||"";
+      // Update any conversations using the deleted model
+      setConvs(prev=>prev.map(c=>{
+        if(c.model===m){
+          const patch={model:fallback};
+          if(!c.id.startsWith("l-"))fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)}).catch(()=>{});
+          return{...c,...patch};
+        }
+        return c;
+      }));
+      // Clear coder model if it was the deleted model
+      if(coderModel===m){setCoderModel("");}
+      // Clear workspace model if it was the deleted model
+      if(wsModel===m){setWsModel(fallback);}
+      if(modelParamsOpen===m)setModelParamsOpen(null);
+    }catch(e){alert(`Delete failed: ${e.message}`);}
+  };
 
   // Pull model — uses shared downloads UI
   const pullModel=async()=>{
@@ -2897,7 +2933,7 @@ function HyprChat(){
                     </div>
                   </div>
                   {hasCustom&&<div style={{width:7,height:7,borderRadius:"50%",background:t.acc,flexShrink:0}}/>}
-                  <button onClick={async e=>{e.stopPropagation();if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}refreshModels();if(modelParamsOpen===m)setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}}  style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"2px 4px",borderRadius:4,flexShrink:0,display:"flex",alignItems:"center",opacity:.4,transition:"opacity .15s"}} onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=.4}><IC.Trash/></button>
+                  <button onClick={e=>{e.stopPropagation();deleteModel(m);}}  style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"2px 4px",borderRadius:4,flexShrink:0,display:"flex",alignItems:"center",opacity:.4,transition:"opacity .15s"}} onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=.4}><IC.Trash/></button>
                   <span style={{fontSize:11,color:t.mut,flexShrink:0,transition:"transform .2s",transform:sel?"rotate(90deg)":"none"}}>›</span>
                 </div>;
               })}
@@ -2926,50 +2962,7 @@ function HyprChat(){
                 <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:t.mut,marginTop:4}}><span>{l1}</span><span>{l2}</span><span>{l3}</span></div>
               </div>
             )}
-            <div style={{marginBottom:24}}>
-              <div style={{fontSize:12,color:t.dim,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,fontWeight:600}}>Default Context Window <Tip k="num_ctx" t={t}/></div>
-              <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-                {[0,4096,8192,16384,32768,65536,131072,262144].map(v=><button key={v} onClick={()=>setNumCtx(v)} style={{padding:"6px 14px",borderRadius:7,border:`1px solid ${numCtx===v?t.acc:t.brd}44`,background:numCtx===v?`${t.acc}22`:t.bgDeep,color:numCtx===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:numCtx===v?700:400}}>
-                  {v===0?"Auto":v>=1024?`${(v/1024).toFixed(0)}K`:v}
-                </button>)}
-              </div>
-              <div style={{fontSize:10,color:t.mut,marginTop:6}}>Sets Ollama num_ctx. Per-model overrides below.</div>
-            </div>
-            <div style={{marginBottom:24}}><label style={{fontSize:12,color:t.dim,textTransform:"uppercase",letterSpacing:.5,display:"block",marginBottom:8,fontWeight:600}}>Workspace Analysis Model</label>
-              <ModelPicker value={wsModel} onChange={setWsModel} models={models} modelDetails={modelDetails} t={t} font={font}/>
-              <div style={{fontSize:10,color:t.mut,marginTop:6}}>Small, fast model for workspace topic auto-detection.</div>
-            </div>
-            <div style={{marginBottom:24}}><label style={{fontSize:12,color:t.dim,textTransform:"uppercase",letterSpacing:.5,display:"block",marginBottom:8,fontWeight:600}}>Code Generator Model</label>
-              {coderModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
-                <div style={{flex:1}}><ModelPicker value={coderModel} onChange={setCoderModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
-                <button onClick={()=>setCoderModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>✕ Reset</button>
-              </div>:<div onClick={()=>setCoderModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
-                <span style={{fontSize:14}}>🧬</span>
-                <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Same as chat model</div><div style={{fontSize:9,color:t.dim}}>Click to select a dedicated coder model</div></div>
-                <span style={{fontSize:9,color:t.mut}}>▾</span>
-              </div>}
-              <div style={{fontSize:10,color:t.mut,marginTop:6}}>Dedicated model for the generate_code sub-agent. Empty = uses the active chat model.</div>
-            </div>
-
-            <div style={{marginBottom:20,display:"flex",alignItems:"center",gap:10}}>
-              <label style={{fontSize:12,color:t.dim,fontWeight:600,whiteSpace:"nowrap"}}>OpenHands Enabled</label>
-              <div onClick={()=>setOpenhandsEnabled(!openhandsEnabled)} style={{width:36,height:20,borderRadius:10,background:openhandsEnabled?t.acc:`${t.mut}44`,cursor:"pointer",position:"relative",transition:"all .2s"}}>
-                <div style={{width:16,height:16,borderRadius:8,background:t.fg,position:"absolute",top:2,left:openhandsEnabled?18:2,transition:"all .2s"}}/>
-              </div>
-              <span style={{fontSize:10,color:t.mut}}>{openhandsEnabled?"On":"Off"}</span>
-            </div>
-
-            <div style={{marginBottom:20}}>
-              <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Coder Context Window: <span style={{color:t.acc}}>{coderNumCtx.toLocaleString()}</span></label>
-              <input type="range" min="2048" max="32768" step="1024" value={coderNumCtx} onChange={e=>setCoderNumCtx(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>2048</span><span>32768</span></div>
-            </div>
-
-            <div style={{marginBottom:20}}>
-              <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Max Agent Rounds: <span style={{color:t.acc}}>{openhandsMaxRounds}</span></label>
-              <input type="range" min="5" max="40" step="1" value={openhandsMaxRounds} onChange={e=>setOpenhandsMaxRounds(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>5</span><span>40</span></div>
-            </div>
+            <div style={{fontSize:11,color:t.mut,marginTop:4}}>Select a model on the left to set its context window.</div>
           </div>
         :
           /* Per-model parameters */
@@ -3015,7 +3008,7 @@ function HyprChat(){
                 </div>
                 <div style={{display:"flex",gap:8}}>
                   <button onClick={()=>uConv(actId,{model:m})} style={{...btnS(t.acc),padding:"7px 16px",fontSize:12}}>Use</button>
-                  <button onClick={async()=>{if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}refreshModels();setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}} style={{...btnS(t.err),padding:"7px 10px",fontSize:12}}><IC.Trash/></button>
+                  <button onClick={()=>deleteModel(m)} style={{...btnS(t.err),padding:"7px 10px",fontSize:12}}><IC.Trash/></button>
                 </div>
               </div>
               {/* Tool calling template fix */}
@@ -3072,21 +3065,43 @@ function HyprChat(){
                   <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:t.mut,marginTop:4}}><span>{l1}</span><span>{l2}</span><span>{l3}</span></div>
                 </div>;
               })}
-              {/* Integer inputs */}
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:24}}>
-                {[["top_k","Top-K","1","200","1","tokens","Integer sample pool"],["num_ctx","Context (tokens)","2048","131072","1024","ctx","Max token window"]].map(([key,lbl,min,max,step,unit,desc])=>{
-                  const val=mp[key]||"";const isEmpty=val===""||val==="default";
-                  return <div key={key} style={{background:`${t.surface}44`,borderRadius:12,padding:"12px 14px",border:`1px solid ${isEmpty?t.brd:t.acc}22`}}>
+              {/* Top-K */}
+              <div style={{marginBottom:24}}>
+                {(()=>{
+                  const key="top_k";const val=mp[key]||"";const isEmpty=val===""||val==="default";
+                  return <div style={{background:`${t.surface}44`,borderRadius:12,padding:"12px 14px",border:`1px solid ${isEmpty?t.brd:t.acc}22`}}>
                     <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
-                      <span style={{fontSize:11,color:t.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:600}}>{lbl}</span>
+                      <span style={{fontSize:11,color:t.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:600}}>Top-K</span>
                       {!isEmpty&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:10,padding:0}}>reset</button>}
                     </div>
                     <input type="number" value={isEmpty?"":val} onChange={e=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:e.target.value}}))}
-                      placeholder="Default" min={min} max={max} step={step}
+                      placeholder="Default" min="1" max="200" step="1"
                       style={{...inputS,padding:"7px 10px",fontSize:13,color:isEmpty?t.mut:t.acc,width:"100%"}}/>
-                    <div style={{fontSize:10,color:t.mut,marginTop:5}}>{desc}</div>
+                    <div style={{fontSize:10,color:t.mut,marginTop:5}}>Integer sample pool</div>
                   </div>;
-                })}
+                })()}
+              </div>
+              {/* Context Window — button grid, defaults to global numCtx */}
+              <div style={{marginBottom:24}}>
+                {(()=>{
+                  const ctxVal=mp["num_ctx"]||"";const isDefault=ctxVal===""||ctxVal==="default";
+                  const effectiveCtx=isDefault?numCtx:parseInt(ctxVal);
+                  return <div>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                      <span style={{fontSize:12,color:t.dim,textTransform:"uppercase",letterSpacing:.5,fontWeight:600}}>Context Window <Tip k="num_ctx" t={t}/></span>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        {!isDefault&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),num_ctx:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:10,padding:0}}>reset to global</button>}
+                        <span style={{fontSize:11,color:isDefault?t.mut:t.acc,fontWeight:600}}>{isDefault?"global default":""}</span>
+                      </div>
+                    </div>
+                    <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+                      {[4096,8192,16384,32768,65536,131072,262144].map(v=><button key={v} onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),num_ctx:v===numCtx?"":String(v)}}))} style={{padding:"6px 14px",borderRadius:7,border:`1px solid ${effectiveCtx===v?t.acc:t.brd}44`,background:effectiveCtx===v?`${t.acc}22`:t.bgDeep,color:effectiveCtx===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:effectiveCtx===v?700:400}}>
+                        {v>=1024?`${(v/1024).toFixed(0)}K`:v}
+                      </button>)}
+                    </div>
+                    {effectiveCtx>0&&<div style={{fontSize:11,color:isDefault?t.mut:t.acc,marginTop:4,fontWeight:600}}>{effectiveCtx>=1024?`${(effectiveCtx/1024).toFixed(0)}K`:effectiveCtx} tokens{isDefault?" (from Settings)":""}</div>}
+                  </div>;
+                })()}
               </div>
               {hasCustom&&<button onClick={()=>setModelParams(p=>{const n={...p};delete n[m];return n;})} style={{...btnS(t.err),fontSize:12,width:"100%",justifyContent:"center",padding:"8px 16px"}}>Reset All to Defaults</button>}
             </div>;
@@ -3144,7 +3159,7 @@ function HyprChat(){
                 </div>
                 <div style={{display:"flex",flexDirection:"column",gap:3,flexShrink:0}}>
                   <button onClick={async e=>{e.stopPropagation();if(makingToolModel)return;setMakingToolModel(m);try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}/create-tool-model`,{method:"POST"});const d=await r.json();if(!r.ok){alert(`Failed: ${d.detail||r.statusText}`);return;}alert(`✅ Modelfile patched for tool calling!`);}catch(e){alert(`Error: ${e.message}`);}finally{setMakingToolModel(null);}}} disabled={!!makingToolModel} title="Patch modelfile to enable native tool calling" style={{background:makingToolModel===m?`${t.mut}15`:`${t.ok}22`,border:`1px solid ${makingToolModel===m?t.mut:t.ok}55`,color:makingToolModel===m?t.mut:t.ok,cursor:makingToolModel?"wait":"pointer",padding:"4px 8px",borderRadius:5,fontSize:9,fontWeight:700,whiteSpace:"nowrap",transition:"all .15s"}}>{makingToolModel===m?"⏳ Patching…":"🔧 Enable Tools"}</button>
-                  <button onClick={async e=>{e.stopPropagation();if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}refreshModels();if(modelParamsOpen===m)setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}}  style={{background:"none",border:`1px solid ${t.err}33`,color:t.err,cursor:"pointer",padding:"3px 8px",borderRadius:5,fontSize:9,fontWeight:600,opacity:.6,transition:"opacity .15s"}} onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=.6}>🗑 Delete</button>
+                  <button onClick={e=>{e.stopPropagation();deleteModel(m);}}  style={{background:"none",border:`1px solid ${t.err}33`,color:t.err,cursor:"pointer",padding:"3px 8px",borderRadius:5,fontSize:9,fontWeight:600,opacity:.6,transition:"opacity .15s"}} onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=.6}>🗑 Delete</button>
                 </div>
                 <span style={{fontSize:9,color:t.mut,flexShrink:0,transition:"transform .2s",transform:isSel?"rotate(90deg)":"none"}}>›</span>
               </div>;
@@ -3232,7 +3247,7 @@ function HyprChat(){
                   <div style={{display:"flex",flexDirection:"column",gap:5,alignItems:"flex-end"}}>
                     <div style={{display:"flex",gap:6}}>
                       <button onClick={()=>uConv(actId,{model:m})} style={{...btnS(t.acc),padding:"5px 12px"}}>Use</button>
-                      <button onClick={async()=>{if(!confirm(`Delete ${m}?`))return;try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}`,{method:"DELETE"});if(!r.ok){const d=await r.json().catch(()=>({}));alert(`Delete failed: ${d.detail||r.statusText}`);return;}refreshModels();setModelParamsOpen(null);}catch(e){alert(`Delete failed: ${e.message}`);}}} style={{...btnS(t.err),padding:"5px 8px"}}><IC.Trash/></button>
+                      <button onClick={()=>deleteModel(m)} style={{...btnS(t.err),padding:"5px 8px"}}><IC.Trash/></button>
                     </div>
                     <button onClick={async e=>{e.stopPropagation();if(makingToolModel)return;setMakingToolModel(m);try{const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}/create-tool-model`,{method:"POST"});const d=await r.json();if(!r.ok){alert(`Failed: ${d.detail||r.statusText}`);return;}alert(`✅ Modelfile patched — this model can now use tools!`);}catch(e){alert(`Error: ${e.message}`);}finally{setMakingToolModel(null);}}} disabled={!!makingToolModel} style={{background:makingToolModel===m?`${t.mut}15`:`${t.ok}22`,border:`1px solid ${makingToolModel===m?t.mut:t.ok}66`,color:makingToolModel===m?t.mut:t.ok,cursor:makingToolModel?"wait":"pointer",padding:"5px 12px",borderRadius:7,fontSize:10,fontWeight:700,whiteSpace:"nowrap",letterSpacing:.3,transition:"all .15s"}}>{makingToolModel===m?"⏳ Patching…":"🔧 Enable Tool Calling"}</button>
                   </div>
@@ -3387,23 +3402,6 @@ function HyprChat(){
             </button>
           </div>
         </div>
-        <div style={{marginBottom:14}}>
-          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Default Context Window</div>
-          <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-            {[0,4096,8192,16384,32768,65536,131072,262144].map(v=><button key={v} onClick={()=>setNumCtx(v)} style={{padding:"6px 14px",borderRadius:7,border:`1px solid ${numCtx===v?t.acc:t.brd}44`,background:numCtx===v?`${t.acc}22`:t.bgDeep,color:numCtx===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:numCtx===v?700:400}}>
-              {v===0?"Auto":v>=1024?`${(v/1024).toFixed(0)}K`:v}
-            </button>)}
-          </div>
-          {numCtx>0&&<div style={{fontSize:11,color:t.acc,marginTop:4,fontWeight:600}}>{numCtx>=1024?`${(numCtx/1024).toFixed(0)}K`:numCtx} tokens</div>}
-          <div style={{fontSize:10,color:t.mut,marginTop:4}}>Sets num_ctx for all chats. Per-model overrides in Model Manager.</div>
-        </div>
-        <div style={{marginBottom:14}}>
-          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Thinking Mode</div>
-          <div style={{display:"flex",gap:4}}>
-            {["auto","on","off"].map(v=><button key={v} onClick={()=>setThinkMode(v)} style={{padding:"5px 12px",borderRadius:7,border:`1px solid ${thinkMode===v?t.acc:t.brd}44`,background:thinkMode===v?`${t.acc}22`:t.bgDeep,color:thinkMode===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:thinkMode===v?700:400}}>{v==="auto"?"Auto":v==="on"?"On":"Off"}</button>)}
-          </div>
-          <div style={{fontSize:10,color:t.mut,marginTop:4}}>Controls whether models use thinking tokens. Auto lets the model decide.</div>
-        </div>
         <div>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
             <div style={{fontSize:12,color:t.dim,fontWeight:600}}>Service Health</div>
@@ -3423,6 +3421,69 @@ function HyprChat(){
               {s?.response_ms!=null&&<span style={{fontSize:10,color:t.mut}}>{s.response_ms}ms</span>}
             </div>;})}
           </div>
+        </div>
+      </div>
+
+      {/* TILE: Model & Generation */}
+      <div style={{background:`${t.surface}33`,border:`1px solid ${t.brd}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
+        <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:14,display:"flex",alignItems:"center",gap:8}}>Model & Generation</div>
+
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Default Context Window</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+            {[0,4096,8192,16384,32768,65536,131072,262144].map(v=><button key={v} onClick={()=>setNumCtx(v)} style={{padding:"6px 14px",borderRadius:7,border:`1px solid ${numCtx===v?t.acc:t.brd}44`,background:numCtx===v?`${t.acc}22`:t.bgDeep,color:numCtx===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:numCtx===v?700:400}}>
+              {v===0?"Auto":v>=1024?`${(v/1024).toFixed(0)}K`:v}
+            </button>)}
+          </div>
+          {numCtx>0&&<div style={{fontSize:11,color:t.acc,marginTop:4,fontWeight:600}}>{numCtx>=1024?`${(numCtx/1024).toFixed(0)}K`:numCtx} tokens</div>}
+          <div style={{fontSize:10,color:t.mut,marginTop:4}}>Sets num_ctx for all chats. Per-model overrides in Model Manager.</div>
+        </div>
+
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Thinking Mode</div>
+          <div style={{display:"flex",gap:4}}>
+            {["auto","on","off"].map(v=><button key={v} onClick={()=>setThinkMode(v)} style={{padding:"5px 12px",borderRadius:7,border:`1px solid ${thinkMode===v?t.acc:t.brd}44`,background:thinkMode===v?`${t.acc}22`:t.bgDeep,color:thinkMode===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:thinkMode===v?700:400}}>{v==="auto"?"Auto":v==="on"?"On":"Off"}</button>)}
+          </div>
+          <div style={{fontSize:10,color:t.mut,marginTop:4}}>Controls whether models use thinking tokens. Auto lets the model decide.</div>
+        </div>
+
+        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
+          <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Workspace Analysis Model</div>
+          <ModelPicker value={wsModel} onChange={setWsModel} models={models} modelDetails={modelDetails} t={t} font={font}/>
+          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Small, fast model for workspace topic auto-detection.</div>
+        </div>
+
+        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
+          <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Code Generator Model</div>
+          {coderModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <div style={{flex:1}}><ModelPicker value={coderModel} onChange={setCoderModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
+            <button onClick={()=>setCoderModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
+          </div>:<div onClick={()=>setCoderModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+            <span style={{fontSize:14}}>🧬</span>
+            <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Same as chat model</div><div style={{fontSize:9,color:t.dim}}>Click to select a dedicated coder model</div></div>
+            <span style={{fontSize:9,color:t.mut}}>▾</span>
+          </div>}
+          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Dedicated model for the generate_code sub-agent. Empty = uses the active chat model.</div>
+        </div>
+
+        <div style={{marginBottom:14,display:"flex",alignItems:"center",gap:10}}>
+          <label style={{fontSize:12,color:t.dim,fontWeight:600,whiteSpace:"nowrap"}}>OpenHands Enabled</label>
+          <div onClick={()=>setOpenhandsEnabled(!openhandsEnabled)} style={{width:36,height:20,borderRadius:10,background:openhandsEnabled?t.acc:`${t.mut}44`,cursor:"pointer",position:"relative",transition:"all .2s"}}>
+            <div style={{width:16,height:16,borderRadius:8,background:t.fg,position:"absolute",top:2,left:openhandsEnabled?18:2,transition:"all .2s"}}/>
+          </div>
+          <span style={{fontSize:10,color:t.mut}}>{openhandsEnabled?"On":"Off"}</span>
+        </div>
+
+        <div style={{marginBottom:14}}>
+          <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Coder Context Window: <span style={{color:t.acc}}>{coderNumCtx.toLocaleString()}</span></label>
+          <input type="range" min="2048" max="32768" step="1024" value={coderNumCtx} onChange={e=>setCoderNumCtx(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>2048</span><span>32768</span></div>
+        </div>
+
+        <div style={{marginBottom:6}}>
+          <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Max Agent Rounds: <span style={{color:t.acc}}>{openhandsMaxRounds}</span></label>
+          <input type="range" min="5" max="40" step="1" value={openhandsMaxRounds} onChange={e=>setOpenhandsMaxRounds(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>5</span><span>40</span></div>
         </div>
       </div>
 

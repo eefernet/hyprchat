@@ -18,6 +18,24 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
     debate_rounds = council.get("debate_rounds", 0) or 0
     messages = req_messages
 
+    # ── Validate all models exist in Ollama ──
+    try:
+        _tags_r = await http.get(f"{config.OLLAMA_URL}/api/tags", timeout=10)
+        if _tags_r.status_code == 200:
+            _available = {m["name"] for m in _tags_r.json().get("models", [])}
+            _fallback = next(iter(_available), config.DEFAULT_MODEL)
+            # Fix host model if deleted
+            if host_model not in _available:
+                print(f"[COUNCIL] Host model '{host_model}' not found, falling back to '{_fallback}'")
+                host_model = _fallback
+            # Fix member models if deleted
+            for member in members:
+                if member.get("model") and member["model"] not in _available:
+                    print(f"[COUNCIL] Member model '{member['model']}' not found, falling back to '{_fallback}'")
+                    member["model"] = _fallback
+    except Exception as _e:
+        print(f"[COUNCIL] Could not validate models: {_e}")
+
     # ── RAG: Query attached knowledge bases for council context ──
     kb_context = ""
     if kb_ids:
@@ -109,7 +127,8 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                 "model": model,
                 "messages": [{"role": "system", "content": sys_p}] + msgs,
                 "stream": True,
-                "options": {}
+                "options": {"num_ctx": 16384},
+                "keep_alive": "30m",
             }
             full = ""
             try:
@@ -257,7 +276,8 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                     "model": member["model"],
                     "messages": [{"role": "user", "content": vote_prompt}],
                     "stream": False,
-                    "options": {"temperature": 0.1, "num_ctx": 8192, "num_predict": 120}
+                    "options": {"temperature": 0.1, "num_ctx": 8192, "num_predict": 120},
+                    "keep_alive": "30m",
                 }, timeout=30)
                 text = r.json()["message"]["content"].strip()
                 vote_m = re.search(r'VOTE:\s*["\']?([^"\'\n\r]+)["\']?', text, re.IGNORECASE)
@@ -350,7 +370,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             {"role": "system", "content": host_system},
             {"role": "user", "content": f"Question: {last_user_msg}\n\n{debate_note}Council responses:\n{all_resp}{vote_summary}\n\nProvide a synthesis and final verdict in English. Reference the peer votes and how positions evolved during the debate if relevant."}
         ]
-        payload = {"model": host_model, "messages": host_msgs, "stream": True, "options": {}}
+        payload = {"model": host_model, "messages": host_msgs, "stream": True, "options": {"num_ctx": 16384}, "keep_alive": "30m"}
         host_full = ""
         try:
             async with http.stream("POST", f"{config.OLLAMA_URL}/api/chat",

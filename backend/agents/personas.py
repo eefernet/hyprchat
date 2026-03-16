@@ -41,7 +41,7 @@ Your FIRST response to any request MUST be a tool call. Never explain what you w
     }
 
     await db.create_model_config(
-        mc_id, "💻 Coder Bot", "",
+        mc_id, "💻 Coder Bot", "qwen2.5-coder:14b",
         system_prompt,
         ["codeagent", "deep_research", "research"],
         [],

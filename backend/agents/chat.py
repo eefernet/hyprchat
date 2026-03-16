@@ -115,6 +115,21 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
     print(f"[CHAT] conv={conv_id} model={req.model} tool_ids={req.tool_ids} msgs={len(req.messages)} persona={req.persona_id}")
 
+    # ── Validate model exists in Ollama before streaming ──
+    try:
+        _tags_r = await http.get(f"{config.OLLAMA_URL}/api/tags", timeout=10)
+        if _tags_r.status_code == 200:
+            _available = [m["name"] for m in _tags_r.json().get("models", [])]
+            if req.model and req.model not in _available:
+                _suggestion = _available[0] if _available else "unknown"
+                _err_msg = f"Model '{req.model}' is not available. It may have been deleted. Available models: {', '.join(_available[:5])}"
+                print(f"[CHAT] Model not found: {req.model}")
+                await events.emit(conv_id, "error", {"status": f"Model not found: {req.model}"})
+                yield f"data: {json.dumps({'type': 'error', 'error': _err_msg})}\n\n"
+                return
+    except Exception as _e:
+        print(f"[CHAT] Could not validate model (continuing anyway): {_e}")
+
     # Resolve persona (model config) if provided — apply parameters and KB
     model_options = {}
     kb_context = ""
@@ -225,6 +240,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         model_options["top_k"] = req.top_k
     if req.repeat_penalty is not None and "repeat_penalty" not in model_options:
         model_options["repeat_penalty"] = req.repeat_penalty
+
+    # Ensure num_ctx always has a sane default to prevent unconstrained context
+    if "num_ctx" not in model_options:
+        model_options["num_ctx"] = config.DEFAULT_NUM_CTX
 
     messages = []
     effective_system = persona_system_prompt if persona_system_prompt is not None else req.system_prompt
@@ -392,6 +411,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     _generate_code_failed = False  # Guard: disable code-block-rescue after generate_code failure
     _generate_code_done = False    # Guard: stop tool calls after successful generate_code
     _rescue_count = 0              # How many times we rescued code blocks
+    _oom_retries = 0               # OOM context halving retries
 
     for round_num in range(MAX_ROUNDS):
         content = ""
@@ -421,6 +441,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             "messages": messages,
             "stream": True,
             "options": model_options,
+            "keep_alive": "10m",
         }
         # Thinking control: None=model default, 0=disable, 1=enable
         if hasattr(req, 'think_budget') and req.think_budget is not None:
@@ -443,6 +464,23 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         inject_text_tool_prompt(messages, available_tool_names)
                         _text_fallback_done = True
                         continue
+                    elif "requires more system memory" in error_body.lower() and _oom_retries < 3:
+                        # OOM — halve num_ctx and retry (up to 3 times)
+                        old_ctx = model_options.get("num_ctx", 0)
+                        new_ctx = max(2048, old_ctx // 2)
+                        if new_ctx < old_ctx:
+                            _oom_retries += 1
+                            model_options["num_ctx"] = new_ctx
+                            print(f"[CHAT] OOM with num_ctx={old_ctx}, retrying with {new_ctx} (attempt {_oom_retries})")
+                            await events.emit(conv_id, "tool_start", {
+                                "tool": "processing", "icon": "activity",
+                                "status": f"Model needs too much VRAM at {old_ctx} ctx, retrying with {new_ctx}..."
+                            })
+                            continue
+                        else:
+                            await events.emit(conv_id, "error", {"status": f"Ollama OOM even at {new_ctx} ctx"})
+                            yield f"data: {json.dumps({'type': 'error', 'error': error_body[:300]})}\n\n"
+                            return
                     else:
                         await events.emit(conv_id, "error", {"status": f"Ollama HTTP {resp.status_code}"})
                         yield f"data: {json.dumps({'type': 'error', 'error': error_body[:300]})}\n\n"
@@ -598,7 +636,14 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
         except Exception as e:
             err_msg = str(e) or "Connection failed or timeout"
-            await events.emit(conv_id, "error", {"status": f"Ollama: {err_msg[:120]}"})
+            # Provide clearer error messages for common failures
+            if "peer closed" in err_msg.lower() or "incomplete chunked" in err_msg.lower():
+                err_msg = (f"Ollama connection dropped while streaming model '{req.model}'. "
+                           f"This usually means the model is too large for available GPU memory (VRAM). "
+                           f"Try a smaller model or reduce num_ctx. Original: {err_msg[:200]}")
+            elif "timeout" in err_msg.lower() or "timed out" in err_msg.lower():
+                err_msg = f"Ollama request timed out for model '{req.model}'. The model may be too slow or overloaded. {err_msg[:200]}"
+            await events.emit(conv_id, "error", {"status": f"Ollama: {err_msg[:200]}"})
             yield f"data: {json.dumps({'type': 'error', 'error': err_msg})}\n\n"
             return
 
@@ -703,17 +748,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             })
 
         if tool_calls:
-            # ── Guard: after successful generate_code, only allow verification tools ──
-            if _generate_code_done:
-                _allowed_after_codegen = {"download_project", "execute_code", "run_shell"}
-                _tc_names = [tc.get("function", {}).get("name", "") for tc in tool_calls]
-                _filtered = [tc for tc in tool_calls if tc.get("function", {}).get("name", "") in _allowed_after_codegen]
-                if len(_filtered) < len(tool_calls):
-                    _blocked = [n for n in _tc_names if n not in _allowed_after_codegen]
-                    print(f"[CHAT]   Blocking non-verification tools after generate_code: {_blocked}")
-                tool_calls = _filtered
-                if not tool_calls:
-                    pass  # Fall through to "no tool calls" path below
+            # ── Guard: after successful generate_code, allow review + re-invocation ──
+            # (No longer blocking tools — the overseer needs to review and potentially re-invoke)
 
             # ── Duplicate / near-duplicate detection ──
             if tool_calls:
@@ -836,10 +872,11 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     if not _tf.done():
                         _elapsed = asyncio.get_event_loop().time() - _tool_start_time
                         _elapsed_str = f"{int(_elapsed)}s"
-                        await events.emit(conv_id, "tool_start", {
-                            "tool": tool_name, "icon": _tool_icon,
-                            "status": f"{_tool_label}{_tool_detail} ({_elapsed_str})",
-                        })
+                        if tool_name != "generate_code":
+                            await events.emit(conv_id, "tool_start", {
+                                "tool": tool_name, "icon": _tool_icon,
+                                "status": f"{_tool_label}{_tool_detail} ({_elapsed_str})",
+                            })
                         # Estimate growing context: base + tool chars so far + time-based estimate
                         # Research tools accumulate ~200 chars/sec on average
                         _est_tool_tokens = max(_tool_chars[0] // 4, int(_elapsed * 50))
@@ -866,15 +903,16 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     _generate_code_failed = True
                     print("[CHAT]   generate_code failed — disabling code-block-rescue for this session")
 
-                # When generate_code succeeds (PROJECT COMPLETE), allow verification but block inspection
+                # When generate_code succeeds (PROJECT COMPLETE), enable overseer review
                 if tool_name == "generate_code" and "PROJECT COMPLETE" in tool_result:
                     _generate_code_done = True
-                    print("[CHAT]   generate_code succeeded — continuing for verification if needed")
+                    print("[CHAT]   generate_code succeeded — overseer reviewing output")
                     messages.append({"role": "tool", "content": (
-                        "SYSTEM: The project has been built and tested by OpenHands. "
-                        "You may now use run_shell or execute_code to verify it works if the user requested verification. "
-                        "Do NOT call list_files or read_file to re-inspect already-created files. "
-                        "If no verification was requested, respond with the project summary and download link."
+                        "SYSTEM: The coding agent has finished. Review the file contents above "
+                        "and evaluate whether the output matches the user's request. "
+                        "If the code is just boilerplate/scaffolding and doesn't implement "
+                        "the actual features requested, call generate_code again with the same "
+                        "project_id and a more detailed task. Otherwise present the results."
                     )})
 
                 # Detect repeated errors — inject guidance, then force-stop if stuck
