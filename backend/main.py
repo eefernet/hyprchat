@@ -237,7 +237,7 @@ class FetchUrlRequest(BaseModel):
 class ConversationCreate(BaseModel):
     title: str = "New Chat"
     model: str = config.DEFAULT_MODEL
-    system_prompt: str = config.DEFAULT_SYSTEM_PROMPT
+    system_prompt: str = ""
     model_config_id: Optional[str] = None
 
 class ConversationUpdate(BaseModel):

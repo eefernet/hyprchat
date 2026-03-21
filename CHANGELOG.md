@@ -1,5 +1,17 @@
 # HyprChat Changelog
 
+## Alpha v15.1.1 — March 2026
+
+### Bug Fixes
+- **New chat defaults to CodeAgent** — New conversations without a persona no longer default to the CodeAgent system prompt. Plain chats now use no system prompt, so the model responds as a generic assistant.
+- **Orphaned tags after chat deletion** — Deleting a conversation now removes its tags from the tag store. Previously, tags from deleted chats persisted as filter buttons in the sidebar.
+
+### Improvements
+- **Tag editor close button** — Added a `×` button next to the `+` in the tag editor to dismiss it. Pressing Escape in the tag input also closes the editor.
+- **Larger tag remove buttons** — Tag pills in the editor are slightly larger (font 10px, bolder `×`) for easier interaction.
+
+---
+
 ## Alpha v15.1 — March 2026
 
 ### New Features

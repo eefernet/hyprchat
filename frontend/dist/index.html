@@ -1374,6 +1374,7 @@ function HyprChat(){
 
   const delChat=async id=>{
     fetch(`${API}/api/conversations/${id}`,{method:"DELETE"}).catch(()=>{});
+    setConvTags(p=>{const n={...p};delete n[id];return n;});
     setConvs(p=>{const n=p.filter(c=>c.id!==id);if(actId===id){setActId(n[0]?.id||null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");}return n;});
   };
 
@@ -2098,7 +2099,7 @@ function HyprChat(){
         {!wsPanel&&<>
         <input value={sq} onChange={e=>setSq(e.target.value)} placeholder="Search..." style={{...inputS,padding:"5px 8px",fontSize:11}}/>
         {(()=>{
-          const allTags=[...new Set(Object.values(convTags).flat())];
+          const convIds=new Set(convs.map(c=>c.id));const allTags=[...new Set(Object.entries(convTags).filter(([k])=>convIds.has(k)).flatMap(([,v])=>v))];
           if(!allTags.length)return null;
           return <div style={{display:"flex",flexWrap:"wrap",gap:3,padding:"2px 0"}}>
             <button onClick={()=>setActiveTagFilter(null)} style={{fontSize:10,padding:"3px 8px",borderRadius:10,background:!activeTagFilter?`${t.acc}22`:`${t.surface}55`,border:`1px solid ${!activeTagFilter?t.acc:t.brd}33`,color:!activeTagFilter?t.acc:t.mut,cursor:"pointer"}}>All</button>
@@ -2125,12 +2126,13 @@ function HyprChat(){
         </div>}
         {showTagEditor===c.id&&<div style={{padding:"4px 8px 6px",animation:"fadeIn .15s"}} onClick={e=>e.stopPropagation()}>
           <div style={{display:"flex",gap:4}}>
-            <input value={newTagInput} onChange={e=>setNewTagInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newTagInput.trim()){const tag=newTagInput.trim();setConvTags(p=>({...p,[c.id]:[...new Set([...(p[c.id]||[]),tag])]}));setNewTagInput("");}}} placeholder="Add tag..." style={{...inputS,padding:"3px 6px",fontSize:10,flex:1}}/>
+            <input value={newTagInput} onChange={e=>setNewTagInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newTagInput.trim()){const tag=newTagInput.trim();setConvTags(p=>({...p,[c.id]:[...new Set([...(p[c.id]||[]),tag])]}));setNewTagInput("");}if(e.key==="Escape")setShowTagEditor(null);}} placeholder="Add tag..." style={{...inputS,padding:"3px 6px",fontSize:10,flex:1}}/>
             <button onClick={()=>{if(newTagInput.trim()){const tag=newTagInput.trim();setConvTags(p=>({...p,[c.id]:[...new Set([...(p[c.id]||[]),tag])]}));setNewTagInput("");}}} style={{...btnS(t.warm),padding:"3px 7px",fontSize:9}}>+</button>
+            <button onClick={()=>setShowTagEditor(null)} style={{...btnS(t.mut),padding:"3px 7px",fontSize:9}}>×</button>
           </div>
           {tags.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:2,marginTop:3}}>
-            {tags.map(tag=><span key={tag} style={{fontSize:8,padding:"1px 5px",borderRadius:8,background:`${t.warm}18`,color:t.warm,border:`1px solid ${t.warm}28`,display:"flex",alignItems:"center",gap:2}}>
-              {tag}<span onClick={()=>setConvTags(p=>({...p,[c.id]:(p[c.id]||[]).filter(x=>x!==tag)}))} style={{cursor:"pointer",opacity:.7}}>×</span>
+            {tags.map(tag=><span key={tag} style={{fontSize:10,padding:"2px 6px",borderRadius:8,background:`${t.warm}18`,color:t.warm,border:`1px solid ${t.warm}28`,display:"flex",alignItems:"center",gap:3}}>
+              {tag}<span onClick={()=>setConvTags(p=>({...p,[c.id]:(p[c.id]||[]).filter(x=>x!==tag)}))} style={{cursor:"pointer",opacity:.7,fontSize:12,fontWeight:700,lineHeight:1}}>×</span>
             </span>)}
           </div>}
         </div>}
