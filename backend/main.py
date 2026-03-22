@@ -237,7 +237,7 @@ class FetchUrlRequest(BaseModel):
 class ConversationCreate(BaseModel):
     title: str = "New Chat"
     model: str = config.DEFAULT_MODEL
-    system_prompt: str = config.DEFAULT_SYSTEM_PROMPT
+    system_prompt: str = ""
     model_config_id: Optional[str] = None
 
 class ConversationUpdate(BaseModel):
@@ -565,8 +565,18 @@ async def archive_contents(filename: str):
                     entries.append({"name": info.filename, "size": info.file_size, "is_dir": info.is_dir()})
         else:
             return JSONResponse({"error": "Not a supported archive"}, status_code=400)
-        # Sort: directories first, then files
-        entries.sort(key=lambda e: (not e["is_dir"], e["name"]))
+        # Sort by path so files appear under their parent directories
+        # For each entry, sort key is the directory path + a flag (dirs before files at same level)
+        def _sort_key(e):
+            parts = e["name"].rstrip("/").split("/")
+            # Build a key that sorts dirs before files at the same level
+            key = []
+            for i, p in enumerate(parts):
+                is_last = (i == len(parts) - 1)
+                # Directories sort before files at the same level
+                key.append((0 if (e["is_dir"] or not is_last) else 1, p.lower()))
+            return key
+        entries.sort(key=_sort_key)
         return {"filename": safe_name, "file_count": len([e for e in entries if not e["is_dir"]]), "entries": entries}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -1024,6 +1034,55 @@ async def get_file_index_status(kb_id: str, filename: str):
     if status:
         return status
     return {"status": "unknown", "filename": filename}
+
+
+@app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/preview")
+async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200):
+    """Preview first N lines of a KB file."""
+    _db = await db.get_db()
+    try:
+        cursor = await _db.execute("SELECT filename FROM kb_files WHERE id = ? AND kb_id = ?", (file_id, kb_id))
+        row = await cursor.fetchone()
+    finally:
+        await _db.close()
+    if not row:
+        raise HTTPException(404, "File not found")
+    filename = row["filename"]
+    kb_dir = os.path.join(config.KB_DIR, kb_id)
+    file_path = os.path.abspath(os.path.join(kb_dir, filename))
+    if not file_path.startswith(os.path.abspath(kb_dir)):
+        raise HTTPException(400, "Invalid path")
+    if not os.path.exists(file_path):
+        raise HTTPException(404, "File not found on disk")
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+        total = len(all_lines)
+        content = "".join(all_lines[:lines])
+        return {"filename": filename, "content": content, "truncated": total > lines, "total_lines": total}
+    except UnicodeDecodeError:
+        return {"filename": filename, "content": "Binary file — preview not available", "truncated": False, "total_lines": 0}
+
+
+@app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/raw")
+async def raw_kb_file(kb_id: str, file_id: int):
+    """Serve a KB file raw (for PDF/image preview in browser)."""
+    _db = await db.get_db()
+    try:
+        cursor = await _db.execute("SELECT filename FROM kb_files WHERE id = ? AND kb_id = ?", (file_id, kb_id))
+        row = await cursor.fetchone()
+    finally:
+        await _db.close()
+    if not row:
+        raise HTTPException(404, "File not found")
+    filename = row["filename"]
+    kb_dir = os.path.join(config.KB_DIR, kb_id)
+    file_path = os.path.abspath(os.path.join(kb_dir, filename))
+    if not file_path.startswith(os.path.abspath(kb_dir)):
+        raise HTTPException(400, "Invalid path")
+    if not os.path.exists(file_path):
+        raise HTTPException(404, "File not found on disk")
+    return FileResponse(file_path, filename=filename)
 
 
 @app.delete("/api/knowledge-bases/files/{file_id}")
@@ -2108,21 +2167,33 @@ async def quick_search(req: QuickSearchRequest):
         if any(s in page_url.lower() for s in skip):
             return idx, ""
         try:
-            resp = await http.get(page_url, timeout=4, follow_redirects=True,
-                                  headers={"User-Agent": "Mozilla/5.0 (compatible; HyprChat/1.0)"})
-            html = resp.text[:15000]  # only need the <head>
-            # Try og:image first, then twitter:image
+            resp = await http.get(page_url, timeout=6, follow_redirects=True,
+                                  headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                                           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                                           "Accept-Language": "en-US,en;q=0.5"})
+            html = resp.text[:30000]  # scan more of the page
+            # Try og:image first, then twitter:image, then generic image meta
             for pattern in [
                 r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
                 r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
                 r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
                 r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
+                r'<meta[^>]+name=["\']twitter:image:src["\'][^>]+content=["\']([^"\']+)["\']',
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image:src["\']',
+                r'<meta[^>]+property=["\']og:image:secure_url["\'][^>]+content=["\']([^"\']+)["\']',
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image:secure_url["\']',
+                r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)["\']',
             ]:
                 m = re.search(pattern, html, re.IGNORECASE)
                 if m:
                     img = m.group(1).strip()
                     if img.startswith("//"):
                         img = "https:" + img
+                    elif img.startswith("/"):
+                        # Relative URL — resolve against page domain
+                        from urllib.parse import urlparse
+                        parsed = urlparse(page_url)
+                        img = f"{parsed.scheme}://{parsed.netloc}{img}"
                     if img.startswith("http"):
                         return idx, img
             return idx, ""

@@ -1,5 +1,48 @@
 # HyprChat Changelog
 
+## Alpha v15.1 — March 2026
+
+### New Features
+- **KB File Preview** — Preview uploaded knowledge base files directly in the browser. New backend endpoint returns the first 200 lines of any KB file. Files are displayed in a scrollable list with filename, size, Preview button, and Delete button. Preview opens in a modal overlay with syntax-friendly monospace rendering.
+- **Theme Preview & Apply** — Theme selector replaced with a dropdown that shows a live preview of any theme before applying. Preview includes color swatches (bg, surface, text, accent, warm, ok, err, pink) and a mini mock chat bubble. Click "Apply" to confirm or "Cancel" to revert.
+- **Nav Rail Labels** — Navigation icons now show text labels below each icon (Chat, Knowledge Bases, Tools, etc.). Configurable via Settings → Appearance → "Nav Labels" toggle. Saved to localStorage.
+- **Settings Tooltips** — Hover `ⓘ` icons next to RAG pipeline settings (chunk size, overlap, max context, top-K, embedding model) and model parameters (temperature, top-P, context window) for plain-English explanations of what each setting does.
+- **Model Pull Bar Repositioned** — "Pull from Ollama" input moved from the right detail pane to a compact sticky bar above the Ollama/HF tab content, always visible without scrolling.
+- **Font Preview & Apply** — Font selector replaced with a dropdown showing a live preview with sample text and code snippet. UI Size and Chat Font Size are now dropdowns inside the font preview panel. Apply/Cancel buttons confirm the change.
+- **HF Download Bar** — HuggingFace download controls (model name input, file count, Download button) moved from the bottom of the file list to a sticky bar at the top of the model detail area, always visible when files are selected.
+
+### Improvements
+- **Personas icon updated** — Nav rail icon changed from cube to person silhouette for better visual clarity.
+- **Model list auto-refresh** — Models refresh automatically when switching to the Model Manager panel and when opening the ModelPicker dropdown. Small refresh icon added inside the ModelPicker trigger bar.
+- **Downloads persist until cleared** — Completed downloads no longer auto-dismiss after 10 seconds. They remain in the downloads panel until manually cleared via "Clear done".
+- **KB file list redesign** — Knowledge base files now display as a scrollable vertical list (max 240px) with file icon, filename, size, Preview button, and Delete button instead of inline chips.
+- **Wider nav rail** — Nav rail widened from 60px to 68px with larger icons and buttons for better readability.
+- **Thinking Mode moved** — Thinking Mode setting (Auto/On/Off) moved from Appearance tile to Connection tile, under Default Context Window.
+- **Tag editor close button** — Added a `×` button next to the `+` in the tag editor to dismiss it. Pressing Escape in the tag input also closes the editor.
+- **Larger tag remove buttons** — Tag pills in the editor are slightly larger (font 10px, bolder `×`) for easier interaction.
+- **KB file type icons** — Knowledge base file list now shows type-specific icons: 📕 PDF, 📘 Word, 📊 spreadsheets, 🗂 data files, 💻 code, 📝 text/markdown, 🌐 HTML, 🖼 images, 📦 archives.
+
+### Bug Fixes
+- **Prompt library quick insert** — Fixed race condition where clicking a prompt in the `⚡` picker would close the picker before setting the input text due to click propagation to the backdrop. Added `stopPropagation` and auto-resize of the textarea after insert.
+- **Downloads panel overlay** — Fixed downloads dropdown using a full-screen fixed backdrop that blocked all page interaction. Now uses a document mousedown listener to close on outside clicks without blocking.
+- **Settings white page crash** — Fixed React error #310 (too many re-renders) caused by `useState` hooks inside IIFEs in render. Theme and font preview state lifted to component level.
+- **Chat state preserved on same-conversation click** — Clicking the same conversation in the sidebar no longer reloads from the backend and clears all ephemeral state (events, tokens, streaming). Now just switches to the chat panel, preserving status pills, tool events, and token counters.
+- **Status pills persist across sessions** — Tool events (thinking, tool calls, code output, file downloads) are now saved to assistant message metadata alongside search results and source links. Status pills survive conversation reloads instead of disappearing.
+- **Council rounds render live during debate** — When a new debate round starts, the frontend reloads persisted messages from the backend so previous rounds appear as collapsible historical sections while the new round streams live. Previously only the current round was visible during streaming.
+- **Council completion shows all rounds immediately** — On `council_complete`, the conversation is reloaded from the backend (which has all rounds with correct `debate_round` metadata) instead of reconstructing from ephemeral state that only held the last round. Rebuttal round dropdowns now appear immediately without needing to switch away and back.
+- **Council voting phase shows final round** — When the voting phase begins, the last streaming round's responses are reloaded from the backend as persisted historical data instead of being lost.
+- **Duplicate council user messages** — Removed the frontend's redundant `POST` save of the user message for council chats, since `council.py` already persists it server-side.
+- **Search card thumbnails improved** — Backend OG image fetching upgraded: real browser User-Agent, 6s timeout (was 4s), scans 30KB of HTML (was 15KB), 5 additional meta tag patterns (`twitter:image:src`, `og:image:secure_url`, `link[rel=image_src]`), resolves relative image URLs.
+- **Search card fallback display** — Cards without thumbnails now show a larger favicon (32px) + domain name instead of a faint chain link emoji.
+- **Horizontal scrollbar visibility** — Scrollbar height increased to 10px (was 5px), added hover highlight with accent color, and increased padding below scroll containers for easier grabbing.
+- **Archive file preview** — Clicking the preview eye on `.tar.gz`, `.tgz`, `.zip`, and `.tar` files now shows a file tree in the preview panel with directory structure, file icons color-coded by type, and formatted file sizes. Previously showed an infinite "Loading..." spinner.
+- **Archive file tree sorting** — Archive entries now sort by full path so files appear directly under their parent directories. Previously all directories were grouped first, then all files, breaking the visual hierarchy.
+- **Council stream survives navigation** — Council streaming state (live responses, votes, host synthesis) now persists in a ref when you navigate away to another conversation. Returning to the council chat restores the live stream instead of showing an empty chat. Previously all live council output was lost on navigation.
+- **New chat defaults to CodeAgent** — New conversations without a persona no longer default to the CodeAgent system prompt. Plain chats now use no system prompt, so the model responds as a generic assistant.
+- **Orphaned tags after chat deletion** — Deleting a conversation now removes its tags from the tag store. Previously, tags from deleted chats persisted as filter buttons in the sidebar.
+
+---
+
 ## Alpha v15 — March 2026
 
 ### New Features

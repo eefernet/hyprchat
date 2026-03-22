@@ -38,29 +38,31 @@ CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".deploy_
 REMOTE_BACKEND  = "/opt/hyprchat/backend/"
 REMOTE_FRONTEND = "/opt/hyprchat/frontend/dist/"
 
-# ── Watched files → (label, remote_dir, is_backend) ──
+# ── Watched files → (label, remote_dir, needs_restart) ──
+# needs_restart: whether deploying this file requires restarting hyprchat service
 WATCHED = {
-    "backend/main.py":              ("Main Server",      REMOTE_BACKEND),
-    "backend/config.py":            ("Config",           REMOTE_BACKEND),
-    "backend/database.py":          ("Database",         REMOTE_BACKEND),
-    "backend/tools.py":             ("Tools",            REMOTE_BACKEND),
-    "backend/rag.py":               ("RAG Pipeline",     REMOTE_BACKEND),
-    "backend/research.py":          ("Research",         REMOTE_BACKEND),
-    "backend/events.py":            ("Events",           REMOTE_BACKEND),
-    "backend/council.py":           ("Council",          REMOTE_BACKEND),
-    "backend/hf.py":                ("HuggingFace",      REMOTE_BACKEND),
-    "backend/openhands_worker.py":  ("OpenHands",        REMOTE_BACKEND),
-    "backend/agents/chat.py":       ("Chat Agent",       REMOTE_BACKEND + "agents/"),
-    "backend/agents/personas.py":   ("Personas",         REMOTE_BACKEND + "agents/"),
-    "backend/agents/__init__.py":   ("Agents Init",      REMOTE_BACKEND + "agents/"),
-    "backend/requirements.txt":     ("Requirements",     REMOTE_BACKEND),
-    "backend/hyprchat.service":     ("Systemd Service",  "/etc/systemd/system/"),
-    "frontend/dist/index.html":     ("Frontend",         REMOTE_FRONTEND),
-    "CHANGELOG.md":                 ("Changelog",        "/opt/hyprchat/"),
-    "README.md":                    ("README",           "/opt/hyprchat/"),
+    "backend/main.py":              ("Main Server",      REMOTE_BACKEND,            True),
+    "backend/config.py":            ("Config",           REMOTE_BACKEND,            True),
+    "backend/database.py":          ("Database",         REMOTE_BACKEND,            True),
+    "backend/tools.py":             ("Tools",            REMOTE_BACKEND,            True),
+    "backend/rag.py":               ("RAG Pipeline",     REMOTE_BACKEND,            True),
+    "backend/research.py":          ("Research",         REMOTE_BACKEND,            True),
+    "backend/events.py":            ("Events",           REMOTE_BACKEND,            True),
+    "backend/council.py":           ("Council",          REMOTE_BACKEND,            True),
+    "backend/hf.py":                ("HuggingFace",      REMOTE_BACKEND,            True),
+    "backend/openhands_worker.py":  ("OpenHands",        REMOTE_BACKEND,            False),
+    "backend/agents/chat.py":       ("Chat Agent",       REMOTE_BACKEND + "agents/", True),
+    "backend/agents/personas.py":   ("Personas",         REMOTE_BACKEND + "agents/", True),
+    "backend/agents/__init__.py":   ("Agents Init",      REMOTE_BACKEND + "agents/", True),
+    "backend/requirements.txt":     ("Requirements",     REMOTE_BACKEND,            True),
+    "backend/hyprchat.service":     ("Systemd Service",  "/etc/systemd/system/",    True),
+    "frontend/dist/index.html":     ("Frontend",         REMOTE_FRONTEND,           False),
+    "CHANGELOG.md":                 ("Changelog",        "/opt/hyprchat/",          False),
+    "README.md":                    ("README",           "/opt/hyprchat/",          False),
 }
 
 CHECK_INTERVAL = 1
+BATCH_WINDOW = 2  # seconds to wait for additional changes before prompting
 
 # ── Terminal helpers ──
 
@@ -195,7 +197,7 @@ def ssh_cmd(host, user, password, command, timeout=30):
 # ── Deploy logic ──
 
 def deploy_changes(changed, cfg):
-    """Deploy changed files and restart service."""
+    """Deploy changed files and restart service only if needed."""
     hypr = cfg["hyprchat"]
     needs_restart = False
     needs_pip = False
@@ -203,7 +205,7 @@ def deploy_changes(changed, cfg):
 
     cb = cfg["codebox"]
 
-    for filepath, (label, remote_dir) in changed:
+    for filepath, (label, remote_dir, restart_flag) in changed:
         # openhands_worker.py goes to codebox server
         if filepath == "backend/openhands_worker.py":
             target = cb
@@ -212,9 +214,9 @@ def deploy_changes(changed, cfg):
             target = hypr
 
         ok, err = scp(filepath, target["ip"], remote_dir, target["user"], target["pass"])
-        status = f"{G}OK{RST}" if ok else f"{R}FAIL{RST}"
         results.append((label, filepath, ok, err, target))
-        needs_restart = True
+        if restart_flag:
+            needs_restart = True
 
         if filepath == "backend/requirements.txt":
             needs_pip = True
@@ -239,7 +241,7 @@ def deploy_changes(changed, cfg):
             print(f"  {R}\u2717{RST} pip install failed: {err}")
 
     # Reload systemd if service file changed
-    if any(fp == "backend/hyprchat.service" for fp, _ in changed):
+    if any(fp == "backend/hyprchat.service" for fp, *_ in changed):
         print()
         print(f"  {Y}\u25b6{RST} Reloading systemd daemon...")
         ok, out, err = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], "systemctl daemon-reload")
@@ -265,7 +267,7 @@ def deploy_changes(changed, cfg):
             print(f"  {R}\u2717{RST} Restart failed: {err}")
 
     # Restart openhands worker on codebox if it was deployed
-    if any(fp == "backend/openhands_worker.py" for fp, _ in changed):
+    if any(fp == "backend/openhands_worker.py" for fp, *_ in changed):
         print()
         print(f"  {Y}\u25b6{RST} Restarting OpenHands worker on Codebox...")
         ok, out, err = ssh_cmd(cb["ip"], cb["user"], cb["pass"],
@@ -317,7 +319,7 @@ def draw_monitor(file_states, prev_times, cfg, last_event=""):
     print(f"  {BLD}Watched Files{RST}")
     print(f"  {bar()}")
 
-    for filepath, (label, remote_dir) in WATCHED.items():
+    for filepath, (label, remote_dir, _restart) in WATCHED.items():
         mtime = prev_times.get(filepath, 0)
         state = file_states.get(filepath, "idle")
 
@@ -364,7 +366,7 @@ def push_all(cfg, file_states):
     print()
 
     deploy_changes(all_files, cfg)
-    for fp, _ in all_files:
+    for fp, *_ in all_files:
         file_states[fp] = "deployed"
 
 
@@ -454,6 +456,22 @@ def main():
                     prev_times[filepath] = mtime
 
             if changed:
+                # Wait briefly to collect any additional file changes
+                last_event = f"{Y}\u25b6 Change detected, collecting...{RST}"
+                draw_monitor(file_states, prev_times, cfg, last_event)
+                time.sleep(BATCH_WINDOW)
+
+                # Re-scan for any files that changed during the window
+                for filepath, info in WATCHED.items():
+                    if not os.path.exists(filepath):
+                        continue
+                    mtime = os.path.getmtime(filepath)
+                    if mtime != prev_times.get(filepath, 0):
+                        if not any(fp == filepath for fp, *_ in changed):
+                            changed.append((filepath, info))
+                        file_states[filepath] = "changed"
+                        prev_times[filepath] = mtime
+
                 last_event = f"{Y}\u25b6 {len(changed)} file(s) changed{RST}"
                 draw_monitor(file_states, prev_times, cfg, last_event)
 
@@ -477,11 +495,11 @@ def main():
                     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
                     deploy_changes(changed, cfg)
                     tty.setcbreak(sys.stdin.fileno())
-                    for fp, _ in changed:
+                    for fp, *_ in changed:
                         file_states[fp] = "deployed"
                     last_event = f"{G}\u2713 Last deploy: {datetime.now().strftime('%H:%M:%S')}{RST}"
                 else:
-                    for fp, _ in changed:
+                    for fp, *_ in changed:
                         file_states[fp] = "idle"
                     last_event = f"{DIM}Skipped deploy at {datetime.now().strftime('%H:%M:%S')}{RST}"
 

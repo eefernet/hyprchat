@@ -1303,9 +1303,57 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         step_lines.append(f"  {i}. [{action}] {detail}")
                     steps_summary = "\n".join(step_lines)
 
+                # ── Read key source files for overseer review ──
+                code_review = ""
+                if files:
+                    # Filter to source files only
+                    _skip_patterns = {
+                        "package-lock.json", ".gitignore", ".env", "node_modules",
+                        ".ico", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".woff", ".ttf",
+                        ".lock", ".map", "LICENSE", ".openhands",
+                    }
+                    _entry_points = [
+                        "App.tsx", "App.jsx", "App.js", "app.py", "main.py", "main.ts",
+                        "index.ts", "index.js", "index.tsx", "server.py", "server.js",
+                        "index.html", "app.js", "app.ts",
+                    ]
+                    source_files = [
+                        f for f in files
+                        if not any(skip in f for skip in _skip_patterns)
+                    ]
+                    # Prioritize entry points first, then the rest
+                    prioritized = []
+                    remaining = []
+                    for f in source_files:
+                        basename = f.rsplit("/", 1)[-1] if "/" in f else f
+                        if basename in _entry_points:
+                            prioritized.append(f)
+                        else:
+                            remaining.append(f)
+                    review_files = (prioritized + remaining)[:5]
+
+                    if review_files:
+                        review_parts = []
+                        for rf in review_files:
+                            try:
+                                cat_r = await http.post(
+                                    f"{config.CODEBOX_URL}/command",
+                                    json={"command": f"cat {shlex.quote(rf)} 2>&1", "timeout": 10},
+                                    timeout=15
+                                )
+                                content = cat_r.json().get("stdout", "").strip()
+                                if content:
+                                    if len(content) > 2000:
+                                        content = content[:2000] + "\n... [truncated]"
+                                    review_parts.append(f"### {rf}\n```\n{content}\n```")
+                            except Exception as cat_e:
+                                print(f"[CODEGEN:OH] Failed to read {rf} for review: {cat_e}")
+                        if review_parts:
+                            code_review = "\n\n".join(review_parts)
+
                 if files:
                     resp = (
-                        f"PROJECT COMPLETE. OpenHands agent autonomously built and tested the project "
+                        f"PROJECT COMPLETE. OpenHands agent built the project "
                         f"(model: {coder_model}, {duration}s, {len(steps)} steps, project_id: {_project_id}).\n\n"
                         f"**Files created ({len(files)}):**\n{file_list}\n"
                     )
@@ -1315,13 +1363,18 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         resp += f"\n{download_result}\n"
                     if summary:
                         resp += f"\n**Agent summary:** {summary[:300]}\n"
+                    if code_review:
+                        resp += f"\n**Key file contents for review:**\n{code_review}\n"
                     resp += (
-                        f"\nThe project is COMPLETE and TESTED. Do NOT inspect or modify any files. "
-                        f"Do NOT call any more tools. Respond to the user with:\n"
+                        f"\nREVIEW the file contents above. Evaluate whether the code actually "
+                        f"fulfills the user's request — not just scaffolding/boilerplate. "
+                        f"If the output is incomplete or doesn't match what was asked, call "
+                        f"generate_code again with project_id='{_project_id}' and a MORE DETAILED "
+                        f"task description explaining exactly what's wrong and what to fix.\n"
+                        f"If the output looks good, respond to the user with:\n"
                         f"1. What was built and its features\n"
-                        f"2. The download link above\n"
-                        f"3. How to run it locally (npm install && npm run dev, or python3 main.py, etc.)\n"
-                        f"4. Brief deployment tips (Vercel/Netlify for React, etc.)\n"
+                        f"2. The download link\n"
+                        f"3. How to run it locally\n"
                     )
                     return resp
                 else:
