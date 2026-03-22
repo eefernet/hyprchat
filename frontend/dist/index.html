@@ -319,6 +319,7 @@ const Pill = ({ev,t,expanded,onToggle})=>{
   const tc=isE?t.err:isD?t.ok:isThink?t.f4:t.acc;
   let detail = null;
   if(expanded && ev.data?.detail){try{detail=JSON.parse(ev.data.detail);}catch{detail=ev.data.detail;}}
+  const isClickable = !!(ev.data?.detail) || isThink;
   
   const toolName = ev.data?.tool||ev.type;
   const status = ev.data?.status||"";
@@ -366,7 +367,7 @@ const Pill = ({ev,t,expanded,onToggle})=>{
   const marqueeKey = Math.floor(status.length / 30);
 
   return <div style={{animation:"fadeIn .3s",marginBottom:2}}>
-    <div onClick={ev.data?.detail?onToggle:undefined} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 12px",background:bg,border:`1px solid ${bc}`,borderRadius:expanded?"9px 9px 0 0":9,fontSize:12,color:tc,cursor:ev.data?.detail?"pointer":"default",maxWidth:"100%",transition:"all .2s",animation:isActive?`fadeIn .3s, pillGlow 2s ease-in-out infinite`:"fadeIn .3s",boxShadow:isActive?`0 0 8px ${bc}`:"none"}}>
+    <div onClick={isClickable?onToggle:undefined} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 12px",background:bg,border:`1px solid ${bc}`,borderRadius:expanded?"9px 9px 0 0":9,fontSize:12,color:tc,cursor:isClickable?"pointer":"default",maxWidth:"100%",transition:"all .2s",animation:isActive?`fadeIn .3s, pillGlow 2s ease-in-out infinite`:"fadeIn .3s",boxShadow:isActive?`0 0 8px ${bc}`:"none"}}>
       {isS&&!isD&&<span style={{display:"inline-block",animation:getIconAnim(toolName),flexShrink:0,lineHeight:1,transformOrigin:"center"}}>{icon}</span>}
       {isD&&<><span style={{color:t.ok,flexShrink:0,lineHeight:1}}>✓</span><span style={{flexShrink:0,lineHeight:1}}>{icon}</span></>}
       <span style={{fontWeight:600,flexShrink:0}}>{label}</span>
@@ -378,11 +379,12 @@ const Pill = ({ev,t,expanded,onToggle})=>{
           </span>
         : <span style={{opacity:.6,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:350,fontStyle:isThink?"italic":"normal"}}>{status}</span>
       }
-      {ev.data?.detail&&<span style={{opacity:.3,flexShrink:0,fontSize:8,marginLeft:2}}>{expanded?"▴":"▾"}</span>}
+      {isClickable&&<span style={{opacity:.3,flexShrink:0,fontSize:8,marginLeft:2}}>{expanded?"▴":"▾"}</span>}
     </div>
-    {expanded&&detail&&<div style={{background:`${t.bgDeep}`,border:`1px solid ${bc}`,borderTop:"none",borderRadius:"0 0 8px 8px",padding:10,fontSize:11,maxHeight:250,overflowY:"auto",maxWidth:600}}>
-      {typeof detail==="string"?<pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontFamily:"inherit"}}>{detail}</pre>
-      :detail.thinking?<div style={{color:t.dim,fontStyle:"italic",lineHeight:1.6,whiteSpace:"pre-wrap"}}>{detail.thinking}</div>
+    {expanded&&(detail||isThink)&&<div style={{background:`${t.bgDeep}`,border:`1px solid ${bc}`,borderTop:"none",borderRadius:"0 0 8px 8px",padding:10,fontSize:11,maxHeight:300,overflowY:"auto",maxWidth:600}}>
+      {!detail?<div style={{color:t.dim,fontStyle:"italic",lineHeight:1.6,whiteSpace:"pre-wrap",opacity:.7}}>{status||"Thinking..."}</div>
+      :typeof detail==="string"?<pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontFamily:"inherit"}}>{detail}</pre>
+      :detail.thinking?<div ref={el=>{if(el&&isActive)el.scrollTop=el.scrollHeight;}} style={{color:t.dim,fontStyle:"italic",lineHeight:1.6,whiteSpace:"pre-wrap",maxHeight:250,overflowY:"auto"}}>{detail.thinking}</div>
       :detail.code?<div>
         {detail.language&&<div style={{color:t.mut,marginBottom:4,fontSize:10}}>🔧 <span style={{color:t.acc}}>{detail.language}</span></div>}
         <pre style={{margin:0,padding:8,background:`${t.surface}88`,borderRadius:4,whiteSpace:"pre-wrap",color:t.warm,fontSize:11,maxHeight:100,overflow:"auto",border:`1px solid ${t.brd}18`}}>{detail.code}</pre>
@@ -2304,7 +2306,7 @@ function HyprChat(){
             <span style={{color:t.f1,flexShrink:0}}>{(()=>{const ext=((f.filename||f.name||"").split(".").pop()||"").toLowerCase();if(ext==="pdf")return"📕";if(["doc","docx"].includes(ext))return"📘";if(["xls","xlsx","csv"].includes(ext))return"📊";if(["json","xml","yaml","yml"].includes(ext))return"🗂";if(["py","js","ts","rs","go","java","c","cpp","h","rb","sh"].includes(ext))return"💻";if(["md"].includes(ext))return"📝";if(["txt","text","log"].includes(ext))return"📝";if(["html","htm"].includes(ext))return"🌐";if(["png","jpg","jpeg","gif","svg","webp"].includes(ext))return"🖼";if(["zip","tar","gz","rar","7z"].includes(ext))return"📦";return"📄";})()}</span>
             <span style={{flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:500}}>{f.filename||f.name}</span>
             <span style={{fontSize:9,color:t.mut,flexShrink:0}}>{((f.file_size||f.size||0)/1024).toFixed(1)}KB</span>
-            {f.id&&<button onClick={async()=>{const fn=(f.filename||f.name||"").toLowerCase();const ext=fn.split(".").pop();if(ext==="pdf"||["png","jpg","jpeg","gif","svg","webp","bmp"].includes(ext)){setKbPreview({filename:f.filename||f.name,rawUrl:`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/raw`,isPdf:ext==="pdf",isImage:["png","jpg","jpeg","gif","svg","webp","bmp"].includes(ext),loading:false});}else{setKbPreview({filename:f.filename||f.name,content:null,loading:true});try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/preview`);const d=await r.json();setKbPreview({filename:d.filename,content:d.content,truncated:d.truncated,total_lines:d.total_lines,loading:false});}catch(e){setKbPreview({filename:f.filename||f.name,content:"Failed to load preview: "+e.message,loading:false});}}}} style={{background:`${t.acc}15`,border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",padding:"2px 8px",borderRadius:5,fontSize:9,fontWeight:600,flexShrink:0}}>Preview</button>}
+            {f.id&&<button onClick={async()=>{const fn=(f.filename||f.name||"").toLowerCase();const ext=fn.split(".").pop();if(ext==="pdf"){setKbPreview({filename:f.filename||f.name,rawUrl:`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/raw`,isPdf:true,pdfFullView:false,content:null,loading:true});try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/pdf-text?pages=10`);const d=await r.json();setKbPreview(p=>({...p,content:d.content,total_pages:d.total_pages,previewed_pages:d.previewed_pages,truncated:d.truncated,loading:false}));}catch(e){setKbPreview(p=>({...p,content:"Failed to extract PDF text: "+e.message,loading:false}));}}else if(["png","jpg","jpeg","gif","svg","webp","bmp"].includes(ext)){setKbPreview({filename:f.filename||f.name,rawUrl:`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/raw`,isImage:true,loading:false});}else{setKbPreview({filename:f.filename||f.name,content:null,loading:true});try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/preview`);const d=await r.json();setKbPreview({filename:d.filename,content:d.content,truncated:d.truncated,total_lines:d.total_lines,loading:false});}catch(e){setKbPreview({filename:f.filename||f.name,content:"Failed to load preview: "+e.message,loading:false});}}}} style={{background:`${t.acc}15`,border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",padding:"2px 8px",borderRadius:5,fontSize:9,fontWeight:600,flexShrink:0}}>Preview</button>}
             <button onClick={()=>{if(f.id)fetch(`${API}/api/knowledge-bases/files/${f.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:(k.files||[]).filter((_,j)=>j!==i)}:k));}} style={{background:"none",border:"none",color:t.err,cursor:"pointer",padding:"2px 4px",fontSize:10,opacity:.6,flexShrink:0}} title="Delete file">✕</button>
           </div>)}
           {!(kb.files||[]).length&&<span style={{fontSize:11,color:t.mut,fontStyle:"italic",padding:"4px 0"}}>No files uploaded</span>}
@@ -4260,14 +4262,16 @@ function HyprChat(){
     {kbPreview&&<div style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setKbPreview(null);}}>
       <div style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,width:"min(720px,95vw)",maxHeight:"85vh",display:"flex",flexDirection:"column",boxShadow:`0 8px 48px #0008`,overflow:"hidden",animation:"fadeIn .25s"}}>
         <div style={{padding:"12px 20px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:8,flexShrink:0,background:`${t.surface}88`}}>
-          <span style={{fontSize:14}}>📄</span>
+          <span style={{fontSize:14}}>{kbPreview.isPdf?"📕":"📄"}</span>
           <span style={{fontSize:13,fontWeight:700,color:t.acc,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{kbPreview.filename}</span>
-          {kbPreview.truncated&&<span style={{fontSize:9,color:t.warm,flexShrink:0}}>Showing first 200 of {kbPreview.total_lines} lines</span>}
+          {kbPreview.isPdf&&!kbPreview.pdfFullView&&kbPreview.truncated&&<span style={{fontSize:9,color:t.warm,flexShrink:0}}>Pages 1-{kbPreview.previewed_pages} of {kbPreview.total_pages}</span>}
+          {kbPreview.truncated&&!kbPreview.isPdf&&<span style={{fontSize:9,color:t.warm,flexShrink:0}}>Showing first 200 of {kbPreview.total_lines} lines</span>}
+          {kbPreview.isPdf&&kbPreview.rawUrl&&<button onClick={()=>setKbPreview(p=>({...p,pdfFullView:!p.pdfFullView}))} style={{background:kbPreview.pdfFullView?`${t.acc}25`:`${t.acc}12`,border:`1px solid ${t.acc}44`,color:t.acc,cursor:"pointer",padding:"3px 10px",borderRadius:6,fontSize:10,fontWeight:600,flexShrink:0,display:"flex",alignItems:"center",gap:4}}>{kbPreview.pdfFullView?"Text View":"Full PDF"}</button>}
           <button onClick={()=>setKbPreview(null)} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:18,padding:"0 4px",lineHeight:1}}>✕</button>
         </div>
         <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
           {kbPreview.loading?<div style={{textAlign:"center",padding:40,color:t.mut}}>Loading preview...</div>
-          :kbPreview.rawUrl&&kbPreview.isPdf?<iframe src={kbPreview.rawUrl} style={{width:"100%",height:"75vh",border:"none",borderRadius:8}}/>
+          :kbPreview.isPdf&&kbPreview.pdfFullView?<iframe src={kbPreview.rawUrl} style={{width:"100%",height:"75vh",border:"none",borderRadius:8}}/>
           :kbPreview.rawUrl&&kbPreview.isImage?<img src={kbPreview.rawUrl} style={{maxWidth:"100%",maxHeight:"75vh",objectFit:"contain",borderRadius:8}} alt={kbPreview.filename}/>
           :<pre style={{fontSize:11,lineHeight:1.6,color:t.text,fontFamily:font,whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{kbPreview.content}</pre>}
         </div>
@@ -4296,9 +4300,9 @@ function HyprChat(){
       @keyframes blink{0%,50%{opacity:1}51%,100%{opacity:0}}
       @keyframes pulse{0%,80%,100%{opacity:.3;transform:scale(.8)}40%{opacity:1;transform:scale(1.2)}}
       @keyframes slide{0%{transform:translateX(-100%)}100%{transform:translateX(350%)}}
-      @keyframes marquee-think{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
-      .pill-marquee-wrap{overflow:hidden;max-width:280px;display:inline-block;vertical-align:middle}
-      .pill-marquee-inner{display:inline-block;white-space:nowrap;animation:marquee-think 8s linear infinite}
+      @keyframes marquee-think{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(-50%,0,0)}}
+      .pill-marquee-wrap{overflow:hidden;max-width:280px;display:inline-block;vertical-align:middle;-webkit-mask-image:linear-gradient(to right,transparent 0%,black 8%,black 92%,transparent 100%);mask-image:linear-gradient(to right,transparent 0%,black 8%,black 92%,transparent 100%)}
+      .pill-marquee-inner{display:inline-block;white-space:nowrap;animation:marquee-think 12s linear infinite;will-change:transform;backface-visibility:hidden}
       @keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
       @keyframes glow{0%,100%{box-shadow:0 0 8px ${t.acc}88}50%{box-shadow:0 0 16px ${t.acc}CC}}
       @keyframes pGlow{0%,100%{box-shadow:0 0 4px ${t.err}44}50%{box-shadow:0 0 14px ${t.err}88}}
