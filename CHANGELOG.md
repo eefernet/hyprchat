@@ -3,6 +3,9 @@
 ## Alpha v15.1 — March 2026
 
 ### New Features
+- **KB PDF Text Preview** — PDF files in Knowledge Bases now open with extracted text from the first 10 pages instead of an empty iframe. New `/pdf-text` backend endpoint extracts page text via `pypdf`. A "Full PDF" toggle button in the preview header switches to the embedded PDF viewer. Shows page count info (e.g. "Pages 1-10 of 42").
+- **Thinking Pill Click-to-Expand** — The reasoning/thinking status pill is now always clickable during streaming. Expanding it shows the model's live thinking content in real-time, auto-scrolling as new tokens arrive. Previously only the final thought was viewable after completion.
+- **Smoother Marquee Animation** — Thinking pill marquee text now uses GPU-accelerated `translate3d` with `will-change` and `backface-visibility` hints. Added gradient edge masking for smooth fade-in/out at edges instead of hard clipping. Animation slowed from 8s to 12s for a calmer scroll.
 - **KB File Preview** — Preview uploaded knowledge base files directly in the browser. New backend endpoint returns the first 200 lines of any KB file. Files are displayed in a scrollable list with filename, size, Preview button, and Delete button. Preview opens in a modal overlay with syntax-friendly monospace rendering.
 - **Theme Preview & Apply** — Theme selector replaced with a dropdown that shows a live preview of any theme before applying. Preview includes color swatches (bg, surface, text, accent, warm, ok, err, pink) and a mini mock chat bubble. Click "Apply" to confirm or "Cancel" to revert.
 - **Nav Rail Labels** — Navigation icons now show text labels below each icon (Chat, Knowledge Bases, Tools, etc.). Configurable via Settings → Appearance → "Nav Labels" toggle. Saved to localStorage.

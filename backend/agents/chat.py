@@ -531,7 +531,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                 yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': _live_gen_tokens, 'prompt_tokens': prompt_tokens, 'live': True})}\n\n"
                             if len(_thinking_buf) % 100 < len(_thinking_token):
                                 snip = _thinking_buf[-60:].replace("\n", " ")
-                                await events.emit(conv_id, "thinking", {"status": f"💭 {snip}..."})
+                                await events.emit(conv_id, "thinking", {"status": f"💭 {snip}...", "detail": json.dumps({"thinking": _thinking_buf[-3000:]})})
                             if not token:
                                 continue  # No content yet, just thinking
 
@@ -561,12 +561,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                     token = after_end
                                     if thinking:
                                         snip = thinking[-60:].replace("\n", " ")
-                                        await events.emit(conv_id, "thinking", {"status": f"💭 {snip}..."})
+                                        await events.emit(conv_id, "thinking", {"status": f"💭 {snip}...", "detail": json.dumps({"thinking": thinking[-3000:]})})
                                 else:
                                     _thinking_buf += token
                                     if len(_thinking_buf) % 100 < len(token):
                                         snip = _thinking_buf[-60:].replace("\n", " ")
-                                        await events.emit(conv_id, "thinking", {"status": f"💭 {snip}..."})
+                                        await events.emit(conv_id, "thinking", {"status": f"💭 {snip}...", "detail": json.dumps({"thinking": _thinking_buf[-3000:]})})
                                     continue
 
                             if token:

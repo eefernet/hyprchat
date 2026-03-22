@@ -1064,6 +1064,41 @@ async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200):
         return {"filename": filename, "content": "Binary file — preview not available", "truncated": False, "total_lines": 0}
 
 
+@app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/pdf-text")
+async def pdf_text_preview(kb_id: str, file_id: int, pages: int = 10):
+    """Extract text from first N pages of a PDF for quick preview."""
+    _db = await db.get_db()
+    try:
+        cursor = await _db.execute("SELECT filename FROM kb_files WHERE id = ? AND kb_id = ?", (file_id, kb_id))
+        row = await cursor.fetchone()
+    finally:
+        await _db.close()
+    if not row:
+        raise HTTPException(404, "File not found")
+    filename = row["filename"]
+    kb_dir = os.path.join(config.KB_DIR, kb_id)
+    file_path = os.path.abspath(os.path.join(kb_dir, filename))
+    if not file_path.startswith(os.path.abspath(kb_dir)):
+        raise HTTPException(400, "Invalid path")
+    if not os.path.exists(file_path):
+        raise HTTPException(404, "File not found on disk")
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(file_path)
+        total_pages = len(reader.pages)
+        extracted = []
+        for i, page in enumerate(reader.pages[:pages]):
+            text = page.extract_text() or ""
+            if text.strip():
+                extracted.append(f"[Page {i+1}]\n{text}")
+        content = "\n\n".join(extracted) if extracted else "No extractable text found in this PDF."
+        return {"filename": filename, "content": content, "total_pages": total_pages, "previewed_pages": min(pages, total_pages), "truncated": total_pages > pages}
+    except ImportError:
+        return {"filename": filename, "content": "pypdf not installed — text extraction unavailable.", "total_pages": 0, "previewed_pages": 0, "truncated": False}
+    except Exception as e:
+        return {"filename": filename, "content": f"Failed to extract PDF text: {e}", "total_pages": 0, "previewed_pages": 0, "truncated": False}
+
+
 @app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/raw")
 async def raw_kb_file(kb_id: str, file_id: int):
     """Serve a KB file raw (for PDF/image preview in browser)."""
