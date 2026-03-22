@@ -1,17 +1,5 @@
 # HyprChat Changelog
 
-## Alpha v15.1.1 — March 2026
-
-### Bug Fixes
-- **New chat defaults to CodeAgent** — New conversations without a persona no longer default to the CodeAgent system prompt. Plain chats now use no system prompt, so the model responds as a generic assistant.
-- **Orphaned tags after chat deletion** — Deleting a conversation now removes its tags from the tag store. Previously, tags from deleted chats persisted as filter buttons in the sidebar.
-
-### Improvements
-- **Tag editor close button** — Added a `×` button next to the `+` in the tag editor to dismiss it. Pressing Escape in the tag input also closes the editor.
-- **Larger tag remove buttons** — Tag pills in the editor are slightly larger (font 10px, bolder `×`) for easier interaction.
-
----
-
 ## Alpha v15.1 — March 2026
 
 ### New Features
@@ -30,6 +18,9 @@
 - **KB file list redesign** — Knowledge base files now display as a scrollable vertical list (max 240px) with file icon, filename, size, Preview button, and Delete button instead of inline chips.
 - **Wider nav rail** — Nav rail widened from 60px to 68px with larger icons and buttons for better readability.
 - **Thinking Mode moved** — Thinking Mode setting (Auto/On/Off) moved from Appearance tile to Connection tile, under Default Context Window.
+- **Tag editor close button** — Added a `×` button next to the `+` in the tag editor to dismiss it. Pressing Escape in the tag input also closes the editor.
+- **Larger tag remove buttons** — Tag pills in the editor are slightly larger (font 10px, bolder `×`) for easier interaction.
+- **KB file type icons** — Knowledge base file list now shows type-specific icons: 📕 PDF, 📘 Word, 📊 spreadsheets, 🗂 data files, 💻 code, 📝 text/markdown, 🌐 HTML, 🖼 images, 📦 archives.
 
 ### Bug Fixes
 - **Prompt library quick insert** — Fixed race condition where clicking a prompt in the `⚡` picker would close the picker before setting the input text due to click propagation to the backdrop. Added `stopPropagation` and auto-resize of the textarea after insert.
@@ -47,6 +38,8 @@
 - **Archive file preview** — Clicking the preview eye on `.tar.gz`, `.tgz`, `.zip`, and `.tar` files now shows a file tree in the preview panel with directory structure, file icons color-coded by type, and formatted file sizes. Previously showed an infinite "Loading..." spinner.
 - **Archive file tree sorting** — Archive entries now sort by full path so files appear directly under their parent directories. Previously all directories were grouped first, then all files, breaking the visual hierarchy.
 - **Council stream survives navigation** — Council streaming state (live responses, votes, host synthesis) now persists in a ref when you navigate away to another conversation. Returning to the council chat restores the live stream instead of showing an empty chat. Previously all live council output was lost on navigation.
+- **New chat defaults to CodeAgent** — New conversations without a persona no longer default to the CodeAgent system prompt. Plain chats now use no system prompt, so the model responds as a generic assistant.
+- **Orphaned tags after chat deletion** — Deleting a conversation now removes its tags from the tag store. Previously, tags from deleted chats persisted as filter buttons in the sidebar.
 
 ---
 

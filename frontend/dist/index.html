@@ -2301,10 +2301,10 @@ function HyprChat(){
         </div>
         <div style={{maxHeight:240,overflowY:"auto",marginBottom:10,display:"flex",flexDirection:"column",gap:3}}>
           {(kb.files||[]).map((f,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 10px",background:`${t.surface}44`,borderRadius:8,border:`1px solid ${t.brd}18`,fontSize:11}}>
-            <span style={{color:t.f1,flexShrink:0}}>📄</span>
+            <span style={{color:t.f1,flexShrink:0}}>{(()=>{const ext=((f.filename||f.name||"").split(".").pop()||"").toLowerCase();if(ext==="pdf")return"📕";if(["doc","docx"].includes(ext))return"📘";if(["xls","xlsx","csv"].includes(ext))return"📊";if(["json","xml","yaml","yml"].includes(ext))return"🗂";if(["py","js","ts","rs","go","java","c","cpp","h","rb","sh"].includes(ext))return"💻";if(["md"].includes(ext))return"📝";if(["txt","text","log"].includes(ext))return"📝";if(["html","htm"].includes(ext))return"🌐";if(["png","jpg","jpeg","gif","svg","webp"].includes(ext))return"🖼";if(["zip","tar","gz","rar","7z"].includes(ext))return"📦";return"📄";})()}</span>
             <span style={{flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:500}}>{f.filename||f.name}</span>
             <span style={{fontSize:9,color:t.mut,flexShrink:0}}>{((f.file_size||f.size||0)/1024).toFixed(1)}KB</span>
-            {f.id&&<button onClick={async()=>{setKbPreview({filename:f.filename||f.name,content:null,loading:true});try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/preview`);const d=await r.json();setKbPreview({filename:d.filename,content:d.content,truncated:d.truncated,total_lines:d.total_lines,loading:false});}catch(e){setKbPreview({filename:f.filename||f.name,content:"Failed to load preview: "+e.message,loading:false});}}} style={{background:`${t.acc}15`,border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",padding:"2px 8px",borderRadius:5,fontSize:9,fontWeight:600,flexShrink:0}}>Preview</button>}
+            {f.id&&<button onClick={async()=>{const fn=(f.filename||f.name||"").toLowerCase();const ext=fn.split(".").pop();if(ext==="pdf"||["png","jpg","jpeg","gif","svg","webp","bmp"].includes(ext)){setKbPreview({filename:f.filename||f.name,rawUrl:`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/raw`,isPdf:ext==="pdf",isImage:["png","jpg","jpeg","gif","svg","webp","bmp"].includes(ext),loading:false});}else{setKbPreview({filename:f.filename||f.name,content:null,loading:true});try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/preview`);const d=await r.json();setKbPreview({filename:d.filename,content:d.content,truncated:d.truncated,total_lines:d.total_lines,loading:false});}catch(e){setKbPreview({filename:f.filename||f.name,content:"Failed to load preview: "+e.message,loading:false});}}}} style={{background:`${t.acc}15`,border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",padding:"2px 8px",borderRadius:5,fontSize:9,fontWeight:600,flexShrink:0}}>Preview</button>}
             <button onClick={()=>{if(f.id)fetch(`${API}/api/knowledge-bases/files/${f.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:(k.files||[]).filter((_,j)=>j!==i)}:k));}} style={{background:"none",border:"none",color:t.err,cursor:"pointer",padding:"2px 4px",fontSize:10,opacity:.6,flexShrink:0}} title="Delete file">✕</button>
           </div>)}
           {!(kb.files||[]).length&&<span style={{fontSize:11,color:t.mut,fontStyle:"italic",padding:"4px 0"}}>No files uploaded</span>}
@@ -4267,6 +4267,8 @@ function HyprChat(){
         </div>
         <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
           {kbPreview.loading?<div style={{textAlign:"center",padding:40,color:t.mut}}>Loading preview...</div>
+          :kbPreview.rawUrl&&kbPreview.isPdf?<iframe src={kbPreview.rawUrl} style={{width:"100%",height:"75vh",border:"none",borderRadius:8}}/>
+          :kbPreview.rawUrl&&kbPreview.isImage?<img src={kbPreview.rawUrl} style={{maxWidth:"100%",maxHeight:"75vh",objectFit:"contain",borderRadius:8}} alt={kbPreview.filename}/>
           :<pre style={{fontSize:11,lineHeight:1.6,color:t.text,fontFamily:font,whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{kbPreview.content}</pre>}
         </div>
       </div>
