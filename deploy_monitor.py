@@ -50,6 +50,7 @@ WATCHED = {
     "backend/events.py":            ("Events",           REMOTE_BACKEND,            True),
     "backend/council.py":           ("Council",          REMOTE_BACKEND,            True),
     "backend/hf.py":                ("HuggingFace",      REMOTE_BACKEND,            True),
+    "backend/workflows.py":         ("Workflows",        REMOTE_BACKEND,            True),
     "backend/openhands_worker.py":  ("OpenHands",        REMOTE_BACKEND,            False),
     "backend/agents/chat.py":       ("Chat Agent",       REMOTE_BACKEND + "agents/", True),
     "backend/agents/personas.py":   ("Personas",         REMOTE_BACKEND + "agents/", True),

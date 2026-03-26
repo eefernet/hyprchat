@@ -111,6 +111,49 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         custom_tool_id_map: dict of custom tools keyed by id
     """
     conv_id = req.conversation_id
+
+    # ── Check for /run workflow command ──
+    last_user_msg = ""
+    for m in reversed(req.messages):
+        if m.get("role") == "user":
+            last_user_msg = m.get("content", "")
+            break
+    if last_user_msg.startswith("/run "):
+        parts = last_user_msg[5:].strip()
+        wf_match = re.match(r'(\S+)\s*(?:"([^"]*)"|(.*))$', parts)
+        if wf_match:
+            wf_name = wf_match.group(1)
+            wf_input = wf_match.group(2) or wf_match.group(3) or ""
+            all_wfs = await db.get_workflows()
+            wf = next((w for w in all_wfs if w["name"].lower() == wf_name.lower()), None)
+            if wf:
+                import uuid as _uuid
+                from workflows import WorkflowExecutor
+                executor = WorkflowExecutor(http, events)
+                run_id = f"wfr-{_uuid.uuid4().hex[:12]}"
+                await db.create_workflow_run(run_id, wf["id"], conv_id, wf_input)
+                await events.emit(conv_id, "tool_start", {"tool": "workflow", "status": f"Running workflow: {wf['name']}...", "icon": "activity"})
+                results = await executor.run(run_id, wf, wf_input, conv_id)
+                summary = f"## Workflow: {wf['name']}\n\n"
+                for r in results:
+                    icon = "✅" if r["status"] == "completed" else "❌"
+                    summary += f"**{icon} {r.get('name', 'Step')}** ({r.get('tool', '')})\n"
+                    if r.get("result"):
+                        preview = r["result"][:2000]
+                        summary += f"```\n{preview}\n```\n\n"
+                    elif r.get("error"):
+                        summary += f"Error: {r['error']}\n\n"
+                await events.emit(conv_id, "complete", {"status": "Workflow complete"})
+                yield f"data: {json.dumps({'type': 'token', 'content': summary})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
+                return
+            else:
+                wf_names = [w["name"] for w in all_wfs]
+                msg = f"Workflow \"{wf_name}\" not found. Available: {wf_names}" if all_wfs else f"Workflow \"{wf_name}\" not found. No workflows defined yet."
+                yield f"data: {json.dumps({'type': 'token', 'content': msg})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
+                return
+
     await events.emit(conv_id, "tool_start", {"tool": "processing", "status": "🔮 Connecting to neural oracle...", "icon": "activity"})
 
     print(f"[CHAT] conv={conv_id} model={req.model} tool_ids={req.tool_ids} msgs={len(req.messages)} persona={req.persona_id}")
@@ -983,6 +1026,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     yield f"data: {json.dumps({'type': 'token', 'content': content[i:i+8]})}\n\n"
                     await asyncio.sleep(0)
             messages.append(msg)
+            # Record token usage for analytics
+            if gen_tokens or prompt_tokens:
+                try:
+                    await db.record_token_usage(conv_id, req.model, getattr(req, 'persona_id', '') or '', prompt_tokens, gen_tokens)
+                except Exception as _te:
+                    print(f"[CHAT] Token recording error: {_te}")
             await events.emit(conv_id, "complete", {"status": "Complete"})
             yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
             return

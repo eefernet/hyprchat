@@ -304,6 +304,9 @@ const IC={
   Flash:()=>sv(<><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><path d="M9 11h4M11 9v4"/></>,14),
   Star:()=>sv(<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>,14),
   Crown:()=>sv(<><path d="M2 20h20"/><path d="m2 16 5-10 5 4 5-4 5 10"/></>,14),
+  GitBranch:(p)=>sv(<><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></>,p?.s||14),
+  BarChart:()=>sv(<><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></>),
+  Workflow:()=>sv(<><path d="M3 3v18h18"/><path d="m7 16 4-8 4 4 4-8"/></>),
 };
 
 const TIC = {code:IC.Code,search:IC.Search,terminal:IC.Terminal,globe:IC.Globe,workflow:IC.Activity};
@@ -1099,6 +1102,15 @@ function HyprChat(){
   const [hfInstalledTab,setHfInstalledTab]=useState(false);
   const [makingToolModel,setMakingToolModel]=useState(null); // model name currently being processed
   const [sq,setSq]=useState("");
+  const [ftsQuery,setFtsQuery]=useState("");
+  const [ftsResults,setFtsResults]=useState([]);
+  const [ftsLoading,setFtsLoading]=useState(false);
+  const [analyticsData,setAnalyticsData]=useState(null);
+  const [analyticsDays,setAnalyticsDays]=useState(30);
+  const [analyticsGroup,setAnalyticsGroup]=useState("day");
+  const [workflows,setWorkflows]=useState([]);
+  const [editWf,setEditWf]=useState(null);
+  const [wfRunning,setWfRunning]=useState(null);
   const [copied,setCopied]=useState(null);
   const [tokC,setTokC]=useState(0);
   const [tokS,setTokS]=useState(0);
@@ -1379,6 +1391,54 @@ function HyprChat(){
     setConvTags(p=>{const n={...p};delete n[id];return n;});
     setConvs(p=>{const n=p.filter(c=>c.id!==id);if(actId===id){setActId(n[0]?.id||null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");}return n;});
   };
+
+  // Full-text search across conversations
+  const doFtsSearch=useCallback(async(q)=>{
+    if(!q.trim()){setFtsResults([]);return;}
+    setFtsLoading(true);
+    try{
+      const r=await fetch(`${API}/api/conversations/search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:q,limit:20})});
+      const data=await r.json();
+      setFtsResults(Array.isArray(data)?data:[]);
+    }catch(e){console.error("FTS search error",e);setFtsResults([]);}
+    finally{setFtsLoading(false);}
+  },[]);
+  useEffect(()=>{const t=setTimeout(()=>{if(ftsQuery.length>=2)doFtsSearch(ftsQuery);else setFtsResults([])},300);return()=>clearTimeout(t);},[ftsQuery,doFtsSearch]);
+
+  // Fork conversation at a specific message
+  const forkAt=async(msgIndex)=>{
+    if(!actId)return;
+    try{
+      const full=await(await fetch(`${API}/api/conversations/${actId}`)).json();
+      const msgs=full.messages||[];
+      if(msgIndex>=msgs.length)return;
+      const dbMsg=msgs[msgIndex];
+      if(!dbMsg?.id)return;
+      const r=await fetch(`${API}/api/conversations/${actId}/fork`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message_id:dbMsg.id})});
+      if(!r.ok)return;
+      const forked=await r.json();
+      setConvs(p=>[{id:forked.id,title:forked.title,model:forked.model,forked_from:actId,updated_at:new Date().toISOString()},...p]);
+      loadConversation(forked.id,{force:true});
+    }catch(e){console.error("Fork error",e);}
+  };
+
+  // Load analytics data
+  const loadAnalytics=useCallback(async()=>{
+    try{
+      const [summary,grouped]=await Promise.all([
+        fetch(`${API}/api/analytics/tokens/summary`).then(r=>r.json()),
+        fetch(`${API}/api/analytics/tokens?days=${analyticsDays}&group_by=${analyticsGroup}`).then(r=>r.json())
+      ]);
+      setAnalyticsData({summary,grouped:Array.isArray(grouped)?grouped:[]});
+    }catch(e){console.error("Analytics error",e);}
+  },[analyticsDays,analyticsGroup]);
+  useEffect(()=>{if(panel==="analytics")loadAnalytics();},[panel,loadAnalytics]);
+
+  // Load workflows
+  const loadWorkflows=useCallback(async()=>{
+    try{const r=await fetch(`${API}/api/workflows`);setWorkflows(await r.json());}catch(e){console.error("Workflow load error",e);}
+  },[]);
+  useEffect(()=>{if(panel==="workflows")loadWorkflows();},[panel,loadWorkflows]);
 
   // Start a new council chat session
   const startCouncilChat=async(councilId)=>{
@@ -2038,7 +2098,7 @@ function HyprChat(){
   };
 
   const glass={background:`${t.surface}CC`,backdropFilter:"blur(24px)",border:`1px solid ${t.brd}44`};
-  const _navShort={Chat:"Chat","Knowledge Bases":"KB",Tools:"Tools",Personas:"Personas","Prompt Library":"Prompts","Council of AI":"Council","Model Manager":"Models",Settings:"Settings"};
+  const _navShort={Chat:"Chat","Knowledge Bases":"KB",Tools:"Tools",Personas:"Personas","Prompt Library":"Prompts","Council of AI":"Council","Model Manager":"Models",Workflows:"Flows",Analytics:"Stats",Settings:"Settings"};
   const nb=(p,ico,lab)=><button onClick={()=>setPanel(p)} title={lab} style={{width:52,height:showNavLabels?50:48,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:12,cursor:"pointer",border:"none",background:panel===p?`${t.acc}22`:"transparent",color:panel===p?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:panel===p?`0 0 10px ${t.acc}22`:"none",padding:showNavLabels?"3px 0 1px":0}}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.7,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{panel===p&&<div style={{position:"absolute",left:0,top:"18%",width:3,height:"64%",borderRadius:"0 3px 3px 0",background:t.acc,boxShadow:`0 0 6px ${t.acc}`}}/>}</button>;
   const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?"#f0a030":t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${n}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
@@ -2081,6 +2141,8 @@ function HyprChat(){
       {nb("prompts",<IC.Zap/>,"Prompt Library")}
       {nb("council",<IC.Council/>,"Council of AI")}
       {nb("models",<IC.Layers/>,"Model Manager")}
+      {nb("workflows",<IC.Workflow/>,"Workflows")}
+      {nb("analytics",<IC.BarChart/>,"Analytics")}
       <div style={{flex:1}}/>
       {nb("settings",<IC.Settings/>,"Settings")}
       <button onClick={()=>setSidebar(p=>!p)} title={sidebar?"Hide conversations":"Show conversations"} style={{width:52,height:48,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:12,cursor:"pointer",border:"none",background:"transparent",color:t.mut,transition:"all .15s",marginTop:4}}>
@@ -2099,7 +2161,12 @@ function HyprChat(){
           <button onClick={()=>{setWsPanel(p=>!p);setActiveWs(null);setWsDetail(null);}} style={{...btnS(wsPanel?t.acc:t.mut),padding:"5px 8px",fontSize:11}} title="Workspaces">🗂</button>
         </div>
         {!wsPanel&&<>
-        <input value={sq} onChange={e=>setSq(e.target.value)} placeholder="Search..." style={{...inputS,padding:"5px 8px",fontSize:11}}/>
+        <input value={sq} onChange={e=>setSq(e.target.value)} placeholder="Filter titles..." style={{...inputS,padding:"5px 8px",fontSize:11}}/>
+        <div style={{position:"relative"}}>
+          <input value={ftsQuery} onChange={e=>setFtsQuery(e.target.value)} onKeyDown={e=>{if(e.key==="Escape"){setFtsQuery("");setFtsResults([]);}}} placeholder="Search all messages..." style={{...inputS,padding:"5px 8px",fontSize:11,paddingLeft:24}}/>
+          <span style={{position:"absolute",left:7,top:"50%",transform:"translateY(-50%)",color:t.mut,opacity:.5,display:"flex"}}><IC.Search/></span>
+          {ftsLoading&&<span style={{position:"absolute",right:7,top:"50%",transform:"translateY(-50%)",fontSize:9,color:t.mut}}>...</span>}
+        </div>
         {(()=>{
           const convIds=new Set(convs.map(c=>c.id));const allTags=[...new Set(Object.entries(convTags).filter(([k])=>convIds.has(k)).flatMap(([,v])=>v))];
           if(!allTags.length)return null;
@@ -2111,11 +2178,19 @@ function HyprChat(){
       </>}
       </div>
       {!wsPanel?<div style={{flex:1,overflowY:"auto",padding:"2px 5px"}}>
-        {filtC.map(c=>{const isCouncil=c.is_council==="1"||c.is_council===1||c.is_council===true;const hasPersona=!!c.persona_name&&!isCouncil;const tags=convTags[c.id]||[];const isAct=c.id===actId&&panel==="chat";const accentColor=isCouncil?t.pink:hasPersona?t.warm:t.acc;return <div key={c.id} style={{marginBottom:1}}>
+        {ftsResults.length>0?<div>
+          <div style={{padding:"4px 6px",fontSize:9,color:t.mut,display:"flex",justifyContent:"space-between",alignItems:"center"}}><span>{ftsResults.length} results</span><button onClick={()=>{setFtsQuery("");setFtsResults([]);}} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:9,padding:0}}>Clear</button></div>
+          {ftsResults.map((r,i)=><div key={i} onClick={()=>{loadConversation(r.conversation_id);setFtsQuery("");setFtsResults([]);}} style={{padding:"6px 8px",borderRadius:8,cursor:"pointer",marginBottom:2,background:`${t.surface}44`,border:`1px solid ${t.brd}22`}}>
+            <div style={{fontSize:11,fontWeight:600,color:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.conv_title||"Chat"}</div>
+            <div style={{fontSize:10,color:t.mut,marginTop:2,display:"flex",gap:4,alignItems:"center"}}><span style={{fontSize:8,padding:"1px 4px",borderRadius:3,background:`${t.brd}22`,color:t.dim}}>{r.role}</span></div>
+            <div style={{fontSize:10,color:t.dim,marginTop:2,lineHeight:1.4,maxHeight:40,overflow:"hidden"}} dangerouslySetInnerHTML={{__html:r.snippet||""}}/>
+          </div>)}
+        </div>:filtC.map(c=>{const isCouncil=c.is_council==="1"||c.is_council===1||c.is_council===true;const hasPersona=!!c.persona_name&&!isCouncil;const tags=convTags[c.id]||[];const isAct=c.id===actId&&panel==="chat";const accentColor=isCouncil?t.pink:hasPersona?t.warm:t.acc;return <div key={c.id} style={{marginBottom:1}}>
         <div onClick={()=>loadConversation(c.id)} style={{padding:"8px 10px",borderRadius:8,cursor:"pointer",background:isAct?`${accentColor}18`:(isCouncil||hasPersona)?`${accentColor}10`:"transparent",border:isAct?`1px solid ${accentColor}44`:(isCouncil||hasPersona)?`1px solid ${accentColor}25`:"1px solid transparent",display:"flex",justifyContent:"space-between",alignItems:"center",borderLeft:(isCouncil||hasPersona)?`3px solid ${isAct?accentColor:`${accentColor}66`}`:"3px solid transparent"}}>
           <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:isAct?t.text:t.dim,flex:1,fontWeight:isAct?500:400,display:"flex",alignItems:"center",gap:5}}>
             {isCouncil&&<span style={{flexShrink:0,color:t.pink,display:"flex",opacity:isAct?1:.7}}><IC.Council/></span>}
             {hasPersona&&(c.persona_avatar?<img src={`${API}${c.persona_avatar}`} style={{width:14,height:14,borderRadius:4,objectFit:"cover",flexShrink:0,opacity:isAct?1:.8}} alt=""/>:<span style={{flexShrink:0,color:t.warm,display:"flex",opacity:isAct?1:.7}}><IC.Bot/></span>)}
+            {c.forked_from&&<span style={{flexShrink:0,color:t.f1||t.acc,display:"flex",opacity:.6,fontSize:9}} title="Forked conversation"><IC.GitBranch/></span>}
             {c.title||"New Chat"}
           </div>
           <div style={{display:"flex",gap:2,flexShrink:0}}>
@@ -2175,6 +2250,9 @@ function HyprChat(){
       <div style={{padding:"9px 16px",...glass,borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0}}>
         <div style={{display:"flex",alignItems:"center",gap:6}}>
           {panel==="chat"&&act&&<>
+            {act.forked_from&&<div style={{display:"flex",alignItems:"center",gap:4,padding:"2px 8px",background:`${t.acc}12`,border:`1px solid ${t.acc}28`,borderRadius:16,fontSize:9,color:t.acc,cursor:"pointer"}} onClick={()=>loadConversation(act.forked_from)}>
+              <IC.GitBranch/> Forked — click to view original
+            </div>}
             {act.is_council?(()=>{
               const cfg=councils.find(c=>c.id===act.council_config_id);
               return <><div style={{display:"flex",alignItems:"center",gap:6,padding:"3px 10px",background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:20}}>
@@ -3380,6 +3458,125 @@ function HyprChat(){
     </div>}
   </div>
 
+      :panel==="analytics"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
+          <div style={{maxWidth:900}}>
+            <div style={{fontSize:20,fontWeight:700,marginBottom:16,display:"flex",alignItems:"center",gap:8}}><IC.BarChart/> Token Analytics</div>
+            <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+              {[7,30,90].map(d=><button key={d} onClick={()=>setAnalyticsDays(d)} style={{...btnS(analyticsDays===d?t.acc:t.mut),padding:"5px 12px"}}>{d}d</button>)}
+              <div style={{flex:1}}/>
+              {["day","model","persona"].map(g=><button key={g} onClick={()=>setAnalyticsGroup(g)} style={{...btnS(analyticsGroup===g?t.acc:t.mut),padding:"5px 12px",textTransform:"capitalize"}}>{g}</button>)}
+              <button onClick={loadAnalytics} style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
+            </div>
+            {analyticsData?<>
+              {/* Summary cards */}
+              {analyticsData.summary&&<div style={{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap"}}>
+                {(()=>{const td=analyticsData.summary.today||[];const todayTotal=td.reduce((s,d)=>s+(d.total_tokens||0),0);const todayReqs=td.reduce((s,d)=>s+(d.request_count||0),0);return <div style={{...cardS,flex:"1 1 200px",minWidth:180}}>
+                  <div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Today</div>
+                  <div style={{fontSize:24,fontWeight:700,color:t.acc}}>{todayTotal.toLocaleString()}</div>
+                  <div style={{fontSize:10,color:t.mut}}>{todayReqs} requests</div>
+                </div>;})()}
+                {(()=>{const md=analyticsData.summary.daily_30d||[];const monthTotal=md.reduce((s,d)=>s+(d.total_tokens||0),0);const monthReqs=md.reduce((s,d)=>s+(d.request_count||0),0);return <div style={{...cardS,flex:"1 1 200px",minWidth:180}}>
+                  <div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Last 30 Days</div>
+                  <div style={{fontSize:24,fontWeight:700,color:t.warm||t.acc}}>{monthTotal.toLocaleString()}</div>
+                  <div style={{fontSize:10,color:t.mut}}>{monthReqs} requests</div>
+                </div>;})()}
+                {(()=>{const models=analyticsData.summary.by_model_7d||[];return <div style={{...cardS,flex:"1 1 200px",minWidth:180}}>
+                  <div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Top Model (7d)</div>
+                  <div style={{fontSize:16,fontWeight:700,color:t.pink||t.acc}}>{models[0]?.model||"—"}</div>
+                  <div style={{fontSize:10,color:t.mut}}>{(models[0]?.total_tokens||0).toLocaleString()} tokens</div>
+                </div>;})()}
+              </div>}
+              {/* Bar chart */}
+              {analyticsData.grouped.length>0?<div style={{...cardS,padding:20}}>
+                <div style={{fontSize:12,fontWeight:600,marginBottom:12,color:t.mut}}>Tokens by {analyticsGroup}</div>
+                <div style={{display:"flex",alignItems:"flex-end",gap:2,height:200,padding:"0 4px"}}>
+                  {(()=>{const data=analyticsData.grouped;const maxVal=Math.max(...data.map(d=>d.total_tokens||0),1);return data.map((d,i)=>{const h=Math.max(((d.total_tokens||0)/maxVal)*180,2);const label=d.date?d.date.slice(5):d.model||d.persona_name||"(none)";return <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4,minWidth:0}}>
+                    <div style={{fontSize:8,color:t.mut,textAlign:"center",lineHeight:1}}>{(d.total_tokens||0).toLocaleString()}</div>
+                    <div title={`${label}: ${(d.total_tokens||0).toLocaleString()} tokens, ${d.request_count||0} reqs`} style={{width:"80%",maxWidth:40,height:h,background:`linear-gradient(180deg,${t.acc},${t.acc}66)`,borderRadius:"4px 4px 0 0",transition:"height .3s",cursor:"pointer",minWidth:6}}/>
+                    <div style={{fontSize:7,color:t.mut,textAlign:"center",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:50,transform:"rotate(-30deg)",transformOrigin:"top center"}}>{label}</div>
+                  </div>;});})()}
+                </div>
+              </div>:<div style={{textAlign:"center",padding:40,color:t.mut}}>No data yet. Start chatting to see analytics!</div>}
+              {/* Model breakdown table */}
+              {analyticsGroup==="model"&&analyticsData.grouped.length>0&&<div style={{...cardS,marginTop:16}}>
+                <div style={{fontSize:12,fontWeight:600,marginBottom:8,color:t.mut}}>Model Breakdown</div>
+                <div style={{display:"flex",padding:"6px 0",borderBottom:`1px solid ${t.brd}33`,fontSize:10,fontWeight:600,color:t.mut}}>
+                  <div style={{flex:2}}>Model</div><div style={{flex:1,textAlign:"right"}}>Prompt</div><div style={{flex:1,textAlign:"right"}}>Completion</div><div style={{flex:1,textAlign:"right"}}>Total</div><div style={{flex:1,textAlign:"right"}}>Requests</div>
+                </div>
+                {analyticsData.grouped.map((d,i)=><div key={i} style={{display:"flex",padding:"5px 0",borderBottom:`1px solid ${t.brd}15`,fontSize:10}}>
+                  <div style={{flex:2,color:t.text,fontWeight:500}}>{d.model}</div>
+                  <div style={{flex:1,textAlign:"right",color:t.mut}}>{(d.prompt_tokens||0).toLocaleString()}</div>
+                  <div style={{flex:1,textAlign:"right",color:t.mut}}>{(d.completion_tokens||0).toLocaleString()}</div>
+                  <div style={{flex:1,textAlign:"right",color:t.acc,fontWeight:600}}>{(d.total_tokens||0).toLocaleString()}</div>
+                  <div style={{flex:1,textAlign:"right",color:t.mut}}>{d.request_count||0}</div>
+                </div>)}
+              </div>}
+            </>:<div style={{textAlign:"center",padding:40,color:t.mut}}>Loading analytics...</div>}
+          </div>
+        </div>
+      </div>
+
+      :panel==="workflows"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
+          <div style={{maxWidth:900}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+              <div style={{fontSize:20,fontWeight:700,display:"flex",alignItems:"center",gap:8}}><IC.Workflow/> Workflows</div>
+              <button onClick={()=>setEditWf({name:"",description:"",steps:[{name:"Step 1",tool:"research",args:{query:"{{input}}"}}]})} style={{...btnS(t.acc),padding:"6px 14px"}}><IC.Plus/> New Workflow</button>
+            </div>
+            {editWf&&<div style={{...cardS,marginBottom:16}}>
+              <div style={{fontSize:14,fontWeight:600,marginBottom:12}}>{editWf.id?"Edit Workflow":"New Workflow"}</div>
+              <div style={{display:"flex",gap:8,marginBottom:10}}>
+                <input value={editWf.name} onChange={e=>setEditWf(p=>({...p,name:e.target.value}))} placeholder="Workflow name..." style={{...inputS,flex:1}}/>
+                <input value={editWf.description} onChange={e=>setEditWf(p=>({...p,description:e.target.value}))} placeholder="Description..." style={{...inputS,flex:2}}/>
+              </div>
+              <div style={{fontSize:11,fontWeight:600,color:t.mut,marginBottom:6}}>Steps</div>
+              {(editWf.steps||[]).map((step,si)=><div key={si} style={{display:"flex",gap:6,marginBottom:6,alignItems:"start"}}>
+                <span style={{fontSize:10,color:t.mut,minWidth:20,paddingTop:8}}>{si+1}.</span>
+                <input value={step.name} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],name:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Step name" style={{...inputS,flex:1,padding:"5px 8px",fontSize:11}}/>
+                <input value={step.tool} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],tool:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Tool name (e.g. research)" style={{...inputS,flex:1,padding:"5px 8px",fontSize:11}}/>
+                <textarea value={typeof step.args==="object"?JSON.stringify(step.args,null,1):step.args||""} onChange={e=>{const s=[...editWf.steps];try{s[si]={...s[si],args:JSON.parse(e.target.value)};}catch{s[si]={...s[si],args:e.target.value};}setEditWf(p=>({...p,steps:s}));}} placeholder='{"query":"{{input}}"}' style={{...inputS,flex:2,padding:"5px 8px",fontSize:10,minHeight:32,fontFamily:"monospace",resize:"vertical"}}/>
+                <button onClick={()=>{const s=editWf.steps.filter((_,i)=>i!==si);setEditWf(p=>({...p,steps:s}));}} style={{...btnS(t.err),padding:"4px 8px",fontSize:9}}>×</button>
+              </div>)}
+              <div style={{display:"flex",gap:6,marginTop:6}}>
+                <button onClick={()=>setEditWf(p=>({...p,steps:[...p.steps,{name:`Step ${p.steps.length+1}`,tool:"",args:{}}]}))} style={{...btnS(t.mut),padding:"4px 10px",fontSize:10}}><IC.Plus/> Add Step</button>
+                <div style={{flex:1}}/>
+                <button onClick={()=>setEditWf(null)} style={{...btnS(t.mut),padding:"4px 10px",fontSize:10}}>Cancel</button>
+                <button onClick={async()=>{
+                  const body={name:editWf.name,description:editWf.description,steps:editWf.steps.map(s=>({...s,args:typeof s.args==="string"?JSON.parse(s.args||"{}"):s.args}))};
+                  if(editWf.id){
+                    await fetch(`${API}/api/workflows/${editWf.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+                  }else{
+                    await fetch(`${API}/api/workflows`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+                  }
+                  setEditWf(null);loadWorkflows();
+                }} style={{...btnS(t.ok),padding:"4px 14px",fontSize:10}}>Save</button>
+              </div>
+              <div style={{fontSize:9,color:t.mut,marginTop:8,lineHeight:1.6}}>
+                Use <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>{"{{input}}"}</code> for the workflow input and <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>{"{{steps.N.result}}"}</code> to reference results from step N (0-indexed).
+              </div>
+            </div>}
+            {workflows.length===0&&!editWf&&<div style={{textAlign:"center",padding:40,color:t.mut}}>No workflows yet. Create one to chain tools together!</div>}
+            {workflows.map(wf=><div key={wf.id} style={{...cardS,display:"flex",alignItems:"center",gap:12}}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:14,fontWeight:600}}>{wf.name}</div>
+                {wf.description&&<div style={{fontSize:10,color:t.mut,marginTop:2}}>{wf.description}</div>}
+                <div style={{fontSize:9,color:t.dim,marginTop:4}}>{(wf.steps||[]).length} steps: {(wf.steps||[]).map(s=>s.tool).join(" → ")}</div>
+              </div>
+              <button onClick={()=>setEditWf({...wf,steps:wf.steps||[]})} style={{...btnS(t.mut),padding:"4px 10px",fontSize:10}}><IC.Pencil/></button>
+              <button onClick={async()=>{
+                const input=prompt("Workflow input:");
+                if(input===null)return;
+                setWfRunning(wf.id);
+                try{await fetch(`${API}/api/workflows/${wf.id}/run`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({input})});}catch(e){console.error(e);}
+                setTimeout(()=>setWfRunning(null),2000);
+              }} style={{...btnS(t.ok),padding:"4px 10px",fontSize:10}}>{wfRunning===wf.id?"Running...":"Run"}</button>
+              <button onClick={async()=>{if(!confirm("Delete this workflow?"))return;await fetch(`${API}/api/workflows/${wf.id}`,{method:"DELETE"});loadWorkflows();}} style={{...btnS(t.err),padding:"4px 10px",fontSize:10}}><IC.Trash/></button>
+            </div>)}
+          </div>
+        </div>
+      </div>
+
       :panel==="settings"?<div style={{flex:1,display:"flex",overflow:"hidden"}}>
     <div style={{flex:showHealthMonitor?"0 0 50%":"1 1 auto",overflowY:"auto",padding:"20px 28px",transition:"flex .3s ease"}}>
     <div style={{maxWidth:760}}>
@@ -4096,6 +4293,9 @@ function HyprChat(){
                     </button>}
                     {isU&&!streaming&&<button onClick={()=>setEditingMsg({index:i,content:msg.content})} style={{background:"none",border:`1px solid ${t.brd}18`,color:t.mut,cursor:"pointer",padding:"2px 6px",borderRadius:4,fontFamily:font,fontSize:9,display:"flex",alignItems:"center",gap:3}}>
                       <IC.Pencil/> edit
+                    </button>}
+                    {!streaming&&<button onClick={()=>forkAt(i)} title="Fork conversation from this point" style={{background:"none",border:`1px solid ${t.brd}18`,color:t.mut,cursor:"pointer",padding:"2px 6px",borderRadius:4,fontFamily:font,fontSize:9,display:"flex",alignItems:"center",gap:3}}>
+                      <IC.GitBranch/> fork
                     </button>}
                   </div>}
                 </div>

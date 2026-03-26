@@ -317,6 +317,27 @@ class ModelConfigUpdate(BaseModel):
     kb_ids: Optional[list[str]] = None
     parameters: Optional[dict] = None
 
+class ConversationSearchRequest(BaseModel):
+    query: str
+    limit: int = 20
+
+class ForkRequest(BaseModel):
+    message_id: int
+
+class WorkflowCreate(BaseModel):
+    name: str
+    description: str = ""
+    steps: list[dict]
+
+class WorkflowUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    steps: Optional[list[dict]] = None
+
+class WorkflowRunRequest(BaseModel):
+    input: str = ""
+    conversation_id: Optional[str] = None
+
 
 # ============================================================
 # HEALTH & INFO
@@ -2407,6 +2428,117 @@ async def get_changelog():
         return {"content": content}
     except FileNotFoundError:
         return {"content": "# Changelog\n\nNo changelog available."}
+
+
+# ============================================================
+# FULL-TEXT CONVERSATION SEARCH
+# ============================================================
+@app.post("/api/conversations/search")
+async def search_conversations(req: ConversationSearchRequest):
+    if not req.query.strip():
+        return []
+    return await db.search_messages(req.query.strip(), req.limit)
+
+
+# ============================================================
+# CONVERSATION FORKING
+# ============================================================
+@app.post("/api/conversations/{conv_id}/fork")
+async def fork_conversation(conv_id: str, req: ForkRequest):
+    original = await db.get_conversation(conv_id)
+    if not original:
+        raise HTTPException(404, "Conversation not found")
+    new_id = f"conv-{uuid.uuid4().hex[:12]}"
+    forked = await db.fork_conversation(conv_id, req.message_id, new_id)
+    if not forked:
+        raise HTTPException(500, "Fork failed")
+    return forked
+
+
+@app.get("/api/conversations/{conv_id}/forks")
+async def get_conversation_forks(conv_id: str):
+    return await db.get_forks(conv_id)
+
+
+# ============================================================
+# TOKEN USAGE ANALYTICS
+# ============================================================
+@app.get("/api/analytics/tokens")
+async def get_token_analytics(days: int = Query(30), group_by: str = Query("day")):
+    if group_by not in ("day", "model", "persona"):
+        raise HTTPException(400, "group_by must be: day, model, or persona")
+    return await db.get_token_usage(days, group_by)
+
+
+@app.get("/api/analytics/tokens/summary")
+async def get_token_summary():
+    today = await db.get_token_usage(1, "day")
+    week = await db.get_token_usage(7, "model")
+    month = await db.get_token_usage(30, "day")
+    return {"today": today, "by_model_7d": week, "daily_30d": month}
+
+
+# ============================================================
+# WORKFLOWS
+# ============================================================
+@app.get("/api/workflows")
+async def list_workflows():
+    return await db.get_workflows()
+
+
+@app.post("/api/workflows")
+async def create_workflow(req: WorkflowCreate):
+    id = f"wf-{uuid.uuid4().hex[:12]}"
+    await db.create_workflow(id, req.name, req.description, json.dumps(req.steps))
+    return {"id": id, "name": req.name, "description": req.description, "steps": req.steps}
+
+
+@app.get("/api/workflows/{wf_id}")
+async def get_workflow(wf_id: str):
+    wf = await db.get_workflow(wf_id)
+    if not wf:
+        raise HTTPException(404, "Workflow not found")
+    return wf
+
+
+@app.put("/api/workflows/{wf_id}")
+async def update_workflow(wf_id: str, req: WorkflowUpdate):
+    kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
+    await db.update_workflow(wf_id, **kwargs)
+    return {"status": "updated"}
+
+
+@app.delete("/api/workflows/{wf_id}")
+async def delete_workflow(wf_id: str):
+    await db.delete_workflow(wf_id)
+    return {"status": "deleted"}
+
+
+@app.post("/api/workflows/{wf_id}/run")
+async def run_workflow(wf_id: str, req: WorkflowRunRequest):
+    wf = await db.get_workflow(wf_id)
+    if not wf:
+        raise HTTPException(404, "Workflow not found")
+    from workflows import WorkflowExecutor
+    run_id = f"wfr-{uuid.uuid4().hex[:12]}"
+    await db.create_workflow_run(run_id, wf_id, req.conversation_id or "", req.input)
+    executor = WorkflowExecutor(http, events)
+    asyncio.create_task(executor.run(run_id, wf, req.input, req.conversation_id))
+    return {"run_id": run_id, "status": "started"}
+
+
+@app.get("/api/workflows/{wf_id}/runs")
+async def get_workflow_runs(wf_id: str):
+    return await db.get_workflow_runs(wf_id)
+
+
+@app.get("/api/workflow-runs/{run_id}")
+async def get_workflow_run(run_id: str):
+    runs = await db.get_workflow_runs()
+    run = next((r for r in runs if r["id"] == run_id), None)
+    if not run:
+        raise HTTPException(404, "Run not found")
+    return run
 
 
 # ============================================================

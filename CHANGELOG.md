@@ -1,5 +1,23 @@
 # HyprChat Changelog
 
+## Alpha v16 — March 2026
+
+### New Features
+- **Full-Text Conversation Search** — Search across all message content using SQLite FTS5. New "Search all messages" input in the sidebar with debounced queries, highlighted result snippets, role badges, and click-to-navigate. Results overlay replaces the conversation list while active. Powered by `porter unicode61` tokenizer with automatic index sync via database triggers.
+- **Conversation Branching/Forking** — Fork any conversation from any message. Click the new "fork" button on any message to create a new conversation with all messages up to that point copied over. Original conversation remains untouched. Forked conversations show a branch icon in the sidebar and a "Forked" badge in the header that links back to the original.
+- **Token Usage Analytics Dashboard** — New "Analytics" panel in the nav rail tracking cumulative token usage. Summary cards show today's tokens, 30-day totals, and top model. CSS bar chart visualizes usage over time with day/model/persona grouping. Model breakdown table with prompt, completion, and total token columns. Configurable date range (7d/30d/90d). Token counts captured from Ollama streaming responses after each generation.
+- **MVP Agent Workflows** — Chain tools into reusable sequential pipelines. New "Workflows" panel with a visual step builder: name each step, pick a tool, define JSON arguments with `{{input}}` and `{{steps.N.result}}` variable substitution. Save, edit, delete, and run workflows from the UI. Trigger from chat with `/run workflow-name "input"`. Standalone `WorkflowExecutor` runs independently of the chat agent loop — no risk to existing tool behavior. Full run history with per-step results stored in the database. SSE events for live progress tracking.
+
+### Technical Details
+- New `backend/workflows.py` — standalone workflow executor calling `exec_tool()` without modifying the chat agent loop
+- New database tables: `token_usage`, `workflows`, `workflow_runs`
+- New FTS5 virtual table `messages_fts` with INSERT/DELETE/UPDATE sync triggers
+- New columns on `conversations`: `forked_from`, `fork_point_msg_id`
+- 12 new API endpoints across search, forking, analytics, and workflows
+- 3 new nav rail icons: BarChart, Workflow, GitBranch
+
+---
+
 ## Alpha v15.1 — March 2026
 
 ### New Features

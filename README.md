@@ -14,6 +14,8 @@ Built with FastAPI + a single-file React SPA — no build step required.
 - Per-conversation model selection & system prompts
 - Personas with avatars, custom configs, and knowledge base injection
 - Conversation tags & sidebar filtering
+- **Full-text search** across all message content with highlighted snippets
+- **Conversation forking** — branch from any message to explore alternatives
 - File attachments & paste-to-attach
 - Prompt library with quick-insert ⚡
 - Coder Bot quick-activate `</>` button in input bar
@@ -55,6 +57,12 @@ Named AI personalities with avatars, model config, system prompts, temperature/c
 
 ### 🗂️ Workspaces
 Group related conversations, track files across chats, analyze topics, and generate personas from knowledge bases.
+
+### ⚡ Workflows
+Chain tools into reusable sequential pipelines. Build workflows in the UI with a step editor — pick tools, define arguments with `{{input}}` and `{{steps.N.result}}` variable substitution. Run from the Workflows panel or trigger from chat with `/run workflow-name "input"`. Full run history with per-step results.
+
+### 📊 Token Analytics
+Dashboard tracking cumulative token usage per model, persona, and day. Summary cards, CSS bar charts, and model breakdown tables. Configurable date range (7d/30d/90d) with day/model/persona grouping.
 
 ### ⚙️ Settings
 - 🎨 14 themes & 9 fonts
