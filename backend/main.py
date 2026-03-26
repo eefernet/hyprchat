@@ -129,10 +129,44 @@ events = EventBus()
 # APP SETUP
 # ============================================================
 _cleanup_task_ref = None
+_scheduler_task_ref = None
+
+
+async def _workflow_scheduler_loop():
+    """Check for due workflow schedules every 60 seconds and run them."""
+    from workflows import WorkflowExecutor, next_cron_time
+    while True:
+        try:
+            due = await db.get_due_schedules()
+            for sched in due:
+                wf = {
+                    "name": sched["workflow_name"],
+                    "description": sched.get("workflow_description", ""),
+                    "steps": sched["workflow_steps"],
+                }
+                run_id = f"wfr-sched-{uuid.uuid4().hex[:8]}"
+                input_text = sched.get("input_template", "")
+                await db.create_workflow_run(run_id, sched["workflow_id"], "", input_text)
+                executor = WorkflowExecutor(http, events)
+                asyncio.create_task(executor.run(run_id, wf, input_text))
+                # Update schedule timing
+                now = time.time()
+                next_run = next_cron_time(sched["cron_expr"], now)
+                from datetime import datetime
+                await db.update_workflow_schedule(
+                    sched["id"],
+                    last_run_at=datetime.utcfromtimestamp(now).isoformat(),
+                    next_run_at=datetime.utcfromtimestamp(next_run).isoformat(),
+                )
+                print(f"[Scheduler] Triggered workflow '{sched['workflow_name']}' (run: {run_id})")
+        except Exception as e:
+            print(f"[Scheduler] Error: {e}")
+        await asyncio.sleep(60)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _cleanup_task_ref, _health_task_ref
+    global _cleanup_task_ref, _health_task_ref, _scheduler_task_ref
     await db.init_db()
     os.makedirs(config.UPLOAD_DIR, exist_ok=True)
     os.makedirs(config.TOOLS_DIR, exist_ok=True)
@@ -169,8 +203,10 @@ async def lifespan(app: FastAPI):
         rag.CHUNK_OVERLAP = int(_rag_cfg["chunk_overlap"])
     # Ensure RAG embedding model is available (non-blocking pull)
     asyncio.create_task(rag.ensure_embed_model())
+    # Start workflow scheduler
+    _scheduler_task_ref = asyncio.create_task(_workflow_scheduler_loop())
     yield
-    for task in [_cleanup_task_ref, _health_task_ref]:
+    for task in [_cleanup_task_ref, _health_task_ref, _scheduler_task_ref]:
         if task:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -338,6 +374,16 @@ class WorkflowRunRequest(BaseModel):
     input: str = ""
     conversation_id: Optional[str] = None
 
+class WorkflowScheduleCreate(BaseModel):
+    workflow_id: str
+    cron_expr: str
+    input_template: str = ""
+
+class WorkflowScheduleUpdate(BaseModel):
+    cron_expr: Optional[str] = None
+    input_template: Optional[str] = None
+    enabled: Optional[bool] = None
+
 
 # ============================================================
 # HEALTH & INFO
@@ -384,10 +430,15 @@ async def _check_searxng() -> dict:
         data = r2.json()
         results = data.get("results", [])
         unresponsive = data.get("unresponsive_engines", [])
-        # Rate-limited: no results at all, or most engines unresponsive
+        # Rate-limited: no results at all
         if not results:
             return {"status": "degraded", "response_ms": ms, "rate_limited": True}
-        if len(unresponsive) >= 2:
+        # Filter out permanently suspended engines (SearXNG auto-disables these — not rate limiting)
+        active_unresponsive = [e for e in unresponsive
+                               if not (isinstance(e, (list, tuple)) and len(e) > 1
+                                       and "Suspended" in str(e[1]))]
+        # Only flag rate-limited if many active engines are failing or results are very thin
+        if len(active_unresponsive) >= 3 or len(results) < 5:
             return {"status": "degraded", "response_ms": ms, "rate_limited": True,
                     "unresponsive_engines": [e[0] if isinstance(e, (list, tuple)) else str(e) for e in unresponsive[:5]]}
         return {"status": "ok", "response_ms": ms, "rate_limited": False}
@@ -632,6 +683,81 @@ async def seed_conspiracy_bot():
 @app.post("/api/seed/based-bot")
 async def seed_based_bot():
     return await _seed_based_bot()
+
+
+@app.post("/api/seed/workflows")
+async def seed_workflows():
+    """Seed built-in workflow presets showcasing all workflow capabilities."""
+    presets = [
+        {
+            "name": "Deep Research",
+            "description": "Search a topic, fetch Wikipedia, AI-summarize, and save a report",
+            "steps": [
+                {"name": "Web Search", "type": "tool", "tool": "research", "args": {"query": "{{input}}"}, "output_var": "search_data", "on_error": "continue"},
+                {"name": "Fetch Wikipedia", "type": "tool", "tool": "fetch_url", "args": {"url": "https://en.wikipedia.org/wiki/{{input}}"}, "output_var": "wiki_data", "retry": 1, "on_error": "continue"},
+                {"name": "AI Summary", "type": "ai_completion", "prompt": "Summarize the following research on '{{input}}' into a clear, well-structured report with key findings, important details, and sources.\n\n## Search Results:\n{{vars.search_data}}\n\n## Wikipedia:\n{{vars.wiki_data}}", "system": "You are a research analyst. Write clear, factual summaries with bullet points and section headers.", "output_var": "summary"},
+                {"name": "Save Report", "type": "tool", "tool": "write_file", "args": {
+                    "path": "/root/research_report.md",
+                    "content": "# Research Report: {{input}}\n\n{{vars.summary}}"
+                }, "condition": "{{vars.summary}} not_empty"},
+            ],
+        },
+        {
+            "name": "System Health Check",
+            "description": "Run all system diagnostics in parallel — disk, memory, network, processes",
+            "steps": [
+                {"name": "Parallel Diagnostics", "type": "parallel", "on_error": "continue", "steps": [
+                    {"name": "Disk Usage", "type": "tool", "tool": "run_shell", "args": {"command": "df -h && echo '---' && du -sh /root/* 2>/dev/null || true"}},
+                    {"name": "Memory & CPU", "type": "tool", "tool": "run_shell", "args": {"command": "free -h && echo '---' && uptime && echo '---' && nproc"}},
+                    {"name": "Network Check", "type": "tool", "tool": "run_shell", "args": {"command": "ping -c 2 8.8.8.8 2>&1 && echo '---' && curl -s -o /dev/null -w '%{http_code}' https://google.com"}},
+                    {"name": "Processes", "type": "tool", "tool": "run_shell", "args": {"command": "ps aux --sort=-%mem | head -15"}},
+                ], "output_var": "diagnostics"},
+                {"name": "AI Health Report", "type": "ai_completion", "prompt": "Analyze these system diagnostics and provide a brief health summary. Flag any concerns (high disk usage, low memory, network issues, zombie processes):\n\n{{vars.diagnostics}}", "system": "You are a sysadmin. Be concise. Use bullet points. Flag warnings clearly.", "output_var": "health_report"},
+                {"name": "Save Report", "type": "tool", "tool": "write_file", "args": {"path": "/root/health_report.md", "content": "# System Health Report\n\n{{vars.health_report}}"}},
+            ],
+        },
+        {
+            "name": "Scrape & Analyze",
+            "description": "Fetch any URL, analyze word frequency, and AI-summarize the content",
+            "steps": [
+                {"name": "Fetch Page", "type": "tool", "tool": "fetch_url", "args": {"url": "{{input}}"}, "output_var": "page_content", "retry": 2, "retry_delay": 2.0},
+                {"name": "Save Content", "type": "tool", "tool": "write_file", "args": {
+                    "path": "/root/scraped.txt",
+                    "content": "{{vars.page_content}}"
+                }},
+                {"name": "Word Analysis", "type": "tool", "tool": "execute_code", "args": {
+                    "code": "import collections, re\ntext = open('/root/scraped.txt').read()\nwords = re.findall(r'[a-zA-Z]{4,}', text.lower())\nfreq = collections.Counter(words).most_common(20)\nprint(f'Total words: {len(words)}')\nprint(f'Unique words: {len(set(words))}')\nprint('\\nTop 20 words:')\nfor w, c in freq:\n    print(f'  {w:20s} {c}')\nlines = text.splitlines()\nprint(f'\\nLines: {len(lines)}')\nprint(f'Characters: {len(text)}')",
+                    "language": "python"
+                }, "output_var": "analysis"},
+                {"name": "AI Summary", "type": "ai_completion", "prompt": "Briefly summarize the content from this URL ({{input}}) based on the scraped text:\n\n{{vars.page_content}}", "system": "Summarize in 3-5 bullet points. Be concise.", "output_var": "content_summary"},
+            ],
+        },
+        {
+            "name": "Multi-URL Scraper",
+            "description": "Loop over multiple URLs (one per line) and fetch each one",
+            "steps": [
+                {"name": "Fetch Each URL", "type": "loop", "over": "{{input}}", "max_iterations": 10, "steps": [
+                    {"name": "Fetch", "type": "tool", "tool": "fetch_url", "args": {"url": "{{loop.item}}"}, "retry": 1, "on_error": "continue"},
+                ], "output_var": "all_pages"},
+                {"name": "Save Results", "type": "tool", "tool": "write_file", "args": {
+                    "path": "/root/multi_scrape.md",
+                    "content": "# Multi-URL Scrape Results\n\n{{vars.all_pages}}"
+                }},
+            ],
+        },
+    ]
+    created = []
+    existing = await db.get_workflows()
+    existing_names = {w["name"] for w in existing}
+    for p in presets:
+        if p["name"] in existing_names:
+            continue
+        wf_id = f"wf-{uuid.uuid4().hex[:12]}"
+        webhook_id = uuid.uuid4().hex[:16]
+        await db.create_workflow(wf_id, p["name"], p["description"], json.dumps(p["steps"]))
+        await db.update_workflow(wf_id, webhook_id=webhook_id)
+        created.append({"id": wf_id, "name": p["name"]})
+    return {"seeded": created, "message": f"{len(created)} workflow(s) created"}
 
 
 # ============================================================
@@ -2489,8 +2615,10 @@ async def list_workflows():
 @app.post("/api/workflows")
 async def create_workflow(req: WorkflowCreate):
     id = f"wf-{uuid.uuid4().hex[:12]}"
+    webhook_id = uuid.uuid4().hex[:16]
     await db.create_workflow(id, req.name, req.description, json.dumps(req.steps))
-    return {"id": id, "name": req.name, "description": req.description, "steps": req.steps}
+    await db.update_workflow(id, webhook_id=webhook_id)
+    return {"id": id, "name": req.name, "description": req.description, "steps": req.steps, "webhook_id": webhook_id}
 
 
 @app.get("/api/workflows/{wf_id}")
@@ -2539,6 +2667,72 @@ async def get_workflow_run(run_id: str):
     if not run:
         raise HTTPException(404, "Run not found")
     return run
+
+
+# ============================================================
+# WORKFLOW SCHEDULES
+# ============================================================
+@app.get("/api/workflow-schedules")
+async def list_workflow_schedules(workflow_id: str = None):
+    return await db.get_workflow_schedules(workflow_id)
+
+
+@app.post("/api/workflow-schedules")
+async def create_workflow_schedule(req: WorkflowScheduleCreate):
+    from workflows import next_cron_time
+    from datetime import datetime
+    wf = await db.get_workflow(req.workflow_id)
+    if not wf:
+        raise HTTPException(404, "Workflow not found")
+    sched_id = f"ws-{uuid.uuid4().hex[:12]}"
+    next_run = next_cron_time(req.cron_expr)
+    next_run_iso = datetime.utcfromtimestamp(next_run).isoformat()
+    await db.create_workflow_schedule(sched_id, req.workflow_id, req.cron_expr, req.input_template, next_run_iso)
+    return {"id": sched_id, "workflow_id": req.workflow_id, "cron_expr": req.cron_expr, "next_run_at": next_run_iso}
+
+
+@app.put("/api/workflow-schedules/{sched_id}")
+async def update_workflow_schedule(sched_id: str, req: WorkflowScheduleUpdate):
+    kwargs = {}
+    if req.cron_expr is not None:
+        kwargs["cron_expr"] = req.cron_expr
+        from workflows import next_cron_time
+        from datetime import datetime
+        kwargs["next_run_at"] = datetime.utcfromtimestamp(next_cron_time(req.cron_expr)).isoformat()
+    if req.input_template is not None:
+        kwargs["input_template"] = req.input_template
+    if req.enabled is not None:
+        kwargs["enabled"] = 1 if req.enabled else 0
+    if kwargs:
+        await db.update_workflow_schedule(sched_id, **kwargs)
+    return {"status": "updated"}
+
+
+@app.delete("/api/workflow-schedules/{sched_id}")
+async def delete_workflow_schedule(sched_id: str):
+    await db.delete_workflow_schedule(sched_id)
+    return {"status": "deleted"}
+
+
+# ============================================================
+# WORKFLOW WEBHOOKS
+# ============================================================
+@app.post("/api/webhooks/workflow/{webhook_id}")
+async def trigger_workflow_webhook(webhook_id: str, request: Request):
+    wf = await db.get_workflow_by_webhook(webhook_id)
+    if not wf:
+        raise HTTPException(404, "Webhook not found")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    from workflows import WorkflowExecutor
+    run_id = f"wfr-hook-{uuid.uuid4().hex[:8]}"
+    input_text = json.dumps(body) if body else ""
+    await db.create_workflow_run(run_id, wf["id"], "", input_text)
+    executor = WorkflowExecutor(http, events)
+    asyncio.create_task(executor.run(run_id, wf, input_text, webhook_data=body))
+    return {"run_id": run_id, "status": "started", "workflow": wf["name"]}
 
 
 # ============================================================

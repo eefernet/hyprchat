@@ -58,8 +58,20 @@ Named AI personalities with avatars, model config, system prompts, temperature/c
 ### 🗂️ Workspaces
 Group related conversations, track files across chats, analyze topics, and generate personas from knowledge bases.
 
-### ⚡ Workflows
-Chain tools into reusable sequential pipelines. Build workflows in the UI with a step editor — pick tools, define arguments with `{{input}}` and `{{steps.N.result}}` variable substitution. Run from the Workflows panel or trigger from chat with `/run workflow-name "input"`. Full run history with per-step results.
+### ⚡ Workflow Automation
+Full automation engine for deterministic tool chains — workflows do things the chat agent cannot.
+
+- **5 step types** — `tool` (standard), `ai_completion` (single LLM prompt), `parallel` (concurrent execution), `loop` (iterate over collections), `run_workflow` (compose sub-workflows)
+- **Conditionals** — Skip steps based on previous results (`contains`, `not_contains`, `==`, `!=`, `is_empty`, `not_empty`)
+- **Named variables** — `{{input}}`, `{{steps.N.result}}`, `{{vars.name}}`, `{{loop.item}}`, `{{webhook.field}}`
+- **Retry & error handling** — Per-step retry (0-3) with exponential backoff. `on_error`: fail, skip, or continue
+- **Cron scheduling** — Run workflows automatically on cron expressions with enable/disable and run tracking
+- **Webhook triggers** — Each workflow gets a unique URL. POST JSON to trigger — connect to GitHub, Home Assistant, n8n, etc.
+- **Composition** — Workflows can call other workflows as sub-steps
+- **Run history** — Expandable per-run step breakdown with status, duration, and result text
+- **Chat trigger** — `/run Workflow Name input text` from the chat input
+- **Visual step editor** — Type selector, condition field, output variable, error handling, and retry per step
+- **Seed presets** — Deep Research (with AI summary), System Health Check (parallel), Scrape & Analyze, Multi-URL Scraper (loop)
 
 ### 📊 Token Analytics
 Dashboard tracking cumulative token usage per model, persona, and day. Summary cards, CSS bar charts, and model breakdown tables. Configurable date range (7d/30d/90d) with day/model/persona grouping.

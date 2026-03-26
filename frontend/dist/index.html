@@ -1111,6 +1111,11 @@ function HyprChat(){
   const [workflows,setWorkflows]=useState([]);
   const [editWf,setEditWf]=useState(null);
   const [wfRunning,setWfRunning]=useState(null);
+  const [selectedWf,setSelectedWf]=useState(null);
+  const [wfRuns,setWfRuns]=useState([]);
+  const [expandedRun,setExpandedRun]=useState(null);
+  const [wfSchedules,setWfSchedules]=useState([]);
+  const [editSched,setEditSched]=useState(null);
   const [copied,setCopied]=useState(null);
   const [tokC,setTokC]=useState(0);
   const [tokS,setTokS]=useState(0);
@@ -1439,6 +1444,13 @@ function HyprChat(){
     try{const r=await fetch(`${API}/api/workflows`);setWorkflows(await r.json());}catch(e){console.error("Workflow load error",e);}
   },[]);
   useEffect(()=>{if(panel==="workflows")loadWorkflows();},[panel,loadWorkflows]);
+  const loadWfRuns=useCallback(async(wfId)=>{
+    try{const r=await fetch(`${API}/api/workflows/${wfId}/runs`);setWfRuns(await r.json());}catch(e){console.error(e);}
+  },[]);
+  const loadWfSchedules=useCallback(async(wfId)=>{
+    try{const r=await fetch(`${API}/api/workflow-schedules?workflow_id=${wfId}`);setWfSchedules(await r.json());}catch(e){console.error(e);}
+  },[]);
+  useEffect(()=>{if(selectedWf){loadWfRuns(selectedWf.id);loadWfSchedules(selectedWf.id);}else{setWfRuns([]);setWfSchedules([]);}},[selectedWf]);
 
   // Start a new council chat session
   const startCouncilChat=async(councilId)=>{
@@ -3519,11 +3531,20 @@ function HyprChat(){
 
       :panel==="workflows"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
         <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
-          <div style={{maxWidth:900}}>
+          <div style={{maxWidth:960}}>
+            {/* ── Header ── */}
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
-              <div style={{fontSize:20,fontWeight:700,display:"flex",alignItems:"center",gap:8}}><IC.Workflow/> Workflows</div>
-              <button onClick={()=>setEditWf({name:"",description:"",steps:[{name:"Step 1",tool:"research",args:{query:"{{input}}"}}]})} style={{...btnS(t.acc),padding:"6px 14px"}}><IC.Plus/> New Workflow</button>
+              <div style={{fontSize:20,fontWeight:700,display:"flex",alignItems:"center",gap:8}}>
+                {selectedWf&&<button onClick={()=>{setSelectedWf(null);setEditWf(null);}} style={{...btnS(t.mut),padding:"4px 10px",fontSize:10}}>Back</button>}
+                <IC.Workflow/> {selectedWf?selectedWf.name:"Workflows"}
+              </div>
+              {!selectedWf&&<div style={{display:"flex",gap:8}}>
+                <button onClick={async()=>{try{await fetch(`${API}/api/seed/workflows`,{method:"POST"});loadWorkflows();}catch(e){console.error(e);}}} style={{...btnS(t.ok),padding:"6px 14px",fontSize:11}}>Seed Presets</button>
+                <button onClick={()=>setEditWf({name:"",description:"",steps:[{name:"Step 1",type:"tool",tool:"research",args:{query:"{{input}}"}}]})} style={{...btnS(t.acc),padding:"6px 14px"}}><IC.Plus/> New Workflow</button>
+              </div>}
             </div>
+
+            {/* ── Workflow Editor ── */}
             {editWf&&<div style={{...cardS,marginBottom:16}}>
               <div style={{fontSize:14,fontWeight:600,marginBottom:12}}>{editWf.id?"Edit Workflow":"New Workflow"}</div>
               <div style={{display:"flex",gap:8,marginBottom:10}}>
@@ -3531,48 +3552,224 @@ function HyprChat(){
                 <input value={editWf.description} onChange={e=>setEditWf(p=>({...p,description:e.target.value}))} placeholder="Description..." style={{...inputS,flex:2}}/>
               </div>
               <div style={{fontSize:11,fontWeight:600,color:t.mut,marginBottom:6}}>Steps</div>
-              {(editWf.steps||[]).map((step,si)=><div key={si} style={{display:"flex",gap:6,marginBottom:6,alignItems:"start"}}>
-                <span style={{fontSize:10,color:t.mut,minWidth:20,paddingTop:8}}>{si+1}.</span>
-                <input value={step.name} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],name:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Step name" style={{...inputS,flex:1,padding:"5px 8px",fontSize:11}}/>
-                <input value={step.tool} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],tool:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Tool name (e.g. research)" style={{...inputS,flex:1,padding:"5px 8px",fontSize:11}}/>
-                <textarea value={typeof step.args==="object"?JSON.stringify(step.args,null,1):step.args||""} onChange={e=>{const s=[...editWf.steps];try{s[si]={...s[si],args:JSON.parse(e.target.value)};}catch{s[si]={...s[si],args:e.target.value};}setEditWf(p=>({...p,steps:s}));}} placeholder='{"query":"{{input}}"}' style={{...inputS,flex:2,padding:"5px 8px",fontSize:10,minHeight:32,fontFamily:"monospace",resize:"vertical"}}/>
-                <button onClick={()=>{const s=editWf.steps.filter((_,i)=>i!==si);setEditWf(p=>({...p,steps:s}));}} style={{...btnS(t.err),padding:"4px 8px",fontSize:9}}>×</button>
-              </div>)}
+              {(editWf.steps||[]).map((step,si)=>{
+                const sType=step.type||"tool";
+                return <div key={si} style={{...cardS,marginBottom:8,padding:10,border:`1px solid ${t.brd}33`}}>
+                  <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:6}}>
+                    <span style={{fontSize:10,color:t.mut,minWidth:20,fontWeight:700}}>{si+1}.</span>
+                    <input value={step.name} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],name:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Step name" style={{...inputS,flex:2,padding:"5px 8px",fontSize:11}}/>
+                    <select value={sType} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],type:e.target.value};setEditWf(p=>({...p,steps:s}));}} style={{...inputS,flex:1,padding:"5px 8px",fontSize:10}}>
+                      <option value="tool">Tool</option>
+                      <option value="ai_completion">AI Completion</option>
+                      <option value="parallel">Parallel</option>
+                      <option value="loop">Loop</option>
+                      <option value="run_workflow">Sub-Workflow</option>
+                    </select>
+                    <button onClick={()=>{const s=editWf.steps.filter((_,i)=>i!==si);setEditWf(p=>({...p,steps:s}));}} style={{...btnS(t.err),padding:"4px 8px",fontSize:9}}>x</button>
+                  </div>
+                  {/* Type-specific fields */}
+                  {sType==="tool"&&<div style={{display:"flex",gap:6,marginBottom:4}}>
+                    <input value={step.tool||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],tool:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Tool (research, fetch_url, run_shell...)" style={{...inputS,flex:1,padding:"5px 8px",fontSize:10}}/>
+                    <textarea value={typeof step.args==="object"?JSON.stringify(step.args,null,1):step.args||""} onChange={e=>{const s=[...editWf.steps];try{s[si]={...s[si],args:JSON.parse(e.target.value)};}catch{s[si]={...s[si],args:e.target.value};}setEditWf(p=>({...p,steps:s}));}} placeholder='{"query":"{{input}}"}' style={{...inputS,flex:2,padding:"5px 8px",fontSize:10,minHeight:32,fontFamily:"monospace",resize:"vertical"}}/>
+                  </div>}
+                  {sType==="ai_completion"&&<div style={{display:"flex",flexDirection:"column",gap:4}}>
+                    <textarea value={step.prompt||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],prompt:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Prompt (use {{input}}, {{steps.N.result}}, {{vars.name}})" style={{...inputS,padding:"5px 8px",fontSize:10,minHeight:48,fontFamily:"monospace",resize:"vertical"}}/>
+                    <div style={{display:"flex",gap:6}}>
+                      <input value={step.model||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],model:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Model (optional, default)" style={{...inputS,flex:1,padding:"5px 8px",fontSize:10}}/>
+                      <input value={step.system||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],system:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="System prompt (optional)" style={{...inputS,flex:2,padding:"5px 8px",fontSize:10}}/>
+                    </div>
+                  </div>}
+                  {sType==="parallel"&&<div>
+                    <div style={{fontSize:9,color:t.mut,marginBottom:4}}>Sub-steps (run concurrently) — JSON array:</div>
+                    <textarea value={typeof step.steps==="object"?JSON.stringify(step.steps,null,2):step.steps||"[]"} onChange={e=>{const s=[...editWf.steps];try{s[si]={...s[si],steps:JSON.parse(e.target.value)};}catch{s[si]={...s[si],steps:e.target.value};}setEditWf(p=>({...p,steps:s}));}} style={{...inputS,width:"100%",padding:"5px 8px",fontSize:10,minHeight:60,fontFamily:"monospace",resize:"vertical"}}/>
+                  </div>}
+                  {sType==="loop"&&<div style={{display:"flex",flexDirection:"column",gap:4}}>
+                    <div style={{display:"flex",gap:6}}>
+                      <input value={step.over||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],over:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Iterate over ({{steps.0.result}} or JSON array)" style={{...inputS,flex:2,padding:"5px 8px",fontSize:10}}/>
+                      <input value={step.max_iterations||10} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],max_iterations:parseInt(e.target.value)||10};setEditWf(p=>({...p,steps:s}));}} type="number" min="1" max="50" style={{...inputS,flex:0,width:60,padding:"5px 8px",fontSize:10}}/>
+                    </div>
+                    <div style={{fontSize:9,color:t.mut}}>Loop sub-steps (JSON array, use {"{{loop.item}}"} and {"{{loop.index}}"}):</div>
+                    <textarea value={typeof step.steps==="object"?JSON.stringify(step.steps,null,2):step.steps||"[]"} onChange={e=>{const s=[...editWf.steps];try{s[si]={...s[si],steps:JSON.parse(e.target.value)};}catch{s[si]={...s[si],steps:e.target.value};}setEditWf(p=>({...p,steps:s}));}} style={{...inputS,width:"100%",padding:"5px 8px",fontSize:10,minHeight:60,fontFamily:"monospace",resize:"vertical"}}/>
+                  </div>}
+                  {sType==="run_workflow"&&<div style={{display:"flex",gap:6}}>
+                    <input value={step.workflow_id||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],workflow_id:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Workflow ID (wf-...)" style={{...inputS,flex:1,padding:"5px 8px",fontSize:10}}/>
+                    <input value={step.input||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],input:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Input to sub-workflow" style={{...inputS,flex:2,padding:"5px 8px",fontSize:10}}/>
+                  </div>}
+                  {/* Common fields: condition, output_var, error handling */}
+                  <div style={{display:"flex",gap:6,marginTop:4}}>
+                    <input value={step.condition||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],condition:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Condition (optional)" style={{...inputS,flex:2,padding:"4px 8px",fontSize:9}}/>
+                    <input value={step.output_var||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],output_var:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Output var" style={{...inputS,flex:1,padding:"4px 8px",fontSize:9}}/>
+                    <select value={step.on_error||"fail"} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],on_error:e.target.value};setEditWf(p=>({...p,steps:s}));}} style={{...inputS,flex:0,width:80,padding:"4px 6px",fontSize:9}}>
+                      <option value="fail">On error: fail</option>
+                      <option value="skip">On error: skip</option>
+                      <option value="continue">On error: continue</option>
+                    </select>
+                    <input value={step.retry||0} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],retry:parseInt(e.target.value)||0};setEditWf(p=>({...p,steps:s}));}} type="number" min="0" max="3" title="Retry count" style={{...inputS,flex:0,width:40,padding:"4px 6px",fontSize:9}}/>
+                  </div>
+                </div>;
+              })}
               <div style={{display:"flex",gap:6,marginTop:6}}>
-                <button onClick={()=>setEditWf(p=>({...p,steps:[...p.steps,{name:`Step ${p.steps.length+1}`,tool:"",args:{}}]}))} style={{...btnS(t.mut),padding:"4px 10px",fontSize:10}}><IC.Plus/> Add Step</button>
+                <button onClick={()=>setEditWf(p=>({...p,steps:[...p.steps,{name:`Step ${p.steps.length+1}`,type:"tool",tool:"",args:{}}]}))} style={{...btnS(t.mut),padding:"4px 10px",fontSize:10}}><IC.Plus/> Add Step</button>
                 <div style={{flex:1}}/>
                 <button onClick={()=>setEditWf(null)} style={{...btnS(t.mut),padding:"4px 10px",fontSize:10}}>Cancel</button>
                 <button onClick={async()=>{
-                  const body={name:editWf.name,description:editWf.description,steps:editWf.steps.map(s=>({...s,args:typeof s.args==="string"?JSON.parse(s.args||"{}"):s.args}))};
+                  const body={name:editWf.name,description:editWf.description,steps:editWf.steps.map(s=>{
+                    const clean={...s};
+                    if(typeof clean.args==="string")try{clean.args=JSON.parse(clean.args);}catch{clean.args={};}
+                    if(typeof clean.steps==="string")try{clean.steps=JSON.parse(clean.steps);}catch{clean.steps=[];}
+                    return clean;
+                  })};
                   if(editWf.id){
                     await fetch(`${API}/api/workflows/${editWf.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
                   }else{
                     await fetch(`${API}/api/workflows`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
                   }
-                  setEditWf(null);loadWorkflows();
+                  setEditWf(null);loadWorkflows();if(selectedWf)setSelectedWf(null);
                 }} style={{...btnS(t.ok),padding:"4px 14px",fontSize:10}}>Save</button>
               </div>
               <div style={{fontSize:9,color:t.mut,marginTop:8,lineHeight:1.6}}>
-                Use <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>{"{{input}}"}</code> for the workflow input and <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>{"{{steps.N.result}}"}</code> to reference results from step N (0-indexed).
+                Variables: <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>{"{{input}}"}</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>{"{{steps.N.result}}"}</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>{"{{vars.name}}"}</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>{"{{loop.item}}"}</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>{"{{webhook.field}}"}</code>
+                <br/>Conditions: <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>contains</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>not_contains</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>==</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>!=</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>is_empty</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>not_empty</code>
               </div>
             </div>}
-            {workflows.length===0&&!editWf&&<div style={{textAlign:"center",padding:40,color:t.mut}}>No workflows yet. Create one to chain tools together!</div>}
-            {workflows.map(wf=><div key={wf.id} style={{...cardS,display:"flex",alignItems:"center",gap:12}}>
-              <div style={{flex:1}}>
-                <div style={{fontSize:14,fontWeight:600}}>{wf.name}</div>
-                {wf.description&&<div style={{fontSize:10,color:t.mut,marginTop:2}}>{wf.description}</div>}
-                <div style={{fontSize:9,color:t.dim,marginTop:4}}>{(wf.steps||[]).length} steps: {(wf.steps||[]).map(s=>s.tool).join(" → ")}</div>
+
+            {/* ── Workflow Detail View (selected) ── */}
+            {selectedWf&&!editWf&&<>
+              <div style={{...cardS,marginBottom:12,padding:14}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div>
+                    <div style={{fontSize:10,color:t.mut}}>{selectedWf.id}</div>
+                    {selectedWf.description&&<div style={{fontSize:12,color:t.mut,marginTop:4}}>{selectedWf.description}</div>}
+                    <div style={{fontSize:10,color:t.dim,marginTop:4}}>{(selectedWf.steps||[]).length} steps: {(selectedWf.steps||[]).map(s=>s.type==="ai_completion"?"AI":(s.tool||s.type)).join(" -> ")}</div>
+                  </div>
+                  <div style={{display:"flex",gap:6}}>
+                    <button onClick={()=>setEditWf({...selectedWf,steps:selectedWf.steps||[]})} style={{...btnS(t.mut),padding:"4px 10px",fontSize:10}}><IC.Pencil/></button>
+                    <button onClick={async()=>{
+                      const input=prompt("Workflow input:");if(input===null)return;
+                      setWfRunning(selectedWf.id);
+                      try{await fetch(`${API}/api/workflows/${selectedWf.id}/run`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({input})});
+                        setTimeout(()=>{loadWfRuns(selectedWf.id);setWfRunning(null);},2000);
+                      }catch(e){console.error(e);setWfRunning(null);}
+                    }} style={{...btnS(t.ok),padding:"4px 10px",fontSize:10}}>{wfRunning===selectedWf.id?"Running...":"Run"}</button>
+                  </div>
+                </div>
               </div>
-              <button onClick={()=>setEditWf({...wf,steps:wf.steps||[]})} style={{...btnS(t.mut),padding:"4px 10px",fontSize:10}}><IC.Pencil/></button>
-              <button onClick={async()=>{
-                const input=prompt("Workflow input:");
-                if(input===null)return;
-                setWfRunning(wf.id);
-                try{await fetch(`${API}/api/workflows/${wf.id}/run`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({input})});}catch(e){console.error(e);}
-                setTimeout(()=>setWfRunning(null),2000);
-              }} style={{...btnS(t.ok),padding:"4px 10px",fontSize:10}}>{wfRunning===wf.id?"Running...":"Run"}</button>
-              <button onClick={async()=>{if(!confirm("Delete this workflow?"))return;await fetch(`${API}/api/workflows/${wf.id}`,{method:"DELETE"});loadWorkflows();}} style={{...btnS(t.err),padding:"4px 10px",fontSize:10}}><IC.Trash/></button>
-            </div>)}
+
+              {/* Webhook section */}
+              {selectedWf.webhook_id&&<div style={{...cardS,marginBottom:12,padding:12}}>
+                <div style={{fontSize:12,fontWeight:600,marginBottom:6}}>Webhook Trigger</div>
+                <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                  <code style={{fontSize:9,background:`${t.brd}22`,padding:"4px 8px",borderRadius:4,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{`${API}/api/webhooks/workflow/${selectedWf.webhook_id}`}</code>
+                  <button onClick={()=>{navigator.clipboard.writeText(`${API}/api/webhooks/workflow/${selectedWf.webhook_id}`);setCopied("wh");setTimeout(()=>setCopied(null),1500);}} style={{...btnS(t.acc),padding:"4px 10px",fontSize:9}}>{copied==="wh"?"Copied!":"Copy"}</button>
+                </div>
+                <div style={{fontSize:9,color:t.mut,marginTop:4}}>POST JSON to this URL to trigger the workflow. Access fields with {"{{webhook.field_name}}"}</div>
+              </div>}
+
+              {/* Schedules section */}
+              <div style={{...cardS,marginBottom:12,padding:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <div style={{fontSize:12,fontWeight:600}}>Schedules</div>
+                  <button onClick={()=>setEditSched({cron_expr:"0 */6 * * *",input_template:""})} style={{...btnS(t.acc),padding:"3px 10px",fontSize:9}}><IC.Plus/> Add</button>
+                </div>
+                {editSched&&<div style={{display:"flex",gap:6,marginBottom:8,alignItems:"center"}}>
+                  <select onChange={e=>{if(e.target.value)setEditSched(p=>({...p,cron_expr:e.target.value}));}} value="" style={{...inputS,flex:0,width:110,padding:"4px 6px",fontSize:9}}>
+                    <option value="">Preset...</option>
+                    <option value="*/5 * * * *">Every 5 min</option>
+                    <option value="*/30 * * * *">Every 30 min</option>
+                    <option value="0 * * * *">Every hour</option>
+                    <option value="0 */6 * * *">Every 6 hours</option>
+                    <option value="0 0 * * *">Daily midnight</option>
+                    <option value="0 0 * * 1">Weekly Monday</option>
+                  </select>
+                  <input value={editSched.cron_expr} onChange={e=>setEditSched(p=>({...p,cron_expr:e.target.value}))} placeholder="Cron (min hr day mon dow)" style={{...inputS,flex:1,padding:"4px 8px",fontSize:10,fontFamily:"monospace"}}/>
+                  <input value={editSched.input_template} onChange={e=>setEditSched(p=>({...p,input_template:e.target.value}))} placeholder="Input template (optional)" style={{...inputS,flex:1,padding:"4px 8px",fontSize:10}}/>
+                  <button onClick={async()=>{
+                    const body={workflow_id:selectedWf.id,cron_expr:editSched.cron_expr,input_template:editSched.input_template};
+                    if(editSched.id){await fetch(`${API}/api/workflow-schedules/${editSched.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});}
+                    else{await fetch(`${API}/api/workflow-schedules`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});}
+                    setEditSched(null);loadWfSchedules(selectedWf.id);
+                  }} style={{...btnS(t.ok),padding:"3px 10px",fontSize:9}}>Save</button>
+                  <button onClick={()=>setEditSched(null)} style={{...btnS(t.mut),padding:"3px 8px",fontSize:9}}>x</button>
+                </div>}
+                {wfSchedules.length===0&&!editSched&&<div style={{fontSize:10,color:t.mut}}>No schedules. Add one to run this workflow automatically.</div>}
+                {wfSchedules.map(sc=><div key={sc.id} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0",borderBottom:`1px solid ${t.brd}22`}}>
+                  <code style={{fontSize:10,fontFamily:"monospace",color:t.acc,minWidth:110}}>{sc.cron_expr}</code>
+                  <div style={{flex:1,fontSize:9,color:t.mut}}>
+                    {sc.last_run_at?`Last: ${new Date(sc.last_run_at).toLocaleString()}`:"Never run"}
+                    {sc.next_run_at&&` | Next: ${new Date(sc.next_run_at).toLocaleString()}`}
+                  </div>
+                  <button onClick={async()=>{
+                    await fetch(`${API}/api/workflow-schedules/${sc.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:!sc.enabled})});
+                    loadWfSchedules(selectedWf.id);
+                  }} style={{...btnS(sc.enabled?t.ok:t.mut),padding:"2px 8px",fontSize:9}}>{sc.enabled?"Enabled":"Disabled"}</button>
+                  <button onClick={async()=>{if(!confirm("Delete schedule?"))return;await fetch(`${API}/api/workflow-schedules/${sc.id}`,{method:"DELETE"});loadWfSchedules(selectedWf.id);}} style={{...btnS(t.err),padding:"2px 6px",fontSize:9}}>x</button>
+                </div>)}
+              </div>
+
+              {/* Run History */}
+              <div style={{...cardS,padding:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <div style={{fontSize:12,fontWeight:600}}>Run History</div>
+                  <button onClick={()=>loadWfRuns(selectedWf.id)} style={{...btnS(t.mut),padding:"2px 8px",fontSize:9}}>Refresh</button>
+                </div>
+                {wfRuns.length===0&&<div style={{fontSize:10,color:t.mut}}>No runs yet.</div>}
+                {wfRuns.map(run=>{
+                  const statusColor=run.status==="completed"?t.ok:run.status==="failed"?t.err:run.status==="running"?t.acc:t.mut;
+                  const duration=run.started_at&&run.completed_at?((new Date(run.completed_at).getTime()-new Date(run.started_at).getTime())/1000).toFixed(1)+"s":run.status==="running"?"...":"—";
+                  const isExpanded=expandedRun===run.id;
+                  return <div key={run.id} style={{marginBottom:8}}>
+                    <div onClick={()=>setExpandedRun(isExpanded?null:run.id)} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",padding:"6px 0",borderBottom:`1px solid ${t.brd}22`}}>
+                      <span style={{fontSize:8,color:statusColor,fontWeight:700}}>{isExpanded?"v":">"}</span>
+                      <span style={{fontSize:10,color:statusColor,fontWeight:600,minWidth:70}}>{run.status}</span>
+                      <span style={{fontSize:9,color:t.mut,flex:1}}>{run.id}</span>
+                      <span style={{fontSize:9,color:t.mut}}>{duration}</span>
+                      <span style={{fontSize:9,color:t.dim}}>{run.created_at?new Date(run.created_at).toLocaleString():""}</span>
+                    </div>
+                    {isExpanded&&<div style={{paddingLeft:16,paddingTop:6}}>
+                      {run.input&&<div style={{fontSize:9,color:t.mut,marginBottom:6}}>Input: <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>{run.input.substring(0,200)}</code></div>}
+                      {run.error&&<div style={{fontSize:10,color:t.err,marginBottom:6}}>Error: {run.error}</div>}
+                      {(run.step_results||[]).map((sr,si)=>{
+                        const sColor=sr.status==="completed"?t.ok:sr.status==="skipped"?"#888":t.err;
+                        const sDur=sr.started_at&&sr.completed_at?(sr.completed_at-sr.started_at).toFixed(2)+"s":"";
+                        return <div key={si} style={{marginBottom:6,paddingLeft:8,borderLeft:`2px solid ${sColor}`}}>
+                          <div style={{display:"flex",alignItems:"center",gap:6}}>
+                            <span style={{fontSize:10,fontWeight:600}}>{sr.name||`Step ${si}`}</span>
+                            <span style={{fontSize:9,color:t.mut}}>{sr.tool||sr.type||""}</span>
+                            <span style={{fontSize:9,color:sColor,fontWeight:600}}>{sr.status}</span>
+                            <span style={{fontSize:9,color:t.dim}}>{sDur}</span>
+                          </div>
+                          {sr.error&&<div style={{fontSize:9,color:t.err,marginTop:2}}>{sr.error}</div>}
+                          {sr.result&&<details style={{marginTop:2}}><summary style={{fontSize:9,color:t.mut,cursor:"pointer"}}>Result ({sr.result.length} chars)</summary><pre style={{fontSize:9,color:t.dim,maxHeight:150,overflow:"auto",background:`${t.brd}11`,padding:6,borderRadius:4,whiteSpace:"pre-wrap",margin:"4px 0"}}>{sr.result.substring(0,3000)}</pre></details>}
+                          {sr.reason&&<div style={{fontSize:9,color:t.mut,fontStyle:"italic",marginTop:2}}>{sr.reason}</div>}
+                        </div>;
+                      })}
+                    </div>}
+                  </div>;
+                })}
+              </div>
+            </>}
+
+            {/* ── Workflow List (when no workflow selected) ── */}
+            {!selectedWf&&!editWf&&<>
+              {workflows.length===0&&<div style={{textAlign:"center",padding:40,color:t.mut}}>No workflows yet. Create one or seed presets to get started!</div>}
+              {workflows.map(wf=><div key={wf.id} style={{...cardS,display:"flex",alignItems:"center",gap:12,cursor:"pointer"}} onClick={()=>{setSelectedWf(wf);setExpandedRun(null);}}>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:14,fontWeight:600}}>{wf.name}</div>
+                  {wf.description&&<div style={{fontSize:10,color:t.mut,marginTop:2}}>{wf.description}</div>}
+                  <div style={{fontSize:9,color:t.dim,marginTop:4}}>{(wf.steps||[]).length} steps: {(wf.steps||[]).map(s=>s.type==="ai_completion"?"AI":(s.tool||s.type)).join(" -> ")}</div>
+                </div>
+                <button onClick={e=>{e.stopPropagation();setEditWf({...wf,steps:wf.steps||[]});}} style={{...btnS(t.mut),padding:"4px 10px",fontSize:10}}><IC.Pencil/></button>
+                <button onClick={async e=>{
+                  e.stopPropagation();
+                  const input=prompt("Workflow input:");if(input===null)return;
+                  setWfRunning(wf.id);
+                  try{await fetch(`${API}/api/workflows/${wf.id}/run`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({input})});}catch(e2){console.error(e2);}
+                  setTimeout(()=>setWfRunning(null),2000);
+                }} style={{...btnS(t.ok),padding:"4px 10px",fontSize:10}}>{wfRunning===wf.id?"Running...":"Run"}</button>
+                <button onClick={async e=>{e.stopPropagation();if(!confirm("Delete this workflow?"))return;await fetch(`${API}/api/workflows/${wf.id}`,{method:"DELETE"});loadWorkflows();}} style={{...btnS(t.err),padding:"4px 10px",fontSize:10}}><IC.Trash/></button>
+              </div>)}
+              <div style={{fontSize:10,color:t.dim,marginTop:12,textAlign:"center"}}>Tip: type <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>/run Workflow Name input text</code> in chat to trigger a workflow</div>
+            </>}
           </div>
         </div>
       </div>

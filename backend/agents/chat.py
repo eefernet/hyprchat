@@ -119,40 +119,52 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             last_user_msg = m.get("content", "")
             break
     if last_user_msg.startswith("/run "):
-        parts = last_user_msg[5:].strip()
-        wf_match = re.match(r'(\S+)\s*(?:"([^"]*)"|(.*))$', parts)
-        if wf_match:
-            wf_name = wf_match.group(1)
-            wf_input = wf_match.group(2) or wf_match.group(3) or ""
-            all_wfs = await db.get_workflows()
-            wf = next((w for w in all_wfs if w["name"].lower() == wf_name.lower()), None)
-            if wf:
-                import uuid as _uuid
-                from workflows import WorkflowExecutor
-                executor = WorkflowExecutor(http, events)
-                run_id = f"wfr-{_uuid.uuid4().hex[:12]}"
-                await db.create_workflow_run(run_id, wf["id"], conv_id, wf_input)
-                await events.emit(conv_id, "tool_start", {"tool": "workflow", "status": f"Running workflow: {wf['name']}...", "icon": "activity"})
-                results = await executor.run(run_id, wf, wf_input, conv_id)
-                summary = f"## Workflow: {wf['name']}\n\n"
-                for r in results:
-                    icon = "✅" if r["status"] == "completed" else "❌"
-                    summary += f"**{icon} {r.get('name', 'Step')}** ({r.get('tool', '')})\n"
-                    if r.get("result"):
-                        preview = r["result"][:2000]
-                        summary += f"```\n{preview}\n```\n\n"
-                    elif r.get("error"):
-                        summary += f"Error: {r['error']}\n\n"
-                await events.emit(conv_id, "complete", {"status": "Workflow complete"})
-                yield f"data: {json.dumps({'type': 'token', 'content': summary})}\n\n"
-                yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
-                return
-            else:
-                wf_names = [w["name"] for w in all_wfs]
-                msg = f"Workflow \"{wf_name}\" not found. Available: {wf_names}" if all_wfs else f"Workflow \"{wf_name}\" not found. No workflows defined yet."
-                yield f"data: {json.dumps({'type': 'token', 'content': msg})}\n\n"
-                yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
-                return
+        run_arg = last_user_msg[5:].strip()
+        all_wfs = await db.get_workflows()
+        # Match workflow by name — try longest name match first, then fall back
+        wf = None
+        wf_input = ""
+        # Sort by name length descending so "System Health Check" matches before "System"
+        for candidate in sorted(all_wfs, key=lambda w: len(w["name"]), reverse=True):
+            if run_arg.lower().startswith(candidate["name"].lower()):
+                wf = candidate
+                wf_input = run_arg[len(candidate["name"]):].strip()
+                break
+        if wf:
+            import uuid as _uuid
+            from workflows import WorkflowExecutor
+            executor = WorkflowExecutor(http, events)
+            run_id = f"wfr-{_uuid.uuid4().hex[:12]}"
+            await db.create_workflow_run(run_id, wf["id"], conv_id, wf_input)
+            await events.emit(conv_id, "tool_start", {"tool": "workflow", "status": f"Running workflow: {wf['name']}...", "icon": "activity"})
+            results = await executor.run(run_id, wf, wf_input, conv_id)
+            summary = f"## Workflow: {wf['name']}\n\n"
+            for r in results:
+                status = r.get("status", "")
+                icon = "✅" if status == "completed" else "⏭" if status == "skipped" else "❌"
+                step_type = r.get("type", "tool")
+                label = f"{r.get('name', 'Step')} ({r.get('tool', step_type)})"
+                duration = ""
+                if r.get("started_at") and r.get("completed_at"):
+                    duration = f" — {r['completed_at'] - r['started_at']:.1f}s"
+                summary += f"**{icon} {label}**{duration}\n"
+                if r.get("result"):
+                    preview = r["result"][:2000]
+                    summary += f"```\n{preview}\n```\n\n"
+                elif r.get("error"):
+                    summary += f"Error: {r['error']}\n\n"
+                elif status == "skipped":
+                    summary += f"_Skipped: {r.get('reason', 'condition false')}_\n\n"
+            await events.emit(conv_id, "complete", {"status": "Workflow complete"})
+            yield f"data: {json.dumps({'type': 'token', 'content': summary})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
+            return
+        else:
+            wf_names = [w["name"] for w in all_wfs]
+            msg = f"Workflow \"{run_arg}\" not found. Available: {wf_names}" if all_wfs else f"No workflows defined yet. Create one in the Workflows panel."
+            yield f"data: {json.dumps({'type': 'token', 'content': msg})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
+            return
 
     await events.emit(conv_id, "tool_start", {"tool": "processing", "status": "🔮 Connecting to neural oracle...", "icon": "activity"})
 

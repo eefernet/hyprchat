@@ -3,17 +3,31 @@
 ## Alpha v16 — March 2026
 
 ### New Features
-- **Full-Text Conversation Search** — Search across all message content using SQLite FTS5. New "Search all messages" input in the sidebar with debounced queries, highlighted result snippets, role badges, and click-to-navigate. Results overlay replaces the conversation list while active. Powered by `porter unicode61` tokenizer with automatic index sync via database triggers.
-- **Conversation Branching/Forking** — Fork any conversation from any message. Click the new "fork" button on any message to create a new conversation with all messages up to that point copied over. Original conversation remains untouched. Forked conversations show a branch icon in the sidebar and a "Forked" badge in the header that links back to the original.
+- **Workflow Automation Platform** — Full automation engine for deterministic tool chains that run independently of the chat agent. Build workflows in the Workflows panel with a visual step editor, or trigger from chat with `/run Workflow Name input text`.
+  - **5 step types** — `tool` (call any built-in tool), `ai_completion` (single Ollama prompt — AI as a tool, not orchestrator), `parallel` (run sub-steps concurrently), `loop` (iterate over lists or JSON arrays), `run_workflow` (call another workflow as a sub-step)
+  - **Conditionals** — Skip steps based on previous results: `contains`, `not_contains`, `==`, `!=`, `is_empty`, `not_empty`
+  - **Named variables** — Steps output to named variables (`output_var`) referenced as `{{vars.name}}`. Also supports `{{input}}`, `{{steps.N.result}}`, `{{loop.item}}`, `{{loop.index}}`, `{{webhook.field}}`
+  - **Retry & error handling** — Per-step retry count (0-3) with exponential backoff. Per-step `on_error`: `fail` (stop), `skip` (continue with null), `continue` (store error as result)
+  - **Cron scheduling** — Schedule workflows on cron expressions with enable/disable toggle, last/next run tracking. Background scheduler checks every 60s. Preset cron options in the UI (every 5min, hourly, daily, weekly)
+  - **Webhook triggers** — Each workflow gets an auto-generated webhook URL. POST JSON to trigger — body fields accessible as `{{webhook.field_name}}`. Connect to GitHub, Home Assistant, n8n, or any external system
+  - **Run history** — Click any workflow for a detail view with expandable run history. Each run shows status badge, duration, and per-step breakdown with name, tool, status, timing, and collapsible result text
+  - **Seed presets** — 4 built-in workflows: Deep Research (search + AI summary + conditional save), System Health Check (parallel diagnostics + AI report), Scrape & Analyze (fetch with retry + word analysis + AI summary), Multi-URL Scraper (loop with per-item error handling)
+- **Full-Text Conversation Search** — Search across all message content using SQLite FTS5. New `Search all messages` input in the sidebar with debounced queries, highlighted result snippets, role badges, and click-to-navigate. Results overlay replaces the conversation list while active. Powered by `porter unicode61` tokenizer with automatic index sync via database triggers.
+- **Conversation Branching/Forking** — Fork any conversation from any message. Click the fork button on any message to create a new conversation with all messages up to that point copied over. Original conversation remains untouched. Forked conversations show a branch icon in the sidebar and a `Forked` badge in the header that links back to the original.
 - **Token Usage Analytics Dashboard** — New "Analytics" panel in the nav rail tracking cumulative token usage. Summary cards show today's tokens, 30-day totals, and top model. CSS bar chart visualizes usage over time with day/model/persona grouping. Model breakdown table with prompt, completion, and total token columns. Configurable date range (7d/30d/90d). Token counts captured from Ollama streaming responses after each generation.
-- **MVP Agent Workflows** — Chain tools into reusable sequential pipelines. New "Workflows" panel with a visual step builder: name each step, pick a tool, define JSON arguments with `{{input}}` and `{{steps.N.result}}` variable substitution. Save, edit, delete, and run workflows from the UI. Trigger from chat with `/run workflow-name "input"`. Standalone `WorkflowExecutor` runs independently of the chat agent loop — no risk to existing tool behavior. Full run history with per-step results stored in the database. SSE events for live progress tracking.
+
+### Bug Fixes
+- **Changelog rendering** — Double-quoted strings in the changelog (10+ chars) were being matched by the inline markdown parser's verbatim quote pattern, causing text to render as warm-colored italic spans instead of normal text. Replaced all long double-quoted strings with backtick code spans or italic emphasis throughout the changelog.
+- **SearXNG false rate-limit reporting** — Health check incorrectly flagged SearXNG as `Rate Limited` because Google and Startpage engines were permanently suspended (access denied / CAPTCHA), always triggering the `unresponsive >= 2` threshold. Fixed by filtering out SearXNG-suspended engines from the unresponsive count and raising the active-failure threshold to >= 3. Disabled Google, Google News, Google Scholar, and Startpage on the SearXNG server since they never work for automated queries.
 
 ### Technical Details
-- New `backend/workflows.py` — standalone workflow executor calling `exec_tool()` without modifying the chat agent loop
-- New database tables: `token_usage`, `workflows`, `workflow_runs`
+- New `backend/workflows.py` — WorkflowExecutor with step type dispatching, condition evaluator, variable substitution, retry wrapper, and hand-rolled cron parser (no external deps)
+- New database tables: `token_usage`, `workflows`, `workflow_runs`, `workflow_schedules`
+- New `webhook_id` column on `workflows` table (auto-generated on creation)
 - New FTS5 virtual table `messages_fts` with INSERT/DELETE/UPDATE sync triggers
 - New columns on `conversations`: `forked_from`, `fork_point_msg_id`
-- 12 new API endpoints across search, forking, analytics, and workflows
+- Background `_workflow_scheduler_loop()` started in FastAPI lifespan
+- 17 new API endpoints across workflows, schedules, webhooks, search, forking, and analytics
 - 3 new nav rail icons: BarChart, Workflow, GitBranch
 
 ---
@@ -21,21 +35,21 @@
 ## Alpha v15.1 — March 2026
 
 ### New Features
-- **KB PDF Text Preview** — PDF files in Knowledge Bases now open with extracted text from the first 10 pages instead of an empty iframe. New `/pdf-text` backend endpoint extracts page text via `pypdf`. A "Full PDF" toggle button in the preview header switches to the embedded PDF viewer. Shows page count info (e.g. "Pages 1-10 of 42").
+- **KB PDF Text Preview** — PDF files in Knowledge Bases now open with extracted text from the first 10 pages instead of an empty iframe. New `/pdf-text` backend endpoint extracts page text via `pypdf`. A `Full PDF` toggle button in the preview header switches to the embedded PDF viewer. Shows page count info (e.g. `Pages 1-10 of 42`).
 - **Thinking Pill Click-to-Expand** — The reasoning/thinking status pill is now always clickable during streaming. Expanding it shows the model's live thinking content in real-time, auto-scrolling as new tokens arrive. Previously only the final thought was viewable after completion.
 - **Smoother Marquee Animation** — Thinking pill marquee text now uses GPU-accelerated `translate3d` with `will-change` and `backface-visibility` hints. Added gradient edge masking for smooth fade-in/out at edges instead of hard clipping. Animation slowed from 8s to 12s for a calmer scroll.
 - **KB File Preview** — Preview uploaded knowledge base files directly in the browser. New backend endpoint returns the first 200 lines of any KB file. Files are displayed in a scrollable list with filename, size, Preview button, and Delete button. Preview opens in a modal overlay with syntax-friendly monospace rendering.
-- **Theme Preview & Apply** — Theme selector replaced with a dropdown that shows a live preview of any theme before applying. Preview includes color swatches (bg, surface, text, accent, warm, ok, err, pink) and a mini mock chat bubble. Click "Apply" to confirm or "Cancel" to revert.
-- **Nav Rail Labels** — Navigation icons now show text labels below each icon (Chat, Knowledge Bases, Tools, etc.). Configurable via Settings → Appearance → "Nav Labels" toggle. Saved to localStorage.
+- **Theme Preview & Apply** — Theme selector replaced with a dropdown that shows a live preview of any theme before applying. Preview includes color swatches (bg, surface, text, accent, warm, ok, err, pink) and a mini mock chat bubble. Click `Apply` to confirm or `Cancel` to revert.
+- **Nav Rail Labels** — Navigation icons now show text labels below each icon (Chat, Knowledge Bases, Tools, etc.). Configurable via Settings → Appearance → `Nav Labels` toggle. Saved to localStorage.
 - **Settings Tooltips** — Hover `ⓘ` icons next to RAG pipeline settings (chunk size, overlap, max context, top-K, embedding model) and model parameters (temperature, top-P, context window) for plain-English explanations of what each setting does.
-- **Model Pull Bar Repositioned** — "Pull from Ollama" input moved from the right detail pane to a compact sticky bar above the Ollama/HF tab content, always visible without scrolling.
+- **Model Pull Bar Repositioned** — `Pull from Ollama` input moved from the right detail pane to a compact sticky bar above the Ollama/HF tab content, always visible without scrolling.
 - **Font Preview & Apply** — Font selector replaced with a dropdown showing a live preview with sample text and code snippet. UI Size and Chat Font Size are now dropdowns inside the font preview panel. Apply/Cancel buttons confirm the change.
 - **HF Download Bar** — HuggingFace download controls (model name input, file count, Download button) moved from the bottom of the file list to a sticky bar at the top of the model detail area, always visible when files are selected.
 
 ### Improvements
 - **Personas icon updated** — Nav rail icon changed from cube to person silhouette for better visual clarity.
 - **Model list auto-refresh** — Models refresh automatically when switching to the Model Manager panel and when opening the ModelPicker dropdown. Small refresh icon added inside the ModelPicker trigger bar.
-- **Downloads persist until cleared** — Completed downloads no longer auto-dismiss after 10 seconds. They remain in the downloads panel until manually cleared via "Clear done".
+- **Downloads persist until cleared** — Completed downloads no longer auto-dismiss after 10 seconds. They remain in the downloads panel until manually cleared via `Clear done`.
 - **KB file list redesign** — Knowledge base files now display as a scrollable vertical list (max 240px) with file icon, filename, size, Preview button, and Delete button instead of inline chips.
 - **Wider nav rail** — Nav rail widened from 60px to 68px with larger icons and buttons for better readability.
 - **Thinking Mode moved** — Thinking Mode setting (Auto/On/Off) moved from Appearance tile to Connection tile, under Default Context Window.
@@ -56,7 +70,7 @@
 - **Search card thumbnails improved** — Backend OG image fetching upgraded: real browser User-Agent, 6s timeout (was 4s), scans 30KB of HTML (was 15KB), 5 additional meta tag patterns (`twitter:image:src`, `og:image:secure_url`, `link[rel=image_src]`), resolves relative image URLs.
 - **Search card fallback display** — Cards without thumbnails now show a larger favicon (32px) + domain name instead of a faint chain link emoji.
 - **Horizontal scrollbar visibility** — Scrollbar height increased to 10px (was 5px), added hover highlight with accent color, and increased padding below scroll containers for easier grabbing.
-- **Archive file preview** — Clicking the preview eye on `.tar.gz`, `.tgz`, `.zip`, and `.tar` files now shows a file tree in the preview panel with directory structure, file icons color-coded by type, and formatted file sizes. Previously showed an infinite "Loading..." spinner.
+- **Archive file preview** — Clicking the preview eye on `.tar.gz`, `.tgz`, `.zip`, and `.tar` files now shows a file tree in the preview panel with directory structure, file icons color-coded by type, and formatted file sizes. Previously showed an infinite loading spinner.
 - **Archive file tree sorting** — Archive entries now sort by full path so files appear directly under their parent directories. Previously all directories were grouped first, then all files, breaking the visual hierarchy.
 - **Council stream survives navigation** — Council streaming state (live responses, votes, host synthesis) now persists in a ref when you navigate away to another conversation. Returning to the council chat restores the live stream instead of showing an empty chat. Previously all live council output was lost on navigation.
 - **New chat defaults to CodeAgent** — New conversations without a persona no longer default to the CodeAgent system prompt. Plain chats now use no system prompt, so the model responds as a generic assistant.
@@ -96,7 +110,7 @@
 - **Per-tool authorization check** — Each tool call is now verified against `available_tool_names` before execution. Blocks unauthorized tools even when some tools ARE enabled (e.g., model tries `run_shell` when only `research` is available). Returns an error message to the model so it can recover.
 - **Over-think loop fix** — When hallucinated tool calls are dropped and the model produces only thinking tokens with no content, the nudge now explicitly tells the model it has no tools and must answer from search results. Previously the generic nudge caused infinite think-loops.
 - **Stronger search context instruction** — Quick search result injection now tells the model to treat search results as its real-time data and not disclaim about lacking internet access.
-- **Persona ID not cleared on leave** — "Leave Persona" button now also clears `model_config_id` from the conversation, preventing stale persona KB injection in subsequent chats.
+- **Persona ID not cleared on leave** — `Leave Persona` button now also clears `model_config_id` from the conversation, preventing stale persona KB injection in subsequent chats.
 - **Persona not carried to new chats** — Removed automatic `lastPersonaId` carry-over that applied the previous persona to blank new conversations.
 - **Page fetch HTTP status check** — `_fetch_page` now returns `None` on HTTP 4xx/5xx instead of trying to parse error pages as content.
 
@@ -134,9 +148,9 @@
 #### Conspiracy Bot Overhaul
 - **Flexible output format** — Replaced rigid 9-section report template with adaptive output style. Simple questions get direct answers, deep investigations get structured reports, person/org inquiries get connection maps.
 - **Streamlined persona prompt** — 95 lines → 35 lines. Clearer investigative philosophy, same uncensored ATLAS identity.
-- **PRIME DIRECTIVE pattern** — Always calls `conspiracy_research` first before answering, matching the Coder Bot's "act don't talk" approach.
+- **PRIME DIRECTIVE pattern** — Always calls `conspiracy_research` first before answering, matching the Coder Bot's *act don't talk* approach.
 - **Document drill-down** — Added `fetch_url` to the bot's tool list so it can read full documents from its research results instead of just summarizing search snippets.
-- **Better tool description** — Broader framing ("any topic where official narratives may be incomplete") with clearer parameter descriptions.
+- **Better tool description** — Broader framing (*any topic where official narratives may be incomplete*) with clearer parameter descriptions.
 
 #### Deploy Monitor
 - **Smart routing** — `openhands_worker.py` now deploys to the Codebox server instead of the HyprChat server, with automatic `systemctl restart openhands-worker`.
@@ -182,10 +196,10 @@
   - **Scientists** — Einstein, Darwin, Ada Lovelace, Feynman, Carl Sagan
   - **Debaters** — The Pragmatist, Devil's Advocate, Futurist, Ethicist, Historian
 - **Debate Rounds** — Configurable rebuttal rounds (0-5) where council members read each other's responses and argue back. Each round streams in parallel with labeled headers.
-- **Council Performance Analytics** — "Analyze Performance" button per council generates a report with:
+- **Council Performance Analytics** — `Analyze Performance` button per council generates a report with:
   - Debate count, session count
   - Member rankings with win rate bars, vote counts, avg response length
-  - "Voted by" breakdown showing which members voted for whom
+  - `Voted by` breakdown showing which members voted for whom
   - Auto-generated recommendations (strongest/weakest performer, model diversity, response length disparity)
 - **Expandable Debate Rounds in Chat** — Historical council responses grouped by round with collapsible sections. Latest round expanded by default, earlier rounds collapsed with response counts.
 - **Delete All Chats** — Danger zone button in Settings to wipe all conversations
@@ -193,11 +207,11 @@
 
 ### Improvements
 - **Council English enforcement** — All council members and host moderator now always respond in English (fixes Qwen models defaulting to Chinese)
-- **New Chat carries context** — Clicking "+ New Chat" while in a council or persona chat creates a new chat with the same council/persona applied
+- **New Chat carries context** — Clicking `+ New Chat` while in a council or persona chat creates a new chat with the same council/persona applied
 - **Leave Persona / Leave Council** — Dedicated exit buttons in the top bar header. Removed old inline ✕ and sidebar persona tag.
 - **Sidebar chat labels** — Council chats show pink left border + council icon; persona chats show warm border + avatar/bot icon
 - **Auto-scroll council responses** — Individual member cards and host synthesis auto-scroll during streaming
-- **Input bar polish** — Centered alignment, larger padding, "What's on your mind?" placeholder
+- **Input bar polish** — Centered alignment, larger padding, *What's on your mind?* placeholder
 - **Alpha badge** — Version label replaced with styled "ALPHA" badge next to HyprChat logo
 
 ---
@@ -213,9 +227,9 @@
 - **OpenHands Worker Service** — New FastAPI microservice (`openhands_worker.py`) running on CodeBox LXC port 8586. Receives coding tasks, runs a full OpenHands agent loop (plan → write → test → fix → iterate), and returns tested code.
 
 ### Improvements
-- **Coder Model selector** — Dropdown in Model Manager Global Defaults to pick which model handles code generation (or "Same as chat model")
+- **Coder Model selector** — Dropdown in Model Manager Global Defaults to pick which model handles code generation (or `Same as chat model`)
 - **OpenHands settings** — `openhands_enabled` toggle and `openhands_max_rounds` configurable via Settings API
-- **Tool pill updates** — generate_code pill now shows "Agent Coding" during execution, "Code Ready" when done
+- **Tool pill updates** — generate_code pill now shows `Agent Coding` during execution, `Code Ready` when done
 - **Code-block rescue hardening** — Minimum 30 chars + code keyword check to prevent ASCII art from being mistaken for code
 - **Repetition detector fix** — Skip whitespace-only patterns to avoid killing ASCII art output
 - **Coder Bot English-only rule** — Added rule 11 to Coder Bot persona ensuring all output is in English
@@ -229,7 +243,7 @@
   - **Ollama tab** — Installed models grouped by family with emoji icons, Use/Remove buttons, pull new model by name
   - **HuggingFace tab** — Search HuggingFace for GGUF models (GGUF-only filter toggle), card grid results, model detail view with file selector, streaming download directly to Ollama
   - **Multi-part GGUF support** — Detects split GGUF files (e.g. `-00001-of-00004.gguf`), groups all parts, downloads and registers them as a single Ollama model
-- **Downloads Bar** — Collapsible pill in the top-right header showing all active and queued model downloads. Displays live progress bar, download speed (MB/s or KB/s), estimated time remaining, and downloaded/total size per download. Auto-expands when a download starts. "Clear done" removes completed entries.
+- **Downloads Bar** — Collapsible pill in the top-right header showing all active and queued model downloads. Displays live progress bar, download speed (MB/s or KB/s), estimated time remaining, and downloaded/total size per download. Auto-expands when a download starts. `Clear done` removes completed entries.
 - **Inline Search Result Cards** — When the AI uses the `research` or `deep_research` tool, a horizontally scrollable row of source cards appears directly below the response. Cards show thumbnail previews (or favicons), title, snippet, YouTube play button overlay for video results, and link to the source. Images returned in markdown (`![alt](url)`) now render inline.
 - **Tool Response Images** — The markdown renderer now handles `![alt](url)` syntax, rendering images inline with rounded corners and error fallback.
 
@@ -237,7 +251,7 @@
 - **Empty response recovery** — When the model returns an empty response, the retry nudge now explicitly instructs it to use its available tools. A second fallback strips tools entirely and retries for a plain text response before giving up.
 - **Model dropdown z-index fix** — The model selector dropdown in the chat header now renders above all content via React portal (fixes rendering behind the chat area due to `backdropFilter` stacking context).
 - **SearXNG results enriched** — Search results now include thumbnail, type (web/youtube/image), and YouTube video ID thumbnail extraction throughout the research pipeline.
-- **Settings cleanup** — Ollama Models section in Settings replaced with "Open Model Manager →" button.
+- **Settings cleanup** — Ollama Models section in Settings replaced with `Open Model Manager` button.
 
 ---
 
