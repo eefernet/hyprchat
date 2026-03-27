@@ -207,6 +207,7 @@ async def init_db():
         # Migrate: add new columns to existing tables if missing
         for col, default in [("tool_ids", "'[]'"), ("persona_name", "''"), ("persona_avatar", "''"),
                               ("is_council", "0"), ("council_config_id", "NULL"), ("use_memories", "0"),
+                              ("pinned", "0"),
                               ]:
             try:
                 await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} TEXT DEFAULT {default}")
@@ -328,7 +329,7 @@ async def get_conversations(limit: int = 50, offset: int = 0):
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT * FROM conversations ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            "SELECT * FROM conversations ORDER BY CAST(COALESCE(pinned,'0') AS INTEGER) DESC, updated_at DESC LIMIT ? OFFSET ?",
             (limit, offset)
         )
         rows = await cursor.fetchall()

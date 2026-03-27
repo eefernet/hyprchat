@@ -1127,10 +1127,10 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 "grep": "🔎", "grep_result": "🔎", "thinking": "🧠", "finish": "✅",
             }
             _ACTION_LABELS = {
-                "starting": "Starting", "terminal": "Running", "terminal_result": "Output",
-                "file_create": "Creating", "file_edit": "Editing", "file_view": "Reading",
-                "file_editor_result": "File ready", "glob": "Searching", "grep": "Scanning",
-                "thinking": "Thinking", "finish": "Finishing",
+                "starting": "Starting agent", "terminal": "Running command", "terminal_result": "Command output",
+                "file_create": "Writing file", "file_edit": "Editing file", "file_view": "Reading file",
+                "file_editor_result": "File saved", "glob": "Searching files", "grep": "Scanning code",
+                "thinking": "Overseer planning", "finish": "Wrapping up",
             }
             _agent_steps = []  # Accumulate steps for expandable detail
 
@@ -1162,7 +1162,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             if evt.get("type") == "step":
                                 step_num = evt.get("step", 0)
                                 action = evt.get("action", "")
-                                detail = evt.get("detail", "")[:80]
+                                detail = re.sub(r'\x1b\[[^a-zA-Z]*[a-zA-Z]|\[\?[0-9]+[a-z]', '', evt.get("detail", ""))[:80]
                                 icon = _ACTION_ICONS.get(action, "⏳")
                                 label = _ACTION_LABELS.get(action, action.replace("_", " ").title())
                                 _agent_steps.append({"step": step_num, "icon": icon, "label": label, "detail": detail})

@@ -33,6 +33,7 @@ from events import EventBus, parse_tool_params
 from agents.chat import chat_stream_generate, TOOL_TEMPLATES, detect_template_family
 from agents.personas import seed_coder_bot as _seed_coder_bot, seed_conspiracy_bot as _seed_conspiracy_bot, seed_based_bot as _seed_based_bot, seed_all_defaults as _seed_all_defaults
 import hf as hf_module
+from hf import parse_ollama_progress
 import rag
 
 # ============================================================
@@ -286,6 +287,7 @@ class ConversationUpdate(BaseModel):
     is_council: Optional[str] = None
     council_config_id: Optional[str] = None
     model_config_id: Optional[str] = None
+    pinned: Optional[str] = None
 
 class CouncilCreate(BaseModel):
     name: str = "My Council"
@@ -1427,11 +1429,32 @@ async def pull_model(request: Request):
 
     async def generate():
         try:
+            got_done = False
             async with http.stream("POST", f"{config.OLLAMA_URL}/api/pull",
-                                   json={"name": model_name, "stream": True}) as response:
+                                   json={"name": model_name, "stream": True},
+                                   timeout=httpx.Timeout(7200.0, connect=10.0)) as response:
                 async for line in response.aiter_lines():
-                    if line:
-                        yield f"data: {line}\n\n"
+                    if not line.strip():
+                        continue
+                    sse, key = parse_ollama_progress(line, model_name)
+                    if not sse:
+                        continue
+                    if key == "error":
+                        yield sse
+                        return
+                    if key == "done":
+                        got_done = True
+                    yield sse
+            if not got_done:
+                # Stream ended without success — verify model exists
+                try:
+                    check = await http.post(f"{config.OLLAMA_URL}/api/show", json={"name": model_name})
+                    if check.status_code == 200:
+                        yield f"data: {json.dumps({'status': 'done', 'message': 'Pull complete'})}\n\n"
+                    else:
+                        yield f"data: {json.dumps({'error': 'Pull stream ended without confirmation'})}\n\n"
+                except Exception:
+                    yield f"data: {json.dumps({'error': 'Pull stream ended — could not verify model'})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
@@ -1441,7 +1464,6 @@ async def pull_model(request: Request):
 @app.delete("/api/models/{model_name:path}")
 async def delete_model(model_name: str):
     """Delete a model from Ollama. Tries alternate name formats if not found."""
-    import json as _json
     # Build list of name variants to try
     names_to_try = [model_name]
     if not model_name.startswith("hf.co/") and "/" in model_name:
@@ -1452,8 +1474,7 @@ async def delete_model(model_name: str):
     for name in names_to_try:
         try:
             r = await http.request("DELETE", f"{config.OLLAMA_URL}/api/delete",
-                                   data=_json.dumps({"name": name}),
-                                   headers={"Content-Type": "application/json"})
+                                   json={"name": name})
             if r.status_code in (200, 204):
                 return {"status": "deleted", "model": model_name}
             err_text = r.text[:400]
@@ -1574,7 +1595,12 @@ async def model_info(model_name: str):
     """Get model details from Ollama."""
     try:
         r = await http.post(f"{config.OLLAMA_URL}/api/show", json={"name": model_name})
+        if r.status_code == 404:
+            raise HTTPException(404, f"Model '{model_name}' not found in Ollama")
+        r.raise_for_status()
         return r.json()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(502, f"Failed to get model info: {e}")
 
@@ -2584,6 +2610,39 @@ async def fork_conversation(conv_id: str, req: ForkRequest):
 @app.get("/api/conversations/{conv_id}/forks")
 async def get_conversation_forks(conv_id: str):
     return await db.get_forks(conv_id)
+
+
+# ============================================================
+# AUTO-TITLE GENERATION
+# ============================================================
+@app.post("/api/conversations/{conv_id}/generate-title")
+async def generate_title(conv_id: str):
+    conv = await db.get_conversation(conv_id)
+    if not conv:
+        raise HTTPException(404, "Conversation not found")
+    msgs = conv.get("messages", [])
+    first_msgs = [m for m in msgs[:4] if m.get("role") in ("user", "assistant")]
+    if not first_msgs:
+        return {"title": ""}
+    summary_input = "\n".join(f"{m['role']}: {(m.get('content') or '')[:200]}" for m in first_msgs)
+    try:
+        resp = await http.post(f"{config.OLLAMA_URL}/api/chat", json={
+            "model": config.WORKSPACE_MODEL or config.DEFAULT_MODEL,
+            "messages": [
+                {"role": "system", "content": "Generate a concise title (5-8 words, no quotes, no punctuation at end) for this conversation. Reply with ONLY the title, nothing else."},
+                {"role": "user", "content": summary_input}
+            ],
+            "stream": False,
+            "options": {"num_ctx": 2048, "temperature": 0.3}
+        }, timeout=30)
+        title = resp.json().get("message", {}).get("content", "").strip().strip('"\'')[:60]
+        if title:
+            await db.update_conversation(conv_id, title=title)
+            return {"title": title}
+        return {"title": ""}
+    except Exception as e:
+        print(f"[AUTO-TITLE] Error: {e}")
+        return {"title": ""}
 
 
 # ============================================================

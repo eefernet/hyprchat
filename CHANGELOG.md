@@ -15,20 +15,39 @@
 - **Full-Text Conversation Search** — Search across all message content using SQLite FTS5. New `Search all messages` input in the sidebar with debounced queries, highlighted result snippets, role badges, and click-to-navigate. Results overlay replaces the conversation list while active. Powered by `porter unicode61` tokenizer with automatic index sync via database triggers.
 - **Conversation Branching/Forking** — Fork any conversation from any message. Click the fork button on any message to create a new conversation with all messages up to that point copied over. Original conversation remains untouched. Forked conversations show a branch icon in the sidebar and a `Forked` badge in the header that links back to the original.
 - **Token Usage Analytics Dashboard** — New "Analytics" panel in the nav rail tracking cumulative token usage. Summary cards show today's tokens, 30-day totals, and top model. CSS bar chart visualizes usage over time with day/model/persona grouping. Model breakdown table with prompt, completion, and total token columns. Configurable date range (7d/30d/90d). Token counts captured from Ollama streaming responses after each generation.
+- **Keyboard Shortcuts** — Global keyboard shortcuts for faster navigation: `Ctrl+K` focuses the full-text search bar, `Ctrl+N` creates a new chat, `Ctrl+/` toggles the sidebar, and `Escape` closes modals/search.
+- **Pinned Conversations** — Pin important chats to the top of the sidebar. Pinned conversations appear in a dedicated section above unpinned ones with a visual separator. Pin state persists in the database.
+- **System Prompt Templates** — Quick-apply system prompts to any conversation without creating a full persona. Prompts saved with category `System Prompt` in the Prompt Library appear as one-click templates in the header. Clear button to remove.
+- **Auto-Title Generation** — New conversations automatically get an LLM-generated title (5-8 words) after the first exchange instead of just the first 40 characters. Uses the workspace analysis model. Configurable via `Auto Title` toggle in Settings.
+- **Streaming Markdown** — Markdown now renders correctly during streaming. A `mdStream()` wrapper automatically closes unclosed code fences and inline backticks before passing to the renderer, preventing rendering glitches mid-stream.
+- **Inline Code Execution Output** — Code execution results now render inline within messages as Jupyter-style cells with language label, success/fail badge, execution time, stdout (dimmed), and stderr (red). Previously only visible in status pills.
+- **Drag-and-Drop File Upload** — Drop files directly onto the chat area to attach them. A dashed-border overlay appears when dragging over the chat. Uses the existing file upload handler (max 5MB, text truncated to 20KB).
+- **Dark/Light Mode Quick Toggle** — Moon/sun icon button in the header instantly switches between the current dark theme and its light counterpart (One Light or Solarized Light). Remembers the previous dark theme to restore on toggle back.
+- **JSON Export & Import** — Export conversations as JSON (alongside existing Markdown export) for backup and reimport. Import button reads a JSON file and recreates the conversation with all messages on the backend.
+- **Message Timestamps** — Each message now displays the time it was sent (HH:MM format) next to the username label. Uses the `created_at` field already stored in the database.
+- **Scroll-to-Top/Bottom Buttons** — Floating arrow buttons appear in long conversations when scrolled more than 400px from the top or bottom. Smooth scroll animation on click.
+
+### Improvements
+- **Light theme contrast** — One Light and Solarized Light themes reworked with darker text, borders, and muted colors for much better readability. Surface colors have more separation from the background.
 
 ### Bug Fixes
 - **Changelog rendering** — Double-quoted strings in the changelog (10+ chars) were being matched by the inline markdown parser's verbatim quote pattern, causing text to render as warm-colored italic spans instead of normal text. Replaced all long double-quoted strings with backtick code spans or italic emphasis throughout the changelog.
 - **SearXNG false rate-limit reporting** — Health check incorrectly flagged SearXNG as `Rate Limited` because Google and Startpage engines were permanently suspended (access denied / CAPTCHA), always triggering the `unresponsive >= 2` threshold. Fixed by filtering out SearXNG-suspended engines from the unresponsive count and raising the active-failure threshold to >= 3. Disabled Google, Google News, Google Scholar, and Startpage on the SearXNG server since they never work for automated queries.
+- **Agent coding step display** — Terminal control codes (ANSI escapes like `[?2004l`) leaked into the agent timeline step details. Fixed by stripping control sequences from step output. Also improved step labels to be more descriptive (e.g. `Running command` instead of `Running`, `Overseer planning` instead of `Thinking`) and added a `Current:` banner with pulsing indicator to highlight the active step. Completed steps now appear dimmed for better visual hierarchy.
 
 ### Technical Details
 - New `backend/workflows.py` — WorkflowExecutor with step type dispatching, condition evaluator, variable substitution, retry wrapper, and hand-rolled cron parser (no external deps)
 - New database tables: `token_usage`, `workflows`, `workflow_runs`, `workflow_schedules`
 - New `webhook_id` column on `workflows` table (auto-generated on creation)
 - New FTS5 virtual table `messages_fts` with INSERT/DELETE/UPDATE sync triggers
-- New columns on `conversations`: `forked_from`, `fork_point_msg_id`
+- New columns on `conversations`: `forked_from`, `fork_point_msg_id`, `pinned`
 - Background `_workflow_scheduler_loop()` started in FastAPI lifespan
-- 17 new API endpoints across workflows, schedules, webhooks, search, forking, and analytics
+- 17 new API endpoints across workflows, schedules, webhooks, search, forking, analytics, and auto-title
 - 3 new nav rail icons: BarChart, Workflow, GitBranch
+- New `POST /api/conversations/{conv_id}/generate-title` endpoint using workspace model
+- `mdStream()` function sanitizes incomplete markdown during streaming
+- New localStorage keys: `hc-prev-dark`, `hc-auto-title`
+- Code output events from `saved_events` metadata rendered as styled `pre` blocks inline
 
 ---
 
