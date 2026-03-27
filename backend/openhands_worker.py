@@ -211,7 +211,7 @@ def run_task(req: RunRequest):
             model=f"ollama_chat/{req.model}",
             api_key="ollama",
             base_url=ollama_base,
-            temperature=0.15,
+            temperature=0.3,
             timeout=180,
             num_retries=2,
             drop_params=True,
@@ -269,10 +269,10 @@ def run_task(req: RunRequest):
         try:
             from openhands.sdk.conversation.types import StuckDetectionThresholds
             _stuck_thresholds = StuckDetectionThresholds(
-                action_observation=5,
-                action_error=4,
-                monologue=5,
-                alternating_pattern=8,
+                action_observation=8,
+                action_error=6,
+                monologue=8,
+                alternating_pattern=12,
             )
         except ImportError:
             pass  # Older SDK version without threshold support
@@ -408,7 +408,7 @@ async def run_task_stream(req: RunRequest):
                 model=f"ollama_chat/{req.model}",
                 api_key="ollama",
                 base_url=ollama_base,
-                temperature=0.15,
+                temperature=0.3,
                 timeout=180,
                 num_retries=2,
                 drop_params=True,
@@ -461,8 +461,8 @@ async def run_task_stream(req: RunRequest):
             try:
                 from openhands.sdk.conversation.types import StuckDetectionThresholds
                 _stuck_thresholds = StuckDetectionThresholds(
-                    action_observation=5, action_error=4,
-                    monologue=5, alternating_pattern=8,
+                    action_observation=8, action_error=6,
+                    monologue=8, alternating_pattern=12,
                 )
             except ImportError:
                 pass
@@ -606,17 +606,13 @@ Working directory: `{work_dir}` — {'continue working on existing files here' i
 ## TASK
 {req.task}
 
-## VERIFICATION (MANDATORY — do ALL of these before finishing)
+## VERIFICATION
+After writing all code:
+1. **Syntax check**: {verify_cmd}
+2. **Fix errors**: If the check fails, fix the code and re-check.
+3. **Dependencies**: Make sure all imports reference real libraries or files you created.
 
-After writing all code, you MUST verify it actually works:
-
-1. **Build / compile**: {verify_cmd}
-2. **Fix all errors**: If compilation fails, read the errors, fix the code, and re-compile until it succeeds. Do NOT finish with broken code.
-3. **Cross-file consistency**: After writing all files, grep for every public method/function/class you defined and verify that all call sites use the correct signature (argument count, types, return type). Fix any mismatches.
-4. **Dependency check**: Verify that every import/include references either a standard library, a declared dependency, or a file you created. Do NOT use APIs you are unsure exist — check documentation or test with a minimal snippet first.
-5. **Smoke test**: If the project has a main entry point, run it (briefly) to confirm it starts without immediate crashes. If it requires a display/GUI, at least verify compilation succeeds.
-
-Only call `finish` after steps 1-4 pass with zero errors.
+Call `finish` once the code compiles/parses without errors.
 """
 
     return prompt
