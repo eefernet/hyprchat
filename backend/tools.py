@@ -758,7 +758,12 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             return "\n".join(parts)
 
         elif name == "fetch_url":
-            url = args.get("url", "")
+            url = args.get("url", "").strip()
+            # Auto-prepend https:// if no protocol present
+            if url and not url.startswith(("http://", "https://")):
+                url = "https://" + url
+            # Encode spaces in URL path (common input issue)
+            url = url.replace(" ", "%20")
             await events.emit(conv_id, "tool_start", {"tool": "fetch_url", "icon": "globe", "status": f"Fetching: {url[:55]}"})
             r = await http.get(url, timeout=15, follow_redirects=True)
             if r.status_code >= 400:

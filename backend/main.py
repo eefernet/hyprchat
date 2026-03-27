@@ -222,7 +222,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0), verify=False)
 
 # ============================================================
 # PYDANTIC MODELS
@@ -722,7 +722,7 @@ async def seed_workflows():
             "name": "Scrape & Analyze",
             "description": "Fetch any URL, analyze word frequency, and AI-summarize the content",
             "steps": [
-                {"name": "Fetch Page", "type": "tool", "tool": "fetch_url", "args": {"url": "{{input}}"}, "output_var": "page_content", "retry": 2, "retry_delay": 2.0},
+                {"name": "Fetch Page", "type": "tool", "tool": "fetch_url", "args": {"url": "{{input}}"}, "output_var": "page_content", "retry": 2, "retry_delay": 2.0, "on_error": "continue"},
                 {"name": "Save Content", "type": "tool", "tool": "write_file", "args": {
                     "path": "/root/scraped.txt",
                     "content": "{{vars.page_content}}"
@@ -2166,9 +2166,14 @@ async def get_council_suggestions(council_id: str):
             "model": sug_model,
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
+            "think": False,
             "options": {"temperature": 0.9, "num_predict": 200}
         }, timeout=30)
-        msg = r.json()["message"]
+        data = r.json()
+        if "error" in data:
+            print(f"[COUNCIL] Suggestions model error: {data['error']}")
+            return {"suggestions": []}
+        msg = data["message"]
         text = msg.get("content", "").strip()
         # Fallback: some models put output in thinking field
         if not text and msg.get("thinking"):

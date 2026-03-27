@@ -212,7 +212,7 @@ class WorkflowExecutor:
         if system:
             payload["system"] = system
 
-        r = await self.http.post(f"{config.OLLAMA_URL}/api/generate", json=payload, timeout=120)
+        r = await self.http.post(f"{config.OLLAMA_URL}/api/generate", json=payload, timeout=300)
         if r.status_code != 200:
             raise RuntimeError(f"Ollama returned {r.status_code}: {r.text[:200]}")
 
@@ -347,6 +347,21 @@ class WorkflowExecutor:
             "total_steps": len(steps),
         })
 
+        try:
+          return await self._run_steps(run_id, steps, ctx, pseudo_conv, workflow, all_step_data)
+        except Exception as e:
+            # Catch-all: never leave a run stuck in "running"
+            await db.update_workflow_run(
+                run_id, status="failed", error=f"Unexpected error: {e}",
+                step_results=json.dumps(all_step_data),
+                completed_at=time.time(),
+            )
+            await self.events.emit(pseudo_conv, "workflow_error", {
+                "run_id": run_id, "error": str(e),
+            })
+            return all_step_data
+
+    async def _run_steps(self, run_id, steps, ctx, pseudo_conv, workflow, all_step_data):
         for i, step in enumerate(steps):
             step_name = step.get("name", f"Step {i}")
             ctx["step_index"] = i
