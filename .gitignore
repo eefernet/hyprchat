@@ -7,6 +7,7 @@ __pycache__/
 .deploy_config.json
 
 # Environment / secrets
+.idea/misc.xml
 .env
 .env.*
 *.pem

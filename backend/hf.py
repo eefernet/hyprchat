@@ -15,6 +15,35 @@ import config
 HF_MODELS_DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), "..", "hf_models")
 
 
+def parse_ollama_progress(line: str, final_name: str = "") -> tuple[str | None, str | None]:
+    """Parse a single Ollama streaming JSON line into a normalized SSE event.
+
+    Returns (sse_string, status_key) where status_key is one of:
+    "downloading", "done", "error", "creating", or None.
+    """
+    try:
+        d = json.loads(line)
+    except json.JSONDecodeError:
+        return None, None
+    if d.get("error"):
+        return f"data: {json.dumps({'status': 'error', 'message': d['error']})}\n\n", "error"
+    status = d.get("status", "")
+    completed = d.get("completed") or 0
+    total = d.get("total") or 0
+    sl = status.lower()
+    if ("pulling" in sl or "downloading" in sl or "verifying" in sl) and total:
+        pct = int(completed / total * 100)
+        mb_d, mb_t = completed / 1048576, total / 1048576
+        msg = f"Downloading {mb_d:.0f}/{mb_t:.0f} MB ({pct}%)"
+        return f"data: {json.dumps({'status': 'downloading', 'pct': pct, 'message': msg, 'completed': completed, 'total': total})}\n\n", "downloading"
+    elif status in ("success", "done"):
+        label = final_name or "model"
+        return f"data: {json.dumps({'status': 'done', 'message': f'✓ {label!r} ready!', 'model_name': final_name})}\n\n", "done"
+    elif status:
+        return f"data: {json.dumps({'status': 'creating', 'message': status})}\n\n", "creating"
+    return None, None
+
+
 async def hf_search(http, q: str = "", limit: int = 20, gguf_only: bool = True):
     """Search HuggingFace models."""
     try:
@@ -40,17 +69,33 @@ async def hf_search(http, q: str = "", limit: int = 20, gguf_only: bool = True):
 
 
 async def hf_model_info(http, repo_id: str):
-    """Get HuggingFace model details including GGUF file listing."""
+    """Get HuggingFace model details including GGUF file listing with sizes."""
     try:
-        r = await http.get(f"https://huggingface.co/api/models/{repo_id}", timeout=15)
+        # Fetch model info and file tree in parallel for sizes
+        import asyncio
+        model_req = http.get(f"https://huggingface.co/api/models/{repo_id}", timeout=15)
+        tree_req = http.get(f"https://huggingface.co/api/models/{repo_id}/tree/main", timeout=15)
+        r, tree_r = await asyncio.gather(model_req, tree_req, return_exceptions=True)
+        if isinstance(r, Exception):
+            raise r
         r.raise_for_status()
         data = r.json()
-        gguf_files = [
-            {"name": s.get("rfilename", ""),
-             "size": s.get("lfs", {}).get("size") or s.get("size") or 0}
-            for s in data.get("siblings", [])
-            if (s.get("rfilename", "") or "").lower().endswith(".gguf")
-        ]
+
+        # Build size lookup from tree endpoint (has actual file sizes)
+        tree_sizes = {}
+        if not isinstance(tree_r, Exception) and tree_r.status_code == 200:
+            for f in tree_r.json():
+                path = f.get("path", "")
+                if path.lower().endswith(".gguf"):
+                    tree_sizes[path] = f.get("size") or f.get("lfs", {}).get("size") or 0
+
+        gguf_files = []
+        for s in data.get("siblings", []):
+            fname = s.get("rfilename", "")
+            if not fname.lower().endswith(".gguf"):
+                continue
+            size = tree_sizes.get(fname) or s.get("lfs", {}).get("size") or s.get("size") or 0
+            gguf_files.append({"name": fname, "size": size})
         return {
             "id": data.get("id", ""),
             "downloads": data.get("downloads", 0),
@@ -110,31 +155,6 @@ async def hf_download(http, request: Request):
     hf_pull_name = f"hf.co/{repo_id}" + (f":{quant}" if quant else "")
     hf_url = f"https://huggingface.co/{repo_id}/resolve/main/{filenames[0]}"
 
-    def _sse_progress(line: str, final_name: str) -> str | None:
-        try:
-            d = json.loads(line)
-        except json.JSONDecodeError:
-            return None
-        if d.get("error"):
-            return f"data: {json.dumps({'status': 'error', 'message': d['error']})}\n\n"
-        status = d.get("status", "")
-        completed = d.get("completed") or 0
-        total = d.get("total") or 0
-        sl = status.lower()
-        if "pulling" in sl or "downloading" in sl or "verifying" in sl:
-            if total:
-                pct = int(completed / total * 100)
-                mb_d, mb_t = completed / 1048576, total / 1048576
-                msg = f"⬇ {mb_d:.0f} / {mb_t:.0f} MB ({pct}%)"
-            else:
-                pct, msg = 0, f"⬇ {status}"
-            return f"data: {json.dumps({'status': 'downloading', 'pct': pct, 'message': msg, 'completed': completed, 'total': total})}\n\n"
-        elif status in ("success", "done"):
-            return f"data: {json.dumps({'status': 'done', 'message': f'✓ {final_name!r} ready!', 'model_name': final_name})}\n\n"
-        elif status:
-            return f"data: {json.dumps({'status': 'creating', 'message': status})}\n\n"
-        return None
-
     async def generate():
         try:
             yield f"data: {json.dumps({'status': 'creating', 'message': f'Pulling {hf_pull_name} via Ollama...'})}\n\n"
@@ -150,10 +170,10 @@ async def hf_download(http, request: Request):
                     async for line in resp.aiter_lines():
                         if not line.strip():
                             continue
-                        sse = _sse_progress(line, model_name)
+                        sse, key = parse_ollama_progress(line, model_name)
                         if not sse:
                             continue
-                        if '"status":"error"' in sse or '"status": "error"' in sse:
+                        if key == "error":
                             pull_err = sse
                             break
                         yield sse
@@ -171,7 +191,7 @@ async def hf_download(http, request: Request):
                         timeout=httpx.Timeout(60.0, connect=10.0),
                     ) as resp2:
                         async for line in resp2.aiter_lines():
-                            sse = _sse_progress(line, model_name)
+                            sse, _ = parse_ollama_progress(line, model_name)
                             if sse:
                                 yield sse
                 yield f"data: {json.dumps({'status': 'done', 'message': f'✓ {model_name!r} ready!', 'model_name': model_name})}\n\n"
@@ -188,18 +208,28 @@ async def hf_download(http, request: Request):
                     err = (await resp.aread()).decode()[:400]
                     yield f"data: {json.dumps({'status': 'error', 'message': f'All download methods failed. Pull: {pull_err} | Modelfile: {err}'})}\n\n"
                     return
-                done = False
+                had_error = False
                 async for line in resp.aiter_lines():
                     if not line.strip():
                         continue
-                    sse = _sse_progress(line, model_name)
+                    sse, key = parse_ollama_progress(line, model_name)
                     if sse:
                         yield sse
-                        if '"status": "done"' in sse:
-                            done = True
+                        if key == "done":
                             return
-                if not done:
-                    yield f"data: {json.dumps({'status': 'done', 'message': f'✓ {model_name!r} ready!', 'model_name': model_name})}\n\n"
+                        if key == "error":
+                            had_error = True
+                            return
+                if not had_error:
+                    # Stream ended without explicit success — verify model exists
+                    try:
+                        check = await http.post(f"{config.OLLAMA_URL}/api/show", json={"name": model_name})
+                        if check.status_code == 200:
+                            yield f"data: {json.dumps({'status': 'done', 'message': f'✓ {model_name!r} ready!', 'model_name': model_name})}\n\n"
+                        else:
+                            yield f"data: {json.dumps({'status': 'error', 'message': 'Stream ended without confirmation — model may not be ready'})}\n\n"
+                    except Exception:
+                        yield f"data: {json.dumps({'status': 'error', 'message': 'Stream ended without confirmation — could not verify model'})}\n\n"
 
         except Exception as e:
             yield f"data: {json.dumps({'status': 'error', 'message': str(e)})}\n\n"

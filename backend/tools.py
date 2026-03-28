@@ -758,7 +758,12 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             return "\n".join(parts)
 
         elif name == "fetch_url":
-            url = args.get("url", "")
+            url = args.get("url", "").strip()
+            # Auto-prepend https:// if no protocol present
+            if url and not url.startswith(("http://", "https://")):
+                url = "https://" + url
+            # Encode spaces in URL path (common input issue)
+            url = url.replace(" ", "%20")
             await events.emit(conv_id, "tool_start", {"tool": "fetch_url", "icon": "globe", "status": f"Fetching: {url[:55]}"})
             r = await http.get(url, timeout=15, follow_redirects=True)
             if r.status_code >= 400:
@@ -1127,10 +1132,10 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 "grep": "🔎", "grep_result": "🔎", "thinking": "🧠", "finish": "✅",
             }
             _ACTION_LABELS = {
-                "starting": "Starting", "terminal": "Running", "terminal_result": "Output",
-                "file_create": "Creating", "file_edit": "Editing", "file_view": "Reading",
-                "file_editor_result": "File ready", "glob": "Searching", "grep": "Scanning",
-                "thinking": "Thinking", "finish": "Finishing",
+                "starting": "Starting agent", "terminal": "Running command", "terminal_result": "Command output",
+                "file_create": "Writing file", "file_edit": "Editing file", "file_view": "Reading file",
+                "file_editor_result": "File saved", "glob": "Searching files", "grep": "Scanning code",
+                "thinking": "Overseer planning", "finish": "Wrapping up",
             }
             _agent_steps = []  # Accumulate steps for expandable detail
 
@@ -1162,7 +1167,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             if evt.get("type") == "step":
                                 step_num = evt.get("step", 0)
                                 action = evt.get("action", "")
-                                detail = evt.get("detail", "")[:80]
+                                detail = re.sub(r'\x1b\[[^a-zA-Z]*[a-zA-Z]|\[\?[0-9]+[a-z]', '', evt.get("detail", ""))[:80]
                                 icon = _ACTION_ICONS.get(action, "⏳")
                                 label = _ACTION_LABELS.get(action, action.replace("_", " ").title())
                                 _agent_steps.append({"step": step_num, "icon": icon, "label": label, "detail": detail})
@@ -1390,12 +1395,86 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         f"(model: {coder_model}, {duration}s). "
                         f"The model may not support tool calling. "
                         f"Detail: {error_detail}\n\n"
-                        f"Please write the code directly using the write_file tool instead."
+                        f"The coding agent failed. You MUST now write the code yourself directly "
+                        f"using write_file and run_shell tools. Do NOT call generate_code again."
                     )
             else:
                 error = result.get("error", "Unknown error")[:300]
                 status = result.get("status", "error")
                 steps = result.get("steps", [])
+
+                # ── Retry once with simplified task on stuck/error ──
+                if status in ("stuck", "error") and not oh_payload.get("_retried"):
+                    print(f"[CODEGEN:OH] Agent {status}, retrying with simplified task (+5 rounds)...")
+                    oh_payload["_retried"] = True
+                    oh_payload["max_rounds"] = max_rounds + 5
+                    oh_payload["task"] = (
+                        f"SIMPLE REQUEST — focus on writing code, not verifying:\n{task}"
+                    )
+                    await events.emit(conv_id, "tool_progress", {
+                        "tool": "generate_code", "icon": "wand",
+                        "status": f"🔄 Retrying with simplified approach...",
+                    })
+                    _agent_steps = []
+                    try:
+                        import httpx as _httpx
+                        async with _httpx.AsyncClient(timeout=_httpx.Timeout(connect=10, read=600, write=10, pool=10)) as retry_client:
+                            async with retry_client.stream("POST", f"{openhands_url}/run-stream", json=oh_payload) as retry_resp:
+                                if retry_resp.status_code == 200:
+                                    async for line in retry_resp.aiter_lines():
+                                        if not line.startswith("data: "):
+                                            continue
+                                        try:
+                                            evt = json.loads(line[6:])
+                                        except (json.JSONDecodeError, ValueError):
+                                            continue
+                                        if evt.get("type") == "step":
+                                            step_num = evt.get("step", 0)
+                                            action = evt.get("action", "")
+                                            detail = re.sub(r'\x1b\[[^a-zA-Z]*[a-zA-Z]|\[\?[0-9]+[a-z]', '', evt.get("detail", ""))[:80]
+                                            icon = _ACTION_ICONS.get(action, "⏳")
+                                            label = _ACTION_LABELS.get(action, action.replace("_", " ").title())
+                                            _agent_steps.append({"step": step_num, "icon": icon, "label": label, "detail": detail})
+                                            await events.emit(conv_id, "tool_progress", {
+                                                "tool": "generate_code", "icon": "wand",
+                                                "status": f"Retry step {step_num}: {icon} {label} — {detail}",
+                                            })
+                                        elif evt.get("type") in ("done", "error"):
+                                            result = evt
+                                            break
+                                else:
+                                    result = None
+                    except Exception as retry_err:
+                        print(f"[CODEGEN:OH] SSE retry failed, trying blocking /run: {retry_err}")
+                        try:
+                            oh_resp = await http.post(f"{openhands_url}/run", json=oh_payload, timeout=600)
+                            if oh_resp.status_code == 200:
+                                result = oh_resp.json()
+                            else:
+                                result = None
+                        except Exception:
+                            result = None
+
+                    # If retry produced a successful result, process it above
+                    if result and result.get("status") == "ok":
+                        files = result.get("files_created", [])
+                        if files:
+                            # Re-run the success path (simplified — just return the result)
+                            duration = result.get("duration_seconds", 0)
+                            _project_id = result.get("project_id", "")
+                            file_list = "\n".join(f"  - {f}" for f in files)
+                            await events.emit(conv_id, "tool_end", {
+                                "tool": "generate_code", "icon": "wand",
+                                "status": f"🤖 OpenHands (retry): {len(files)} file(s) built ({duration}s)",
+                            })
+                            return (
+                                f"PROJECT COMPLETE (retry succeeded). OpenHands agent built the project "
+                                f"(model: {coder_model}, {duration}s, project_id: {_project_id}).\n\n"
+                                f"**Files created ({len(files)}):**\n{file_list}\n"
+                            )
+                    # Retry also failed — fall through to error response below
+                    print(f"[CODEGEN:OH] Retry also failed")
+
                 await events.emit(conv_id, "tool_end", {
                     "tool": "generate_code", "icon": "wand",
                     "status": f"🤖 OpenHands agent {status}",
@@ -1405,7 +1484,10 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 if steps:
                     last_steps = [f"  - [{s.get('action','')}] {s.get('detail','')[:80]}" for s in steps[-5:]]
                     err_resp += f"\nLast agent steps:\n" + "\n".join(last_steps)
-                err_resp += "\nYou can still write code directly using write_file + run_shell to test it."
+                err_resp += (
+                    "\n\nThe coding agent failed. You MUST now write the code yourself directly "
+                    "using write_file and run_shell tools. Do NOT call generate_code again."
+                )
                 return err_resp
 
         elif name in custom_tool_map:

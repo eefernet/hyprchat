@@ -138,6 +138,56 @@ CREATE TABLE IF NOT EXISTS service_health_log (
     checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_health_service_time ON service_health_log(service, checked_at);
+
+CREATE TABLE IF NOT EXISTS token_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT,
+    model TEXT NOT NULL,
+    persona_name TEXT DEFAULT '',
+    prompt_tokens INTEGER DEFAULT 0,
+    completion_tokens INTEGER DEFAULT 0,
+    total_tokens INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_token_usage_model ON token_usage(model);
+CREATE INDEX IF NOT EXISTS idx_token_usage_date ON token_usage(created_at);
+
+CREATE TABLE IF NOT EXISTS workflows (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    steps TEXT NOT NULL DEFAULT '[]',
+    webhook_id TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    conversation_id TEXT,
+    status TEXT DEFAULT 'pending',
+    input TEXT DEFAULT '',
+    step_results TEXT DEFAULT '[]',
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    error TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS workflow_schedules (
+    id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    cron_expr TEXT NOT NULL,
+    input_template TEXT DEFAULT '',
+    enabled INTEGER DEFAULT 1,
+    last_run_at TIMESTAMP,
+    next_run_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+);
 """
 
 
@@ -157,6 +207,7 @@ async def init_db():
         # Migrate: add new columns to existing tables if missing
         for col, default in [("tool_ids", "'[]'"), ("persona_name", "''"), ("persona_avatar", "''"),
                               ("is_council", "0"), ("council_config_id", "NULL"), ("use_memories", "0"),
+                              ("pinned", "0"),
                               ]:
             try:
                 await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} TEXT DEFAULT {default}")
@@ -170,6 +221,44 @@ async def init_db():
             except Exception as e:
                 if "duplicate column" not in str(e).lower():
                     print(f"[DB MIGRATION] Warning: {e}")
+        # Migrate workflows: add webhook_id column
+        try:
+            await db.execute("ALTER TABLE workflows ADD COLUMN webhook_id TEXT DEFAULT ''")
+        except Exception as e:
+            if "duplicate column" not in str(e).lower():
+                print(f"[DB MIGRATION] Warning: {e}")
+        # Migrate conversations: add fork columns
+        for col, default in [("forked_from", "NULL"), ("fork_point_msg_id", "NULL")]:
+            try:
+                await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} TEXT DEFAULT {default}")
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    print(f"[DB MIGRATION] Warning: {e}")
+        # FTS5 full-text search index for messages
+        try:
+            await db.execute("SELECT * FROM messages_fts LIMIT 1")
+        except Exception:
+            await db.executescript("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                    content,
+                    content='messages',
+                    content_rowid='id',
+                    tokenize='porter unicode61'
+                );
+                CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+                    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+                END;
+                CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
+                    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
+                END;
+                CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE OF content ON messages BEGIN
+                    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
+                    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+                END;
+            """)
+            # Rebuild index from existing messages
+            await db.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+            print("[DB MIGRATION] Created FTS5 search index for messages")
         # Seed preset personas (idempotent — fixed ID)
         DEEP_RESEARCHER_PROMPT = """You are Deep Researcher — an expert research analyst powered by real-time multi-source intelligence gathering.
 
@@ -240,7 +329,7 @@ async def get_conversations(limit: int = 50, offset: int = 0):
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT * FROM conversations ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            "SELECT * FROM conversations ORDER BY CAST(COALESCE(pinned,'0') AS INTEGER) DESC, updated_at DESC LIMIT ? OFFSET ?",
             (limit, offset)
         )
         rows = await cursor.fetchall()
@@ -775,5 +864,342 @@ async def get_kb_files_for_kbs(kb_ids: list) -> list:
             kb_ids
         )
         return [dict(r) for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+
+# ============================================================
+# FULL-TEXT SEARCH
+# ============================================================
+async def search_messages(query: str, limit: int = 20):
+    """Full-text search across all messages, returning conversation context."""
+    db = await get_db()
+    try:
+        cursor = await db.execute("""
+            SELECT m.id, m.conversation_id, m.role, m.content,
+                   snippet(messages_fts, 0, '<mark>', '</mark>', '...', 32) AS snippet,
+                   c.title AS conv_title
+            FROM messages_fts
+            JOIN messages m ON m.id = messages_fts.rowid
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE messages_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+        """, (query, limit))
+        return [dict(r) for r in await cursor.fetchall()]
+    except Exception as e:
+        print(f"[SEARCH] Error: {e}")
+        return []
+    finally:
+        await db.close()
+
+
+# ============================================================
+# CONVERSATION FORKING
+# ============================================================
+async def fork_conversation(original_conv_id: str, fork_msg_id: int, new_conv_id: str):
+    """Fork a conversation at a specific message, copying messages up to that point."""
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT * FROM conversations WHERE id = ?", (original_conv_id,))
+        original = await cursor.fetchone()
+        if not original:
+            return None
+        original = dict(original)
+        now = datetime.utcnow().isoformat()
+        await db.execute(
+            """INSERT INTO conversations
+               (id, title, model, system_prompt, model_config_id, tool_ids,
+                persona_name, persona_avatar, forked_from, fork_point_msg_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (new_conv_id, f"Fork of {original.get('title', 'Chat')}", original.get("model", ""),
+             original.get("system_prompt", ""), original.get("model_config_id"),
+             original.get("tool_ids", "[]"), original.get("persona_name", ""),
+             original.get("persona_avatar", ""), original_conv_id, str(fork_msg_id), now, now)
+        )
+        await db.execute("""
+            INSERT INTO messages (conversation_id, role, content, metadata, created_at)
+            SELECT ?, role, content, metadata, created_at
+            FROM messages WHERE conversation_id = ? AND id <= ?
+            ORDER BY id ASC
+        """, (new_conv_id, original_conv_id, fork_msg_id))
+        await db.commit()
+        return await get_conversation(new_conv_id)
+    finally:
+        await db.close()
+
+
+async def get_forks(conv_id: str):
+    """Get all conversations forked from this one."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT id, title, fork_point_msg_id, created_at FROM conversations WHERE forked_from = ?",
+            (conv_id,))
+        return [dict(r) for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+
+# ============================================================
+# TOKEN USAGE ANALYTICS
+# ============================================================
+async def record_token_usage(conversation_id: str, model: str, persona_name: str,
+                              prompt_tokens: int, completion_tokens: int):
+    db = await get_db()
+    try:
+        await db.execute(
+            """INSERT INTO token_usage (conversation_id, model, persona_name,
+               prompt_tokens, completion_tokens, total_tokens)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (conversation_id, model, persona_name or "", prompt_tokens, completion_tokens,
+             prompt_tokens + completion_tokens)
+        )
+        await db.commit()
+    except Exception as e:
+        print(f"[TOKEN USAGE] Error recording: {e}")
+    finally:
+        await db.close()
+
+
+async def get_token_usage(days: int = 30, group_by: str = "day"):
+    """Aggregate token usage. group_by: day, model, persona."""
+    db = await get_db()
+    try:
+        if group_by == "model":
+            q = """SELECT model, SUM(prompt_tokens) as prompt_tokens,
+                   SUM(completion_tokens) as completion_tokens,
+                   SUM(total_tokens) as total_tokens, COUNT(*) as request_count
+                   FROM token_usage WHERE created_at >= datetime('now', ?)
+                   GROUP BY model ORDER BY total_tokens DESC"""
+        elif group_by == "persona":
+            q = """SELECT persona_name, SUM(prompt_tokens) as prompt_tokens,
+                   SUM(completion_tokens) as completion_tokens,
+                   SUM(total_tokens) as total_tokens, COUNT(*) as request_count
+                   FROM token_usage WHERE created_at >= datetime('now', ?)
+                   GROUP BY persona_name ORDER BY total_tokens DESC"""
+        else:
+            q = """SELECT date(created_at) as date,
+                   SUM(prompt_tokens) as prompt_tokens,
+                   SUM(completion_tokens) as completion_tokens,
+                   SUM(total_tokens) as total_tokens, COUNT(*) as request_count
+                   FROM token_usage WHERE created_at >= datetime('now', ?)
+                   GROUP BY date(created_at) ORDER BY date ASC"""
+        cursor = await db.execute(q, (f"-{days} days",))
+        return [dict(r) for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+
+# ============================================================
+# WORKFLOW CRUD
+# ============================================================
+async def create_workflow(id: str, name: str, description: str, steps: str):
+    db = await get_db()
+    try:
+        now = datetime.utcnow().isoformat()
+        await db.execute(
+            "INSERT INTO workflows (id, name, description, steps, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (id, name, description, steps, now, now)
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_workflows():
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT * FROM workflows ORDER BY updated_at DESC")
+        wfs = []
+        for r in await cursor.fetchall():
+            w = dict(r)
+            try:
+                w["steps"] = json.loads(w["steps"])
+            except (json.JSONDecodeError, TypeError):
+                w["steps"] = []
+            wfs.append(w)
+        return wfs
+    finally:
+        await db.close()
+
+
+async def get_workflow(id: str):
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT * FROM workflows WHERE id = ?", (id,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        w = dict(row)
+        try:
+            w["steps"] = json.loads(w["steps"])
+        except (json.JSONDecodeError, TypeError):
+            w["steps"] = []
+        return w
+    finally:
+        await db.close()
+
+
+async def update_workflow(id: str, **kwargs):
+    if not kwargs:
+        return
+    db = await get_db()
+    try:
+        if "steps" in kwargs and isinstance(kwargs["steps"], list):
+            kwargs["steps"] = json.dumps(kwargs["steps"])
+        sets = ", ".join(f"{k} = ?" for k in kwargs)
+        vals = list(kwargs.values()) + [id]
+        await db.execute(f"UPDATE workflows SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?", vals)
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def delete_workflow(id: str):
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM workflows WHERE id = ?", (id,))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def create_workflow_run(id: str, workflow_id: str, conversation_id: str, input_text: str):
+    db = await get_db()
+    try:
+        now = datetime.utcnow().isoformat()
+        await db.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, conversation_id, status, input, created_at) VALUES (?, ?, ?, 'pending', ?, ?)",
+            (id, workflow_id, conversation_id or "", input_text, now)
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def update_workflow_run(id: str, **kwargs):
+    if not kwargs:
+        return
+    db = await get_db()
+    try:
+        sets = ", ".join(f"{k} = ?" for k in kwargs)
+        vals = list(kwargs.values()) + [id]
+        await db.execute(f"UPDATE workflow_runs SET {sets} WHERE id = ?", vals)
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_workflow_runs(workflow_id: str = None, limit: int = 20):
+    db = await get_db()
+    try:
+        if workflow_id:
+            cursor = await db.execute(
+                "SELECT * FROM workflow_runs WHERE workflow_id = ? ORDER BY created_at DESC LIMIT ?",
+                (workflow_id, limit))
+        else:
+            cursor = await db.execute(
+                "SELECT * FROM workflow_runs ORDER BY created_at DESC LIMIT ?", (limit,))
+        runs = []
+        for r in await cursor.fetchall():
+            run = dict(r)
+            try:
+                run["step_results"] = json.loads(run.get("step_results", "[]"))
+            except (json.JSONDecodeError, TypeError):
+                run["step_results"] = []
+            runs.append(run)
+        return runs
+    finally:
+        await db.close()
+
+
+async def get_workflow_by_webhook(webhook_id: str):
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT * FROM workflows WHERE webhook_id = ?", (webhook_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        w = dict(row)
+        try:
+            w["steps"] = json.loads(w["steps"])
+        except (json.JSONDecodeError, TypeError):
+            w["steps"] = []
+        return w
+    finally:
+        await db.close()
+
+
+# ============================================================
+# WORKFLOW SCHEDULES
+# ============================================================
+async def create_workflow_schedule(id: str, workflow_id: str, cron_expr: str, input_template: str, next_run_at: str):
+    db = await get_db()
+    try:
+        now = datetime.utcnow().isoformat()
+        await db.execute(
+            "INSERT INTO workflow_schedules (id, workflow_id, cron_expr, input_template, enabled, next_run_at, created_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
+            (id, workflow_id, cron_expr, input_template, next_run_at, now)
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_workflow_schedules(workflow_id: str = None):
+    db = await get_db()
+    try:
+        if workflow_id:
+            cursor = await db.execute(
+                "SELECT * FROM workflow_schedules WHERE workflow_id = ? ORDER BY created_at DESC",
+                (workflow_id,))
+        else:
+            cursor = await db.execute("SELECT * FROM workflow_schedules ORDER BY created_at DESC")
+        return [dict(r) for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+
+async def update_workflow_schedule(id: str, **kwargs):
+    if not kwargs:
+        return
+    db = await get_db()
+    try:
+        sets = ", ".join(f"{k} = ?" for k in kwargs)
+        vals = list(kwargs.values()) + [id]
+        await db.execute(f"UPDATE workflow_schedules SET {sets} WHERE id = ?", vals)
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def delete_workflow_schedule(id: str):
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM workflow_schedules WHERE id = ?", (id,))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_due_schedules():
+    db = await get_db()
+    try:
+        now = datetime.utcnow().isoformat()
+        cursor = await db.execute(
+            "SELECT ws.*, w.name as workflow_name, w.steps as workflow_steps, w.description as workflow_description "
+            "FROM workflow_schedules ws JOIN workflows w ON ws.workflow_id = w.id "
+            "WHERE ws.enabled = 1 AND ws.next_run_at <= ?",
+            (now,))
+        schedules = []
+        for r in await cursor.fetchall():
+            s = dict(r)
+            try:
+                s["workflow_steps"] = json.loads(s["workflow_steps"])
+            except (json.JSONDecodeError, TypeError):
+                s["workflow_steps"] = []
+            schedules.append(s)
+        return schedules
     finally:
         await db.close()
