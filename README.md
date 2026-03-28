@@ -159,6 +159,65 @@ systemctl status hyprchat        # status
 
 ---
 
+## 🧪 Testing
+
+HyprChat includes a comprehensive test suite (101 tests) covering all major features. Tests run against a live server instance.
+
+### Setup
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install pytest httpx
+```
+
+### Running tests
+
+```bash
+# Run all tests
+python -m pytest tests/ -v
+
+# Run against a different server
+HYPRCHAT_URL=http://192.168.1.120:8000 python -m pytest tests/ -v
+
+# Run a specific category
+python -m pytest tests/ -v -k "health"       # health & settings
+python -m pytest tests/ -v -k "conversation"  # conversation CRUD
+python -m pytest tests/ -v -k "chat"          # SSE chat streaming
+python -m pytest tests/ -v -k "knowledge"     # knowledge bases & RAG
+python -m pytest tests/ -v -k "tool"          # tools & code execution
+python -m pytest tests/ -v -k "persona"       # personas
+python -m pytest tests/ -v -k "workspace"     # workspaces
+python -m pytest tests/ -v -k "council"       # councils & debates
+python -m pytest tests/ -v -k "workflow"      # workflow automation
+python -m pytest tests/ -v -k "huggingface"   # HuggingFace browser
+python -m pytest tests/ -v -k "integration"   # end-to-end flows
+
+# Or use the runner script
+chmod +x tests/run_tests.sh
+./tests/run_tests.sh
+```
+
+### Test coverage
+
+| Category | Tests | What's covered |
+|----------|-------|----------------|
+| Health & Settings | 10 | Health check, history, settings CRUD, changelog, RAG stats, analytics |
+| Models | 7 | Model listing, details, info, template info, builtin tools, languages |
+| Conversations | 10 | CRUD, messages, persistence, search, forking, 404 handling |
+| Chat/SSE | 3 | SSE streaming, token events, bad model handling, event stream |
+| Knowledge Bases | 7 | KB CRUD, file upload, listing, reindexing |
+| Tools & Execution | 9 | Tool CRUD, Python exec, shell exec, fetch_url, web search |
+| Personas | 9 | Persona CRUD, seed bots (coder, conspiracy, based) |
+| Workspaces | 7 | Workspace CRUD, add/remove conversations |
+| Councils | 11 | Council CRUD, members, presets, AI suggestions, analytics |
+| Workflows | 11 | Workflow CRUD, execution + polling, webhooks, schedules, seeding |
+| HuggingFace | 5 | GGUF search, model info, readme |
+| Integration | 5 | Full lifecycle flows combining multiple features |
+
+---
+
 ## 🧰 Stack
 
 | Layer | Tech |

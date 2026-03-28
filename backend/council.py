@@ -10,6 +10,32 @@ import config
 import database as db
 
 
+def _is_gibberish(text: str, threshold: float = 0.3) -> bool:
+    """Detect incoherent model output by checking the ratio of real English words."""
+    if not text or len(text) < 50:
+        return False
+    words = re.findall(r'[a-zA-Z]{3,}', text.lower())
+    if len(words) < 10:
+        return False
+    # Common English words — if fewer than threshold are recognizable, it's gibberish
+    common = {
+        "the", "and", "for", "are", "but", "not", "you", "all", "can", "had", "her",
+        "was", "one", "our", "out", "has", "his", "how", "its", "may", "new", "now",
+        "old", "see", "way", "who", "did", "get", "let", "say", "she", "too", "use",
+        "this", "that", "with", "have", "from", "they", "been", "said", "each", "which",
+        "their", "will", "other", "about", "many", "then", "them", "some", "could",
+        "would", "make", "like", "time", "just", "know", "take", "people", "into",
+        "year", "your", "good", "very", "when", "what", "there", "also", "after",
+        "should", "think", "because", "these", "than", "first", "must", "being",
+        "through", "most", "where", "much", "before", "between", "does", "however",
+        "while", "such", "even", "though", "well", "still", "risk", "data", "based",
+        "model", "system", "company", "group", "specific", "hiring", "tool",
+    }
+    recognized = sum(1 for w in words if w in common)
+    ratio = recognized / len(words)
+    return ratio < threshold
+
+
 async def stream_council_chat(http, events, council, req_messages, conv_id, quick_search: bool = False, kb_ids: list = None):
     """Async generator that streams council member responses, voting, and host synthesis."""
     members = council.get("members", [])
@@ -131,27 +157,40 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                 "keep_alive": "30m",
             }
             full = ""
-            try:
-                async with http.stream("POST", f"{config.OLLAMA_URL}/api/chat",
-                                       json=payload, timeout=180) as resp:
-                    async for line in resp.aiter_lines():
-                        if not line.strip():
-                            continue
-                        try:
-                            chunk = json.loads(line)
-                        except Exception:
-                            continue
-                        content = chunk.get("message", {}).get("content", "")
-                        if content:
-                            full += content
-                            await output_q.put({"type": "council_token",
-                                                "member_id": mid, "model": model,
-                                                "content": content, "round": round_num})
-                        if chunk.get("done"):
-                            break
-            except Exception as e:
-                await output_q.put({"type": "council_token", "member_id": mid,
-                                    "model": model, "content": f"\n[Error: {e}]", "round": round_num})
+            max_attempts = 2
+            for attempt in range(max_attempts):
+                full = ""
+                try:
+                    async with http.stream("POST", f"{config.OLLAMA_URL}/api/chat",
+                                           json=payload, timeout=180) as resp:
+                        async for line in resp.aiter_lines():
+                            if not line.strip():
+                                continue
+                            try:
+                                chunk = json.loads(line)
+                            except Exception:
+                                continue
+                            content = chunk.get("message", {}).get("content", "")
+                            if content:
+                                full += content
+                                await output_q.put({"type": "council_token",
+                                                    "member_id": mid, "model": model,
+                                                    "content": content, "round": round_num})
+                            if chunk.get("done"):
+                                break
+                except Exception as e:
+                    print(f"[COUNCIL] Member {member.get('persona_name', model)} error (attempt {attempt+1}): {e}")
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(2)
+                        continue
+                    await output_q.put({"type": "council_token", "member_id": mid,
+                                        "model": model, "content": f"\n[Error: {e}]", "round": round_num})
+                # Got a non-empty response, break retry loop
+                if full.strip():
+                    break
+                elif attempt < max_attempts - 1:
+                    print(f"[COUNCIL] Member {member.get('persona_name', model)} empty response, retrying...")
+                    await asyncio.sleep(2)
             round_responses[mid] = full
             await output_q.put({"type": "council_done", "member_id": mid, "model": model, "round": round_num})
 
@@ -171,12 +210,15 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Update tracking
+        # Update tracking — only overwrite if the member actually responded
         for mid, content in round_responses.items():
-            member_responses[mid] = content
+            if content.strip():
+                member_responses[mid] = content
+            else:
+                print(f"[COUNCIL] Member {mid} produced empty response in round {round_num}, keeping previous")
             if mid not in all_round_responses:
                 all_round_responses[mid] = []
-            all_round_responses[mid].append(content)
+            all_round_responses[mid].append(content if content.strip() else member_responses.get(mid, ""))
 
     # ── Round 0: Initial responses ──
     yield f"data: {json.dumps({'type': 'council_round', 'round': 0, 'total_rounds': debate_rounds + 1, 'label': 'Opening Statements'})}\n\n"
@@ -209,7 +251,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                     continue
                 name = m.get("persona_name") or m["model"].split(":")[0]
                 prev = member_responses.get(m["id"], "")
-                if prev:
+                if prev and not _is_gibberish(prev):
                     others_text.append(f'[{name}]: {prev[:800]}')
             if not others_text:
                 return None
@@ -242,7 +284,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
     vote_tally = {}
     updated_points = {}
 
-    responding_members = [m for m in members if member_responses.get(m["id"])]
+    responding_members = [m for m in members if member_responses.get(m["id"]) and not _is_gibberish(member_responses[m["id"]])]
     if len(responding_members) > 1:
         yield f"data: {json.dumps({'type': 'council_voting'})}\n\n"
 
@@ -340,7 +382,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                 for member in members:
                     mid = member["id"]
                     rounds = all_round_responses.get(mid, [])
-                    if rnd_idx < len(rounds) and rounds[rnd_idx]:
+                    if rnd_idx < len(rounds) and rounds[rnd_idx] and not _is_gibberish(rounds[rnd_idx]):
                         name = member.get("persona_name") or member["model"]
                         round_entries.append(f"[{name}]: {rounds[rnd_idx][:600]}")
                 if round_entries:
@@ -349,7 +391,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
         else:
             all_resp = "\n\n".join(
                 f"[{member.get('persona_name') or member['model']}]: {member_responses.get(member['id'], '')}"
-                for member in members if member_responses.get(member["id"])
+                for member in members if member_responses.get(member["id"]) and not _is_gibberish(member_responses[member["id"]])
             )
         vote_summary = ""
         if vote_details:

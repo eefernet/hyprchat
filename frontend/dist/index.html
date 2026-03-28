@@ -426,7 +426,7 @@ const Pill = ({ev,t,expanded,onToggle})=>{
 };
 
 // Inline tool status: shows latest pill, expands to show all
-const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
+const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=>{
   const [showAll,setShowAll]=useState(false);
   if(!evts.length) return null;
 
@@ -463,9 +463,14 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview})=>{
   for(const [key, group] of Object.entries(toolPairs)){
     const end = group.find(e=>e.type==="tool_end"||e.type==="tool_done"||e.type==="tool_error");
     if(end){merged.push(end);}else{
-      // Show latest progress event if available, otherwise latest start
-      const progress = [...group].reverse().find(e=>e.type==="tool_progress");
-      merged.push(progress || group[group.length-1]);
+      // No matching end — if historical (saved), force done state so pills don't linger
+      const last = group[group.length-1];
+      if(historical){
+        merged.push({...last, type:"tool_done", data:{...last.data, status:"done"}});
+      }else{
+        const progress = [...group].reverse().find(e=>e.type==="tool_progress");
+        merged.push(progress || last);
+      }
     }
   }
 
@@ -1657,7 +1662,7 @@ function HyprChat(){
           }catch{}}
       }
       // Capture relevant events into metadata for persistence (tool status + search results + source links)
-      const _savedEvts = evtsRef.current.filter(e=>["source_links","search_results","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type));
+      const _savedEvts = evtsRef.current.filter(e=>["source_links","search_results","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
       const _msgMeta = _savedEvts.length ? {saved_events: _savedEvts} : undefined;
       uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={role:"assistant",content:full,isS:false,metadata:_msgMeta||{}};return{...c,messages:m};});
       // Save to DB
@@ -2330,7 +2335,7 @@ function HyprChat(){
 
     {/* MAIN */}
     <div style={{flex:1,display:"flex",flexDirection:"column",zIndex:5,minWidth:0}}>
-      <div style={{padding:"9px 16px",...glass,borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0}}>
+      <div style={{padding:"9px 16px",...glass,borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0,position:"relative",zIndex:100}}>
         <div style={{display:"flex",alignItems:"center",gap:6}}>
           {panel==="chat"&&act&&<>
             {act.forked_from&&<div style={{display:"flex",alignItems:"center",gap:4,padding:"2px 8px",background:`${t.acc}12`,border:`1px solid ${t.acc}28`,borderRadius:16,fontSize:9,color:t.acc,cursor:"pointer"}} onClick={()=>loadConversation(act.forked_from)}>
@@ -2355,8 +2360,8 @@ function HyprChat(){
               <button onClick={()=>setShowSysPromptPicker(p=>!p)} style={{fontSize:10,padding:"3px 8px",borderRadius:8,border:`1px solid ${act.system_prompt?`${t.warm}44`:`${t.brd}33`}`,background:act.system_prompt?`${t.warm}12`:"transparent",color:act.system_prompt?t.warm:t.mut,cursor:"pointer",fontFamily:font,display:"flex",alignItems:"center",gap:3}}>
                 {act.system_prompt?"\u{1F4CB} System Prompt":"\u002B System Prompt"}
               </button>
-              {showSysPromptPicker&&<div style={{position:"absolute",top:"calc(100% + 6px)",left:0,zIndex:50,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:260,maxWidth:340,padding:8,animation:"fadeIn .15s"}}>
-                {(()=>{const sysPrompts=prompts.filter(p=>p.category&&p.category.toLowerCase()==="system prompt");return sysPrompts.length?<><div style={{maxHeight:200,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
+              {showSysPromptPicker&&<div style={{position:"absolute",top:"calc(100% + 6px)",left:0,zIndex:9999,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:260,maxWidth:340,padding:8,animation:"fadeIn .15s"}}>
+                {(()=>{const sysPrompts=prompts.filter(p=>p.is_system||(p.category&&p.category.toLowerCase()==="system prompt"));return sysPrompts.length?<><div style={{maxHeight:200,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
                   {sysPrompts.map(p=><div key={p.id} onClick={()=>{uConv(actId,{system_prompt:p.content});fetch(`${API}/api/conversations/${actId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({system_prompt:p.content})});setShowSysPromptPicker(false);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.warm}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
                     <div style={{fontSize:11,fontWeight:600,color:t.text}}>{p.title}</div>
                     <div style={{fontSize:9,color:t.mut,marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.content.slice(0,80)}...</div>
@@ -2365,7 +2370,7 @@ function HyprChat(){
                 {act.system_prompt&&<div style={{borderTop:`1px solid ${t.brd}22`,marginTop:4,paddingTop:4}}>
                   <button onClick={()=>{uConv(actId,{system_prompt:""});fetch(`${API}/api/conversations/${actId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({system_prompt:""})});setShowSysPromptPicker(false);}} style={{...btnS(t.err),width:"100%",justifyContent:"center",fontSize:9}}>Clear System Prompt</button>
                 </div>}</>
-                :<div style={{padding:12,textAlign:"center",color:t.mut,fontSize:11}}>No system prompt templates. Add prompts with category "System Prompt" in the Prompt Library.</div>;})()}
+                :<div style={{padding:12,textAlign:"center",color:t.mut,fontSize:11}}>No system prompt templates. Check "Available as System Prompt" on any prompt in the Prompt Library.</div>;})()}
               </div>}
             </div>}
           </>}
@@ -2996,7 +3001,7 @@ function HyprChat(){
       :panel==="prompts"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"14px 18px",borderBottom:`1px solid ${t.brd}22`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
       <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Zap/><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.f1}}>Prompt Library</span></div>
-      <button onClick={()=>{const id=`p-${Date.now()}`;setPrompts(p=>[{id,title:"New Prompt",content:"",category:"General"},...p]);}} style={btnS(t.f1)}><IC.Plus/> New Prompt</button>
+      <button onClick={()=>{const id=`p-${Date.now()}`;setPrompts(p=>[{id,title:"New Prompt",content:"",category:"General",is_system:false},...p]);}} style={btnS(t.f1)}><IC.Plus/> New Prompt</button>
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       {!prompts.length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>
@@ -3018,6 +3023,10 @@ function HyprChat(){
               <input value={editPrompt.title} onChange={e=>setEditPrompt(ep=>({...ep,title:e.target.value}))} placeholder="Title" style={{...inputS,flex:2,fontWeight:600}}/>
               <input value={editPrompt.category} onChange={e=>setEditPrompt(ep=>({...ep,category:e.target.value}))} placeholder="Category" style={{...inputS,flex:1,fontSize:10}}/>
             </div>
+            <label style={{display:"flex",alignItems:"center",gap:6,fontSize:10,color:t.dim,cursor:"pointer",marginBottom:6}}>
+              <input type="checkbox" checked={!!editPrompt.is_system} onChange={e=>setEditPrompt(ep=>({...ep,is_system:e.target.checked}))} style={{accentColor:t.warm,cursor:"pointer"}}/>
+              Available as System Prompt
+            </label>
             <textarea value={editPrompt.content} onChange={e=>setEditPrompt(ep=>({...ep,content:e.target.value}))} rows={5} placeholder="Your prompt text..." style={{...inputS,resize:"vertical",lineHeight:1.5,marginBottom:8}}/>
             <div style={{display:"flex",gap:4,justifyContent:"flex-end"}}>
               <button onClick={()=>{setPrompts(ps=>ps.map(x=>x.id===p.id?{...x,...editPrompt}:x));setEditPrompt(null);}} style={btnS(t.ok)}>Save</button>
@@ -3027,11 +3036,11 @@ function HyprChat(){
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
               <div style={{flex:1,minWidth:0}}>
                 <div style={{fontSize:13,fontWeight:600,color:t.text}}>{p.title}</div>
-                <div style={{fontSize:10,color:t.f1,marginTop:1}}>{p.category||"General"}</div>
+                <div style={{fontSize:10,color:t.f1,marginTop:1,display:"flex",alignItems:"center",gap:4}}>{p.category||"General"}{p.is_system&&<span style={{fontSize:8,padding:"1px 5px",borderRadius:6,background:`${t.warm}18`,color:t.warm,fontWeight:600}}>System Prompt</span>}</div>
               </div>
               <div style={{display:"flex",gap:4,flexShrink:0}}>
                 <button onClick={()=>{setInp(p.content);setPanel("chat");}} style={{...btnS(t.f1),fontSize:9}}>⚡ Use</button>
-                <button onClick={()=>setEditPrompt({id:p.id,title:p.title,content:p.content,category:p.category||"General"})} style={btnS(t.mut)}><IC.Pencil/></button>
+                <button onClick={()=>setEditPrompt({id:p.id,title:p.title,content:p.content,category:p.category||"General",is_system:!!p.is_system})} style={btnS(t.mut)}><IC.Pencil/></button>
                 <button onClick={()=>setPrompts(ps=>ps.filter(x=>x.id!==p.id))} style={btnS(t.err)}><IC.Trash/></button>
               </div>
             </div>
@@ -4594,7 +4603,7 @@ function HyprChat(){
                   </div>
                   {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:null;})()}
                   {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:null;})()}
-                  {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>;})()}
+                  {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>;})()}
                   {/* Inline code execution output */}
                   {(()=>{if(isU)return null;const savedEvts=msg.metadata?.saved_events||[];const codeOuts=savedEvts.filter(e=>e.type==="code_output");if(!codeOuts.length)return null;return codeOuts.map((e,ci)=>{const d=e.data||{};return <div key={ci} style={{margin:"8px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${d.success?`${t.ok}33`:`${t.err}33`}`,background:t.bgDeep}}>
                     <div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${d.success?t.ok:t.err}10`,borderBottom:`1px solid ${d.success?t.ok:t.err}22`}}>
