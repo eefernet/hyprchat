@@ -406,7 +406,7 @@ const Pill = ({ev,t,expanded,onToggle})=>{
           <span style={{fontSize:11,fontWeight:700,color:t.acc}}>{last.icon} {last.label}</span>
           <span style={{fontSize:10,color:t.dim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{last.detail}</span>
         </div>;})()}
-        <div style={{display:"flex",flexDirection:"column",gap:0,maxHeight:240,overflowY:"auto",paddingLeft:8,borderLeft:`2px solid ${t.acc}22`}}>
+        <div style={{display:"flex",flexDirection:"column",gap:0,paddingLeft:8,borderLeft:`2px solid ${t.acc}22`}}>
           {detail.steps.map((s,i)=>{const isLast=i===detail.steps.length-1;return <div key={i} style={{display:"flex",gap:6,alignItems:"flex-start",padding:"3px 0",position:"relative",opacity:isLast?1:.65}}>
             <span style={{position:"absolute",left:-13,top:6,width:isLast?8:6,height:isLast?8:6,borderRadius:"50%",background:isLast?t.acc:`${t.acc}55`,animation:isLast?"pulse 1.4s infinite":"none",transition:"all .2s"}}/>
             <span style={{flexShrink:0,fontSize:11,width:18,textAlign:"center"}}>{s.icon}</span>
@@ -432,9 +432,10 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=
 
   // Stable string key for expandedPill — avoids collapse when new events arrive
   // Guard: if evts only has source_links/search_results (no tool/thinking/streaming), merged will be empty
-  const getPillKey = (ev) => {
+  const getPillKey = (ev, idx) => {
     if(ev.type==="thinking"||ev.type==="thought_done") return "thinking";
     if(ev.type==="streaming"||ev.type==="complete") return "streaming";
+    if(idx!==undefined) return `${ev.data?.tool||ev.type}_${idx}`;
     return ev.data?.tool || ev.type;
   };
 
@@ -453,24 +454,29 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=
     merged.push(done || thinkingEvts[thinkingEvts.length-1]);
   }
 
-  // Tools: pair start→end by tool name, keep unpaired starts. tool_progress updates replace start status.
-  const toolPairs = {};
+  // Tools: pair each start→end sequentially (not by name, so repeated tools each get a step)
+  const _pendingStarts = []; // stack of unmatched tool_start events
   for(const e of toolEvts){
     const key = e.data?.tool||"unknown";
-    if(!toolPairs[key]) toolPairs[key] = [];
-    toolPairs[key].push(e);
+    if(e.type==="tool_start"){
+      _pendingStarts.push({key, evt: e});
+    } else if(e.type==="tool_progress"){
+      // Update the latest pending start for this tool
+      const idx = [..._pendingStarts].reverse().findIndex(p=>p.key===key);
+      if(idx>=0) _pendingStarts[_pendingStarts.length-1-idx].evt = e;
+    } else { // tool_end, tool_done, tool_error
+      // Match with the oldest pending start for this tool
+      const idx = _pendingStarts.findIndex(p=>p.key===key);
+      if(idx>=0) _pendingStarts.splice(idx, 1);
+      merged.push(e);
+    }
   }
-  for(const [key, group] of Object.entries(toolPairs)){
-    const end = group.find(e=>e.type==="tool_end"||e.type==="tool_done"||e.type==="tool_error");
-    if(end){merged.push(end);}else{
-      // No matching end — if historical (saved), force done state so pills don't linger
-      const last = group[group.length-1];
-      if(historical){
-        merged.push({...last, type:"tool_done", data:{...last.data, status:"done"}});
-      }else{
-        const progress = [...group].reverse().find(e=>e.type==="tool_progress");
-        merged.push(progress || last);
-      }
+  // Remaining unmatched starts
+  for(const {evt} of _pendingStarts){
+    if(historical){
+      merged.push({...evt, type:"tool_done", data:{...evt.data, status:"done"}});
+    }else{
+      merged.push(evt);
     }
   }
 
@@ -521,12 +527,16 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=
     const fileMap={};
     fileReadyEvts.forEach(e=>{const d=e.data||{};if(!d.filename)return;if(!fileMap[d.filename])fileMap[d.filename]={d,count:1};else{fileMap[d.filename].d=d;fileMap[d.filename].count++;}});
     return <>{Object.values(fileMap).map(({d,count},i)=>{
-    return <div key={i} style={{display:"inline-flex",alignItems:"center",gap:4,marginTop:5}}>
+    const isImg=d.is_image||/\.(png|jpe?g|gif|svg|webp)$/i.test(d.filename);
+    return <div key={i} style={{marginTop:5}}>
+      {isImg&&<img src={`${API}${d.url}`} alt={d.filename} style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`,cursor:"pointer"}} onClick={()=>onPreview&&onPreview(d.filename,d.url)} onError={e=>e.target.style.display="none"}/>}
+      <div style={{display:"inline-flex",alignItems:"center",gap:4,marginTop:isImg?2:0}}>
       <a href={`${API}${d.url}`} download={d.filename}
         style={{display:"inline-flex",alignItems:"center",gap:7,padding:"7px 14px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontSize:12,fontWeight:700,cursor:"pointer"}}>
         <span style={{fontSize:16}}>{_fileIcon(d.filename)}</span><span>{d.filename}</span>{count>1&&<span style={{fontSize:9,background:t.acc,color:t.bg,borderRadius:8,padding:"1px 5px",fontWeight:700,marginLeft:2}}>v{count}</span>}<span style={{fontSize:10,opacity:.6}}>⬇</span>
       </a>
       {onPreview&&<button onClick={()=>onPreview(d.filename,d.url)} title="Preview" style={{padding:"7px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:13,display:"flex",alignItems:"center"}}>👁</button>}
+      </div>
     </div>;
   })}</>;};
 
@@ -625,7 +635,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=
       Hide steps ▴
     </button>
     <div style={{display:"flex",flexDirection:"column",gap:2}}>
-      {merged.map((ev)=><Pill key={getPillKey(ev)} ev={ev} t={t} expanded={expandedPill===getPillKey(ev)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(ev)?null:getPillKey(ev))}/>)}
+      {merged.map((ev,i)=><Pill key={getPillKey(ev,i)} ev={ev} t={t} expanded={expandedPill===getPillKey(ev,i)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(ev,i)?null:getPillKey(ev,i))}/>)}
     </div>
     <CodeOutputCards/>
     <FileReadyButtons/>
@@ -828,6 +838,18 @@ function SandboxSection({t,btnS,labelS}){
     }catch{setCbResult({error:"Failed"});}
     setCbCleaning(false);
   };
+  const cleanAll=async()=>{
+    setCleaning(true);setCbCleaning(true);setCleanResult(null);setCbResult(null);
+    try{
+      const [r1,r2]=await Promise.all([
+        fetch(`${API}/api/settings/cleanup-now`,{method:"POST"}).then(r=>r.json()).catch(()=>({error:"Sandbox failed"})),
+        fetch(`${API}/api/settings/cleanup-codebox`,{method:"POST"}).then(r=>r.json()).catch(()=>({error:"Codebox failed"})),
+      ]);
+      setCleanResult(r1);setCbResult(r2);
+      const r3=await fetch(`${API}/api/settings`);const d3=await r3.json();setSbInfo(d3);
+    }catch{setCleanResult({error:"Failed"});}
+    setCleaning(false);setCbCleaning(false);
+  };
   const INTERVALS=[
     {label:"Every week",days:7},{label:"Every 2 weeks",days:14},
     {label:"Monthly (default)",days:30},{label:"Every 3 months",days:90},
@@ -859,12 +881,9 @@ function SandboxSection({t,btnS,labelS}){
       </div>
       {cleanupDays===0&&<div style={{fontSize:10,color:t.warm,marginTop:4}}>⚠ Files will never be cleaned automatically. Clean manually when needed.</div>}
     </div>
-    <div style={{display:"flex",alignItems:"center",gap:8}}>
-      <button onClick={cleanNow} disabled={cleaning} style={{...btnS(t.err),opacity:cleaning?.6:1}}>
-        {cleaning?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span> Cleaning...</>:"🗑 Clean Sandbox"}
-      </button>
-      <button onClick={cleanCodebox} disabled={cbCleaning} style={{...btnS(t.warm||"#e89b3e"),opacity:cbCleaning?.6:1}}>
-        {cbCleaning?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span> Cleaning...</>:"🗑 Clean Codebox"}
+    <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+      <button onClick={cleanAll} disabled={cleaning||cbCleaning} style={{...btnS(t.err),opacity:(cleaning||cbCleaning)?.6:1}}>
+        {(cleaning||cbCleaning)?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span> Cleaning...</>:"🗑 Clean All"}
       </button>
       {cleanResult&&!cleanResult.error&&<span style={{fontSize:11,color:t.ok}}>
         ✓ Sandbox: {cleanResult.deleted} file{cleanResult.deleted!==1?"s":""}{cleanResult.freed_bytes>0?`, freed ${fmtBytes(cleanResult.freed_bytes)}`:""}
@@ -1016,6 +1035,7 @@ function HyprChat(){
   const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"14");}catch{return 14;}});
   const [chatWidth,setChatWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-w")||"880");}catch{return 880;}});
   const [wsModel,setWsModel]=useState(()=>{try{return localStorage.getItem("hc-ws-model")||"qwen2.5:7b";}catch{return "qwen2.5:7b";}});
+  const [planningModel,setPlanningModel]=useState(()=>{try{return localStorage.getItem("hc-planning-model")||"";}catch{return "";}});
   const [coderModel,setCoderModel]=useState(()=>{try{return localStorage.getItem("hc-coder-model")||"";}catch{return "";}});
   const [coderNumCtx,setCoderNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-coder-num-ctx")||"8192");}catch{return 8192;}});
   const [openhandsEnabled,setOpenhandsEnabled]=useState(()=>{try{return localStorage.getItem("hc-openhands-enabled")!=="false";}catch{return true;}});
@@ -1091,6 +1111,7 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
   useEffect(()=>{try{localStorage.setItem("hc-custom-quotes",JSON.stringify(customQuotes));}catch{}},[customQuotes]);
   useEffect(()=>{try{localStorage.setItem("hc-ws-model",wsModel);}catch{}},[wsModel]);
+  useEffect(()=>{try{localStorage.setItem("hc-planning-model",planningModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({planning_model:planningModel})}).catch(()=>{});}catch{}},[planningModel]);
   useEffect(()=>{try{localStorage.setItem("hc-coder-model",coderModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({coder_model:coderModel})}).catch(()=>{});}catch{}},[coderModel]);
   useEffect(()=>{try{localStorage.setItem("hc-coder-num-ctx",coderNumCtx);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_num_ctx:coderNumCtx})}).catch(()=>{});}catch{}},[coderNumCtx]);
   useEffect(()=>{try{localStorage.setItem("hc-openhands-enabled",openhandsEnabled);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_enabled:openhandsEnabled})}).catch(()=>{});}catch{}},[openhandsEnabled]);
@@ -1231,17 +1252,19 @@ function HyprChat(){
       const isCouncil=v=>v==="1"||v===1||v===true;
       setConvs(cs.map(c=>({...c, messages: [], is_council: isCouncil(c.is_council), council_config_id: c.council_config_id||null})));
       setActId(cs[0].id);
+      setLoadingConv(true);
       // Fetch full first conversation
       fetch(`${API}/api/conversations/${cs[0].id}`).then(r=>r.json()).then(full=>{
         const parseMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
         setConvs(prev=>prev.map(c=>c.id===cs[0].id?{...c, messages:(full.messages||[]).map(m=>({role:m.role,content:m.content,metadata:parseMeta(m)})), model:full.model||c.model, system_prompt:full.system_prompt||c.system_prompt, tool_ids:full.tool_ids||c.tool_ids||[], model_config_id:full.model_config_id||null, is_council:isCouncil(full.is_council), council_config_id:full.council_config_id||null}:c));
-      }).catch(()=>{});
+        setLoadingConv(false);
+      }).catch(()=>{setLoadingConv(false);});
     }}).catch(()=>{});
     fetch(`${API}/api/knowledge-bases`).then(r=>r.json()).then(setKbs).catch(()=>{});
     fetch(`${API}/api/tools`).then(r=>r.json()).then(setTools).catch(()=>{});
     fetch(`${API}/api/model-configs`).then(r=>r.json()).then(setMcs).catch(()=>{});
     fetch(`${API}/api/health`).then(r=>r.json()).then(d=>setHealth(d.services||{})).catch(()=>{});
-    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));if(d.current_coder_model!=null)setCoderModel(d.current_coder_model);if(d.openhands_num_ctx!=null)setCoderNumCtx(d.openhands_num_ctx);if(d.openhands_enabled!=null)setOpenhandsEnabled(d.openhands_enabled);if(d.openhands_max_rounds!=null)setOpenhandsMaxRounds(d.openhands_max_rounds);}).catch(()=>{});
+    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));if(d.current_planning_model!=null)setPlanningModel(d.current_planning_model);if(d.current_coder_model!=null)setCoderModel(d.current_coder_model);if(d.openhands_num_ctx!=null)setCoderNumCtx(d.openhands_num_ctx);if(d.openhands_enabled!=null)setOpenhandsEnabled(d.openhands_enabled);if(d.openhands_max_rounds!=null)setOpenhandsMaxRounds(d.openhands_max_rounds);}).catch(()=>{});
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
     fetch(`${API}/api/workspaces`).then(r=>r.json()).then(setWorkspaces).catch(()=>{});
     fetch(`${API}/api/councils`).then(r=>r.json()).then(setCouncils).catch(()=>{});
@@ -1264,7 +1287,7 @@ function HyprChat(){
     const connect=()=>{
       if(closed)return;
       const es=new EventSource(`${API}/api/events/${actId}`);
-      es.onmessage=e=>{try{const ev=JSON.parse(e.data);if(ev.type!=="heartbeat"&&ev.type!=="keepalive")setEvts(p=>[...p.slice(-50),ev]);retryDelay=1000;}catch{}};
+      es.onmessage=e=>{try{const ev=JSON.parse(e.data);if(ev.type!=="heartbeat"&&ev.type!=="keepalive")setEvts(p=>[...p.slice(-200),ev]);retryDelay=1000;}catch{}};
       es.onerror=()=>{es.close();if(!closed){retryTimer=setTimeout(()=>{retryDelay=Math.min(retryDelay*2,30000);connect();},retryDelay);}};
       sseR.current=es;
     };
@@ -1280,8 +1303,13 @@ function HyprChat(){
 
   // Load conversation messages from backend when switching chats
   const loadConversation = useCallback(async (id, {force=false}={}) => {
-    // If clicking the same conversation, just switch to chat panel without clearing state
-    if(id===actIdRef.current&&!force){setPanel("chat");return;}
+    // If clicking the same conversation that already has messages, just switch panel
+    if(id===actIdRef.current&&!force){
+      // Check if messages exist — if not, fall through to reload from DB
+      let _hasMessages=false;
+      setConvs(prev=>{_hasMessages=prev.some(c=>c.id===id&&c.messages?.length>0);return prev;});
+      if(_hasMessages){setPanel("chat");return;}
+    }
     // Save current council stream state to ref before switching away
     if(councilStreamRef.current?.cid===actIdRef.current&&councilStreamRef.current?.running){
       // Already tracked in ref by the stream loop — no action needed
@@ -1602,6 +1630,8 @@ function HyprChat(){
   // Core send logic — used by send, regenerate, and edit
   const sendMessages=async(cid, messagesToSend, appendUser)=>{
     setStreaming(true);setTokC(0);setTokS(0);setEvts([]);setExpandedPill(null);setCtxTokens(0);setGenTokens(0);
+    // Save user message to DB immediately (not after stream) so it persists on reload
+    if(appendUser) fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"user",content:appendUser})}).catch(()=>{});
     try{
       const cv=convs.find(c=>c.id===cid);
       let am = messagesToSend.map(m=>({role:m.role,content:m.content}));
@@ -1665,8 +1695,7 @@ function HyprChat(){
       const _savedEvts = evtsRef.current.filter(e=>["source_links","search_results","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
       const _msgMeta = _savedEvts.length ? {saved_events: _savedEvts} : undefined;
       uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={role:"assistant",content:full,isS:false,metadata:_msgMeta||{}};return{...c,messages:m};});
-      // Save to DB
-      if(appendUser) fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"user",content:appendUser})}).catch(()=>{});
+      // Save assistant message to DB (user message was saved at stream start)
       fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:full,metadata:_msgMeta})}).catch(()=>{});
       // Auto-generate title after first exchange
       if(autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const msgCount=(cv2?.messages||[]).filter(m=>m.role==="user").length;if(msgCount<=1)fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST"}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
@@ -1675,7 +1704,7 @@ function HyprChat(){
   };
 
   const send=async()=>{
-    if(streaming||(!inp.trim()&&!attachments.length))return;
+    if(streaming||loadingConv||(!inp.trim()&&!attachments.length))return;
     let cid=actId;
     if(!cid){await newChat();return;}
     const cv=convs.find(c=>c.id===cid);
@@ -1881,7 +1910,8 @@ function HyprChat(){
         }
         return c;
       }));
-      // Clear coder model if it was the deleted model
+      // Clear planning/coder model if it was the deleted model
+      if(planningModel===m){setPlanningModel("");}
       if(coderModel===m){setCoderModel("");}
       // Clear workspace model if it was the deleted model
       if(wsModel===m){setWsModel(fallback);}
@@ -1908,7 +1938,7 @@ function HyprChat(){
         for(const ln of lines){
           if(!ln.startsWith("data: "))continue;
           try{const d=JSON.parse(ln.slice(6));
-            if(d.error){updDl({status:"error",error:d.error});continue;}
+            if(d.error||d.status==="error"){updDl({status:"error",error:d.error||d.message||"Unknown error"});continue;}
             if(d.status==="success"||d.status==="done"){
               updDl({status:"done",pct:100,message:"Done!"});
               refreshModels();
@@ -3963,6 +3993,19 @@ function HyprChat(){
         </div>
 
         <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
+          <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Code Planning Model</div>
+          {planningModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <div style={{flex:1}}><ModelPicker value={planningModel} onChange={setPlanningModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
+            <button onClick={()=>setPlanningModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
+          </div>:<div onClick={()=>setPlanningModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+            <span style={{fontSize:14}}>🧠</span>
+            <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Same as chat model</div><div style={{fontSize:9,color:t.dim}}>Click to select a dedicated planning model</div></div>
+            <span style={{fontSize:9,color:t.mut}}>▾</span>
+          </div>}
+          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Model used by plan_project to design architecture before coding. Best with a strong reasoning model.</div>
+        </div>
+
+        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
           <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Code Generator Model</div>
           {coderModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
             <div style={{flex:1}}><ModelPicker value={coderModel} onChange={setCoderModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
@@ -4775,7 +4818,7 @@ function HyprChat(){
             </>}
             <textarea ref={inpRef} value={inp} onChange={e=>setInp(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
               placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":"What's on your mind?"}`} rows={1}
-              disabled={streaming||councilRunning}
+              disabled={streaming||councilRunning||loadingConv}
               style={{flex:1,background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:14,outline:"none",resize:"none",padding:"8px 0",maxHeight:140,lineHeight:1.6}}
               onInput={e=>{e.target.style.height="auto";e.target.style.height=Math.min(e.target.scrollHeight,120)+"px";}}
               onPaste={e=>{const files=Array.from(e.clipboardData?.files||[]);if(files.length){e.preventDefault();handleFileUpload(files);}}}/>

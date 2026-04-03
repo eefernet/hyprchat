@@ -1,3 +1,10 @@
+## Alpha v16.1 — March 2026
+
+### Bug Fixes
+- Fixed how conversations are loaded from the database on fresh start, prevents conversation merging
+- Fixed RAG Pipeline purge, now it actually deletes from disk, not just the database
+
+
 ## Alpha v16 — March 2026
 
 ### New Features

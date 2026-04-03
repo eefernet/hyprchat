@@ -179,6 +179,9 @@ async def lifespan(app: FastAPI):
     if _settings.get("ollama_url"):
         config.OLLAMA_URL = _settings["ollama_url"]
         print(f"[Config] Loaded Ollama URL from settings: {config.OLLAMA_URL}")
+    if _settings.get("planning_model"):
+        config.PLANNING_MODEL = _settings["planning_model"]
+        print(f"[Config] Loaded Planning Model from settings: {config.PLANNING_MODEL}")
     if _settings.get("coder_model"):
         config.CODER_MODEL = _settings["coder_model"]
         print(f"[Config] Loaded Coder Model from settings: {config.CODER_MODEL}")
@@ -1058,13 +1061,20 @@ async def delete_conversation(conv_id: str):
 
 @app.delete("/api/conversations")
 async def delete_all_conversations():
-    """Delete ALL conversations and their messages."""
-    convs = await db.get_conversations()
-    count = 0
-    for c in convs:
-        await db.delete_conversation(c["id"])
-        count += 1
-    print(f"[Cleanup] Deleted all {count} conversations")
+    """Delete ALL conversations, messages, and related data."""
+    conn = await db.get_db()
+    try:
+        await conn.execute("DELETE FROM messages")
+        await conn.execute("DELETE FROM conversation_files")
+        await conn.execute("DELETE FROM workspace_conversations")
+        await conn.execute("DELETE FROM conversations")
+        await conn.commit()
+        cursor = await conn.execute("SELECT changes()")
+        row = await cursor.fetchone()
+        count = row[0] if row else 0
+    finally:
+        await conn.close()
+    print(f"[Cleanup] Deleted all conversations and related data")
     return {"deleted": count}
 
 
@@ -2439,6 +2449,7 @@ async def get_app_settings():
     return {
         **settings,
         "current_ollama_url": config.OLLAMA_URL,
+        "current_planning_model": config.PLANNING_MODEL,
         "current_coder_model": config.CODER_MODEL,
         "openhands_enabled": config.OPENHANDS_ENABLED,
         "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
@@ -2454,7 +2465,7 @@ async def get_app_settings():
 @app.patch("/api/settings")
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
-    allowed = {"file_cleanup_days", "ollama_url", "rag", "coder_model", "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx"}
+    allowed = {"file_cleanup_days", "ollama_url", "rag", "planning_model", "coder_model", "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
@@ -2473,6 +2484,9 @@ async def update_app_settings(body: dict = Body(...)):
         print(f"[Config] Updated Ollama URL to: {config.OLLAMA_URL}")
     elif "ollama_url" in body and not body["ollama_url"]:
         config.OLLAMA_URL = os.getenv("OLLAMA_URL", "http://192.168.1.110:11434")
+    if "planning_model" in body:
+        config.PLANNING_MODEL = body["planning_model"] or ""
+        print(f"[Config] Updated Planning Model to: {config.PLANNING_MODEL or '(use chat model)'}")
     if "coder_model" in body:
         config.CODER_MODEL = body["coder_model"] or ""
         print(f"[Config] Updated Coder Model to: {config.CODER_MODEL or '(use orchestrator model)'}")
@@ -2486,7 +2500,7 @@ async def update_app_settings(body: dict = Body(...)):
         config.OPENHANDS_NUM_CTX = int(body["openhands_num_ctx"])
         print(f"[Config] OpenHands num_ctx: {config.OPENHANDS_NUM_CTX}")
     save_settings(settings)
-    return {**settings, "current_ollama_url": config.OLLAMA_URL, "current_coder_model": config.CODER_MODEL}
+    return {**settings, "current_ollama_url": config.OLLAMA_URL, "current_planning_model": config.PLANNING_MODEL, "current_coder_model": config.CODER_MODEL}
 
 
 @app.get("/api/rag/stats")
@@ -2527,7 +2541,7 @@ async def get_rag_stats():
 
 @app.delete("/api/rag/collections")
 async def delete_all_rag_collections():
-    """Delete ALL ChromaDB collections (RAG indices)."""
+    """Delete ALL ChromaDB collections (RAG indices) and reclaim disk space."""
     try:
         client = rag.get_chroma()
         collections = client.list_collections()
@@ -2536,6 +2550,12 @@ async def delete_all_rag_collections():
             client.delete_collection(c.name)
             count += 1
         print(f"[RAG] Purged all {count} collections")
+        # Reset ChromaDB client and remove data directory to reclaim disk space
+        import shutil
+        rag._chroma_client = None
+        if os.path.exists(rag.CHROMA_DIR):
+            shutil.rmtree(rag.CHROMA_DIR)
+            print(f"[RAG] Removed ChromaDB data directory: {rag.CHROMA_DIR}")
         return {"deleted": count}
     except Exception as e:
         print(f"[RAG] Purge error: {e}")
