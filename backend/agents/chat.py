@@ -314,6 +314,41 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         )
     if effective_system:
         messages.append({"role": "system", "content": effective_system})
+
+    # ── Active project context: if this conversation has a coding project, inject it ──
+    # Lets the bot answer "fix this bug in the project you built me" without the LLM
+    # having to remember to call resume_project on its own. One DB query, fails closed.
+    try:
+        _active_project = await db.get_coding_project_by_conv(conv_id)
+    except Exception as _ape:
+        _active_project = None
+        print(f"[CHAT] Active project lookup failed (non-fatal): {_ape}")
+
+    if _active_project:
+        _ap_files = _active_project.get("file_manifest") or []
+        _ap_id = _active_project.get("id", "") or ""
+        _ap_lines = [
+            "## ACTIVE PROJECT (this conversation already has a built project)",
+            f"- name: {_active_project.get('name', '?')}",
+            f"- project_id: {_ap_id}",
+            f"- language: {_active_project.get('language', '?')}",
+            f"- description: {(_active_project.get('description') or '')[:200]}",
+        ]
+        if _ap_files:
+            _ap_lines.append(f"- files ({len(_ap_files)}):")
+            for _f in _ap_files[:25]:
+                _ap_lines.append(f"  - {_f}")
+            if len(_ap_files) > 25:
+                _ap_lines.append(f"  - ... and {len(_ap_files) - 25} more")
+        _ap_lines.append(
+            "\nIf the user reports a bug, error, or asks for changes to this project: "
+            "use read_file on the relevant files first to see the current code, then fix "
+            "with write_file (small changes) or generate_code with project_id="
+            f"'{_ap_id}' (large changes). Do NOT start a new project."
+        )
+        messages.append({"role": "system", "content": "\n".join(_ap_lines)})
+        print(f"[CHAT] Injected active project context: {_active_project.get('name', '?')} ({len(_ap_files)} files)")
+
     messages.extend([{"role": m["role"], "content": m["content"]} for m in req.messages])
 
     # ── Build Ollama-native tool definitions ──

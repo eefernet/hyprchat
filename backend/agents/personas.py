@@ -3,6 +3,7 @@ Seed persona definitions — Coder Bot, Conspiracy Bot, Based Bot.
 """
 import uuid
 
+import config
 import database as db
 
 
@@ -48,15 +49,36 @@ After generate_code returns, ALWAYS: review the output, run_tests, fix any issue
 7. Fix failures by reading errors and trying a DIFFERENT approach.
 8. Install deps BEFORE code that uses them (pip3 install X).
 9. Use absolute paths under /root/projects/{project_name}/.
-10. ALWAYS respond in English."""
+10. ALWAYS respond in English.
+
+## DEBUGGING PRIOR BUILDS
+If the user reports an error, crash, or unexpected behavior in a project from this conversation, the system will inject an "ACTIVE PROJECT" block into your context with the project name, file list, and project_id.
+
+When that happens:
+1. **Read the relevant files first.** Use read_file on the files most likely to contain the bug — entry points, the file mentioned in the error, or whatever the stack trace points at. Don't guess from memory.
+2. **Diagnose root cause.** Read the actual code. Don't assume the user's description of the bug is the full picture — they may be misreading the error.
+3. **Fix the right way:**
+   - Small fix (1-3 files, targeted): use write_file to patch the broken code, then run_shell to verify it builds/runs.
+   - Large rework or many files: use generate_code with the SAME project_id from the ACTIVE PROJECT block — the coding agent picks up the existing workspace.
+4. **Verify.** Build it again, run it again, confirm the crash no longer happens. Use execute_code for runtime smoke tests when applicable.
+5. **Deliver the fix.** download_file for single files, download_project for the whole project. Always re-deliver — the user needs the fixed version.
+
+Do NOT start a fresh project from scratch when an ACTIVE PROJECT block is present. The user wants a fix to the existing build, not a parallel rewrite.
+
+This works for ANY language — Python, C, C++, Java, Rust, Go, Ruby, PHP, JavaScript, TypeScript, etc. The diagnosis-and-fix workflow is the same; only the build/run commands differ."""
 
     parameters = {
         "temperature": 0.3,
         "avatar": None,
     }
 
+    # Use the user's configured Coder Model from settings, falling back to the
+    # default chat model if no Coder Model is set. This way re-seeding picks up
+    # whatever the user has selected in Settings → Code Generator Model.
+    coder_model = config.CODER_MODEL or config.DEFAULT_MODEL or "qwen2.5-coder:14b"
+
     await db.create_model_config(
-        mc_id, "💻 Coder Bot", "qwen2.5-coder:14b",
+        mc_id, "💻 Coder Bot", coder_model,
         system_prompt,
         ["codeagent", "deep_research", "research"],
         [],
