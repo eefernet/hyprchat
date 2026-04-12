@@ -579,6 +579,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                    json=payload, timeout=300) as resp:
                 if resp.status_code != 200:
                     error_body = (await resp.aread()).decode()[:500]
+                    if "not found" in error_body.lower():
+                        _msg = f"Model '{req.model}' not found in Ollama. It may have been deleted. Please select a different model."
+                        print(f"[CHAT] Model not found: {req.model}")
+                        await events.emit(conv_id, "tool_end", {"tool": "processing", "status": f"Model not found: {req.model}", "icon": "alert"})
+                        yield f"data: {json.dumps({'type': 'error', 'error': _msg})}\n\n"
+                        return
                     if "does not support tools" in error_body.lower() and not _text_fallback_done:
                         # Model doesn't support native tools — switch to text-based
                         print(f"[CHAT] Model {req.model} rejected native tools — switching to text-based")
@@ -651,7 +657,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         except Exception:
                             continue
 
-                        # Detect Ollama error in stream (e.g. CUDA OOM)
+                        # Detect Ollama error in stream (e.g. CUDA OOM, corrupt model)
                         if chunk.get("error"):
                             _ollama_err = chunk["error"][:300]
                             print(f"[CHAT]   Ollama stream error: {_ollama_err}")
@@ -660,6 +666,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                 _oom_hint = f"GPU out of memory with num_ctx={model_options.get('num_ctx', 'default')}. Try a smaller context size or smaller model."
                                 await events.emit(conv_id, "error", {"status": f"GPU OOM: {_oom_hint}"})
                                 yield f"data: {json.dumps({'type': 'error', 'error': _oom_hint})}\n\n"
+                                return
+                            # Corrupt or broken model
+                            if any(s in _ollama_err.lower() for s in ("input stream", "failed to load", "invalid model", "ggml", "unexpected eof")):
+                                _corrupt_msg = f"Model '{req.model}' failed to load — it may be corrupt or incomplete. Try deleting and re-downloading it."
+                                await events.emit(conv_id, "tool_end", {"tool": "processing", "status": _corrupt_msg, "icon": "alert"})
+                                yield f"data: {json.dumps({'type': 'error', 'error': _corrupt_msg})}\n\n"
                                 return
                             await events.emit(conv_id, "error", {"status": f"Ollama: {_ollama_err[:120]}"})
                             yield f"data: {json.dumps({'type': 'error', 'error': _ollama_err})}\n\n"

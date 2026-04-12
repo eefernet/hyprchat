@@ -383,6 +383,45 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
     if calls:
         return calls
 
+    # 2b. <function=NAME><parameter=KEY>VALUE</parameter>...</function> (qwen3-coder, Hermes XML-ish)
+    # Example:
+    #   <function=list_files>
+    #   <parameter=path>
+    #   /root/projects/proj-abc
+    #   </parameter>
+    #   </function>
+    for fn_match in re.finditer(
+        r'<function\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*>(.*?)</function\s*>',
+        content, re.DOTALL | re.IGNORECASE,
+    ):
+        fname = fn_match.group(1).strip()
+        body = fn_match.group(2)
+        if fname not in available_names:
+            continue
+        args: dict = {}
+        for p_match in re.finditer(
+            r'<parameter\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*>(.*?)</parameter\s*>',
+            body, re.DOTALL | re.IGNORECASE,
+        ):
+            pkey = p_match.group(1).strip()
+            pval = p_match.group(2).strip()
+            # Coerce obvious literals so numeric/bool params still work
+            if pval.lower() in ("true", "false"):
+                args[pkey] = (pval.lower() == "true")
+            else:
+                try:
+                    if re.fullmatch(r'-?\d+', pval):
+                        args[pkey] = int(pval)
+                    elif re.fullmatch(r'-?\d+\.\d+', pval):
+                        args[pkey] = float(pval)
+                    else:
+                        args[pkey] = pval
+                except (ValueError, TypeError):
+                    args[pkey] = pval
+        calls.append({"function": {"name": fname, "arguments": args}})
+    if calls:
+        return calls
+
     # 3. JSON objects with name+arguments anywhere in text
     for json_str in _extract_json_objects(stripped):
         try:
@@ -615,6 +654,11 @@ def strip_tool_calls(content: str) -> str:
     # Remove <tool_call>...</tool_call>
     content = re.sub(
         r'<tool[_\-]?call[s]?>\s*.*?\s*</tool[_\-]?call[s]?>',
+        '', content, flags=re.DOTALL | re.IGNORECASE
+    )
+    # Remove qwen3-coder / Hermes-style <function=name>...<parameter=k>v</parameter>...</function>
+    content = re.sub(
+        r'<function\s*=\s*[A-Za-z_][A-Za-z0-9_]*\s*>.*?</function\s*>',
         '', content, flags=re.DOTALL | re.IGNORECASE
     )
     # Remove ```json blocks containing tool calls
@@ -1560,6 +1604,19 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
             })
             print(f"[CODEGEN:OH] model={coder_model} lang={language} num_ctx={num_ctx} task={task[:100]!r}")
 
+            # Auto-resolve project_id: if model didn't pass one, check for an
+            # active uploaded project on this conversation so OpenHands works
+            # inside the user's uploaded project directory.
+            _oh_project_id = args.get("project_id", "")
+            if not _oh_project_id and conv_id:
+                try:
+                    _active = await db.get_coding_project_by_conv(conv_id)
+                    if _active and _active.get("openhands_project_id"):
+                        _oh_project_id = _active["openhands_project_id"]
+                        print(f"[CODEGEN:OH] Auto-attached active project {_oh_project_id} for conv {conv_id}")
+                except Exception as _ap_e:
+                    print(f"[CODEGEN:OH] Active project lookup failed (non-fatal): {_ap_e}")
+
             oh_payload = {
                 "task": task, "model": coder_model,
                 "ollama_url": config.OLLAMA_URL,
@@ -1567,7 +1624,7 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 "num_ctx": num_ctx,
                 "language": language,
                 "context": context,
-                "project_id": args.get("project_id", ""),
+                "project_id": _oh_project_id,
             }
 
             # Action → emoji mapping for progress pills

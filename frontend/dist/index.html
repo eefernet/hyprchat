@@ -1181,6 +1181,31 @@ function HyprChat(){
   const [loadingConv,setLoadingConv]=useState(false);
   const [editingMsg,setEditingMsg]=useState(null); // {index, content}
   const [attachments,setAttachments]=useState([]); // [{name, content}]
+  const [coderProjUploading,setCoderProjUploading]=useState(false);
+  const [coderProjInfo,setCoderProjInfo]=useState(null); // {name, file_count, language}
+  const uploadCoderProject=async(f)=>{
+    if(!actId||!f)return;
+    setCoderProjUploading(true);setCoderProjInfo(null);
+    // Placeholder chip so user sees something is happening
+    const placeholderName=`📦 uploading ${f.name}...`;
+    setAttachments(p=>[...p.filter(a=>!a.name.startsWith("📦 ")),{name:placeholderName,content:"[Project archive upload in progress]"}]);
+    try{
+      const fd=new FormData();fd.append("file",f);fd.append("conv_id",actId);
+      const r=await fetch(`${API}/api/coder/upload-project`,{method:"POST",body:fd});
+      if(!r.ok){const err=await r.json().catch(()=>({detail:r.statusText}));throw new Error(err.detail||`HTTP ${r.status}`);}
+      const data=await r.json();
+      setCoderProjInfo({name:data.name,file_count:data.file_count,language:data.language});
+      setAttachments(p=>[
+        ...p.filter(a=>a.name!==placeholderName&&!a.name.startsWith("📦 project:")),
+        {name:`📦 project: ${data.name} (${data.file_count} ${data.language} files)`,content:`[Uploaded project attached to sandbox at ${data.sandbox_path}]`}
+      ]);
+    }catch(e){
+      setAttachments(p=>p.filter(a=>a.name!==placeholderName));
+      alert(`Project upload failed: ${e.message}`);
+    }finally{
+      setCoderProjUploading(false);
+    }
+  };
   const [workspaces,setWorkspaces]=useState([]);
   const [wsPanel,setWsPanel]=useState(false);
   const [activeWs,setActiveWs]=useState(null);
@@ -1249,6 +1274,8 @@ function HyprChat(){
     setTimeout(dismissLoader,5000); // fallback
     fetch(`${API}/api/models`).then(r=>r.json()).then(d=>{setModels(d.models||[]);setModelDetails(d.model_details||{});dismissLoader();}).catch(()=>{setModels(["qwen3.5:27b","qwen3-coder:30b"]);dismissLoader();});
     fetch(`${API}/api/conversations`).then(r=>r.json()).then(cs=>{if(cs.length){
+      // Seed last-model from most recent conversation if not set
+      try{if(!localStorage.getItem("hc-last-model")&&cs[0]?.model)localStorage.setItem("hc-last-model",cs[0].model);}catch{}
       const isCouncil=v=>v==="1"||v===1||v===true;
       setConvs(cs.map(c=>({...c, messages: [], is_council: isCouncil(c.is_council), council_config_id: c.council_config_id||null})));
       setActId(cs[0].id);
@@ -1315,7 +1342,7 @@ function HyprChat(){
       // Already tracked in ref by the stream loop — no action needed
     }
     const reqId = ++loadReqRef.current;
-    setActId(id);setPanel("chat");setEvts([]);setExpandedPill(null);
+    setActId(id);setPanel("chat");setEvts([]);setExpandedPill(null);setQuickResults([]);
     // Check if we're navigating back to an active council stream
     const activeStream=councilStreamRef.current;
     if(activeStream?.cid===id&&activeStream.running){
@@ -1394,6 +1421,8 @@ function HyprChat(){
       for(const k of ["title","model","system_prompt","tool_ids","persona_name","persona_avatar","is_council","council_config_id","model_config_id"]){
         if(JSON.stringify(updated[k])!==JSON.stringify(c[k])&&updated[k]!==undefined)patch[k]=updated[k];
       }
+      // Remember last-used model for new chats
+      if(patch.model)try{localStorage.setItem("hc-last-model",patch.model);}catch{}
       if(Object.keys(patch).length&&!id.startsWith("l-")){
         fetch(`${API}/api/conversations/${id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)}).catch(()=>{});
       }
@@ -1421,8 +1450,10 @@ function HyprChat(){
       }
     }
 
+    const lastModel=(()=>{try{return localStorage.getItem("hc-last-model")||"";}catch{return "";}})();
+    const defaultModel=persona?.model||curConv?.model||lastModel||models[0]||"qwen3.5:27b";
     try{
-      const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:"New Chat",model:persona?.model||models[0]||"qwen3.5:27b"})});
+      const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:"New Chat",model:defaultModel})});
       const c=await r.json();c.messages=[];
       // Apply persona directly to the conv object before adding to state
       if(persona){
@@ -1432,7 +1463,7 @@ function HyprChat(){
       setConvs(p=>[c,...p]);setActId(c.id);
     }catch{
       const newId=`l-${Date.now()}`;
-      const c={id:newId,title:"New Chat",messages:[],model:persona?.model||models[0]||"",system_prompt:persona?.system_prompt||"",...(persona||{})};
+      const c={id:newId,title:"New Chat",messages:[],model:defaultModel,system_prompt:persona?.system_prompt||"",...(persona||{})};
       setConvs(p=>[c,...p]);setActId(newId);
     }
     setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
@@ -1634,7 +1665,7 @@ function HyprChat(){
     if(appendUser) fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"user",content:appendUser})}).catch(()=>{});
     try{
       const cv=convs.find(c=>c.id===cid);
-      let am = messagesToSend.map(m=>({role:m.role,content:m.content}));
+      let am = messagesToSend.map(m=>({role:m.role,content:m._fullContent||m.content}));
       // Get model-specific params, falling back to globals
       let modelName=cv?.model||models[0]||"";
       // If the selected model is no longer available, fall back to first available
@@ -1644,6 +1675,8 @@ function HyprChat(){
         modelName=fb;
         if(fb)uConv(cid,{model:fb});
       }
+      // Remember last-used model for new chats
+      if(modelName)try{localStorage.setItem("hc-last-model",modelName);}catch{}
       const mp=modelParams[modelName]||{};
       const resolveParam=(mpVal,globalVal)=>{
         if(mpVal===undefined||mpVal===""||mpVal==="default")return globalVal||undefined;
@@ -1698,7 +1731,7 @@ function HyprChat(){
       // Save assistant message to DB (user message was saved at stream start)
       fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:full,metadata:_msgMeta})}).catch(()=>{});
       // Auto-generate title after first exchange
-      if(autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const msgCount=(cv2?.messages||[]).filter(m=>m.role==="user").length;if(msgCount<=1)fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST"}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
+      if(autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const curTitle=cv2?.title||"";if(!curTitle||curTitle==="New Chat"||curTitle===appendUser.slice(0,40))fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
     }catch(e){if(e.name!=="AbortError")uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={role:"assistant",content:`\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false};return{...c,messages:m};});}
     setStreaming(false);setAttachments([]);
   };
@@ -1710,23 +1743,40 @@ function HyprChat(){
     const cv=convs.find(c=>c.id===cid);
     // Route council chats to council sender
     if(cv?.is_council){await sendCouncil();return;}
-    // Build content with attachments
-    let content = inp.trim();
+    // Build content with attachments — full text for model, display version for UI
+    let displayContent = inp.trim();
+    let modelContent = displayContent;
+    const pdfAttachments = [];
     if(attachments.length){
-      const fileCtx = attachments.map(a=>`📎 **${a.name}**:\n\`\`\`\n${a.content}\n\`\`\``).join("\n\n");
-      content = content ? `${content}\n\n${fileCtx}` : fileCtx;
+      const pdfParts = [];
+      const fileParts = [];
+      for(const a of attachments){
+        if(a.type==="pdf"){
+          pdfParts.push(`📄 **${a.name}** (${a.pages||"?"} pages):\n${a.content}`);
+          pdfAttachments.push({name:a.name,pages:a.pages||0});
+        }else{
+          fileParts.push(`📎 **${a.name}**:\n\`\`\`\n${a.content}\n\`\`\``);
+        }
+      }
+      const allFileCtx = [...fileParts,...pdfParts].join("\n\n");
+      modelContent = modelContent ? `${modelContent}\n\n${allFileCtx}` : allFileCtx;
+      // Non-PDF files still show inline
+      if(fileParts.length){
+        const nonPdfCtx = fileParts.join("\n\n");
+        displayContent = displayContent ? `${displayContent}\n\n${nonPdfCtx}` : nonPdfCtx;
+      }
     }
     // Quick search fires in parallel — don't block the chat
-    if(quickSearch&&content.trim()){
+    if(quickSearch&&modelContent.trim()){
       setSearchLoading(true);setQuickResults([]);
-      fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:content.trim().slice(0,200),count:6})}).then(r=>r.json()).then(d=>{setQuickResults(d.results||[]);setSearchLoading(false);}).catch(()=>{setQuickResults([]);setSearchLoading(false);});
+      fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:modelContent.trim().slice(0,200),count:6})}).then(r=>r.json()).then(d=>{setQuickResults(d.results||[]);setSearchLoading(false);}).catch(()=>{setQuickResults([]);setSearchLoading(false);});
     }else{setQuickResults([]);}
-    const um={role:"user",content};
-    uConv(cid,c=>({...c,title:(!c.messages||!c.messages.length)?content.slice(0,40):c.title,messages:[...(c.messages||[]),um,{role:"assistant",content:"",isS:true}]}));
+    const um={role:"user",content:displayContent,_fullContent:modelContent,metadata:{pdfs:pdfAttachments.length?pdfAttachments:undefined}};
+    uConv(cid,c=>({...c,title:(!c.messages||!c.messages.length)?(displayContent||pdfAttachments.map(p=>p.name).join(", ")).slice(0,40):c.title,messages:[...(c.messages||[]),um,{role:"assistant",content:"",isS:true}]}));
     setInp("");setAttachments([]);if(inpRef.current){inpRef.current.style.height="auto";}
     setTimeout(()=>{if(chatScrollRef.current)chatScrollRef.current.scrollTop=chatScrollRef.current.scrollHeight;},0);
     const am=[...(cv?.messages||[]),um];
-    await sendMessages(cid, am, um.content);
+    await sendMessages(cid, am, um._fullContent||um.content);
   };
 
   const regenerate=async(msgIndex)=>{
@@ -1753,18 +1803,48 @@ function HyprChat(){
 
   // File upload handler
   const handleFileUpload=async(files)=>{
-    const newAttachments=[];
-    for(const file of files){
-      if(file.size>5*1024*1024){continue;} // Skip files > 5MB
-      try{
-        const text=await file.text();
-        newAttachments.push({name:file.name,content:text.substring(0,20000)});
-      }catch{
-        // Binary file — read as base64 preview
-        newAttachments.push({name:file.name,content:`[Binary file: ${file.name}, ${(file.size/1024).toFixed(1)}KB]`});
+    // If Coder Bot is active, intercept archive drops and route them to the
+    // project upload endpoint instead of treating them as text attachments.
+    const isArchive=(f)=>{const n=(f.name||"").toLowerCase();return n.endsWith(".zip")||n.endsWith(".tar")||n.endsWith(".tar.gz")||n.endsWith(".tgz")||n.endsWith(".tar.bz2")||n.endsWith(".tbz2");};
+    const isPdf=(f)=>(f.name||"").toLowerCase().endsWith(".pdf");
+    const coderActive=act?.persona_name&&act.persona_name.includes("Coder");
+    let remaining=files;
+    if(coderActive){
+      const archives=files.filter(isArchive);
+      remaining=files.filter(f=>!isArchive(f));
+      if(archives.length){
+        if(archives.length>1)console.warn("Multiple archives dropped — only the first will be attached as a Coder Bot project.");
+        uploadCoderProject(archives[0]);
       }
     }
-    setAttachments(p=>[...p,...newAttachments]);
+    const newAttachments=[];
+    for(const file of remaining){
+      if(isPdf(file)){
+        if(file.size>50*1024*1024){console.warn(`Skipped ${file.name} — too large (max 50MB)`);continue;}
+        // Add a loading placeholder immediately
+        const placeholderIdx=attachments.length+newAttachments.length;
+        setAttachments(p=>[...p,{name:file.name,content:"",type:"pdf",pages:0,loading:true}]);
+        try{
+          const fd=new FormData();fd.append("file",file);
+          const r=await fetch(`${API}/api/extract-pdf`,{method:"POST",body:fd});
+          if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||`HTTP ${r.status}`);}
+          const d=await r.json();
+          setAttachments(p=>p.map((a,i)=>a.name===file.name&&a.loading?{name:file.name,content:d.text||"No text extracted.",type:"pdf",pages:d.total_pages||0,loading:false}:a));
+        }catch(e){
+          console.error("PDF extraction failed:",e);
+          setAttachments(p=>p.map(a=>a.name===file.name&&a.loading?{name:file.name,content:`[PDF extraction failed: ${e.message}]`,type:"pdf",pages:0,loading:false}:a));
+        }
+        continue;
+      }
+      if(file.size>5*1024*1024){continue;}
+      try{
+        const text=await file.text();
+        newAttachments.push({name:file.name,content:text.substring(0,20000),type:"text"});
+      }catch{
+        newAttachments.push({name:file.name,content:`[Binary file: ${file.name}, ${(file.size/1024).toFixed(1)}KB]`,type:"binary"});
+      }
+    }
+    if(newAttachments.length)setAttachments(p=>[...p,...newAttachments]);
   };
 
   const stop=()=>{abortR.current?.abort();setStreaming(false);};
@@ -4372,7 +4452,7 @@ function HyprChat(){
           onDrop={e=>{e.preventDefault();e.stopPropagation();setDragOver(false);const files=Array.from(e.dataTransfer.files);if(files.length)handleFileUpload(files);}}>
           {/* Drag overlay */}
           {dragOver&&<div style={{position:"absolute",inset:0,zIndex:50,background:`${t.acc}12`,border:`3px dashed ${t.acc}`,borderRadius:16,display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(4px)",pointerEvents:"none"}}>
-            <div style={{fontSize:15,color:t.acc,fontWeight:700,letterSpacing:1}}>Drop files to attach</div>
+            <div style={{fontSize:15,color:t.acc,fontWeight:700,letterSpacing:1}}>{act?.persona_name&&act.persona_name.includes("Coder")?"Drop files or a project archive (.zip, .tar.gz)":"Drop files to attach (PDFs supported)"}</div>
           </div>}
           {/* Scroll-to-top / Scroll-to-bottom */}
           {showScrollTop&&<button onClick={()=>chatScrollRef.current?.scrollTo({top:0,behavior:"smooth"})} style={{position:"absolute",top:12,right:20,zIndex:20,...glass,border:`1px solid ${t.brd}33`,borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:14,boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to top">{"\u2191"}</button>}
@@ -4641,6 +4721,13 @@ function HyprChat(){
                       </div>
                     </div>
                     :msg.isS?mdStream(msg.content):md(msg.content)}
+                    {isU&&msg.metadata?.pdfs?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:msg.content?8:0}}>
+                      {msg.metadata.pdfs.map((p,pi)=><span key={pi} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.err}10`,border:`1px solid ${t.err}25`,padding:"5px 12px",borderRadius:8,fontSize:11,fontWeight:500,color:t.text}}>
+                        <span style={{fontSize:16}}>📄</span>
+                        <span>{p.name}</span>
+                        {p.pages>0&&<span style={{fontSize:9,color:t.mut,fontWeight:400}}>{p.pages} pages</span>}
+                      </span>)}
+                    </div>}
                     {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
                     {msg.isS&&!msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
                   </div>
@@ -4790,15 +4877,23 @@ function HyprChat(){
               </button>)}
               {!councilSugLoading&&<button onClick={()=>fetchCouncilSuggestions(act?.council_config_id)} title="Regenerate suggestions" style={{background:"none",border:`1px solid ${t.brd}33`,borderRadius:"50%",width:24,height:24,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:11,flexShrink:0}}>↻</button>}
             </div>}
-          {attachments.length>0&&<div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",flexWrap:"wrap",gap:4,padding:"4px 0"}}>
-            {attachments.map((a,i)=><Chip key={i} l={`📎 ${a.name}`} c={t.f1} bg={`${t.f1}15`} onX={()=>setAttachments(p=>p.filter((_,j)=>j!==i))}/>)}
+          {attachments.length>0&&<div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",flexWrap:"wrap",gap:6,padding:"6px 0"}}>
+            {attachments.map((a,i)=>a.type==="pdf"?
+              <span key={i} style={{display:"inline-flex",alignItems:"center",gap:6,background:a.loading?`${t.warm}12`:`${t.err}10`,border:`1px solid ${a.loading?t.warm:t.err}30`,color:a.loading?t.warm:t.err,padding:"4px 10px",borderRadius:10,fontSize:10,fontWeight:600,transition:"all .2s"}}>
+                <span style={{fontSize:13}}>{a.loading?"⏳":"📄"}</span>
+                <span style={{color:t.text,fontWeight:500}}>{a.name}</span>
+                {!a.loading&&a.pages>0&&<span style={{color:t.mut,fontWeight:400}}>{a.pages}p</span>}
+                {a.loading&&<span style={{color:t.mut,fontWeight:400,fontStyle:"italic"}}>extracting...</span>}
+                <span onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} style={{cursor:"pointer",opacity:.6,marginLeft:2}}>&times;</span>
+              </span>
+            :<Chip key={i} l={`📎 ${a.name}`} c={t.f1} bg={`${t.f1}15`} onX={()=>setAttachments(p=>p.filter((_,j)=>j!==i))}/>)}
           </div>}
           <div style={{maxWidth:chatWidth,margin:"0 auto",...glass,borderRadius:16,padding:"6px 6px 6px 14px",display:"flex",alignItems:"center",gap:6,border:`1px solid ${councilRunning?t.pink:streaming?t.warm:quickSearch?t.f1:t.acc}38`,boxShadow:`0 0 ${councilRunning||streaming?32:16}px ${councilRunning?t.pink:streaming?t.warm:t.acc}${councilRunning||streaming?"22":"0C"}`,transition:"box-shadow .4s,border-color .4s",minHeight:48}}>
             {!act?.is_council&&<><button onClick={()=>fileRef.current?.click()} title="Attach file" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"4px 3px",display:"flex",alignItems:"center",flexShrink:0,opacity:.6}}>
               <IC.Paperclip/>
             </button>
             <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>{if(e.target.files?.length)handleFileUpload(Array.from(e.target.files));e.target.value="";}}/>
-            {(()=>{const coderMc=mcs.find(m=>m.name&&m.name.includes("Coder"));const isCoderActive=act?.persona_name&&act.persona_name.includes("Coder");return coderMc?<button onClick={()=>{if(isCoderActive)return;uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:coderMc.parameters?.avatar});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} title={isCoderActive?"Coder Bot active":"Activate Coder Bot"} style={{background:isCoderActive?`${t.ok}20`:"none",border:isCoderActive?`1px solid ${t.ok}44`:"none",color:isCoderActive?t.ok:t.mut,cursor:isCoderActive?"default":"pointer",padding:"4px 5px",display:"flex",alignItems:"center",flexShrink:0,fontSize:13,opacity:isCoderActive?1:.7,borderRadius:6}}>&lt;/&gt;</button>:null;})()}
+            {(()=>{const coderMc=mcs.find(m=>m.name&&m.name.includes("Coder"));const isCoderActive=act?.persona_name&&act.persona_name.includes("Coder");return coderMc?<button onClick={()=>{if(isCoderActive)return;uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:coderMc.parameters?.avatar});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} title={isCoderActive?"Coder Bot active — drop a .zip/.tar.gz to attach a project":"Activate Coder Bot"} style={{background:isCoderActive?`${t.ok}20`:"none",border:isCoderActive?`1px solid ${t.ok}44`:"none",color:isCoderActive?t.ok:t.mut,cursor:isCoderActive?"default":"pointer",padding:"4px 5px",display:"flex",alignItems:"center",flexShrink:0,fontSize:13,opacity:isCoderActive?1:.7,borderRadius:6}}>&lt;/&gt;</button>:null;})()}
             {prompts.length>0&&<div ref={promptPickerRef} style={{position:"relative"}}>
               <button onClick={()=>{setShowPromptPicker(p=>!p);setPromptSearch("");}} title="Prompt Library (⚡)" style={{background:showPromptPicker?`${t.f1}15`:"none",border:"none",color:showPromptPicker?t.f1:t.mut,cursor:"pointer",padding:"4px 5px",display:"flex",alignItems:"center",flexShrink:0,fontSize:13,opacity:showPromptPicker?1:.7}}>⚡</button>
               {showPromptPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:50,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8}}>

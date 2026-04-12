@@ -393,6 +393,36 @@ async def get_conversation(id: str):
         await db.close()
 
 
+def _scrub_surrogates(v):
+    """SQLite's UTF-8 bindings reject any string containing a surrogate
+    codepoint (lone \\uD83D etc.). The frontend occasionally sends unpaired
+    surrogates when a JavaScript string gets sliced mid-emoji. We combine any
+    valid high/low pairs into their real codepoint, and replace truly lone
+    surrogates with '?' so the UPDATE never 500s."""
+    if not isinstance(v, str):
+        return v
+    if not any(0xD800 <= ord(c) <= 0xDFFF for c in v):
+        return v  # fast path — no surrogates present
+    out = []
+    i = 0
+    n = len(v)
+    while i < n:
+        co = ord(v[i])
+        if 0xD800 <= co <= 0xDBFF and i + 1 < n:
+            no = ord(v[i + 1])
+            if 0xDC00 <= no <= 0xDFFF:
+                out.append(chr(0x10000 + ((co - 0xD800) << 10) + (no - 0xDC00)))
+                i += 2
+                continue
+        if 0xD800 <= co <= 0xDFFF:
+            out.append("?")  # lone surrogate — replace
+            i += 1
+            continue
+        out.append(v[i])
+        i += 1
+    return "".join(out)
+
+
 async def update_conversation(id: str, **kwargs):
     if not kwargs:
         return
@@ -402,7 +432,7 @@ async def update_conversation(id: str, **kwargs):
         if "tool_ids" in kwargs and isinstance(kwargs["tool_ids"], list):
             kwargs["tool_ids"] = json.dumps(kwargs["tool_ids"])
         sets = ", ".join(f"{k} = ?" for k in kwargs)
-        vals = list(kwargs.values()) + [id]
+        vals = [_scrub_surrogates(v) for v in kwargs.values()] + [id]
         await db.execute(f"UPDATE conversations SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?", vals)
         await db.commit()
     finally:

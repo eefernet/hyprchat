@@ -1,57 +1,54 @@
-## Alpha v16.1 — April 6th, 2026
+## Alpha v16.1 — April 2026
 
-### Improvements 
-- Completely overhauled coder bot. Redesigned how it handles every request.
-  - The bot will now plan before it calls the coding tools. The user has the ability to set a `planning` model
-  	in the settings right above the selection for the coding agent model selection. Thinking models work best here.
-  - The bot will ask itself if it needs to use OpenHands agent or not. It will use OpenHands if the plan calls for more 
-  	than 3 files for the project
-  - Better communication between the agent and the overseer bot. When the agent is called and then is finished, the overseer
-  	will check the work of the agent to ensure that the task was completed to the users specifications. If it was not, the overseer
-  	will re-prompt the agent to finish its task, clean up code, or fix errors.
-  - `generate_code` is now project-level instead of per-file. One call builds the entire project (source, configs, package manifests)
-  	rather than the model invoking the tool once for each file.
-  - Each OpenHands run gets an isolated `/root/project-{uuid}` workspace, so leftover files from previous tasks no longer
-  	contaminate new project archives (e.g. an old Java project showing up inside a new React build).
-  - Filesystem snapshot diffing replaces unreliable event parsing — every file the agent creates is correctly detected,
-  	with a `find -mmin -10` fallback scan if the snapshot misses anything.
-  - On success, the project is auto-packaged and a download link is returned in the same tool result, so the user always
-  	gets the archive without an extra round-trip.
-  - Expert task prompt with per-language hints (Python venv, Vite for React, cargo, go mod, javac, etc.) plus an explicit
-  	"install EVERY dependency you use" rule (fixes missing Tailwind / unlisted deps).
-  - OpenHands `stuck_detector` integration: stuck-with-files counts as success, stuck-without-files surfaces a clean error
-  	with the last 5 agent steps for debugging context.
-  - Live progress events from the worker are surfaced as status pills with tool-specific icons (wand, package, microscope, eye,
-  	archive, etc.) so the user can see what the agent is actually doing in real time.
-  - Iteration budget raised: `OPENHANDS_MAX_ROUNDS` 6 → 12 and HTTP timeout 300s → 600s so larger projects (React + Vite + Tailwind)
-  	finish in one shot.
-  - PROJECT COMPLETE hard stop: after a successful `generate_code`, an authoritative SYSTEM message is injected and a guard
-  	blocks any further tool calls except `download_project`. Stops the model from wasting rounds inspecting code OpenHands
-  	already built and tested.
-  - Code-block-rescue loop guard: after a `generate_code` ERROR, the rescue path is disabled so non-tool models can't
-  	infinite-loop dumping the same broken code.
-  - Context window pruning (`MAX_CONTEXT_CHARS=50000`) truncates old tool results before each round to prevent context
-  	explosion on long sessions.
-  - Near-duplicate tool detection tracks the last 3 tool-call signatures (not just the previous one) to catch models
-  	retrying the same operation across non-adjacent rounds.
-  - Dev server detection (`npm run dev`, `npm start`, `flask run`, `uvicorn`, `python -m http.server`, etc.) warns the agent
-  	instead of letting it hang the sandbox waiting on a server.
-  - Repeated-error force stop: same error signature 3× in a row breaks the tool loop and tells the model to summarize.
-  - Clean archive names: `project-abc12345.tar.gz` is normalized to `project.tar.gz` for user-facing downloads.
-  - New `ArchiveLink` frontend component fetches `/api/downloads/{file}/contents` and renders an expandable file tree for
-  	`.tar.gz` and `.zip` downloads, with download + preview toggle.
-  - Markdown link rendering (`[text](url)`) added to the chat pipeline; archive links auto-upgrade to `ArchiveLink`. Bullet
-  	(`- item`) and numbered (`1. item`) lists now render as proper lists.
+### New Features
+- **PDF Chat Attachments** — Drag-and-drop or paste PDF files into chat; text is extracted server-side via `pypdf` and injected as readable content with page markers. Dedicated PDF chip with page count and loading state.
+- **`POST /api/extract-pdf`** — Standalone PDF text extraction endpoint (up to 50MB)
+
+### Coder Bot Overhaul
+- **Plan-first architecture** — The bot plans before calling tools. Configurable planning model in Settings (thinking models recommended).
+- **Smart OpenHands routing** — Automatically decides whether to use the OpenHands agent based on project complexity (3+ files triggers agent).
+- **Overseer verification** — After the agent finishes, the overseer reviews output against user specs and re-prompts if needed.
+- **Project-level `generate_code`** — One call builds the entire project (source, configs, manifests) instead of one file at a time.
+- **Isolated workspaces** — Each OpenHands run gets `/root/project-{uuid}`, preventing file contamination across tasks.
+- **Filesystem snapshot diffing** — Replaces unreliable event parsing; `find -mmin -10` fallback catches every created file.
+- **Auto-package on success** — Download link returned in the same tool result, no extra round-trip.
+- **Per-language task hints** — Python venv, Vite for React, cargo, go mod, javac, etc. plus "install EVERY dependency" rule.
+- **Stuck detector** — Stuck-with-files = success; stuck-without-files = clean error with last 5 agent steps.
+- **Live progress pills** — Real-time status icons (wand, package, microscope, eye, archive) from the worker.
+- **Higher limits** — `OPENHANDS_MAX_ROUNDS` 6 → 12, HTTP timeout 300s → 600s for larger projects.
+- **PROJECT COMPLETE guard** — After success, blocks further tool calls except `download_project`.
+- **Rescue loop guard** — After a `generate_code` error, rescue path disabled to prevent infinite code-dump loops.
+- **Context pruning** — `MAX_CONTEXT_CHARS=50000` truncates old tool results to prevent context explosion.
+- **Near-duplicate detection** — Tracks last 3 tool-call signatures to catch retries across non-adjacent rounds.
+- **Dev server detection** — Warns agent instead of hanging on `npm run dev`, `flask run`, `uvicorn`, etc.
+- **Repeated-error stop** — Same error 3x in a row breaks the loop and forces a summary.
+- **Clean archive names** — `project-abc12345.tar.gz` normalized to `project.tar.gz`.
+
+### UI Improvements
+- **ArchiveLink component** — Expandable file tree for `.tar.gz`/`.zip` downloads with preview toggle.
+- **Markdown links** — `[text](url)` rendering in chat; archive links auto-upgrade to ArchiveLink.
+- **List rendering** — Bullet and numbered lists render as proper HTML lists.
+- **PDF badge in chat** — Uploaded PDFs display as a compact `📄 filename.pdf  N pages` badge instead of dumping extracted text into the message bubble. Full text is still sent to the model.
+- **New chat remembers model** — New chats default to the last model you used (persisted in localStorage) instead of the first model in the list.
+- Drag overlay now mentions PDF support.
 
 ### Bug Fixes
-- Fixed how conversations are loaded from the database on fresh start, prevents conversation merging
-- Fixed RAG Pipeline purge, now it actually deletes from disk, not just the database
-- Fixed the download button disappearing immediately after appearing — caused by the model making more tool calls after
-  `generate_code` success which cleared the frontend `file_ready` event; now hard-stopped via PROJECT COMPLETE.
-- Fixed `generate_code` reporting 0 files created when OpenHands events couldn't be parsed; filesystem snapshot diffing +
-  `find -mmin -10` fallback now catch every created file.
-- Fixed `work_dir` ordering bug in OpenHands worker where the task prompt referenced the workspace path before it was created.
-- Fixed Coderbot getting stuck retrying `npm run dev` (a hanging dev server) by adding dev-server command detection.
+- Fixed conversations merging on fresh start due to incorrect database loading order
+- Fixed RAG purge only deleting from database, not disk
+- Fixed download button disappearing when model made extra tool calls after `generate_code` success
+- Fixed `generate_code` reporting 0 files when OpenHands events couldn't be parsed
+- Fixed `work_dir` ordering bug where task prompt referenced workspace before creation
+- Fixed Coder Bot hanging on dev server commands (`npm run dev`, `npm start`, etc.)
+- Fixed workspace analysis not surfacing errors — Ollama failures now return proper HTTP status and error detail
+- Fixed workspace analysis timeout (30s → 60s) for slower models
+- Fixed OpenHands not receiving uploaded project files — `generate_code` now auto-resolves the active project for the conversation so the agent works inside the user's uploaded project directory
+- Fixed quick search results bleeding between conversations — results now clear on conversation switch
+- Fixed new chat defaulting to first model in list instead of the last model the user actually used
+- Fixed last-used model not persisting — `hc-last-model` now saved on every message send and seeded from most recent conversation on first load
+- Fixed stale model references on conversations — `sendMessages` auto-detects deleted models and falls back to first available
+- Fixed cryptic Ollama errors — "model not found" and corrupt model errors ("Error in input stream") now show clear, actionable messages instead of raw Ollama output
+- Fixed auto-title using wrong model — now uses the user's workspace analysis model from Settings instead of the backend default
+- Fixed auto-title not firing reliably — stale React closure caused message count check to miss; now triggers based on conversation title instead
 
 
 ## Alpha v16 — March 2026
