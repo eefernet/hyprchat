@@ -406,7 +406,7 @@ const Pill = ({ev,t,expanded,onToggle})=>{
           <span style={{fontSize:11,fontWeight:700,color:t.acc}}>{last.icon} {last.label}</span>
           <span style={{fontSize:10,color:t.dim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{last.detail}</span>
         </div>;})()}
-        <div style={{display:"flex",flexDirection:"column",gap:0,maxHeight:240,overflowY:"auto",paddingLeft:8,borderLeft:`2px solid ${t.acc}22`}}>
+        <div style={{display:"flex",flexDirection:"column",gap:0,paddingLeft:8,borderLeft:`2px solid ${t.acc}22`}}>
           {detail.steps.map((s,i)=>{const isLast=i===detail.steps.length-1;return <div key={i} style={{display:"flex",gap:6,alignItems:"flex-start",padding:"3px 0",position:"relative",opacity:isLast?1:.65}}>
             <span style={{position:"absolute",left:-13,top:6,width:isLast?8:6,height:isLast?8:6,borderRadius:"50%",background:isLast?t.acc:`${t.acc}55`,animation:isLast?"pulse 1.4s infinite":"none",transition:"all .2s"}}/>
             <span style={{flexShrink:0,fontSize:11,width:18,textAlign:"center"}}>{s.icon}</span>
@@ -432,9 +432,10 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=
 
   // Stable string key for expandedPill — avoids collapse when new events arrive
   // Guard: if evts only has source_links/search_results (no tool/thinking/streaming), merged will be empty
-  const getPillKey = (ev) => {
+  const getPillKey = (ev, idx) => {
     if(ev.type==="thinking"||ev.type==="thought_done") return "thinking";
     if(ev.type==="streaming"||ev.type==="complete") return "streaming";
+    if(idx!==undefined) return `${ev.data?.tool||ev.type}_${idx}`;
     return ev.data?.tool || ev.type;
   };
 
@@ -453,24 +454,29 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=
     merged.push(done || thinkingEvts[thinkingEvts.length-1]);
   }
 
-  // Tools: pair start→end by tool name, keep unpaired starts. tool_progress updates replace start status.
-  const toolPairs = {};
+  // Tools: pair each start→end sequentially (not by name, so repeated tools each get a step)
+  const _pendingStarts = []; // stack of unmatched tool_start events
   for(const e of toolEvts){
     const key = e.data?.tool||"unknown";
-    if(!toolPairs[key]) toolPairs[key] = [];
-    toolPairs[key].push(e);
+    if(e.type==="tool_start"){
+      _pendingStarts.push({key, evt: e});
+    } else if(e.type==="tool_progress"){
+      // Update the latest pending start for this tool
+      const idx = [..._pendingStarts].reverse().findIndex(p=>p.key===key);
+      if(idx>=0) _pendingStarts[_pendingStarts.length-1-idx].evt = e;
+    } else { // tool_end, tool_done, tool_error
+      // Match with the oldest pending start for this tool
+      const idx = _pendingStarts.findIndex(p=>p.key===key);
+      if(idx>=0) _pendingStarts.splice(idx, 1);
+      merged.push(e);
+    }
   }
-  for(const [key, group] of Object.entries(toolPairs)){
-    const end = group.find(e=>e.type==="tool_end"||e.type==="tool_done"||e.type==="tool_error");
-    if(end){merged.push(end);}else{
-      // No matching end — if historical (saved), force done state so pills don't linger
-      const last = group[group.length-1];
-      if(historical){
-        merged.push({...last, type:"tool_done", data:{...last.data, status:"done"}});
-      }else{
-        const progress = [...group].reverse().find(e=>e.type==="tool_progress");
-        merged.push(progress || last);
-      }
+  // Remaining unmatched starts
+  for(const {evt} of _pendingStarts){
+    if(historical){
+      merged.push({...evt, type:"tool_done", data:{...evt.data, status:"done"}});
+    }else{
+      merged.push(evt);
     }
   }
 
@@ -521,12 +527,16 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=
     const fileMap={};
     fileReadyEvts.forEach(e=>{const d=e.data||{};if(!d.filename)return;if(!fileMap[d.filename])fileMap[d.filename]={d,count:1};else{fileMap[d.filename].d=d;fileMap[d.filename].count++;}});
     return <>{Object.values(fileMap).map(({d,count},i)=>{
-    return <div key={i} style={{display:"inline-flex",alignItems:"center",gap:4,marginTop:5}}>
+    const isImg=d.is_image||/\.(png|jpe?g|gif|svg|webp)$/i.test(d.filename);
+    return <div key={i} style={{marginTop:5}}>
+      {isImg&&<img src={`${API}${d.url}`} alt={d.filename} style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`,cursor:"pointer"}} onClick={()=>onPreview&&onPreview(d.filename,d.url)} onError={e=>e.target.style.display="none"}/>}
+      <div style={{display:"inline-flex",alignItems:"center",gap:4,marginTop:isImg?2:0}}>
       <a href={`${API}${d.url}`} download={d.filename}
         style={{display:"inline-flex",alignItems:"center",gap:7,padding:"7px 14px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontSize:12,fontWeight:700,cursor:"pointer"}}>
         <span style={{fontSize:16}}>{_fileIcon(d.filename)}</span><span>{d.filename}</span>{count>1&&<span style={{fontSize:9,background:t.acc,color:t.bg,borderRadius:8,padding:"1px 5px",fontWeight:700,marginLeft:2}}>v{count}</span>}<span style={{fontSize:10,opacity:.6}}>⬇</span>
       </a>
       {onPreview&&<button onClick={()=>onPreview(d.filename,d.url)} title="Preview" style={{padding:"7px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:13,display:"flex",alignItems:"center"}}>👁</button>}
+      </div>
     </div>;
   })}</>;};
 
@@ -625,7 +635,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=
       Hide steps ▴
     </button>
     <div style={{display:"flex",flexDirection:"column",gap:2}}>
-      {merged.map((ev)=><Pill key={getPillKey(ev)} ev={ev} t={t} expanded={expandedPill===getPillKey(ev)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(ev)?null:getPillKey(ev))}/>)}
+      {merged.map((ev,i)=><Pill key={getPillKey(ev,i)} ev={ev} t={t} expanded={expandedPill===getPillKey(ev,i)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(ev,i)?null:getPillKey(ev,i))}/>)}
     </div>
     <CodeOutputCards/>
     <FileReadyButtons/>
@@ -828,6 +838,18 @@ function SandboxSection({t,btnS,labelS}){
     }catch{setCbResult({error:"Failed"});}
     setCbCleaning(false);
   };
+  const cleanAll=async()=>{
+    setCleaning(true);setCbCleaning(true);setCleanResult(null);setCbResult(null);
+    try{
+      const [r1,r2]=await Promise.all([
+        fetch(`${API}/api/settings/cleanup-now`,{method:"POST"}).then(r=>r.json()).catch(()=>({error:"Sandbox failed"})),
+        fetch(`${API}/api/settings/cleanup-codebox`,{method:"POST"}).then(r=>r.json()).catch(()=>({error:"Codebox failed"})),
+      ]);
+      setCleanResult(r1);setCbResult(r2);
+      const r3=await fetch(`${API}/api/settings`);const d3=await r3.json();setSbInfo(d3);
+    }catch{setCleanResult({error:"Failed"});}
+    setCleaning(false);setCbCleaning(false);
+  };
   const INTERVALS=[
     {label:"Every week",days:7},{label:"Every 2 weeks",days:14},
     {label:"Monthly (default)",days:30},{label:"Every 3 months",days:90},
@@ -859,12 +881,9 @@ function SandboxSection({t,btnS,labelS}){
       </div>
       {cleanupDays===0&&<div style={{fontSize:10,color:t.warm,marginTop:4}}>⚠ Files will never be cleaned automatically. Clean manually when needed.</div>}
     </div>
-    <div style={{display:"flex",alignItems:"center",gap:8}}>
-      <button onClick={cleanNow} disabled={cleaning} style={{...btnS(t.err),opacity:cleaning?.6:1}}>
-        {cleaning?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span> Cleaning...</>:"🗑 Clean Sandbox"}
-      </button>
-      <button onClick={cleanCodebox} disabled={cbCleaning} style={{...btnS(t.warm||"#e89b3e"),opacity:cbCleaning?.6:1}}>
-        {cbCleaning?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span> Cleaning...</>:"🗑 Clean Codebox"}
+    <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+      <button onClick={cleanAll} disabled={cleaning||cbCleaning} style={{...btnS(t.err),opacity:(cleaning||cbCleaning)?.6:1}}>
+        {(cleaning||cbCleaning)?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span> Cleaning...</>:"🗑 Clean All"}
       </button>
       {cleanResult&&!cleanResult.error&&<span style={{fontSize:11,color:t.ok}}>
         ✓ Sandbox: {cleanResult.deleted} file{cleanResult.deleted!==1?"s":""}{cleanResult.freed_bytes>0?`, freed ${fmtBytes(cleanResult.freed_bytes)}`:""}
@@ -1016,6 +1035,7 @@ function HyprChat(){
   const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"14");}catch{return 14;}});
   const [chatWidth,setChatWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-w")||"880");}catch{return 880;}});
   const [wsModel,setWsModel]=useState(()=>{try{return localStorage.getItem("hc-ws-model")||"qwen2.5:7b";}catch{return "qwen2.5:7b";}});
+  const [planningModel,setPlanningModel]=useState(()=>{try{return localStorage.getItem("hc-planning-model")||"";}catch{return "";}});
   const [coderModel,setCoderModel]=useState(()=>{try{return localStorage.getItem("hc-coder-model")||"";}catch{return "";}});
   const [coderNumCtx,setCoderNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-coder-num-ctx")||"8192");}catch{return 8192;}});
   const [openhandsEnabled,setOpenhandsEnabled]=useState(()=>{try{return localStorage.getItem("hc-openhands-enabled")!=="false";}catch{return true;}});
@@ -1091,6 +1111,7 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
   useEffect(()=>{try{localStorage.setItem("hc-custom-quotes",JSON.stringify(customQuotes));}catch{}},[customQuotes]);
   useEffect(()=>{try{localStorage.setItem("hc-ws-model",wsModel);}catch{}},[wsModel]);
+  useEffect(()=>{try{localStorage.setItem("hc-planning-model",planningModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({planning_model:planningModel})}).catch(()=>{});}catch{}},[planningModel]);
   useEffect(()=>{try{localStorage.setItem("hc-coder-model",coderModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({coder_model:coderModel})}).catch(()=>{});}catch{}},[coderModel]);
   useEffect(()=>{try{localStorage.setItem("hc-coder-num-ctx",coderNumCtx);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_num_ctx:coderNumCtx})}).catch(()=>{});}catch{}},[coderNumCtx]);
   useEffect(()=>{try{localStorage.setItem("hc-openhands-enabled",openhandsEnabled);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_enabled:openhandsEnabled})}).catch(()=>{});}catch{}},[openhandsEnabled]);
@@ -1160,6 +1181,31 @@ function HyprChat(){
   const [loadingConv,setLoadingConv]=useState(false);
   const [editingMsg,setEditingMsg]=useState(null); // {index, content}
   const [attachments,setAttachments]=useState([]); // [{name, content}]
+  const [coderProjUploading,setCoderProjUploading]=useState(false);
+  const [coderProjInfo,setCoderProjInfo]=useState(null); // {name, file_count, language}
+  const uploadCoderProject=async(f)=>{
+    if(!actId||!f)return;
+    setCoderProjUploading(true);setCoderProjInfo(null);
+    // Placeholder chip so user sees something is happening
+    const placeholderName=`📦 uploading ${f.name}...`;
+    setAttachments(p=>[...p.filter(a=>!a.name.startsWith("📦 ")),{name:placeholderName,content:"[Project archive upload in progress]"}]);
+    try{
+      const fd=new FormData();fd.append("file",f);fd.append("conv_id",actId);
+      const r=await fetch(`${API}/api/coder/upload-project`,{method:"POST",body:fd});
+      if(!r.ok){const err=await r.json().catch(()=>({detail:r.statusText}));throw new Error(err.detail||`HTTP ${r.status}`);}
+      const data=await r.json();
+      setCoderProjInfo({name:data.name,file_count:data.file_count,language:data.language});
+      setAttachments(p=>[
+        ...p.filter(a=>a.name!==placeholderName&&!a.name.startsWith("📦 project:")),
+        {name:`📦 project: ${data.name} (${data.file_count} ${data.language} files)`,content:`[Uploaded project attached to sandbox at ${data.sandbox_path}]`}
+      ]);
+    }catch(e){
+      setAttachments(p=>p.filter(a=>a.name!==placeholderName));
+      alert(`Project upload failed: ${e.message}`);
+    }finally{
+      setCoderProjUploading(false);
+    }
+  };
   const [workspaces,setWorkspaces]=useState([]);
   const [wsPanel,setWsPanel]=useState(false);
   const [activeWs,setActiveWs]=useState(null);
@@ -1228,20 +1274,24 @@ function HyprChat(){
     setTimeout(dismissLoader,5000); // fallback
     fetch(`${API}/api/models`).then(r=>r.json()).then(d=>{setModels(d.models||[]);setModelDetails(d.model_details||{});dismissLoader();}).catch(()=>{setModels(["qwen3.5:27b","qwen3-coder:30b"]);dismissLoader();});
     fetch(`${API}/api/conversations`).then(r=>r.json()).then(cs=>{if(cs.length){
+      // Seed last-model from most recent conversation if not set
+      try{if(!localStorage.getItem("hc-last-model")&&cs[0]?.model)localStorage.setItem("hc-last-model",cs[0].model);}catch{}
       const isCouncil=v=>v==="1"||v===1||v===true;
       setConvs(cs.map(c=>({...c, messages: [], is_council: isCouncil(c.is_council), council_config_id: c.council_config_id||null})));
       setActId(cs[0].id);
+      setLoadingConv(true);
       // Fetch full first conversation
       fetch(`${API}/api/conversations/${cs[0].id}`).then(r=>r.json()).then(full=>{
         const parseMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
         setConvs(prev=>prev.map(c=>c.id===cs[0].id?{...c, messages:(full.messages||[]).map(m=>({role:m.role,content:m.content,metadata:parseMeta(m)})), model:full.model||c.model, system_prompt:full.system_prompt||c.system_prompt, tool_ids:full.tool_ids||c.tool_ids||[], model_config_id:full.model_config_id||null, is_council:isCouncil(full.is_council), council_config_id:full.council_config_id||null}:c));
-      }).catch(()=>{});
+        setLoadingConv(false);
+      }).catch(()=>{setLoadingConv(false);});
     }}).catch(()=>{});
     fetch(`${API}/api/knowledge-bases`).then(r=>r.json()).then(setKbs).catch(()=>{});
     fetch(`${API}/api/tools`).then(r=>r.json()).then(setTools).catch(()=>{});
     fetch(`${API}/api/model-configs`).then(r=>r.json()).then(setMcs).catch(()=>{});
     fetch(`${API}/api/health`).then(r=>r.json()).then(d=>setHealth(d.services||{})).catch(()=>{});
-    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));if(d.current_coder_model!=null)setCoderModel(d.current_coder_model);if(d.openhands_num_ctx!=null)setCoderNumCtx(d.openhands_num_ctx);if(d.openhands_enabled!=null)setOpenhandsEnabled(d.openhands_enabled);if(d.openhands_max_rounds!=null)setOpenhandsMaxRounds(d.openhands_max_rounds);}).catch(()=>{});
+    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));if(d.current_planning_model!=null)setPlanningModel(d.current_planning_model);if(d.current_coder_model!=null)setCoderModel(d.current_coder_model);if(d.openhands_num_ctx!=null)setCoderNumCtx(d.openhands_num_ctx);if(d.openhands_enabled!=null)setOpenhandsEnabled(d.openhands_enabled);if(d.openhands_max_rounds!=null)setOpenhandsMaxRounds(d.openhands_max_rounds);}).catch(()=>{});
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
     fetch(`${API}/api/workspaces`).then(r=>r.json()).then(setWorkspaces).catch(()=>{});
     fetch(`${API}/api/councils`).then(r=>r.json()).then(setCouncils).catch(()=>{});
@@ -1264,7 +1314,7 @@ function HyprChat(){
     const connect=()=>{
       if(closed)return;
       const es=new EventSource(`${API}/api/events/${actId}`);
-      es.onmessage=e=>{try{const ev=JSON.parse(e.data);if(ev.type!=="heartbeat"&&ev.type!=="keepalive")setEvts(p=>[...p.slice(-50),ev]);retryDelay=1000;}catch{}};
+      es.onmessage=e=>{try{const ev=JSON.parse(e.data);if(ev.type!=="heartbeat"&&ev.type!=="keepalive")setEvts(p=>[...p.slice(-200),ev]);retryDelay=1000;}catch{}};
       es.onerror=()=>{es.close();if(!closed){retryTimer=setTimeout(()=>{retryDelay=Math.min(retryDelay*2,30000);connect();},retryDelay);}};
       sseR.current=es;
     };
@@ -1280,14 +1330,19 @@ function HyprChat(){
 
   // Load conversation messages from backend when switching chats
   const loadConversation = useCallback(async (id, {force=false}={}) => {
-    // If clicking the same conversation, just switch to chat panel without clearing state
-    if(id===actIdRef.current&&!force){setPanel("chat");return;}
+    // If clicking the same conversation that already has messages, just switch panel
+    if(id===actIdRef.current&&!force){
+      // Check if messages exist — if not, fall through to reload from DB
+      let _hasMessages=false;
+      setConvs(prev=>{_hasMessages=prev.some(c=>c.id===id&&c.messages?.length>0);return prev;});
+      if(_hasMessages){setPanel("chat");return;}
+    }
     // Save current council stream state to ref before switching away
     if(councilStreamRef.current?.cid===actIdRef.current&&councilStreamRef.current?.running){
       // Already tracked in ref by the stream loop — no action needed
     }
     const reqId = ++loadReqRef.current;
-    setActId(id);setPanel("chat");setEvts([]);setExpandedPill(null);
+    setActId(id);setPanel("chat");setEvts([]);setExpandedPill(null);setQuickResults([]);
     // Check if we're navigating back to an active council stream
     const activeStream=councilStreamRef.current;
     if(activeStream?.cid===id&&activeStream.running){
@@ -1366,6 +1421,8 @@ function HyprChat(){
       for(const k of ["title","model","system_prompt","tool_ids","persona_name","persona_avatar","is_council","council_config_id","model_config_id"]){
         if(JSON.stringify(updated[k])!==JSON.stringify(c[k])&&updated[k]!==undefined)patch[k]=updated[k];
       }
+      // Remember last-used model for new chats
+      if(patch.model)try{localStorage.setItem("hc-last-model",patch.model);}catch{}
       if(Object.keys(patch).length&&!id.startsWith("l-")){
         fetch(`${API}/api/conversations/${id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)}).catch(()=>{});
       }
@@ -1393,8 +1450,10 @@ function HyprChat(){
       }
     }
 
+    const lastModel=(()=>{try{return localStorage.getItem("hc-last-model")||"";}catch{return "";}})();
+    const defaultModel=persona?.model||curConv?.model||lastModel||models[0]||"qwen3.5:27b";
     try{
-      const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:"New Chat",model:persona?.model||models[0]||"qwen3.5:27b"})});
+      const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:"New Chat",model:defaultModel})});
       const c=await r.json();c.messages=[];
       // Apply persona directly to the conv object before adding to state
       if(persona){
@@ -1404,7 +1463,7 @@ function HyprChat(){
       setConvs(p=>[c,...p]);setActId(c.id);
     }catch{
       const newId=`l-${Date.now()}`;
-      const c={id:newId,title:"New Chat",messages:[],model:persona?.model||models[0]||"",system_prompt:persona?.system_prompt||"",...(persona||{})};
+      const c={id:newId,title:"New Chat",messages:[],model:defaultModel,system_prompt:persona?.system_prompt||"",...(persona||{})};
       setConvs(p=>[c,...p]);setActId(newId);
     }
     setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
@@ -1602,9 +1661,11 @@ function HyprChat(){
   // Core send logic — used by send, regenerate, and edit
   const sendMessages=async(cid, messagesToSend, appendUser)=>{
     setStreaming(true);setTokC(0);setTokS(0);setEvts([]);setExpandedPill(null);setCtxTokens(0);setGenTokens(0);
+    // Save user message to DB immediately (not after stream) so it persists on reload
+    if(appendUser) fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"user",content:appendUser})}).catch(()=>{});
     try{
       const cv=convs.find(c=>c.id===cid);
-      let am = messagesToSend.map(m=>({role:m.role,content:m.content}));
+      let am = messagesToSend.map(m=>({role:m.role,content:m._fullContent||m.content}));
       // Get model-specific params, falling back to globals
       let modelName=cv?.model||models[0]||"";
       // If the selected model is no longer available, fall back to first available
@@ -1614,6 +1675,8 @@ function HyprChat(){
         modelName=fb;
         if(fb)uConv(cid,{model:fb});
       }
+      // Remember last-used model for new chats
+      if(modelName)try{localStorage.setItem("hc-last-model",modelName);}catch{}
       const mp=modelParams[modelName]||{};
       const resolveParam=(mpVal,globalVal)=>{
         if(mpVal===undefined||mpVal===""||mpVal==="default")return globalVal||undefined;
@@ -1665,39 +1728,55 @@ function HyprChat(){
       const _savedEvts = evtsRef.current.filter(e=>["source_links","search_results","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
       const _msgMeta = _savedEvts.length ? {saved_events: _savedEvts} : undefined;
       uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={role:"assistant",content:full,isS:false,metadata:_msgMeta||{}};return{...c,messages:m};});
-      // Save to DB
-      if(appendUser) fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"user",content:appendUser})}).catch(()=>{});
+      // Save assistant message to DB (user message was saved at stream start)
       fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:full,metadata:_msgMeta})}).catch(()=>{});
       // Auto-generate title after first exchange
-      if(autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const msgCount=(cv2?.messages||[]).filter(m=>m.role==="user").length;if(msgCount<=1)fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST"}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
+      if(autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const curTitle=cv2?.title||"";if(!curTitle||curTitle==="New Chat"||curTitle===appendUser.slice(0,40))fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
     }catch(e){if(e.name!=="AbortError")uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={role:"assistant",content:`\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false};return{...c,messages:m};});}
     setStreaming(false);setAttachments([]);
   };
 
   const send=async()=>{
-    if(streaming||(!inp.trim()&&!attachments.length))return;
+    if(streaming||loadingConv||(!inp.trim()&&!attachments.length))return;
     let cid=actId;
     if(!cid){await newChat();return;}
     const cv=convs.find(c=>c.id===cid);
     // Route council chats to council sender
     if(cv?.is_council){await sendCouncil();return;}
-    // Build content with attachments
-    let content = inp.trim();
+    // Build content with attachments — full text for model, display version for UI
+    let displayContent = inp.trim();
+    let modelContent = displayContent;
+    const pdfAttachments = [];
     if(attachments.length){
-      const fileCtx = attachments.map(a=>`📎 **${a.name}**:\n\`\`\`\n${a.content}\n\`\`\``).join("\n\n");
-      content = content ? `${content}\n\n${fileCtx}` : fileCtx;
+      const pdfParts = [];
+      const fileParts = [];
+      for(const a of attachments){
+        if(a.type==="pdf"){
+          pdfParts.push(`📄 **${a.name}** (${a.pages||"?"} pages):\n${a.content}`);
+          pdfAttachments.push({name:a.name,pages:a.pages||0});
+        }else{
+          fileParts.push(`📎 **${a.name}**:\n\`\`\`\n${a.content}\n\`\`\``);
+        }
+      }
+      const allFileCtx = [...fileParts,...pdfParts].join("\n\n");
+      modelContent = modelContent ? `${modelContent}\n\n${allFileCtx}` : allFileCtx;
+      // Non-PDF files still show inline
+      if(fileParts.length){
+        const nonPdfCtx = fileParts.join("\n\n");
+        displayContent = displayContent ? `${displayContent}\n\n${nonPdfCtx}` : nonPdfCtx;
+      }
     }
     // Quick search fires in parallel — don't block the chat
-    if(quickSearch&&content.trim()){
+    if(quickSearch&&modelContent.trim()){
       setSearchLoading(true);setQuickResults([]);
-      fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:content.trim().slice(0,200),count:6})}).then(r=>r.json()).then(d=>{setQuickResults(d.results||[]);setSearchLoading(false);}).catch(()=>{setQuickResults([]);setSearchLoading(false);});
+      fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:modelContent.trim().slice(0,200),count:6})}).then(r=>r.json()).then(d=>{setQuickResults(d.results||[]);setSearchLoading(false);}).catch(()=>{setQuickResults([]);setSearchLoading(false);});
     }else{setQuickResults([]);}
-    const um={role:"user",content};
-    uConv(cid,c=>({...c,title:(!c.messages||!c.messages.length)?content.slice(0,40):c.title,messages:[...(c.messages||[]),um,{role:"assistant",content:"",isS:true}]}));
+    const um={role:"user",content:displayContent,_fullContent:modelContent,metadata:{pdfs:pdfAttachments.length?pdfAttachments:undefined}};
+    uConv(cid,c=>({...c,title:(!c.messages||!c.messages.length)?(displayContent||pdfAttachments.map(p=>p.name).join(", ")).slice(0,40):c.title,messages:[...(c.messages||[]),um,{role:"assistant",content:"",isS:true}]}));
     setInp("");setAttachments([]);if(inpRef.current){inpRef.current.style.height="auto";}
     setTimeout(()=>{if(chatScrollRef.current)chatScrollRef.current.scrollTop=chatScrollRef.current.scrollHeight;},0);
     const am=[...(cv?.messages||[]),um];
-    await sendMessages(cid, am, um.content);
+    await sendMessages(cid, am, um._fullContent||um.content);
   };
 
   const regenerate=async(msgIndex)=>{
@@ -1724,18 +1803,48 @@ function HyprChat(){
 
   // File upload handler
   const handleFileUpload=async(files)=>{
-    const newAttachments=[];
-    for(const file of files){
-      if(file.size>5*1024*1024){continue;} // Skip files > 5MB
-      try{
-        const text=await file.text();
-        newAttachments.push({name:file.name,content:text.substring(0,20000)});
-      }catch{
-        // Binary file — read as base64 preview
-        newAttachments.push({name:file.name,content:`[Binary file: ${file.name}, ${(file.size/1024).toFixed(1)}KB]`});
+    // If Coder Bot is active, intercept archive drops and route them to the
+    // project upload endpoint instead of treating them as text attachments.
+    const isArchive=(f)=>{const n=(f.name||"").toLowerCase();return n.endsWith(".zip")||n.endsWith(".tar")||n.endsWith(".tar.gz")||n.endsWith(".tgz")||n.endsWith(".tar.bz2")||n.endsWith(".tbz2");};
+    const isPdf=(f)=>(f.name||"").toLowerCase().endsWith(".pdf");
+    const coderActive=act?.persona_name&&act.persona_name.includes("Coder");
+    let remaining=files;
+    if(coderActive){
+      const archives=files.filter(isArchive);
+      remaining=files.filter(f=>!isArchive(f));
+      if(archives.length){
+        if(archives.length>1)console.warn("Multiple archives dropped — only the first will be attached as a Coder Bot project.");
+        uploadCoderProject(archives[0]);
       }
     }
-    setAttachments(p=>[...p,...newAttachments]);
+    const newAttachments=[];
+    for(const file of remaining){
+      if(isPdf(file)){
+        if(file.size>50*1024*1024){console.warn(`Skipped ${file.name} — too large (max 50MB)`);continue;}
+        // Add a loading placeholder immediately
+        const placeholderIdx=attachments.length+newAttachments.length;
+        setAttachments(p=>[...p,{name:file.name,content:"",type:"pdf",pages:0,loading:true}]);
+        try{
+          const fd=new FormData();fd.append("file",file);
+          const r=await fetch(`${API}/api/extract-pdf`,{method:"POST",body:fd});
+          if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||`HTTP ${r.status}`);}
+          const d=await r.json();
+          setAttachments(p=>p.map((a,i)=>a.name===file.name&&a.loading?{name:file.name,content:d.text||"No text extracted.",type:"pdf",pages:d.total_pages||0,loading:false}:a));
+        }catch(e){
+          console.error("PDF extraction failed:",e);
+          setAttachments(p=>p.map(a=>a.name===file.name&&a.loading?{name:file.name,content:`[PDF extraction failed: ${e.message}]`,type:"pdf",pages:0,loading:false}:a));
+        }
+        continue;
+      }
+      if(file.size>5*1024*1024){continue;}
+      try{
+        const text=await file.text();
+        newAttachments.push({name:file.name,content:text.substring(0,20000),type:"text"});
+      }catch{
+        newAttachments.push({name:file.name,content:`[Binary file: ${file.name}, ${(file.size/1024).toFixed(1)}KB]`,type:"binary"});
+      }
+    }
+    if(newAttachments.length)setAttachments(p=>[...p,...newAttachments]);
   };
 
   const stop=()=>{abortR.current?.abort();setStreaming(false);};
@@ -1881,7 +1990,8 @@ function HyprChat(){
         }
         return c;
       }));
-      // Clear coder model if it was the deleted model
+      // Clear planning/coder model if it was the deleted model
+      if(planningModel===m){setPlanningModel("");}
       if(coderModel===m){setCoderModel("");}
       // Clear workspace model if it was the deleted model
       if(wsModel===m){setWsModel(fallback);}
@@ -1908,7 +2018,7 @@ function HyprChat(){
         for(const ln of lines){
           if(!ln.startsWith("data: "))continue;
           try{const d=JSON.parse(ln.slice(6));
-            if(d.error){updDl({status:"error",error:d.error});continue;}
+            if(d.error||d.status==="error"){updDl({status:"error",error:d.error||d.message||"Unknown error"});continue;}
             if(d.status==="success"||d.status==="done"){
               updDl({status:"done",pct:100,message:"Done!"});
               refreshModels();
@@ -2467,6 +2577,9 @@ function HyprChat(){
 
       {/* Status pills - removed from here, now in chat area */}
 
+      {/* Panels + Preview wrapper */}
+      <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+      <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",minWidth:0}}>
       {/* Panels */}
       {wsPanel&&activeWs
         ?<WorkspaceDetail ws={wsDetail} wsLoading={wsLoading} t={t} API={API}
@@ -3963,6 +4076,19 @@ function HyprChat(){
         </div>
 
         <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
+          <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Code Planning Model</div>
+          {planningModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <div style={{flex:1}}><ModelPicker value={planningModel} onChange={setPlanningModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
+            <button onClick={()=>setPlanningModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
+          </div>:<div onClick={()=>setPlanningModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+            <span style={{fontSize:14}}>🧠</span>
+            <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Same as chat model</div><div style={{fontSize:9,color:t.dim}}>Click to select a dedicated planning model</div></div>
+            <span style={{fontSize:9,color:t.mut}}>▾</span>
+          </div>}
+          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Model used by plan_project to design architecture before coding. Best with a strong reasoning model.</div>
+        </div>
+
+        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
           <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Code Generator Model</div>
           {coderModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
             <div style={{flex:1}}><ModelPicker value={coderModel} onChange={setCoderModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
@@ -4329,7 +4455,7 @@ function HyprChat(){
           onDrop={e=>{e.preventDefault();e.stopPropagation();setDragOver(false);const files=Array.from(e.dataTransfer.files);if(files.length)handleFileUpload(files);}}>
           {/* Drag overlay */}
           {dragOver&&<div style={{position:"absolute",inset:0,zIndex:50,background:`${t.acc}12`,border:`3px dashed ${t.acc}`,borderRadius:16,display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(4px)",pointerEvents:"none"}}>
-            <div style={{fontSize:15,color:t.acc,fontWeight:700,letterSpacing:1}}>Drop files to attach</div>
+            <div style={{fontSize:15,color:t.acc,fontWeight:700,letterSpacing:1}}>{act?.persona_name&&act.persona_name.includes("Coder")?"Drop files or a project archive (.zip, .tar.gz)":"Drop files to attach (PDFs supported)"}</div>
           </div>}
           {/* Scroll-to-top / Scroll-to-bottom */}
           {showScrollTop&&<button onClick={()=>chatScrollRef.current?.scrollTo({top:0,behavior:"smooth"})} style={{position:"absolute",top:12,right:20,zIndex:20,...glass,border:`1px solid ${t.brd}33`,borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:14,boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to top">{"\u2191"}</button>}
@@ -4598,6 +4724,13 @@ function HyprChat(){
                       </div>
                     </div>
                     :msg.isS?mdStream(msg.content):md(msg.content)}
+                    {isU&&msg.metadata?.pdfs?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:msg.content?8:0}}>
+                      {msg.metadata.pdfs.map((p,pi)=><span key={pi} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.err}10`,border:`1px solid ${t.err}25`,padding:"5px 12px",borderRadius:8,fontSize:11,fontWeight:500,color:t.text}}>
+                        <span style={{fontSize:16}}>📄</span>
+                        <span>{p.name}</span>
+                        {p.pages>0&&<span style={{fontSize:9,color:t.mut,fontWeight:400}}>{p.pages} pages</span>}
+                      </span>)}
+                    </div>}
                     {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
                     {msg.isS&&!msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
                   </div>
@@ -4635,8 +4768,88 @@ function HyprChat(){
             <div ref={chatEnd}/>
           </div>}
         </div>
-          {/* Preview panel */}
-          {previewFile&&<div style={{width:previewWidth,flexShrink:0,borderLeft:`1px solid ${t.brd}33`,background:t.bgDeep,display:"flex",flexDirection:"column",position:"relative",overflow:"hidden",transition:"width .15s"}}>
+        </div>
+        {/* TOOL TOGGLES BAR + QUICK SEARCH */}
+        <div style={{padding:"0 16px",flexShrink:0}}>
+          <div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",gap:4,overflowX:"auto",padding:"4px 0",alignItems:"center"}}>
+            {!act?.is_council&&allTools.map(tl=>{
+              const on=(act?.tool_ids||[]).includes(tl.id);
+              const isQs=tl.id==="quick_search";
+              const col=isQs?t.f1:t.warm;
+              return <button key={tl.id} onClick={()=>{
+                if(!actId)return;
+                uConv(actId,c=>{const ids=c.tool_ids||[];return{...c,tool_ids:on?ids.filter(x=>x!==tl.id):[...ids,tl.id]};});
+              }} style={{display:"flex",alignItems:"center",gap:4,padding:"4px 10px",borderRadius:12,fontSize:10,fontWeight:on?600:400,cursor:"pointer",whiteSpace:"nowrap",background:on?`${col}18`:`${t.surface}44`,border:`1px solid ${on?col:t.brd}33`,color:on?col:t.mut,transition:"all .15s",boxShadow:on?`0 0 6px ${col}22`:"none"}}>
+                {isQs&&searchLoading?<span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span>:(on?<IC.ToggleOn/>:<IC.ToggleOff/>)}{tl.name}
+              </button>;
+            })}
+          </div>
+        </div>
+        {/* INPUT */}
+        <div style={{padding:"6px 18px 14px",flexShrink:0}}>
+          {/* Attachment chips */}
+          {/* Council suggested prompts */}
+          {act?.is_council&&!councilRunning&&(councilSuggestions.length>0||councilSugLoading)&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 0 6px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+              {councilSugLoading?<div style={{display:"flex",alignItems:"center",gap:5,padding:"4px 0",width:"100%"}}>
+                <div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
+                <span style={{fontSize:10,color:t.mut}}>Generating suggestions...</span>
+              </div>:councilSuggestions.map((s,i)=><button key={i} onClick={()=>{setInp(s);setCouncilSuggestions([]);setTimeout(()=>inpRef.current?.focus(),50);}}
+                style={{background:`${t.pink}08`,border:`1px solid ${t.pink}25`,borderRadius:20,padding:"5px 12px",fontSize:11,color:t.dim,cursor:"pointer",fontFamily:font,transition:"all .15s",maxWidth:"100%",textAlign:"left",lineHeight:1.4}}
+                onMouseOver={e=>{e.currentTarget.style.background=`${t.pink}18`;e.currentTarget.style.borderColor=`${t.pink}44`;e.currentTarget.style.color=t.text;}}
+                onMouseOut={e=>{e.currentTarget.style.background=`${t.pink}08`;e.currentTarget.style.borderColor=`${t.pink}25`;e.currentTarget.style.color=t.dim;}}>
+                {s}
+              </button>)}
+              {!councilSugLoading&&<button onClick={()=>fetchCouncilSuggestions(act?.council_config_id)} title="Regenerate suggestions" style={{background:"none",border:`1px solid ${t.brd}33`,borderRadius:"50%",width:24,height:24,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:11,flexShrink:0}}>↻</button>}
+            </div>}
+          {attachments.length>0&&<div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",flexWrap:"wrap",gap:6,padding:"6px 0"}}>
+            {attachments.map((a,i)=>a.type==="pdf"?
+              <span key={i} style={{display:"inline-flex",alignItems:"center",gap:6,background:a.loading?`${t.warm}12`:`${t.err}10`,border:`1px solid ${a.loading?t.warm:t.err}30`,color:a.loading?t.warm:t.err,padding:"4px 10px",borderRadius:10,fontSize:10,fontWeight:600,transition:"all .2s"}}>
+                <span style={{fontSize:13}}>{a.loading?"⏳":"📄"}</span>
+                <span style={{color:t.text,fontWeight:500}}>{a.name}</span>
+                {!a.loading&&a.pages>0&&<span style={{color:t.mut,fontWeight:400}}>{a.pages}p</span>}
+                {a.loading&&<span style={{color:t.mut,fontWeight:400,fontStyle:"italic"}}>extracting...</span>}
+                <span onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} style={{cursor:"pointer",opacity:.6,marginLeft:2}}>&times;</span>
+              </span>
+            :<Chip key={i} l={`📎 ${a.name}`} c={t.f1} bg={`${t.f1}15`} onX={()=>setAttachments(p=>p.filter((_,j)=>j!==i))}/>)}
+          </div>}
+          <div style={{maxWidth:chatWidth,margin:"0 auto",...glass,borderRadius:16,padding:"6px 6px 6px 14px",display:"flex",alignItems:"center",gap:6,border:`1px solid ${councilRunning?t.pink:streaming?t.warm:quickSearch?t.f1:t.acc}38`,boxShadow:`0 0 ${councilRunning||streaming?32:16}px ${councilRunning?t.pink:streaming?t.warm:t.acc}${councilRunning||streaming?"22":"0C"}`,transition:"box-shadow .4s,border-color .4s",minHeight:48}}>
+            {!act?.is_council&&<><button onClick={()=>fileRef.current?.click()} title="Attach file" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"4px 3px",display:"flex",alignItems:"center",flexShrink:0,opacity:.6}}>
+              <IC.Paperclip/>
+            </button>
+            <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>{if(e.target.files?.length)handleFileUpload(Array.from(e.target.files));e.target.value="";}}/>
+            {(()=>{const coderMc=mcs.find(m=>m.name&&m.name.includes("Coder"));const isCoderActive=act?.persona_name&&act.persona_name.includes("Coder");return coderMc?<button onClick={()=>{if(isCoderActive)return;uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:coderMc.parameters?.avatar});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} title={isCoderActive?"Coder Bot active — drop a .zip/.tar.gz to attach a project":"Activate Coder Bot"} style={{background:isCoderActive?`${t.ok}20`:"none",border:isCoderActive?`1px solid ${t.ok}44`:"none",color:isCoderActive?t.ok:t.mut,cursor:isCoderActive?"default":"pointer",padding:"4px 5px",display:"flex",alignItems:"center",flexShrink:0,fontSize:13,opacity:isCoderActive?1:.7,borderRadius:6}}>&lt;/&gt;</button>:null;})()}
+            {prompts.length>0&&<div ref={promptPickerRef} style={{position:"relative"}}>
+              <button onClick={()=>{setShowPromptPicker(p=>!p);setPromptSearch("");}} title="Prompt Library (⚡)" style={{background:showPromptPicker?`${t.f1}15`:"none",border:"none",color:showPromptPicker?t.f1:t.mut,cursor:"pointer",padding:"4px 5px",display:"flex",alignItems:"center",flexShrink:0,fontSize:13,opacity:showPromptPicker?1:.7}}>⚡</button>
+              {showPromptPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:50,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8}}>
+                <input value={promptSearch} onChange={e=>setPromptSearch(e.target.value)} placeholder="Search prompts..." style={{...inputS,marginBottom:6,padding:"5px 8px",fontSize:11}} autoFocus/>
+                <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
+                  {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={(e)=>{e.stopPropagation();setInp(p.content);setShowPromptPicker(false);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
+                    <div style={{fontSize:11,fontWeight:600,color:t.text}}>{p.title}</div>
+                    <div style={{fontSize:9,color:t.f1,marginTop:1}}>{p.category||"General"}</div>
+                  </div>)}
+                  {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())).length===0&&<div style={{textAlign:"center",padding:16,color:t.mut,fontSize:11}}>No matches</div>}
+                </div>
+                <div style={{borderTop:`1px solid ${t.brd}22`,marginTop:4,paddingTop:4}}>
+                  <button onClick={()=>{setShowPromptPicker(false);setPanel("prompts");}} style={{...btnS(t.f1),width:"100%",justifyContent:"center",fontSize:9}}>Manage Prompts →</button>
+                </div>
+              </div>}
+            </div>}
+            </>}
+            <textarea ref={inpRef} value={inp} onChange={e=>setInp(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
+              placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":"What's on your mind?"}`} rows={1}
+              disabled={streaming||councilRunning||loadingConv}
+              style={{flex:1,background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:14,outline:"none",resize:"none",padding:"8px 0",maxHeight:140,lineHeight:1.6}}
+              onInput={e=>{e.target.style.height="auto";e.target.style.height=Math.min(e.target.scrollHeight,120)+"px";}}
+              onPaste={e=>{const files=Array.from(e.clipboardData?.files||[]);if(files.length){e.preventDefault();handleFileUpload(files);}}}/>
+            {councilRunning?<button onClick={()=>setCouncilRunning(false)} style={{background:t.pink,border:"none",color:"#fff",padding:"10px 14px",borderRadius:12,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            :streaming?<button onClick={stop} style={{background:t.err,border:"none",color:"#fff",padding:"10px 14px",borderRadius:12,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            :<button onClick={send} disabled={!inp.trim()&&!attachments.length} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.acc):t.sfBri,border:"none",color:(inp.trim()||attachments.length)?t.bgDeep:t.mut,padding:"10px 14px",borderRadius:12,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all .2s",boxShadow:(inp.trim()||attachments.length)?`0 0 12px ${t.acc}44`:"none"}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
+          </div>
+        </div>
+      </>}
+      </div>{/* end inner panel column */}
+      {/* Preview panel — outside panel ternary so it renders alongside any panel */}
+      {previewFile&&<div style={{width:previewWidth,flexShrink:0,borderLeft:`1px solid ${t.brd}33`,background:t.bgDeep,display:"flex",flexDirection:"column",position:"relative",overflow:"hidden",transition:"width .15s"}}>
             {/* Drag handle */}
             <div onMouseDown={startPreviewDrag} style={{position:"absolute",left:0,top:0,bottom:0,width:5,cursor:"col-resize",zIndex:10,background:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}44`} onMouseLeave={e=>e.currentTarget.style.background="transparent"}/>
             {/* Header */}
@@ -4714,77 +4927,7 @@ function HyprChat(){
               }
             </div>
           </div>}
-        </div>
-        {/* TOOL TOGGLES BAR + QUICK SEARCH */}
-        <div style={{padding:"0 16px",flexShrink:0}}>
-          <div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",gap:4,overflowX:"auto",padding:"4px 0",alignItems:"center"}}>
-            {!act?.is_council&&allTools.map(tl=>{
-              const on=(act?.tool_ids||[]).includes(tl.id);
-              const isQs=tl.id==="quick_search";
-              const col=isQs?t.f1:t.warm;
-              return <button key={tl.id} onClick={()=>{
-                if(!actId)return;
-                uConv(actId,c=>{const ids=c.tool_ids||[];return{...c,tool_ids:on?ids.filter(x=>x!==tl.id):[...ids,tl.id]};});
-              }} style={{display:"flex",alignItems:"center",gap:4,padding:"4px 10px",borderRadius:12,fontSize:10,fontWeight:on?600:400,cursor:"pointer",whiteSpace:"nowrap",background:on?`${col}18`:`${t.surface}44`,border:`1px solid ${on?col:t.brd}33`,color:on?col:t.mut,transition:"all .15s",boxShadow:on?`0 0 6px ${col}22`:"none"}}>
-                {isQs&&searchLoading?<span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span>:(on?<IC.ToggleOn/>:<IC.ToggleOff/>)}{tl.name}
-              </button>;
-            })}
-          </div>
-        </div>
-        {/* INPUT */}
-        <div style={{padding:"6px 18px 14px",flexShrink:0}}>
-          {/* Attachment chips */}
-          {/* Council suggested prompts */}
-          {act?.is_council&&!councilRunning&&(councilSuggestions.length>0||councilSugLoading)&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 0 6px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
-              {councilSugLoading?<div style={{display:"flex",alignItems:"center",gap:5,padding:"4px 0",width:"100%"}}>
-                <div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
-                <span style={{fontSize:10,color:t.mut}}>Generating suggestions...</span>
-              </div>:councilSuggestions.map((s,i)=><button key={i} onClick={()=>{setInp(s);setCouncilSuggestions([]);setTimeout(()=>inpRef.current?.focus(),50);}}
-                style={{background:`${t.pink}08`,border:`1px solid ${t.pink}25`,borderRadius:20,padding:"5px 12px",fontSize:11,color:t.dim,cursor:"pointer",fontFamily:font,transition:"all .15s",maxWidth:"100%",textAlign:"left",lineHeight:1.4}}
-                onMouseOver={e=>{e.currentTarget.style.background=`${t.pink}18`;e.currentTarget.style.borderColor=`${t.pink}44`;e.currentTarget.style.color=t.text;}}
-                onMouseOut={e=>{e.currentTarget.style.background=`${t.pink}08`;e.currentTarget.style.borderColor=`${t.pink}25`;e.currentTarget.style.color=t.dim;}}>
-                {s}
-              </button>)}
-              {!councilSugLoading&&<button onClick={()=>fetchCouncilSuggestions(act?.council_config_id)} title="Regenerate suggestions" style={{background:"none",border:`1px solid ${t.brd}33`,borderRadius:"50%",width:24,height:24,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:11,flexShrink:0}}>↻</button>}
-            </div>}
-          {attachments.length>0&&<div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",flexWrap:"wrap",gap:4,padding:"4px 0"}}>
-            {attachments.map((a,i)=><Chip key={i} l={`📎 ${a.name}`} c={t.f1} bg={`${t.f1}15`} onX={()=>setAttachments(p=>p.filter((_,j)=>j!==i))}/>)}
-          </div>}
-          <div style={{maxWidth:chatWidth,margin:"0 auto",...glass,borderRadius:16,padding:"6px 6px 6px 14px",display:"flex",alignItems:"center",gap:6,border:`1px solid ${councilRunning?t.pink:streaming?t.warm:quickSearch?t.f1:t.acc}38`,boxShadow:`0 0 ${councilRunning||streaming?32:16}px ${councilRunning?t.pink:streaming?t.warm:t.acc}${councilRunning||streaming?"22":"0C"}`,transition:"box-shadow .4s,border-color .4s",minHeight:48}}>
-            {!act?.is_council&&<><button onClick={()=>fileRef.current?.click()} title="Attach file" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"4px 3px",display:"flex",alignItems:"center",flexShrink:0,opacity:.6}}>
-              <IC.Paperclip/>
-            </button>
-            <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>{if(e.target.files?.length)handleFileUpload(Array.from(e.target.files));e.target.value="";}}/>
-            {(()=>{const coderMc=mcs.find(m=>m.name&&m.name.includes("Coder"));const isCoderActive=act?.persona_name&&act.persona_name.includes("Coder");return coderMc?<button onClick={()=>{if(isCoderActive)return;uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:coderMc.parameters?.avatar});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} title={isCoderActive?"Coder Bot active":"Activate Coder Bot"} style={{background:isCoderActive?`${t.ok}20`:"none",border:isCoderActive?`1px solid ${t.ok}44`:"none",color:isCoderActive?t.ok:t.mut,cursor:isCoderActive?"default":"pointer",padding:"4px 5px",display:"flex",alignItems:"center",flexShrink:0,fontSize:13,opacity:isCoderActive?1:.7,borderRadius:6}}>&lt;/&gt;</button>:null;})()}
-            {prompts.length>0&&<div ref={promptPickerRef} style={{position:"relative"}}>
-              <button onClick={()=>{setShowPromptPicker(p=>!p);setPromptSearch("");}} title="Prompt Library (⚡)" style={{background:showPromptPicker?`${t.f1}15`:"none",border:"none",color:showPromptPicker?t.f1:t.mut,cursor:"pointer",padding:"4px 5px",display:"flex",alignItems:"center",flexShrink:0,fontSize:13,opacity:showPromptPicker?1:.7}}>⚡</button>
-              {showPromptPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:50,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8}}>
-                <input value={promptSearch} onChange={e=>setPromptSearch(e.target.value)} placeholder="Search prompts..." style={{...inputS,marginBottom:6,padding:"5px 8px",fontSize:11}} autoFocus/>
-                <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
-                  {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={(e)=>{e.stopPropagation();setInp(p.content);setShowPromptPicker(false);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
-                    <div style={{fontSize:11,fontWeight:600,color:t.text}}>{p.title}</div>
-                    <div style={{fontSize:9,color:t.f1,marginTop:1}}>{p.category||"General"}</div>
-                  </div>)}
-                  {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())).length===0&&<div style={{textAlign:"center",padding:16,color:t.mut,fontSize:11}}>No matches</div>}
-                </div>
-                <div style={{borderTop:`1px solid ${t.brd}22`,marginTop:4,paddingTop:4}}>
-                  <button onClick={()=>{setShowPromptPicker(false);setPanel("prompts");}} style={{...btnS(t.f1),width:"100%",justifyContent:"center",fontSize:9}}>Manage Prompts →</button>
-                </div>
-              </div>}
-            </div>}
-            </>}
-            <textarea ref={inpRef} value={inp} onChange={e=>setInp(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
-              placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":"What's on your mind?"}`} rows={1}
-              disabled={streaming||councilRunning}
-              style={{flex:1,background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:14,outline:"none",resize:"none",padding:"8px 0",maxHeight:140,lineHeight:1.6}}
-              onInput={e=>{e.target.style.height="auto";e.target.style.height=Math.min(e.target.scrollHeight,120)+"px";}}
-              onPaste={e=>{const files=Array.from(e.clipboardData?.files||[]);if(files.length){e.preventDefault();handleFileUpload(files);}}}/>
-            {councilRunning?<button onClick={()=>setCouncilRunning(false)} style={{background:t.pink,border:"none",color:"#fff",padding:"10px 14px",borderRadius:12,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :streaming?<button onClick={stop} style={{background:t.err,border:"none",color:"#fff",padding:"10px 14px",borderRadius:12,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :<button onClick={send} disabled={!inp.trim()&&!attachments.length} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.acc):t.sfBri,border:"none",color:(inp.trim()||attachments.length)?t.bgDeep:t.mut,padding:"10px 14px",borderRadius:12,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all .2s",boxShadow:(inp.trim()||attachments.length)?`0 0 12px ${t.acc}44`:"none"}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
-          </div>
-        </div>
-      </>}
+      </div>{/* end panels + preview wrapper */}
     </div>
 
 

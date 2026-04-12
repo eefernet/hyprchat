@@ -188,6 +188,20 @@ CREATE TABLE IF NOT EXISTS workflow_schedules (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS coding_projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    language TEXT DEFAULT '',
+    file_manifest TEXT DEFAULT '[]',
+    last_plan TEXT DEFAULT '',
+    conversation_id TEXT,
+    openhands_project_id TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_coding_projects_conv ON coding_projects(conversation_id);
 """
 
 
@@ -379,6 +393,36 @@ async def get_conversation(id: str):
         await db.close()
 
 
+def _scrub_surrogates(v):
+    """SQLite's UTF-8 bindings reject any string containing a surrogate
+    codepoint (lone \\uD83D etc.). The frontend occasionally sends unpaired
+    surrogates when a JavaScript string gets sliced mid-emoji. We combine any
+    valid high/low pairs into their real codepoint, and replace truly lone
+    surrogates with '?' so the UPDATE never 500s."""
+    if not isinstance(v, str):
+        return v
+    if not any(0xD800 <= ord(c) <= 0xDFFF for c in v):
+        return v  # fast path — no surrogates present
+    out = []
+    i = 0
+    n = len(v)
+    while i < n:
+        co = ord(v[i])
+        if 0xD800 <= co <= 0xDBFF and i + 1 < n:
+            no = ord(v[i + 1])
+            if 0xDC00 <= no <= 0xDFFF:
+                out.append(chr(0x10000 + ((co - 0xD800) << 10) + (no - 0xDC00)))
+                i += 2
+                continue
+        if 0xD800 <= co <= 0xDFFF:
+            out.append("?")  # lone surrogate — replace
+            i += 1
+            continue
+        out.append(v[i])
+        i += 1
+    return "".join(out)
+
+
 async def update_conversation(id: str, **kwargs):
     if not kwargs:
         return
@@ -388,7 +432,7 @@ async def update_conversation(id: str, **kwargs):
         if "tool_ids" in kwargs and isinstance(kwargs["tool_ids"], list):
             kwargs["tool_ids"] = json.dumps(kwargs["tool_ids"])
         sets = ", ".join(f"{k} = ?" for k in kwargs)
-        vals = list(kwargs.values()) + [id]
+        vals = [_scrub_surrogates(v) for v in kwargs.values()] + [id]
         await db.execute(f"UPDATE conversations SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?", vals)
         await db.commit()
     finally:
@@ -398,6 +442,10 @@ async def update_conversation(id: str, **kwargs):
 async def delete_conversation(id: str):
     db = await get_db()
     try:
+        # Explicitly delete related rows (don't rely solely on CASCADE)
+        await db.execute("DELETE FROM messages WHERE conversation_id = ?", (id,))
+        await db.execute("DELETE FROM conversation_files WHERE conversation_id = ?", (id,))
+        await db.execute("DELETE FROM workspace_conversations WHERE conversation_id = ?", (id,))
         await db.execute("DELETE FROM conversations WHERE id = ?", (id,))
         await db.commit()
     finally:
@@ -1201,5 +1249,71 @@ async def get_due_schedules():
                 s["workflow_steps"] = []
             schedules.append(s)
         return schedules
+    finally:
+        await db.close()
+
+
+# ============================================================
+# CODING PROJECT CRUD
+# ============================================================
+async def upsert_coding_project(project_id: str, name: str, conversation_id: str = "",
+                                 description: str = "", language: str = "",
+                                 file_manifest: list = None, last_plan: str = "",
+                                 openhands_project_id: str = ""):
+    db = await get_db()
+    try:
+        now = datetime.utcnow().isoformat()
+        manifest_json = json.dumps(file_manifest or [])
+        existing = await db.execute_fetchall("SELECT id FROM coding_projects WHERE id = ?", (project_id,))
+        if existing:
+            await db.execute(
+                "UPDATE coding_projects SET name=?, description=?, language=?, file_manifest=?, "
+                "last_plan=?, conversation_id=?, openhands_project_id=?, updated_at=? WHERE id=?",
+                (name, description, language, manifest_json, last_plan,
+                 conversation_id, openhands_project_id, now, project_id)
+            )
+        else:
+            await db.execute(
+                "INSERT INTO coding_projects(id,name,description,language,file_manifest,last_plan,"
+                "conversation_id,openhands_project_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (project_id, name, description, language, manifest_json, last_plan,
+                 conversation_id, openhands_project_id, now, now)
+            )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_coding_project_by_conv(conversation_id: str):
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM coding_projects WHERE conversation_id = ? ORDER BY updated_at DESC LIMIT 1",
+            (conversation_id,)
+        )
+        if not rows:
+            return None
+        p = dict(rows[0])
+        try:
+            p["file_manifest"] = json.loads(p.get("file_manifest", "[]"))
+        except (json.JSONDecodeError, TypeError):
+            p["file_manifest"] = []
+        return p
+    finally:
+        await db.close()
+
+
+async def get_coding_project(project_id: str):
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT * FROM coding_projects WHERE id = ?", (project_id,))
+        if not rows:
+            return None
+        p = dict(rows[0])
+        try:
+            p["file_manifest"] = json.loads(p.get("file_manifest", "[]"))
+        except (json.JSONDecodeError, TypeError):
+            p["file_manifest"] = []
+        return p
     finally:
         await db.close()

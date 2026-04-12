@@ -554,3 +554,124 @@ async def reindex_kb(kb_id: str, files: list[dict]) -> list[dict]:
         r = await index_file(kb_id, f["filename"], f["filepath"])
         results.append(r)
     return results
+
+
+# ============================================================
+# CODE MEMORY — index generated code for future reference
+# ============================================================
+_CODE_COLLECTION = "code_memory"
+
+
+def _get_code_collection():
+    """Get or create the global code memory collection."""
+    client = get_chroma()
+    return client.get_or_create_collection(
+        name=_CODE_COLLECTION,
+        metadata={"hnsw:space": "cosine"},
+    )
+
+
+async def index_generated_code(task: str, language: str, file_contents: dict,
+                                conv_id: str = "", project_id: str = "") -> dict:
+    """Index generated code into code memory for future reference.
+
+    Args:
+        task: The original task description
+        language: Programming language
+        file_contents: Dict of {filepath: code_content}
+        conv_id: Conversation ID
+        project_id: Project ID from generate_code
+
+    Returns:
+        Stats about the indexing operation
+    """
+    if not file_contents:
+        return {"indexed": False, "reason": "no files"}
+
+    ids = []
+    texts = []
+    metadatas = []
+    for filepath, content in file_contents.items():
+        if not content or len(content.strip()) < 20:
+            continue
+        # Chunk code content
+        source_label = f"{filepath} ({language})"
+        chunks = chunk_text(content, source_label)
+        for chunk in chunks:
+            content_hash = hashlib.md5(chunk["text"].encode()).hexdigest()
+            ids.append(content_hash)
+            texts.append(chunk["text"])
+            metadatas.append({
+                "filename": filepath,
+                "language": language,
+                "task": task[:300],
+                "conv_id": conv_id,
+                "project_id": project_id,
+                "chunk_index": chunk["chunk_index"],
+                "char_count": len(chunk["text"]),
+            })
+
+    if not texts:
+        return {"indexed": False, "reason": "no substantial content"}
+
+    embeddings = await embed_texts(texts)
+    valid = [(i, t, m, e) for i, t, m, e in zip(ids, texts, metadatas, embeddings) if e is not None]
+    if not valid:
+        return {"indexed": False, "reason": "embedding failed"}
+
+    v_ids, v_texts, v_metas, v_embeds = zip(*valid)
+    collection = _get_code_collection()
+    collection.upsert(
+        ids=list(v_ids),
+        documents=list(v_texts),
+        metadatas=list(v_metas),
+        embeddings=list(v_embeds),
+    )
+    print(f"[RAG] Indexed {len(v_ids)} code chunks from {len(file_contents)} files ({language})")
+    return {"indexed": True, "chunks": len(v_ids), "files": len(file_contents)}
+
+
+async def query_code_memory(query_text: str, top_k: int = 4, language: str = "") -> list[dict]:
+    """Query code memory for similar past projects/code.
+
+    Returns:
+        List of dicts with keys: text, filename, score, task, language
+    """
+    if not query_text.strip():
+        return []
+
+    query_embedding = await embed_single(query_text)
+    if query_embedding is None:
+        return []
+
+    try:
+        collection = _get_code_collection()
+        count = collection.count()
+        if count == 0:
+            return []
+
+        where_filter = {"language": language} if language else None
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(top_k, count),
+            where=where_filter,
+        )
+        if not results or not results.get("documents"):
+            return []
+
+        matches = []
+        for i, doc in enumerate(results["documents"][0]):
+            meta = results["metadatas"][0][i] if results.get("metadatas") else {}
+            dist = results["distances"][0][i] if results.get("distances") else 0
+            matches.append({
+                "text": doc,
+                "filename": meta.get("filename", ""),
+                "score": 1 - dist,
+                "task": meta.get("task", ""),
+                "language": meta.get("language", ""),
+                "project_id": meta.get("project_id", ""),
+            })
+        return matches
+    except Exception as e:
+        print(f"[RAG] Code memory query failed: {e}")
+        return []

@@ -163,6 +163,105 @@ CODEAGENT_TOOLS = {
             }, "required": ["task", "language"]},
         },
     },
+    "plan_project": {
+        "type": "function",
+        "function": {
+            "name": "plan_project",
+            "description": "Create an architecture plan before writing code. Call this FIRST for any multi-file project. Uses a dedicated planning model to design file structure, dependencies, component interactions, and build order. Returns a structured plan — do NOT write code yet, implement the plan step by step after.",
+            "parameters": {"type": "object", "properties": {
+                "task": {"type": "string", "description": "What to build — detailed requirements and features"},
+                "language": {"type": "string", "description": "Primary language: python, javascript, typescript, rust, go, etc."},
+                "constraints": {"type": "string", "description": "Technical constraints, preferred libraries, deployment target, etc."},
+            }, "required": ["task", "language"]},
+        },
+    },
+    "search_files": {
+        "type": "function",
+        "function": {
+            "name": "search_files",
+            "description": "Search for a text or regex pattern in project files. Returns matching lines with file paths and line numbers. Useful for finding function definitions, imports, TODOs, error strings, etc.",
+            "parameters": {"type": "object", "properties": {
+                "pattern": {"type": "string", "description": "Text or regex pattern to search for"},
+                "path": {"type": "string", "description": "Directory to search in (default: /root)"},
+                "file_pattern": {"type": "string", "description": "File glob filter, e.g. '*.py' or '*.ts'"},
+            }, "required": ["pattern"]},
+        },
+    },
+    "diff_files": {
+        "type": "function",
+        "function": {
+            "name": "diff_files",
+            "description": "Show unified diff between two files. Useful for comparing versions, reviewing changes, or debugging modifications.",
+            "parameters": {"type": "object", "properties": {
+                "path_a": {"type": "string", "description": "First file path"},
+                "path_b": {"type": "string", "description": "Second file path"},
+            }, "required": ["path_a", "path_b"]},
+        },
+    },
+    "git_init": {
+        "type": "function",
+        "function": {
+            "name": "git_init",
+            "description": "Initialize a git repository in a project directory with a sensible .gitignore and initial commit.",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Project directory path (default: /root)"},
+                "language": {"type": "string", "description": "Primary language for .gitignore (python, javascript, rust, go, java)"},
+            }, "required": []},
+        },
+    },
+    "git_diff": {
+        "type": "function",
+        "function": {
+            "name": "git_diff",
+            "description": "Show uncommitted changes in the git repository.",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Repository directory (default: /root)"},
+            }, "required": []},
+        },
+    },
+    "git_commit": {
+        "type": "function",
+        "function": {
+            "name": "git_commit",
+            "description": "Stage all changes and create a git commit with the given message.",
+            "parameters": {"type": "object", "properties": {
+                "message": {"type": "string", "description": "Commit message"},
+                "path": {"type": "string", "description": "Repository directory (default: /root)"},
+            }, "required": ["message"]},
+        },
+    },
+    "run_tests": {
+        "type": "function",
+        "function": {
+            "name": "run_tests",
+            "description": "Auto-detect and run tests in the project. Detects pytest, jest, cargo test, go test, etc.",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Project directory (default: /root)"},
+                "framework": {"type": "string", "description": "Force a specific framework: pytest, jest, cargo, go, npm"},
+            }, "required": []},
+        },
+    },
+    "lint_code": {
+        "type": "function",
+        "function": {
+            "name": "lint_code",
+            "description": "Auto-detect language and run linter/formatter. Python: ruff, JS/TS: prettier, Rust: cargo fmt, Go: gofmt.",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Project directory (default: /root)"},
+                "language": {"type": "string", "description": "Force language: python, javascript, typescript, rust, go"},
+            }, "required": []},
+        },
+    },
+    "resume_project": {
+        "type": "function",
+        "function": {
+            "name": "resume_project",
+            "description": "Resume a previous coding project. Reads the project's file listing from the sandbox and returns context from the last plan and file manifest so you can continue where you left off.",
+            "parameters": {"type": "object", "properties": {
+                "project_id": {"type": "string", "description": "Project ID to resume (from a previous generate_code or plan_project)"},
+            }, "required": []},
+        },
+    },
 }
 
 
@@ -251,8 +350,10 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
     Handles: raw JSON, <tool_call> tags, JSON in code blocks, bare JSON objects."""
     calls = []
 
-    # Strip markdown code fences for parsing
+    # Strip markdown code fences and model-specific special tokens for parsing
     stripped = re.sub(r'```(?:json|tool_call|tool)?\s*\n?', '', content).strip().rstrip('`')
+    # Strip GPT-OSS / other model special tokens that appear after JSON
+    stripped = re.sub(r'<\|(?:call|message|im_end|im_start|eot_id|end)\|>.*', '', stripped, flags=re.DOTALL).strip()
 
     # 1. Entire response is a single JSON tool call
     for _try_str in (stripped, _fix_json_newlines(stripped)):
@@ -264,8 +365,9 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
             pass
 
     # 2. <tool_call>JSON</tool_call> tags (Qwen native format)
+    # Also match <|call|>JSON patterns (GPT-OSS format)
     tag_matches = re.findall(
-        r'<tool[_\-]?call[s]?>\s*(.*?)\s*</tool[_\-]?call[s]?>',
+        r'<(?:tool[_\-]?call[s]?|\|call\|)>\s*(.*?)\s*</(?:tool[_\-]?call[s]?|\|call\|)>',
         content, re.DOTALL | re.IGNORECASE
     )
     for raw in tag_matches:
@@ -278,6 +380,45 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
                     calls.append({"function": {"name": name, "arguments": args}})
             except (json.JSONDecodeError, TypeError):
                 pass
+    if calls:
+        return calls
+
+    # 2b. <function=NAME><parameter=KEY>VALUE</parameter>...</function> (qwen3-coder, Hermes XML-ish)
+    # Example:
+    #   <function=list_files>
+    #   <parameter=path>
+    #   /root/projects/proj-abc
+    #   </parameter>
+    #   </function>
+    for fn_match in re.finditer(
+        r'<function\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*>(.*?)</function\s*>',
+        content, re.DOTALL | re.IGNORECASE,
+    ):
+        fname = fn_match.group(1).strip()
+        body = fn_match.group(2)
+        if fname not in available_names:
+            continue
+        args: dict = {}
+        for p_match in re.finditer(
+            r'<parameter\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*>(.*?)</parameter\s*>',
+            body, re.DOTALL | re.IGNORECASE,
+        ):
+            pkey = p_match.group(1).strip()
+            pval = p_match.group(2).strip()
+            # Coerce obvious literals so numeric/bool params still work
+            if pval.lower() in ("true", "false"):
+                args[pkey] = (pval.lower() == "true")
+            else:
+                try:
+                    if re.fullmatch(r'-?\d+', pval):
+                        args[pkey] = int(pval)
+                    elif re.fullmatch(r'-?\d+\.\d+', pval):
+                        args[pkey] = float(pval)
+                    else:
+                        args[pkey] = pval
+                except (ValueError, TypeError):
+                    args[pkey] = pval
+        calls.append({"function": {"name": fname, "arguments": args}})
     if calls:
         return calls
 
@@ -482,6 +623,15 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
         "download_file": ["filename"],
         "download_project": ["filenames", "project_name"],
         "delete_file": ["path"],
+        "plan_project": ["task", "language", "constraints"],
+        "search_files": ["pattern", "path", "file_pattern"],
+        "diff_files": ["path_a", "path_b"],
+        "git_init": ["path", "language"],
+        "git_diff": ["path"],
+        "git_commit": ["message", "path"],
+        "run_tests": ["path", "framework"],
+        "lint_code": ["path", "language"],
+        "resume_project": ["project_id"],
         "research": ["query"],
         "fetch_url": ["url"],
         "generate_code": ["task", "language", "context"],
@@ -504,6 +654,11 @@ def strip_tool_calls(content: str) -> str:
     # Remove <tool_call>...</tool_call>
     content = re.sub(
         r'<tool[_\-]?call[s]?>\s*.*?\s*</tool[_\-]?call[s]?>',
+        '', content, flags=re.DOTALL | re.IGNORECASE
+    )
+    # Remove qwen3-coder / Hermes-style <function=name>...<parameter=k>v</parameter>...</function>
+    content = re.sub(
+        r'<function\s*=\s*[A-Za-z_][A-Za-z0-9_]*\s*>.*?</function\s*>',
         '', content, flags=re.DOTALL | re.IGNORECASE
     )
     # Remove ```json blocks containing tool calls
@@ -882,14 +1037,19 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     "status": f"{filename} ready",
                     "detail": json.dumps({"file": filename, "path": path, "download_url": download_url}),
                 })
+                _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
+                _ext = os.path.splitext(filename)[1].lower()
                 await events.emit(conv_id, "file_ready", {
                     "filename": filename, "url": download_url,
+                    "is_image": _ext in _IMAGE_EXTS,
                 })
                 try:
                     cf_id = f"cf-{uuid.uuid4().hex[:8]}"
                     await db.add_conversation_file(cf_id, conv_id, filename, download_url)
                 except Exception as e:
                     print(f"[FileTrack] {e}")
+                if _ext in _IMAGE_EXTS:
+                    return f"![{filename}]({download_url})\n\n**[Download {filename}]({download_url})**"
                 return f"**[Download {filename}]({download_url})**"
             else:
                 await events.emit(conv_id, "tool_end", {"tool": "download_file", "icon": "code", "status": f"File not found: {path}"})
@@ -953,6 +1113,300 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             ok = exit_code == 0
             await events.emit(conv_id, "tool_end", {"tool": "delete_file", "icon": "terminal", "status": f"{'Deleted' if ok else 'Failed'}: {path}"})
             return f"Deleted: {path}" if ok else f"ERROR: Delete failed (exit {exit_code}): {result.get('stderr', '')[:200]}"
+
+        elif name == "search_files":
+            pattern = args.get("pattern", "")
+            if not pattern:
+                return "ERROR: pattern is required"
+            search_path = args.get("path", "/root")
+            file_pattern = args.get("file_pattern", "")
+            await events.emit(conv_id, "tool_start", {"tool": "search_files", "icon": "search", "status": f"Searching: {pattern[:40]}"})
+            cmd = f"grep -rn"
+            if file_pattern:
+                cmd += f" --include={shlex.quote(file_pattern)}"
+            cmd += f" {shlex.quote(pattern)} {shlex.quote(search_path)} 2>/dev/null | head -60"
+            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 15}, timeout=20)
+            result = r.json()
+            output = result.get("stdout", "").strip()
+            match_count = len(output.splitlines()) if output else 0
+            await events.emit(conv_id, "tool_end", {"tool": "search_files", "icon": "search", "status": f"Found {match_count} matches"})
+            return output if output else f"No matches found for '{pattern}' in {search_path}"
+
+        elif name == "diff_files":
+            path_a = args.get("path_a", "")
+            path_b = args.get("path_b", "")
+            if not path_a or not path_b:
+                return "ERROR: path_a and path_b are required"
+            await events.emit(conv_id, "tool_start", {"tool": "diff_files", "icon": "terminal", "status": f"Diffing files..."})
+            cmd = f"diff -u {shlex.quote(path_a)} {shlex.quote(path_b)}"
+            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 10}, timeout=15)
+            result = r.json()
+            output = result.get("stdout", "").strip()
+            exit_code = result.get("exit_code", 0)
+            await events.emit(conv_id, "tool_end", {"tool": "diff_files", "icon": "terminal", "status": "Diff complete"})
+            if exit_code == 0:
+                return "Files are identical."
+            elif exit_code == 1:
+                return output[:8000] if output else "Files differ but no diff output."
+            else:
+                return f"ERROR: diff failed: {result.get('stderr', '')[:200]}"
+
+        elif name == "git_init":
+            path = args.get("path", "/root")
+            language = args.get("language", "python").lower()
+            await events.emit(conv_id, "tool_start", {"tool": "git_init", "icon": "terminal", "status": f"Initializing git repo in {path}"})
+            gitignore_map = {
+                "python": "__pycache__/\n*.pyc\n*.pyo\nvenv/\n.env\n*.egg-info/\ndist/\nbuild/\n.pytest_cache/\n",
+                "javascript": "node_modules/\n.env\ndist/\nbuild/\n*.log\n.cache/\ncoverage/\n",
+                "typescript": "node_modules/\n.env\ndist/\nbuild/\n*.log\n.cache/\ncoverage/\n",
+                "rust": "target/\nCargo.lock\n",
+                "go": "bin/\n*.exe\nvendor/\n",
+                "java": "*.class\ntarget/\n.idea/\n*.jar\nbuild/\n",
+            }
+            gitignore = gitignore_map.get(language, "__pycache__/\nnode_modules/\n.env\nvenv/\n")
+            b64_gi = base64.b64encode(gitignore.encode()).decode()
+            cmd = (
+                f"cd {shlex.quote(path)} && "
+                f"git init && "
+                f"printf '%s' {shlex.quote(b64_gi)} | base64 -d > .gitignore && "
+                f"git add -A && "
+                f"git -c user.email='bot@hyprchat' -c user.name='HyprCoder' commit -m 'Initial commit' 2>&1"
+            )
+            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 15}, timeout=20)
+            result = r.json()
+            output = result.get("stdout", "").strip()
+            ok = result.get("exit_code", -1) == 0
+            await events.emit(conv_id, "tool_end", {"tool": "git_init", "icon": "terminal", "status": f"{'Initialized' if ok else 'Failed'}"})
+            return output[:3000] if output else ("Git repo initialized." if ok else f"ERROR: {result.get('stderr', '')[:200]}")
+
+        elif name == "git_diff":
+            path = args.get("path", "/root")
+            await events.emit(conv_id, "tool_start", {"tool": "git_diff", "icon": "terminal", "status": "Checking changes..."})
+            cmd = f"cd {shlex.quote(path)} && git diff && git diff --cached && git status --short"
+            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 10}, timeout=15)
+            result = r.json()
+            output = result.get("stdout", "").strip()
+            await events.emit(conv_id, "tool_end", {"tool": "git_diff", "icon": "terminal", "status": "Done"})
+            return output[:8000] if output else "No changes detected."
+
+        elif name == "git_commit":
+            message = args.get("message", "Update")
+            path = args.get("path", "/root")
+            await events.emit(conv_id, "tool_start", {"tool": "git_commit", "icon": "terminal", "status": f"Committing: {message[:40]}"})
+            cmd = (
+                f"cd {shlex.quote(path)} && "
+                f"git add -A && "
+                f"git -c user.email='bot@hyprchat' -c user.name='HyprCoder' commit -m {shlex.quote(message)} 2>&1"
+            )
+            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 15}, timeout=20)
+            result = r.json()
+            output = result.get("stdout", "").strip()
+            ok = result.get("exit_code", -1) == 0
+            await events.emit(conv_id, "tool_end", {"tool": "git_commit", "icon": "terminal", "status": f"{'Committed' if ok else 'Failed'}"})
+            return output[:3000] if output else ("Committed." if ok else f"ERROR: {result.get('stderr', '')[:200]}")
+
+        elif name == "run_tests":
+            path = args.get("path", "/root")
+            framework = args.get("framework", "").lower()
+            await events.emit(conv_id, "tool_start", {"tool": "run_tests", "icon": "code", "status": "Detecting test framework..."})
+
+            if not framework:
+                # Auto-detect
+                detect_cmd = (
+                    f"cd {shlex.quote(path)} && "
+                    f"ls pytest.ini setup.cfg pyproject.toml conftest.py 2>/dev/null; "
+                    f"ls package.json Cargo.toml go.mod 2>/dev/null; "
+                    f"find . -maxdepth 3 -name 'test_*.py' -o -name '*_test.py' -o -name '*.test.js' -o -name '*.test.ts' -o -name '*.spec.js' 2>/dev/null | head -5"
+                )
+                detect_r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": detect_cmd, "timeout": 10}, timeout=15)
+                detect_out = detect_r.json().get("stdout", "")
+                if "Cargo.toml" in detect_out:
+                    framework = "cargo"
+                elif "go.mod" in detect_out:
+                    framework = "go"
+                elif "package.json" in detect_out:
+                    # Check if jest or vitest
+                    pkg_r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": f"cat {shlex.quote(path)}/package.json 2>/dev/null", "timeout": 5}, timeout=10)
+                    pkg = pkg_r.json().get("stdout", "")
+                    if "vitest" in pkg:
+                        framework = "vitest"
+                    elif "jest" in pkg or ".test.js" in detect_out or ".test.ts" in detect_out or ".spec.js" in detect_out:
+                        framework = "jest"
+                    else:
+                        framework = "npm"
+                elif any(f in detect_out for f in ("pytest.ini", "setup.cfg", "pyproject.toml", "conftest.py", "test_")):
+                    framework = "pytest"
+                else:
+                    framework = "pytest"  # fallback
+
+            test_cmds = {
+                "pytest": f"cd {shlex.quote(path)} && /root/venv/bin/python3 -m pytest -v --tb=short 2>&1",
+                "jest": f"cd {shlex.quote(path)} && npx jest --verbose 2>&1",
+                "vitest": f"cd {shlex.quote(path)} && npx vitest run 2>&1",
+                "npm": f"cd {shlex.quote(path)} && npm test 2>&1",
+                "cargo": f"cd {shlex.quote(path)} && cargo test 2>&1",
+                "go": f"cd {shlex.quote(path)} && go test ./... -v 2>&1",
+            }
+            cmd = test_cmds.get(framework, test_cmds["pytest"])
+            await events.emit(conv_id, "tool_start", {"tool": "run_tests", "icon": "code", "status": f"Running {framework} tests..."})
+            start = time.time()
+            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 120}, timeout=130)
+            elapsed = time.time() - start
+            result = r.json()
+            output = _strip_ansi(result.get("stdout", "")).strip()
+            ok = result.get("exit_code", -1) == 0
+            await events.emit(conv_id, "tool_end", {"tool": "run_tests", "icon": "code", "status": f"{'PASSED' if ok else 'FAILED'} ({framework}, {elapsed:.1f}s)"})
+            parts = [f"**{'TESTS PASSED' if ok else 'TESTS FAILED'}** | {framework} | {elapsed:.1f}s\n"]
+            if output:
+                parts.append(f"```\n{output[:8000]}\n```")
+            return "\n".join(parts)
+
+        elif name == "lint_code":
+            path = args.get("path", "/root")
+            language = args.get("language", "").lower()
+            await events.emit(conv_id, "tool_start", {"tool": "lint_code", "icon": "code", "status": "Detecting language..."})
+
+            if not language:
+                detect_cmd = f"ls {shlex.quote(path)}/*.py {shlex.quote(path)}/**/*.py {shlex.quote(path)}/Cargo.toml {shlex.quote(path)}/go.mod {shlex.quote(path)}/package.json 2>/dev/null | head -10"
+                detect_r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": detect_cmd, "timeout": 5}, timeout=10)
+                detect_out = detect_r.json().get("stdout", "")
+                if "Cargo.toml" in detect_out:
+                    language = "rust"
+                elif "go.mod" in detect_out:
+                    language = "go"
+                elif "package.json" in detect_out:
+                    language = "javascript"
+                elif ".py" in detect_out:
+                    language = "python"
+                else:
+                    language = "python"
+
+            lint_cmds = {
+                "python": f"cd {shlex.quote(path)} && pip3 install -q ruff 2>/dev/null && ruff check --fix . 2>&1 && ruff format . 2>&1",
+                "javascript": f"cd {shlex.quote(path)} && npx prettier --write '**/*.{{js,jsx,ts,tsx,json,css}}' 2>&1",
+                "typescript": f"cd {shlex.quote(path)} && npx prettier --write '**/*.{{js,jsx,ts,tsx,json,css}}' 2>&1",
+                "rust": f"cd {shlex.quote(path)} && cargo fmt 2>&1",
+                "go": f"cd {shlex.quote(path)} && gofmt -w . 2>&1",
+            }
+            cmd = lint_cmds.get(language, lint_cmds["python"])
+            await events.emit(conv_id, "tool_start", {"tool": "lint_code", "icon": "code", "status": f"Linting {language}..."})
+            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 60}, timeout=70)
+            result = r.json()
+            output = _strip_ansi(result.get("stdout", "")).strip()
+            ok = result.get("exit_code", -1) == 0
+            await events.emit(conv_id, "tool_end", {"tool": "lint_code", "icon": "code", "status": f"{'Done' if ok else 'Issues found'} ({language})"})
+            parts = [f"**Lint/Format: {language}** {'✅ Clean' if ok else '⚠️ Issues'}\n"]
+            if output:
+                parts.append(f"```\n{output[:6000]}\n```")
+            return "\n".join(parts)
+
+        elif name == "resume_project":
+            project_id = args.get("project_id", "")
+            await events.emit(conv_id, "tool_start", {"tool": "resume_project", "icon": "activity", "status": "Loading project context..."})
+            # Try DB first
+            project = None
+            if project_id:
+                project = await db.get_coding_project(project_id)
+            if not project:
+                project = await db.get_coding_project_by_conv(conv_id)
+            if not project:
+                await events.emit(conv_id, "tool_end", {"tool": "resume_project", "icon": "activity", "status": "No project found"})
+                return "No previous project found for this conversation. Start fresh with plan_project or generate_code."
+
+            # Scan sandbox for current files
+            scan_cmd = (
+                "find /root/ -maxdepth 5 -type f "
+                "! -path '*/node_modules/*' ! -path '*/.git/*' "
+                "! -path '*/__pycache__/*' ! -path '*/.cache/*' "
+                "! -path '*/.npm/*' ! -path '*/venv/*' "
+                "! -path '*/.openhands/*' ! -path '*/.bash_history' "
+                "! -name '*.pyc' ! -name 'package-lock.json' "
+                "2>/dev/null | sort"
+            )
+            try:
+                scan_r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": scan_cmd, "timeout": 10}, timeout=15)
+                live_files = [f for f in scan_r.json().get("stdout", "").strip().splitlines() if f.strip()]
+            except Exception:
+                live_files = []
+
+            await events.emit(conv_id, "tool_end", {"tool": "resume_project", "icon": "activity", "status": f"Loaded: {project['name']}"})
+            parts = [
+                f"**Resuming Project: {project['name']}**",
+                f"- Language: {project.get('language', 'unknown')}",
+                f"- Description: {project.get('description', 'N/A')}",
+            ]
+            if project.get("last_plan"):
+                parts.append(f"\n**Previous Plan:**\n{project['last_plan'][:4000]}")
+            if project.get("file_manifest"):
+                parts.append(f"\n**Saved file manifest:**")
+                for f in project["file_manifest"][:30]:
+                    parts.append(f"  - {f}")
+            if live_files:
+                parts.append(f"\n**Live files on sandbox ({len(live_files)}):**")
+                for f in live_files[:30]:
+                    parts.append(f"  - {f}")
+            parts.append("\nYou can now continue working on this project. Read any file to see its current state.")
+            return "\n".join(parts)
+
+        elif name == "plan_project":
+            task = args.get("task", "")
+            language = args.get("language", "python")
+            constraints = args.get("constraints", "")
+            if not task:
+                return "ERROR: task is required"
+            planning_model = config.PLANNING_MODEL or config.DEFAULT_MODEL
+            await events.emit(conv_id, "tool_start", {"tool": "plan_project", "icon": "activity", "status": f"🧠 Planning architecture with {planning_model}..."})
+            plan_prompt = f"""You are a senior software architect. Design a complete implementation plan for this project.
+
+## Requirements
+{task}
+
+## Language
+{language}
+
+## Constraints
+{constraints if constraints else "None specified"}
+
+## Your plan MUST include:
+1. **File Tree** — every file to create, with a one-line description of its purpose
+2. **Dependencies** — packages/libraries needed with install commands
+3. **Component Design** — how components interact (data flow, API contracts, imports)
+4. **Build Order** — which files to create first (dependencies before dependents)
+5. **Key Design Decisions** — why this architecture over alternatives
+6. **Testing Strategy** — what to test and how
+
+Be specific. Name actual files, functions, classes, and routes. This plan will be handed to a coding agent for implementation."""
+            try:
+                r = await http.post(
+                    f"{config.OLLAMA_URL}/api/chat",
+                    json={"model": planning_model, "messages": [{"role": "user", "content": plan_prompt}], "stream": False, "options": {"temperature": 0.3, "num_ctx": 16384}},
+                    timeout=180,
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    plan = data.get("message", {}).get("content", "")
+                    if plan:
+                        await events.emit(conv_id, "tool_end", {"tool": "plan_project", "icon": "activity", "status": "🧠 Architecture plan ready"})
+                        # Save plan to project memory
+                        try:
+                            proj_id = f"proj-{uuid.uuid4().hex[:12]}"
+                            await db.upsert_coding_project(
+                                project_id=proj_id, name=task[:60].strip().replace("\n", " "),
+                                conversation_id=conv_id, description=task[:500],
+                                language=language, last_plan=plan[:8000],
+                            )
+                        except Exception as proj_e:
+                            print(f"[PLAN] Failed to save project: {proj_e}")
+                        return f"## Architecture Plan\n\n{plan}\n\n---\n*Now implement this plan step by step using write_file, run_shell, and other tools.*"
+                    else:
+                        await events.emit(conv_id, "tool_end", {"tool": "plan_project", "icon": "activity", "status": "⚠ Planning returned empty"})
+                        return "ERROR: Planning model returned empty response"
+                else:
+                    await events.emit(conv_id, "tool_end", {"tool": "plan_project", "icon": "activity", "status": f"⚠ Planning failed ({r.status_code})"})
+                    return f"ERROR: Planning model returned HTTP {r.status_code}: {r.text[:200]}"
+            except Exception as e:
+                await events.emit(conv_id, "tool_end", {"tool": "plan_project", "icon": "activity", "status": "⚠ Planning failed"})
+                return f"ERROR: Planning call failed: {e}"
 
         elif name == "deep_research":
             topic = args.get("topic", "")
@@ -1076,12 +1530,48 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 except Exception as e:
                     print(f"[CODEGEN RAG] KB pre-query failed: {e}")
 
+            # Query code memory for similar past projects
+            try:
+                import rag as _rag
+                _code_matches = await _rag.query_code_memory(task, top_k=3, language=language)
+                if _code_matches:
+                    _code_ctx = "\n\n--- Similar Past Code (from code memory) ---\n"
+                    for _cm in _code_matches:
+                        if _cm.get("score", 0) > 0.3:
+                            _code_ctx += f"\n# From: {_cm['filename']} (task: {_cm.get('task', '')[:80]})\n{_cm['text'][:1500]}\n"
+                    if len(_code_ctx) > 60:
+                        context = (context + _code_ctx) if context else _code_ctx.strip()
+                        print(f"[CODEGEN] Injected {len(_code_matches)} code memory matches")
+            except Exception as _cm_e:
+                print(f"[CODEGEN] Code memory query failed (non-fatal): {_cm_e}")
+
+            # Pre-scan for library/API mentions and auto-research
+            _API_KEYWORDS = ["api", "sdk", "library", "framework", "package", "module"]
+            _task_lower = task.lower()
+            if any(kw in _task_lower for kw in _API_KEYWORDS) or re.search(r'(?:using|with)\s+\w+(?:\.\w+)*\s+(?:api|sdk|library)', _task_lower):
+                try:
+                    import urllib.parse
+                    _lib_query = f"{task[:100]} {language} documentation tutorial"
+                    _params = urllib.parse.urlencode({"q": _lib_query, "format": "json", "count": 5})
+                    _sr = await http.get(f"{config.SEARXNG_URL}/search?{_params}", timeout=10)
+                    if _sr.status_code == 200:
+                        _results = _sr.json().get("results", [])[:3]
+                        if _results:
+                            _api_snippets = []
+                            for _item in _results:
+                                _api_snippets.append(f"- {_item.get('title', '')}: {_item.get('content', '')[:200]}")
+                            _api_context = "\n\n--- API/Library Reference (auto-researched) ---\n" + "\n".join(_api_snippets)
+                            context = (context + _api_context) if context else _api_context.strip()
+                            print(f"[CODEGEN] Pre-researched {len(_results)} API references for: {task[:60]}")
+                except Exception as _re:
+                    print(f"[CODEGEN] API pre-research failed (non-fatal): {_re}")
+
             if not getattr(config, "OPENHANDS_ENABLED", True):
                 return "ERROR: OpenHands is disabled in settings. Enable it or use write_file + run_shell directly."
 
             openhands_url = config.OPENHANDS_URL
             max_rounds = getattr(config, "OPENHANDS_MAX_ROUNDS", 20)
-            num_ctx = getattr(config, "OPENHANDS_NUM_CTX", 8192)
+            num_ctx = getattr(config, "OPENHANDS_NUM_CTX", 16384)
 
             # Health check with retry (3 attempts, 1s between)
             _oh_healthy = False
@@ -1114,6 +1604,19 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             })
             print(f"[CODEGEN:OH] model={coder_model} lang={language} num_ctx={num_ctx} task={task[:100]!r}")
 
+            # Auto-resolve project_id: if model didn't pass one, check for an
+            # active uploaded project on this conversation so OpenHands works
+            # inside the user's uploaded project directory.
+            _oh_project_id = args.get("project_id", "")
+            if not _oh_project_id and conv_id:
+                try:
+                    _active = await db.get_coding_project_by_conv(conv_id)
+                    if _active and _active.get("openhands_project_id"):
+                        _oh_project_id = _active["openhands_project_id"]
+                        print(f"[CODEGEN:OH] Auto-attached active project {_oh_project_id} for conv {conv_id}")
+                except Exception as _ap_e:
+                    print(f"[CODEGEN:OH] Active project lookup failed (non-fatal): {_ap_e}")
+
             oh_payload = {
                 "task": task, "model": coder_model,
                 "ollama_url": config.OLLAMA_URL,
@@ -1121,7 +1624,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 "num_ctx": num_ctx,
                 "language": language,
                 "context": context,
-                "project_id": args.get("project_id", ""),
+                "project_id": _oh_project_id,
             }
 
             # Action → emoji mapping for progress pills
@@ -1381,6 +1884,43 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         f"2. The download link\n"
                         f"3. How to run it locally\n"
                     )
+                    # Save project metadata to DB for resume_project
+                    try:
+                        proj_name = task[:60].strip().replace("\n", " ")
+                        await db.upsert_coding_project(
+                            project_id=_project_id or f"proj-{uuid.uuid4().hex[:12]}",
+                            name=proj_name, conversation_id=conv_id,
+                            description=task[:500], language=language,
+                            file_manifest=files, openhands_project_id=_project_id,
+                        )
+                    except Exception as proj_e:
+                        print(f"[CODEGEN] Failed to save project metadata: {proj_e}")
+                    # Index generated code into code memory RAG
+                    if code_review:
+                        try:
+                            import rag as _rag
+                            # Parse code_review into {filepath: content} dict
+                            _code_files = {}
+                            _current_file = None
+                            _current_lines = []
+                            for _line in code_review.split("\n"):
+                                if _line.startswith("### "):
+                                    if _current_file and _current_lines:
+                                        _code_files[_current_file] = "\n".join(_current_lines)
+                                    _current_file = _line[4:].strip()
+                                    _current_lines = []
+                                elif _current_file:
+                                    if not (_line.startswith("```") and len(_line) < 20):
+                                        _current_lines.append(_line)
+                            if _current_file and _current_lines:
+                                _code_files[_current_file] = "\n".join(_current_lines)
+                            if _code_files:
+                                asyncio.create_task(_rag.index_generated_code(
+                                    task=task, language=language, file_contents=_code_files,
+                                    conv_id=conv_id, project_id=_project_id,
+                                ))
+                        except Exception as _rag_e:
+                            print(f"[CODEGEN] Code RAG indexing failed (non-fatal): {_rag_e}")
                     return resp
                 else:
                     # Agent ran but produced no files — treat as failure

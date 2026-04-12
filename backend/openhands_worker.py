@@ -206,7 +206,8 @@ def run_task(req: RunRequest):
         # Others (qwen2.5-coder) put JSON in content text → use prompt-based.
         native_tc = _check_tool_support(ollama_base, req.model)
 
-        # ── LLM config ──
+        # ── LLM config (scale context for complex tasks) ──
+        effective_ctx = _scale_num_ctx(req)
         llm = _LLM(
             model=f"ollama_chat/{req.model}",
             api_key="ollama",
@@ -216,8 +217,10 @@ def run_task(req: RunRequest):
             num_retries=2,
             drop_params=True,
             native_tool_calling=native_tc,
-            litellm_extra_body={"num_ctx": req.num_ctx},
+            litellm_extra_body={"num_ctx": effective_ctx},
         )
+        if effective_ctx != req.num_ctx:
+            print(f"[OH-Worker] Scaled num_ctx: {req.num_ctx} → {effective_ctx} (complex task)")
 
         # ── Agent with core tools ──
         tools = [
@@ -596,7 +599,9 @@ def _build_task_prompt(req: RunRequest, work_dir: str = "/root", continuing: boo
     verify_cmd = _VERIFY_CMDS.get(lang, f"Run the appropriate syntax check / compiler for {lang}.")
 
     prompt = f"""## WORKSPACE
-Working directory: `{work_dir}` — {'continue working on existing files here' if continuing else 'create ALL files here'}. Language: {req.language}
+Working directory: `{work_dir}` — {'continue working on existing files here' if continuing else 'create ALL files here'}.
+Language: {req.language}
+IMPORTANT: ALL files MUST be created inside `{work_dir}`. Do NOT create files in /root/ directly. Use `{work_dir}/` as the base path for everything.
 """
 
     if req.context:
@@ -611,11 +616,28 @@ After writing all code:
 1. **Syntax check**: {verify_cmd}
 2. **Fix errors**: If the check fails, fix the code and re-check.
 3. **Dependencies**: Make sure all imports reference real libraries or files you created.
+4. **Git**: Initialize a git repo with `git init && git add -A && git commit -m 'Initial commit'` after the project works.
 
 Call `finish` once the code compiles/parses without errors.
 """
 
     return prompt
+
+
+def _scale_num_ctx(req: RunRequest) -> int:
+    """Scale num_ctx based on task complexity."""
+    base = req.num_ctx
+    task_len = len(req.task) + len(req.context)
+    # Multi-file keywords suggest more context needed
+    complex_keywords = ["multi-file", "full-stack", "microservice", "monorepo",
+                        "database", "authentication", "frontend and backend",
+                        "react", "vue", "angular", "django", "flask", "express"]
+    is_complex = any(kw in req.task.lower() for kw in complex_keywords)
+    if is_complex or task_len > 2000:
+        return max(base, 32768)
+    elif task_len > 1000:
+        return max(base, 24576)
+    return base
 
 
 def _parse_event(event) -> dict | None:
@@ -807,31 +829,60 @@ def health():
 
 @app.post("/clean")
 def clean_workspace():
-    """Delete all project directories from /root/projects/."""
+    """Delete all project files from /root/projects/ and stray project files from /root/."""
     import shutil
     deleted = 0
     freed = 0
     errors = []
+
+    # Dotfiles and system dirs to NEVER delete
+    _KEEP = {
+        ".bash_history", ".bashrc", ".profile", ".selected_editor",
+        ".wget-hsts", ".lesshst", ".install-29c4ce8f.log",
+        ".ssh", ".cache", ".config", ".local", ".cargo", ".rustup",
+        ".choosenim", ".nimble", ".vmodules", ".dart-tool", ".dotnet",
+        ".julia", ".juliaup", ".m2", ".npm", ".nuget", ".openhands",
+        ".scalac", "bin", "venv",
+    }
+
+    # 1) Clean /root/projects/
     try:
         if PROJECTS_DIR.exists():
             for item in PROJECTS_DIR.iterdir():
-                if item.is_dir():
-                    try:
-                        size = sum(f.stat().st_size for f in item.rglob("*") if f.is_file())
+                try:
+                    size = sum(f.stat().st_size for f in item.rglob("*") if f.is_file()) if item.is_dir() else item.stat().st_size
+                    if item.is_dir():
                         shutil.rmtree(item)
-                        deleted += 1
-                        freed += size
-                    except Exception as e:
-                        errors.append(f"{item.name}: {e}")
-                elif item.is_file():
-                    try:
-                        freed += item.stat().st_size
+                    else:
                         item.unlink()
-                        deleted += 1
-                    except Exception as e:
-                        errors.append(f"{item.name}: {e}")
+                    deleted += 1
+                    freed += size
+                except Exception as e:
+                    errors.append(f"projects/{item.name}: {e}")
     except Exception as e:
-        errors.append(str(e))
+        errors.append(f"projects: {e}")
+
+    # 2) Clean stray user files from /root/ (not dotfiles/system)
+    root = Path("/root")
+    try:
+        for item in root.iterdir():
+            if item.name in _KEEP or item.name.startswith("."):
+                continue
+            if item.name == "projects":
+                continue  # already handled above
+            try:
+                size = sum(f.stat().st_size for f in item.rglob("*") if f.is_file()) if item.is_dir() else item.stat().st_size
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+                deleted += 1
+                freed += size
+            except Exception as e:
+                errors.append(f"{item.name}: {e}")
+    except Exception as e:
+        errors.append(f"root: {e}")
+
     print(f"[OH-Worker] Clean complete: {deleted} items, freed {freed // 1024} KB")
     return {"deleted": deleted, "freed_bytes": freed, "errors": errors}
 

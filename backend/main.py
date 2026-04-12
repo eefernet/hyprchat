@@ -179,6 +179,9 @@ async def lifespan(app: FastAPI):
     if _settings.get("ollama_url"):
         config.OLLAMA_URL = _settings["ollama_url"]
         print(f"[Config] Loaded Ollama URL from settings: {config.OLLAMA_URL}")
+    if _settings.get("planning_model"):
+        config.PLANNING_MODEL = _settings["planning_model"]
+        print(f"[Config] Loaded Planning Model from settings: {config.PLANNING_MODEL}")
     if _settings.get("coder_model"):
         config.CODER_MODEL = _settings["coder_model"]
         print(f"[Config] Loaded Coder Model from settings: {config.CODER_MODEL}")
@@ -687,6 +690,245 @@ async def seed_based_bot():
     return await _seed_based_bot()
 
 
+# ============================================================
+# CODER BOT — upload an existing project archive
+# ============================================================
+@app.post("/api/coder/upload-project")
+async def upload_coder_project(
+    file: UploadFile = File(...),
+    conv_id: str = Form(...),
+):
+    """Upload a .zip/.tar/.tar.gz of an existing project, extract it into the
+    sandbox at /root/projects/{project_id}, and register it as the active
+    coding project for this conversation. The chat agent's ACTIVE PROJECT
+    injection then makes Coder Bot aware of the uploaded code automatically."""
+    import io as _io
+    import tarfile
+    import zipfile
+
+    if not conv_id:
+        raise HTTPException(400, "conv_id required")
+
+    safe_name = os.path.basename(file.filename or "project")
+    lower = safe_name.lower()
+    is_zip = lower.endswith(".zip")
+    tar_suffixes = (".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar")
+    is_tar = any(lower.endswith(s) for s in tar_suffixes)
+    if not (is_zip or is_tar):
+        raise HTTPException(400, "Upload must be .zip, .tar, .tar.gz, .tgz, .tar.bz2, or .tbz2")
+
+    content = await file.read()
+    if len(content) > config.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+        raise HTTPException(413, f"Archive too large (max {config.MAX_UPLOAD_SIZE_MB}MB)")
+
+    # Derive project name + id
+    base = safe_name
+    for suf in (".tar.gz", ".tar.bz2", ".tgz", ".tbz2", ".tar", ".zip"):
+        if base.lower().endswith(suf):
+            base = base[: -len(suf)]
+            break
+    base = re.sub(r"[^a-zA-Z0-9._-]", "-", base).strip("-_.") or "uploaded-project"
+    project_id = f"proj-{uuid.uuid4().hex[:12]}"
+    project_name = base[:60]
+
+    # Extract locally to a staging dir with path sanitization
+    staging_root = os.path.join(config.UPLOAD_DIR, "coder_projects", project_id)
+    os.makedirs(staging_root, exist_ok=True)
+    staging_abs = os.path.abspath(staging_root)
+
+    def _safe_target(member_name: str) -> Optional[str]:
+        if not member_name or member_name.startswith("/") or "\x00" in member_name:
+            return None
+        parts = [p for p in member_name.replace("\\", "/").split("/") if p not in ("", ".")]
+        if any(p == ".." for p in parts):
+            return None
+        target = os.path.abspath(os.path.join(staging_abs, *parts))
+        if target != staging_abs and not target.startswith(staging_abs + os.sep):
+            return None
+        return target
+
+    try:
+        if is_zip:
+            with zipfile.ZipFile(_io.BytesIO(content)) as zf:
+                for info in zf.infolist():
+                    target = _safe_target(info.filename)
+                    if not target:
+                        continue
+                    if info.is_dir():
+                        os.makedirs(target, exist_ok=True)
+                    else:
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        with zf.open(info) as src, open(target, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+        else:
+            if lower.endswith((".tar.gz", ".tgz")):
+                mode = "r:gz"
+            elif lower.endswith((".tar.bz2", ".tbz2")):
+                mode = "r:bz2"
+            else:
+                mode = "r:"
+            with tarfile.open(fileobj=_io.BytesIO(content), mode=mode) as tf:
+                for m in tf.getmembers():
+                    if m.islnk() or m.issym() or m.isdev():
+                        continue
+                    target = _safe_target(m.name)
+                    if not target:
+                        continue
+                    if m.isdir():
+                        os.makedirs(target, exist_ok=True)
+                    elif m.isfile():
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        ef = tf.extractfile(m)
+                        if ef is None:
+                            continue
+                        with open(target, "wb") as dst:
+                            shutil.copyfileobj(ef, dst)
+    except HTTPException:
+        raise
+    except Exception as e:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        raise HTTPException(400, f"Failed to extract archive: {e}")
+
+    # Collapse a single top-level folder (typical of GitHub tarballs)
+    try:
+        entries = [e for e in os.listdir(staging_root) if not e.startswith("__MACOSX")]
+        if len(entries) == 1:
+            only = os.path.join(staging_root, entries[0])
+            if os.path.isdir(only):
+                for name in os.listdir(only):
+                    shutil.move(os.path.join(only, name), os.path.join(staging_root, name))
+                shutil.rmtree(only, ignore_errors=True)
+    except Exception as e:
+        print(f"[CoderUpload] top-level collapse failed (non-fatal): {e}")
+
+    # Walk the cleaned tree for manifest + language detection
+    manifest: list[str] = []
+    ext_counts: dict[str, int] = {}
+    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv",
+                 "dist", "build", ".next", ".cache", ".idea", ".vscode", "target"}
+    for root, dirs, files in os.walk(staging_root):
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        for fname in files:
+            rel = os.path.relpath(os.path.join(root, fname), staging_root)
+            manifest.append(rel)
+            ext = os.path.splitext(fname)[1].lower()
+            ext_counts[ext] = ext_counts.get(ext, 0) + 1
+
+    if not manifest:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        raise HTTPException(400, "Archive contained no usable files")
+
+    lang_map = {
+        ".py": "python", ".js": "javascript", ".jsx": "javascript",
+        ".ts": "typescript", ".tsx": "typescript",
+        ".rs": "rust", ".go": "go", ".java": "java", ".kt": "kotlin",
+        ".rb": "ruby", ".php": "php", ".c": "c", ".h": "c",
+        ".cpp": "cpp", ".cc": "cpp", ".hpp": "cpp", ".cs": "csharp",
+        ".swift": "swift", ".scala": "scala", ".sh": "bash",
+    }
+    lang_totals: dict[str, int] = {}
+    for ext, n in ext_counts.items():
+        lang = lang_map.get(ext)
+        if lang:
+            lang_totals[lang] = lang_totals.get(lang, 0) + n
+    language = max(lang_totals, key=lang_totals.get) if lang_totals else "unknown"
+
+    # Re-tar the sanitized tree (gzip) for transport to the sandbox
+    tar_buf = _io.BytesIO()
+    with tarfile.open(fileobj=tar_buf, mode="w:gz") as out_tf:
+        out_tf.add(staging_root, arcname=".")
+    tar_bytes = tar_buf.getvalue()
+    tar_b64 = base64.b64encode(tar_bytes).decode()
+
+    # Upload to codebox via chunked /command calls (command line can't hold
+    # tens of MB at once). Each chunk appends base64 to a temp file; final
+    # command decodes + extracts into /root/projects/{project_id}.
+    remote_dir = f"/root/projects/{project_id}"
+    remote_tmp = f"/tmp/{project_id}.tar.gz.b64"
+    CHUNK = 400_000  # ~400KB of base64 per HTTP call
+    total_chunks = (len(tar_b64) + CHUNK - 1) // CHUNK
+
+    try:
+        async with httpx.AsyncClient() as http_client:
+            # Reset temp file + ensure project dir
+            init_cmd = (
+                f"rm -f {shlex.quote(remote_tmp)} && "
+                f"mkdir -p {shlex.quote(remote_dir)} && "
+                f"touch {shlex.quote(remote_tmp)}"
+            )
+            r = await http_client.post(
+                f"{config.CODEBOX_URL}/command",
+                json={"command": init_cmd, "timeout": 15},
+                timeout=25,
+            )
+            if r.json().get("exit_code", 1) != 0:
+                raise HTTPException(500, "Failed to prep sandbox directory")
+
+            for i in range(total_chunks):
+                chunk = tar_b64[i * CHUNK : (i + 1) * CHUNK]
+                append_cmd = (
+                    f"printf '%s' {shlex.quote(chunk)} >> {shlex.quote(remote_tmp)}"
+                )
+                r = await http_client.post(
+                    f"{config.CODEBOX_URL}/command",
+                    json={"command": append_cmd, "timeout": 30},
+                    timeout=45,
+                )
+                if r.json().get("exit_code", 1) != 0:
+                    raise HTTPException(500, f"Chunk {i+1}/{total_chunks} upload failed")
+
+            # Decode + extract + cleanup
+            extract_cmd = (
+                f"base64 -d {shlex.quote(remote_tmp)} | "
+                f"tar -xzf - -C {shlex.quote(remote_dir)} && "
+                f"rm -f {shlex.quote(remote_tmp)}"
+            )
+            r = await http_client.post(
+                f"{config.CODEBOX_URL}/command",
+                json={"command": extract_cmd, "timeout": 120},
+                timeout=180,
+            )
+            data = r.json()
+            if data.get("exit_code", 1) != 0:
+                raise HTTPException(
+                    500,
+                    f"Sandbox extraction failed: {(data.get('stderr') or '')[:300]}",
+                )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"CodeBox upload failed: {e}")
+
+    # Register as the conversation's active coding project. The chat agent's
+    # ACTIVE PROJECT injection (agents/chat.py) will pick this up on next turn,
+    # and openhands_worker will reuse /root/projects/{project_id} because the
+    # directory name matches the project_id.
+    description = f"Uploaded project: {safe_name} — {len(manifest)} files, {language}"
+    try:
+        await db.upsert_coding_project(
+            project_id=project_id,
+            name=project_name,
+            conversation_id=conv_id,
+            description=description,
+            language=language,
+            file_manifest=manifest,
+            openhands_project_id=project_id,
+        )
+    except Exception as e:
+        print(f"[CoderUpload] DB save failed (non-fatal): {e}")
+
+    # Keep the local staging copy as a backup we can re-push if needed.
+    return {
+        "project_id": project_id,
+        "name": project_name,
+        "language": language,
+        "file_count": len(manifest),
+        "files": manifest[:30],
+        "sandbox_path": remote_dir,
+        "size_bytes": len(content),
+    }
+
+
 @app.post("/api/seed/workflows")
 async def seed_workflows():
     """Seed built-in workflow presets showcasing all workflow capabilities."""
@@ -1058,13 +1300,20 @@ async def delete_conversation(conv_id: str):
 
 @app.delete("/api/conversations")
 async def delete_all_conversations():
-    """Delete ALL conversations and their messages."""
-    convs = await db.get_conversations()
-    count = 0
-    for c in convs:
-        await db.delete_conversation(c["id"])
-        count += 1
-    print(f"[Cleanup] Deleted all {count} conversations")
+    """Delete ALL conversations, messages, and related data."""
+    conn = await db.get_db()
+    try:
+        await conn.execute("DELETE FROM messages")
+        await conn.execute("DELETE FROM conversation_files")
+        await conn.execute("DELETE FROM workspace_conversations")
+        await conn.execute("DELETE FROM conversations")
+        await conn.commit()
+        cursor = await conn.execute("SELECT changes()")
+        row = await cursor.fetchone()
+        count = row[0] if row else 0
+    finally:
+        await conn.close()
+    print(f"[Cleanup] Deleted all conversations and related data")
     return {"deleted": count}
 
 
@@ -1246,6 +1495,32 @@ async def pdf_text_preview(kb_id: str, file_id: int, pages: int = 10):
         return {"filename": filename, "content": "pypdf not installed — text extraction unavailable.", "total_pages": 0, "previewed_pages": 0, "truncated": False}
     except Exception as e:
         return {"filename": filename, "content": f"Failed to extract PDF text: {e}", "total_pages": 0, "previewed_pages": 0, "truncated": False}
+
+
+@app.post("/api/extract-pdf")
+async def extract_pdf(file: UploadFile = File(...)):
+    """Extract text from an uploaded PDF file."""
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF files are accepted")
+    content = await file.read()
+    if len(content) > 50 * 1024 * 1024:
+        raise HTTPException(413, "PDF too large (max 50MB)")
+    try:
+        from pypdf import PdfReader
+        import io
+        reader = PdfReader(io.BytesIO(content))
+        total_pages = len(reader.pages)
+        extracted = []
+        for i, page in enumerate(reader.pages):
+            text = page.extract_text() or ""
+            if text.strip():
+                extracted.append(f"[Page {i+1}]\n{text}")
+        text = "\n\n".join(extracted) if extracted else "No extractable text found in this PDF."
+        return {"filename": file.filename, "text": text, "total_pages": total_pages}
+    except ImportError:
+        raise HTTPException(500, "pypdf not installed on server")
+    except Exception as e:
+        raise HTTPException(422, f"Failed to extract PDF text: {e}")
 
 
 @app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/raw")
@@ -1748,16 +2023,21 @@ async def analyze_workspace_topics(ws_id: str, body: dict = Body(default={})):
         r = await http.post(
             f"{config.OLLAMA_URL}/api/generate",
             json={"model": ws_model, "prompt": prompt, "stream": False, "options": {"temperature": 0.2}},
-            timeout=30
+            timeout=60
         )
+        if r.status_code != 200:
+            detail = r.text[:200] if r.text else f"HTTP {r.status_code}"
+            raise HTTPException(r.status_code, f"Ollama error ({ws_model}): {detail}")
         raw = r.json().get("response", "[]")
         import re as _re
         raw = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL).strip()
         start, end = raw.find("["), raw.rfind("]")
         topics = json.loads(raw[start:end + 1]) if start != -1 else []
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[Analyze] {e}")
-        topics = []
+        raise HTTPException(500, f"Analysis failed: {e}")
     await db.update_workspace(ws_id, topics=json.dumps(topics[:5]))
     return {"topics": topics}
 
@@ -2439,6 +2719,7 @@ async def get_app_settings():
     return {
         **settings,
         "current_ollama_url": config.OLLAMA_URL,
+        "current_planning_model": config.PLANNING_MODEL,
         "current_coder_model": config.CODER_MODEL,
         "openhands_enabled": config.OPENHANDS_ENABLED,
         "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
@@ -2454,7 +2735,7 @@ async def get_app_settings():
 @app.patch("/api/settings")
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
-    allowed = {"file_cleanup_days", "ollama_url", "rag", "coder_model", "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx"}
+    allowed = {"file_cleanup_days", "ollama_url", "rag", "planning_model", "coder_model", "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
@@ -2473,6 +2754,9 @@ async def update_app_settings(body: dict = Body(...)):
         print(f"[Config] Updated Ollama URL to: {config.OLLAMA_URL}")
     elif "ollama_url" in body and not body["ollama_url"]:
         config.OLLAMA_URL = os.getenv("OLLAMA_URL", "http://192.168.1.110:11434")
+    if "planning_model" in body:
+        config.PLANNING_MODEL = body["planning_model"] or ""
+        print(f"[Config] Updated Planning Model to: {config.PLANNING_MODEL or '(use chat model)'}")
     if "coder_model" in body:
         config.CODER_MODEL = body["coder_model"] or ""
         print(f"[Config] Updated Coder Model to: {config.CODER_MODEL or '(use orchestrator model)'}")
@@ -2486,7 +2770,7 @@ async def update_app_settings(body: dict = Body(...)):
         config.OPENHANDS_NUM_CTX = int(body["openhands_num_ctx"])
         print(f"[Config] OpenHands num_ctx: {config.OPENHANDS_NUM_CTX}")
     save_settings(settings)
-    return {**settings, "current_ollama_url": config.OLLAMA_URL, "current_coder_model": config.CODER_MODEL}
+    return {**settings, "current_ollama_url": config.OLLAMA_URL, "current_planning_model": config.PLANNING_MODEL, "current_coder_model": config.CODER_MODEL}
 
 
 @app.get("/api/rag/stats")
@@ -2527,7 +2811,7 @@ async def get_rag_stats():
 
 @app.delete("/api/rag/collections")
 async def delete_all_rag_collections():
-    """Delete ALL ChromaDB collections (RAG indices)."""
+    """Delete ALL ChromaDB collections (RAG indices) and reclaim disk space."""
     try:
         client = rag.get_chroma()
         collections = client.list_collections()
@@ -2536,6 +2820,12 @@ async def delete_all_rag_collections():
             client.delete_collection(c.name)
             count += 1
         print(f"[RAG] Purged all {count} collections")
+        # Reset ChromaDB client and remove data directory to reclaim disk space
+        import shutil
+        rag._chroma_client = None
+        if os.path.exists(rag.CHROMA_DIR):
+            shutil.rmtree(rag.CHROMA_DIR)
+            print(f"[RAG] Removed ChromaDB data directory: {rag.CHROMA_DIR}")
         return {"deleted": count}
     except Exception as e:
         print(f"[RAG] Purge error: {e}")
@@ -2621,7 +2911,7 @@ async def get_conversation_forks(conv_id: str):
 # AUTO-TITLE GENERATION
 # ============================================================
 @app.post("/api/conversations/{conv_id}/generate-title")
-async def generate_title(conv_id: str):
+async def generate_title(conv_id: str, body: dict = Body(default={})):
     conv = await db.get_conversation(conv_id)
     if not conv:
         raise HTTPException(404, "Conversation not found")
@@ -2630,9 +2920,10 @@ async def generate_title(conv_id: str):
     if not first_msgs:
         return {"title": ""}
     summary_input = "\n".join(f"{m['role']}: {(m.get('content') or '')[:200]}" for m in first_msgs)
+    title_model = body.get("model") or config.WORKSPACE_MODEL or config.DEFAULT_MODEL
     try:
         resp = await http.post(f"{config.OLLAMA_URL}/api/chat", json={
-            "model": config.WORKSPACE_MODEL or config.DEFAULT_MODEL,
+            "model": title_model,
             "messages": [
                 {"role": "system", "content": "Generate a concise title (5-8 words, no quotes, no punctuation at end) for this conversation. Reply with ONLY the title, nothing else."},
                 {"role": "user", "content": summary_input}

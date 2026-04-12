@@ -97,7 +97,9 @@ def detect_template_family(model_name: str) -> str:
 
 
 CODEAGENT_TOOLS_SET = {"execute_code", "run_shell", "write_file", "read_file",
-                       "list_files", "download_file", "download_project", "delete_file"}
+                       "list_files", "download_file", "download_project", "delete_file",
+                       "search_files", "diff_files", "git_init", "git_diff", "git_commit",
+                       "run_tests", "lint_code", "resume_project"}
 
 
 async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_id_map):
@@ -312,6 +314,41 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         )
     if effective_system:
         messages.append({"role": "system", "content": effective_system})
+
+    # ── Active project context: if this conversation has a coding project, inject it ──
+    # Lets the bot answer "fix this bug in the project you built me" without the LLM
+    # having to remember to call resume_project on its own. One DB query, fails closed.
+    try:
+        _active_project = await db.get_coding_project_by_conv(conv_id)
+    except Exception as _ape:
+        _active_project = None
+        print(f"[CHAT] Active project lookup failed (non-fatal): {_ape}")
+
+    if _active_project:
+        _ap_files = _active_project.get("file_manifest") or []
+        _ap_id = _active_project.get("id", "") or ""
+        _ap_lines = [
+            "## ACTIVE PROJECT (this conversation already has a built project)",
+            f"- name: {_active_project.get('name', '?')}",
+            f"- project_id: {_ap_id}",
+            f"- language: {_active_project.get('language', '?')}",
+            f"- description: {(_active_project.get('description') or '')[:200]}",
+        ]
+        if _ap_files:
+            _ap_lines.append(f"- files ({len(_ap_files)}):")
+            for _f in _ap_files[:25]:
+                _ap_lines.append(f"  - {_f}")
+            if len(_ap_files) > 25:
+                _ap_lines.append(f"  - ... and {len(_ap_files) - 25} more")
+        _ap_lines.append(
+            "\nIf the user reports a bug, error, or asks for changes to this project: "
+            "use read_file on the relevant files first to see the current code, then fix "
+            "with write_file (small changes) or generate_code with project_id="
+            f"'{_ap_id}' (large changes). Do NOT start a new project."
+        )
+        messages.append({"role": "system", "content": "\n".join(_ap_lines)})
+        print(f"[CHAT] Injected active project context: {_active_project.get('name', '?')} ({len(_ap_files)} files)")
+
     messages.extend([{"role": m["role"], "content": m["content"]} for m in req.messages])
 
     # ── Build Ollama-native tool definitions ──
@@ -356,6 +393,13 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             if tname in CODEAGENT_TOOLS and tname not in available_tool_names:
                 ollama_tools.append(CODEAGENT_TOOLS[tname])
                 available_tool_names.add(tname)
+
+    # ── Always include execute_code + download_file so any chat can generate visuals ──
+    _visual_tools = ("execute_code", "download_file")
+    for _vt in _visual_tools:
+        if _vt not in available_tool_names and _vt in CODEAGENT_TOOLS:
+            ollama_tools.append(CODEAGENT_TOOLS[_vt])
+            available_tool_names.add(_vt)
 
     print(f"[CHAT]   Tools: {sorted(available_tool_names)}")
 
@@ -415,8 +459,26 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     "status": f"Search failed: {e}",
                 })
 
-    # Inject tool-use system prompt when tools are available
-    if available_tool_names & CODEAGENT_TOOLS_SET:
+    # Inject visualization hint for non-coder chats that have execute_code + download_file
+    _has_full_codeagent = bool(available_tool_names & (CODEAGENT_TOOLS_SET - {"execute_code", "download_file"}))
+    if not _has_full_codeagent and "execute_code" in available_tool_names:
+        _viz_hint = (
+            "\n\n## Visualization Capability\n"
+            "You have access to execute_code and download_file tools. "
+            "When a visual aid (chart, graph, diagram) would genuinely help explain something, "
+            "use execute_code to run Python with matplotlib and save the image, "
+            "then download_file to deliver it. Install packages with: "
+            'execute_code(code="import subprocess; subprocess.run([\'pip3\',\'install\',\'matplotlib\'])", language="python") '
+            "before using them. Save images to /root/projects/charts/. "
+            "Only generate visuals when they add real value — don't force them.\n"
+        )
+        if messages and messages[0]["role"] == "system":
+            messages[0]["content"] += _viz_hint
+        else:
+            messages.insert(0, {"role": "system", "content": _viz_hint.strip()})
+
+    # Inject tool-use system prompt when full codeagent tools are available
+    if _has_full_codeagent:
         tool_sys = "\n\n## CODING AGENT PROTOCOL (MANDATORY)\n"
 
         if "generate_code" in available_tool_names:
@@ -455,15 +517,16 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     if "repeat_penalty" not in model_options and available_tool_names:
         model_options["repeat_penalty"] = 1.1
 
-    MAX_ROUNDS = getattr(config, "MAX_AGENT_ROUNDS", 12)
-    MAX_CONTEXT_CHARS = 50000  # ~12.5k tokens — prune old tool results beyond this
+    _is_coder = _has_full_codeagent
+    MAX_ROUNDS = config.MAX_AGENT_ROUNDS_CODER if _is_coder else config.MAX_AGENT_ROUNDS
+    MAX_CONTEXT_CHARS = 80000  # ~20k tokens — prune old tool results beyond this
     _text_fallback_done = False
     _prev_tool_key = None  # Track previous tool call to detect loops
     _tool_history = []     # Last N tool keys for near-duplicate detection
     _dup_break_count = 0   # How many times we broke out of duplicate loops
     _last_error_sig = None  # Signature of last tool error for loop detection
     _error_repeat_count = 0  # Consecutive times we've seen the same error
-    _generate_code_failed = False  # Guard: disable code-block-rescue after generate_code failure
+    _generate_code_fail_rounds = 0  # Counter: successful rounds since generate_code failure (0 = no failure or just failed)
     _generate_code_done = False    # Guard: stop tool calls after successful generate_code
     _rescue_count = 0              # How many times we rescued code blocks
     _oom_retries = 0               # OOM context halving retries
@@ -498,6 +561,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             "options": model_options,
             "keep_alive": "10m",
         }
+        print(f"[CHAT] Sending to Ollama: model={req.model} options={model_options}")
         # Thinking control: None=model default, 0=disable, 1=enable
         if hasattr(req, 'think_budget') and req.think_budget is not None:
             if req.think_budget == 0:
@@ -507,11 +571,20 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         if ollama_tools:
             payload["tools"] = ollama_tools
 
+        # Keepalive before Ollama call — prevents browser/proxy timeout during prompt eval
+        yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+
         try:
             async with http.stream("POST", f"{config.OLLAMA_URL}/api/chat",
                                    json=payload, timeout=300) as resp:
                 if resp.status_code != 200:
                     error_body = (await resp.aread()).decode()[:500]
+                    if "not found" in error_body.lower():
+                        _msg = f"Model '{req.model}' not found in Ollama. It may have been deleted. Please select a different model."
+                        print(f"[CHAT] Model not found: {req.model}")
+                        await events.emit(conv_id, "tool_end", {"tool": "processing", "status": f"Model not found: {req.model}", "icon": "alert"})
+                        yield f"data: {json.dumps({'type': 'error', 'error': _msg})}\n\n"
+                        return
                     if "does not support tools" in error_body.lower() and not _text_fallback_done:
                         # Model doesn't support native tools — switch to text-based
                         print(f"[CHAT] Model {req.model} rejected native tools — switching to text-based")
@@ -519,7 +592,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         inject_text_tool_prompt(messages, available_tool_names)
                         _text_fallback_done = True
                         continue
-                    elif "requires more system memory" in error_body.lower() and _oom_retries < 3:
+                    elif any(s in error_body.lower() for s in ("requires more system memory", "out of memory", "llama runner process has terminated", "failed to allocate")) and _oom_retries < 3:
                         # OOM — halve num_ctx and retry (up to 3 times)
                         old_ctx = model_options.get("num_ctx", 0)
                         new_ctx = max(2048, old_ctx // 2)
@@ -550,7 +623,33 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     # so code blocks don't flash in chat before tool calls are detected
                     _has_tools = bool(available_tool_names)
 
-                    async for line in resp.aiter_lines():
+                    # Pipe aiter_lines into a queue so we can read with timeout
+                    # without corrupting the httpx stream (asyncio.wait_for cancels)
+                    _line_q = asyncio.Queue()
+                    _SENTINEL = object()
+
+                    async def _drain_ollama():
+                        try:
+                            async for _ol in resp.aiter_lines():
+                                await _line_q.put(_ol)
+                        except Exception as _drain_err:
+                            await _line_q.put(("__error__", _drain_err))
+                        finally:
+                            await _line_q.put(_SENTINEL)
+
+                    _drain_task = asyncio.create_task(_drain_ollama())
+
+                    while True:
+                        try:
+                            line = await asyncio.wait_for(_line_q.get(), timeout=15)
+                        except asyncio.TimeoutError:
+                            # No data from Ollama in 15s — send keepalive to prevent browser disconnect
+                            yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+                            continue
+                        if line is _SENTINEL:
+                            break
+                        if isinstance(line, tuple) and len(line) == 2 and line[0] == "__error__":
+                            raise line[1]
                         if not line.strip():
                             continue
                         try:
@@ -558,7 +657,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         except Exception:
                             continue
 
-                        # Detect Ollama error in stream (e.g. CUDA OOM)
+                        # Detect Ollama error in stream (e.g. CUDA OOM, corrupt model)
                         if chunk.get("error"):
                             _ollama_err = chunk["error"][:300]
                             print(f"[CHAT]   Ollama stream error: {_ollama_err}")
@@ -567,6 +666,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                 _oom_hint = f"GPU out of memory with num_ctx={model_options.get('num_ctx', 'default')}. Try a smaller context size or smaller model."
                                 await events.emit(conv_id, "error", {"status": f"GPU OOM: {_oom_hint}"})
                                 yield f"data: {json.dumps({'type': 'error', 'error': _oom_hint})}\n\n"
+                                return
+                            # Corrupt or broken model
+                            if any(s in _ollama_err.lower() for s in ("input stream", "failed to load", "invalid model", "ggml", "unexpected eof")):
+                                _corrupt_msg = f"Model '{req.model}' failed to load — it may be corrupt or incomplete. Try deleting and re-downloading it."
+                                await events.emit(conv_id, "tool_end", {"tool": "processing", "status": _corrupt_msg, "icon": "alert"})
+                                yield f"data: {json.dumps({'type': 'error', 'error': _corrupt_msg})}\n\n"
                                 return
                             await events.emit(conv_id, "error", {"status": f"Ollama: {_ollama_err[:120]}"})
                             yield f"data: {json.dumps({'type': 'error', 'error': _ollama_err})}\n\n"
@@ -689,6 +794,14 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                 tool_calls = msg_chunk["tool_calls"]
                             break
 
+                    # Clean up the drain task
+                    if not _drain_task.done():
+                        _drain_task.cancel()
+                        try:
+                            await _drain_task
+                        except (asyncio.CancelledError, Exception):
+                            pass
+
         except Exception as e:
             err_msg = str(e) or "Connection failed or timeout"
             # Provide clearer error messages for common failures
@@ -730,7 +843,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         # ── Code block rescue: when model dumps code in chat instead of using tools ──
         # Skip rescue if model was just told to stop looping, or if generate_code already failed
         # (prevents infinite loop: generate_code fails -> model dumps code -> rescue -> execute -> fail -> repeat)
-        if not tool_calls and content and (available_tool_names & CODEAGENT_TOOLS_SET) and _rescue_count < 1 and not _generate_code_failed:
+        if not tool_calls and content and _has_full_codeagent and _rescue_count < 3 and _generate_code_fail_rounds < 1:
             code_blocks = re.findall(r'```(\w*)\n(.*?)```', content, re.DOTALL)
             if code_blocks and not any(cb[1].strip().startswith('{') for cb in code_blocks):
                 # Model wrote code blocks without making tool calls — rescue via write_file + run_shell
@@ -781,8 +894,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         content = ""
                         msg["content"] = ""
                         break
-                # Second rescue attempt → inject stern message instead
-                if not tool_calls and _rescue_count >= 1:
+                # Past max rescue attempts → inject stern message instead
+                if not tool_calls and _rescue_count >= 3:
                     messages.append({"role": "tool", "content": "SYSTEM: STOP writing code in chat text. You MUST use tools. Call write_file or execute_code for ALL code."})
                     content = ""
                     msg["content"] = ""
@@ -856,6 +969,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             messages.append(msg)
             yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
 
+            # ── Classify tools for parallel vs sequential execution ──
+            _PARALLEL_SAFE = {"read_file", "list_files", "search_files", "diff_files",
+                              "git_diff", "research", "fetch_url"}
+            _parsed_calls = []
             for tc in tool_calls:
                 fn = tc.get("function", {})
                 tool_name = fn.get("name", "")
@@ -866,109 +983,175 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     except (json.JSONDecodeError, ValueError):
                         print(f"[CHAT] Warning: failed to parse tool args JSON for {tool_name}: {tool_args[:200]!r}")
                         tool_args = {}
+                _parsed_calls.append((tool_name, tool_args))
 
-                # Block unauthorized tools (model may hallucinate tools not in the enabled set)
-                if tool_name not in available_tool_names:
-                    print(f"[CHAT]   Blocked unauthorized tool: {tool_name} (allowed: {sorted(available_tool_names)})")
-                    messages.append({"role": "tool", "content": f"Error: tool '{tool_name}' is not available in this session."})
-                    continue
+            # Check if all calls are parallel-safe (different read targets)
+            _all_parallel = (
+                len(_parsed_calls) > 1
+                and all(n in _PARALLEL_SAFE for n, _ in _parsed_calls)
+            )
+            # Also allow parallel write_file if all paths are different
+            if not _all_parallel and len(_parsed_calls) > 1:
+                _names = [n for n, _ in _parsed_calls]
+                if all(n in (_PARALLEL_SAFE | {"write_file"}) for n in _names):
+                    _write_paths = [a.get("path", "") for n, a in _parsed_calls if n == "write_file"]
+                    if len(_write_paths) == len(set(_write_paths)):
+                        _all_parallel = True
 
-                print(f"[CHAT]   Executing tool: {tool_name}({json.dumps(tool_args)[:200]})")
+            if _all_parallel:
+                print(f"[CHAT]   Running {len(_parsed_calls)} tools in parallel")
 
-                # Tool-specific icons and status labels for progress pills
-                _TOOL_ICONS = {
-                    "execute_code": ("code", "⚡ Executing code"),
-                    "run_shell": ("terminal", "🖥️ Running command"),
-                    "write_file": ("file-plus", "📝 Writing file"),
-                    "read_file": ("file-text", "📖 Reading file"),
-                    "list_files": ("folder", "📂 Listing files"),
-                    "download_file": ("download", "📦 Preparing download"),
-                    "download_project": ("package", "📦 Packaging project"),
-                    "delete_file": ("trash-2", "🗑️ Deleting file"),
-                    "generate_code": ("wand", "🤖 OpenHands building project"),
-                    "research": ("search", "🔍 Searching the web"),
-                    "fetch_url": ("globe", "🌐 Fetching URL"),
-                    "deep_research": ("microscope", "🔬 Deep research in progress"),
-                    "conspiracy_research": ("eye", "🕵️ Investigating"),
-                }
-                _tool_icon, _tool_label = _TOOL_ICONS.get(tool_name, ("tool", f"🔧 Running {tool_name}"))
-                _tool_detail = ""
-                if tool_name == "run_shell":
-                    _tool_detail = f": {tool_args.get('command', '')[:60]}"
-                elif tool_name == "execute_code":
-                    _tool_detail = f" ({tool_args.get('language', 'code')})"
-                elif tool_name == "write_file":
-                    _tool_detail = f": {tool_args.get('path', '')}"
-                elif tool_name == "generate_code":
-                    _tool_detail = f" ({tool_args.get('language', '')})"
+            for batch_start in range(0, len(_parsed_calls), max(1, len(_parsed_calls) if _all_parallel else 1)):
+                batch_end = len(_parsed_calls) if _all_parallel else batch_start + 1
+                batch = _parsed_calls[batch_start:batch_end]
 
-                await events.emit(conv_id, "tool_start", {
-                    "tool": tool_name, "icon": _tool_icon,
-                    "status": f"{_tool_label}{_tool_detail}",
-                })
+                _futures = []
+                _metas = []  # (tool_name, tool_args, icon, label, detail)
+                for tool_name, tool_args in batch:
+                    # Block unauthorized tools
+                    if tool_name not in available_tool_names:
+                        print(f"[CHAT]   Blocked unauthorized tool: {tool_name} (allowed: {sorted(available_tool_names)})")
+                        messages.append({"role": "tool", "content": f"Error: tool '{tool_name}' is not available in this session."})
+                        continue
 
-                # Execute via integrated CodeAgent — with keepalive loop
-                _tf = asyncio.get_event_loop().create_future()
-                _tool_chars = [0]  # mutable counter for live progress
-                async def _run_tool_bg(_n=tool_name, _a=tool_args, _c=conv_id, _f=_tf, _tc=_tool_chars, _kb=persona_kb_ids):
-                    try:
-                        r = await exec_tool(http, events, _n, _a, _c, custom_tool_map, conv_model=req.model, kb_ids=_kb)
-                        _tc[0] = len(r) if r else 0
-                        if not _f.done(): _f.set_result(r)
-                    except Exception as _e:
-                        if not _f.done(): _f.set_exception(_e)
+                    print(f"[CHAT]   Executing tool: {tool_name}({json.dumps(tool_args)[:200]})")
 
-                asyncio.create_task(_run_tool_bg())
+                    # Tool-specific icons and status labels for progress pills
+                    _TOOL_ICONS = {
+                        "execute_code": ("code", "⚡ Executing code"),
+                        "run_shell": ("terminal", "🖥️ Running command"),
+                        "write_file": ("file-plus", "📝 Writing file"),
+                        "read_file": ("file-text", "📖 Reading file"),
+                        "list_files": ("folder", "📂 Listing files"),
+                        "download_file": ("download", "📦 Preparing download"),
+                        "download_project": ("package", "📦 Packaging project"),
+                        "delete_file": ("trash-2", "🗑️ Deleting file"),
+                        "generate_code": ("wand", "🤖 OpenHands building project"),
+                        "research": ("search", "🔍 Searching the web"),
+                        "fetch_url": ("globe", "🌐 Fetching URL"),
+                        "deep_research": ("microscope", "🔬 Deep research in progress"),
+                        "conspiracy_research": ("eye", "🕵️ Investigating"),
+                        "plan_project": ("activity", "🧠 Planning architecture"),
+                        "run_tests": ("code", "🧪 Running tests"),
+                        "lint_code": ("code", "🧹 Linting code"),
+                        "git_init": ("terminal", "📁 Initializing git"),
+                        "git_diff": ("terminal", "📊 Checking changes"),
+                        "git_commit": ("terminal", "💾 Committing"),
+                        "resume_project": ("activity", "📂 Resuming project"),
+                        "search_files": ("search", "🔍 Searching files"),
+                        "diff_files": ("terminal", "📊 Diffing files"),
+                    }
+                    _tool_icon, _tool_label = _TOOL_ICONS.get(tool_name, ("tool", f"🔧 Running {tool_name}"))
+                    _tool_detail = ""
+                    if tool_name == "run_shell":
+                        _tool_detail = f": {tool_args.get('command', '')[:60]}"
+                    elif tool_name == "execute_code":
+                        _tool_detail = f" ({tool_args.get('language', 'code')})"
+                    elif tool_name == "write_file":
+                        _tool_detail = f": {tool_args.get('path', '')}"
+                    elif tool_name == "generate_code":
+                        _tool_detail = f" ({tool_args.get('language', '')})"
 
+                    await events.emit(conv_id, "tool_start", {
+                        "tool": tool_name, "icon": _tool_icon,
+                        "status": f"{_tool_label}{_tool_detail}",
+                    })
+
+                    # Execute via integrated CodeAgent — with keepalive loop
+                    _tf = asyncio.get_event_loop().create_future()
+                    _tool_chars = [0]
+                    async def _run_tool_bg(_n=tool_name, _a=tool_args, _c=conv_id, _f=_tf, _tc=_tool_chars, _kb=persona_kb_ids):
+                        try:
+                            r = await exec_tool(http, events, _n, _a, _c, custom_tool_map, conv_model=req.model, kb_ids=_kb)
+                            _tc[0] = len(r) if r else 0
+                            if not _f.done(): _f.set_result(r)
+                        except Exception as _e:
+                            if not _f.done(): _f.set_exception(_e)
+
+                    asyncio.create_task(_run_tool_bg())
+                    _futures.append((_tf, _tool_chars, tool_name, _tool_icon, _tool_label, _tool_detail))
+
+                # Wait for all futures in this batch
                 _base_ctx = sum(len(m.get("content", "")) for m in messages) // 4
                 _tool_start_time = asyncio.get_event_loop().time()
-                while not _tf.done():
+                while _futures and not all(f[0].done() for f in _futures):
                     await asyncio.sleep(2)
-                    if not _tf.done():
-                        _elapsed = asyncio.get_event_loop().time() - _tool_start_time
-                        _elapsed_str = f"{int(_elapsed)}s"
-                        if tool_name != "generate_code":
-                            await events.emit(conv_id, "tool_start", {
-                                "tool": tool_name, "icon": _tool_icon,
-                                "status": f"{_tool_label}{_tool_detail} ({_elapsed_str})",
-                            })
-                        # Estimate growing context: base + tool chars so far + time-based estimate
-                        # Research tools accumulate ~200 chars/sec on average
-                        _est_tool_tokens = max(_tool_chars[0] // 4, int(_elapsed * 50))
-                        _est_ctx = _base_ctx + _est_tool_tokens
-                        yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': _est_ctx, 'live': True})}\n\n"
-                        yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+                    for _tf, _tool_chars, _tn, _ti, _tl, _td in _futures:
+                        if not _tf.done():
+                            _elapsed = asyncio.get_event_loop().time() - _tool_start_time
+                            if _tn != "generate_code":
+                                await events.emit(conv_id, "tool_progress", {
+                                    "tool": _tn, "icon": _ti,
+                                    "status": f"{_tl}{_td} ({int(_elapsed)}s)",
+                                })
+                    _est_tool_tokens = sum(max(tc[0] // 4, 50) for _, tc, *_ in _futures)
+                    _est_ctx = _base_ctx + _est_tool_tokens
+                    yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': _est_ctx, 'live': True})}\n\n"
+                    yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
 
-                try:
-                    tool_result = _tf.result()
-                except Exception as te:
-                    tool_result = f"**Tool error ({tool_name}):** {str(te)}"
+                # Collect results in order
+                for _fi, (_tf, _tool_chars, tool_name, _tool_icon, _tool_label, _tool_detail) in enumerate(_futures):
+                    try:
+                        tool_result = _tf.result()
+                    except Exception as te:
+                        tool_result = f"**Tool error ({tool_name}):** {str(te)}"
 
-                # Truncate huge results
-                MAX_TOOL_RESULT = 12000
-                if len(tool_result) > MAX_TOOL_RESULT:
-                    orig_len = len(tool_result)
-                    tool_result = tool_result[:MAX_TOOL_RESULT] + f"\n\n[TRUNCATED — result was {orig_len} chars]"
+                    # Truncate huge results — keep head + tail (errors are usually at the bottom)
+                    MAX_TOOL_RESULT = 24000
+                    if len(tool_result) > MAX_TOOL_RESULT:
+                        orig_len = len(tool_result)
+                        head = tool_result[:4000]
+                        tail = tool_result[-8000:]
+                        tool_result = head + f"\n\n[... {orig_len - 12000} chars omitted ...]\n\n" + tail
 
-                messages.append({"role": "tool", "content": tool_result})
-                print(f"[CHAT]   Tool result ({tool_name}): {len(tool_result)} chars")
+                    messages.append({"role": "tool", "content": tool_result})
+                    print(f"[CHAT]   Tool result ({tool_name}): {len(tool_result)} chars")
 
-                # Track generate_code failures to prevent code-block-rescue loops
-                if tool_name == "generate_code" and tool_result.startswith("ERROR"):
-                    _generate_code_failed = True
-                    print("[CHAT]   generate_code failed — disabling code-block-rescue for this session")
+                    # After plan_project: nudge model to use generate_code for large projects
+                    if tool_name == "plan_project" and len(tool_result) > 1000:
+                        # Count file references in the plan to gauge project size
+                        _file_refs = tool_result.count(".py") + tool_result.count(".js") + tool_result.count(".ts") + tool_result.count(".html") + tool_result.count(".go") + tool_result.count(".rs")
+                        if _file_refs >= 3:
+                            messages.append({"role": "tool", "content": (
+                                "SYSTEM: This is a large project with multiple files. "
+                                "Use generate_code to build it — the coding agent will implement "
+                                "the entire plan autonomously. Pass the full task description and "
+                                "language. After it finishes, review the output, run tests, and deliver."
+                            )})
+                            print(f"[CHAT]   plan_project returned large plan ({_file_refs} file refs) — nudging to generate_code")
 
-                # When generate_code succeeds (PROJECT COMPLETE), enable overseer review
-                if tool_name == "generate_code" and "PROJECT COMPLETE" in tool_result:
-                    _generate_code_done = True
-                    print("[CHAT]   generate_code succeeded — overseer reviewing output")
-                    messages.append({"role": "tool", "content": (
-                        "SYSTEM: The coding agent has finished. Review the file contents above "
-                        "and evaluate whether the output matches the user's request. "
-                        "If the code is just boilerplate/scaffolding and doesn't implement "
-                        "the actual features requested, call generate_code again with the same "
-                        "project_id and a more detailed task. Otherwise present the results."
-                    )})
+                    # Track generate_code failures — temporarily disable code-block-rescue
+                    if tool_name == "generate_code" and tool_result.startswith("ERROR"):
+                        _generate_code_fail_rounds = -2
+                        _rescue_count = 0
+                        print("[CHAT]   generate_code failed — pausing code-block-rescue for 2 rounds")
+                    elif _generate_code_fail_rounds < 0:
+                        _generate_code_fail_rounds += 1
+
+                    # When generate_code succeeds (PROJECT COMPLETE), enable overseer review
+                    if tool_name == "generate_code" and "PROJECT COMPLETE" in tool_result:
+                        _generate_code_done = True
+                        print("[CHAT]   generate_code succeeded — overseer reviewing output")
+                        messages.append({"role": "tool", "content": (
+                            "SYSTEM: The coding agent has finished. Review the file contents above "
+                            "and evaluate whether the output matches the user's request. "
+                            "If the code is just boilerplate/scaffolding and doesn't implement "
+                            "the actual features requested, call generate_code again with the same "
+                            "project_id and a more detailed task. Otherwise present the results."
+                        )})
+
+                    # After execute_code: nudge model to deliver image files
+                    if tool_name == "execute_code" and tool_result:
+                        _img_match = re.search(r'(/root/[^\s\'"]+\.(?:png|jpg|jpeg|svg|gif|webp))', tool_result)
+                        if _img_match:
+                            messages.append({"role": "tool", "content": (
+                                f"SYSTEM: Image saved at {_img_match.group(1)}. "
+                                "Call download_file to deliver it to the user."
+                            )})
+                            print(f"[CHAT]   Image detected in execute_code output — nudging download_file")
+
+                if _all_parallel:
+                    break  # All were in one batch
 
                 # Detect repeated errors — inject guidance, then force-stop if stuck
                 if tool_name in ("execute_code", "run_shell") and ("FAILED" in tool_result or "Error" in tool_result or "Traceback" in tool_result):
@@ -1075,7 +1258,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 continue
 
             # Nudge the model to respond
-            if available_tool_names & CODEAGENT_TOOLS_SET:
+            if _has_full_codeagent:
                 messages.append({"role": "user", "content": "Use your tools to accomplish the task. Call execute_code, write_file, or run_shell now."})
             else:
                 messages.append({"role": "user", "content": "Please provide a response."})
