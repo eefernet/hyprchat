@@ -2577,6 +2577,9 @@ function HyprChat(){
 
       {/* Status pills - removed from here, now in chat area */}
 
+      {/* Panels + Preview wrapper */}
+      <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+      <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",minWidth:0}}>
       {/* Panels */}
       {wsPanel&&activeWs
         ?<WorkspaceDetail ws={wsDetail} wsLoading={wsLoading} t={t} API={API}
@@ -4765,86 +4768,6 @@ function HyprChat(){
             <div ref={chatEnd}/>
           </div>}
         </div>
-          {/* Preview panel */}
-          {previewFile&&<div style={{width:previewWidth,flexShrink:0,borderLeft:`1px solid ${t.brd}33`,background:t.bgDeep,display:"flex",flexDirection:"column",position:"relative",overflow:"hidden",transition:"width .15s"}}>
-            {/* Drag handle */}
-            <div onMouseDown={startPreviewDrag} style={{position:"absolute",left:0,top:0,bottom:0,width:5,cursor:"col-resize",zIndex:10,background:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}44`} onMouseLeave={e=>e.currentTarget.style.background="transparent"}/>
-            {/* Header */}
-            <div style={{padding:"9px 12px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:7,flexShrink:0,background:`${t.surface}88`}}>
-              <span style={{fontSize:11,fontWeight:700,color:t.text,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{previewFile.isExternal?(()=>{try{return new URL(previewFile.url).hostname.replace("www.","");}catch{return previewFile.filename;}})():previewFile.filename}</span>
-              <span style={{fontSize:9,color:previewFile.isExternal?t.warm:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:4,flexShrink:0}}>{previewFile.isExternal?"web":`.${previewFile.type}`}</span>
-              {previewFile.isExternal
-                ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:10,textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.acc}44`,borderRadius:4,flexShrink:0}}>↗ open</a>
-                :<a href={`${API}${previewFile.url}`} download={previewFile.filename} style={{color:t.ok,fontSize:10,textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.ok}44`,borderRadius:4,flexShrink:0}}>⬇</a>}
-              <button onClick={closePreview} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:16,padding:"0 2px",flexShrink:0,lineHeight:1}}>✕</button>
-            </div>
-            {/* Content */}
-            <div style={{flex:1,overflowY:"auto",padding:14}}>
-              {previewError?<div style={{display:"flex",flexDirection:"column",gap:10,padding:16,background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:10,color:t.err}}>
-                <div style={{fontWeight:700,fontSize:12}}>⚠ {previewError}</div>
-                {previewFile.isExternal
-                  ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:11,textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.acc}44`,borderRadius:6,display:"inline-flex",alignItems:"center",gap:4}}>↗ Open in new tab</a>
-                  :<a href={`${API}${previewFile.url}`} download={previewFile.filename} style={{color:t.ok,fontSize:11,textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.ok}44`,borderRadius:6,display:"inline-flex",alignItems:"center",gap:4}}>⬇ Download anyway</a>}
-              </div>
-              :previewFile.isExternal&&previewFile.type==="pdf"
-                ?<iframe src={`${API}/api/proxy-preview?url=${encodeURIComponent(previewFile.url)}`} style={{width:"100%",height:"100%",border:"none",borderRadius:6,minHeight:500}} title={previewFile.filename}/>
-              :previewFile.isExternal&&["png","jpg","jpeg","gif","webp","svg"].includes(previewFile.type)
-                ?<img src={`${API}/api/proxy-preview?url=${encodeURIComponent(previewFile.url)}`} style={{maxWidth:"100%",borderRadius:6,display:"block"}} alt={previewFile.filename}/>
-              :["png","jpg","jpeg","gif","webp","svg"].includes(previewFile.type)&&!previewFile.isExternal
-                ?<img src={`${API}${previewFile.url}`} style={{maxWidth:"100%",borderRadius:6,display:"block"}} alt={previewFile.filename}/>
-                :previewFile.type==="archive"&&previewArchive
-                ?<div>
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,padding:"8px 12px",background:`${t.surface}88`,borderRadius:8,border:`1px solid ${t.brd}22`}}>
-                    <span style={{fontSize:20}}>📦</span>
-                    <div style={{flex:1}}>
-                      <div style={{fontSize:12,fontWeight:700,color:t.text}}>{previewArchive.filename}</div>
-                      <div style={{fontSize:10,color:t.mut}}>{previewArchive.file_count} files, {previewArchive.entries.length} entries</div>
-                    </div>
-                    <a href={`${API}${previewFile.url}`} download={previewFile.filename} style={{color:t.ok,fontSize:10,textDecoration:"none",padding:"4px 10px",border:`1px solid ${t.ok}44`,borderRadius:6,fontWeight:600}}>⬇ Download</a>
-                  </div>
-                  <div style={{borderRadius:8,border:`1px solid ${t.brd}22`,overflow:"hidden"}}>
-                    {previewArchive.entries.filter(e=>e.name!=="./"&&e.name!=="."&&e.name!=="/").map((entry,i)=>{
-                      const depth=Math.max(0,(entry.name.match(/\//g)||[]).length-(entry.is_dir?1:0));
-                      const basename=entry.is_dir?entry.name.replace(/\/$/,"").split("/").pop()+"/":entry.name.split("/").pop();
-                      const sizeStr=entry.is_dir?"":entry.size>=1048576?(entry.size/1048576).toFixed(1)+"MB":entry.size>=1024?(entry.size/1024).toFixed(1)+"KB":entry.size+"B";
-                      const extC=(basename.match(/\.(\w+)$/)||[])[1]||"";
-                      const iconColor=entry.is_dir?t.warm:["py","js","ts","rs","go","java","c","cpp","sh"].includes(extC)?t.acc:["md","txt","log","csv"].includes(extC)?t.dim:["json","yaml","toml","xml","html","css"].includes(extC)?t.f1:t.mut;
-                      return <div key={i} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",paddingLeft:10+depth*16,background:i%2===0?"transparent":`${t.surface}33`,borderBottom:i<previewArchive.entries.length-1?`1px solid ${t.brd}11`:"none",fontSize:11,color:entry.is_dir?t.warm:t.dim}}>
-                        <span style={{fontSize:12,flexShrink:0,color:iconColor}}>{entry.is_dir?"📁":"📄"}</span>
-                        <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:entry.is_dir?600:400}}>{basename}</span>
-                        {sizeStr&&<span style={{fontSize:9,color:t.mut,flexShrink:0,fontFamily:"monospace"}}>{sizeStr}</span>}
-                      </div>;
-                    })}
-                  </div>
-                </div>
-                :previewFile.type==="html"&&previewContent
-                ?<iframe sandbox="allow-scripts allow-same-origin" srcDoc={previewContent} style={{width:"100%",height:"100%",border:"none",borderRadius:6,background:"#fff",minHeight:400}} title={previewFile.filename}/>
-                :previewFile.type==="md"&&previewContent
-                ?<div style={{lineHeight:1.7,fontSize:12,color:t.dim}}>{(() => {
-                    if(!previewContent)return null;
-                    let text=previewContent;
-                    text=text.replace(/(?<!\]\()\/api\/downloads\/([^\s)"'`\]]+)/g,'[📎 $1](/api/downloads/$1)');
-                    return text.split(/(```[\s\S]*?```)/g).map((p,i)=>{
-                      if(p.startsWith("```")){const m=p.match(/```(\w*)\n?([\s\S]*?)```/);const code=m?.[2]||p.slice(3,-3);return <pre key={i} style={{margin:"8px 0",padding:10,background:`${t.surface}88`,borderRadius:6,overflowX:"auto",fontSize:11,color:t.warm,border:`1px solid ${t.brd}33`}}>{code}</pre>;}
-                      return <span key={i} style={{whiteSpace:"pre-wrap"}}>{p.split("\n").map((ln,j)=>{
-                        if(ln.match(/^### /))return<div key={j} style={{fontSize:13,fontWeight:700,color:t.acc,margin:"10px 0 4px"}}>{ln.slice(4)}</div>;
-                        if(ln.match(/^## /))return<div key={j} style={{fontSize:14,fontWeight:700,color:t.acc,margin:"12px 0 5px"}}>{ln.slice(3)}</div>;
-                        if(ln.match(/^# /))return<div key={j} style={{fontSize:16,fontWeight:700,color:t.acc,margin:"14px 0 6px"}}>{ln.slice(2)}</div>;
-                        return<div key={j} style={{minHeight:ln===""?8:"auto"}}>{ln}</div>;
-                      })}</span>;
-                    });
-                  })()}</div>
-                :previewContent
-                ?<pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:11,color:t.dim,fontFamily:font,lineHeight:1.6}}>{previewContent}</pre>
-                :!["png","jpg","jpeg","gif","webp","svg","archive"].includes(previewFile.type)
-                ?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:12,gap:6}}><span style={{fontSize:32}}>⏳</span>Loading...</div>
-                :previewFile.type==="archive"&&!previewArchive&&!previewError
-                ?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:12,gap:6}}><span style={{fontSize:32}}>📦</span>Reading archive...</div>
-                :null
-              }
-            </div>
-          </div>}
-        </div>
         {/* TOOL TOGGLES BAR + QUICK SEARCH */}
         <div style={{padding:"0 16px",flexShrink:0}}>
           <div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",gap:4,overflowX:"auto",padding:"4px 0",alignItems:"center"}}>
@@ -4923,6 +4846,87 @@ function HyprChat(){
           </div>
         </div>
       </>}
+      </div>{/* end inner panel column */}
+      {/* Preview panel — outside panel ternary so it renders alongside any panel */}
+      {previewFile&&<div style={{width:previewWidth,flexShrink:0,borderLeft:`1px solid ${t.brd}33`,background:t.bgDeep,display:"flex",flexDirection:"column",position:"relative",overflow:"hidden",transition:"width .15s"}}>
+            {/* Drag handle */}
+            <div onMouseDown={startPreviewDrag} style={{position:"absolute",left:0,top:0,bottom:0,width:5,cursor:"col-resize",zIndex:10,background:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}44`} onMouseLeave={e=>e.currentTarget.style.background="transparent"}/>
+            {/* Header */}
+            <div style={{padding:"9px 12px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:7,flexShrink:0,background:`${t.surface}88`}}>
+              <span style={{fontSize:11,fontWeight:700,color:t.text,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{previewFile.isExternal?(()=>{try{return new URL(previewFile.url).hostname.replace("www.","");}catch{return previewFile.filename;}})():previewFile.filename}</span>
+              <span style={{fontSize:9,color:previewFile.isExternal?t.warm:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:4,flexShrink:0}}>{previewFile.isExternal?"web":`.${previewFile.type}`}</span>
+              {previewFile.isExternal
+                ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:10,textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.acc}44`,borderRadius:4,flexShrink:0}}>↗ open</a>
+                :<a href={`${API}${previewFile.url}`} download={previewFile.filename} style={{color:t.ok,fontSize:10,textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.ok}44`,borderRadius:4,flexShrink:0}}>⬇</a>}
+              <button onClick={closePreview} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:16,padding:"0 2px",flexShrink:0,lineHeight:1}}>✕</button>
+            </div>
+            {/* Content */}
+            <div style={{flex:1,overflowY:"auto",padding:14}}>
+              {previewError?<div style={{display:"flex",flexDirection:"column",gap:10,padding:16,background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:10,color:t.err}}>
+                <div style={{fontWeight:700,fontSize:12}}>⚠ {previewError}</div>
+                {previewFile.isExternal
+                  ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:11,textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.acc}44`,borderRadius:6,display:"inline-flex",alignItems:"center",gap:4}}>↗ Open in new tab</a>
+                  :<a href={`${API}${previewFile.url}`} download={previewFile.filename} style={{color:t.ok,fontSize:11,textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.ok}44`,borderRadius:6,display:"inline-flex",alignItems:"center",gap:4}}>⬇ Download anyway</a>}
+              </div>
+              :previewFile.isExternal&&previewFile.type==="pdf"
+                ?<iframe src={`${API}/api/proxy-preview?url=${encodeURIComponent(previewFile.url)}`} style={{width:"100%",height:"100%",border:"none",borderRadius:6,minHeight:500}} title={previewFile.filename}/>
+              :previewFile.isExternal&&["png","jpg","jpeg","gif","webp","svg"].includes(previewFile.type)
+                ?<img src={`${API}/api/proxy-preview?url=${encodeURIComponent(previewFile.url)}`} style={{maxWidth:"100%",borderRadius:6,display:"block"}} alt={previewFile.filename}/>
+              :["png","jpg","jpeg","gif","webp","svg"].includes(previewFile.type)&&!previewFile.isExternal
+                ?<img src={`${API}${previewFile.url}`} style={{maxWidth:"100%",borderRadius:6,display:"block"}} alt={previewFile.filename}/>
+                :previewFile.type==="archive"&&previewArchive
+                ?<div>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,padding:"8px 12px",background:`${t.surface}88`,borderRadius:8,border:`1px solid ${t.brd}22`}}>
+                    <span style={{fontSize:20}}>📦</span>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:12,fontWeight:700,color:t.text}}>{previewArchive.filename}</div>
+                      <div style={{fontSize:10,color:t.mut}}>{previewArchive.file_count} files, {previewArchive.entries.length} entries</div>
+                    </div>
+                    <a href={`${API}${previewFile.url}`} download={previewFile.filename} style={{color:t.ok,fontSize:10,textDecoration:"none",padding:"4px 10px",border:`1px solid ${t.ok}44`,borderRadius:6,fontWeight:600}}>⬇ Download</a>
+                  </div>
+                  <div style={{borderRadius:8,border:`1px solid ${t.brd}22`,overflow:"hidden"}}>
+                    {previewArchive.entries.filter(e=>e.name!=="./"&&e.name!=="."&&e.name!=="/").map((entry,i)=>{
+                      const depth=Math.max(0,(entry.name.match(/\//g)||[]).length-(entry.is_dir?1:0));
+                      const basename=entry.is_dir?entry.name.replace(/\/$/,"").split("/").pop()+"/":entry.name.split("/").pop();
+                      const sizeStr=entry.is_dir?"":entry.size>=1048576?(entry.size/1048576).toFixed(1)+"MB":entry.size>=1024?(entry.size/1024).toFixed(1)+"KB":entry.size+"B";
+                      const extC=(basename.match(/\.(\w+)$/)||[])[1]||"";
+                      const iconColor=entry.is_dir?t.warm:["py","js","ts","rs","go","java","c","cpp","sh"].includes(extC)?t.acc:["md","txt","log","csv"].includes(extC)?t.dim:["json","yaml","toml","xml","html","css"].includes(extC)?t.f1:t.mut;
+                      return <div key={i} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",paddingLeft:10+depth*16,background:i%2===0?"transparent":`${t.surface}33`,borderBottom:i<previewArchive.entries.length-1?`1px solid ${t.brd}11`:"none",fontSize:11,color:entry.is_dir?t.warm:t.dim}}>
+                        <span style={{fontSize:12,flexShrink:0,color:iconColor}}>{entry.is_dir?"📁":"📄"}</span>
+                        <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:entry.is_dir?600:400}}>{basename}</span>
+                        {sizeStr&&<span style={{fontSize:9,color:t.mut,flexShrink:0,fontFamily:"monospace"}}>{sizeStr}</span>}
+                      </div>;
+                    })}
+                  </div>
+                </div>
+                :previewFile.type==="html"&&previewContent
+                ?<iframe sandbox="allow-scripts allow-same-origin" srcDoc={previewContent} style={{width:"100%",height:"100%",border:"none",borderRadius:6,background:"#fff",minHeight:400}} title={previewFile.filename}/>
+                :previewFile.type==="md"&&previewContent
+                ?<div style={{lineHeight:1.7,fontSize:12,color:t.dim}}>{(() => {
+                    if(!previewContent)return null;
+                    let text=previewContent;
+                    text=text.replace(/(?<!\]\()\/api\/downloads\/([^\s)"'`\]]+)/g,'[📎 $1](/api/downloads/$1)');
+                    return text.split(/(```[\s\S]*?```)/g).map((p,i)=>{
+                      if(p.startsWith("```")){const m=p.match(/```(\w*)\n?([\s\S]*?)```/);const code=m?.[2]||p.slice(3,-3);return <pre key={i} style={{margin:"8px 0",padding:10,background:`${t.surface}88`,borderRadius:6,overflowX:"auto",fontSize:11,color:t.warm,border:`1px solid ${t.brd}33`}}>{code}</pre>;}
+                      return <span key={i} style={{whiteSpace:"pre-wrap"}}>{p.split("\n").map((ln,j)=>{
+                        if(ln.match(/^### /))return<div key={j} style={{fontSize:13,fontWeight:700,color:t.acc,margin:"10px 0 4px"}}>{ln.slice(4)}</div>;
+                        if(ln.match(/^## /))return<div key={j} style={{fontSize:14,fontWeight:700,color:t.acc,margin:"12px 0 5px"}}>{ln.slice(3)}</div>;
+                        if(ln.match(/^# /))return<div key={j} style={{fontSize:16,fontWeight:700,color:t.acc,margin:"14px 0 6px"}}>{ln.slice(2)}</div>;
+                        return<div key={j} style={{minHeight:ln===""?8:"auto"}}>{ln}</div>;
+                      })}</span>;
+                    });
+                  })()}</div>
+                :previewContent
+                ?<pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:11,color:t.dim,fontFamily:font,lineHeight:1.6}}>{previewContent}</pre>
+                :!["png","jpg","jpeg","gif","webp","svg","archive"].includes(previewFile.type)
+                ?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:12,gap:6}}><span style={{fontSize:32}}>⏳</span>Loading...</div>
+                :previewFile.type==="archive"&&!previewArchive&&!previewError
+                ?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:12,gap:6}}><span style={{fontSize:32}}>📦</span>Reading archive...</div>
+                :null
+              }
+            </div>
+          </div>}
+      </div>{/* end panels + preview wrapper */}
     </div>
 
 

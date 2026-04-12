@@ -49,6 +49,7 @@
 - Fixed cryptic Ollama errors — "model not found" and corrupt model errors ("Error in input stream") now show clear, actionable messages instead of raw Ollama output
 - Fixed auto-title using wrong model — now uses the user's workspace analysis model from Settings instead of the backend default
 - Fixed auto-title not firing reliably — stale React closure caused message count check to miss; now triggers based on conversation title instead
+- Fixed workspace file preview panel not showing when Workspace tab is active — preview panel moved outside panel ternary so it renders alongside any active panel
 
 
 ## Alpha v16 — March 2026
