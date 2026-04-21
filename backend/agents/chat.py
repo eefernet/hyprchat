@@ -315,6 +315,31 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     if effective_system:
         messages.append({"role": "system", "content": effective_system})
 
+    # ── Rendering hint — tell the model diagrams/math render INLINE, not as files ──
+    # Without this, models with write_file / generate_code available will often save
+    # flowcharts to a file and return a download link instead of emitting inline.
+    messages.append({
+        "role": "system",
+        "content": (
+            "## RENDERING\n"
+            "The chat UI renders two rich formats inline — use them directly in your response text:\n"
+            "- **Diagrams**: wrap Mermaid source in a ```mermaid code fence. Flowcharts, sequence diagrams, "
+            "class/state/ER diagrams, gantt, mindmap, and pie all render as live SVG. Example: "
+            "```mermaid\\nflowchart LR\\nA --> B\\n```\n"
+            "- **Math**: use `$...$` for inline math and `$$...$$` for display equations. KaTeX renders both.\n"
+            "Do NOT call write_file, generate_code, or any other tool to produce a diagram or equation. "
+            "Emit them inline in your chat text — the user sees the rendered output immediately.\n"
+            "\n"
+            "### Combining diagrams and math\n"
+            "Mermaid does NOT render LaTeX inside node labels. Keep node labels as plain text "
+            "(short descriptions, variable names like `E_n` or `psi`, plain ASCII). If a node "
+            "needs an equation, reference it by name in the node and write the actual equation "
+            "as a separate `$$...$$` block ABOVE or BELOW the diagram. Never put `$...$` or "
+            "`\\frac{}{}` or other LaTeX syntax inside a mermaid node label — it will show as "
+            "raw dollar-sign text instead of rendered math."
+        )
+    })
+
     # ── Active project context: if this conversation has a coding project, inject it ──
     # Lets the bot answer "fix this bug in the project you built me" without the LLM
     # having to remember to call resume_project on its own. One DB query, fails closed.
