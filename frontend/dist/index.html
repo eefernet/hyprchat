@@ -246,6 +246,7 @@
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
 <script type="text/babel" data-presets="react" data-type="module">
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
@@ -1034,9 +1035,12 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
 function MermaidBlock({code,theme,font,epoch}){
   const t=theme;
   const containerRef=useRef(null);
+  const fsRef=useRef(null);
+  const panZoomRef=useRef(null);
   const [err,setErr]=useState(null);
   const [cpd,setCpd]=useState(false);
   const [showSrc,setShowSrc]=useState(false);
+  const [fs,setFs]=useState(false);
   const id=useMemo(()=>`mmd-${Math.random().toString(36).slice(2,10)}`,[]);
   useEffect(()=>{
     if(!window.mermaid||!containerRef.current||showSrc)return;
@@ -1049,12 +1053,47 @@ function MermaidBlock({code,theme,font,epoch}){
     }catch(e){setErr(String(e?.message||e));}
     return()=>{cancelled=true;};
   },[code,epoch,showSrc,id]);
+  useEffect(()=>{
+    if(!fs||!fsRef.current||!containerRef.current)return;
+    const srcSvg=containerRef.current.querySelector("svg");
+    if(!srcSvg)return;
+    const clone=srcSvg.cloneNode(true);
+    clone.removeAttribute("style");
+    clone.setAttribute("width","100%");
+    clone.setAttribute("height","100%");
+    clone.style.maxWidth="none";
+    clone.style.display="block";
+    fsRef.current.innerHTML="";
+    fsRef.current.appendChild(clone);
+    try{
+      panZoomRef.current=window.svgPanZoom(clone,{
+        controlIconsEnabled:true,
+        fit:true,
+        center:true,
+        minZoom:0.3,
+        maxZoom:12,
+        zoomScaleSensitivity:0.35,
+        contain:false
+      });
+    }catch(e){console.warn("svg-pan-zoom failed",e);}
+    return()=>{
+      try{panZoomRef.current?.destroy();}catch{}
+      panZoomRef.current=null;
+    };
+  },[fs]);
+  useEffect(()=>{
+    if(!fs)return;
+    const onKey=e=>{if(e.key==="Escape")setFs(false);};
+    window.addEventListener("keydown",onKey);
+    return()=>window.removeEventListener("keydown",onKey);
+  },[fs]);
   const copyCode=()=>{try{navigator.clipboard.writeText(code);setCpd(true);setTimeout(()=>setCpd(false),1500);}catch{}};
   const headerBtn={background:"none",border:"none",cursor:"pointer",padding:"3px 6px",fontSize:10,fontFamily:font,borderRadius:5,display:"flex",alignItems:"center",gap:3};
   return <div style={{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep}}>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`}}>
       <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ mermaid</span>
       <div style={{display:"flex",gap:4}}>
+        {!err&&!showSrc&&<button onClick={()=>setFs(true)} style={{...headerBtn,color:t.dim}} title="fullscreen / zoom">⛶ expand</button>}
         <button onClick={()=>setShowSrc(s=>!s)} style={{...headerBtn,color:showSrc?t.acc:t.dim}} title={showSrc?"show diagram":"show source"}>{showSrc?"◱ diagram":"{ } source"}</button>
         <button onClick={copyCode} style={{...headerBtn,color:cpd?t.ok:t.dim}} title="copy source">{cpd?"✓ copied":"⧉ copy"}</button>
       </div>
@@ -1065,6 +1104,20 @@ function MermaidBlock({code,theme,font,epoch}){
     </div>
     :showSrc?<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
     :<div ref={containerRef} className="mermaid-container" style={{background:t.bgDeep}}/>}
+    {fs&&ReactDOM.createPortal(
+      <div style={{position:"fixed",inset:0,zIndex:200,background:"rgba(0,0,0,.82)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setFs(false);}}>
+        <div style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,width:"min(1600px,95vw)",height:"90vh",display:"flex",flexDirection:"column",boxShadow:`0 8px 48px #0008`,overflow:"hidden"}}>
+          <div style={{padding:"10px 16px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:10,flexShrink:0,background:`${t.surface}88`}}>
+            <span style={{fontSize:11,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ mermaid — fullscreen</span>
+            <span style={{fontSize:10,color:t.mut,flex:1}}>drag to pan · scroll to zoom · ESC to close</span>
+            <button onClick={()=>panZoomRef.current?.reset()} style={{...headerBtn,color:t.dim}} title="reset view">⟲ reset</button>
+            <button onClick={()=>setFs(false)} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:18,padding:"0 4px",lineHeight:1}} title="close">✕</button>
+          </div>
+          <div ref={fsRef} style={{flex:1,overflow:"hidden",background:t.bgDeep}}/>
+        </div>
+      </div>,
+      document.body
+    )}
   </div>;
 }
 
