@@ -2438,10 +2438,14 @@ function HyprChat(){
           <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
         </div>;
       }
-      return <div key={i}>{p.split(/(\$\$[\s\S]+?\$\$)/g).map((seg,si)=>{
+      // Protect $$/$ sequences inside single-line backtick inline code from the display-math split below
+      const _DD=" DD ",_SD=" SD ";
+      const pMasked=p.replace(/`[^`\n]+`/g,m=>m.replace(/\$\$/g,_DD).replace(/\$/g,_SD));
+      return <div key={i}>{pMasked.split(/(\$\$[\s\S]+?\$\$)/g).map((seg,si)=>{
         if(seg.startsWith("$$")&&seg.endsWith("$$")&&seg.length>=4){
           return <div key={`m${si}`} style={{margin:"12px 0",textAlign:"center",overflowX:"auto",color:t.text,fontSize:"1.05em"}}>{seg}</div>;
         }
+        seg=seg.split(_DD).join("$$").split(_SD).join("$");
         return <React.Fragment key={`s${si}`}>{seg.split("\n").map((ln,j)=>{
         if(ln.match(/^---+$|^\*\*\*+$|^___+$/))return <hr key={j} style={{border:"none",borderTop:`1px solid ${t.brd}44`,margin:"10px 0"}}/>;
         if(ln.match(/^##### /))return <div key={j} style={{fontSize:12,fontWeight:700,color:t.acc,margin:"8px 0 3px"}}>{inlineParse(ln.slice(6))}</div>;
