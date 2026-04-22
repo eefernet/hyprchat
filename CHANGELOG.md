@@ -7,10 +7,10 @@
 - **`<MDWrap>` wrapper** — Wraps 8 render surfaces (chat, council cards, HF README, changelog modal) and invokes KaTeX auto-render after mount. Streaming messages skip wrapping so partial tokens don't flicker.
 - **Multi-line display math** — `md()` pre-splits non-code segments by `$$...$$` before line-splitting so equations spanning multiple lines render as one KaTeX node instead of fragmenting across `<div>`s.
 - **Backend rendering hint** — `chat.py` injects a system message telling the model diagrams/math render inline (not via `write_file` or `generate_code`) and explicitly warns against embedding `$...$` LaTeX inside Mermaid node labels.
-- **Changelog `$$` inside backticks** — `md()` now masks `$$`/`$` inside single-line inline-code backticks before the display-math split, so documentation literals like `` `$$...$$` `` render as inline code instead of being yanked out as a math block.
+- **Display-math escape inside inline code** — `md()` now masks `$$` and `$` inside single-line backtick inline code before the display-math split, so documentation examples that quote a math delimiter render as inline code instead of being yanked out as a math block.
 - **GFM task lists** — `- [ ]` / `- [x]` render as real checkboxes with strikethrough on completed items (read-only; reflects the markdown state).
 - **Collapsible `<details>`/`<summary>`** — Raw HTML `<details>` blocks render as interactive collapsibles with a chevron. New top-level `Collapsible` component.
-- **Diff code blocks** — ```` ```diff ```` fences color `+`/`-`/hunk/metadata lines using the active theme's `ok`/`err`/`acc`/`mut` channels.
+- **Diff code blocks** — fences tagged `diff` color `+` / `-` / hunk / metadata lines using the active theme's `ok`/`err`/`acc`/`mut` channels.
 - **Syntax highlighting** — Prism.js autoloader loaded via CDN; every code fence gets `language-X` highlighting via a new `CodeBlock` component that runs `Prism.highlightElement` after mount. Copy button and language chip preserved.
 - **Footnotes** — `[^label]` / `[^label]: …` pairs render as superscript numeric links with smooth-scroll to an auto-appended footnote block. Unique per-render IDs prevent collisions across messages.
 
