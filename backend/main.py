@@ -1347,6 +1347,14 @@ async def add_message(conv_id: str, request: Request):
     return {"status": "added"}
 
 
+@app.delete("/api/conversations/{conv_id}/messages/{msg_id}")
+async def delete_message(conv_id: str, msg_id: int):
+    ok = await db.delete_message(msg_id)
+    if not ok:
+        raise HTTPException(404, "message not found")
+    return {"status": "deleted"}
+
+
 # ============================================================
 # KNOWLEDGE BASES
 # ============================================================

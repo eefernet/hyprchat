@@ -120,6 +120,22 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         if m.get("role") == "user":
             last_user_msg = m.get("content", "")
             break
+
+    # ── Defensive persist of the incoming user message ──
+    # The frontend POSTs the user message fire-and-forget; if that fails
+    # (flaky network, etc.) the message would be lost while the assistant
+    # reply still saves below. Upsert if the most recent user message in
+    # the DB doesn't match the incoming one.
+    if conv_id and last_user_msg:
+        try:
+            existing = await db.get_conversation(conv_id)
+            if existing:
+                msgs = existing.get("messages") or []
+                recent_user = next((m for m in reversed(msgs) if m.get("role") == "user"), None)
+                if not recent_user or (recent_user.get("content") or "") != last_user_msg:
+                    await db.add_message(conv_id, "user", last_user_msg)
+        except Exception:
+            pass
     if last_user_msg.startswith("/run "):
         run_arg = last_user_msg[5:].strip()
         all_wfs = await db.get_workflows()
