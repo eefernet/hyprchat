@@ -367,6 +367,7 @@ const Pill = ({ev,t,expanded,onToggle})=>{
     "memory": isD ? ["🧠", "Recalled"] : ["🧠", "Remembering"],
     "generate_code": isD ? ["🧬", "Code Ready"] : ["🧬", "Agent Coding"],
     "generating": ["✍️", "Generating"],
+    "refinement": isD ? ["✨", "Refined"] : ["✨", "Refining"],
     "error": ["❌", "Error"],
     "tool_error": ["❌", "Error"],
   };
@@ -514,7 +515,9 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=
   const searchResultEvts = evts.filter(e=>e.type==="search_results");
   const sourceLinkEvts = evts.filter(e=>e.type==="source_links");
 
-  const CodeOutputCards = ()=><>{codeOutputEvts.map((e,i)=>{
+  // Historical renders: the per-message block at msg.metadata.saved_events renders
+  // collapsible code output, so ToolStatus shouldn't render another copy here.
+  const CodeOutputCards = ()=>historical?null:<>{codeOutputEvts.map((e,i)=>{
     const d=e.data||{};
     return <div key={i} style={{marginTop:6,borderRadius:8,overflow:"hidden",border:`1px solid ${d.success?t.ok:t.err}33`,background:t.bgDeep,fontSize:11}}>
       <div style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:`${d.success?t.ok:t.err}10`,borderBottom:`1px solid ${d.success?t.ok:t.err}22`}}>
@@ -1181,6 +1184,19 @@ function HyprChat(){
   const [scanlineEffect,setScanlineEffect]=useState(()=>{try{return localStorage.getItem("hc-scanline")==="1";}catch{return false;}});
   const [showNavLabels,setShowNavLabels]=useState(()=>{try{return localStorage.getItem("hc-nav-labels")!=="0";}catch{return true;}});
   const [thinkMode,setThinkMode]=useState(()=>{try{return localStorage.getItem("hc-think-mode")||"auto";}catch{return "auto";}});
+  // Effort Level — global default (0=Blurt, 1=Ponder, 2=Forge, 3=Galaxy Brain)
+  const [globalEffort,setGlobalEffort]=useState(()=>{try{return parseInt(localStorage.getItem("hc-effort-level")||"0")||0;}catch{return 0;}});
+  // Per-chat override map: { [convId]: 0|1|2|3 }. Absent entry = inherit globalEffort.
+  const [effortPerChat,setEffortPerChat]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-effort-per-chat")||"{}");}catch{return {};}});
+  // Creative level names with emoji — index == rounds count
+  const EFFORT_LEVELS=[
+    {emoji:"💭",name:"Blurt",desc:"Raw answer, no review"},
+    {emoji:"🧠",name:"Ponder",desc:"One self-review pass"},
+    {emoji:"🔥",name:"Forge",desc:"Two refinement passes"},
+    {emoji:"🌌",name:"Galaxy Brain",desc:"Max effort — three passes"},
+  ];
+  // Resolve effort for a given conv id (per-chat override, else global)
+  const resolveEffort=(cid)=>(cid&&effortPerChat[cid]!==undefined?effortPerChat[cid]:globalEffort);
   const [lastPersonaId,setLastPersonaId]=useState(()=>{try{return localStorage.getItem("hc-last-persona")||null;}catch{return null;}});
   const [fontSize,setFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font-size")||"14");}catch{return 14;}});
   const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"14");}catch{return 14;}});
@@ -1215,6 +1231,8 @@ function HyprChat(){
   const [modelSearch,setModelSearch]=useState("");
   const [prompts,setPrompts]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-prompts")||"[]");}catch{return [];}});
   const [showPromptPicker,setShowPromptPicker]=useState(false);
+  const [showEffortPicker,setShowEffortPicker]=useState(false);
+  const effortPickerRef=useRef(null);
   const [promptSearch,setPromptSearch]=useState("");
   const [editPrompt,setEditPrompt]=useState(null); // {id, title, content, category}
 
@@ -1308,6 +1326,8 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-scanline",scanlineEffect?"1":"0");}catch{}},[scanlineEffect]);
   useEffect(()=>{try{localStorage.setItem("hc-nav-labels",showNavLabels?"1":"0");}catch{}},[showNavLabels]);
   useEffect(()=>{try{localStorage.setItem("hc-think-mode",thinkMode);}catch{}},[thinkMode]);
+  useEffect(()=>{try{localStorage.setItem("hc-effort-level",String(globalEffort));}catch{}},[globalEffort]);
+  useEffect(()=>{try{localStorage.setItem("hc-effort-per-chat",JSON.stringify(effortPerChat));}catch{}},[effortPerChat]);
   useEffect(()=>{try{localStorage.setItem("hc-font-size",fontSize);}catch{}},[fontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-ui-font-size",uiFontSize);}catch{}},[uiFontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
@@ -1616,6 +1636,12 @@ function HyprChat(){
     document.addEventListener("mousedown",handler);
     return()=>document.removeEventListener("mousedown",handler);
   },[showPromptPicker]);
+  useEffect(()=>{
+    if(!showEffortPicker)return;
+    const handler=(e)=>{if(effortPickerRef.current&&!effortPickerRef.current.contains(e.target))setShowEffortPicker(false);};
+    document.addEventListener("mousedown",handler);
+    return()=>document.removeEventListener("mousedown",handler);
+  },[showEffortPicker]);
   // Fetch council suggestions
   const fetchCouncilSuggestions=(cfgId)=>{
     if(!cfgId)return;
@@ -1921,10 +1947,12 @@ function HyprChat(){
       if(sendTopK!==undefined)body.top_k=sendTopK;
       if(sendRepeatPenalty!==undefined)body.repeat_penalty=sendRepeatPenalty;
       if(thinkMode!=="auto")body.think_budget=thinkMode==="off"?0:1;
+      const _effort=resolveEffort(cid);
+      if(_effort>0)body.effort_rounds=_effort;
       const res=await fetch(`${API}/api/chat/stream`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:ctrl.signal});
       if(!res.ok){const errText=await res.text().catch(()=>res.statusText);throw new Error(`HTTP ${res.status}: ${errText}`);}
       const rdr=res.body.getReader(),dec=new TextDecoder();
-      let full="",buf="";
+      let full="",buf="",refinementsCount=0;
       while(true){
         const{done,value}=await rdr.read();if(done)break;
         buf+=dec.decode(value,{stream:true});
@@ -1934,7 +1962,8 @@ function HyprChat(){
           try{const d=JSON.parse(ln.slice(6));
             if(d.type==="token"){full+=d.content;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:true};return{...c,messages:m};});}
             else if(d.type==="clear"){full="";uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});}
-            else if(d.type==="done"){setTokS(d.speed);if(d.gen_tokens||d.tokens)setSessionTokens(p=>p+((d.gen_tokens||d.tokens)||0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens){setGenTokens(d.gen_tokens);setTokC(d.gen_tokens);}}
+            else if(d.type==="refinement_start"){full="";refinementsCount=d.round||refinementsCount;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});const _refEv={type:"tool_start",data:{tool:"refinement",status:`Refining answer (${d.round}/${d.total})...`,icon:"sparkles",round:d.round,total:d.total},timestamp:Date.now()/1000};streamSaveEvtsRef.current.push(_refEv);setEvts(p=>[...p.slice(-200),_refEv]);}
+            else if(d.type==="done"){setTokS(d.speed);if(d.gen_tokens||d.tokens)setSessionTokens(p=>p+((d.gen_tokens||d.tokens)||0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens){setGenTokens(d.gen_tokens);setTokC(d.gen_tokens);}if(d.refinements)refinementsCount=d.refinements;}
             else if(d.type==="ctx_update"){if(d.gen_tokens)setTokC(d.gen_tokens);if(d.prompt_tokens)setCtxTokens(d.prompt_tokens);}
             else if(d.type==="error"){full=`\`\`\`\n⚠ ${d.error}\n\`\`\``;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:false};return{...c,messages:m};});}
           }catch{}}
@@ -1943,7 +1972,7 @@ function HyprChat(){
       // Prefer the persistent stream-save buffer, which survives chat switches. Fall back to evtsRef for safety.
       const _rawEvts = streamSaveEvtsRef.current.length > 0 ? streamSaveEvtsRef.current : evtsRef.current;
       const _savedEvts = _rawEvts.filter(e=>["source_links","search_results","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
-      const _msgMeta = _savedEvts.length ? {saved_events: _savedEvts} : undefined;
+      const _msgMeta = (_savedEvts.length || refinementsCount > 0) ? {...(_savedEvts.length?{saved_events:_savedEvts}:{}), ...(refinementsCount>0?{refinements:refinementsCount}:{})} : undefined;
       uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:false,metadata:_msgMeta||{}};return{...c,messages:m};});
       // Save assistant message to DB (user message was saved at stream start)
       fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:full,metadata:_msgMeta})}).catch(()=>{});
@@ -4375,6 +4404,16 @@ function HyprChat(){
           <div style={{fontSize:10,color:t.mut,marginTop:4}}>Controls whether models use thinking tokens. Auto lets the model decide.</div>
         </div>
 
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Default Effort Level</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+            {EFFORT_LEVELS.map((lv,v)=><button key={v} title={lv.desc} onClick={()=>setGlobalEffort(v)} style={{padding:"6px 12px",borderRadius:7,border:`1px solid ${globalEffort===v?t.pink:t.brd}44`,background:globalEffort===v?`${t.pink}22`:t.bgDeep,color:globalEffort===v?t.pink:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:globalEffort===v?700:400,display:"inline-flex",alignItems:"center",gap:5}}>
+              <span style={{fontSize:14}}>{lv.emoji}</span>{lv.name}
+            </button>)}
+          </div>
+          <div style={{fontSize:10,color:t.mut,marginTop:4}}>After the initial answer, the model re-examines and refines it. {EFFORT_LEVELS[globalEffort].name} = {globalEffort===0?"no review":`${globalEffort} review pass${globalEffort>1?"es":""}`}. Each chat can override this.</div>
+        </div>
+
         <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
           <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Workspace Analysis Model</div>
           <ModelPicker value={wsModel} onChange={setWsModel} models={models} modelDetails={modelDetails} t={t} font={font}/>
@@ -4795,7 +4834,7 @@ function HyprChat(){
             // Compat: flatten all rounds into .responses for voting display
             for(const turn of turns){turn.responses=Object.values(turn.rounds).flat();}
             const isLastTurn=(ti)=>ti===turns.length-1;
-            return <div style={{maxWidth:"100%",padding:"0 20px",overflowY:"auto"}}>
+            return <div key={actId||"empty"} style={{maxWidth:"100%",padding:"0 20px",overflowY:"auto"}}>
               {turns.map((turn,ti)=><div key={ti} style={{marginBottom:28,animation:`fadeIn .3s both`}}>
                 {/* User message */}
                 <div style={{display:"flex",gap:9,alignItems:"flex-start",marginBottom:12}}>
@@ -4965,7 +5004,7 @@ function HyprChat(){
               </div>}
               <div ref={chatEnd}/>
             </div>;
-          })():<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 16px"}}>
+          })():<div key={actId||"empty"} style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 16px"}}>
             {(()=>{const filteredMsgs=(act.messages||[]).filter(msg=>msg.role==="user"||msg.role==="assistant");
               // Find the index of the last assistant message to place quick search results before it
               let lastAssistantFilteredIdx=-1;
@@ -5019,6 +5058,7 @@ function HyprChat(){
                       </span>
                       :<span style={{color:t.mut}}>{act.model||"assistant"}</span>}
                     {msg.created_at&&<span style={{fontSize:9,color:t.mut,opacity:.4,marginLeft:2}}>{new Date(msg.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
+                    {!isU&&!msg.isS&&(()=>{const meta=typeof msg.metadata==="string"?(()=>{try{return JSON.parse(msg.metadata);}catch{return{};}})():(msg.metadata||{});const n=meta.refinements||0;if(n<=0)return null;const lvl=EFFORT_LEVELS[n]||EFFORT_LEVELS[EFFORT_LEVELS.length-1];return <span title={`Refined ${n}× via ${lvl.name}`} style={{fontSize:9,padding:"1px 6px",borderRadius:8,background:`${t.pink}15`,border:`1px solid ${t.pink}30`,color:t.pink,display:"inline-flex",alignItems:"center",gap:3,fontWeight:600}}>✨ Refined {n}×</span>;})()}
                   </div>
                   <div style={{background:isU?`${t.surface}60`:"transparent",padding:isU?"10px 14px":"0",borderRadius:isU?10:0,border:isU?`1px solid ${t.brd}28`:"none",lineHeight:1.7,fontSize:fontSize,color:t.dim}}>
                     {isEditing?<div style={{display:"flex",flexDirection:"column",gap:6}}>
@@ -5041,7 +5081,7 @@ function HyprChat(){
                     {msg.isS&&!msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
                   </div>
                   {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:null;})()}
-                  {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:null;})()}
+                  {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:null;})()}
                   {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>;})()}
                   {/* Inline code execution output */}
                   {(()=>{if(isU)return null;const savedEvts=msg.metadata?.saved_events||[];const codeOuts=savedEvts.filter(e=>e.type==="code_output");if(!codeOuts.length)return null;return codeOuts.map((e,ci)=>{const d=e.data||{};const ckey=`${i}-${ci}`;const collapsed=collapsedOutputs.has(ckey);const toggleCollapsed=()=>setCollapsedOutputs(s=>{const n=new Set(s);if(n.has(ckey))n.delete(ckey);else n.add(ckey);return n;});return <div key={ci} style={{margin:"8px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${d.success?`${t.ok}33`:`${t.err}33`}`,background:t.bgDeep}}>
@@ -5180,6 +5220,24 @@ function HyprChat(){
                 </div>
               </div>}
             </div>}
+            {!act?.is_council&&(()=>{const lvl=resolveEffort(actId);const L=EFFORT_LEVELS[lvl]||EFFORT_LEVELS[0];const overridden=actId&&effortPerChat[actId]!==undefined&&effortPerChat[actId]!==globalEffort;return <div ref={effortPickerRef} style={{position:"relative",flexShrink:0}}>
+              <button onClick={()=>setShowEffortPicker(p=>!p)} title={`Effort: ${L.name} — ${L.desc}${overridden?" (overrides global)":""}`} style={{background:showEffortPicker?`${t.pink}15`:"none",border:overridden?`1px solid ${t.pink}55`:"none",color:lvl>0?t.pink:t.mut,cursor:"pointer",padding:"3px 8px",borderRadius:8,display:"flex",alignItems:"center",gap:4,fontSize:11,flexShrink:0,opacity:lvl>0?1:.65,fontWeight:600}}>
+                <span style={{fontSize:13}}>{L.emoji}</span><span style={{fontSize:10}}>{L.name}</span>
+              </button>
+              {showEffortPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:50,background:t.bgDeep,border:`1px solid ${t.pink}33`,borderRadius:10,boxShadow:`0 4px 24px #0008`,minWidth:200,padding:6}}>
+                <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,padding:"3px 6px 5px",fontWeight:700}}>Effort — this chat</div>
+                {EFFORT_LEVELS.map((lv,v)=><button key={v} onClick={()=>{if(actId){setEffortPerChat(p=>({...p,[actId]:v}));}setShowEffortPicker(false);}} style={{display:"flex",alignItems:"center",gap:6,width:"100%",textAlign:"left",padding:"6px 8px",borderRadius:6,background:lvl===v?`${t.pink}18`:"transparent",border:"none",color:lvl===v?t.pink:t.dim,cursor:"pointer",fontSize:11,fontFamily:font,marginBottom:2}}>
+                  <span style={{fontSize:14}}>{lv.emoji}</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:600}}>{lv.name}{globalEffort===v&&<span style={{fontSize:8,color:t.mut,marginLeft:4,opacity:.7}}>default</span>}</div>
+                    <div style={{fontSize:9,color:t.mut}}>{lv.desc}</div>
+                  </div>
+                </button>)}
+                {actId&&effortPerChat[actId]!==undefined&&<div style={{borderTop:`1px solid ${t.brd}22`,marginTop:4,paddingTop:4}}>
+                  <button onClick={()=>{setEffortPerChat(p=>{const n={...p};delete n[actId];return n;});setShowEffortPicker(false);}} style={{width:"100%",background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:10,padding:"4px 0",fontFamily:font}}>Use global default →</button>
+                </div>}
+              </div>}
+            </div>;})()}
             </>}
             <textarea ref={inpRef} value={inp} onChange={e=>setInp(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
               placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":"What's on your mind?"}`} rows={1}

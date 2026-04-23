@@ -1,3 +1,15 @@
+## Alpha v16.2 — April 22, 2026
+
+### Effort Level — Iterative Self-Review
+- **Scalable response quality** — After the initial answer is finished, the model re-examines its own response and produces a refined version. Runs 0–3 additional review passes. Each pass can call tools (`research`, `fetch_url`, etc.) to verify claims before refining.
+- **4 creative levels** — 💭 **Blurt** (raw, no review) / 🧠 **Ponder** (1 pass) / 🔥 **Forge** (2 passes) / 🌌 **Galaxy Brain** (3 passes).
+- **Global default + per-chat override** — Settings has a "Default Effort Level" chip row. Each chat gets a compact emoji chip next to the input that lets the user override for just that conversation (new chats inherit the global default).
+- **Replace-with-final UX** — During refinement, the streamed answer is wiped and re-streamed each round; only the polished final version stays in the bubble. Live pill shows "✨ Refining answer (1/3)..." during each pass. Finished messages carry an `✨ Refined N×` badge next to the timestamp.
+- **Mechanism** — New `effort_rounds` field on `ChatRequest`. `chat_stream_generate` re-enters the main agent loop after the "no more tool calls" exit, appending a critique prompt that asks the model to check for factual errors, logical gaps, missing context, or unclear phrasing. The existing `MAX_AGENT_ROUNDS` cap still governs total rounds so review can't runaway.
+- **New SSE event** — `refinement_start` `{round, total}` signals each review pass to the frontend. The `done` payload now carries `refinements: N` which is persisted to the message metadata so the badge survives reload.
+- **Storage** — `localStorage["hc-effort-level"]` for the global default; `localStorage["hc-effort-per-chat"] = {convId: level}` for per-chat overrides. No DB migration needed.
+
+
 ## Alpha v16.1.1 — April 22, 2026
 
 ### Rich Rendering

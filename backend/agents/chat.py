@@ -601,6 +601,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     _generate_code_done = False    # Guard: stop tool calls after successful generate_code
     _rescue_count = 0              # How many times we rescued code blocks
     _oom_retries = 0               # OOM context halving retries
+    # Effort-level self-review rounds: 0=off, capped at 3
+    _review_round = 0
+    _review_budget = max(0, min(3, int(getattr(req, "effort_rounds", 0) or 0)))
+    _best_review_content = ""  # Longest detailed answer seen so far — used for anti-regression
 
     for round_num in range(MAX_ROUNDS):
         content = ""
@@ -608,6 +612,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         tool_calls = []
         gen_tokens = 0
         prompt_tokens = 0
+        _gen_pill_started = False  # First "generating" pill uses tool_start; subsequent ones use tool_progress so the frontend collapses them into one updating pill
 
         # ── Context window management: prune old tool results to stay under budget ──
         _ctx_size = sum(len(m.get("content", "")) for m in messages)
@@ -830,7 +835,9 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                     # Buffer mode: emit a progress pill instead of streaming tokens
                                     # Show what the model is working on via SSE event
                                     if len(content) % 200 < len(token):
-                                        await events.emit(conv_id, "tool_start", {
+                                        _evt_type = "tool_start" if not _gen_pill_started else "tool_progress"
+                                        _gen_pill_started = True
+                                        await events.emit(conv_id, _evt_type, {
                                             "tool": "generating",
                                             "status": f"✍️ Generating... ({len(content)} chars)",
                                             "icon": "edit",
@@ -1265,6 +1272,64 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 for i in range(0, len(content), 8):
                     yield f"data: {json.dumps({'type': 'token', 'content': content[i:i+8]})}\n\n"
                     await asyncio.sleep(0)
+
+            # ── Effort-level self-review: loop back with a critique prompt ──
+            if _review_round < _review_budget:
+                # ── Anti-regression guard ──
+                # When the first answer was already correct, later review rounds
+                # tend to shrink into terse meta-commentary ("the original is
+                # accurate, no changes needed"). If the just-produced content is
+                # drastically shorter than the best detailed answer we've seen,
+                # treat this round as a "nothing to fix" confirmation: restore
+                # the best content, skip further review, and emit the done event.
+                if (len(_best_review_content) >= 500
+                        and len(content) < int(0.5 * len(_best_review_content))):
+                    print(f"[CHAT]   Review round {_review_round + 1} regressed "
+                          f"({len(content)} vs best {len(_best_review_content)} chars) — "
+                          f"keeping best answer, stopping refinement")
+                    yield f"data: {json.dumps({'type': 'clear'})}\n\n"
+                    for i in range(0, len(_best_review_content), 8):
+                        yield f"data: {json.dumps({'type': 'token', 'content': _best_review_content[i:i+8]})}\n\n"
+                        await asyncio.sleep(0)
+                    content = _best_review_content
+                    msg["content"] = _best_review_content
+                    # Fall through to the finalization block below
+                else:
+                    # Update best-seen content if this round is at least as good
+                    if len(content) >= len(_best_review_content):
+                        _best_review_content = content
+                    _review_round += 1
+                    print(f"[CHAT]   Review round {_review_round}/{_review_budget} — re-examining answer")
+                    # Commit the just-finished answer to history so the model sees what it said
+                    messages.append(msg)
+                    # Frontend: wipe the streamed answer, then show refinement progress.
+                    # Only emit via the chat stream — the frontend synthesizes the pill
+                    # from refinement_start. An extra EventBus emit would duplicate it.
+                    yield f"data: {json.dumps({'type': 'clear'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'refinement_start', 'round': _review_round, 'total': _review_budget})}\n\n"
+                    # Inject the critique prompt as a user turn
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Re-examine your previous response for factual errors, logical "
+                            "gaps, inaccurate claims, unclear phrasing, missing context, or "
+                            "overlooked angles. Then output the FINAL user-facing answer.\n\n"
+                            "CRITICAL RULES for your output:\n"
+                            "1. Your output IS the final answer shown to the user. It replaces "
+                            "the previous answer entirely.\n"
+                            "2. Do NOT write meta-commentary like 'the previous answer is "
+                            "correct', 'no changes needed', 'I verified...' — just output "
+                            "the answer itself.\n"
+                            "3. If the previous answer was already accurate and complete, "
+                            "output it AGAIN in full (same level of detail, tables, examples) "
+                            "— do not shorten or summarize it.\n"
+                            "4. If you found issues, output the improved full answer.\n"
+                            "5. You may call tools (research, fetch_url, execute_code) first "
+                            "to verify facts before writing the final answer."
+                        ),
+                    })
+                    continue
+
             messages.append(msg)
             # Record token usage for analytics
             if gen_tokens or prompt_tokens:
@@ -1273,13 +1338,19 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 except Exception as _te:
                     print(f"[CHAT] Token recording error: {_te}")
             await events.emit(conv_id, "complete", {"status": "Complete"})
-            yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
+            _done_payload = {"type": "done", "model": req.model}
+            if _review_round > 0:
+                _done_payload["refinements"] = _review_round
+            yield f"data: {json.dumps(_done_payload)}\n\n"
             return
         else:
             # Empty content — try to recover
             if round_num >= 3:
                 await events.emit(conv_id, "complete", {"status": "Complete"})
-                yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
+                _done_payload = {"type": "done", "model": req.model}
+                if _review_round > 0:
+                    _done_payload["refinements"] = _review_round
+                yield f"data: {json.dumps(_done_payload)}\n\n"
                 return
             print(f"[CHAT]   Empty content (round {round_num}), gen_tokens={gen_tokens}, thinking={len(thinking)}")
 
@@ -1310,4 +1381,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             continue
 
     await events.emit(conv_id, "complete", {"status": "Complete (max rounds)"})
-    yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
+    _done_payload = {"type": "done", "model": req.model}
+    if _review_round > 0:
+        _done_payload["refinements"] = _review_round
+    yield f"data: {json.dumps(_done_payload)}\n\n"

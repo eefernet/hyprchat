@@ -244,6 +244,7 @@ class ChatRequest(BaseModel):
     top_k: Optional[int] = None
     repeat_penalty: Optional[float] = None
     think_budget: Optional[int] = None  # None=auto, 0=disable thinking, 1=enable thinking
+    effort_rounds: Optional[int] = None  # 0=off, 1-3=extra self-review passes after the initial answer
 
 class ExecuteRequest(BaseModel):
     conversation_id: Optional[str] = None
