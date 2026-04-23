@@ -1,4 +1,4 @@
-## Alpha v16.1.1 — April 2026
+## Alpha v16.1.1 — April 22, 2026
 
 ### Rich Rendering
 - **Mermaid.js diagrams** — ` ```mermaid ` code fences render inline as live SVG: flowcharts, sequence, class, state, ER, gantt, mindmap, pie. Theme-synced (34 mapped variables) and re-render when the user switches themes mid-conversation.
