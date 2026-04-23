@@ -220,7 +220,7 @@ app = FastAPI(title="HyprChat", version="2.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -1438,6 +1438,9 @@ async def get_file_index_status(kb_id: str, filename: str):
     status_key = f"{kb_id}:{filename}"
     status = _indexing_status.get(status_key)
     if status:
+        # Evict terminal statuses on read so the dict doesn't grow unbounded
+        if status.get("status") in ("done", "error"):
+            _indexing_status.pop(status_key, None)
         return status
     return {"status": "unknown", "filename": filename}
 
@@ -1716,6 +1719,10 @@ async def pull_model(request: Request):
             async with http.stream("POST", f"{config.OLLAMA_URL}/api/pull",
                                    json={"name": model_name, "stream": True},
                                    timeout=httpx.Timeout(7200.0, connect=10.0)) as response:
+                if response.status_code != 200:
+                    err_body = (await response.aread()).decode()[:300]
+                    yield f"data: {json.dumps({'error': f'Ollama returned HTTP {response.status_code}: {err_body}'})}\n\n"
+                    return
                 async for line in response.aiter_lines():
                     if not line.strip():
                         continue
@@ -1938,7 +1945,8 @@ async def upload_persona_avatar(mc_id: str, file: UploadFile = File(...)):
     avatar_dir = os.path.join(config.UPLOAD_DIR, "avatars")
     os.makedirs(avatar_dir, exist_ok=True)
 
-    raw_ext = (file.filename or "").rsplit(".", 1)[-1].lower()[:10] if "." in (file.filename or "") else "png"
+    fname = file.filename or ""
+    raw_ext = fname.rsplit(".", 1)[-1].lower()[:10] if "." in fname else "png"
     if raw_ext not in ("png", "jpg", "jpeg", "gif", "webp", "svg"):
         raise HTTPException(400, "Invalid image type — allowed: png, jpg, jpeg, gif, webp, svg")
     ext = raw_ext
@@ -2040,7 +2048,7 @@ async def analyze_workspace_topics(ws_id: str, body: dict = Body(default={})):
         import re as _re
         raw = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL).strip()
         start, end = raw.find("["), raw.rfind("]")
-        topics = json.loads(raw[start:end + 1]) if start != -1 else []
+        topics = json.loads(raw[start:end + 1]) if start != -1 and end > start else []
     except HTTPException:
         raise
     except Exception as e:

@@ -822,7 +822,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     parts.append("\n---\n⚠️ input() does NOT work in this sandbox (no stdin). Remove all input() calls. Use hardcoded test values, function parameters, or sys.argv with write_file + run_shell.")
                 elif "indexerror" in combined_err and "argv" in combined_err:
                     parts.append("\n---\n⚠️ sys.argv has no arguments in execute_code. To test scripts with arguments: 1) write_file to save the script, 2) run_shell to execute it with args (e.g., python3 /root/script.py arg1 arg2).")
-                elif "no such file" in combined_err or "not found" in combined_err and "command" not in combined_err:
+                elif ("no such file" in combined_err or "not found" in combined_err) and "command" not in combined_err:
                     parts.append("\n---\n⚠️ File not found. Working directory is /root/. Use absolute paths (/root/filename) or save files with write_file first.")
                 elif "modulenotfounderror" in combined_err or "no module named" in combined_err:
                     parts.append("\n---\n⚠️ Missing package. Install it first: run_shell(command='pip3 install <package>'), then retry.")
@@ -964,7 +964,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             })
             out = f"```\n{stdout}\n```" if stdout else ""
             err = f"\nstderr:\n```\n{stderr}\n```" if stderr and not success else ""
-            result_text = f"exit code: {exit_code}\n{out}{err}" or f"(exit code: {exit_code}, no output)"
+            result_text = f"exit code: {exit_code}\n{out}{err}" if (stdout or stderr) else f"(exit code: {exit_code}, no output)"
             if not success:
                 result_text += "\n---\nCommand failed. Check the error above and try a different approach or fix the command."
 
