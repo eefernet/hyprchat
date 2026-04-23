@@ -101,6 +101,36 @@ CODEAGENT_TOOLS_SET = {"execute_code", "run_shell", "write_file", "read_file",
                        "search_files", "diff_files", "git_init", "git_diff", "git_commit",
                        "run_tests", "lint_code", "resume_project"}
 
+# Tools safe to run in parallel (read-only or independent-target writes)
+_PARALLEL_SAFE_TOOLS = {"read_file", "list_files", "search_files", "diff_files",
+                        "git_diff", "research", "fetch_url"}
+
+# Tool icons and human-readable labels for progress pills
+_TOOL_ICONS = {
+    "execute_code": ("code", "⚡ Executing code"),
+    "run_shell": ("terminal", "🖥️ Running command"),
+    "write_file": ("file-plus", "📝 Writing file"),
+    "read_file": ("file-text", "📖 Reading file"),
+    "list_files": ("folder", "📂 Listing files"),
+    "download_file": ("download", "📦 Preparing download"),
+    "download_project": ("package", "📦 Packaging project"),
+    "delete_file": ("trash-2", "🗑️ Deleting file"),
+    "generate_code": ("wand", "🤖 OpenHands building project"),
+    "research": ("search", "🔍 Searching the web"),
+    "fetch_url": ("globe", "🌐 Fetching URL"),
+    "deep_research": ("microscope", "🔬 Deep research in progress"),
+    "conspiracy_research": ("eye", "🕵️ Investigating"),
+    "plan_project": ("activity", "🧠 Planning architecture"),
+    "run_tests": ("code", "🧪 Running tests"),
+    "lint_code": ("code", "🧹 Linting code"),
+    "git_init": ("terminal", "📁 Initializing git"),
+    "git_diff": ("terminal", "📊 Checking changes"),
+    "git_commit": ("terminal", "💾 Committing"),
+    "resume_project": ("activity", "📂 Resuming project"),
+    "search_files": ("search", "🔍 Searching files"),
+    "diff_files": ("terminal", "📊 Diffing files"),
+}
+
 
 async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_id_map):
     """Async generator that yields SSE events for a streaming chat with tool-calling.
@@ -120,6 +150,22 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         if m.get("role") == "user":
             last_user_msg = m.get("content", "")
             break
+
+    # ── Defensive persist of the incoming user message ──
+    # The frontend POSTs the user message fire-and-forget; if that fails
+    # (flaky network, etc.) the message would be lost while the assistant
+    # reply still saves below. Upsert if the most recent user message in
+    # the DB doesn't match the incoming one.
+    if conv_id and last_user_msg:
+        try:
+            existing = await db.get_conversation(conv_id)
+            if existing:
+                msgs = existing.get("messages") or []
+                recent_user = next((m for m in reversed(msgs) if m.get("role") == "user"), None)
+                if not recent_user or (recent_user.get("content") or "") != last_user_msg:
+                    await db.add_message(conv_id, "user", last_user_msg)
+        except Exception:
+            pass
     if last_user_msg.startswith("/run "):
         run_arg = last_user_msg[5:].strip()
         all_wfs = await db.get_workflows()
@@ -314,6 +360,31 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         )
     if effective_system:
         messages.append({"role": "system", "content": effective_system})
+
+    # ── Rendering hint — tell the model diagrams/math render INLINE, not as files ──
+    # Without this, models with write_file / generate_code available will often save
+    # flowcharts to a file and return a download link instead of emitting inline.
+    messages.append({
+        "role": "system",
+        "content": (
+            "## RENDERING\n"
+            "The chat UI renders two rich formats inline — use them directly in your response text:\n"
+            "- **Diagrams**: wrap Mermaid source in a ```mermaid code fence. Flowcharts, sequence diagrams, "
+            "class/state/ER diagrams, gantt, mindmap, and pie all render as live SVG. Example: "
+            "```mermaid\\nflowchart LR\\nA --> B\\n```\n"
+            "- **Math**: use `$...$` for inline math and `$$...$$` for display equations. KaTeX renders both.\n"
+            "Do NOT call write_file, generate_code, or any other tool to produce a diagram or equation. "
+            "Emit them inline in your chat text — the user sees the rendered output immediately.\n"
+            "\n"
+            "### Combining diagrams and math\n"
+            "Mermaid does NOT render LaTeX inside node labels. Keep node labels as plain text "
+            "(short descriptions, variable names like `E_n` or `psi`, plain ASCII). If a node "
+            "needs an equation, reference it by name in the node and write the actual equation "
+            "as a separate `$$...$$` block ABOVE or BELOW the diagram. Never put `$...$` or "
+            "`\\frac{}{}` or other LaTeX syntax inside a mermaid node label — it will show as "
+            "raw dollar-sign text instead of rendered math."
+        )
+    })
 
     # ── Active project context: if this conversation has a coding project, inject it ──
     # Lets the bot answer "fix this bug in the project you built me" without the LLM
@@ -970,8 +1041,6 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
 
             # ── Classify tools for parallel vs sequential execution ──
-            _PARALLEL_SAFE = {"read_file", "list_files", "search_files", "diff_files",
-                              "git_diff", "research", "fetch_url"}
             _parsed_calls = []
             for tc in tool_calls:
                 fn = tc.get("function", {})
@@ -988,12 +1057,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             # Check if all calls are parallel-safe (different read targets)
             _all_parallel = (
                 len(_parsed_calls) > 1
-                and all(n in _PARALLEL_SAFE for n, _ in _parsed_calls)
+                and all(n in _PARALLEL_SAFE_TOOLS for n, _ in _parsed_calls)
             )
             # Also allow parallel write_file if all paths are different
             if not _all_parallel and len(_parsed_calls) > 1:
                 _names = [n for n, _ in _parsed_calls]
-                if all(n in (_PARALLEL_SAFE | {"write_file"}) for n in _names):
+                if all(n in (_PARALLEL_SAFE_TOOLS | {"write_file"}) for n in _names):
                     _write_paths = [a.get("path", "") for n, a in _parsed_calls if n == "write_file"]
                     if len(_write_paths) == len(set(_write_paths)):
                         _all_parallel = True
@@ -1016,31 +1085,6 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
                     print(f"[CHAT]   Executing tool: {tool_name}({json.dumps(tool_args)[:200]})")
 
-                    # Tool-specific icons and status labels for progress pills
-                    _TOOL_ICONS = {
-                        "execute_code": ("code", "⚡ Executing code"),
-                        "run_shell": ("terminal", "🖥️ Running command"),
-                        "write_file": ("file-plus", "📝 Writing file"),
-                        "read_file": ("file-text", "📖 Reading file"),
-                        "list_files": ("folder", "📂 Listing files"),
-                        "download_file": ("download", "📦 Preparing download"),
-                        "download_project": ("package", "📦 Packaging project"),
-                        "delete_file": ("trash-2", "🗑️ Deleting file"),
-                        "generate_code": ("wand", "🤖 OpenHands building project"),
-                        "research": ("search", "🔍 Searching the web"),
-                        "fetch_url": ("globe", "🌐 Fetching URL"),
-                        "deep_research": ("microscope", "🔬 Deep research in progress"),
-                        "conspiracy_research": ("eye", "🕵️ Investigating"),
-                        "plan_project": ("activity", "🧠 Planning architecture"),
-                        "run_tests": ("code", "🧪 Running tests"),
-                        "lint_code": ("code", "🧹 Linting code"),
-                        "git_init": ("terminal", "📁 Initializing git"),
-                        "git_diff": ("terminal", "📊 Checking changes"),
-                        "git_commit": ("terminal", "💾 Committing"),
-                        "resume_project": ("activity", "📂 Resuming project"),
-                        "search_files": ("search", "🔍 Searching files"),
-                        "diff_files": ("terminal", "📊 Diffing files"),
-                    }
                     _tool_icon, _tool_label = _TOOL_ICONS.get(tool_name, ("tool", f"🔧 Running {tool_name}"))
                     _tool_detail = ""
                     if tool_name == "run_shell":
@@ -1058,7 +1102,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     })
 
                     # Execute via integrated CodeAgent — with keepalive loop
-                    _tf = asyncio.get_event_loop().create_future()
+                    _tf = asyncio.get_running_loop().create_future()
                     _tool_chars = [0]
                     async def _run_tool_bg(_n=tool_name, _a=tool_args, _c=conv_id, _f=_tf, _tc=_tool_chars, _kb=persona_kb_ids):
                         try:
@@ -1073,12 +1117,13 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
                 # Wait for all futures in this batch
                 _base_ctx = sum(len(m.get("content", "")) for m in messages) // 4
-                _tool_start_time = asyncio.get_event_loop().time()
+                _loop = asyncio.get_running_loop()
+                _tool_start_time = _loop.time()
                 while _futures and not all(f[0].done() for f in _futures):
                     await asyncio.sleep(2)
                     for _tf, _tool_chars, _tn, _ti, _tl, _td in _futures:
                         if not _tf.done():
-                            _elapsed = asyncio.get_event_loop().time() - _tool_start_time
+                            _elapsed = _loop.time() - _tool_start_time
                             if _tn != "generate_code":
                                 await events.emit(conv_id, "tool_progress", {
                                     "tool": _tn, "icon": _ti,

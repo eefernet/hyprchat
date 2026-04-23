@@ -373,7 +373,7 @@ async def get_conversation(id: str):
         except (json.JSONDecodeError, TypeError):
             conv["tool_ids"] = []
         cursor = await db.execute(
-            "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC", (id,)
+            "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, id ASC", (id,)
         )
         messages = await cursor.fetchall()
         parsed_msgs = []
@@ -464,6 +464,16 @@ async def add_message(conversation_id: str, role: str, content: str, metadata: d
             (conversation_id,)
         )
         await db.commit()
+    finally:
+        await db.close()
+
+
+async def delete_message(message_id: int) -> bool:
+    db = await get_db()
+    try:
+        cur = await db.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+        await db.commit()
+        return cur.rowcount > 0
     finally:
         await db.close()
 

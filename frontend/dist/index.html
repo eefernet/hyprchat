@@ -101,6 +101,14 @@
     letter-spacing: 2px; text-transform: uppercase;
     animation: hcSlideUp .9s .3s cubic-bezier(.16,1,.3,1) both;
   }
+
+  /* ── KaTeX + Mermaid integration ── */
+  .katex { color: inherit; font-size: 1.05em; }
+  .katex-display { margin: 8px 0; overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
+  .katex-display > .katex { white-space: normal; }
+  .katex-error { color: #BF616A; font-family: monospace; font-size: 0.9em; background: rgba(191,97,106,0.08); padding: 1px 4px; border-radius: 3px; }
+  .mermaid-container { display: flex; justify-content: center; padding: 14px 12px; }
+  .mermaid-container svg { max-width: 100%; height: auto; }
 </style>
 </head>
 <body>
@@ -234,22 +242,30 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css">
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js" data-manual></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" data-autoloader-path="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/"></script>
 <script type="text/babel" data-presets="react" data-type="module">
-const { useState, useEffect, useRef, useCallback } = React;
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 const API = window.HYPRCHAT_API || "";
 const THEMES = {
   nord:{name:"Nord",bg:"#2E3440",bgDeep:"#242933",surface:"#3B4252",sfHov:"#434C5E",sfBri:"#4C566A",brd:"#4C566A",text:"#ECEFF4",dim:"#D8DEE9",mut:"#81A1C1",acc:"#88C0D0",acc2:"#81A1C1",warm:"#EBCB8B",ok:"#A3BE8C",err:"#BF616A",pink:"#B48EAD",f1:"#8FBCBB",f4:"#5E81AC"},
   catppuccin:{name:"Catppuccin",bg:"#1E1E2E",bgDeep:"#181825",surface:"#313244",sfHov:"#45475A",sfBri:"#585B70",brd:"#45475A",text:"#CDD6F4",dim:"#BAC2DE",mut:"#89B4FA",acc:"#89B4FA",acc2:"#74C7EC",warm:"#F9E2AF",ok:"#A6E3A1",err:"#F38BA8",pink:"#CBA6F7",f1:"#94E2D5",f4:"#7287FD"},
-  gruvbox:{name:"Gruvbox",bg:"#282828",bgDeep:"#1D2021",surface:"#3C3836",sfHov:"#504945",sfBri:"#665C54",brd:"#504945",text:"#EBDBB2",dim:"#D5C4A1",mut:"#83A598",acc:"#83A598",acc2:"#8EC07C",warm:"#FABD2F",ok:"#B8BB26",err:"#FB4934",pink:"#D3869B",f1:"#8EC07C",f4:"#076678"},
+  gruvbox:{name:"Gruvbox",bg:"#282828",bgDeep:"#1D2021",surface:"#3C3836",sfHov:"#504945",sfBri:"#665C54",brd:"#504945",text:"#EBDBB2",dim:"#D5C4A1",mut:"#a89984",acc:"#83A598",acc2:"#8EC07C",warm:"#FABD2F",ok:"#B8BB26",err:"#FB4934",pink:"#D3869B",f1:"#8EC07C",f4:"#83a598"},
   tokyoNight:{name:"Tokyo Night",bg:"#1A1B26",bgDeep:"#16161E",surface:"#24283B",sfHov:"#292E42",sfBri:"#3B4261",brd:"#3B4261",text:"#C0CAF5",dim:"#A9B1D6",mut:"#7AA2F7",acc:"#7AA2F7",acc2:"#7DCFFF",warm:"#E0AF68",ok:"#9ECE6A",err:"#F7768E",pink:"#BB9AF7",f1:"#73DACA",f4:"#2AC3DE"},
-  rosePine:{name:"Rosé Pine",bg:"#191724",bgDeep:"#1F1D2E",surface:"#26233A",sfHov:"#2A2837",sfBri:"#403D52",brd:"#403D52",text:"#E0DEF4",dim:"#C4A7E7",mut:"#9CCFD8",acc:"#9CCFD8",acc2:"#C4A7E7",warm:"#F6C177",ok:"#31748F",err:"#EB6F92",pink:"#C4A7E7",f1:"#9CCFD8",f4:"#EA9A97"},
-  dracula:{name:"Dracula",bg:"#282A36",bgDeep:"#1E1F29",surface:"#343746",sfHov:"#414354",sfBri:"#4D4F64",brd:"#44475A",text:"#F8F8F2",dim:"#CFCFCF",mut:"#6272A4",acc:"#BD93F9",acc2:"#FF79C6",warm:"#F1FA8C",ok:"#50FA7B",err:"#FF5555",pink:"#FF79C6",f1:"#8BE9FD",f4:"#BD93F9"},
+  rosePine:{name:"Rosé Pine",bg:"#191724",bgDeep:"#1F1D2E",surface:"#26233A",sfHov:"#2A2837",sfBri:"#403D52",brd:"#403D52",text:"#E0DEF4",dim:"#c9bdde",mut:"#908caa",acc:"#9CCFD8",acc2:"#C4A7E7",warm:"#F6C177",ok:"#5ca99c",err:"#EB6F92",pink:"#C4A7E7",f1:"#9CCFD8",f4:"#EA9A97"},
+  dracula:{name:"Dracula",bg:"#282A36",bgDeep:"#1E1F29",surface:"#343746",sfHov:"#414354",sfBri:"#4D4F64",brd:"#44475A",text:"#F8F8F2",dim:"#CFCFCF",mut:"#8a9cd0",acc:"#BD93F9",acc2:"#FF79C6",warm:"#F1FA8C",ok:"#50FA7B",err:"#FF5555",pink:"#FF79C6",f1:"#8BE9FD",f4:"#BD93F9"},
   oneLight:{name:"One Light",bg:"#FAFAFA",bgDeep:"#EFEFEF",surface:"#E2E3E5",sfHov:"#D5D6DA",sfBri:"#C5C6CC",brd:"#B0B1B8",text:"#282A30",dim:"#3E4047",mut:"#6B6E78",acc:"#3569D6",acc2:"#4260CC",warm:"#A06D00",ok:"#3D8B3D",err:"#D03B2F",pink:"#9021A0",f1:"#0174A8",f4:"#3569D6"},
-  midnight:{name:"Midnight",bg:"#0A0A0F",bgDeep:"#050508",surface:"#111118",sfHov:"#1A1A24",sfBri:"#222230",brd:"#1E1E2E",text:"#C8C8E8",dim:"#9090B8",mut:"#4A4A6A",acc:"#7C6FCD",acc2:"#5A4FA0",warm:"#E0A060",ok:"#40C080",err:"#E05060",pink:"#B060B0",f1:"#40A0C0",f4:"#6060C0"},
-  terminal:{name:"Terminal",bg:"#0a0f0a",bgDeep:"#050805",surface:"#0d1a0d",sfHov:"#112211",sfBri:"#163316",brd:"#1a3a1a",text:"#00ff41",dim:"#00cc33",mut:"#008822",acc:"#00ff41",acc2:"#33ff77",warm:"#ffcc00",ok:"#00ff41",err:"#ff3333",pink:"#ff00ff",f1:"#00ccff",f4:"#00ff88"},
-  cyberpunk:{name:"Cyberpunk",bg:"#0d0015",bgDeep:"#080010",surface:"#150025",sfHov:"#1a002e",sfBri:"#220038",brd:"#2a0045",text:"#f0e6ff",dim:"#c8a8ff",mut:"#7733aa",acc:"#ff00ff",acc2:"#cc00cc",warm:"#ffee00",ok:"#00ffcc",err:"#ff1155",pink:"#ff00cc",f1:"#00ccff",f4:"#aa00ff"},
-  solarizedDark:{name:"Solarized Dark",bg:"#002b36",bgDeep:"#001e27",surface:"#073642",sfHov:"#0a4153",sfBri:"#0d4f63",brd:"#094858",text:"#839496",dim:"#657b83",mut:"#586e75",acc:"#268bd2",acc2:"#2aa198",warm:"#b58900",ok:"#859900",err:"#dc322f",pink:"#d33682",f1:"#2aa198",f4:"#6c71c4"},
+  midnight:{name:"Midnight",bg:"#0A0A0F",bgDeep:"#050508",surface:"#111118",sfHov:"#1A1A24",sfBri:"#222230",brd:"#1E1E2E",text:"#C8C8E8",dim:"#9090B8",mut:"#7a7aa8",acc:"#9b8ce0",acc2:"#6e63b8",warm:"#E0A060",ok:"#40C080",err:"#E05060",pink:"#c080c0",f1:"#5ab8d0",f4:"#7a7ad0"},
+  terminal:{name:"Terminal",bg:"#0a0f0a",bgDeep:"#050805",surface:"#0d1a0d",sfHov:"#112211",sfBri:"#163316",brd:"#1a3a1a",text:"#baffc6",dim:"#7fe89a",mut:"#5ca776",acc:"#00ff41",acc2:"#33ff77",warm:"#ffcc00",ok:"#00ff41",err:"#ff7a7a",pink:"#ff66ff",f1:"#7ad6ff",f4:"#55ffa0"},
+  cyberpunk:{name:"Cyberpunk",bg:"#0d0015",bgDeep:"#080010",surface:"#150025",sfHov:"#1a002e",sfBri:"#220038",brd:"#2a0045",text:"#f0e6ff",dim:"#d2b8ff",mut:"#b083d8",acc:"#f26bff",acc2:"#d859e5",warm:"#ffe066",ok:"#5cf2c9",err:"#ff5577",pink:"#ff66d4",f1:"#5cc9ff",f4:"#c77bff"},
+  solarizedDark:{name:"Solarized Dark",bg:"#002b36",bgDeep:"#001e27",surface:"#073642",sfHov:"#0a4153",sfBri:"#0d4f63",brd:"#094858",text:"#d6dcd6",dim:"#a7b4b3",mut:"#839496",acc:"#4ba6e8",acc2:"#4dbab0",warm:"#cfa036",ok:"#a4b53b",err:"#e05652",pink:"#e25999",f1:"#4dbab0",f4:"#868bd8"},
   solarizedLight:{name:"Solarized Light",bg:"#fdf6e3",bgDeep:"#eee8d5",surface:"#e8e1cc",sfHov:"#ddd5be",sfBri:"#d0c8b0",brd:"#b5ad96",text:"#3b4d53",dim:"#475963",mut:"#6e7f86",acc:"#1a7abf",acc2:"#1f8c85",warm:"#a37400",ok:"#6d8400",err:"#c62828",pink:"#c42484",f1:"#1f8c85",f4:"#5c63b0"},
   materialOcean:{name:"Material Ocean",bg:"#0f111a",bgDeep:"#090b10",surface:"#1a1c25",sfHov:"#21232d",sfBri:"#292b36",brd:"#2a2d3a",text:"#a6accd",dim:"#8b91b8",mut:"#4b526d",acc:"#82aaff",acc2:"#89ddff",warm:"#ffcb6b",ok:"#c3e88d",err:"#f07178",pink:"#c792ea",f1:"#89ddff",f4:"#7986cb"},
   ayuDark:{name:"Ayu Dark",bg:"#0b0e14",bgDeep:"#070910",surface:"#0d1017",sfHov:"#111520",sfBri:"#161a26",brd:"#1a1f2e",text:"#cccac2",dim:"#b3b1ad",mut:"#626a73",acc:"#39bae6",acc2:"#59c2ff",warm:"#ffb454",ok:"#aad94c",err:"#f28779",pink:"#d2a6ff",f1:"#95e6cb",f4:"#39bae6"},
@@ -1018,6 +1034,141 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
 }
 
 // ============================================================
+// Mermaid diagram block — renders ```mermaid fences as SVG
+function MermaidBlock({code,theme,font,epoch}){
+  const t=theme;
+  const containerRef=useRef(null);
+  const fsRef=useRef(null);
+  const panZoomRef=useRef(null);
+  const [err,setErr]=useState(null);
+  const [cpd,setCpd]=useState(false);
+  const [showSrc,setShowSrc]=useState(false);
+  const [fs,setFs]=useState(false);
+  const id=useMemo(()=>`mmd-${Math.random().toString(36).slice(2,10)}`,[]);
+  useEffect(()=>{
+    if(!window.mermaid||!containerRef.current||showSrc)return;
+    let cancelled=false;
+    setErr(null);
+    try{
+      window.mermaid.render(id,code).then(({svg})=>{
+        if(!cancelled&&containerRef.current)containerRef.current.innerHTML=svg;
+      }).catch(e=>{if(!cancelled)setErr(String(e?.message||e));});
+    }catch(e){setErr(String(e?.message||e));}
+    return()=>{cancelled=true;};
+  },[code,epoch,showSrc,id]);
+  useEffect(()=>{
+    if(!fs||!fsRef.current||!containerRef.current)return;
+    const srcSvg=containerRef.current.querySelector("svg");
+    if(!srcSvg)return;
+    const clone=srcSvg.cloneNode(true);
+    clone.removeAttribute("style");
+    clone.setAttribute("width","100%");
+    clone.setAttribute("height","100%");
+    clone.style.maxWidth="none";
+    clone.style.display="block";
+    fsRef.current.innerHTML="";
+    fsRef.current.appendChild(clone);
+    try{
+      panZoomRef.current=window.svgPanZoom(clone,{
+        controlIconsEnabled:true,
+        fit:true,
+        center:true,
+        minZoom:0.3,
+        maxZoom:12,
+        zoomScaleSensitivity:0.35,
+        contain:false
+      });
+    }catch(e){console.warn("svg-pan-zoom failed",e);}
+    return()=>{
+      try{panZoomRef.current?.destroy();}catch{}
+      panZoomRef.current=null;
+    };
+  },[fs]);
+  useEffect(()=>{
+    if(!fs)return;
+    const onKey=e=>{if(e.key==="Escape")setFs(false);};
+    window.addEventListener("keydown",onKey);
+    return()=>window.removeEventListener("keydown",onKey);
+  },[fs]);
+  const copyCode=()=>{try{navigator.clipboard.writeText(code);setCpd(true);setTimeout(()=>setCpd(false),1500);}catch{}};
+  const headerBtn={background:"none",border:"none",cursor:"pointer",padding:"3px 6px",fontSize:10,fontFamily:font,borderRadius:5,display:"flex",alignItems:"center",gap:3};
+  return <div style={{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`}}>
+      <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ mermaid</span>
+      <div style={{display:"flex",gap:4}}>
+        {!err&&!showSrc&&<button onClick={()=>setFs(true)} style={{...headerBtn,color:t.dim}} title="fullscreen / zoom">⛶ expand</button>}
+        <button onClick={()=>setShowSrc(s=>!s)} style={{...headerBtn,color:showSrc?t.acc:t.dim}} title={showSrc?"show diagram":"show source"}>{showSrc?"◱ diagram":"{ } source"}</button>
+        <button onClick={copyCode} style={{...headerBtn,color:cpd?t.ok:t.dim}} title="copy source">{cpd?"✓ copied":"⧉ copy"}</button>
+      </div>
+    </div>
+    {err?<div>
+      <div style={{padding:"8px 12px",background:`${t.err}12`,color:t.err,fontSize:11,fontFamily:font,borderBottom:`1px solid ${t.err}33`}}>⚠ Mermaid render error: {err}</div>
+      <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
+    </div>
+    :showSrc?<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
+    :<div ref={containerRef} className="mermaid-container" style={{background:t.bgDeep}}/>}
+    {fs&&ReactDOM.createPortal(
+      <div style={{position:"fixed",inset:0,zIndex:200,background:"rgba(0,0,0,.82)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setFs(false);}}>
+        <div style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,width:"min(1600px,95vw)",height:"90vh",display:"flex",flexDirection:"column",boxShadow:`0 8px 48px #0008`,overflow:"hidden"}}>
+          <div style={{padding:"10px 16px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:10,flexShrink:0,background:`${t.surface}88`}}>
+            <span style={{fontSize:11,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ mermaid — fullscreen</span>
+            <span style={{fontSize:10,color:t.mut,flex:1}}>drag to pan · scroll to zoom · ESC to close</span>
+            <button onClick={()=>panZoomRef.current?.reset()} style={{...headerBtn,color:t.dim}} title="reset view">⟲ reset</button>
+            <button onClick={()=>setFs(false)} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:18,padding:"0 4px",lineHeight:1}} title="close">✕</button>
+          </div>
+          <div ref={fsRef} style={{flex:1,overflow:"hidden",background:t.bgDeep}}/>
+        </div>
+      </div>,
+      document.body
+    )}
+  </div>;
+}
+
+// Syntax-highlighted code block (Prism)
+function CodeBlock({code,lang,t,font}){
+  const ref=useRef(null);
+  useEffect(()=>{
+    if(!ref.current||!window.Prism)return;
+    try{window.Prism.highlightElement(ref.current);}catch{}
+  },[code,lang]);
+  const cls=lang?`language-${lang}`:"language-none";
+  return <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,background:"transparent"}}><code ref={ref} className={cls} style={{fontFamily:font,background:"transparent",color:t.dim,padding:0,textShadow:"none"}}>{code}</code></pre>;
+}
+
+// Collapsible <details>/<summary> block
+function Collapsible({summary,children,theme,font,defaultOpen}){
+  const [open,setOpen]=useState(!!defaultOpen);
+  return <div style={{margin:"8px 0",border:`1px solid ${theme.brd}44`,borderRadius:8,background:`${theme.surface}44`,overflow:"hidden"}}>
+    <div onClick={()=>setOpen(o=>!o)} style={{padding:"6px 10px",cursor:"pointer",display:"flex",alignItems:"center",gap:6,fontSize:12,fontWeight:600,color:theme.dim,userSelect:"none",background:`${theme.surface}66`}}>
+      <span style={{display:"inline-block",transition:"transform .15s",transform:open?"rotate(90deg)":"rotate(0)",color:theme.acc,fontSize:10}}>▶</span>
+      <span>{summary||"Details"}</span>
+    </div>
+    {open&&<div style={{padding:"8px 12px",fontSize:13,lineHeight:1.6,color:theme.dim,borderTop:`1px solid ${theme.brd}28`}}>{children}</div>}
+  </div>;
+}
+
+// KaTeX post-render wrapper — runs renderMathInElement against mounted children
+function MDWrap({children}){
+  const ref=useRef(null);
+  useEffect(()=>{
+    if(!window.renderMathInElement||!ref.current)return;
+    try{
+      window.renderMathInElement(ref.current,{
+        delimiters:[
+          {left:"$$",right:"$$",display:true},
+          {left:"\\[",right:"\\]",display:true},
+          {left:"\\(",right:"\\)",display:false},
+          {left:"$",right:"$",display:false}
+        ],
+        throwOnError:false,
+        ignoredTags:["script","noscript","style","textarea","pre","code"]
+      });
+    }catch{}
+  });
+  return <div ref={ref}>{children}</div>;
+}
+
+// ============================================================
 function HyprChat(){
   const [tm,setTm]=useState(()=>{try{return localStorage.getItem("hc-theme")||"nord";}catch{return "nord";}});
   const [fi,setFi]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font")||"0");}catch{return 0;}});
@@ -1095,6 +1246,57 @@ function HyprChat(){
   const LIGHT_PAIRS={nord:"oneLight",catppuccin:"oneLight",gruvbox:"oneLight",tokyoNight:"oneLight",rosePine:"oneLight",dracula:"oneLight",midnight:"oneLight",terminal:"oneLight",cyberpunk:"oneLight",solarizedDark:"solarizedLight",materialOcean:"oneLight",ayuDark:"oneLight",oneLight:"nord",solarizedLight:"solarizedDark"};
   const isLightTheme=tm==="oneLight"||tm==="solarizedLight";
 
+  // Mermaid init — re-runs when theme/font changes; bumps epoch to force diagram re-render
+  const [mermaidEpoch,setMermaidEpoch]=useState(0);
+  useEffect(()=>{
+    if(!window.mermaid)return;
+    try{
+      window.mermaid.initialize({
+        startOnLoad:false,
+        securityLevel:"strict",
+        theme:"base",
+        fontFamily:font,
+        themeVariables:{
+          background:t.bgDeep,
+          primaryColor:t.surface,
+          primaryTextColor:t.text,
+          primaryBorderColor:t.brd,
+          secondaryColor:t.bgDeep,
+          secondaryTextColor:t.dim,
+          secondaryBorderColor:t.brd,
+          tertiaryColor:t.sfHov,
+          tertiaryTextColor:t.text,
+          tertiaryBorderColor:t.brd,
+          lineColor:t.acc,
+          textColor:t.text,
+          mainBkg:t.surface,
+          nodeBorder:t.acc,
+          clusterBkg:`${t.bgDeep}`,
+          clusterBorder:t.brd,
+          edgeLabelBackground:t.bgDeep,
+          noteBkgColor:`${t.warm}22`,
+          noteTextColor:t.text,
+          noteBorderColor:t.warm,
+          errorBkgColor:`${t.err}22`,
+          errorTextColor:t.err,
+          actorBkg:t.surface,
+          actorBorder:t.acc,
+          actorTextColor:t.text,
+          actorLineColor:t.mut,
+          signalColor:t.dim,
+          signalTextColor:t.text,
+          labelBoxBkgColor:t.surface,
+          labelBoxBorderColor:t.brd,
+          labelTextColor:t.text,
+          loopTextColor:t.text,
+          activationBkgColor:t.sfHov,
+          activationBorderColor:t.acc
+        }
+      });
+      setMermaidEpoch(e=>e+1);
+    }catch{}
+  },[tm,fi]);
+
   useEffect(()=>{try{localStorage.setItem("hc-theme",tm);}catch{}},[tm]);
   useEffect(()=>{try{localStorage.setItem("hc-font",String(fi));}catch{}},[fi]);
   useEffect(()=>{try{localStorage.setItem("hc-token-limit",String(tokenLimit));}catch{}},[tokenLimit]);
@@ -1163,6 +1365,10 @@ function HyprChat(){
   const [panel,setPanel]=useState("chat");
   const [evts,setEvts]=useState([]);
   const evtsRef=useRef([]);
+  // Dedicated save buffer — accumulates events for the current stream regardless of chat switches
+  const streamSaveEvtsRef=useRef([]);
+  // Conversation id currently being streamed (null when idle). Set at sendMessages start, cleared on completion.
+  const streamingCidRef=useRef(null);
   const [kbs,setKbs]=useState([]);
   const [uploadProgress,setUploadProgress]=useState({});  // {kbId: {filename, progress, status, error}}
   const [tools,setTools]=useState([]);
@@ -1180,6 +1386,9 @@ function HyprChat(){
   const [expandedPill,setExpandedPill]=useState(null);
   const [loadingConv,setLoadingConv]=useState(false);
   const [editingMsg,setEditingMsg]=useState(null); // {index, content}
+  const [regenPopover,setRegenPopover]=useState(null); // {index, model, temperature, personaId}
+  const [toasts,setToasts]=useState([]); // [{id, text, onUndo}]
+  const [collapsedOutputs,setCollapsedOutputs]=useState(()=>new Set()); // Set of "msgIdx-outputIdx" keys
   const [attachments,setAttachments]=useState([]); // [{name, content}]
   const [coderProjUploading,setCoderProjUploading]=useState(false);
   const [coderProjInfo,setCoderProjInfo]=useState(null); // {name, file_count, language}
@@ -1314,7 +1523,7 @@ function HyprChat(){
     const connect=()=>{
       if(closed)return;
       const es=new EventSource(`${API}/api/events/${actId}`);
-      es.onmessage=e=>{try{const ev=JSON.parse(e.data);if(ev.type!=="heartbeat"&&ev.type!=="keepalive")setEvts(p=>[...p.slice(-200),ev]);retryDelay=1000;}catch{}};
+      es.onmessage=e=>{try{const ev=JSON.parse(e.data);if(ev.type!=="heartbeat"&&ev.type!=="keepalive"){setEvts(p=>[...p.slice(-200),ev]);streamSaveEvtsRef.current.push(ev);}retryDelay=1000;}catch{}};
       es.onerror=()=>{es.close();if(!closed){retryTimer=setTimeout(()=>{retryDelay=Math.min(retryDelay*2,30000);connect();},retryDelay);}};
       sseR.current=es;
     };
@@ -1366,7 +1575,10 @@ function HyprChat(){
       if (full && full.messages) {
         const parseMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
         const isCouncil=v=>v==="1"||v===1||v===true;
-        setConvs(prev=>prev.map(c=>c.id===id ? {...c, messages: full.messages.map(m=>({role:m.role,content:m.content,metadata:parseMeta(m)})), model: full.model||c.model, system_prompt: full.system_prompt||c.system_prompt, tool_ids: full.tool_ids||c.tool_ids||[], model_config_id: full.model_config_id||null, is_council: isCouncil(full.is_council), council_config_id: full.council_config_id||null} : c));
+        // If this conversation is being streamed right now, local state is authoritative for messages —
+        // skip the overwrite so the stream's m[m.length-1] assistant update doesn't clobber the user message.
+        const skipMessages = streamingCidRef.current === id;
+        setConvs(prev=>prev.map(c=>c.id===id ? {...c, ...(skipMessages ? {} : {messages: full.messages.map(m=>({id:m.id,role:m.role,content:m.content,metadata:parseMeta(m),created_at:m.created_at}))}), model: full.model||c.model, system_prompt: full.system_prompt||c.system_prompt, tool_ids: full.tool_ids||c.tool_ids||[], model_config_id: full.model_config_id||null, is_council: isCouncil(full.is_council), council_config_id: full.council_config_id||null} : c));
         // Fetch suggestions for council chats with no messages yet
         if(isCouncil(full.is_council)&&full.council_config_id&&!(full.messages||[]).length){
           fetchCouncilSuggestions(full.council_config_id);
@@ -1569,7 +1781,7 @@ function HyprChat(){
       fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:userMsg,count:6})}).then(r=>r.json()).then(d=>{setQuickResults(d.results||[]);setSearchLoading(false);}).catch(()=>{setQuickResults([]);setSearchLoading(false);});
     }else{setQuickResults([]);}
     // Add user message to UI (backend council.py also saves it, so don't POST here)
-    uConv(cid,c=>({...c,messages:[...(c.messages||[]),{role:"user",content:userMsg,metadata:{}}]}));
+    uConv(cid,c=>({...c,messages:[...(c.messages||[]),{role:"user",content:userMsg,metadata:{},created_at:new Date().toISOString()}]}));
     // Title generation
     if(!(cv.messages||[]).length){const title=userMsg.slice(0,40)+(userMsg.length>40?"...":"");uConv(cid,{title});fetch(`${API}/api/conversations/${cid}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({title})}).catch(()=>{});}
     // Start council streaming
@@ -1659,15 +1871,18 @@ function HyprChat(){
   const estimateTokens = (msgs) => msgs.reduce((sum,m)=>sum+Math.ceil((m.content||"").length/4),0);
 
   // Core send logic — used by send, regenerate, and edit
-  const sendMessages=async(cid, messagesToSend, appendUser)=>{
+  const sendMessages=async(cid, messagesToSend, appendUser, overrides)=>{
+    overrides = overrides || {};
     setStreaming(true);setTokC(0);setTokS(0);setEvts([]);setExpandedPill(null);setCtxTokens(0);setGenTokens(0);
-    // Save user message to DB immediately (not after stream) so it persists on reload
-    if(appendUser) fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"user",content:appendUser})}).catch(()=>{});
+    streamSaveEvtsRef.current=[];
+    streamingCidRef.current=cid;
+    // User message persistence is handled server-side by chat_stream_generate's defensive save —
+    // doing it from the client too would race and create duplicates.
     try{
       const cv=convs.find(c=>c.id===cid);
       let am = messagesToSend.map(m=>({role:m.role,content:m._fullContent||m.content}));
       // Get model-specific params, falling back to globals
-      let modelName=cv?.model||models[0]||"";
+      let modelName=overrides.model||cv?.model||models[0]||"";
       // If the selected model is no longer available, fall back to first available
       if(modelName&&models.length>0&&!models.includes(modelName)){
         const fb=models[0]||"";
@@ -1682,7 +1897,7 @@ function HyprChat(){
         if(mpVal===undefined||mpVal===""||mpVal==="default")return globalVal||undefined;
         const n=parseFloat(mpVal);return isNaN(n)?undefined:n;
       };
-      const sendTemp=resolveParam(mp.temperature,defaultTemp);
+      const sendTemp=overrides.temperature!==undefined?overrides.temperature:resolveParam(mp.temperature,defaultTemp);
       const sendTopP=resolveParam(mp.top_p,defaultTopP);
       const sendNumCtx=resolveParam(mp.num_ctx,numCtx)||undefined;
       const sendTopK=mp.top_k&&mp.top_k!=="default"?parseInt(mp.top_k)||undefined:undefined;
@@ -1699,7 +1914,7 @@ function HyprChat(){
       }
 
       const ctrl=new AbortController();abortR.current=ctrl;
-      const body={conversation_id:cid,model:modelName,messages:am,system_prompt:cv?.system_prompt||"",tool_ids:cv?.tool_ids||[],persona_id:cv?.model_config_id||null};
+      const body={conversation_id:cid,model:modelName,messages:am,system_prompt:cv?.system_prompt||"",tool_ids:cv?.tool_ids||[],persona_id:overrides.persona_id!==undefined?overrides.persona_id:(cv?.model_config_id||null)};
       if(sendNumCtx)body.num_ctx=sendNumCtx;
       if(sendTemp!==undefined)body.temperature=sendTemp;
       if(sendTopP!==undefined)body.top_p=sendTopP;
@@ -1717,23 +1932,25 @@ function HyprChat(){
         for(const ln of lines){
           if(!ln.startsWith("data: "))continue;
           try{const d=JSON.parse(ln.slice(6));
-            if(d.type==="token"){full+=d.content;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={role:"assistant",content:full,isS:true};return{...c,messages:m};});}
-            else if(d.type==="clear"){full="";uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={role:"assistant",content:"",isS:true};return{...c,messages:m};});}
+            if(d.type==="token"){full+=d.content;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:true};return{...c,messages:m};});}
+            else if(d.type==="clear"){full="";uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});}
             else if(d.type==="done"){setTokS(d.speed);if(d.gen_tokens||d.tokens)setSessionTokens(p=>p+((d.gen_tokens||d.tokens)||0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens){setGenTokens(d.gen_tokens);setTokC(d.gen_tokens);}}
             else if(d.type==="ctx_update"){if(d.gen_tokens)setTokC(d.gen_tokens);if(d.prompt_tokens)setCtxTokens(d.prompt_tokens);}
-            else if(d.type==="error"){full=`\`\`\`\n⚠ ${d.error}\n\`\`\``;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={role:"assistant",content:full,isS:false};return{...c,messages:m};});}
+            else if(d.type==="error"){full=`\`\`\`\n⚠ ${d.error}\n\`\`\``;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:false};return{...c,messages:m};});}
           }catch{}}
       }
       // Capture relevant events into metadata for persistence (tool status + search results + source links)
-      const _savedEvts = evtsRef.current.filter(e=>["source_links","search_results","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
+      // Prefer the persistent stream-save buffer, which survives chat switches. Fall back to evtsRef for safety.
+      const _rawEvts = streamSaveEvtsRef.current.length > 0 ? streamSaveEvtsRef.current : evtsRef.current;
+      const _savedEvts = _rawEvts.filter(e=>["source_links","search_results","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
       const _msgMeta = _savedEvts.length ? {saved_events: _savedEvts} : undefined;
-      uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={role:"assistant",content:full,isS:false,metadata:_msgMeta||{}};return{...c,messages:m};});
+      uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:false,metadata:_msgMeta||{}};return{...c,messages:m};});
       // Save assistant message to DB (user message was saved at stream start)
       fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:full,metadata:_msgMeta})}).catch(()=>{});
       // Auto-generate title after first exchange
       if(autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const curTitle=cv2?.title||"";if(!curTitle||curTitle==="New Chat"||curTitle===appendUser.slice(0,40))fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
-    }catch(e){if(e.name!=="AbortError")uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={role:"assistant",content:`\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false};return{...c,messages:m};});}
-    setStreaming(false);setAttachments([]);
+    }catch(e){if(e.name!=="AbortError")uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:`\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false};return{...c,messages:m};});}
+    setStreaming(false);setAttachments([]);streamingCidRef.current=null;
   };
 
   const send=async()=>{
@@ -1771,22 +1988,23 @@ function HyprChat(){
       setSearchLoading(true);setQuickResults([]);
       fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:modelContent.trim().slice(0,200),count:6})}).then(r=>r.json()).then(d=>{setQuickResults(d.results||[]);setSearchLoading(false);}).catch(()=>{setQuickResults([]);setSearchLoading(false);});
     }else{setQuickResults([]);}
-    const um={role:"user",content:displayContent,_fullContent:modelContent,metadata:{pdfs:pdfAttachments.length?pdfAttachments:undefined}};
-    uConv(cid,c=>({...c,title:(!c.messages||!c.messages.length)?(displayContent||pdfAttachments.map(p=>p.name).join(", ")).slice(0,40):c.title,messages:[...(c.messages||[]),um,{role:"assistant",content:"",isS:true}]}));
+    const _now=new Date().toISOString();
+    const um={role:"user",content:displayContent,_fullContent:modelContent,metadata:{pdfs:pdfAttachments.length?pdfAttachments:undefined},created_at:_now};
+    uConv(cid,c=>({...c,title:(!c.messages||!c.messages.length)?(displayContent||pdfAttachments.map(p=>p.name).join(", ")).slice(0,40):c.title,messages:[...(c.messages||[]),um,{role:"assistant",content:"",isS:true,created_at:_now}]}));
     setInp("");setAttachments([]);if(inpRef.current){inpRef.current.style.height="auto";}
     setTimeout(()=>{if(chatScrollRef.current)chatScrollRef.current.scrollTop=chatScrollRef.current.scrollHeight;},0);
     const am=[...(cv?.messages||[]),um];
     await sendMessages(cid, am, um._fullContent||um.content);
   };
 
-  const regenerate=async(msgIndex)=>{
+  const regenerate=async(msgIndex, overrides)=>{
     if(streaming)return;
     const cid=actId;if(!cid)return;
     // Remove the assistant message at msgIndex and re-send everything before it
-    uConv(cid,c=>{const m=[...(c.messages||[])];m[msgIndex]={role:"assistant",content:"",isS:true};return{...c,messages:m.slice(0,msgIndex+1)};});
+    uConv(cid,c=>{const m=[...(c.messages||[])];m[msgIndex]={role:"assistant",content:"",isS:true,created_at:new Date().toISOString()};return{...c,messages:m.slice(0,msgIndex+1)};});
     const cv=convs.find(c=>c.id===cid);
     const msgsBeforeRegen=(cv?.messages||[]).slice(0,msgIndex);
-    await sendMessages(cid, msgsBeforeRegen, null);
+    await sendMessages(cid, msgsBeforeRegen, null, overrides);
   };
 
   const editMessage=async(msgIndex, newContent)=>{
@@ -1794,11 +2012,34 @@ function HyprChat(){
     const cid=actId;if(!cid)return;
     setEditingMsg(null);
     // Replace the user message and remove everything after it, then re-send
-    uConv(cid,c=>{const m=(c.messages||[]).slice(0,msgIndex);m.push({role:"user",content:newContent});m.push({role:"assistant",content:"",isS:true});return{...c,messages:m};});
+    uConv(cid,c=>{const m=(c.messages||[]).slice(0,msgIndex);const _now=new Date().toISOString();m.push({role:"user",content:newContent,created_at:_now});m.push({role:"assistant",content:"",isS:true,created_at:_now});return{...c,messages:m};});
     const cv=convs.find(c=>c.id===cid);
     const msgsUpToEdit=(cv?.messages||[]).slice(0,msgIndex);
     msgsUpToEdit.push({role:"user",content:newContent});
     await sendMessages(cid, msgsUpToEdit, newContent);
+  };
+
+  const delMsg=(msgIndex)=>{
+    if(streaming)return;
+    const cid=actId;if(!cid)return;
+    const cv=convs.find(c=>c.id===cid);
+    const removed=cv?.messages?.[msgIndex];
+    if(!removed)return;
+    uConv(cid,c=>({...c,messages:(c.messages||[]).filter((_,ix)=>ix!==msgIndex)}));
+    const tid=Math.random().toString(36).slice(2,9);
+    let undone=false;
+    const onUndo=()=>{
+      undone=true;
+      uConv(cid,c=>{const m=[...(c.messages||[])];m.splice(msgIndex,0,removed);return{...c,messages:m};});
+      setToasts(ts=>ts.filter(x=>x.id!==tid));
+    };
+    setToasts(ts=>[...ts,{id:tid,text:"Message deleted",onUndo}]);
+    setTimeout(()=>{
+      setToasts(ts=>ts.filter(x=>x.id!==tid));
+      if(!undone&&removed.id){
+        fetch(`${API}/api/conversations/${cid}/messages/${removed.id}`,{method:"DELETE"}).catch(()=>{});
+      }
+    },5000);
   };
 
   // File upload handler
@@ -1847,7 +2088,7 @@ function HyprChat(){
     if(newAttachments.length)setAttachments(p=>[...p,...newAttachments]);
   };
 
-  const stop=()=>{abortR.current?.abort();setStreaming(false);};
+  const stop=()=>{abortR.current?.abort();setStreaming(false);streamingCidRef.current=null;};
 
   const openPreview=async(filename,url)=>{
     const isExternal=url.startsWith("http://") || url.startsWith("https://");
@@ -2154,12 +2395,17 @@ function HyprChat(){
   const inlineParse=(text)=>{
     if(!text)return null;
     // Split by: inline-code, images, bold+link, bold, italic(*), italic(_), markdown link, bare URL, double-quoted strings (10+ chars)
-    return text.split(/(`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s"'<>\])\},]+|"[^"\n]{10,}")/g).map((s,k)=>{
+    return text.split(/(`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s"'<>\])\},]+|"[^"\n]{10,}"|[^]+)/g).map((s,k)=>{
       if(!s)return null;
       const imgMatch=s.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
       if(imgMatch){const[,alt,src]=imgMatch;return <img key={k} src={src} alt={alt||""} style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`}} onError={e=>e.target.style.display="none"}/>;}
       if(s.startsWith("`")&&s.endsWith("`")&&s.length>1)
         return <code key={k} style={{background:`${t.surface}CC`,padding:"1px 5px",borderRadius:3,fontFamily:font,fontSize:"0.88em",color:t.warm}}>{s.slice(1,-1)}</code>;
+      if(s.charCodeAt(0)===0xE010){
+        const inner=s.slice(1,-1);const ci=inner.indexOf(":");
+        const pref=inner.slice(0,ci),num=inner.slice(ci+1);
+        return <sup key={k} style={{fontSize:"0.75em",lineHeight:0,margin:"0 1px"}}><a href={`#fn-${pref}-${num}`} onClick={e=>{e.preventDefault();const el=document.getElementById(`fn-${pref}-${num}`);if(el)el.scrollIntoView({behavior:"smooth",block:"center"});}} style={{color:t.acc,textDecoration:"none",padding:"0 3px",borderRadius:3,background:`${t.acc}18`,fontWeight:700}}>{num}</a></sup>;
+      }
       const boldLinkMatch=s.match(/^\*\*\[([^\]]+)\]\(([^)]+)\)\*\*$/);
       if(boldLinkMatch){
         const [,lt,lu]=boldLinkMatch;
@@ -2248,9 +2494,30 @@ function HyprChat(){
     if(!text)return null;
     // Normalize bare /api/downloads/ paths to markdown download links
     text = text.replace(/(?<!\]\()\/api\/downloads\/([^\s)"'`\]]+)/g, '[📎 $1](/api/downloads/$1)');
-    return text.split(/(```[\s\S]*?```)/g).map((p,i)=>{
+    // Footnotes: extract [^label]: content defs (must start at line), collect, and replace [^label] refs with indexed placeholders
+    const _fnDefs={}; const _fnOrder=[]; const _fnIdx={};
+    text = text.replace(/^\[\^([^\]]+)\]:\s*(.+)$/gm,(_m,lbl,body)=>{_fnDefs[lbl]=body.trim();return "";});
+    const _fnPrefix=Math.random().toString(36).slice(2,8);
+    text = text.replace(/\[\^([^\]]+)\]/g,(m,lbl)=>{
+      if(!(lbl in _fnIdx)){_fnOrder.push(lbl);_fnIdx[lbl]=_fnOrder.length;}
+      return ""+_fnPrefix+":"+_fnIdx[lbl]+"";
+    });
+    const _rendered = text.split(/(```[\s\S]*?```|<details[\s\S]*?<\/details>)/g).map((p,i)=>{
+      if(p.startsWith("<details")){
+        const sm=p.match(/<summary[^>]*>([\s\S]*?)<\/summary>/i);
+        const summary=sm?sm[1].trim():"Details";
+        const body=p
+          .replace(/^<details[^>]*>/i,"")
+          .replace(/<\/details>\s*$/i,"")
+          .replace(/<summary[^>]*>[\s\S]*?<\/summary>/i,"")
+          .trim();
+        const open=/^<details[^>]*\bopen\b/i.test(p);
+        return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open}>{md(body)}</Collapsible>;
+      }
       if(p.startsWith("```")){
         const m=p.match(/```(\w*)\n?([\s\S]*?)```/);const lang=m?.[1]||"",code=m?.[2]||p.slice(3,-3);const bid=`c${i}`;
+        if(lang==="mermaid")return <MermaidBlock key={i} code={code} theme={t} font={font} epoch={mermaidEpoch}/>;
+        const isDiff=lang==="diff";
         return <div key={i} style={{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`}}>
             <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:1}}><IC.Terminal/>{lang||"code"}</span>
@@ -2258,10 +2525,30 @@ function HyprChat(){
               {copied===bid?<><IC.Check/> copied</>:<><IC.Copy/> copy</>}
             </button>
           </div>
-          <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
+          {isDiff
+            ?<pre style={{margin:0,padding:"8px 0",fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code.split("\n").map((ln,li)=>{
+                const c0=ln.charAt(0);
+                const isAdd=c0==="+"&&!ln.startsWith("+++");
+                const isDel=c0==="-"&&!ln.startsWith("---");
+                const isHunk=ln.startsWith("@@");
+                const isMeta=ln.startsWith("+++")||ln.startsWith("---")||ln.startsWith("diff ")||ln.startsWith("index ");
+                const bg=isAdd?`${t.ok}12`:isDel?`${t.err}12`:isHunk?`${t.acc}10`:"transparent";
+                const col=isAdd?t.ok:isDel?t.err:isHunk?t.acc:isMeta?t.mut:t.dim;
+                const fs=isMeta?"italic":"normal";
+                return <div key={li} style={{padding:"0 12px",background:bg,color:col,fontStyle:fs,whiteSpace:"pre"}}>{ln||" "}</div>;
+              })}</pre>
+            :<CodeBlock code={code} lang={lang} t={t} font={font}/>}
         </div>;
       }
-      return <div key={i}>{p.split("\n").map((ln,j)=>{
+      // Protect $$/$ sequences inside single-line backtick inline code from the display-math split below
+      const _DD="",_SD="";
+      const pMasked=p.replace(/`[^`\n]+`/g,m=>m.replace(/\$\$/g,_DD).replace(/\$/g,_SD));
+      return <div key={i}>{pMasked.split(/(\$\$[\s\S]+?\$\$)/g).map((seg,si)=>{
+        if(seg.startsWith("$$")&&seg.endsWith("$$")&&seg.length>=4){
+          return <div key={`m${si}`} style={{margin:"12px 0",textAlign:"center",overflowX:"auto",color:t.text,fontSize:"1.05em"}}>{seg}</div>;
+        }
+        seg=seg.split(_DD).join("$$").split(_SD).join("$");
+        return <React.Fragment key={`s${si}`}>{seg.split("\n").map((ln,j)=>{
         if(ln.match(/^---+$|^\*\*\*+$|^___+$/))return <hr key={j} style={{border:"none",borderTop:`1px solid ${t.brd}44`,margin:"10px 0"}}/>;
         if(ln.match(/^##### /))return <div key={j} style={{fontSize:12,fontWeight:700,color:t.acc,margin:"8px 0 3px"}}>{inlineParse(ln.slice(6))}</div>;
         if(ln.match(/^#### /))return <div key={j} style={{fontSize:13,fontWeight:700,color:t.acc,margin:"10px 0 4px"}}>{inlineParse(ln.slice(5))}</div>;
@@ -2272,14 +2559,22 @@ function HyprChat(){
         /* If this line is just an attribution (— Name...), skip — it was consumed by the previous quote line */
         if(qRaw.match(/^[—–]\s/))return null;
         /* Look ahead: if next line is "> — Attribution", grab it */
-        const allLines=p.split("\n");const nextLn=(j+1<allLines.length)?allLines[j+1]:"";
+        const allLines=seg.split("\n");const nextLn=(j+1<allLines.length)?allLines[j+1]:"";
         const nextAttr=nextLn.match(/^>\s?[—–]\s*(.+)/);
         const attrLabel=nextAttr?nextAttr[1]:"quoted source";
         return <div key={j} style={{borderLeft:`3px solid ${t.warm}`,paddingLeft:12,margin:"6px 0",background:`${t.warm}0D`,borderRadius:"0 6px 6px 0",padding:"8px 12px",borderLeftWidth:3,borderLeftStyle:"solid",borderLeftColor:t.warm}}>
           <div style={{display:"flex",alignItems:"flex-start",gap:6}}><span style={{color:t.warm,fontSize:16,lineHeight:1,flexShrink:0,marginTop:1}}>"</span><span style={{color:t.text,fontStyle:"italic",fontSize:"0.95em",lineHeight:1.6,flex:1}}>{inlineParse(qRaw)}</span><span style={{color:t.warm,fontSize:16,lineHeight:1,flexShrink:0,alignSelf:"flex-end"}}>"</span></div>
           <div style={{marginTop:4,fontSize:9,color:t.warm,opacity:0.7,textTransform:"uppercase",letterSpacing:1}}>{inlineParse(attrLabel)}</div>
         </div>;}
-        if(ln.match(/^[-*+]\s+/))return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:t.acc,marginTop:"0.25em",fontSize:"0.7em",flexShrink:0}}>●</span><span style={{flex:1}}>{inlineParse(ln.replace(/^[-*+]\s+/,""))}</span></div>;
+        if(ln.match(/^[-*+]\s+/)){
+          const rest=ln.replace(/^[-*+]\s+/,"");
+          const taskMatch=rest.match(/^\[([ xX])\]\s+(.*)$/);
+          if(taskMatch){
+            const checked=taskMatch[1].toLowerCase()==="x";
+            return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><input type="checkbox" checked={checked} readOnly style={{marginTop:"0.3em",accentColor:t.acc,flexShrink:0,cursor:"default",width:12,height:12}}/><span style={{flex:1,opacity:checked?0.65:1,textDecoration:checked?"line-through":"none",textDecorationColor:`${t.mut}88`}}>{inlineParse(taskMatch[2])}</span></div>;
+          }
+          return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:t.acc,marginTop:"0.25em",fontSize:"0.7em",flexShrink:0}}>●</span><span style={{flex:1}}>{inlineParse(rest)}</span></div>;
+        }
         if(ln.match(/^\d+\.\s+/)){const num=ln.match(/^(\d+)\./)[1];return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:t.acc,minWidth:18,flexShrink:0,fontWeight:600,fontSize:"0.9em"}}>{num}.</span><span style={{flex:1}}>{inlineParse(ln.replace(/^\d+\.\s+/,""))}</span></div>;}
         if(ln.match(/^\|.+\|/)){
           const isDivider=ln.replace(/[\s\-:|]/g,"").length===0;
@@ -2290,8 +2585,19 @@ function HyprChat(){
           </div>;
         }
         return <div key={j} style={{minHeight:ln===""?8:"auto"}}>{inlineParse(ln)}</div>;
+      })}</React.Fragment>;
       })}</div>;
     });
+    if(_fnOrder.length>0){
+      return <React.Fragment>{_rendered}<div style={{marginTop:14,paddingTop:10,borderTop:`1px solid ${t.brd}33`,fontSize:11,color:t.mut}}>
+        <div style={{fontSize:9,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.mut,marginBottom:6,opacity:.7}}>Footnotes</div>
+        {_fnOrder.map((lbl,ix)=>{const num=ix+1;return <div key={lbl} id={`fn-${_fnPrefix}-${num}`} style={{display:"flex",gap:8,margin:"2px 0",lineHeight:1.5}}>
+          <span style={{color:t.acc,fontWeight:700,flexShrink:0,minWidth:16}}>{num}.</span>
+          <span style={{flex:1,color:t.dim}}>{inlineParse(_fnDefs[lbl]||"")}</span>
+        </div>;})}
+      </div></React.Fragment>;
+    }
+    return _rendered;
   };
 
   const glass={background:`${t.surface}CC`,backdropFilter:"blur(24px)",border:`1px solid ${t.brd}44`};
@@ -2380,7 +2686,7 @@ function HyprChat(){
           {ftsResults.map((r,i)=><div key={i} onClick={()=>{loadConversation(r.conversation_id);setFtsQuery("");setFtsResults([]);}} style={{padding:"6px 8px",borderRadius:8,cursor:"pointer",marginBottom:2,background:`${t.surface}44`,border:`1px solid ${t.brd}22`}}>
             <div style={{fontSize:11,fontWeight:600,color:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.conv_title||"Chat"}</div>
             <div style={{fontSize:10,color:t.mut,marginTop:2,display:"flex",gap:4,alignItems:"center"}}><span style={{fontSize:8,padding:"1px 4px",borderRadius:3,background:`${t.brd}22`,color:t.dim}}>{r.role}</span></div>
-            <div style={{fontSize:10,color:t.dim,marginTop:2,lineHeight:1.4,maxHeight:40,overflow:"hidden"}} dangerouslySetInnerHTML={{__html:r.snippet||""}}/>
+            <div style={{fontSize:10,color:t.dim,marginTop:2,lineHeight:1.4,maxHeight:40,overflow:"hidden"}} dangerouslySetInnerHTML={{__html:(r.snippet||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/&lt;(\/?mark)&gt;/g,"<$1>")}}/>
           </div>)}
         </div>:(()=>{const pinnedC=filtC.filter(c=>c.pinned==="1"||c.pinned===1);const unpinnedC=filtC.filter(c=>c.pinned!=="1"&&c.pinned!==1);const renderConv=(c)=>{const isCouncil=c.is_council==="1"||c.is_council===1||c.is_council===true;const hasPersona=!!c.persona_name&&!isCouncil;const tags=convTags[c.id]||[];const isAct=c.id===actId&&panel==="chat";const accentColor=isCouncil?t.pink:hasPersona?t.warm:t.acc;const isPinned=c.pinned==="1"||c.pinned===1;return <div key={c.id} style={{marginBottom:1}}>
         <div onClick={()=>loadConversation(c.id)} style={{padding:"10px 12px",borderRadius:9,cursor:"pointer",background:isAct?`${accentColor}18`:(isCouncil||hasPersona)?`${accentColor}10`:"transparent",border:isAct?`1px solid ${accentColor}44`:(isCouncil||hasPersona)?`1px solid ${accentColor}25`:"1px solid transparent",display:"flex",justifyContent:"space-between",alignItems:"center",borderLeft:(isCouncil||hasPersona)?`3px solid ${isAct?accentColor:`${accentColor}66`}`:"3px solid transparent"}}>
@@ -3685,7 +3991,7 @@ function HyprChat(){
             <div style={{flex:1,overflowY:"auto",padding:"14px 18px"}}>
               <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:12}}>README</div>
               {hfReadmeLoading?<div style={{color:t.mut,fontSize:11,fontStyle:"italic"}}>Loading README...</div>:
-              hfReadme?<div style={{fontSize:12,lineHeight:1.7,color:t.dim}}>{md(hfReadme)}</div>:
+              hfReadme?<div style={{fontSize:12,lineHeight:1.7,color:t.dim}}><MDWrap>{md(hfReadme)}</MDWrap></div>:
               <div style={{color:t.mut,fontSize:11,fontStyle:"italic"}}>No README available.</div>}
             </div>
           </div>
@@ -4496,7 +4802,7 @@ function HyprChat(){
                   <div style={{width:27,height:27,borderRadius:7,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.f4}20`,border:`1px solid ${t.f4}28`,color:t.f4,flexShrink:0,marginTop:2}}><IC.User/></div>
                   <div style={{flex:1}}>
                     <div style={{fontSize:10,color:t.mut,marginBottom:2,fontWeight:600,letterSpacing:.5}}>you</div>
-                    <div style={{background:`${t.surface}50`,padding:"8px 12px",borderRadius:9,border:`1px solid ${t.brd}18`,lineHeight:1.6,fontSize:fontSize,color:t.dim}}>{md(turn.user.content)}</div>
+                    <div style={{background:`${t.surface}50`,padding:"8px 12px",borderRadius:9,border:`1px solid ${t.brd}18`,lineHeight:1.6,fontSize:fontSize,color:t.dim}}><MDWrap>{md(turn.user.content)}</MDWrap></div>
                   </div>
                 </div>
                 {/* Quick search results — show before last turn's responses */}
@@ -4556,7 +4862,7 @@ function HyprChat(){
                           {votesReceived>0&&<span style={{background:`${t.pink}20`,border:`1px solid ${t.pink}44`,borderRadius:10,padding:"2px 7px",fontSize:10,fontWeight:700,color:t.pink,flexShrink:0}}>{"🗳 ".repeat(Math.min(votesReceived,3))}{votesReceived}</span>}
                           <span style={{background:pts>0?`${t.ok}20`:pts<0?`${t.err}20`:`${t.mut}10`,border:`1px solid ${ptsColor}40`,borderRadius:10,padding:"2px 7px",fontSize:10,fontWeight:700,color:ptsColor,flexShrink:0}}>{pts>0?"+":""}{pts}pt</span>
                         </div>
-                        <div style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:320,overflowY:"auto"}}>{md(resp.content)}</div>
+                        <div style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:320,overflowY:"auto"}}><MDWrap>{md(resp.content)}</MDWrap></div>
                         {memberId&&<div style={{padding:"6px 10px",borderTop:`1px solid ${t.brd}18`,display:"flex",gap:4}}>
                           <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,5)} title="Best answer (+5)" style={{...btnS(t.ok),flex:1,justifyContent:"center",padding:"4px 6px",fontSize:9}}><IC.Star/> Best</button>
                           <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,2)} title="Good answer (+2)" style={{...btnS(t.acc),padding:"4px 6px",fontSize:9}}>👍</button>
@@ -4607,7 +4913,7 @@ function HyprChat(){
                             {!resp.done?<div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>:<span style={{color:t.ok,fontSize:11}}>✓</span>}
                           </div>
                           <div ref={el=>{if(el&&!resp.done)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:320,overflowY:"auto"}}>
-                            {md(resp.content||"")}
+                            <MDWrap>{md(resp.content||"")}</MDWrap>
                             {!resp.done&&<span style={{display:"inline-block",width:2,height:13,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
                           </div>
                         </div>;
@@ -4640,7 +4946,7 @@ function HyprChat(){
                       {councilRunning&&isLastTurn(ti)&&!turn.host&&<div style={{display:"flex",gap:3,marginLeft:"auto"}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.warm,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
                     </div>
                     <div ref={el=>{if(el&&councilRunning&&isLastTurn(ti)&&!turn.host)el.scrollTop=el.scrollHeight;}} style={{fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:400,overflowY:"auto"}}>
-                      {md(turn.host?.content||councilHostContent)}
+                      <MDWrap>{md(turn.host?.content||councilHostContent)}</MDWrap>
                       {councilRunning&&isLastTurn(ti)&&councilHostContent&&!turn.host&&<span style={{display:"inline-block",width:2,height:13,background:t.warm,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
                     </div>
                   </div>}
@@ -4654,7 +4960,7 @@ function HyprChat(){
                     <span style={{fontSize:11,fontWeight:700,color:t.acc}}>{resp.model?.split(":")[0]||mid}</span>
                     {!resp.done&&<div style={{display:"flex",gap:3,marginLeft:"auto"}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
                   </div>
-                  <div ref={el=>{if(el&&!resp.done)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:320,overflowY:"auto"}}>{md(resp.content||"")}</div>
+                  <div ref={el=>{if(el&&!resp.done)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:320,overflowY:"auto"}}><MDWrap>{md(resp.content||"")}</MDWrap></div>
                 </div>)}
               </div>}
               <div ref={chatEnd}/>
@@ -4723,7 +5029,7 @@ function HyprChat(){
                         <button onClick={()=>setEditingMsg(null)} style={btnS(t.mut)}>Cancel</button>
                       </div>
                     </div>
-                    :msg.isS?mdStream(msg.content):md(msg.content)}
+                    :msg.isS?mdStream(msg.content):<MDWrap>{md(msg.content)}</MDWrap>}
                     {isU&&msg.metadata?.pdfs?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:msg.content?8:0}}>
                       {msg.metadata.pdfs.map((p,pi)=><span key={pi} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.err}10`,border:`1px solid ${t.err}25`,padding:"5px 12px",borderRadius:8,fontSize:11,fontWeight:500,color:t.text}}>
                         <span style={{fontSize:16}}>📄</span>
@@ -4738,27 +5044,67 @@ function HyprChat(){
                   {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:null;})()}
                   {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>;})()}
                   {/* Inline code execution output */}
-                  {(()=>{if(isU)return null;const savedEvts=msg.metadata?.saved_events||[];const codeOuts=savedEvts.filter(e=>e.type==="code_output");if(!codeOuts.length)return null;return codeOuts.map((e,ci)=>{const d=e.data||{};return <div key={ci} style={{margin:"8px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${d.success?`${t.ok}33`:`${t.err}33`}`,background:t.bgDeep}}>
-                    <div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${d.success?t.ok:t.err}10`,borderBottom:`1px solid ${d.success?t.ok:t.err}22`}}>
+                  {(()=>{if(isU)return null;const savedEvts=msg.metadata?.saved_events||[];const codeOuts=savedEvts.filter(e=>e.type==="code_output");if(!codeOuts.length)return null;return codeOuts.map((e,ci)=>{const d=e.data||{};const ckey=`${i}-${ci}`;const collapsed=collapsedOutputs.has(ckey);const toggleCollapsed=()=>setCollapsedOutputs(s=>{const n=new Set(s);if(n.has(ckey))n.delete(ckey);else n.add(ckey);return n;});return <div key={ci} style={{margin:"8px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${d.success?`${t.ok}33`:`${t.err}33`}`,background:t.bgDeep}}>
+                    <div onClick={toggleCollapsed} title={collapsed?"Show output":"Hide output"} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${d.success?t.ok:t.err}10`,borderBottom:collapsed?"none":`1px solid ${d.success?t.ok:t.err}22`,cursor:"pointer",userSelect:"none"}}>
+                      <span style={{display:"inline-block",transition:"transform .15s",transform:collapsed?"rotate(-90deg)":"rotate(0)",color:d.success?t.ok:t.err,fontSize:10}}>{"\u25BE"}</span>
                       <span>{d.success?"\u2705":"\u274C"}</span>
                       <span style={{fontWeight:600,color:d.success?t.ok:t.err,fontSize:11}}>{d.language||"code"} output</span>
                       {d.exec_time&&<span style={{color:t.mut,marginLeft:"auto",fontSize:10}}>{parseFloat(d.exec_time).toFixed(1)}s</span>}
                     </div>
-                    {d.stdout&&<pre style={{margin:0,padding:"8px 12px",whiteSpace:"pre-wrap",color:t.dim,fontSize:12,lineHeight:1.5,borderBottom:d.stderr?`1px solid ${t.brd}22`:"none",fontFamily:font}}>{d.stdout}</pre>}
-                    {d.stderr&&<pre style={{margin:0,padding:"8px 12px",whiteSpace:"pre-wrap",color:t.err,fontSize:11,lineHeight:1.5,background:`${t.err}08`,fontFamily:font}}>{d.stderr}</pre>}
+                    {!collapsed&&d.stdout&&<pre style={{margin:0,padding:"8px 12px",whiteSpace:"pre-wrap",color:t.dim,fontSize:12,lineHeight:1.5,borderBottom:d.stderr?`1px solid ${t.brd}22`:"none",fontFamily:font}}>{d.stdout}</pre>}
+                    {!collapsed&&d.stderr&&<pre style={{margin:0,padding:"8px 12px",whiteSpace:"pre-wrap",color:t.err,fontSize:11,lineHeight:1.5,background:`${t.err}08`,fontFamily:font}}>{d.stderr}</pre>}
                   </div>;});})()}
                   {!msg.isS&&!isEditing&&<div style={{display:"flex",gap:3,marginTop:3}}>
                     {!isU&&msg.content&&<button onClick={()=>cp(msg.content,mid)} style={{background:"none",border:`1px solid ${t.brd}18`,color:copied===mid?t.ok:t.mut,cursor:"pointer",padding:"2px 6px",borderRadius:4,fontFamily:font,fontSize:9,display:"flex",alignItems:"center",gap:3}}>
                       {copied===mid?<><IC.Check/> copied</>:<><IC.Copy/> copy</>}
                     </button>}
-                    {!isU&&msg.content&&!streaming&&<button onClick={()=>regenerate(i)} style={{background:"none",border:`1px solid ${t.brd}18`,color:t.mut,cursor:"pointer",padding:"2px 6px",borderRadius:4,fontFamily:font,fontSize:9,display:"flex",alignItems:"center",gap:3}}>
-                      <IC.Refresh/> regenerate
-                    </button>}
+                    {!isU&&msg.content&&!streaming&&<div style={{position:"relative",display:"inline-flex"}}>
+                      <button onClick={()=>regenerate(i)} style={{background:"none",border:`1px solid ${t.brd}18`,borderRight:"none",color:t.mut,cursor:"pointer",padding:"2px 6px",borderRadius:"4px 0 0 4px",fontFamily:font,fontSize:9,display:"flex",alignItems:"center",gap:3}}>
+                        <IC.Refresh/> regenerate
+                      </button>
+                      <button onClick={()=>setRegenPopover(p=>p?.index===i?null:{index:i,model:"",temperature:"",personaId:""})} title="Regenerate with different model / temperature / persona" style={{background:regenPopover?.index===i?`${t.acc}18`:"none",border:`1px solid ${t.brd}18`,color:regenPopover?.index===i?t.acc:t.mut,cursor:"pointer",padding:"2px 5px",borderRadius:"0 4px 4px 0",fontFamily:font,fontSize:9,display:"flex",alignItems:"center"}}>▾</button>
+                      {regenPopover?.index===i&&<div style={{position:"absolute",top:"calc(100% + 4px)",left:0,background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:8,padding:10,zIndex:20,minWidth:240,boxShadow:`0 8px 24px rgba(0,0,0,.4)`}}>
+                        <div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:1,marginBottom:8,fontWeight:700}}>Regenerate with</div>
+                        <div style={{marginBottom:6}}>
+                          <div style={{fontSize:9,color:t.mut,marginBottom:2}}>Model</div>
+                          <select value={regenPopover.model} onChange={e=>setRegenPopover(p=>({...p,model:e.target.value}))} style={{width:"100%",fontSize:11,padding:"4px 6px",background:t.bgDeep,border:`1px solid ${t.brd}55`,color:t.text,borderRadius:4,fontFamily:font,boxSizing:"border-box"}}>
+                            <option value="">(default: {act?.model||"current"})</option>
+                            {models.map(m=><option key={m} value={m}>{m}</option>)}
+                          </select>
+                        </div>
+                        <div style={{marginBottom:6}}>
+                          <div style={{fontSize:9,color:t.mut,marginBottom:2}}>Temperature</div>
+                          <input type="number" min="0" max="2" step="0.05" placeholder={`default: ${defaultTemp}`} value={regenPopover.temperature} onChange={e=>setRegenPopover(p=>({...p,temperature:e.target.value}))} style={{width:"100%",fontSize:11,padding:"4px 6px",background:t.bgDeep,border:`1px solid ${t.brd}55`,color:t.text,borderRadius:4,fontFamily:font,boxSizing:"border-box"}}/>
+                        </div>
+                        <div style={{marginBottom:8}}>
+                          <div style={{fontSize:9,color:t.mut,marginBottom:2}}>Persona</div>
+                          <select value={regenPopover.personaId} onChange={e=>setRegenPopover(p=>({...p,personaId:e.target.value}))} style={{width:"100%",fontSize:11,padding:"4px 6px",background:t.bgDeep,border:`1px solid ${t.brd}55`,color:t.text,borderRadius:4,fontFamily:font,boxSizing:"border-box"}}>
+                            <option value="">(default: current)</option>
+                            <option value="none">— No persona —</option>
+                            {mcs.map(mc=><option key={mc.id} value={mc.id}>{mc.name}</option>)}
+                          </select>
+                        </div>
+                        <div style={{display:"flex",gap:4,justifyContent:"flex-end"}}>
+                          <button onClick={()=>setRegenPopover(null)} style={{background:"none",border:`1px solid ${t.brd}44`,color:t.mut,cursor:"pointer",padding:"3px 10px",borderRadius:4,fontFamily:font,fontSize:10}}>Cancel</button>
+                          <button onClick={()=>{
+                            const ov={};
+                            if(regenPopover.model)ov.model=regenPopover.model;
+                            if(regenPopover.temperature!==""){const n=parseFloat(regenPopover.temperature);if(!isNaN(n))ov.temperature=n;}
+                            if(regenPopover.personaId)ov.persona_id=regenPopover.personaId==="none"?null:regenPopover.personaId;
+                            setRegenPopover(null);
+                            regenerate(i, Object.keys(ov).length?ov:undefined);
+                          }} style={{background:`${t.acc}22`,border:`1px solid ${t.acc}55`,color:t.acc,cursor:"pointer",padding:"3px 10px",borderRadius:4,fontFamily:font,fontSize:10,fontWeight:700}}>Regenerate</button>
+                        </div>
+                      </div>}
+                    </div>}
                     {isU&&!streaming&&<button onClick={()=>setEditingMsg({index:i,content:msg.content})} style={{background:"none",border:`1px solid ${t.brd}18`,color:t.mut,cursor:"pointer",padding:"2px 6px",borderRadius:4,fontFamily:font,fontSize:9,display:"flex",alignItems:"center",gap:3}}>
                       <IC.Pencil/> edit
                     </button>}
                     {!streaming&&<button onClick={()=>forkAt(i)} title="Fork conversation from this point" style={{background:"none",border:`1px solid ${t.brd}18`,color:t.mut,cursor:"pointer",padding:"2px 6px",borderRadius:4,fontFamily:font,fontSize:9,display:"flex",alignItems:"center",gap:3}}>
                       <IC.GitBranch/> fork
+                    </button>}
+                    {!streaming&&<button onClick={()=>delMsg(i)} title="Delete this message" style={{background:"none",border:`1px solid ${t.brd}18`,color:t.mut,cursor:"pointer",padding:"2px 6px",borderRadius:4,fontFamily:font,fontSize:9,display:"flex",alignItems:"center",gap:3}}>
+                      <IC.Trash/> delete
                     </button>}
                   </div>}
                 </div>
@@ -4951,6 +5297,14 @@ function HyprChat(){
       </div>
     </div>}
 
+    {/* Toast host (undo snackbars, etc.) */}
+    {toasts.length>0&&<div style={{position:"fixed",bottom:20,left:"50%",transform:"translateX(-50%)",zIndex:110,display:"flex",flexDirection:"column",gap:6,pointerEvents:"none"}}>
+      {toasts.map(tt=><div key={tt.id} style={{display:"flex",alignItems:"center",gap:10,background:t.bgDeep,border:`1px solid ${t.brd}66`,borderRadius:10,padding:"8px 14px",fontSize:12,color:t.dim,boxShadow:`0 8px 24px rgba(0,0,0,.4)`,pointerEvents:"auto",animation:"fadeIn .2s"}}>
+        <span>{tt.text}</span>
+        {tt.onUndo&&<button onClick={tt.onUndo} style={{background:"none",border:`1px solid ${t.acc}55`,color:t.acc,cursor:"pointer",padding:"2px 10px",borderRadius:6,fontFamily:font,fontSize:11,fontWeight:700}}>Undo</button>}
+      </div>)}
+    </div>}
+
     {/* Changelog Modal */}
     {showChangelog&&<div style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setShowChangelog(false);}}>
       <div style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,width:"min(1100px,95vw)",maxHeight:"85vh",display:"flex",flexDirection:"column",boxShadow:`0 8px 48px #0008`,overflow:"hidden",animation:"fadeIn .25s"}}>
@@ -4963,7 +5317,7 @@ function HyprChat(){
           {!changelogContent?<div style={{textAlign:"center",padding:40,color:t.mut,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
             <div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
             Loading changelog...
-          </div>:md(changelogContent)}
+          </div>:<MDWrap>{md(changelogContent)}</MDWrap>}
         </div>
       </div>
     </div>}

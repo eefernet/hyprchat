@@ -1,3 +1,50 @@
+## Alpha v16.1.1 — April 22, 2026
+
+### Rich Rendering
+- **Mermaid.js diagrams** — ` ```mermaid ` code fences render inline as live SVG: flowcharts, sequence, class, state, ER, gantt, mindmap, pie. Theme-synced (34 mapped variables) and re-render when the user switches themes mid-conversation.
+- **KaTeX math** — Inline `$...$`, display `$$...$$`, and LaTeX `\(...\)` / `\[...\]` delimiters all render as typeset math. Code blocks are ignored so `$` in source stays literal.
+- **`<MermaidBlock>` component** — Header with `◈ mermaid` label, source toggle, and copy button matching existing code-block styling. Broken diagrams show a red error banner plus the raw source instead of breaking the message.
+- **`<MDWrap>` wrapper** — Wraps 8 render surfaces (chat, council cards, HF README, changelog modal) and invokes KaTeX auto-render after mount. Streaming messages skip wrapping so partial tokens don't flicker.
+- **Multi-line display math** — `md()` pre-splits non-code segments by `$$...$$` before line-splitting so equations spanning multiple lines render as one KaTeX node instead of fragmenting across `<div>`s.
+- **Backend rendering hint** — `chat.py` injects a system message telling the model diagrams/math render inline (not via `write_file` or `generate_code`) and explicitly warns against embedding `$...$` LaTeX inside Mermaid node labels.
+- **Display-math escape inside inline code** — `md()` now masks `$$` and `$` inside single-line backtick inline code before the display-math split, so documentation examples that quote a math delimiter render as inline code instead of being yanked out as a math block.
+- **GFM task lists** — `- [ ]` / `- [x]` render as real checkboxes with strikethrough on completed items (read-only; reflects the markdown state).
+- **Collapsible `<details>`/`<summary>`** — Raw HTML `<details>` blocks render as interactive collapsibles with a chevron. New top-level `Collapsible` component.
+- **Diff code blocks** — fences tagged `diff` color `+` / `-` / hunk / metadata lines using the active theme's `ok`/`err`/`acc`/`mut` channels.
+- **Syntax highlighting** — Prism.js autoloader loaded via CDN; every code fence gets `language-X` highlighting via a new `CodeBlock` component that runs `Prism.highlightElement` after mount. Copy button and language chip preserved.
+- **Footnotes** — `[^label]` / `[^label]: …` pairs render as superscript numeric links with smooth-scroll to an auto-appended footnote block. Unique per-render IDs prevent collisions across messages.
+
+### Message Actions
+- **Timestamps fixed** — `created_at` now set at every in-session construction site (send, regenerate, edit, council) and preserved across streaming updates by spreading the prior message object. Fixes HH:MM labels that never appeared until a page reload. Reload path also preserves `id` + `created_at` from the backend.
+- **Regenerate with…** — The plain regenerate button is now a split button; the ▾ chevron opens a popover to pick a one-shot model / temperature / persona override for this single retry. `sendMessages` and `regenerate` accept an `overrides` parameter.
+- **Delete message with undo** — New trash button per message; removes immediately, shows a 5-second undo snackbar via a new fixed-position `ToastHost`. Backend: `DELETE /api/conversations/{conv_id}/messages/{msg_id}` + `db.delete_message()`. FTS trigger auto-syncs the search index.
+- **Collapsible python output** — Each code-output block header is click-to-toggle; ▾ rotates to show collapsed state. In-memory per `{msgIndex, outputIndex}`; default expanded.
+
+### Themes
+- **Contrast rebalance** — Seven harshest themes rebalanced to meet readable minimums (text ≥7:1, dim ≥4.5:1, mut ≥3:1) without losing identity: Terminal (tamed neon body text, kept Matrix green accent), Cyberpunk (softened pure-magenta), Solarized Dark (lifted the famously-dim gray body text), Gruvbox (raised the dark-teal `f4`), Dracula (`mut` readable), Rosé Pine (fixed inverted dim/text hierarchy), Midnight (`mut` lifted). Nord, Catppuccin, Tokyo Night, One Light, Ayu Dark, Material Ocean, Solarized Light untouched.
+
+### Persistence & Streaming Robustness
+- **User message save moved server-side** — Frontend no longer POSTs the user message separately. `chat_stream_generate` defensively persists the latest user message at stream start if the DB's most-recent user row doesn't match. Eliminates the fire-and-forget race that silently dropped user messages on flaky networks (and the duplicate it caused when both paths fired).
+- **Stable message order** — `get_conversation` now orders by `created_at ASC, id ASC`, so same-second user/assistant pairs (typical on fast greetings) can't flip on reload.
+- **Stream-clobber fix** — New `streamingCidRef` tracks the conversation being streamed; `loadConversation` skips the messages-array overwrite when loading the streaming conv. Previously, switching away mid-stream and back could fetch a backend snapshot with only the user message; the in-progress `m[m.length-1]` stream update then overwrote the user message with assistant content, making it disappear.
+- **Pills race fix** — New `streamSaveEvtsRef` accumulates events independently of the UI `evts` state, so `setEvts([])` on chat switch no longer wipes the metadata buffer that `saved_events` reads from at stream finalization. Pills persist on the completed message.
+
+### Cleanup
+- **Sentinel cleanup** — The `$$` backtick-masking in `md()` previously used null-byte sentinels, which made grep treat the frontend file as binary. Swapped for Unicode PUA characters (U+E000 / U+E001). Footnote sentinels use U+E010.
+
+### Bug Fixes
+- Fixed operator-precedence bug in `tools.py` execute_code error hinting — `"no such file" in err or "not found" in err and "command" not in err` was bound as `or (... and ...)`, silently skipping the `command` guard on the "no such file" branch. Parens now force the intended grouping.
+- Fixed dead-code `or` fallback in `run_shell` result text — `f"exit code: {exit_code}\n{out}{err}" or "(no output)"` is always truthy because the f-string contains literal text, so the no-output fallback never fired. Replaced with an explicit `if (stdout or stderr)` branch.
+- Fixed `analyze_workspace` crashing on malformed LLM JSON — the topic parser sliced `raw[start:end+1]` without checking `end > start`. If the response had `[` but no `]`, the empty slice raised inside `json.loads`. Added the `end > start` guard so it falls back to `[]` cleanly.
+- Fixed invalid CORS configuration — `allow_origins=["*"]` with `allow_credentials=True` is rejected by browsers per the CORS spec. Switched `allow_credentials` to `False` so preflight requests succeed.
+- Fixed XSS in full-text conversation search — SQLite's `snippet()` wraps matches in `<mark>` tags but does NOT HTML-escape surrounding message content, and the frontend rendered it via `dangerouslySetInnerHTML`. A malicious message could inject script/iframe tags that executed when searched. Snippet is now fully HTML-escaped with only `<mark>`/`</mark>` re-enabled.
+- Fixed `pull_model` silently returning empty on upstream errors — the streaming generator never checked `response.status_code` before iterating, so non-200 responses from Ollama produced no SSE events. Now yields a clear error event and bails out.
+- Fixed unbounded growth of `_indexing_status` dict — every KB file upload left a permanent entry. Terminal `done`/`error` statuses are now evicted on read.
+- Fixed deprecated `asyncio.get_event_loop()` calls in `agents/chat.py` — replaced with `asyncio.get_running_loop()` to silence deprecation warnings in Python 3.10+ and avoid the "no running loop" edge case on future versions.
+- Reduced chat-loop allocations — the per-round `_PARALLEL_SAFE` set and 22-entry `_TOOL_ICONS` dict are now module-level constants instead of being rebuilt every tool-calling round.
+- Minor: avatar upload no longer evaluates `file.filename or ""` three times in one expression.
+
+
 ## Alpha v16.1 — April 2026
 
 ### New Features
