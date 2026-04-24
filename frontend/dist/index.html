@@ -247,6 +247,7 @@
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css">
 <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js" data-manual></script>
 <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" data-autoloader-path="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/"></script>
@@ -1124,6 +1125,79 @@ function MermaidBlock({code,theme,font,epoch}){
       </div>,
       document.body
     )}
+  </div>;
+}
+
+// Chart.js block — renders ```chart JSON fences as inline charts
+function ChartBlock({code,theme,font,epoch}){
+  const t=theme;
+  const canvasRef=useRef(null);
+  const chartRef=useRef(null);
+  const [err,setErr]=useState(null);
+  const [cpd,setCpd]=useState(false);
+  const [showSrc,setShowSrc]=useState(false);
+  useEffect(()=>{
+    if(!window.Chart||!canvasRef.current||showSrc)return;
+    let cfg;
+    try{cfg=JSON.parse(code);}
+    catch(e){setErr("Invalid JSON: "+String(e.message));return;}
+    if(cfg.data&&!cfg.datasets){cfg.datasets=[{label:cfg.label||"Value",data:cfg.data}];delete cfg.data;}
+    const palette=[t.acc,t.ok,t.warm,t.err||"#e06c75","#b39ddb","#80cbc4","#ffab91","#90caf9"];
+    const type=cfg.type||"bar";
+    const isCircular=["pie","doughnut","polarArea"].includes(type);
+    const datasets=(cfg.datasets||[]).map((ds,i)=>{
+      const color=ds.color||ds.borderColor||palette[i%palette.length];
+      const out={label:ds.label||`Dataset ${i+1}`,data:ds.data||[],borderWidth:ds.borderWidth??2,tension:ds.tension??0.25,...ds};
+      if(isCircular){
+        out.backgroundColor=ds.backgroundColor||(ds.data||[]).map((_,k)=>palette[k%palette.length]+"CC");
+        out.borderColor=ds.borderColor||t.bgDeep;
+        out.borderWidth=ds.borderWidth??2;
+      }else{
+        out.backgroundColor=ds.backgroundColor||(type==="line"?color+"22":color+"AA");
+        out.borderColor=ds.borderColor||color;
+      }
+      return out;
+    });
+    if(chartRef.current){try{chartRef.current.destroy();}catch{}chartRef.current=null;}
+    try{
+      chartRef.current=new window.Chart(canvasRef.current,{
+        type,
+        data:{labels:cfg.labels||[],datasets},
+        options:{
+          responsive:true,
+          maintainAspectRatio:false,
+          plugins:{
+            legend:{labels:{color:t.dim,font:{family:font,size:11}}},
+            title:cfg.title?{display:true,text:cfg.title,color:t.text,font:{family:font,size:13,weight:"bold"},padding:{bottom:10}}:{display:false},
+            tooltip:{bodyFont:{family:font},titleFont:{family:font},backgroundColor:t.surface+"EE",borderColor:t.brd,borderWidth:1,titleColor:t.text,bodyColor:t.dim}
+          },
+          scales:isCircular?{}:{
+            x:{ticks:{color:t.mut,font:{family:font,size:10}},grid:{color:t.brd+"33"},title:cfg.xLabel?{display:true,text:cfg.xLabel,color:t.dim,font:{family:font,size:11}}:{display:false}},
+            y:{ticks:{color:t.mut,font:{family:font,size:10}},grid:{color:t.brd+"33"},title:cfg.yLabel?{display:true,text:cfg.yLabel,color:t.dim,font:{family:font,size:11}}:{display:false}}
+          },
+          ...(cfg.options||{})
+        }
+      });
+      setErr(null);
+    }catch(e){setErr("Chart error: "+String(e.message));}
+    return()=>{if(chartRef.current){try{chartRef.current.destroy();}catch{}chartRef.current=null;}};
+  },[code,epoch,showSrc,t,font]);
+  const copyCode=()=>{try{navigator.clipboard.writeText(code);setCpd(true);setTimeout(()=>setCpd(false),1500);}catch{}};
+  const headerBtn={background:"none",border:"none",cursor:"pointer",padding:"3px 6px",fontSize:10,fontFamily:font,borderRadius:5,display:"flex",alignItems:"center",gap:3};
+  return <div style={{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`}}>
+      <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ chart</span>
+      <div style={{display:"flex",gap:4}}>
+        <button onClick={()=>setShowSrc(s=>!s)} style={{...headerBtn,color:showSrc?t.acc:t.dim}} title={showSrc?"show chart":"show source"}>{showSrc?"◱ chart":"{ } source"}</button>
+        <button onClick={copyCode} style={{...headerBtn,color:cpd?t.ok:t.dim}} title="copy source">{cpd?"✓ copied":"⧉ copy"}</button>
+      </div>
+    </div>
+    {err?<div>
+      <div style={{padding:"8px 12px",background:`${t.err}12`,color:t.err,fontSize:11,fontFamily:font,borderBottom:`1px solid ${t.err}33`}}>⚠ Chart render error: {err}</div>
+      <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
+    </div>
+    :showSrc?<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
+    :<div style={{padding:14,height:320,position:"relative"}}><canvas ref={canvasRef}/></div>}
   </div>;
 }
 
@@ -2424,7 +2498,7 @@ function HyprChat(){
   const inlineParse=(text)=>{
     if(!text)return null;
     // Split by: inline-code, images, bold+link, bold, italic(*), italic(_), markdown link, bare URL, double-quoted strings (10+ chars)
-    return text.split(/(`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s"'<>\])\},]+|"[^"\n]{10,}"|[^]+)/g).map((s,k)=>{
+    return text.split(/(`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s"'<>\])\},]+|"[^"\n]{10,}"|<kbd>[^<]+<\/kbd>|rgba?\([^)]+\)|hsla?\([^)]+\)|#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6})\b|[^]+)/g).map((s,k)=>{
       if(!s)return null;
       const imgMatch=s.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
       if(imgMatch){const[,alt,src]=imgMatch;return <img key={k} src={src} alt={alt||""} style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`}} onError={e=>e.target.style.display="none"}/>;}
@@ -2499,6 +2573,18 @@ function HyprChat(){
       // Inline verbatim quote: "text 10+ chars" — highlight as word-for-word source
       if(s.startsWith('"')&&s.endsWith('"')&&s.length>11)
         return <span key={k} style={{color:t.warm,background:`${t.warm}15`,padding:"1px 4px",borderRadius:3,fontStyle:"italic",borderBottom:`1px dashed ${t.warm}66`}} title="Verbatim quote">{s}</span>;
+      // Keyboard keys: <kbd>Ctrl</kbd>
+      if(s.startsWith("<kbd>")&&s.endsWith("</kbd>")){
+        const kv=s.slice(5,-6);
+        return <kbd key={k} style={{display:"inline-block",padding:"1px 6px",background:`linear-gradient(180deg,${t.surface}EE,${t.bgDeep})`,border:`1px solid ${t.brd}AA`,borderBottomWidth:2,borderRadius:4,fontSize:"0.82em",fontFamily:font,color:t.text,boxShadow:`0 1px 0 ${t.brd}88`,verticalAlign:"baseline",margin:"0 1px",minWidth:14,textAlign:"center",lineHeight:1.4}}>{kv}</kbd>;
+      }
+      // Inline color swatch: #rrggbb, #rrggbbaa, rgb(), rgba(), hsl(), hsla()
+      if(s.match(/^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/)||s.match(/^(rgba?|hsla?)\(/)){
+        return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:4,padding:"1px 6px 1px 4px",background:`${t.surface}BB`,border:`1px solid ${t.brd}55`,borderRadius:4,verticalAlign:"middle",margin:"0 1px"}}>
+          <span style={{width:10,height:10,borderRadius:2,background:s,border:`1px solid ${t.brd}66`,flexShrink:0,boxShadow:"inset 0 0 0 1px rgba(255,255,255,.08)"}}/>
+          <code style={{fontSize:"0.85em",color:t.warm,background:"none",padding:0,fontFamily:font}}>{s}</code>
+        </span>;
+      }
       return s;
     });
   };
@@ -2546,6 +2632,7 @@ function HyprChat(){
       if(p.startsWith("```")){
         const m=p.match(/```(\w*)\n?([\s\S]*?)```/);const lang=m?.[1]||"",code=m?.[2]||p.slice(3,-3);const bid=`c${i}`;
         if(lang==="mermaid")return <MermaidBlock key={i} code={code} theme={t} font={font} epoch={mermaidEpoch}/>;
+        if(lang==="chart")return <ChartBlock key={i} code={code} theme={t} font={font} epoch={mermaidEpoch}/>;
         const isDiff=lang==="diff";
         return <div key={i} style={{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`}}>
@@ -2577,18 +2664,49 @@ function HyprChat(){
           return <div key={`m${si}`} style={{margin:"12px 0",textAlign:"center",overflowX:"auto",color:t.text,fontSize:"1.05em"}}>{seg}</div>;
         }
         seg=seg.split(_DD).join("$$").split(_SD).join("$");
-        return <React.Fragment key={`s${si}`}>{seg.split("\n").map((ln,j)=>{
+        const _lines=seg.split("\n");
+        const _consumed=new Set();
+        return <React.Fragment key={`s${si}`}>{_lines.map((ln,j)=>{
+        if(_consumed.has(j))return null;
         if(ln.match(/^---+$|^\*\*\*+$|^___+$/))return <hr key={j} style={{border:"none",borderTop:`1px solid ${t.brd}44`,margin:"10px 0"}}/>;
         if(ln.match(/^##### /))return <div key={j} style={{fontSize:12,fontWeight:700,color:t.acc,margin:"8px 0 3px"}}>{inlineParse(ln.slice(6))}</div>;
         if(ln.match(/^#### /))return <div key={j} style={{fontSize:13,fontWeight:700,color:t.acc,margin:"10px 0 4px"}}>{inlineParse(ln.slice(5))}</div>;
         if(ln.match(/^### /))return <div key={j} style={{fontSize:14,fontWeight:700,color:t.acc,margin:"12px 0 5px"}}>{inlineParse(ln.slice(4))}</div>;
         if(ln.match(/^## /))return <div key={j} style={{fontSize:15,fontWeight:700,color:t.acc,margin:"14px 0 6px"}}>{inlineParse(ln.slice(3))}</div>;
         if(ln.match(/^# /))return <div key={j} style={{fontSize:17,fontWeight:700,color:t.acc,margin:"16px 0 7px"}}>{inlineParse(ln.slice(2))}</div>;
+        /* GitHub-style callout: > [!NOTE|TIP|IMPORTANT|WARNING|CAUTION] */
+        const mCallout=ln.match(/^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$/i);
+        if(mCallout){
+          const ctype=mCallout[1].toUpperCase();
+          const firstRest=mCallout[2]||"";
+          const bodyLines=[];
+          if(firstRest.trim())bodyLines.push(firstRest);
+          let ck=j+1;
+          while(ck<_lines.length && _lines[ck].match(/^>\s?/)){
+            bodyLines.push(_lines[ck].replace(/^>\s?/,""));
+            _consumed.add(ck);
+            ck++;
+          }
+          const cfg={
+            NOTE:{color:t.acc,icon:"ℹ",label:"Note"},
+            TIP:{color:t.ok,icon:"💡",label:"Tip"},
+            IMPORTANT:{color:t.warm,icon:"★",label:"Important"},
+            WARNING:{color:"#f0a030",icon:"⚠",label:"Warning"},
+            CAUTION:{color:t.err,icon:"⛔",label:"Caution"}
+          }[ctype];
+          return <div key={j} style={{borderLeft:`3px solid ${cfg.color}`,background:`${cfg.color}12`,padding:"8px 12px 10px",borderRadius:"0 6px 6px 0",margin:"8px 0"}}>
+            <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:bodyLines.length?5:0,fontSize:10,fontWeight:700,color:cfg.color,textTransform:"uppercase",letterSpacing:0.8}}>
+              <span style={{fontSize:13,lineHeight:1}}>{cfg.icon}</span>
+              <span>{cfg.label}</span>
+            </div>
+            {bodyLines.length>0 && <div style={{color:t.text,fontSize:"0.95em",lineHeight:1.55}}>{bodyLines.map((bl,bi)=><div key={bi} style={{minHeight:bl===""?6:"auto"}}>{inlineParse(bl)}</div>)}</div>}
+          </div>;
+        }
         if(ln.match(/^>\s?/)){const qRaw=ln.replace(/^>\s?/,"");
         /* If this line is just an attribution (— Name...), skip — it was consumed by the previous quote line */
         if(qRaw.match(/^[—–]\s/))return null;
         /* Look ahead: if next line is "> — Attribution", grab it */
-        const allLines=seg.split("\n");const nextLn=(j+1<allLines.length)?allLines[j+1]:"";
+        const nextLn=(j+1<_lines.length)?_lines[j+1]:"";
         const nextAttr=nextLn.match(/^>\s?[—–]\s*(.+)/);
         const attrLabel=nextAttr?nextAttr[1]:"quoted source";
         return <div key={j} style={{borderLeft:`3px solid ${t.warm}`,paddingLeft:12,margin:"6px 0",background:`${t.warm}0D`,borderRadius:"0 6px 6px 0",padding:"8px 12px",borderLeftWidth:3,borderLeftStyle:"solid",borderLeftColor:t.warm}}>
@@ -2606,11 +2724,27 @@ function HyprChat(){
         }
         if(ln.match(/^\d+\.\s+/)){const num=ln.match(/^(\d+)\./)[1];return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:t.acc,minWidth:18,flexShrink:0,fontWeight:600,fontSize:"0.9em"}}>{num}.</span><span style={{flex:1}}>{inlineParse(ln.replace(/^\d+\.\s+/,""))}</span></div>;}
         if(ln.match(/^\|.+\|/)){
-          const isDivider=ln.replace(/[\s\-:|]/g,"").length===0;
-          if(isDivider)return null;
-          const cells=ln.split("|").slice(1,-1).map(c=>c.trim());
-          return <div key={j} style={{display:"flex",gap:0,borderBottom:`1px solid ${t.brd}22`,fontSize:11}}>
-            {cells.map((c,ci)=><div key={ci} style={{flex:1,padding:"3px 8px",borderRight:ci<cells.length-1?`1px solid ${t.brd}22`:"none",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{inlineParse(c)}</div>)}
+          /* Group contiguous pipe-rows into one <table> with header + alignment */
+          const tRows=[ln];
+          let tk=j+1;
+          while(tk<_lines.length && _lines[tk].match(/^\|.+\|/)){
+            tRows.push(_lines[tk]);_consumed.add(tk);tk++;
+          }
+          const parseRow=r=>r.split("|").slice(1,-1).map(c=>c.trim());
+          const isDivRow=r=>r.replace(/[\s\-:|]/g,"").length===0&&r.includes("-");
+          let header=null,aligns=[],body=[];
+          if(tRows.length>=2&&isDivRow(tRows[1])){
+            header=parseRow(tRows[0]);
+            aligns=parseRow(tRows[1]).map(c=>{const lf=c.startsWith(":"),rg=c.endsWith(":");return lf&&rg?"center":rg?"right":"left";});
+            body=tRows.slice(2).map(parseRow);
+          }else{
+            body=tRows.filter(r=>!isDivRow(r)).map(parseRow);
+          }
+          return <div key={j} style={{margin:"10px 0",overflowX:"auto",borderRadius:8,border:`1px solid ${t.brd}44`,background:`${t.bgDeep}66`}}>
+            <table style={{borderCollapse:"collapse",width:"100%",fontSize:12,fontFamily:font}}>
+              {header&&<thead><tr>{header.map((h,hi)=><th key={hi} style={{textAlign:aligns[hi]||"left",padding:"7px 12px",borderBottom:`1px solid ${t.brd}66`,background:`${t.surface}AA`,color:t.acc,fontWeight:700,fontSize:10,letterSpacing:0.5,textTransform:"uppercase",whiteSpace:"nowrap"}}>{inlineParse(h)}</th>)}</tr></thead>}
+              <tbody>{body.map((row,ri)=><tr key={ri} style={{borderBottom:ri<body.length-1?`1px solid ${t.brd}22`:"none"}}>{row.map((c,ci)=><td key={ci} style={{textAlign:aligns[ci]||"left",padding:"6px 12px",color:t.dim,verticalAlign:"top",lineHeight:1.5,wordBreak:"break-word"}}>{inlineParse(c)}</td>)}</tr>)}</tbody>
+            </table>
           </div>;
         }
         return <div key={j} style={{minHeight:ln===""?8:"auto"}}>{inlineParse(ln)}</div>;
