@@ -2593,7 +2593,8 @@ function HyprChat(){
   const mdStream=(text)=>{
     if(!text)return null;
     let t2=text;
-    const fences=(t2.match(/```/g)||[]).length;
+    // Only line-start ``` counts as a fence delimiter — inline mentions in prose don't.
+    const fences=(t2.match(/(?:^|\n)```/g)||[]).length;
     if(fences%2!==0)t2+="\n```";
     // Count single backticks (exclude triple backticks first)
     const stripped=t2.replace(/```/g,"");
@@ -2617,7 +2618,12 @@ function HyprChat(){
       if(!(lbl in _fnIdx)){_fnOrder.push(lbl);_fnIdx[lbl]=_fnOrder.length;}
       return ""+_fnPrefix+":"+_fnIdx[lbl]+"";
     });
-    const _rendered = text.split(/(```[\s\S]*?```|<details[\s\S]*?<\/details>)/g).map((p,i)=>{
+    // Auto-close unclosed fences so a model that opens ```chart and gets interrupted
+    // by a tool call (or just forgets) still renders as a block instead of raw text.
+    // Count only line-start ``` so inline mentions like ` ```chart ` in prose (e.g. the
+    // changelog) don't throw off the balance or get captured as real fences below.
+    if(((text.match(/(?:^|\n)```/g)||[]).length)%2!==0)text+="\n```";
+    const _rendered = text.split(/((?<=^|\n)```[\s\S]*?\n```(?=\n|$)|<details[\s\S]*?<\/details>)/g).map((p,i)=>{
       if(p.startsWith("<details")){
         const sm=p.match(/<summary[^>]*>([\s\S]*?)<\/summary>/i);
         const summary=sm?sm[1].trim():"Details";
