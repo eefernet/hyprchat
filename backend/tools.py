@@ -1354,7 +1354,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             constraints = args.get("constraints", "")
             if not task:
                 return "ERROR: task is required"
-            planning_model = config.PLANNING_MODEL or config.DEFAULT_MODEL
+            planning_model = config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL
             await events.emit(conv_id, "tool_start", {"tool": "plan_project", "icon": "activity", "status": f"🧠 Planning architecture with {planning_model}..."})
             plan_prompt = f"""You are a senior software architect. Design a complete implementation plan for this project.
 
@@ -1386,7 +1386,12 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                     data = r.json()
                     plan = data.get("message", {}).get("content", "")
                     if plan:
-                        await events.emit(conv_id, "tool_end", {"tool": "plan_project", "icon": "activity", "status": "🧠 Architecture plan ready"})
+                        await events.emit(conv_id, "tool_end", {
+                            "tool": "plan_project",
+                            "icon": "activity",
+                            "status": "🧠 Architecture plan ready",
+                            "detail": json.dumps({"plan": plan[:12000], "language": language, "task": task[:200]}),
+                        })
                         # Save plan to project memory
                         try:
                             proj_id = f"proj-{uuid.uuid4().hex[:12]}"

@@ -847,16 +847,23 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                 if _live_gen_tokens % 10 == 0:
                                     yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': _live_gen_tokens, 'prompt_tokens': prompt_tokens, 'live': True})}\n\n"
 
-                                # Repetition detection: check last 200 chars for short repeating patterns
+                                # Repetition detection: catch true degenerate loops (e.g. "the the the…")
+                                # without killing legitimate repeated structure (chart labels, JSON arrays,
+                                # tables). Skipped inside fenced blocks; outside, requires >85% window
+                                # coverage and higher counts for short patterns.
                                 _repeat_window = (_repeat_window + token)[-200:]
-                                if len(_repeat_window) >= 120:
+                                _in_fence = (content.count("```") % 2) == 1
+                                if not _in_fence and len(_repeat_window) >= 120:
                                     for plen in range(2, 25):
                                         pat = _repeat_window[-plen:]
-                                        # Skip whitespace-only patterns (common in ASCII art, tables, formatted output)
+                                        # Skip whitespace-only patterns (ASCII art, tables, formatted output)
                                         if not pat.strip():
                                             continue
                                         count = _repeat_window.count(pat)
-                                        if count >= 8 and count * plen > len(_repeat_window) * 0.5:
+                                        # Short patterns (≤4 chars) need much higher counts: separators
+                                        # like ", " or "}, {" repeat heavily in normal structured prose.
+                                        min_count = 20 if plen <= 4 else 8
+                                        if count >= min_count and count * plen > len(_repeat_window) * 0.85:
                                             print(f"[CHAT]   Repetition detected: {pat!r} x{count} — stopping generation")
                                             content = content[:content.rfind(pat)]
                                             break

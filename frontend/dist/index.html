@@ -443,8 +443,55 @@ const Pill = ({ev,t,expanded,onToggle})=>{
   </div>;
 };
 
+// Reasoning + Plan panels: surface model thinking & architecture plan above the pill row
+// during agent coding so the user can see what the bot decided to do while waiting.
+const ReasoningPanel = ({text,t,streaming})=>{
+  const [expanded,setExpanded]=useState(streaming);
+  useEffect(()=>{setExpanded(streaming);},[streaming]);
+  if(!text) return null;
+  const bc=`${t.f4}33`;
+  const bg=`${t.f4}0a`;
+  const tc=t.f4;
+  return <div style={{marginBottom:6,animation:"fadeIn .3s",borderRadius:10,border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%"}}>
+    <div onClick={()=>setExpanded(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none"}}>
+      <span style={{fontSize:13,lineHeight:1,animation:streaming?"bop 2s ease-in-out infinite":"none",transformOrigin:"center"}}>💡</span>
+      <span style={{fontWeight:700,fontSize:11,color:tc,letterSpacing:.3}}>Reasoning</span>
+      {streaming&&<span style={{fontSize:10,color:tc,opacity:.55,fontStyle:"italic"}}>thinking…</span>}
+      <span style={{marginLeft:"auto",fontSize:9,color:tc,opacity:.45}}>{expanded?"▴":"▾"}</span>
+    </div>
+    {expanded&&<div ref={el=>{if(el&&streaming)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 14px",fontSize:11,lineHeight:1.65,color:t.dim,fontStyle:"italic",whiteSpace:"pre-wrap",maxHeight:260,overflowY:"auto",opacity:.92}}>{text}</div>}
+  </div>;
+};
+
+const PlanPanel = ({plan,t,streaming,md,onCopy})=>{
+  const [expanded,setExpanded]=useState(streaming);
+  const [copied,setCopied]=useState(false);
+  useEffect(()=>{setExpanded(streaming);},[streaming]);
+  if(!plan) return null;
+  const bc=streaming?`${t.acc}66`:`${t.acc}38`;
+  const bg=`${t.acc}0c`;
+  const tc=t.acc;
+  const copy=async(e)=>{
+    e.stopPropagation();
+    try{await navigator.clipboard.writeText(plan);setCopied(true);setTimeout(()=>setCopied(false),1400);}catch{}
+    onCopy&&onCopy();
+  };
+  return <div style={{marginBottom:6,animation:"fadeIn .3s",borderRadius:10,border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%",boxShadow:streaming?`0 0 12px ${t.acc}22`:"none",transition:"all .3s"}}>
+    <div onClick={()=>setExpanded(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none",animation:streaming?"pillGlow 2s ease-in-out infinite":"none"}}>
+      <span style={{fontSize:13,lineHeight:1,animation:streaming?"bop 2s ease-in-out infinite":"none",transformOrigin:"center"}}>🧠</span>
+      <span style={{fontWeight:700,fontSize:11,color:tc,letterSpacing:.3}}>Architecture Plan</span>
+      {streaming&&<span style={{fontSize:10,color:tc,opacity:.6,fontStyle:"italic"}}>building…</span>}
+      <button onClick={copy} title="Copy plan" style={{marginLeft:"auto",background:copied?`${t.ok}22`:"transparent",border:`1px solid ${copied?t.ok:`${tc}33`}`,color:copied?t.ok:tc,padding:"2px 8px",borderRadius:6,fontSize:9,fontFamily:"inherit",cursor:"pointer",fontWeight:600,opacity:.85}}>{copied?"copied":"copy"}</button>
+      <span style={{fontSize:9,color:tc,opacity:.45,marginLeft:4}}>{expanded?"▴":"▾"}</span>
+    </div>
+    {expanded&&<div style={{padding:"10px 14px",fontSize:12,lineHeight:1.65,color:t.dim,maxHeight:420,overflowY:"auto"}}>
+      {md?<MDWrap>{md(plan)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit",color:t.dim}}>{plan}</pre>}
+    </div>}
+  </div>;
+};
+
 // Inline tool status: shows latest pill, expands to show all
-const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=>{
+const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical,md})=>{
   const [showAll,setShowAll]=useState(false);
   if(!evts.length) return null;
 
@@ -515,6 +562,20 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=
   const fileReadyEvts = evts.filter(e=>e.type==="file_ready");
   const searchResultEvts = evts.filter(e=>e.type==="search_results");
   const sourceLinkEvts = evts.filter(e=>e.type==="source_links");
+
+  // Surface reasoning + architecture plan above the pill row.
+  // Reasoning: latest thinking/thought_done event with detail.thinking
+  // Plan: latest plan_project tool_end with detail.plan
+  const _parseDetail = (ev)=>{const d=ev?.data?.detail;if(!d)return null;try{return typeof d==="string"?JSON.parse(d):d;}catch{return null;}};
+  const _thinkEvts = evts.filter(e=>(e.type==="thinking"||e.type==="thought_done")&&_parseDetail(e)?.thinking);
+  const reasoningText = _thinkEvts.length ? (_parseDetail(_thinkEvts[_thinkEvts.length-1])?.thinking||"") : "";
+  const _planEvts = evts.filter(e=>(e.type==="tool_end"||e.type==="tool_done")&&e.data?.tool==="plan_project"&&_parseDetail(e)?.plan);
+  const planText = _planEvts.length ? (_parseDetail(_planEvts[_planEvts.length-1])?.plan||"") : "";
+  const isStreaming = !historical;
+  const Panels = (reasoningText||planText) ? <div style={{display:"flex",flexDirection:"column",gap:0,marginBottom:reasoningText||planText?4:0}}>
+    {reasoningText && <ReasoningPanel text={reasoningText} t={t} streaming={isStreaming}/>}
+    {planText && <PlanPanel plan={planText} t={t} streaming={isStreaming} md={md}/>}
+  </div> : null;
 
   // Historical renders: the per-message block at msg.metadata.saved_events renders
   // collapsible code output, so ToolStatus shouldn't render another copy here.
@@ -636,6 +697,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=
     const activeThinking = merged.find(e=>e.type==="thinking");
     const primaryPill = activeThinking || latest;
     return <div style={{padding:"4px 0"}}>
+      {Panels}
       {primaryPill&&<div style={{display:"flex",flexDirection:"column",gap:3}}>
         <Pill ev={primaryPill} t={t} expanded={expandedPill===getPillKey(primaryPill)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(primaryPill)?null:getPillKey(primaryPill))}/>
         {primaryPill!==latest&&latest&&<Pill ev={latest} t={t} expanded={expandedPill===getPillKey(latest)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(latest)?null:getPillKey(latest))}/>}
@@ -651,6 +713,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=
   }
 
   return <div style={{padding:"4px 0"}}>
+    {Panels}
     <button onClick={()=>setShowAll(false)} style={{background:`${t.surface}60`,border:`1px solid ${t.brd}22`,color:t.mut,padding:"2px 8px",borderRadius:10,fontSize:10,cursor:"pointer",fontFamily:"inherit",marginBottom:4}}>
       Hide steps ▴
     </button>
@@ -1230,6 +1293,21 @@ function MDWrap({children}){
   useEffect(()=>{
     if(!window.renderMathInElement||!ref.current)return;
     try{
+      // Currency $-signs (e.g. "$94 ... $17.50") otherwise pair up as a math
+      // span. Swap them for a placeholder before auto-render, restore after.
+      const PH="";
+      const SKIP={SCRIPT:1,STYLE:1,CODE:1,PRE:1,TEXTAREA:1};
+      const walk=(n,fn)=>{
+        if(n.nodeType===3){fn(n);return;}
+        if(n.nodeType!==1||SKIP[n.tagName])return;
+        for(let c=n.firstChild;c;c=c.nextSibling)walk(c,fn);
+      };
+      walk(ref.current,n=>{
+        const v=n.nodeValue;
+        if(!v||v.indexOf("$")<0)return;
+        const out=v.replace(/(?<![\\$])\$(?=\d)/g,PH);
+        if(out!==v)n.nodeValue=out;
+      });
       window.renderMathInElement(ref.current,{
         delimiters:[
           {left:"$$",right:"$$",display:true},
@@ -1239,6 +1317,10 @@ function MDWrap({children}){
         ],
         throwOnError:false,
         ignoredTags:["script","noscript","style","textarea","pre","code"]
+      });
+      walk(ref.current,n=>{
+        const v=n.nodeValue;
+        if(v&&v.indexOf(PH)>=0)n.nodeValue=v.split(PH).join("$");
       });
     }catch{}
   });
@@ -4570,7 +4652,7 @@ function HyprChat(){
             <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Same as chat model</div><div style={{fontSize:9,color:t.dim}}>Click to select a dedicated planning model</div></div>
             <span style={{fontSize:9,color:t.mut}}>▾</span>
           </div>}
-          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Model used by plan_project to design architecture before coding. Best with a strong reasoning model.</div>
+          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Model used by plan_project to design architecture before coding. Empty = uses the active chat model.</div>
         </div>
 
         <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
@@ -5218,11 +5300,11 @@ function HyprChat(){
                       </span>)}
                     </div>}
                     {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                    {msg.isS&&!msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
+                    {msg.isS&&!msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
                   </div>
-                  {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:null;})()}
-                  {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:null;})()}
-                  {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>;})()}
+                  {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:null;})()}
+                  {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:null;})()}
+                  {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>;})()}
                   {/* Inline code execution output */}
                   {(()=>{if(isU)return null;const savedEvts=msg.metadata?.saved_events||[];const codeOuts=savedEvts.filter(e=>e.type==="code_output");if(!codeOuts.length)return null;return codeOuts.map((e,ci)=>{const d=e.data||{};const ckey=`${i}-${ci}`;const collapsed=collapsedOutputs.has(ckey);const toggleCollapsed=()=>setCollapsedOutputs(s=>{const n=new Set(s);if(n.has(ckey))n.delete(ckey);else n.add(ckey);return n;});return <div key={ci} style={{margin:"8px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${d.success?`${t.ok}33`:`${t.err}33`}`,background:t.bgDeep}}>
                     <div onClick={toggleCollapsed} title={collapsed?"Show output":"Hide output"} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${d.success?t.ok:t.err}10`,borderBottom:collapsed?"none":`1px solid ${d.success?t.ok:t.err}22`,cursor:"pointer",userSelect:"none"}}>
@@ -5290,7 +5372,7 @@ function HyprChat(){
                 </div>
               </div></React.Fragment>;
             });})()}
-            {evts.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}><ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/></div>}
+            {evts.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}><ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/></div>}
             <div ref={chatEnd}/>
           </div>}
         </div>
