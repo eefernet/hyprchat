@@ -2062,7 +2062,14 @@ function HyprChat(){
     // doing it from the client too would race and create duplicates.
     try{
       const cv=convs.find(c=>c.id===cid);
-      let am = messagesToSend.map(m=>({role:m.role,content:m._fullContent||m.content}));
+      let am = messagesToSend.map(m=>{
+        const out={role:m.role,content:m._fullContent||m.content};
+        // Pass images from current send (_images) or persisted user metadata (metadata.images)
+        const persistedImgs=(m.metadata&&Array.isArray(m.metadata.images))?m.metadata.images.map(im=>(im.dataUrl||"").split(",")[1]||"").filter(Boolean):null;
+        const imgs=(Array.isArray(m._images)&&m._images.length)?m._images:(persistedImgs&&persistedImgs.length?persistedImgs:null);
+        if(imgs)out.images=imgs;
+        return out;
+      });
       // Get model-specific params, falling back to globals
       let modelName=overrides.model||cv?.model||models[0]||"";
       // If the selected model is no longer available, fall back to first available
@@ -2149,11 +2156,20 @@ function HyprChat(){
     let displayContent = inp.trim();
     let modelContent = displayContent;
     const pdfAttachments = [];
+    const imageAttachments = []; // {name, dataUrl, mime} for UI render
+    const imageBase64s = [];      // raw base64 (no data: prefix) for Ollama images field
     if(attachments.length){
       const pdfParts = [];
       const fileParts = [];
+      const imageNames = [];
       for(const a of attachments){
-        if(a.type==="pdf"){
+        if(a.type==="image"){
+          imageAttachments.push({name:a.name,dataUrl:a.dataUrl,mime:a.mime});
+          // Strip "data:image/png;base64," prefix → raw base64 for Ollama
+          const b64=(a.dataUrl||"").split(",")[1]||"";
+          if(b64) imageBase64s.push(b64);
+          imageNames.push(a.name);
+        }else if(a.type==="pdf"){
           pdfParts.push(`📄 **${a.name}** (${a.pages||"?"} pages):\n${a.content}`);
           pdfAttachments.push({name:a.name,pages:a.pages||0});
         }else{
@@ -2162,6 +2178,11 @@ function HyprChat(){
       }
       const allFileCtx = [...fileParts,...pdfParts].join("\n\n");
       modelContent = modelContent ? `${modelContent}\n\n${allFileCtx}` : allFileCtx;
+      // Non-vision-capable models won't see images directly; give them a textual hint.
+      if(imageNames.length){
+        const imgHint = `[Attached ${imageNames.length} image${imageNames.length>1?"s":""}: ${imageNames.join(", ")}]`;
+        modelContent = modelContent ? `${modelContent}\n\n${imgHint}` : imgHint;
+      }
       // Non-PDF files still show inline
       if(fileParts.length){
         const nonPdfCtx = fileParts.join("\n\n");
@@ -2174,7 +2195,7 @@ function HyprChat(){
       fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:modelContent.trim().slice(0,200),count:6})}).then(r=>r.json()).then(d=>{setQuickResults(d.results||[]);setSearchLoading(false);}).catch(()=>{setQuickResults([]);setSearchLoading(false);});
     }else{setQuickResults([]);}
     const _now=new Date().toISOString();
-    const um={role:"user",content:displayContent,_fullContent:modelContent,metadata:{pdfs:pdfAttachments.length?pdfAttachments:undefined},created_at:_now};
+    const um={role:"user",content:displayContent,_fullContent:modelContent,_images:imageBase64s.length?imageBase64s:undefined,metadata:{pdfs:pdfAttachments.length?pdfAttachments:undefined,images:imageAttachments.length?imageAttachments:undefined},created_at:_now};
     uConv(cid,c=>({...c,title:(!c.messages||!c.messages.length)?(displayContent||pdfAttachments.map(p=>p.name).join(", ")).slice(0,40):c.title,messages:[...(c.messages||[]),um,{role:"assistant",content:"",isS:true,created_at:_now}]}));
     setInp("");setAttachments([]);if(inpRef.current){inpRef.current.style.height="auto";}
     setTimeout(()=>{if(chatScrollRef.current)chatScrollRef.current.scrollTop=chatScrollRef.current.scrollHeight;},0);
@@ -2233,6 +2254,7 @@ function HyprChat(){
     // project upload endpoint instead of treating them as text attachments.
     const isArchive=(f)=>{const n=(f.name||"").toLowerCase();return n.endsWith(".zip")||n.endsWith(".tar")||n.endsWith(".tar.gz")||n.endsWith(".tgz")||n.endsWith(".tar.bz2")||n.endsWith(".tbz2");};
     const isPdf=(f)=>(f.name||"").toLowerCase().endsWith(".pdf");
+    const isImage=(f)=>(f.type||"").startsWith("image/")||/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(f.name||"");
     const coderActive=act?.persona_name&&act.persona_name.includes("Coder");
     let remaining=files;
     if(coderActive){
@@ -2245,6 +2267,16 @@ function HyprChat(){
     }
     const newAttachments=[];
     for(const file of remaining){
+      if(isImage(file)){
+        if(file.size>20*1024*1024){console.warn(`Skipped ${file.name} — image too large (max 20MB)`);continue;}
+        try{
+          const dataUrl=await new Promise((res,rej)=>{const rd=new FileReader();rd.onload=()=>res(rd.result);rd.onerror=rej;rd.readAsDataURL(file);});
+          // Friendly default name for clipboard pastes (browser provides "image.png")
+          const niceName=file.name||`screenshot-${new Date().toISOString().replace(/[:.]/g,"-").slice(0,19)}.png`;
+          newAttachments.push({name:niceName,dataUrl,type:"image",size:file.size,mime:file.type||"image/png"});
+        }catch(e){console.error("Image read failed:",e);}
+        continue;
+      }
       if(isPdf(file)){
         if(file.size>50*1024*1024){console.warn(`Skipped ${file.name} — too large (max 50MB)`);continue;}
         // Add a loading placeholder immediately
@@ -5292,6 +5324,12 @@ function HyprChat(){
                       </div>
                     </div>
                     :msg.isS?mdStream(msg.content):<MDWrap>{md(msg.content)}</MDWrap>}
+                    {isU&&msg.metadata?.images?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:msg.content?10:0}}>
+                      {msg.metadata.images.map((img,ii)=><div key={ii} title={img.name} style={{display:"inline-flex",flexDirection:"column",gap:4,alignItems:"flex-start",maxWidth:260}}>
+                        <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:8,border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:`0 2px 10px ${t.acc}18`}}/>
+                        <span style={{fontSize:9,color:t.mut,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:260}}>📷 {img.name}</span>
+                      </div>)}
+                    </div>}
                     {isU&&msg.metadata?.pdfs?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:msg.content?8:0}}>
                       {msg.metadata.pdfs.map((p,pi)=><span key={pi} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.err}10`,border:`1px solid ${t.err}25`,padding:"5px 12px",borderRadius:8,fontSize:11,fontWeight:500,color:t.text}}>
                         <span style={{fontSize:16}}>📄</span>
@@ -5410,7 +5448,14 @@ function HyprChat(){
               {!councilSugLoading&&<button onClick={()=>fetchCouncilSuggestions(act?.council_config_id)} title="Regenerate suggestions" style={{background:"none",border:`1px solid ${t.brd}33`,borderRadius:"50%",width:24,height:24,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:11,flexShrink:0}}>↻</button>}
             </div>}
           {attachments.length>0&&<div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",flexWrap:"wrap",gap:6,padding:"6px 0"}}>
-            {attachments.map((a,i)=>a.type==="pdf"?
+            {attachments.map((a,i)=>a.type==="image"?
+              <span key={i} title={a.name} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.acc}10`,border:`1px solid ${t.acc}30`,padding:"3px 8px 3px 3px",borderRadius:10,fontSize:10,fontWeight:600,maxWidth:240}}>
+                <img src={a.dataUrl} alt={a.name} style={{height:32,width:32,objectFit:"cover",borderRadius:6,border:`1px solid ${t.acc}33`,display:"block",cursor:"pointer"}} onClick={()=>openPreview&&openPreview(a.name,a.dataUrl)}/>
+                <span style={{color:t.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:140}}>{a.name}</span>
+                <span style={{color:t.mut,fontWeight:400,fontSize:9}}>{(a.size/1024).toFixed(0)}KB</span>
+                <span onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} style={{cursor:"pointer",opacity:.6,marginLeft:2,color:t.acc}}>&times;</span>
+              </span>
+            :a.type==="pdf"?
               <span key={i} style={{display:"inline-flex",alignItems:"center",gap:6,background:a.loading?`${t.warm}12`:`${t.err}10`,border:`1px solid ${a.loading?t.warm:t.err}30`,color:a.loading?t.warm:t.err,padding:"4px 10px",borderRadius:10,fontSize:10,fontWeight:600,transition:"all .2s"}}>
                 <span style={{fontSize:13}}>{a.loading?"⏳":"📄"}</span>
                 <span style={{color:t.text,fontWeight:500}}>{a.name}</span>

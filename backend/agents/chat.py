@@ -454,7 +454,13 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         messages.append({"role": "system", "content": "\n".join(_ap_lines)})
         print(f"[CHAT] Injected active project context: {_active_project.get('name', '?')} ({len(_ap_files)} files)")
 
-    messages.extend([{"role": m["role"], "content": m["content"]} for m in req.messages])
+    for m in req.messages:
+        _msg = {"role": m["role"], "content": m["content"]}
+        # Pass image attachments through to vision-capable Ollama models.
+        # Non-vision models silently ignore the field.
+        if m.get("images"):
+            _msg["images"] = m["images"]
+        messages.append(_msg)
 
     # ── Build Ollama-native tool definitions ──
     available_tool_names = set()
