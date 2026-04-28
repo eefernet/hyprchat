@@ -2707,8 +2707,8 @@ function HyprChat(){
   const mdStream=(text)=>{
     if(!text)return null;
     let t2=text;
-    // Only line-start ``` counts as a fence delimiter — inline mentions in prose don't.
-    const fences=(t2.match(/(?:^|\n)```/g)||[]).length;
+    // Only line-start ``` (allowing up to 3 spaces of CommonMark indent) counts as a fence delimiter.
+    const fences=(t2.match(/(?:^|\n)[ \t]{0,3}```/g)||[]).length;
     if(fences%2!==0)t2+="\n```";
     // Count single backticks (exclude triple backticks first)
     const stripped=t2.replace(/```/g,"");
@@ -2734,10 +2734,10 @@ function HyprChat(){
     });
     // Auto-close unclosed fences so a model that opens ```chart and gets interrupted
     // by a tool call (or just forgets) still renders as a block instead of raw text.
-    // Count only line-start ``` so inline mentions like ` ```chart ` in prose (e.g. the
-    // changelog) don't throw off the balance or get captured as real fences below.
-    if(((text.match(/(?:^|\n)```/g)||[]).length)%2!==0)text+="\n```";
-    const _rendered = text.split(/((?<=^|\n)```[\s\S]*?\n```(?=\n|$)|<details[\s\S]*?<\/details>)/g).map((p,i)=>{
+    // Count only line-start ``` (allowing up to 3 spaces of CommonMark indent) so inline
+    // mentions like ` ```chart ` in prose don't throw off the balance.
+    if(((text.match(/(?:^|\n)[ \t]{0,3}```/g)||[]).length)%2!==0)text+="\n```";
+    const _rendered = text.split(/((?<=^|\n)[ \t]{0,3}```[\s\S]*?\n[ \t]{0,3}```[ \t]*(?=\n|$)|<details[\s\S]*?<\/details>)/g).map((p,i)=>{
       if(p.startsWith("<details")){
         const sm=p.match(/<summary[^>]*>([\s\S]*?)<\/summary>/i);
         const summary=sm?sm[1].trim():"Details";
@@ -2749,8 +2749,16 @@ function HyprChat(){
         const open=/^<details[^>]*\bopen\b/i.test(p);
         return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open}>{md(body)}</Collapsible>;
       }
-      if(p.startsWith("```")){
-        const m=p.match(/```(\w*)\n?([\s\S]*?)```/);const lang=m?.[1]||"",code=m?.[2]||p.slice(3,-3);const bid=`c${i}`;
+      if(/^[ \t]{0,3}```/.test(p)){
+        const m=p.match(/^[ \t]*```(\w*)\n?([\s\S]*?)\n?[ \t]*```[ \t]*$/);
+        const lang=m?.[1]||"";
+        let code=m?.[2]||p.replace(/^[ \t]*```[^\n]*\n?/,"").replace(/\n?[ \t]*```[ \t]*$/,"");
+        // Dedent: strip common leading whitespace (LLMs often indent fences inside list items)
+        const _codeLines=code.split("\n");
+        const _indents=_codeLines.filter(l=>l.trim()).map(l=>(l.match(/^[ \t]*/)?.[0].length)||0);
+        const _minIndent=_indents.length?Math.min(..._indents):0;
+        if(_minIndent>0)code=_codeLines.map(l=>l.slice(_minIndent)).join("\n");
+        const bid=`c${i}`;
         if(lang==="mermaid")return <MermaidBlock key={i} code={code} theme={t} font={font} epoch={mermaidEpoch}/>;
         if(lang==="chart")return <ChartBlock key={i} code={code} theme={t} font={font} epoch={mermaidEpoch}/>;
         const isDiff=lang==="diff";

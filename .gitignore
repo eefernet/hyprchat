@@ -6,6 +6,9 @@ __pycache__/
 # Deploy config (contains server credentials)
 .deploy_config.json
 
+# Internal infra inventory — homelab IPs and service map
+CLAUDE.md
+
 # Environment / secrets
 .idea/misc.xml
 .env
