@@ -330,6 +330,8 @@ const TIC = {code:IC.Code,search:IC.Search,terminal:IC.Terminal,globe:IC.Globe,w
 
 // Status pill - inline with chat, expressive and geeky
 const Pill = ({ev,t,expanded,onToggle})=>{
+  const scrollRef = useRef(null);
+  const stickRef = useRef(true);  // sticky-bottom: auto-scroll to new steps unless user scrolled up
   const isS = ev.type==="tool_start"||ev.type==="tool_progress"||ev.type==="thinking"||ev.type==="streaming";
   const isE = ev.type==="tool_error"||ev.type==="error";
   const isD = ev.type==="tool_end"||ev.type==="tool_done"||ev.type==="complete"||ev.type==="thought_done";
@@ -340,6 +342,25 @@ const Pill = ({ev,t,expanded,onToggle})=>{
   let detail = null;
   if(expanded && ev.data?.detail){try{detail=JSON.parse(ev.data.detail);}catch{detail=ev.data.detail;}}
   const isClickable = !!(ev.data?.detail) || isThink;
+  const stepsLen = (detail && typeof detail==="object" && Array.isArray(detail.steps)) ? detail.steps.length : 0;
+  // Reset sticky + jump to bottom when the panel is (re)opened.
+  useEffect(()=>{
+    if(!expanded)return;
+    stickRef.current = true;
+    const el=scrollRef.current;
+    if(el)el.scrollTop = el.scrollHeight;
+  },[expanded]);
+  // When new steps arrive, auto-scroll only if user hasn't scrolled up.
+  useEffect(()=>{
+    if(!expanded||!stickRef.current)return;
+    const el=scrollRef.current;
+    if(el)el.scrollTop = el.scrollHeight;
+  },[stepsLen,expanded]);
+  const handlePanelScroll = (e)=>{
+    const el=e.currentTarget;
+    // 24px tolerance — treat "almost at bottom" as still sticky
+    stickRef.current = (el.scrollHeight - el.scrollTop - el.clientHeight) < 24;
+  };
   
   const toolName = ev.data?.tool||ev.type;
   const status = ev.data?.status||"";
@@ -374,7 +395,20 @@ const Pill = ({ev,t,expanded,onToggle})=>{
   };
   const [icon, label] = labelMap[toolName] || (isE ? ["❌", toolName] : isD ? ["✓", toolName] : ["⏳", toolName]);
   const isActive = isS && !isD;
-  const showMarquee = isThink && isActive && !expanded && status.length > 15;
+  // De-duplicate status: backend often emits "🔮 Connecting to neural oracle..." while the
+  // labelMap also renders "🔮 Connecting" — strip a leading emoji and the label word from
+  // the status so the pill doesn't read "Connecting Connecting...".
+  const displayStatus = (()=>{
+    if(!status)return "";
+    // Strip leading emoji (incl. ZWJ U+200D and VS16 U+FE0F) and whitespace.
+    let s = status.replace(/^[\p{Extended_Pictographic}‍️\s]+/u,"");
+    if(label){
+      const re = new RegExp("^" + label.replace(/[.*+?^${}()|[\]\\]/g,"\\$&") + "\\s*[:—\\-]?\\s*","i");
+      s = s.replace(re,"");
+    }
+    return s.trim();
+  })();
+  const showMarquee = isThink && isActive && !expanded && displayStatus.length > 15;
   const getIconAnim = (name) => {
     if(name==="execute_code"||name==="run_shell") return "spin 1.2s linear infinite";
     if(name==="research"||name==="deep_research"||name==="fetch_url"||name==="conspiracy_research"||name==="kb") return "swing 1.5s ease-in-out infinite";
@@ -385,7 +419,7 @@ const Pill = ({ev,t,expanded,onToggle})=>{
     if(name==="thinking"||name==="streaming") return "bop 2s ease-in-out infinite";
     return "bop 1.5s ease-in-out infinite";
   };
-  const marqueeKey = Math.floor(status.length / 30);
+  const marqueeKey = Math.floor(displayStatus.length / 30);
 
   return <div style={{animation:"fadeIn .3s",marginBottom:2}}>
     <div onClick={isClickable?onToggle:undefined} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 12px",background:bg,border:`1px solid ${bc}`,borderRadius:expanded?"9px 9px 0 0":9,fontSize:12,color:tc,cursor:isClickable?"pointer":"default",maxWidth:"100%",transition:"all .2s",animation:isActive?`fadeIn .3s, pillGlow 2s ease-in-out infinite`:"fadeIn .3s",boxShadow:isActive?`0 0 8px ${bc}`:"none"}}>
@@ -395,14 +429,14 @@ const Pill = ({ev,t,expanded,onToggle})=>{
       {showMarquee
         ? <span className="pill-marquee-wrap">
             <span key={marqueeKey} className="pill-marquee-inner" style={{color:tc,opacity:.75,fontStyle:"italic"}}>
-              {status}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{status}
+              {displayStatus}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{displayStatus}
             </span>
           </span>
-        : <span style={{opacity:.6,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:350,fontStyle:isThink?"italic":"normal"}}>{status}</span>
+        : displayStatus&&<span style={{opacity:.6,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:350,fontStyle:isThink?"italic":"normal"}}>{displayStatus}</span>
       }
       {isClickable&&<span style={{opacity:.3,flexShrink:0,fontSize:8,marginLeft:2}}>{expanded?"▴":"▾"}</span>}
     </div>
-    {expanded&&(detail||isThink)&&<div style={{background:`${t.bgDeep}`,border:`1px solid ${bc}`,borderTop:"none",borderRadius:"0 0 8px 8px",padding:10,fontSize:11,maxHeight:300,overflowY:"auto",maxWidth:600}}>
+    {expanded&&(detail||isThink)&&<div ref={scrollRef} onScroll={handlePanelScroll} style={{background:`${t.bgDeep}`,border:`1px solid ${bc}`,borderTop:"none",borderRadius:"0 0 8px 8px",padding:10,fontSize:11,maxHeight:300,overflowY:"auto",maxWidth:600}}>
       {!detail?<div style={{color:t.dim,fontStyle:"italic",lineHeight:1.6,whiteSpace:"pre-wrap",opacity:.7}}>{status||"Thinking..."}</div>
       :typeof detail==="string"?<pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontFamily:"inherit"}}>{detail}</pre>
       :detail.thinking?<div ref={el=>{if(el&&isActive)el.scrollTop=el.scrollHeight;}} style={{color:t.dim,fontStyle:"italic",lineHeight:1.6,whiteSpace:"pre-wrap",maxHeight:250,overflowY:"auto"}}>{detail.thinking}</div>

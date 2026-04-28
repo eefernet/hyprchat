@@ -75,6 +75,8 @@ DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen3.5:27b")
 WORKSPACE_MODEL = os.getenv("WORKSPACE_MODEL", "qwen3.5:4b")
 PLANNING_MODEL = os.getenv("PLANNING_MODEL", "qwen3.5:27b")
 CODER_MODEL = os.getenv("CODER_MODEL", "qwen2.5-coder:14b")
+CRITIC_MODEL = os.getenv("CRITIC_MODEL", "")  # Empty = falls back to PLANNING_MODEL. Independent code reviewer for generate_code output.
+CRITIC_ENABLED = os.getenv("CRITIC_ENABLED", "true").lower() == "true"
 OPENHANDS_ENABLED = os.getenv("OPENHANDS_ENABLED", "true").lower() == "true"  # Toggle OpenHands for generate_code tool
 OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "20"))
 OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", "16384"))

@@ -1864,6 +1864,68 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                         if review_parts:
                             code_review = "\n\n".join(review_parts)
 
+                # ── Independent critic pass: catch runtime bugs that pass syntax/compile checks ──
+                # Uses a separate model from the coder so it can't rationalize its own mistakes.
+                critique = ""
+                if code_review and config.CRITIC_ENABLED:
+                    critic_model = config.CRITIC_MODEL or config.PLANNING_MODEL or config.DEFAULT_MODEL
+                    await events.emit(conv_id, "tool_progress", {
+                        "tool": "generate_code", "icon": "wand",
+                        "status": f"🔍 Reviewing code with {critic_model}...",
+                    })
+                    critic_prompt = f"""You are a senior code reviewer. An autonomous coding agent was asked to build:
+
+"{task}"
+
+Language: {language}
+
+The agent says it's done. Your job: catch RUNTIME bugs the agent missed — issues that pass syntax/compile checks but break behavior. Read carefully. Ignore stylistic concerns; focus on correctness.
+
+## Files
+{code_review}
+
+## What to look for
+- Setter/getter mismatches (e.g. `setStroke(color)` then `fillRect(...)` — fill color is never set)
+- Constants defined but ignored downstream (e.g. SPEED=5 but the move function hardcodes 500)
+- Math/units that produce nonsense values at runtime (e.g. 5 px/sec at 60fps barely moves)
+- Missing background fills, focus calls, init, lifecycle hooks, event listener registration
+- Off-by-one, wrong sign, wrong variable used in a formula
+- API misuse (wrong method, wrong order, missing required setup call)
+- Missing wiring between components (handler exists but never registered)
+- User requirements that don't appear in the code
+
+## Output format
+If you find issues, list them as numbered items:
+1. **path/to/file.ext** — what's wrong (one sentence) — why it breaks at runtime
+
+List every concrete bug you can find, max 10. Be specific: name the variable, function, or method.
+If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
+                    try:
+                        cr = await http.post(
+                            f"{config.OLLAMA_URL}/api/chat",
+                            json={
+                                "model": critic_model,
+                                "messages": [{"role": "user", "content": critic_prompt}],
+                                "stream": False,
+                                "options": {"temperature": 0.2, "num_ctx": 16384},
+                            },
+                            timeout=180,
+                        )
+                        if cr.status_code == 200:
+                            critique = cr.json().get("message", {}).get("content", "").strip()
+                            # Strip <think> blocks if the critic model emits them
+                            critique = re.sub(r"<think>[\s\S]*?</think>", "", critique).strip()
+                            issues_found = bool(critique) and "NO RUNTIME ISSUES FOUND" not in critique.upper()
+                            await events.emit(conv_id, "tool_progress", {
+                                "tool": "generate_code", "icon": "wand",
+                                "status": f"🔍 Review complete — {'issues found' if issues_found else 'no issues'}",
+                                "detail": json.dumps({"method": "code_review", "args": {"reviewer": critic_model}, "result": critique[:4000]}),
+                            })
+                        else:
+                            print(f"[CODEGEN:CRITIC] Critic call failed HTTP {cr.status_code}")
+                    except Exception as critic_e:
+                        print(f"[CODEGEN:CRITIC] Critic call failed: {critic_e}")
+
                 if files:
                     resp = (
                         f"PROJECT COMPLETE. OpenHands agent built the project "
@@ -1878,13 +1940,24 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                         resp += f"\n**Agent summary:** {summary[:300]}\n"
                     if code_review:
                         resp += f"\n**Key file contents for review:**\n{code_review}\n"
+                    if critique:
+                        _has_issues = "NO RUNTIME ISSUES FOUND" not in critique.upper()
+                        resp += f"\n**Independent code review (reviewer model):**\n{critique}\n"
+                        if _has_issues:
+                            resp += (
+                                f"\n⚠ The reviewer flagged runtime bugs that pass `mvn compile` / "
+                                f"`tsc --noEmit` but break behavior. You MUST fix each one before "
+                                f"delivering. For each issue: open the file with read_file, edit "
+                                f"with write_file, and re-verify. Do NOT call download_file or "
+                                f"download_project until the flagged bugs are addressed.\n"
+                            )
                     resp += (
                         f"\nREVIEW the file contents above. Evaluate whether the code actually "
                         f"fulfills the user's request — not just scaffolding/boilerplate. "
                         f"If the output is incomplete or doesn't match what was asked, call "
                         f"generate_code again with project_id='{_project_id}' and a MORE DETAILED "
                         f"task description explaining exactly what's wrong and what to fix.\n"
-                        f"If the output looks good, respond to the user with:\n"
+                        f"If the output looks good AND the reviewer found no issues (or all issues are fixed), respond to the user with:\n"
                         f"1. What was built and its features\n"
                         f"2. The download link\n"
                         f"3. How to run it locally\n"
