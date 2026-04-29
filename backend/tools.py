@@ -701,6 +701,92 @@ async def _ensure_venv(http):
     return False
 
 
+# Language → filename substring hints for KB retrieval bias. Each entry lists the filename
+# fragments (case-insensitive) that should be preferred when the task targets that language.
+# Frameworks/runtimes commonly used WITH a language are included so e.g. a Java task biases
+# toward javafx_ / swing_ / spring_ chunks even though those aren't "the Java language" itself.
+# Substrings are matched against the chunk's source filename via rag.query(prefer_filename_hints).
+_KB_LANG_HINTS: dict[str, list[str]] = {
+    "python":     ["python_", "django_", "flask_", "fastapi_", "pandas_", "numpy_",
+                   "pytorch_", "sqlalchemy_"],
+    "java":       ["java_", "javafx_", "swing_", "spring_"],
+    "kotlin":     ["kotlin_", "android_", "spring_"],
+    "javascript": ["javascript_", "nodejs_", "express_", "react_", "vue_", "angular_",
+                   "nextjs_", "svelte_", "jquery_", "npm_"],
+    "typescript": ["typescript_", "nextjs_", "react_", "angular_", "nodejs_", "express_"],
+    "rust":       ["rust_"],
+    "go":         ["go_", "gin_"],
+    "c":          ["c_reference", "cpp_"],
+    "cpp":        ["cpp_", "c_reference", "cmake_"],
+    "c++":        ["cpp_", "c_reference", "cmake_"],
+    "csharp":     ["csharp_", "aspnet_", "unity_"],
+    "c#":         ["csharp_", "aspnet_", "unity_"],
+    "swift":      ["swift_", "swiftui_", "ios_"],
+    "ruby":       ["ruby_", "rails_"],
+    "php":        ["php_", "laravel_"],
+    "lua":        ["lua_"],
+    "elixir":     ["elixir_"],
+    "haskell":    ["haskell_"],
+    "scala":      ["scala_"],
+    "dart":       ["dart_", "flutter_"],
+    "perl":       ["perl_"],
+    "html":       ["html_", "css_", "tailwind_", "bootstrap_"],
+    "css":        ["css_", "tailwind_", "bootstrap_"],
+    "bash":       ["bash_", "linux_", "vim_"],
+    "sh":         ["bash_", "linux_"],
+    "powershell": ["powershell_"],
+    "sql":        ["sql_", "postgres_", "mysql_", "mongodb_", "redis_", "sqlalchemy_"],
+}
+
+# Free-form tokens that hint at a framework even if they don't appear in the language field.
+# Searched in the task text (lowercased) when the language map alone doesn't pick a hint.
+_KB_TASK_HINTS: dict[str, list[str]] = {
+    "javafx":      ["javafx_"],
+    "swing":       ["swing_"],
+    "spring boot": ["spring_"],
+    "react":       ["react_"],
+    "vue":         ["vue_"],
+    "angular":     ["angular_"],
+    "next.js":     ["nextjs_"],
+    "tailwind":    ["tailwind_"],
+    "django":      ["django_"],
+    "flask":       ["flask_"],
+    "fastapi":     ["fastapi_"],
+    "unity":       ["unity_"],
+    "unreal":      ["unreal_"],
+    "godot":       ["godot_"],
+    "kubernetes":  ["kubernetes_"],
+    "docker":      ["docker_"],
+    "terraform":   ["terraform_"],
+    "ansible":     ["ansible_"],
+}
+
+
+def _kb_filename_hints_for_language(language: str, task: str = "") -> list[str] | None:
+    """Pick filename substring hints that should be preferred when retrieving KB chunks.
+
+    Returns None when no hints apply, so callers can pass through to unbiased retrieval.
+    """
+    hints: list[str] = []
+    lang_key = (language or "").lower().strip()
+    if lang_key in _KB_LANG_HINTS:
+        hints.extend(_KB_LANG_HINTS[lang_key])
+    task_lower = (task or "").lower()
+    for keyword, more in _KB_TASK_HINTS.items():
+        if keyword in task_lower:
+            hints.extend(more)
+    if not hints:
+        return None
+    # De-duplicate while preserving order.
+    seen = set()
+    out = []
+    for h in hints:
+        if h not in seen:
+            seen.add(h)
+            out.append(h)
+    return out
+
+
 def _get_run_cmd(language: str, filepath: str) -> str:
     """Return the shell command to run a file for the given language."""
     lang = language.lower()
@@ -1379,7 +1465,7 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
             try:
                 r = await http.post(
                     f"{config.OLLAMA_URL}/api/chat",
-                    json={"model": planning_model, "messages": [{"role": "user", "content": plan_prompt}], "stream": False, "options": {"temperature": 0.3, "num_ctx": 16384}},
+                    json={"model": planning_model, "messages": [{"role": "user", "content": plan_prompt}], "stream": False, "options": {"temperature": 0.3, "num_ctx": config.DEFAULT_NUM_CTX}},
                     timeout=180,
                 )
                 if r.status_code == 200:
@@ -1519,19 +1605,29 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 context = (context + "\n\nReference code:\n" + args["code"]).strip()
             coder_model = config.CODER_MODEL or conv_model or config.DEFAULT_MODEL
 
-            # Inject KB context so OpenHands agent has access to uploaded documentation
+            # Inject KB context so OpenHands agent has access to uploaded documentation.
+            # Bias retrieval toward filenames matching the requested language/framework so a
+            # Java task pulls java_/javafx_/spring_ chunks instead of competing for the same
+            # top_k slots with unrelated languages (swift, ruby, etc.).
             if kb_ids and task:
                 try:
                     import rag
-                    chunks = await rag.query(kb_ids, task, top_k=4)
+                    chunks = await rag.query(
+                        kb_ids, task, top_k=6,
+                        prefer_filename_hints=_kb_filename_hints_for_language(language, task),
+                    )
                     if chunks:
-                        kb_prior = rag.format_context(chunks, max_chars=3000)
+                        kb_prior = rag.format_context(chunks, max_chars=4500)
                         kb_section = (
                             "\n\n--- Knowledge Base (uploaded reference docs) ---\n"
                             + kb_prior
                         )
                         context = (context + kb_section) if context else kb_section.strip()
-                        print(f"[CODEGEN RAG] Pre-loaded {len(chunks)} KB chunks for generate_code: {task[:60]}")
+                        _matched = sum(1 for c in chunks
+                                       if any(h in (c.get("filename") or "").lower()
+                                              for h in (_kb_filename_hints_for_language(language, task) or [])))
+                        print(f"[CODEGEN RAG] Pre-loaded {len(chunks)} KB chunks "
+                              f"({_matched} lang-matched) for generate_code: {task[:60]}")
                 except Exception as e:
                     print(f"[CODEGEN RAG] KB pre-query failed: {e}")
 
@@ -1930,7 +2026,7 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                                 "model": critic_model,
                                 "messages": [{"role": "user", "content": critic_prompt}],
                                 "stream": False,
-                                "options": {"temperature": 0.2, "num_ctx": 16384},
+                                "options": {"temperature": 0.2, "num_ctx": config.DEFAULT_NUM_CTX},
                             },
                             timeout=600,
                         )

@@ -260,10 +260,12 @@ def run_task(req: RunRequest):
         # Others (qwen2.5-coder) put JSON in content text → use prompt-based.
         native_tc = _check_tool_support(ollama_base, req.model)
 
-        # ── LLM config (scale context for complex tasks) ──
-        effective_ctx = _scale_num_ctx(req)
-        # Force the loaded instance to match effective_ctx — user setting wins.
-        _ensure_loaded(ollama_base, req.model, effective_ctx)
+        # ── LLM config ──
+        # The user's num_ctx from HyprChat settings is authoritative — we don't
+        # second-guess it based on task length / keywords. Force-load Ollama at
+        # exactly that value, and pass it nested under "options" so litellm
+        # forwards it as options.num_ctx (Ollama ignores top-level num_ctx).
+        _ensure_loaded(ollama_base, req.model, req.num_ctx)
         llm = _LLM(
             model=f"ollama_chat/{req.model}",
             api_key="ollama",
@@ -273,10 +275,8 @@ def run_task(req: RunRequest):
             num_retries=2,
             drop_params=True,
             native_tool_calling=native_tc,
-            litellm_extra_body={"num_ctx": effective_ctx},
+            litellm_extra_body={"options": {"num_ctx": req.num_ctx}},
         )
-        if effective_ctx != req.num_ctx:
-            print(f"[OH-Worker] Scaled num_ctx: {req.num_ctx} → {effective_ctx} (complex task)")
 
         # ── Agent with core tools ──
         tools = [
@@ -475,7 +475,12 @@ async def run_task_stream(req: RunRequest):
                 num_retries=2,
                 drop_params=True,
                 native_tool_calling=native_tc,
-                litellm_extra_body={"num_ctx": req.num_ctx},
+                # Pass num_ctx nested under "options" so litellm forwards it to
+                # Ollama's options.num_ctx field. A bare {"num_ctx": ...} lands at
+                # the body's top level, which Ollama silently ignores → it falls
+                # back to the modelfile default (often 131K), blowing VRAM and
+                # tripping the 180s timeout.
+                litellm_extra_body={"options": {"num_ctx": req.num_ctx}},
             )
 
             tools = [
@@ -685,20 +690,6 @@ Only call `finish` after step 2 exits 0 with every expected file present. Callin
     return prompt
 
 
-def _scale_num_ctx(req: RunRequest) -> int:
-    """Scale num_ctx based on task complexity."""
-    base = req.num_ctx
-    task_len = len(req.task) + len(req.context)
-    # Multi-file keywords suggest more context needed
-    complex_keywords = ["multi-file", "full-stack", "microservice", "monorepo",
-                        "database", "authentication", "frontend and backend",
-                        "react", "vue", "angular", "django", "flask", "express"]
-    is_complex = any(kw in req.task.lower() for kw in complex_keywords)
-    if is_complex or task_len > 2000:
-        return max(base, 32768)
-    elif task_len > 1000:
-        return max(base, 24576)
-    return base
 
 
 def _parse_event(event) -> dict | None:

@@ -191,6 +191,12 @@ async def lifespan(app: FastAPI):
     if "openhands_max_rounds" in _settings:
         config.OPENHANDS_MAX_ROUNDS = int(_settings["openhands_max_rounds"])
         print(f"[Config] Loaded OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
+    if "default_num_ctx" in _settings:
+        # Single knob the user controls. Drives the chat-side fallback in chat.py and
+        # every internal LLM call (plan_project, critic) — so increasing the chat ctx
+        # in Settings doesn't get silently capped by a hardcoded 16K downstream.
+        config.DEFAULT_NUM_CTX = int(_settings["default_num_ctx"])
+        print(f"[Config] Loaded default num_ctx: {config.DEFAULT_NUM_CTX}")
     # Run cleanup once on startup to clear any stale files
     _run_cleanup_sync()
     # Start background cleanup loop
@@ -2741,6 +2747,7 @@ async def get_app_settings():
         "openhands_enabled": config.OPENHANDS_ENABLED,
         "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
         "openhands_num_ctx": config.OPENHANDS_NUM_CTX,
+        "default_num_ctx": config.DEFAULT_NUM_CTX,
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
         "sandbox_size_bytes": size,
@@ -2752,7 +2759,7 @@ async def get_app_settings():
 @app.patch("/api/settings")
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
-    allowed = {"file_cleanup_days", "ollama_url", "rag", "planning_model", "coder_model", "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx"}
+    allowed = {"file_cleanup_days", "ollama_url", "rag", "planning_model", "coder_model", "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx", "default_num_ctx"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
@@ -2786,6 +2793,9 @@ async def update_app_settings(body: dict = Body(...)):
     if "openhands_num_ctx" in body:
         config.OPENHANDS_NUM_CTX = int(body["openhands_num_ctx"])
         print(f"[Config] OpenHands num_ctx: {config.OPENHANDS_NUM_CTX}")
+    if "default_num_ctx" in body:
+        config.DEFAULT_NUM_CTX = int(body["default_num_ctx"])
+        print(f"[Config] Default num_ctx: {config.DEFAULT_NUM_CTX}")
     save_settings(settings)
     return {**settings, "current_ollama_url": config.OLLAMA_URL, "current_planning_model": config.PLANNING_MODEL, "current_coder_model": config.CODER_MODEL}
 

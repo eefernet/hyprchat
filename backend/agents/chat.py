@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import traceback
 import urllib.parse
 
 import config
@@ -762,6 +763,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                             async for _ol in resp.aiter_lines():
                                 await _line_q.put(_ol)
                         except Exception as _drain_err:
+                            print(f"[CHAT]   drain_ollama exception: {type(_drain_err).__name__}: {_drain_err!r}")
                             await _line_q.put(("__error__", _drain_err))
                         finally:
                             await _line_q.put(_SENTINEL)
@@ -941,14 +943,22 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                             pass
 
         except Exception as e:
-            err_msg = str(e) or "Connection failed or timeout"
+            # Log the actual cause — previously this catch silently emitted str(e) to the
+            # client, leaving the journal blank when Ollama streams died in unexpected ways.
+            print(f"[CHAT]   Round {round_num} exception: {type(e).__name__}: {e!r}")
+            traceback.print_exc()
+            err_msg = str(e) or f"{type(e).__name__} (no message)"
+            err_lower = err_msg.lower()
             # Provide clearer error messages for common failures
-            if "peer closed" in err_msg.lower() or "incomplete chunked" in err_msg.lower():
+            if "peer closed" in err_lower or "incomplete chunked" in err_lower:
                 err_msg = (f"Ollama connection dropped while streaming model '{req.model}'. "
                            f"This usually means the model is too large for available GPU memory (VRAM). "
                            f"Try a smaller model or reduce num_ctx. Original: {err_msg[:200]}")
-            elif "timeout" in err_msg.lower() or "timed out" in err_msg.lower():
+            elif "timeout" in err_lower or "timed out" in err_lower:
                 err_msg = f"Ollama request timed out for model '{req.model}'. The model may be too slow or overloaded. {err_msg[:200]}"
+            elif "input stream" in err_lower or "failed to load" in err_lower or "ggml" in err_lower:
+                err_msg = (f"Model '{req.model}' failed mid-stream — it may be corrupt or hit a context-buffer issue. "
+                           f"Try `ollama stop {req.model}` and retry, or reduce num_ctx. Original: {err_msg[:200]}")
             await events.emit(conv_id, "error", {"status": f"Ollama: {err_msg[:200]}"})
             yield f"data: {json.dumps({'type': 'error', 'error': err_msg})}\n\n"
             return
