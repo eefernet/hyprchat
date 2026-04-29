@@ -1777,33 +1777,12 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 })
                 print(f"[CODEGEN:OH] Done: {len(files)} files in {duration}s, project_dir={project_dir}, project_id={_project_id}")
 
-                # Auto-package project for download
+                # Auto-packaging removed — the chat agent typically keeps working past
+                # generate_code (filling in missing files, fixing critic-flagged bugs, etc.),
+                # so a tarball produced here was almost always stale by the time the user
+                # downloaded it. The agent must now call download_project / download_file
+                # explicitly once the project is verified complete.
                 download_result = ""
-                if files:
-                    try:
-                        if len(files) == 1:
-                            # Single file — use download_file
-                            await events.emit(conv_id, "tool_start", {
-                                "tool": "download_file", "icon": "code",
-                                "status": f"Preparing: {files[0]}",
-                            })
-                            download_result = await exec_tool(
-                                http, events, "download_file",
-                                {"path": files[0]}, conv_id, {}, conv_model=conv_model
-                            )
-                        else:
-                            # Multi-file — package as tar.gz
-                            await events.emit(conv_id, "tool_start", {
-                                "tool": "download_project", "icon": "package",
-                                "status": "Packaging project for download...",
-                            })
-                            download_result = await exec_tool(
-                                http, events, "download_project",
-                                {"directory": project_dir}, conv_id, {}, conv_model=conv_model
-                            )
-                        print(f"[CODEGEN:OH] Auto-download: {download_result[:100]}")
-                    except Exception as dl_e:
-                        print(f"[CODEGEN:OH] Auto-download failed: {dl_e}")
 
                 # Format progress steps from OpenHands
                 steps = result.get("steps", [])
@@ -1864,6 +1843,50 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                         if review_parts:
                             code_review = "\n\n".join(review_parts)
 
+                # ── Plan-vs-actual undershoot check ──
+                # If the task description listed expected files and the agent created
+                # significantly fewer, flag the result as INCOMPLETE so the chat agent
+                # fixes it before delivering. Catches coder models that call `finish` early.
+                undershoot_warning = ""
+                _expected_files = []
+                try:
+                    # Parse task body for filenames in "File structure:" / "- foo.java" / "├── foo.java" patterns
+                    _task_text = task or ""
+                    # Match basenames with common code extensions in list-like positions.
+                    _ext_re = r"\.(?:java|py|js|ts|tsx|jsx|go|rs|c|cpp|h|hpp|rb|php|cs|kt|swift|html|css|sql|sh|toml|yaml|yml|json|md|xml)"
+                    _name_re = re.compile(
+                        r"(?:^|[\s├└│─\-\*•])([A-Za-z][\w\-]*" + _ext_re + r")\b",
+                        re.MULTILINE,
+                    )
+                    for _m in _name_re.finditer(_task_text):
+                        _fn = _m.group(1)
+                        if _fn not in _expected_files:
+                            _expected_files.append(_fn)
+                except Exception as _ef_e:
+                    print(f"[CODEGEN:OH] Expected-file parse failed (non-fatal): {_ef_e}")
+
+                if _expected_files:
+                    _actual_basenames = {(f.rsplit("/", 1)[-1] if "/" in f else f) for f in (files or [])}
+                    _missing = [n for n in _expected_files if n not in _actual_basenames]
+                    _present = len(_expected_files) - len(_missing)
+                    print(f"[CODEGEN:OH] Manifest check: {_present}/{len(_expected_files)} expected files present, missing={_missing[:8]}")
+                    # Trigger if any of: <50% present, or 3+ missing files
+                    if _expected_files and (_present / len(_expected_files) < 0.5 or len(_missing) >= 3):
+                        undershoot_warning = (
+                            f"⚠ INCOMPLETE: agent created {_present}/{len(_expected_files)} expected files. "
+                            f"Missing: {', '.join(_missing[:12])}{'…' if len(_missing) > 12 else ''}. "
+                            f"DO NOT deliver the project to the user yet. Either: "
+                            f"(a) call generate_code again with project_id='{_project_id}' and a task that "
+                            f"explicitly lists ONLY the missing files to create, or "
+                            f"(b) write each missing file directly with write_file. "
+                            f"After all expected files exist, re-verify with run_shell (e.g. compile/parse) "
+                            f"before download_project."
+                        )
+                        await events.emit(conv_id, "tool_progress", {
+                            "tool": "generate_code", "icon": "wand",
+                            "status": f"⚠ Agent undershot: {_present}/{len(_expected_files)} files",
+                        })
+
                 # ── Independent critic pass: catch runtime bugs that pass syntax/compile checks ──
                 # Uses a separate model from the coder so it can't rationalize its own mistakes.
                 critique = ""
@@ -1909,7 +1932,7 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                                 "stream": False,
                                 "options": {"temperature": 0.2, "num_ctx": 16384},
                             },
-                            timeout=180,
+                            timeout=600,
                         )
                         if cr.status_code == 200:
                             critique = cr.json().get("message", {}).get("content", "").strip()
@@ -1922,20 +1945,31 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                                 "detail": json.dumps({"method": "code_review", "args": {"reviewer": critic_model}, "result": critique[:4000]}),
                             })
                         else:
-                            print(f"[CODEGEN:CRITIC] Critic call failed HTTP {cr.status_code}")
+                            print(f"[CODEGEN:CRITIC] Critic call failed HTTP {cr.status_code}: {cr.text[:200]}")
+                            await events.emit(conv_id, "tool_progress", {
+                                "tool": "generate_code", "icon": "wand",
+                                "status": f"⚠ Critic skipped (HTTP {cr.status_code})",
+                            })
                     except Exception as critic_e:
-                        print(f"[CODEGEN:CRITIC] Critic call failed: {critic_e}")
+                        print(f"[CODEGEN:CRITIC] Critic call failed ({type(critic_e).__name__}): {critic_e}")
+                        await events.emit(conv_id, "tool_progress", {
+                            "tool": "generate_code", "icon": "wand",
+                            "status": f"⚠ Critic skipped ({type(critic_e).__name__})",
+                        })
 
                 if files:
+                    _status_word = "INCOMPLETE" if undershoot_warning else "COMPLETE"
                     resp = (
-                        f"PROJECT COMPLETE. OpenHands agent built the project "
+                        f"PROJECT {_status_word}. OpenHands agent ran "
                         f"(model: {coder_model}, {duration}s, {len(steps)} steps, project_id: {_project_id}).\n\n"
                         f"**Files created ({len(files)}):**\n{file_list}\n"
                     )
+                    if undershoot_warning:
+                        resp += f"\n{undershoot_warning}\n"
                     if steps_summary:
                         resp += f"\n**Agent activity (last steps):**\n{steps_summary}\n"
-                    if download_result and "Download" in download_result:
-                        resp += f"\n{download_result}\n"
+                    # download_result is intentionally always empty now — see comment near line 1780.
+                    # The chat agent is expected to call download_project explicitly after verification.
                     if summary:
                         resp += f"\n**Agent summary:** {summary[:300]}\n"
                     if code_review:
@@ -1956,11 +1990,14 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                         f"fulfills the user's request — not just scaffolding/boilerplate. "
                         f"If the output is incomplete or doesn't match what was asked, call "
                         f"generate_code again with project_id='{_project_id}' and a MORE DETAILED "
-                        f"task description explaining exactly what's wrong and what to fix.\n"
-                        f"If the output looks good AND the reviewer found no issues (or all issues are fixed), respond to the user with:\n"
-                        f"1. What was built and its features\n"
-                        f"2. The download link\n"
-                        f"3. How to run it locally\n"
+                        f"task description explaining exactly what's wrong and what to fix.\n\n"
+                        f"## DELIVERY (REQUIRED — no auto-download)\n"
+                        f"NO tarball has been packaged yet. When (and only when) the project is verified complete:\n"
+                        f"1. Make sure all expected files exist and any reviewer-flagged issues are fixed.\n"
+                        f"2. Verify it builds/runs (e.g. `mvn compile`, `python -c 'import ...'`, etc.) via run_shell.\n"
+                        f"3. Call download_project(directory='{project_dir}') to package the FINAL sandbox state.\n"
+                        f"4. THEN respond to the user with: what was built, the download link returned by step 3, and how to run it locally.\n"
+                        f"Calling download_project before the project is complete will deliver a broken project.\n"
                     )
                     # Save project metadata to DB for resume_project
                     try:

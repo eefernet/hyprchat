@@ -118,6 +118,60 @@ def _persist_tool_cache():
         print(f"[OH-Worker] Failed to persist tool cache: {e}")
 
 
+def _ensure_loaded(ollama_base: str, model: str, num_ctx: int) -> None:
+    """Force-load `model` into Ollama's VRAM with exactly `num_ctx` context.
+
+    Why this exists: litellm's ollama_chat provider doesn't reliably forward
+    options.num_ctx, and once Ollama has a model loaded with one num_ctx, it
+    keeps that loaded instance for subsequent requests regardless of what they
+    ask for. To make the user-set num_ctx authoritative, we evict any existing
+    load with the wrong context and preload with the desired value before the
+    agent run starts. Best-effort — failures don't block the run.
+    """
+    import requests
+
+    try:
+        ps = requests.get(f"{ollama_base}/api/ps", timeout=5).json()
+        for m in (ps.get("models") or []):
+            if m.get("name") == model:
+                cur = m.get("context_length")
+                if cur == num_ctx:
+                    print(f"[OH-Worker] {model} already loaded at num_ctx={num_ctx}, skipping preload")
+                    return
+                print(f"[OH-Worker] {model} loaded at num_ctx={cur}, evicting to reload at {num_ctx}")
+                break
+    except Exception as e:
+        print(f"[OH-Worker] _ensure_loaded ps check failed (non-fatal): {e}")
+
+    # Evict (best-effort) so the next load picks up the new num_ctx.
+    try:
+        requests.post(
+            f"{ollama_base}/api/generate",
+            json={"model": model, "keep_alive": 0},
+            timeout=30,
+        )
+    except Exception as e:
+        print(f"[OH-Worker] _ensure_loaded evict failed (non-fatal): {e}")
+
+    # Preload with empty prompt + the user's num_ctx. This is what binds the
+    # loaded instance to the requested context — Ollama caches options on first
+    # load. Empty prompt makes this nearly free aside from the model swap.
+    try:
+        requests.post(
+            f"{ollama_base}/api/generate",
+            json={
+                "model": model,
+                "prompt": "",
+                "options": {"num_ctx": num_ctx},
+                "keep_alive": "10m",
+            },
+            timeout=180,
+        )
+        print(f"[OH-Worker] Preloaded {model} at num_ctx={num_ctx}")
+    except Exception as e:
+        print(f"[OH-Worker] _ensure_loaded preload failed (non-fatal): {e}")
+
+
 def _check_tool_support(ollama_base: str, model: str) -> bool:
     """Check if an Ollama model actually returns structured tool_calls.
 
@@ -208,6 +262,8 @@ def run_task(req: RunRequest):
 
         # ── LLM config (scale context for complex tasks) ──
         effective_ctx = _scale_num_ctx(req)
+        # Force the loaded instance to match effective_ctx — user setting wins.
+        _ensure_loaded(ollama_base, req.model, effective_ctx)
         llm = _LLM(
             model=f"ollama_chat/{req.model}",
             api_key="ollama",
@@ -406,6 +462,9 @@ async def run_task_stream(req: RunRequest):
         try:
             ollama_base = req.ollama_url.rstrip("/")
             native_tc = _check_tool_support(ollama_base, req.model)
+            # Force the loaded instance to match req.num_ctx — user setting wins
+            # over Modelfile defaults and over whatever litellm forwards (or fails to forward).
+            _ensure_loaded(ollama_base, req.model, req.num_ctx)
 
             llm = _LLM(
                 model=f"ollama_chat/{req.model}",
@@ -611,14 +670,16 @@ IMPORTANT: ALL files MUST be created inside `{work_dir}`. Do NOT create files in
 ## TASK
 {req.task}
 
-## VERIFICATION
-After writing all code:
-1. **Syntax check**: {verify_cmd}
-2. **Fix errors**: If the check fails, fix the code and re-check.
-3. **Dependencies**: Make sure all imports reference real libraries or files you created.
-4. **Git**: Initialize a git repo with `git init && git add -A && git commit -m 'Initial commit'` after the project works.
+## VERIFICATION (REQUIRED BEFORE finish)
+You MUST complete every step before calling `finish`. `finish` is a gate, not a goal.
 
-Call `finish` once the code compiles/parses without errors.
+1. **Inventory**: Run `ls -R {work_dir}` and confirm every file mentioned in the TASK above exists. If the TASK lists a file structure, EVERY file in that list must be present. Missing any → you are not done.
+2. **Compile / parse**: {verify_cmd}
+3. **Resolve missing references**: If step 2 fails because a referenced class, module, function, type, or import does not exist, you MUST create the missing file(s) with their full contents and re-run step 2. Do NOT stub them out, do NOT call `finish` with unresolved references.
+4. **Dependencies**: Make sure imports reference real libraries (declared in pom.xml/package.json/requirements.txt etc.) or files you created.
+5. **Git**: `git init && git add -A && git commit -m 'Initial commit'` after the project compiles.
+
+Only call `finish` after step 2 exits 0 with every expected file present. Calling `finish` early — with compile errors, missing files, or unresolved references — counts as task failure.
 """
 
     return prompt

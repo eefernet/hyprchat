@@ -2162,7 +2162,7 @@ function HyprChat(){
             else if(d.type==="refinement_start"){full="";refinementsCount=d.round||refinementsCount;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});const _refEv={type:"tool_start",data:{tool:"refinement",status:`Refining answer (${d.round}/${d.total})...`,icon:"sparkles",round:d.round,total:d.total},timestamp:Date.now()/1000};streamSaveEvtsRef.current.push(_refEv);setEvts(p=>[...p.slice(-200),_refEv]);}
             else if(d.type==="done"){setTokS(d.speed);if(d.gen_tokens||d.tokens)setSessionTokens(p=>p+((d.gen_tokens||d.tokens)||0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens){setGenTokens(d.gen_tokens);setTokC(d.gen_tokens);}if(d.refinements)refinementsCount=d.refinements;}
             else if(d.type==="ctx_update"){if(d.gen_tokens)setTokC(d.gen_tokens);if(d.prompt_tokens)setCtxTokens(d.prompt_tokens);}
-            else if(d.type==="error"){full=`\`\`\`\n⚠ ${d.error}\n\`\`\``;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:false};return{...c,messages:m};});}
+            else if(d.type==="error"){const _errBlock=(full?"\n\n":"")+"```\n⚠ "+d.error+"\n```";full=full+_errBlock;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:false};return{...c,messages:m};});}
           }catch{}}
       }
       // Capture relevant events into metadata for persistence (tool status + search results + source links)

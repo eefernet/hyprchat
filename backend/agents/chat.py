@@ -726,6 +726,19 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                             yield f"data: {json.dumps({'type': 'error', 'error': error_body[:300]})}\n\n"
                             return
                     else:
+                        err_lower = error_body.lower()
+                        print(f"[CHAT] Ollama HTTP {resp.status_code}: {error_body[:300]}")
+                        # Mirror the corrupt-model classification from the stream-chunk path —
+                        # Ollama can surface the same conditions either inline or as an HTTP error body.
+                        if any(s in err_lower for s in ("input stream", "failed to load", "invalid model", "ggml", "unexpected eof")):
+                            _corrupt_msg = (
+                                f"Model '{req.model}' failed to load — it may be corrupt, incomplete, "
+                                f"or hit a context-buffer issue. Try `ollama stop {req.model}` and retry, "
+                                f"or reduce num_ctx."
+                            )
+                            await events.emit(conv_id, "tool_end", {"tool": "processing", "status": _corrupt_msg, "icon": "alert"})
+                            yield f"data: {json.dumps({'type': 'error', 'error': _corrupt_msg})}\n\n"
+                            return
                         await events.emit(conv_id, "error", {"status": f"Ollama HTTP {resp.status_code}"})
                         yield f"data: {json.dumps({'type': 'error', 'error': error_body[:300]})}\n\n"
                         return
