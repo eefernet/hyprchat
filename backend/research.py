@@ -57,11 +57,14 @@ async def _search_google_fallback(http, query: str, count: int = 10) -> list:
         return []
 
 
-async def _search_searxng(http, searxng_url: str, query: str, count: int = 10, categories: str = "general") -> list:
+async def _search_searxng(http, searxng_url: str, query: str, count: int = 10, categories: str = "general", safesearch: str | None = None) -> list:
     """Search SearXNG and return structured results. Falls back to Google scrape if SearXNG returns nothing."""
     results = []
     try:
-        params = urllib.parse.urlencode({"q": query, "format": "json", "language": "en", "categories": categories})
+        _params = {"q": query, "format": "json", "language": "en", "categories": categories}
+        if safesearch is not None:
+            _params["safesearch"] = safesearch
+        params = urllib.parse.urlencode(_params)
         r = await http.get(f"{searxng_url}/search?{params}", timeout=12)
         if r.status_code == 429:
             await asyncio.sleep(3.0)

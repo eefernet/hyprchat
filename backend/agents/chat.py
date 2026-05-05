@@ -15,6 +15,7 @@ import database as db
 import rag
 from tools import CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls, strip_tool_calls
 from events import inject_text_tool_prompt, parse_tool_params
+from quick_search import run_quick_search_for_chat
 
 
 # ── Tool-calling templates keyed by model family ──
@@ -518,61 +519,30 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
     print(f"[CHAT]   Tools: {sorted(available_tool_names)}")
 
-    # ── Quick Search: fetch SearXNG results and inject as context ──
+    # ── Quick Search: gate → rewrite → search → rank → fetch → inject ──
     if "quick_search" in req.tool_ids:
-        user_query = ""
-        for m in reversed(req.messages):
-            if m.get("role") == "user" and m.get("content"):
-                user_query = m["content"].strip()[:200]
-                break
-        if user_query:
+        try:
+            qs = await run_quick_search_for_chat(
+                http,
+                config.OLLAMA_URL,
+                config.WORKSPACE_MODEL or config.DEFAULT_MODEL,
+                events, conv_id, messages,
+                default_model=config.DEFAULT_MODEL,
+            )
+            if qs.get("context"):
+                for m in reversed(messages):
+                    if m["role"] == "user":
+                        m["content"] = (m.get("content") or "") + "\n\n" + qs["context"]
+                        break
+        except Exception as e:
+            print(f"[CHAT]   Quick search error: {e}")
             try:
-                await events.emit(conv_id, "tool_start", {
-                    "tool": "quick_search", "status": f"Searching: {user_query[:60]}",
-                    "icon": "search"
-                })
-                params = urllib.parse.urlencode({
-                    "q": user_query, "format": "json",
-                    "language": "en", "safesearch": "0",
-                })
-                r = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=10)
-                data = r.json()
-                results = data.get("results", [])[:6]
-                if results:
-                    search_ctx = "\n\n=== WEB SEARCH RESULTS ===\n"
-                    search_ctx += f"Query: {user_query}\n\n"
-                    for i, item in enumerate(results, 1):
-                        title = item.get("title", "")
-                        url = item.get("url", "")
-                        snippet = item.get("content", "")
-                        search_ctx += f"{i}. **{title}**\n   URL: {url}\n   {snippet}\n\n"
-                    search_ctx += (
-                        "IMPORTANT: Use the search results above to answer the user's question. "
-                        "Summarize the information from these results as if you know it. "
-                        "Do NOT say you lack real-time data or cannot access the internet — "
-                        "these results ARE your real-time data. Cite sources when relevant.\n"
-                    )
-                    # Inject into the last user message so model sees it in context
-                    for m in reversed(messages):
-                        if m["role"] == "user":
-                            m["content"] += search_ctx
-                            break
-                    await events.emit(conv_id, "tool_done", {
-                        "tool": "quick_search", "icon": "search",
-                        "status": f"Found {len(results)} results",
-                    })
-                    print(f"[CHAT]   Quick search: {len(results)} results for {user_query[:60]!r}")
-                else:
-                    await events.emit(conv_id, "tool_done", {
-                        "tool": "quick_search", "icon": "search",
-                        "status": "No results found",
-                    })
-            except Exception as e:
-                print(f"[CHAT]   Quick search error: {e}")
                 await events.emit(conv_id, "tool_done", {
                     "tool": "quick_search", "icon": "alert-circle",
                     "status": f"Search failed: {e}",
                 })
+            except Exception:
+                pass
 
     # Inject visualization hint for non-coder chats that have execute_code + download_file
     _has_full_codeagent = bool(available_tool_names & (CODEAGENT_TOOLS_SET - {"execute_code", "download_file"}))

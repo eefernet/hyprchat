@@ -2793,7 +2793,18 @@ function HyprChat(){
     return text.split(/(`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s"'<>\])\},]+|"[^"\n]{10,}"|<kbd>[^<]+<\/kbd>|rgba?\([^)]+\)|hsla?\([^)]+\)|#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6})\b|[^]+)/g).map((s,k)=>{
       if(!s)return null;
       const imgMatch=s.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
-      if(imgMatch){const[,alt,src]=imgMatch;return <img key={k} src={src} alt={alt||""} style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`}} onError={e=>e.target.style.display="none"}/>;}
+      if(imgMatch){const[,alt,src]=imgMatch;
+        // Force any third-party image URL through our proxy: privacy (no IP/cookies leaked
+        // to NYT/Wikipedia/etc), hotlink bypass (proxy sends domain-matched Referer), and
+        // mixed-content fix. /api/img-proxy URLs and same-origin /api/ URLs pass through.
+        let finalSrc = src;
+        if(/^https?:\/\//i.test(src)){
+          // Decode once if double-encoded (model sometimes encodes %28 → %2528)
+          let raw = src;
+          if(/%25[0-9A-F]{2}/i.test(raw)){try{raw = decodeURIComponent(raw);}catch{}}
+          finalSrc = `${API}/api/img-proxy?u=${encodeURIComponent(raw)}`;
+        }
+        return <img key={k} src={finalSrc} alt={alt||""} referrerPolicy="no-referrer" loading="lazy" style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`}} onError={e=>e.target.style.display="none"}/>;}
       if(s.startsWith("`")&&s.endsWith("`")&&s.length>1)
         return <code key={k} style={{background:`${t.surface}CC`,padding:"1px 5px",borderRadius:3,fontFamily:font,fontSize:"0.88em",color:t.warm}}>{s.slice(1,-1)}</code>;
       if(s.charCodeAt(0)===0xE010){

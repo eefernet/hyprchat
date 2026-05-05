@@ -8,6 +8,7 @@ __pycache__/
 
 # Internal infra inventory — homelab IPs and service map
 CLAUDE.md
+claude.md
 
 # Environment / secrets
 .idea/misc.xml

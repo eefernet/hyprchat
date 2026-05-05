@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException, Query, Body
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -30,6 +30,7 @@ import database as db
 from tools import CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls, strip_tool_calls
 from council import stream_council_chat
 from events import EventBus, parse_tool_params
+import quick_search as qs_module
 from agents.chat import chat_stream_generate, TOOL_TEMPLATES, detect_template_family
 from agents.personas import seed_coder_bot as _seed_coder_bot, seed_coder_bot_v2 as _seed_coder_bot_v2, seed_conspiracy_bot as _seed_conspiracy_bot, seed_based_bot as _seed_based_bot, seed_all_defaults as _seed_all_defaults
 import hf as hf_module
@@ -2678,103 +2679,48 @@ async def council_chat_stream_ep(req: CouncilChatRequest):
 # ============================================================
 # QUICK SEARCH
 # ============================================================
+@app.get("/api/img-proxy")
+async def img_proxy(u: str):
+    """Proxy a remote image so the user's browser never hits the source.
+    Hides user IP/referrer/cookies from third-party servers, bypasses most
+    hotlink protection (we send a domain-matched Referer), and resolves
+    mixed-content warnings for http images on https pages.
+    """
+    parsed = urllib.parse.urlparse(u)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="bad url")
+    try:
+        r = await http.get(
+            u, timeout=8, follow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; image-proxy)",
+                "Accept": "image/*",
+                "Referer": f"{parsed.scheme}://{parsed.netloc}/",
+            },
+        )
+    except Exception:
+        raise HTTPException(status_code=502, detail="fetch failed")
+    ct = r.headers.get("content-type", "")
+    if r.status_code != 200 or not ct.lower().startswith("image/"):
+        raise HTTPException(status_code=404, detail="not found")
+    if len(r.content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="too large")
+    return Response(
+        content=r.content, media_type=ct,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.post("/api/quick-search")
 async def quick_search(req: QuickSearchRequest):
-    """Fast web search via SearXNG — returns structured results with type detection."""
+    """Fast web search via SearXNG — returns structured results with type detection
+    and OG-image enrichment for the frontend carousel. Delegates to the shared
+    helper in `quick_search.py`.
+    """
     try:
-        params = urllib.parse.urlencode({
-            "q": req.query,
-            "format": "json",
-            "language": "en",
-            "time_range": "",
-            "safesearch": "0",
-        })
-        r = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=10)
-        data = r.json()
+        return await qs_module.run_quick_search_for_api(http, req.query, count=req.count)
     except Exception as e:
         return {"results": [], "query": req.query, "error": str(e)}
-
-    results = []
-    for item in data.get("results", [])[:req.count]:
-        url = item.get("url", "")
-        url_lower = url.lower()
-        thumbnail = item.get("thumbnail") or item.get("img_src") or ""
-        result_type = "web"
-
-        if "youtube.com/watch" in url_lower or "youtu.be/" in url_lower:
-            result_type = "youtube"
-            vid_id = None
-            if "youtube.com/watch" in url_lower:
-                qs = url.split("?", 1)[1] if "?" in url else ""
-                for part in qs.split("&"):
-                    if part.startswith("v="):
-                        vid_id = part[2:].split("&")[0]
-                        break
-            elif "youtu.be/" in url_lower:
-                vid_id = url.split("youtu.be/")[1].split("?")[0].split("/")[0]
-            if vid_id:
-                thumbnail = f"https://img.youtube.com/vi/{vid_id}/mqdefault.jpg"
-        elif thumbnail or any(url_lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
-            result_type = "image"
-
-        results.append({
-            "title": item.get("title", ""),
-            "url": url,
-            "snippet": item.get("content", "")[:300],
-            "thumbnail": thumbnail,
-            "engine": item.get("engine", ""),
-            "type": result_type,
-        })
-
-    # ── Fetch OG images for results missing thumbnails (parallel, fast timeout) ──
-    async def _fetch_og_image(idx: int, page_url: str):
-        skip = ["youtube.com", "twitter.com", "x.com", "facebook.com", "instagram.com",
-                "linkedin.com", "tiktok.com", ".pdf"]
-        if any(s in page_url.lower() for s in skip):
-            return idx, ""
-        try:
-            resp = await http.get(page_url, timeout=6, follow_redirects=True,
-                                  headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                                           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                                           "Accept-Language": "en-US,en;q=0.5"})
-            html = resp.text[:30000]  # scan more of the page
-            # Try og:image first, then twitter:image, then generic image meta
-            for pattern in [
-                r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
-                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
-                r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
-                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
-                r'<meta[^>]+name=["\']twitter:image:src["\'][^>]+content=["\']([^"\']+)["\']',
-                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image:src["\']',
-                r'<meta[^>]+property=["\']og:image:secure_url["\'][^>]+content=["\']([^"\']+)["\']',
-                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image:secure_url["\']',
-                r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)["\']',
-            ]:
-                m = re.search(pattern, html, re.IGNORECASE)
-                if m:
-                    img = m.group(1).strip()
-                    if img.startswith("//"):
-                        img = "https:" + img
-                    elif img.startswith("/"):
-                        # Relative URL — resolve against page domain
-                        from urllib.parse import urlparse
-                        parsed = urlparse(page_url)
-                        img = f"{parsed.scheme}://{parsed.netloc}{img}"
-                    if img.startswith("http"):
-                        return idx, img
-            return idx, ""
-        except Exception:
-            return idx, ""
-
-    needs_og = [(i, r["url"]) for i, r in enumerate(results) if not r["thumbnail"] and r["type"] == "web"]
-    if needs_og:
-        tasks = [_fetch_og_image(i, u) for i, u in needs_og[:6]]
-        og_results = await asyncio.gather(*tasks, return_exceptions=True)
-        for res in og_results:
-            if isinstance(res, tuple) and res[1]:
-                results[res[0]]["thumbnail"] = res[1]
-
-    return {"results": results, "query": req.query}
 
 
 # ============================================================
