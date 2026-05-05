@@ -31,7 +31,7 @@ from tools import CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls, strip_tool_
 from council import stream_council_chat
 from events import EventBus, parse_tool_params
 from agents.chat import chat_stream_generate, TOOL_TEMPLATES, detect_template_family
-from agents.personas import seed_coder_bot as _seed_coder_bot, seed_conspiracy_bot as _seed_conspiracy_bot, seed_based_bot as _seed_based_bot, seed_all_defaults as _seed_all_defaults
+from agents.personas import seed_coder_bot as _seed_coder_bot, seed_coder_bot_v2 as _seed_coder_bot_v2, seed_conspiracy_bot as _seed_conspiracy_bot, seed_based_bot as _seed_based_bot, seed_all_defaults as _seed_all_defaults
 import hf as hf_module
 from hf import parse_ollama_progress
 import rag
@@ -688,6 +688,10 @@ async def seed_all_defaults():
 async def seed_coder_bot():
     return await _seed_coder_bot()
 
+@app.post("/api/seed/coder-bot-v2")
+async def seed_coder_bot_v2():
+    return await _seed_coder_bot_v2()
+
 @app.post("/api/seed/conspiracy-bot")
 async def seed_conspiracy_bot():
     return await _seed_conspiracy_bot()
@@ -1270,6 +1274,38 @@ async def event_stream(conversation_id: str):
 
 
 # ============================================================
+# RUNS — Coder Bot v2 durable agent invocations
+# ============================================================
+# Live updates flow through the existing /api/events/{conversation_id} stream;
+# run-tagged events carry a `run_id` field that the frontend filters on.
+# These endpoints exist so the UI can rebuild a run's state on reconnect.
+
+@app.get("/api/runs/{run_id}")
+async def get_run(run_id: str):
+    """Full run state including parsed result_envelope and events_log."""
+    run = await db.get_run(run_id)
+    if not run:
+        raise HTTPException(404, "Run not found")
+    return run
+
+
+@app.get("/api/runs")
+async def list_runs(conversation_id: str = Query(None), project_id: str = Query(None),
+                    limit: int = Query(100)):
+    """List runs filtered by conversation or project. Newest first.
+
+    Exactly one of conversation_id / project_id must be provided.
+    """
+    if conversation_id and project_id:
+        raise HTTPException(400, "Provide only one of conversation_id, project_id")
+    if conversation_id:
+        return await db.get_runs_by_conversation(conversation_id, limit=limit)
+    if project_id:
+        return await db.get_runs_by_project(project_id, limit=limit)
+    raise HTTPException(400, "conversation_id or project_id is required")
+
+
+# ============================================================
 # CONVERSATIONS
 # ============================================================
 @app.post("/api/conversations")
@@ -1350,8 +1386,22 @@ async def add_message(conv_id: str, request: Request):
                 pass
     if not role or content is None:
         raise HTTPException(400, "role and content are required")
-    await db.add_message(conv_id, role, content, metadata=meta)
-    return {"status": "added"}
+    msg_id = await db.add_message(conv_id, role, content, metadata=meta)
+    return {"status": "added", "message_id": msg_id}
+
+
+@app.patch("/api/conversations/{conv_id}/messages/{msg_id}")
+async def update_message(conv_id: str, msg_id: int, body: dict = Body(...)):
+    """Update content and/or metadata of an existing message. Used by the frontend's
+    stream-complete handler to finalize a message the chat agent created at stream-start —
+    keeps the row count to one per assistant turn even if the chat agent already persisted
+    progressive snapshots from the server side."""
+    content = body.get("content")
+    meta = body.get("metadata")
+    if content is None and meta is None:
+        raise HTTPException(400, "content or metadata required")
+    await db.update_message(msg_id, content=content, metadata=meta)
+    return {"status": "updated"}
 
 
 @app.delete("/api/conversations/{conv_id}/messages/{msg_id}")

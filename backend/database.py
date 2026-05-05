@@ -202,6 +202,26 @@ CREATE TABLE IF NOT EXISTS coding_projects (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_coding_projects_conv ON coding_projects(conversation_id);
+
+-- Coder Bot v2: durable agent runs. One row per agent invocation
+-- (architect / builder.* / reviewer / fixer / qa / generate_code wrapper).
+-- Survives browser disconnects; UI re-renders from this table.
+CREATE TABLE IF NOT EXISTS runs (
+    id              TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    role            TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'queued',
+    project_id      TEXT DEFAULT '',
+    parent_run_id   TEXT DEFAULT '',
+    started_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ended_at        TIMESTAMP,
+    result_envelope TEXT DEFAULT '{}',
+    events_log      TEXT DEFAULT '[]',
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_runs_conv    ON runs(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
+CREATE INDEX IF NOT EXISTS idx_runs_parent  ON runs(parent_run_id);
 """
 
 
@@ -500,17 +520,44 @@ async def delete_conversation(id: str):
         await db.close()
 
 
-async def add_message(conversation_id: str, role: str, content: str, metadata: dict = None):
+async def add_message(conversation_id: str, role: str, content: str, metadata: dict = None) -> int:
+    """Insert a new message; return its auto-generated id so callers can update it later
+    (e.g. chat agent persisting the assistant message progressively as rounds complete)."""
     db = await get_db()
     try:
-        await db.execute(
+        cur = await db.execute(
             "INSERT INTO messages (conversation_id, role, content, metadata) VALUES (?, ?, ?, ?)",
             (conversation_id, role, content, json.dumps(metadata or {}))
         )
+        new_id = cur.lastrowid
         await db.execute(
             "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (conversation_id,)
         )
+        await db.commit()
+        return new_id
+    finally:
+        await db.close()
+
+
+async def update_message(message_id: int, *, content: str = None, metadata: dict = None) -> None:
+    """Update content and/or metadata of an existing message. Used by the chat agent to
+    save its assistant message progressively at round boundaries — so a mid-stream
+    disconnect leaves a recoverable message in the conversation."""
+    sets = []
+    vals = []
+    if content is not None:
+        sets.append("content=?")
+        vals.append(content)
+    if metadata is not None:
+        sets.append("metadata=?")
+        vals.append(json.dumps(metadata))
+    if not sets:
+        return
+    vals.append(message_id)
+    db = await get_db()
+    try:
+        await db.execute(f"UPDATE messages SET {', '.join(sets)} WHERE id=?", tuple(vals))
         await db.commit()
     finally:
         await db.close()
@@ -1373,5 +1420,136 @@ async def get_coding_project(project_id: str):
         except (json.JSONDecodeError, TypeError):
             p["file_manifest"] = []
         return p
+    finally:
+        await db.close()
+
+
+# ============================================================
+# RUNS — Coder Bot v2 durable agent invocations
+# ============================================================
+
+def _row_to_run(row) -> dict:
+    """Decode a runs row into a dict, parsing JSON columns."""
+    r = dict(row)
+    try:
+        r["result_envelope"] = json.loads(r.get("result_envelope") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        r["result_envelope"] = {}
+    try:
+        r["events_log"] = json.loads(r.get("events_log") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        r["events_log"] = []
+    return r
+
+
+async def create_run(run_id: str, conversation_id: str, role: str,
+                     project_id: str = "", parent_run_id: str = "",
+                     status: str = "queued") -> None:
+    """Create a new run row. Status defaults to 'queued'; caller transitions to 'running' when it starts."""
+    db = await get_db()
+    try:
+        now = datetime.utcnow().isoformat()
+        await db.execute(
+            "INSERT INTO runs(id, conversation_id, role, status, project_id, parent_run_id, "
+            "started_at, result_envelope, events_log) VALUES(?,?,?,?,?,?,?,?,?)",
+            (run_id, conversation_id, role, status, project_id or "", parent_run_id or "",
+             now, "{}", "[]")
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def update_run(run_id: str, *, status: str = None, result_envelope: dict = None,
+                     ended: bool = False) -> None:
+    """Update status and/or result envelope on an existing run.
+
+    `ended=True` stamps `ended_at` to now (use when transitioning to a terminal status).
+    """
+    sets = []
+    vals = []
+    if status is not None:
+        sets.append("status=?")
+        vals.append(status)
+    if result_envelope is not None:
+        sets.append("result_envelope=?")
+        vals.append(json.dumps(result_envelope))
+    if ended:
+        sets.append("ended_at=?")
+        vals.append(datetime.utcnow().isoformat())
+    if not sets:
+        return
+    vals.append(run_id)
+    db = await get_db()
+    try:
+        await db.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id=?", tuple(vals))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def append_run_event(run_id: str, event: dict) -> None:
+    """Append a structured event to a run's events_log (JSON array, append-only).
+
+    Reads the current events_log, appends, writes back. Concurrent appends to the
+    same run are not expected (one writer per run by design); if that ever changes,
+    move to a separate run_events table.
+    """
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT events_log FROM runs WHERE id=?", (run_id,))
+        if not rows:
+            return
+        try:
+            log = json.loads(rows[0]["events_log"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            log = []
+        # Stamp the event with a server-side timestamp so order is reliable
+        # even when callers don't pass one.
+        if "ts" not in event:
+            event = {**event, "ts": datetime.utcnow().isoformat()}
+        log.append(event)
+        await db.execute("UPDATE runs SET events_log=? WHERE id=?",
+                         (json.dumps(log), run_id))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_run(run_id: str) -> dict | None:
+    """Return a single run with parsed result_envelope and events_log."""
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT * FROM runs WHERE id=?", (run_id,))
+        if not rows:
+            return None
+        return _row_to_run(rows[0])
+    finally:
+        await db.close()
+
+
+async def get_runs_by_conversation(conversation_id: str, limit: int = 100) -> list[dict]:
+    """All runs for a conversation, newest first. Used by the frontend on reconnect
+    to rebuild the run cards under each message."""
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM runs WHERE conversation_id=? ORDER BY started_at DESC LIMIT ?",
+            (conversation_id, limit)
+        )
+        return [_row_to_run(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def get_runs_by_project(project_id: str, limit: int = 50) -> list[dict]:
+    """All runs that touched a given project, newest first."""
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM runs WHERE project_id=? ORDER BY started_at DESC LIMIT ?",
+            (project_id, limit)
+        )
+        return [_row_to_run(r) for r in rows]
     finally:
         await db.close()

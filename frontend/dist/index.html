@@ -524,6 +524,110 @@ const PlanPanel = ({plan,t,streaming,md,onCopy})=>{
   </div>;
 };
 
+// Coder Bot v2 — durable run card. Reads a `runs` row by id, subscribes to
+// run-tagged live events from the parent's events stream, and renders
+// status + collapsible event timeline. Survives browser disconnects: on mount
+// it fetches /api/runs/{runId} so the timeline rebuilds even if the SSE chat
+// stream dropped while the agent was still running.
+const RunCard = ({runId, liveEvts, t, font})=>{
+  const [run, setRun] = useState(null);
+  const [expanded, setExpanded] = useState(false);
+  const [err, setErr] = useState(null);
+  // Initial fetch + when run terminal status changes, refetch for envelope.
+  useEffect(()=>{
+    if(!runId) return;
+    let cancelled = false;
+    const load = async ()=>{
+      try{
+        const r = await fetch(`${API}/api/runs/${runId}`);
+        if(!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if(!cancelled) setRun(d);
+      }catch(e){if(!cancelled) setErr(e.message||"load failed");}
+    };
+    load();
+    // Light poll while the run is still in flight — covers reconnect mid-run
+    // when liveEvts haven't yet filled in. Stops as soon as we see a terminal status.
+    const id = setInterval(()=>{
+      setRun(cur=>{
+        if(cur && (cur.status==="succeeded"||cur.status==="failed"||cur.status==="partial")){clearInterval(id);return cur;}
+        load(); return cur;
+      });
+    }, 4000);
+    return ()=>{cancelled=true; clearInterval(id);};
+  },[runId]);
+  // Merge persisted events with live events that arrived for this run after mount.
+  const persistedEvts = run?.events_log || [];
+  const liveForRun = (liveEvts||[]).filter(e=>{
+    const rid = e?.data?.run_id || e?.run_id;
+    return rid && rid===runId && (e.type==="tool_progress"||e.type==="tool_start"||e.type==="step");
+  });
+  // Dedupe live events by step number against persisted log (persisted is ground truth on reconnect).
+  const persistedSteps = new Set(persistedEvts.filter(p=>p.type==="step").map(p=>p.step));
+  const newLive = liveForRun.filter(e=>{
+    const step = e?.data?.step ?? e?.step;
+    return step!==undefined && !persistedSteps.has(step);
+  });
+  const allSteps = [...persistedEvts.filter(p=>p.type==="step"),
+                    ...newLive.map(e=>({type:"step", step:e.data?.step ?? e.step,
+                                        action:e.data?.action ?? e.action,
+                                        detail:e.data?.detail ?? e.detail}))];
+  // Visual status colour
+  const status = run?.status || "loading";
+  const colour = status==="succeeded" ? t.ok :
+                 status==="failed" ? t.err :
+                 status==="partial" ? "#e9a45a" :
+                 t.acc;
+  const statusLabel = {
+    queued:"queued", running:"running…", succeeded:"succeeded",
+    failed:"failed", partial:"partial", loading:"loading…",
+  }[status] || status;
+  const role = run?.role || "builder";
+  const env = run?.result_envelope || {};
+  const filesN = (env.files_written||[]).length;
+  const dur = env.duration_s;
+  const isStreaming = status==="running" || status==="queued";
+  const bc = isStreaming ? `${colour}66` : `${colour}38`;
+  const bg = `${colour}0c`;
+  return <div style={{marginTop:6,marginBottom:6,animation:"fadeIn .3s",borderRadius:10,border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%",boxShadow:isStreaming?`0 0 12px ${colour}22`:"none",transition:"all .3s"}}>
+    <div onClick={()=>setExpanded(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none",animation:isStreaming?"pillGlow 2s ease-in-out infinite":"none"}}>
+      <span style={{fontSize:13,lineHeight:1,animation:isStreaming?"bop 2s ease-in-out infinite":"none"}}>🤖</span>
+      <span style={{fontWeight:700,fontSize:11,color:colour,letterSpacing:.3}}>Run · {role}</span>
+      <span style={{fontSize:10,color:colour,opacity:.7,fontStyle:isStreaming?"italic":"normal"}}>{statusLabel}</span>
+      {filesN>0 && <span style={{fontSize:10,color:t.mut}}>· {filesN} file{filesN===1?"":"s"}</span>}
+      {dur && <span style={{fontSize:10,color:t.mut}}>· {dur}s</span>}
+      {err && <span style={{fontSize:10,color:t.err}}>· {err}</span>}
+      <span style={{fontSize:9,color:colour,opacity:.45,marginLeft:"auto"}}>{expanded?"▴":"▾"}</span>
+    </div>
+    {expanded && <div style={{padding:"8px 12px",fontSize:11,lineHeight:1.55,color:t.dim,maxHeight:320,overflowY:"auto",fontFamily:font}}>
+      {allSteps.length===0 && <div style={{color:t.mut,fontStyle:"italic"}}>No steps recorded yet…</div>}
+      {allSteps.map((s,i)=>(
+        <div key={i} style={{padding:"3px 0",borderBottom:i<allSteps.length-1?`1px solid ${t.brd}12`:"none"}}>
+          <span style={{color:t.mut,marginRight:6}}>#{s.step}</span>
+          <span style={{color:colour,fontWeight:600,marginRight:6}}>{s.action||"?"}</span>
+          <span style={{color:t.dim}}>{(s.detail||"").slice(0,160)}</span>
+        </div>
+      ))}
+      {env.summary && <div style={{marginTop:8,padding:"6px 8px",borderRadius:6,background:`${colour}10`,color:t.dim,fontStyle:"italic"}}>{env.summary}</div>}
+      {env.error && <div style={{marginTop:8,padding:"6px 8px",borderRadius:6,background:`${t.err}10`,color:t.err}}>⚠ {env.error}</div>}
+      {(env.manifest_missing||[]).length>0 && <div style={{marginTop:6,fontSize:10,color:t.mut}}>missing: {(env.manifest_missing||[]).slice(0,8).join(", ")}</div>}
+    </div>}
+  </div>;
+};
+
+// Pluck unique run_ids out of a list of saved/live events. Each is an
+// independent agent invocation that should render its own RunCard.
+const _runIdsFromEvents = (evts)=>{
+  if(!Array.isArray(evts)) return [];
+  const seen = new Set();
+  const out = [];
+  for(const e of evts){
+    const rid = e?.data?.run_id || e?.run_id;
+    if(rid && !seen.has(rid)){seen.add(rid); out.push(rid);}
+  }
+  return out;
+};
+
 // Inline tool status: shows latest pill, expands to show all
 const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical,md})=>{
   const [showAll,setShowAll]=useState(false);
@@ -1794,6 +1898,26 @@ function HyprChat(){
           fetchCouncilSuggestions(full.council_config_id);
         }
       }
+      // Phase 0.6: if a run is still in flight on this conversation (e.g. user closed
+      // the tab mid-stream), restore the streaming UI state so the stop button shows
+      // and the user knows the agent is still working in the background. Skip when
+      // we're already actively streaming this conversation locally.
+      if(streamingCidRef.current!==id){
+        try{
+          const rr = await fetch(`${API}/api/runs?conversation_id=${id}`);
+          if(rr.ok){
+            const runs = await rr.json();
+            const anyRunning = (runs||[]).some(r=>r.status==="running"||r.status==="queued");
+            if(anyRunning && reqId===loadReqRef.current){
+              // No local fetch to abort — set streaming=true so the input bar
+              // shows the stop button. Clicking stop will clear this UI state;
+              // the agent itself continues running on the backend until done.
+              setStreaming(true);
+              streamingCidRef.current = id;
+            }
+          }
+        }catch{}
+      }
     } catch(e) { console.error("Failed to load conversation:", e); }
     if(reqId===loadReqRef.current) setLoadingConv(false);
   }, []);
@@ -2150,6 +2274,11 @@ function HyprChat(){
       if(!res.ok){const errText=await res.text().catch(()=>res.statusText);throw new Error(`HTTP ${res.status}: ${errText}`);}
       const rdr=res.body.getReader(),dec=new TextDecoder();
       let full="",buf="",refinementsCount=0;
+      // Phase 0.6: backend creates the assistant message at stream start and sends
+      // its id via an `init` SSE event. We PATCH this row on stream-complete instead
+      // of POSTing a duplicate, so disconnect-then-reload still leaves exactly one
+      // assistant message per turn.
+      let _streamMsgId=null;
       while(true){
         const{done,value}=await rdr.read();if(done)break;
         buf+=dec.decode(value,{stream:true});
@@ -2157,10 +2286,11 @@ function HyprChat(){
         for(const ln of lines){
           if(!ln.startsWith("data: "))continue;
           try{const d=JSON.parse(ln.slice(6));
-            if(d.type==="token"){full+=d.content;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:true};return{...c,messages:m};});}
+            if(d.type==="init"){_streamMsgId=d.message_id;}
+            else if(d.type==="token"){full+=d.content;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:true};return{...c,messages:m};});}
             else if(d.type==="clear"){full="";uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});}
             else if(d.type==="refinement_start"){full="";refinementsCount=d.round||refinementsCount;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});const _refEv={type:"tool_start",data:{tool:"refinement",status:`Refining answer (${d.round}/${d.total})...`,icon:"sparkles",round:d.round,total:d.total},timestamp:Date.now()/1000};streamSaveEvtsRef.current.push(_refEv);setEvts(p=>[...p.slice(-200),_refEv]);}
-            else if(d.type==="done"){setTokS(d.speed);if(d.gen_tokens||d.tokens)setSessionTokens(p=>p+((d.gen_tokens||d.tokens)||0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens){setGenTokens(d.gen_tokens);setTokC(d.gen_tokens);}if(d.refinements)refinementsCount=d.refinements;}
+            else if(d.type==="done"){if(d.message_id)_streamMsgId=d.message_id;setTokS(d.speed);if(d.gen_tokens||d.tokens)setSessionTokens(p=>p+((d.gen_tokens||d.tokens)||0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens){setGenTokens(d.gen_tokens);setTokC(d.gen_tokens);}if(d.refinements)refinementsCount=d.refinements;}
             else if(d.type==="ctx_update"){if(d.gen_tokens)setTokC(d.gen_tokens);if(d.prompt_tokens)setCtxTokens(d.prompt_tokens);}
             else if(d.type==="error"){const _errBlock=(full?"\n\n":"")+"```\n⚠ "+d.error+"\n```";full=full+_errBlock;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:false};return{...c,messages:m};});}
           }catch{}}
@@ -2169,10 +2299,24 @@ function HyprChat(){
       // Prefer the persistent stream-save buffer, which survives chat switches. Fall back to evtsRef for safety.
       const _rawEvts = streamSaveEvtsRef.current.length > 0 ? streamSaveEvtsRef.current : evtsRef.current;
       const _savedEvts = _rawEvts.filter(e=>["source_links","search_results","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
-      const _msgMeta = (_savedEvts.length || refinementsCount > 0) ? {...(_savedEvts.length?{saved_events:_savedEvts}:{}), ...(refinementsCount>0?{refinements:refinementsCount}:{})} : undefined;
-      uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:false,metadata:_msgMeta||{}};return{...c,messages:m};});
-      // Save assistant message to DB (user message was saved at stream start)
-      fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:full,metadata:_msgMeta})}).catch(()=>{});
+      // Pluck run_ids out of the saved events so the RunCard component can find them
+      // even after a reload (when live evts are gone).
+      const _streamRunIds = _runIdsFromEvents(_savedEvts);
+      const _msgMeta = (_savedEvts.length || refinementsCount > 0 || _streamRunIds.length) ? {
+        ...(_savedEvts.length?{saved_events:_savedEvts}:{}),
+        ...(refinementsCount>0?{refinements:refinementsCount}:{}),
+        ...(_streamRunIds.length?{run_ids:_streamRunIds}:{}),
+        in_progress: false,
+      } : {in_progress: false};
+      uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:false,metadata:_msgMeta};return{...c,messages:m};});
+      // Save final assistant message state to DB. PATCH the row the backend already
+      // created at stream start (preferred — exactly one row per turn). Fall back to
+      // POST for older backends or if init/done didn't include a message_id.
+      if(_streamMsgId){
+        fetch(`${API}/api/conversations/${cid}/messages/${_streamMsgId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:full,metadata:_msgMeta})}).catch(()=>{});
+      }else{
+        fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:full,metadata:_msgMeta})}).catch(()=>{});
+      }
       // Auto-generate title after first exchange
       if(autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const curTitle=cv2?.title||"";if(!curTitle||curTitle==="New Chat"||curTitle===appendUser.slice(0,40))fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
     }catch(e){if(e.name!=="AbortError")uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:`\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false};return{...c,messages:m};});}
@@ -5385,6 +5529,28 @@ function HyprChat(){
                   {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:null;})()}
                   {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:null;})()}
                   {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>;})()}
+                  {/* Coder Bot v2 — durable run cards. Render one card per unique run_id.
+                      Sources, in priority: explicit metadata.run_ids (written server-side at
+                      each round boundary — survives mid-stream reload), then live events
+                      (current message), then saved_events (history). */}
+                  {(()=>{
+                    if(isU) return null;
+                    const msgs = act.messages||[];
+                    const lastAI = msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;
+                    const isLast = i===lastAI;
+                    // Merge run_ids from all three sources, dedup, preserve first-seen order.
+                    const ridsFromMeta = Array.isArray(msg.metadata?.run_ids) ? msg.metadata.run_ids : [];
+                    const ridsFromEvts = _runIdsFromEvents(isLast && evts.length>0 ? evts : (msg.metadata?.saved_events||[]));
+                    const seen = new Set();
+                    const runIds = [];
+                    for(const r of [...ridsFromMeta, ...ridsFromEvts]){
+                      if(r && !seen.has(r)){seen.add(r); runIds.push(r);}
+                    }
+                    if(!runIds.length) return null;
+                    return runIds.map(rid =>
+                      <RunCard key={rid} runId={rid} liveEvts={isLast?evts:[]} t={t} font={font}/>
+                    );
+                  })()}
                   {/* Inline code execution output */}
                   {(()=>{if(isU)return null;const savedEvts=msg.metadata?.saved_events||[];const codeOuts=savedEvts.filter(e=>e.type==="code_output");if(!codeOuts.length)return null;return codeOuts.map((e,ci)=>{const d=e.data||{};const ckey=`${i}-${ci}`;const collapsed=collapsedOutputs.has(ckey);const toggleCollapsed=()=>setCollapsedOutputs(s=>{const n=new Set(s);if(n.has(ckey))n.delete(ckey);else n.add(ckey);return n;});return <div key={ci} style={{margin:"8px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${d.success?`${t.ok}33`:`${t.err}33`}`,background:t.bgDeep}}>
                     <div onClick={toggleCollapsed} title={collapsed?"Show output":"Hide output"} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${d.success?t.ok:t.err}10`,borderBottom:collapsed?"none":`1px solid ${d.success?t.ok:t.err}22`,cursor:"pointer",userSelect:"none"}}>

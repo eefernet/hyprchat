@@ -175,6 +175,27 @@ CODEAGENT_TOOLS = {
             }, "required": ["task", "language"]},
         },
     },
+    "run_review": {
+        "type": "function",
+        "function": {
+            "name": "run_review",
+            "description": "Review a project after generate_code (or after manual changes) by running its real build, test, and lint commands in the sandbox and analysing the output. Returns a structured issue list (compile / test / lint / smell). Use this INSTEAD of manually reading and rewriting files round-by-round — it's faster, more thorough, and produces actionable scoped fixes. Reviewer is read-only — it never edits code.",
+            "parameters": {"type": "object", "properties": {
+                "project_dir": {"type": "string", "description": "Absolute path to the project root in the sandbox, e.g. '/root/projects/pong-game'. If omitted, uses the conversation's active project."},
+                "project_id": {"type": "string", "description": "Optional project_id from a previous generate_code run, used for run-graph linkage."},
+            }, "required": []},
+        },
+    },
+    "run_fixer": {
+        "type": "function",
+        "function": {
+            "name": "run_fixer",
+            "description": "Apply targeted edits for issues identified by run_review. The Fixer reads each issue's fix-scope files, asks a coder LLM for minimal complete-file replacements, and writes the edits back. Use this AFTER run_review returns issues, INSTEAD OF manually reading + writing each file in chat rounds. After run_fixer completes, call run_review AGAIN to verify the fixes worked. Hard cap on fixer cycles: 3.",
+            "parameters": {"type": "object", "properties": {
+                "reviewer_run_id": {"type": "string", "description": "The run_id of the run_review call whose issues you want to fix (e.g. 'run-bd6f9dc7b4e3'). If omitted, the most recent reviewer run on this conversation is used."},
+            }, "required": []},
+        },
+    },
     "search_files": {
         "type": "function",
         "function": {
@@ -624,6 +645,7 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
         "download_project": ["filenames", "project_name"],
         "delete_file": ["path"],
         "plan_project": ["task", "language", "constraints"],
+        "run_review": ["project_dir", "project_id"],
         "search_files": ["pattern", "path", "file_pattern"],
         "diff_files": ["path_a", "path_b"],
         "git_init": ["path", "language"],
@@ -815,6 +837,122 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
     """Execute a built-in or custom tool and return the result string."""
     custom_tool_map = custom_tool_map or {}
     try:
+        # ─── v2 workflow gate (deterministic over persuasion) ───────────────
+        # Two interlocking states gate every non-meta tool call. Both fire
+        # only for v2 personas (detected by model_config.name containing "v2").
+        # v1 stays untouched.
+        #
+        #   State 1 — PENDING REVIEW: a builder or fixer just succeeded but
+        #     no reviewer ran after it. Block everything except run_review.
+        #     This is what stops the v1 antipattern of read_file → write_file
+        #     → javac chains after generate_code.
+        #
+        #   State 2 — PENDING FIX: the most recent run is a reviewer with
+        #     status=issues or status=error. Block everything except
+        #     run_fixer (and run_review, in case the model wants to re-check).
+        #     This is what stops the model from ignoring reviewer findings
+        #     and shipping (or hand-editing one file at a time).
+        if conv_id and name not in ("run_review", "run_fixer"):
+            try:
+                _runs_for_v2_gate = await db.get_runs_by_conversation(conv_id, limit=20)
+                _pending_run = None    # state 1 trigger
+                _pending_kind = ""
+                _pending_review = None  # state 2 trigger
+
+                # Walk newest-first.
+                # Builder/fixer runs in ANY non-trivial state require verification.
+                # `partial` and `stuck` mean the build wrote some files but didn't
+                # finish — the model needs run_review to find out what's there.
+                # `failed` means the build crashed; run_review will fail fast and
+                # tell the model so. Same logic for fixer. Only "queued"/"running"
+                # (in-flight) and unknown statuses are skipped.
+                _BUILDER_GATING = {"succeeded", "partial", "stuck", "failed"}
+                _FIXER_GATING = {"succeeded", "failed", "partial"}
+                for _r in _runs_for_v2_gate:
+                    _role = _r.get("role", "")
+                    if _role == "reviewer":
+                        # Most recent reviewer: state 2 is whether it has issues.
+                        _env_r = _r.get("result_envelope") or {}
+                        _rstatus = (_env_r.get("status") or "").lower()
+                        if _rstatus in ("issues", "error"):
+                            _pending_review = _r
+                        break
+                    if _role.startswith("builder") and _r.get("status") in _BUILDER_GATING:
+                        _pending_run = _r
+                        _pending_kind = "builder"
+                        break
+                    if _role == "fixer" and _r.get("status") in _FIXER_GATING:
+                        _pending_run = _r
+                        _pending_kind = "fixer"
+                        break
+
+                # If neither state triggers, fall through and run normally.
+                _gate_msg = None
+                if _pending_run is not None:
+                    _env = _pending_run.get("result_envelope") or {}
+                    _pd = (_env.get("project_dir") or "").strip()
+                    _pid = _pending_run.get("id", "?")
+                    _why = ("generate_code" if _pending_kind == "builder" else "run_fixer")
+                    _gate_msg = (
+                        "state", "review-needed",
+                        f"BLOCKED — {_why} ({_pid}) just completed but "
+                        f"run_review has not been called yet.\n\n"
+                        f"Your VERY NEXT tool call MUST be:\n"
+                        f"  run_review(project_dir='{_pd}')\n\n"
+                        f"Do not call {name}, read_file, write_file, run_shell, javac, "
+                        f"or any other tool first. The Reviewer runs the project's real "
+                        f"build / tests / lint and tells you exactly what (if anything) "
+                        f"still needs fixing — with file:line references and a fix scope.",
+                        f"⛔ Blocked — call run_review first (after {_why} {_pid[:14]}…)",
+                        _pid,
+                    )
+                elif _pending_review is not None:
+                    _rid = _pending_review.get("id", "?")
+                    _rstatus_disp = (_pending_review.get("result_envelope") or {}).get("status", "?")
+                    _gate_msg = (
+                        "state", "fix-needed",
+                        f"BLOCKED — run_review ({_rid}) returned status='{_rstatus_disp}' "
+                        f"with issues that have not been addressed.\n\n"
+                        f"Your VERY NEXT tool call MUST be:\n"
+                        f"  run_fixer(reviewer_run_id='{_rid}')\n\n"
+                        f"The Fixer reads each issue's fix-scope files, generates targeted "
+                        f"edits via the coder model, and writes them back. Do NOT manually "
+                        f"call read_file / write_file for these issues — that's the v1 "
+                        f"antipattern that burns rounds. After run_fixer completes, call "
+                        f"run_review again to verify.",
+                        f"⛔ Blocked — call run_fixer first (review {_rid[:14]}… has issues)",
+                        _rid,
+                    )
+
+                if _gate_msg is not None:
+                    # Detect v2 persona before actually blocking. v1 has no
+                    # run_review or run_fixer in its workflow.
+                    _is_v2 = False
+                    try:
+                        _conv_row = await db.get_conversation(conv_id)
+                        _mc_id = (_conv_row or {}).get("model_config_id") if _conv_row else None
+                        if _mc_id:
+                            _all_mc = await db.get_model_configs()
+                            _mc = next((m for m in _all_mc if m.get("id") == _mc_id), None)
+                            if _mc and "v2" in (_mc.get("name") or "").lower():
+                                _is_v2 = True
+                    except Exception as _pe:
+                        print(f"[v2-gate] persona lookup failed (non-fatal): {_pe}")
+
+                    if _is_v2:
+                        _, _state_label, _body, _short_status, _trigger_id = _gate_msg
+                        await events.emit(conv_id, "tool_end", {
+                            "tool": name, "icon": "code",
+                            "status": _short_status,
+                        })
+                        print(f"[v2-gate] state={_state_label} blocked tool={name} "
+                              f"trigger={_trigger_id}", flush=True)
+                        return _body
+            except Exception as _gge:
+                # Gate is best-effort — don't crash legitimate work if the
+                # runs/persona lookup fails. Log and proceed.
+                print(f"[v2-gate] gate check failed (non-fatal): {_gge}")
+
         if name == "execute_code":
             code = args.get("code", "")
             language = args.get("language", "python")
@@ -1143,6 +1281,60 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
 
         elif name == "download_project":
             directory = args.get("directory", "/root")
+
+            # Reviewer gate (Coder Bot v2): if the most recent reviewer run on
+            # this conversation reported issues or could not identify the
+            # project, refuse to ship until the orchestrator runs a fixer pass
+            # and re-runs run_review. v1 personas don't produce reviewer runs,
+            # so this is naturally inert for them.
+            if conv_id:
+                try:
+                    _runs_for_gate = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _latest_reviewer = None
+                    for _r in _runs_for_gate:
+                        if _r.get("role") == "reviewer":
+                            _latest_reviewer = _r
+                            break
+                    if _latest_reviewer:
+                        _env = _latest_reviewer.get("result_envelope") or {}
+                        _rstatus = (_env.get("status") or "").lower()
+                        if _rstatus in ("issues", "error"):
+                            issues = _env.get("issues") or []
+                            n = len(issues)
+                            lines = [
+                                f"BLOCKED — last run_review on this project returned status='{_rstatus}'.",
+                                f"Build: `{_env.get('build_cmd','')}` exit={_env.get('build_exit','?')}. "
+                                f"Tests: `{_env.get('test_cmd','')}` exit={_env.get('test_exit','?')}.",
+                                "",
+                                f"You CANNOT call download_project until the project passes review. "
+                                f"Reviewer flagged {n} issue{'s' if n != 1 else ''}:",
+                            ]
+                            for i, iss in enumerate(issues[:5], 1):
+                                lines.append(
+                                    f"  {i}. [{iss.get('severity','?')}] {iss.get('file','?')}"
+                                    + (f":{','.join(str(x) for x in iss.get('lines') or [])}" if iss.get('lines') else "")
+                                    + f" — {iss.get('summary','')}"
+                                )
+                                scope = iss.get("suggested_fix_scope") or []
+                                if scope:
+                                    lines.append(f"     fix scope: {', '.join(scope[:5])}")
+                            lines.append("")
+                            lines.append(
+                                "REQUIRED NEXT STEPS: 1) read each file in 'fix scope', 2) edit it with "
+                                "write_file to address the listed summary, 3) call run_review again. "
+                                "Repeat until run_review returns CLEAN. THEN call download_project."
+                            )
+                            await events.emit(conv_id, "tool_end", {
+                                "tool": "download_project", "icon": "code",
+                                "status": f"⛔ Blocked — last review had {n} issue{'s' if n != 1 else ''}",
+                            })
+                            print(f"[CHAT] download_project blocked: latest reviewer={_latest_reviewer.get('id')} status={_rstatus} issues={n}")
+                            return "\n".join(lines)
+                except Exception as _ge:
+                    # Gate is best-effort — don't crash legitimate downloads if
+                    # the runs query fails. Log and proceed.
+                    print(f"[CHAT] download_project gate check failed (non-fatal): {_ge}")
+
             await events.emit(conv_id, "tool_start", {"tool": "download_project", "icon": "code", "status": f"Packaging: {directory}"})
             dirname = directory.rstrip("/").split("/")[-1] or "project"
             # Clean up auto-generated UUIDs from directory names (project-abc12345 → project)
@@ -1434,6 +1626,162 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             parts.append("\nYou can now continue working on this project. Read any file to see its current state.")
             return "\n".join(parts)
 
+        elif name == "run_review":
+            # Coder Bot v2 — run the Reviewer agent on a project. Returns a structured
+            # issue list the chat agent can react to (instead of doing 28 rounds of
+            # manual file reading + rewriting). The Reviewer is read-only.
+            from agents import reviewer
+            project_dir = (args.get("project_dir") or "").strip()
+            project_id = (args.get("project_id") or "").strip()
+
+            # Preferred lookup: most recent succeeded builder run for this conv.
+            # The builder envelope records the actual workspace path (e.g.
+            # /root/projects/pong) — this is the one that matters. coding_projects
+            # is a less reliable source because openhands_project_id is sometimes
+            # blank when the run finished via a path we don't track.
+            if not project_dir and conv_id:
+                try:
+                    _runs = await db.get_runs_by_conversation(conv_id, limit=20)
+                    for _r in _runs:
+                        if _r.get("role", "").startswith("builder") and _r.get("status") == "succeeded":
+                            _env = _r.get("result_envelope") or {}
+                            _pd = (_env.get("project_dir") or "").strip()
+                            if _pd:
+                                project_dir = _pd
+                                if not project_id:
+                                    project_id = (_env.get("project_id") or "").strip()
+                                print(f"[run_review] resolved project_dir={project_dir} from builder run {_r.get('id')}")
+                                break
+                except Exception as _bre:
+                    print(f"[run_review] builder run lookup failed: {_bre}")
+
+            # Secondary fallback: coding_projects.
+            if not project_dir and conv_id:
+                try:
+                    _active = await db.get_coding_project_by_conv(conv_id)
+                    if _active:
+                        # Active project's working dir on Codebox is /root/projects/{openhands_project_id}
+                        _ohp = _active.get("openhands_project_id") or _active.get("id")
+                        if _ohp:
+                            project_dir = f"/root/projects/{_ohp}"
+                            if not project_id:
+                                project_id = _ohp
+                except Exception as _ape:
+                    print(f"[run_review] active project lookup failed: {_ape}")
+            if not project_dir:
+                return ("ERROR: run_review needs project_dir (e.g. '/root/projects/pong-game') "
+                        "or an active project on this conversation. Pass it explicitly: "
+                        "run_review(project_dir='/root/projects/<name>')")
+
+            envelope = await reviewer.run_review(http, events, conv_id,
+                                                  project_dir=project_dir,
+                                                  project_id=project_id)
+            # Format the envelope as a tool-result string the chat agent can read
+            # without needing to know the JSON schema. Keep it compact.
+            status = envelope.get("status", "?")
+            summary = envelope.get("summary", "")
+            issues = envelope.get("issues") or []
+            reviewer_run_id = envelope.get("run_id", "")
+            if status == "clean":
+                return (f"REVIEW CLEAN. {summary}\n"
+                        f"Build: `{envelope.get('build_cmd','')}` exit={envelope.get('build_exit','?')}. "
+                        f"Tests: `{envelope.get('test_cmd','')}` exit={envelope.get('test_exit','?')}. "
+                        f"Project is ready — package and deliver with download_project.")
+            lines = [f"REVIEW FOUND {len(issues)} ISSUE(S). {summary}",
+                     f"Build: `{envelope.get('build_cmd','')}` exit={envelope.get('build_exit','?')}. "
+                     f"Tests: `{envelope.get('test_cmd','')}` exit={envelope.get('test_exit','?')}.",
+                     f"reviewer_run_id: {reviewer_run_id}",
+                     ""]
+            for i, iss in enumerate(issues, 1):
+                lines.append(f"{i}. [{iss.get('severity','?')}] {iss.get('file','?')}"
+                             + (f":{','.join(str(x) for x in iss.get('lines') or [])}" if iss.get('lines') else "")
+                             + f" — {iss.get('summary','')}")
+                scope = iss.get("suggested_fix_scope") or []
+                if scope:
+                    lines.append(f"   fix scope: {', '.join(scope[:5])}")
+            lines.append("")
+            lines.append(
+                f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
+                f"  run_fixer(reviewer_run_id='{reviewer_run_id}')\n"
+                f"This runs the Fixer agent which reads the fix-scope files, generates "
+                f"targeted edits, and writes them back. AFTER run_fixer returns, call "
+                f"run_review again to verify the project is now CLEAN. Do NOT manually "
+                f"read_file / write_file for these issues — that's the v1 antipattern that "
+                f"burns rounds. Hard cap: 3 review/fix cycles."
+            )
+            return "\n".join(lines)
+
+        elif name == "run_fixer":
+            # Coder Bot v2 Phase 2 — apply targeted edits for issues from a prior
+            # run_review. Stateless agent: reads scope files, generates JSON edits
+            # via the coder model, writes them back. Does not re-run the build —
+            # the chat agent calls run_review again afterwards to verify.
+            from agents import fixer
+            reviewer_run_id = (args.get("reviewer_run_id") or "").strip()
+
+            # If not given, find the most recent reviewer run for this conv.
+            if not reviewer_run_id and conv_id:
+                try:
+                    _runs = await db.get_runs_by_conversation(conv_id, limit=20)
+                    for _r in _runs:
+                        if _r.get("role") == "reviewer":
+                            reviewer_run_id = _r["id"]
+                            print(f"[run_fixer] resolved reviewer_run_id={reviewer_run_id}")
+                            break
+                except Exception as _re:
+                    print(f"[run_fixer] reviewer lookup failed: {_re}")
+
+            if not reviewer_run_id:
+                return ("ERROR: run_fixer needs reviewer_run_id (the run_id from a prior "
+                        "run_review call), and no reviewer run was found on this conversation. "
+                        "Call run_review first.")
+
+            await events.emit(conv_id, "tool_start", {
+                "tool": "run_fixer", "icon": "wrench",
+                "status": f"🛠 Starting Fixer for review {reviewer_run_id[:14]}…",
+            })
+
+            envelope = await fixer.run_fixer(http, events, conv_id,
+                                              reviewer_run_id=reviewer_run_id)
+
+            f_status = envelope.get("status", "?")
+            files = envelope.get("files_touched") or []
+            errors = envelope.get("errors") or []
+            n_issues = envelope.get("issues_addressed", 0)
+
+            if f_status == "applied":
+                lines = [
+                    f"FIXER APPLIED EDITS to {len(files)} file(s) across {n_issues} issue(s).",
+                    "Files touched:",
+                ] + [f"  - {f}" for f in files[:10]]
+                if errors:
+                    lines.append("")
+                    lines.append("Non-fatal errors:")
+                    lines += [f"  - {e}" for e in errors[:5]]
+                lines.append("")
+                lines.append("REQUIRED NEXT TOOL CALL: run_review (no args needed — uses the "
+                             "active project). It will re-run the build/tests and tell you "
+                             "whether the fixes worked.")
+                return "\n".join(lines)
+            elif f_status == "partial":
+                lines = [
+                    f"FIXER PARTIAL: applied {len(files)} edit(s) but {len(errors)} error(s) occurred.",
+                    "Files touched:",
+                ] + [f"  - {f}" for f in files[:10]]
+                lines.append("")
+                lines.append("Errors:")
+                lines += [f"  - {e}" for e in errors[:5]]
+                lines.append("")
+                lines.append("REQUIRED NEXT TOOL CALL: run_review to see the current state of the project.")
+                return "\n".join(lines)
+            elif f_status == "skipped":
+                return f"FIXER SKIPPED: {envelope.get('summary', 'no issues to fix')}."
+            else:
+                err_str = "; ".join(errors[:5]) or envelope.get("summary", "no edits applied")
+                return (f"FIXER FAILED: no edits applied. Reasons: {err_str}\n\n"
+                        f"You may need to fix manually with read_file + write_file (one round per "
+                        f"file), then call run_review to verify.")
+
         elif name == "plan_project":
             task = args.get("task", "")
             language = args.get("language", "python")
@@ -1699,11 +2047,33 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                     "You can still write code directly using write_file + run_shell to test it."
                 )
 
+            # Phase 0: create a durable run row for this generate_code invocation.
+            # Survives browser disconnects; the frontend's RunCard reads this row
+            # by run_id (passed via the tool_start event below) and can rebuild
+            # the build timeline on reconnect even if the SSE chat stream dropped.
+            _run_id = f"run-{uuid.uuid4().hex[:12]}"
+            try:
+                await db.create_run(_run_id, conv_id, role="builder.legacy",
+                                    project_id="", status="running")
+            except Exception as _re:
+                print(f"[RUN] create_run failed (non-fatal): {_re}")
+                _run_id = ""
+
+            async def _finalize_run(status: str, envelope: dict):
+                """Mark the run terminal with the given status + envelope. Safe to no-op."""
+                if not _run_id:
+                    return
+                try:
+                    await db.update_run(_run_id, status=status, result_envelope=envelope, ended=True)
+                except Exception as _fre:
+                    print(f"[RUN] finalize failed (non-fatal): {_fre}")
+
             await events.emit(conv_id, "tool_start", {
                 "tool": "generate_code", "icon": "wand",
                 "status": f"🤖 OpenHands agent building {language} project...",
+                "run_id": _run_id,
             })
-            print(f"[CODEGEN:OH] model={coder_model} lang={language} num_ctx={num_ctx} task={task[:100]!r}")
+            print(f"[CODEGEN:OH] model={coder_model} lang={language} num_ctx={num_ctx} task={task[:100]!r} run_id={_run_id}")
 
             # Auto-resolve project_id: if model didn't pass one, check for an
             # active uploaded project on this conversation so OpenHands works
@@ -1726,7 +2096,23 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 "language": language,
                 "context": context,
                 "project_id": _oh_project_id,
+                # Pass our run_id through so the worker registers the run under
+                # this key. POST /cancel/{run_id} can then abort it cleanly.
+                "run_id": _run_id or "",
             }
+
+            async def _signal_oh_cancel(reason: str):
+                """Best-effort cancel signal to the OpenHands worker."""
+                if not _run_id:
+                    return
+                try:
+                    await http.post(
+                        f"{openhands_url}/cancel/{_run_id}",
+                        timeout=5.0,
+                    )
+                    print(f"[CODEGEN:OH] Cancel signal sent to worker for {_run_id} ({reason})", flush=True)
+                except Exception as ce:
+                    print(f"[CODEGEN:OH] Cancel signal failed for {_run_id}: {ce}", flush=True)
 
             # Action → emoji mapping for progress pills
             _ACTION_ICONS = {
@@ -1743,7 +2129,10 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
             }
             _agent_steps = []  # Accumulate steps for expandable detail
 
-            # Try SSE streaming first, fall back to blocking /run
+            # Try SSE streaming first. Fall back to blocking /run ONLY if the
+            # connect failed before the first event (transport issue) — never
+            # if the stream dropped mid-run, which would resurrect a fresh
+            # OpenHands session the user can't see or stop.
             result = None
             _sse_first_event = False
             try:
@@ -1779,12 +2168,48 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                                     "tool": "generate_code", "icon": "wand",
                                     "status": f"Step {step_num}/{max_rounds}: {icon} {label} — {detail}",
                                     "detail": json.dumps({"steps": _agent_steps}),
+                                    "run_id": _run_id,
                                 })
-                            elif evt.get("type") in ("done", "error"):
+                                # Append to durable run log for reconnect-time rebuild.
+                                if _run_id:
+                                    try:
+                                        await db.append_run_event(_run_id, {
+                                            "type": "step", "step": step_num,
+                                            "action": action, "detail": detail,
+                                        })
+                                    except Exception:
+                                        pass
+                            elif evt.get("type") in ("done", "error", "cancelled"):
                                 result = evt
                                 break
+            except asyncio.CancelledError:
+                # User pressed stop (or browser closed). Tell the worker to
+                # abort, then re-raise so the chat stream unwinds cleanly.
+                # Critically: do NOT fall back to /run here.
+                await _signal_oh_cancel("chat stream cancelled")
+                await _finalize_run("cancelled", {"error": "Run cancelled by user"})
+                raise
             except Exception as sse_err:
-                print(f"[CODEGEN:OH] SSE stream failed ({type(sse_err).__name__}: {sse_err}), falling back to /run", flush=True)
+                if _sse_first_event:
+                    # Stream dropped after work began. The OpenHands run on the
+                    # other end is still alive; the right move is to tell it to
+                    # stop, not to silently start a second concurrent run.
+                    print(f"[CODEGEN:OH] SSE stream failed mid-run "
+                          f"({type(sse_err).__name__}: {sse_err}); cancelling worker side, NOT falling back",
+                          flush=True)
+                    await _signal_oh_cancel("SSE dropped mid-run")
+                    await events.emit(conv_id, "tool_end", {
+                        "tool": "generate_code", "icon": "code",
+                        "status": f"OpenHands stream interrupted: {sse_err}",
+                        "run_id": _run_id,
+                    })
+                    await _finalize_run("failed", {"error": f"SSE stream interrupted: {sse_err}"})
+                    return (f"ERROR: OpenHands stream interrupted mid-run ({type(sse_err).__name__}). "
+                            f"The worker run was cancelled. Try generate_code again, or use write_file + run_shell.")
+                # No first event yet → genuine connect/transport failure → fall back.
+                print(f"[CODEGEN:OH] SSE stream failed before first event "
+                      f"({type(sse_err).__name__}: {sse_err}), falling back to /run",
+                      flush=True)
                 await events.emit(conv_id, "tool_progress", {
                     "tool": "generate_code", "icon": "wand",
                     "status": "⚡ Running agent (non-streaming)...",
@@ -1797,21 +2222,34 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                         await events.emit(conv_id, "tool_end", {
                             "tool": "generate_code", "icon": "code",
                             "status": f"OpenHands HTTP {oh_resp.status_code}",
+                            "run_id": _run_id,
+                        })
+                        await _finalize_run("failed", {
+                            "error": f"OpenHands returned HTTP {oh_resp.status_code}",
+                            "stderr_tail": oh_resp.text[:500],
                         })
                         return f"ERROR: OpenHands returned HTTP {oh_resp.status_code}: {oh_resp.text[:200]}"
                     result = oh_resp.json()
+                except asyncio.CancelledError:
+                    await _signal_oh_cancel("chat stream cancelled during /run fallback")
+                    await _finalize_run("cancelled", {"error": "Run cancelled by user"})
+                    raise
                 except Exception as oh_e:
                     await events.emit(conv_id, "tool_end", {
                         "tool": "generate_code", "icon": "code",
                         "status": f"OpenHands request failed: {oh_e}",
+                        "run_id": _run_id,
                     })
+                    await _finalize_run("failed", {"error": f"OpenHands request failed: {oh_e}"})
                     return f"ERROR: OpenHands request failed: {oh_e}. Try write_file + run_shell instead."
 
             if not result:
                 await events.emit(conv_id, "tool_end", {
                     "tool": "generate_code", "icon": "code",
                     "status": "OpenHands returned no result",
+                    "run_id": _run_id,
                 })
+                await _finalize_run("failed", {"error": "OpenHands returned no result"})
                 return "ERROR: OpenHands returned no result. Try write_file + run_shell instead."
             if result.get("status") == "ok":
                 files = result.get("files_created", [])
@@ -2132,6 +2570,24 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                                 ))
                         except Exception as _rag_e:
                             print(f"[CODEGEN] Code RAG indexing failed (non-fatal): {_rag_e}")
+                    # Finalize the durable run with a structured envelope summarising
+                    # what got built. Mark partial when the agent undershot the manifest;
+                    # the build itself can still be considered a success otherwise.
+                    _final_status = "partial" if undershoot_warning else "succeeded"
+                    await _finalize_run(_final_status, {
+                        "files_written": files,
+                        "manifest_satisfied": [n for n in _expected_files
+                                                if n in {(f.rsplit("/", 1)[-1] if "/" in f else f)
+                                                         for f in (files or [])}],
+                        "manifest_missing": _missing if _expected_files else [],
+                        "build_summary": summary,
+                        "project_id": _project_id,
+                        "project_dir": project_dir,
+                        "duration_s": duration,
+                        "critique": critique,
+                        "model": coder_model,
+                        "language": language,
+                    })
                     return resp
                 else:
                     # Agent ran but produced no files — treat as failure
@@ -2139,8 +2595,16 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                     await events.emit(conv_id, "tool_end", {
                         "tool": "generate_code", "icon": "wand",
                         "status": f"🤖 OpenHands: 0 files (model may not support tools)",
+                        "run_id": _run_id,
                     })
                     error_detail = summary[:200] if summary else "Agent completed but produced no files"
+                    await _finalize_run("failed", {
+                        "error": "Agent finished but created 0 files",
+                        "model": coder_model,
+                        "language": language,
+                        "duration_s": duration,
+                        "summary": error_detail,
+                    })
                     return (
                         f"ERROR: OpenHands agent finished but created 0 files "
                         f"(model: {coder_model}, {duration}s). "
@@ -2167,6 +2631,7 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                         "status": f"🔄 Retrying with simplified approach...",
                     })
                     _agent_steps = []
+                    _retry_first_event = False
                     try:
                         import httpx as _httpx
                         async with _httpx.AsyncClient(timeout=_httpx.Timeout(connect=10, read=600, write=10, pool=10)) as retry_client:
@@ -2179,6 +2644,7 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                                             evt = json.loads(line[6:])
                                         except (json.JSONDecodeError, ValueError):
                                             continue
+                                        _retry_first_event = True
                                         if evt.get("type") == "step":
                                             step_num = evt.get("step", 0)
                                             action = evt.get("action", "")
@@ -2190,21 +2656,37 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                                                 "tool": "generate_code", "icon": "wand",
                                                 "status": f"Retry step {step_num}: {icon} {label} — {detail}",
                                             })
-                                        elif evt.get("type") in ("done", "error"):
+                                        elif evt.get("type") in ("done", "error", "cancelled"):
                                             result = evt
                                             break
                                 else:
                                     result = None
+                    except asyncio.CancelledError:
+                        await _signal_oh_cancel("chat stream cancelled during retry")
+                        await _finalize_run("cancelled", {"error": "Run cancelled by user"})
+                        raise
                     except Exception as retry_err:
-                        print(f"[CODEGEN:OH] SSE retry failed, trying blocking /run: {retry_err}")
-                        try:
-                            oh_resp = await http.post(f"{openhands_url}/run", json=oh_payload, timeout=600)
-                            if oh_resp.status_code == 200:
-                                result = oh_resp.json()
-                            else:
-                                result = None
-                        except Exception:
+                        if _retry_first_event:
+                            # Same rule: don't resurrect with /run after a mid-stream drop.
+                            print(f"[CODEGEN:OH] Retry SSE dropped mid-run "
+                                  f"({type(retry_err).__name__}: {retry_err}); cancelling worker side")
+                            await _signal_oh_cancel("retry SSE dropped mid-run")
                             result = None
+                        else:
+                            print(f"[CODEGEN:OH] Retry SSE failed before first event "
+                                  f"({type(retry_err).__name__}: {retry_err}), trying blocking /run")
+                            try:
+                                oh_resp = await http.post(f"{openhands_url}/run", json=oh_payload, timeout=600)
+                                if oh_resp.status_code == 200:
+                                    result = oh_resp.json()
+                                else:
+                                    result = None
+                            except asyncio.CancelledError:
+                                await _signal_oh_cancel("chat stream cancelled during retry /run")
+                                await _finalize_run("cancelled", {"error": "Run cancelled by user"})
+                                raise
+                            except Exception:
+                                result = None
 
                     # If retry produced a successful result, process it above
                     if result and result.get("status") == "ok":
@@ -2217,6 +2699,16 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                             await events.emit(conv_id, "tool_end", {
                                 "tool": "generate_code", "icon": "wand",
                                 "status": f"🤖 OpenHands (retry): {len(files)} file(s) built ({duration}s)",
+                                "run_id": _run_id,
+                            })
+                            await _finalize_run("succeeded", {
+                                "files_written": files,
+                                "build_summary": "Retry succeeded after initial failure",
+                                "project_id": _project_id,
+                                "duration_s": duration,
+                                "model": coder_model,
+                                "language": language,
+                                "retried": True,
                             })
                             return (
                                 f"PROJECT COMPLETE (retry succeeded). OpenHands agent built the project "
@@ -2229,6 +2721,7 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                 await events.emit(conv_id, "tool_end", {
                     "tool": "generate_code", "icon": "wand",
                     "status": f"🤖 OpenHands agent {status}",
+                    "run_id": _run_id,
                 })
                 print(f"[CODEGEN:OH] Agent {status}: {error}")
                 err_resp = f"ERROR: OpenHands agent {status}: {error}."
@@ -2239,6 +2732,14 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                     "\n\nThe coding agent failed. You MUST now write the code yourself directly "
                     "using write_file and run_shell tools. Do NOT call generate_code again."
                 )
+                await _finalize_run("failed", {
+                    "error": error,
+                    "agent_status": status,
+                    "model": coder_model,
+                    "language": language,
+                    "last_steps": [{"action": s.get("action", ""), "detail": s.get("detail", "")[:200]}
+                                    for s in (steps[-5:] if steps else [])],
+                })
                 return err_resp
 
         elif name in custom_tool_map:

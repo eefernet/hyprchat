@@ -8,6 +8,7 @@ Deploy to CodeBox LXC at /opt/openhands-worker/openhands_worker.py
 import asyncio
 import json
 import os
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -15,6 +16,28 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+
+class _RunCancelled(Exception):
+    """Raised inside on_event when the client requests cancellation."""
+
+
+_ACTIVE_RUNS: dict[str, dict] = {}
+_ACTIVE_RUNS_LOCK = threading.Lock()
+
+
+def _register_run(run_id: str, conversation, cancel_event: threading.Event) -> None:
+    if not run_id:
+        return
+    with _ACTIVE_RUNS_LOCK:
+        _ACTIVE_RUNS[run_id] = {"conversation": conversation, "cancel": cancel_event}
+
+
+def _deregister_run(run_id: str) -> None:
+    if not run_id:
+        return
+    with _ACTIVE_RUNS_LOCK:
+        _ACTIVE_RUNS.pop(run_id, None)
 
 app = FastAPI(title="OpenHands Worker")
 
@@ -85,6 +108,7 @@ class RunRequest(BaseModel):
     language: str = "python"
     context: str = ""
     project_id: str = ""
+    run_id: str = ""
 
 
 class RunResponse(BaseModel):
@@ -251,6 +275,8 @@ def run_task(req: RunRequest):
     _ensure_sdk()
     start = time.time()
     progress_log = []
+    cancel_event = threading.Event()
+    conversation = None
 
     try:
         ollama_base = req.ollama_url.rstrip("/")
@@ -313,6 +339,8 @@ def run_task(req: RunRequest):
 
         # ── Event callback for live progress tracking ──
         def on_event(event):
+            if cancel_event.is_set():
+                raise _RunCancelled()
             try:
                 step_info = _parse_event(event)
                 if step_info:
@@ -348,9 +376,10 @@ def run_task(req: RunRequest):
         if _stuck_thresholds is not None:
             conv_kwargs["stuck_detection_thresholds"] = _stuck_thresholds
         conversation = _Conversation(**conv_kwargs)
+        _register_run(req.run_id, conversation, cancel_event)
 
         conversation.send_message(full_task)
-        print(f"[OH-Worker] Starting run (max_rounds={req.max_rounds}, num_ctx={req.num_ctx})...")
+        print(f"[OH-Worker] Starting run (run_id={req.run_id or '-'}, max_rounds={req.max_rounds}, num_ctx={req.num_ctx})...")
         conversation.run()
 
         status_str = str(conversation.state.execution_status)
@@ -422,6 +451,15 @@ def run_task(req: RunRequest):
             project_id=project_name,
         )
 
+    except _RunCancelled:
+        duration = time.time() - start
+        print(f"[OH-Worker] Run cancelled (run_id={req.run_id or '-'}) after {duration:.1f}s")
+        return RunResponse(
+            status="cancelled",
+            error="Run cancelled by client",
+            duration_seconds=round(duration, 1),
+            steps=progress_log[-20:],
+        )
     except Exception as e:
         duration = time.time() - start
         tb = traceback.format_exc()
@@ -432,6 +470,32 @@ def run_task(req: RunRequest):
             duration_seconds=round(duration, 1),
             steps=progress_log[-20:],
         )
+    finally:
+        _deregister_run(req.run_id)
+        if conversation is not None:
+            try:
+                conversation.close()
+            except Exception as ce:
+                print(f"[OH-Worker] conversation.close() failed (non-fatal): {ce}")
+
+
+@app.post("/cancel/{run_id}")
+def cancel_run(run_id: str):
+    """Cancel an in-flight run by run_id. Idempotent: returns 200 even if not found."""
+    with _ACTIVE_RUNS_LOCK:
+        entry = _ACTIVE_RUNS.get(run_id)
+    if not entry:
+        return {"status": "not_found", "run_id": run_id}
+    entry["cancel"].set()
+    # Also call pause() so the SDK exits at the next iteration even if the
+    # callback hasn't fired yet (e.g., model is mid-stream). close() runs in
+    # the worker thread's finally block.
+    try:
+        entry["conversation"].pause()
+    except Exception as e:
+        print(f"[OH-Worker] pause() during cancel failed (non-fatal): {e}")
+    print(f"[OH-Worker] Cancel signalled for run_id={run_id}")
+    return {"status": "cancelled", "run_id": run_id}
 
 
 @app.post("/run-stream")
@@ -448,6 +512,8 @@ async def run_task_stream(req: RunRequest):
     step_counter = [0]
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
+    cancel_event = threading.Event()
+    conversation_holder = [None]  # populated once Conversation is built
 
     def _send_sse(data):
         try:
@@ -509,6 +575,10 @@ async def run_task_stream(req: RunRequest):
             pre_snapshot = _snapshot_workspace(work_dir)
 
             def on_event(event):
+                # Cancellation check happens BEFORE the inner try/except so
+                # _RunCancelled propagates out of conversation.run().
+                if cancel_event.is_set():
+                    raise _RunCancelled()
                 try:
                     step_info = _parse_event(event)
                     if step_info:
@@ -545,11 +615,13 @@ async def run_task_stream(req: RunRequest):
             if _stuck_thresholds is not None:
                 conv_kwargs["stuck_detection_thresholds"] = _stuck_thresholds
             conversation = _Conversation(**conv_kwargs)
+            conversation_holder[0] = conversation
+            _register_run(req.run_id, conversation, cancel_event)
 
             conversation.send_message(full_task)
             _send_sse({"type": "step", "action": "starting", "detail": f"Agent starting (max {req.max_rounds} rounds)...", "step": 0})
 
-            print(f"[OH-Worker] Starting streamed run (max_rounds={req.max_rounds}, num_ctx={req.num_ctx})...")
+            print(f"[OH-Worker] Starting streamed run (run_id={req.run_id or '-'}, max_rounds={req.max_rounds}, num_ctx={req.num_ctx})...")
             conversation.run()
 
             # Post-run processing
@@ -602,6 +674,16 @@ async def run_task_stream(req: RunRequest):
                 "project_id": project_name,
             }
 
+        except _RunCancelled:
+            duration = time.time() - start
+            print(f"[OH-Worker] Run cancelled (run_id={req.run_id or '-'}) after {duration:.1f}s")
+            result_holder[0] = {
+                "type": "cancelled",
+                "status": "cancelled",
+                "error": "Run cancelled by client",
+                "duration_seconds": round(duration, 1),
+                "steps": progress_log[-20:],
+            }
         except Exception as e:
             duration = time.time() - start
             result_holder[0] = {
@@ -610,6 +692,14 @@ async def run_task_stream(req: RunRequest):
                 "duration_seconds": round(duration, 1),
                 "steps": progress_log[-20:],
             }
+        finally:
+            _deregister_run(req.run_id)
+            conv = conversation_holder[0]
+            if conv is not None:
+                try:
+                    conv.close()
+                except Exception as ce:
+                    print(f"[OH-Worker] conversation.close() failed (non-fatal): {ce}")
 
         # Signal completion
         _send_sse(None)

@@ -8,6 +8,7 @@ import os
 import re
 import traceback
 import urllib.parse
+from datetime import datetime
 
 import config
 import database as db
@@ -100,7 +101,7 @@ def detect_template_family(model_name: str) -> str:
 CODEAGENT_TOOLS_SET = {"execute_code", "run_shell", "write_file", "read_file",
                        "list_files", "download_file", "download_project", "delete_file",
                        "search_files", "diff_files", "git_init", "git_diff", "git_commit",
-                       "run_tests", "lint_code", "resume_project"}
+                       "run_tests", "lint_code", "resume_project", "run_review", "run_fixer"}
 
 # Tools safe to run in parallel (read-only or independent-target writes)
 _PARALLEL_SAFE_TOOLS = {"read_file", "list_files", "search_files", "diff_files",
@@ -122,6 +123,8 @@ _TOOL_ICONS = {
     "deep_research": ("microscope", "🔬 Deep research in progress"),
     "conspiracy_research": ("eye", "🕵️ Investigating"),
     "plan_project": ("activity", "🧠 Planning architecture"),
+    "run_review": ("search-check", "🔍 Reviewing project"),
+    "run_fixer": ("wrench", "🛠 Fixer applying scoped edits"),
     "run_tests": ("code", "🧪 Running tests"),
     "lint_code": ("code", "🧹 Linting code"),
     "git_init": ("terminal", "📁 Initializing git"),
@@ -632,6 +635,23 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     _is_coder = _has_full_codeagent
     MAX_ROUNDS = config.MAX_AGENT_ROUNDS_CODER if _is_coder else config.MAX_AGENT_ROUNDS
     MAX_CONTEXT_CHARS = 80000  # ~20k tokens — prune old tool results beyond this
+
+    # Phase 0.6: create the assistant-message stub at stream start so disconnects
+    # don't lose work. The agent updates this row at every round boundary; if the
+    # client closes the tab mid-stream, the most recent saved content is what
+    # the frontend sees on reload.
+    _assistant_msg_id = None
+    _stream_started_at = datetime.utcnow().isoformat()
+    try:
+        _assistant_msg_id = await db.add_message(conv_id, "assistant", "", metadata={
+            "stream_started_at": _stream_started_at,
+            "in_progress": True,
+        })
+        # Tell the frontend the message_id so it can PATCH the final state on
+        # stream-complete instead of POSTing a duplicate.
+        yield f"data: {json.dumps({'type': 'init', 'message_id': _assistant_msg_id})}\n\n"
+    except Exception as _ase:
+        print(f"[CHAT] Failed to create assistant message stub: {_ase}")
     _text_fallback_done = False
     _prev_tool_key = None  # Track previous tool call to detect loops
     _tool_history = []     # Last N tool keys for near-duplicate detection
@@ -1056,6 +1076,26 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         if tool_calls:
             print(f"[CHAT]   tool_calls: {json.dumps(tool_calls)[:300]}")
 
+        # Phase 0.6: snapshot the assistant message at every round boundary.
+        # On disconnect, the most recent snapshot is what the frontend renders
+        # when the user reopens the conversation. We tag it with run_ids of any
+        # runs created during this stream so the RunCard component can rebuild.
+        if _assistant_msg_id is not None:
+            try:
+                _runs_now = await db.get_runs_by_conversation(conv_id, limit=20)
+                _stream_run_ids = [r["id"] for r in _runs_now
+                                    if r.get("started_at", "") >= _stream_started_at]
+                await db.update_message(_assistant_msg_id,
+                    content=content,
+                    metadata={
+                        "stream_started_at": _stream_started_at,
+                        "in_progress": True,
+                        "round": round_num,
+                        "run_ids": _stream_run_ids,
+                    })
+            except Exception as _use:
+                print(f"[CHAT]   round-save failed (non-fatal): {_use}")
+
         # Emit final thinking content
         if thinking:
             await events.emit(conv_id, "thought_done", {
@@ -1072,6 +1112,17 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 _tool_key = json.dumps([(tc.get("function", {}).get("name"), json.dumps(tc.get("function", {}).get("arguments", {}), sort_keys=True)) for tc in tool_calls], sort_keys=True)
                 _tc_names_dup = [tc.get("function", {}).get("name", "") for tc in tool_calls]
 
+                # The v2 fix loop is review → fixer → review → fixer …, so
+                # run_review and run_fixer are designed to be called multiple
+                # times with identical arguments. The v2 workflow gate (in
+                # tools.py) enforces correctness here; the duplicate detector
+                # should NOT second-guess it. Exempt these two from both
+                # exact and near-duplicate checks.
+                _LOOP_TOOLS = {"run_review", "run_fixer"}
+                _all_loop_tools = bool(_tc_names_dup) and all(
+                    n in _LOOP_TOOLS for n in _tc_names_dup
+                )
+
                 # Exact duplicate: same as immediately previous round
                 _is_dup = _tool_key == _prev_tool_key
                 # Near-duplicate: same tool key seen in last 3 rounds
@@ -1085,9 +1136,18 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     ) if _tool_key in _tool_history else False
                     if _is_test_rerun and _had_write_since:
                         print(f"[CHAT]   Allowing re-test after file modification")
+                    elif _all_loop_tools:
+                        print(f"[CHAT]   Allowing re-run of v2 loop tool(s): {_tc_names_dup}")
                     else:
                         _is_dup = True
                         print(f"[CHAT]   Near-duplicate detected (seen in last 3 rounds)")
+
+                # Even an exact back-to-back duplicate is fine for loop tools —
+                # the gate will refuse if the workflow is wrong.
+                if _is_dup and _all_loop_tools:
+                    print(f"[CHAT]   Allowing exact re-run of v2 loop tool(s) "
+                          f"(gate enforces workflow): {_tc_names_dup}")
+                    _is_dup = False
 
                 if _is_dup:
                     _dup_break_count += 1
@@ -1408,7 +1468,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 except Exception as _te:
                     print(f"[CHAT] Token recording error: {_te}")
             await events.emit(conv_id, "complete", {"status": "Complete"})
-            _done_payload = {"type": "done", "model": req.model}
+            _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id}
             if _review_round > 0:
                 _done_payload["refinements"] = _review_round
             yield f"data: {json.dumps(_done_payload)}\n\n"
@@ -1417,7 +1477,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             # Empty content — try to recover
             if round_num >= 3:
                 await events.emit(conv_id, "complete", {"status": "Complete"})
-                _done_payload = {"type": "done", "model": req.model}
+                _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id}
                 if _review_round > 0:
                     _done_payload["refinements"] = _review_round
                 yield f"data: {json.dumps(_done_payload)}\n\n"
@@ -1450,8 +1510,87 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 messages.append({"role": "user", "content": "Please provide a response."})
             continue
 
+    # Reached MAX_ROUNDS without the model emitting final user-facing text.
+    # Synthesize a fallback summary so the conversation isn't a blank message —
+    # tell the user we ran out of round budget, list the runs created, and
+    # what the last reviewer (if any) reported. Stream + persist.
+    _fallback_lines = [
+        f"⚠️ **Ran out of round budget** ({MAX_ROUNDS} rounds) before reaching a final answer.",
+    ]
+    try:
+        _all_runs = await db.get_runs_by_conversation(conv_id, limit=30)
+        # Only count runs that were created during this stream.
+        _stream_runs = [r for r in _all_runs if r.get("started_at", "") >= _stream_started_at]
+
+        _builders = [r for r in _stream_runs if r.get("role", "").startswith("builder")]
+        _reviewers = [r for r in _stream_runs if r.get("role") == "reviewer"]
+
+        if _builders:
+            _b_succ = sum(1 for r in _builders if r.get("status") == "succeeded")
+            _b_fail = len(_builders) - _b_succ
+            _fallback_lines.append(
+                f"\n**Builder runs**: {len(_builders)} "
+                f"({_b_succ} succeeded, {_b_fail} failed). "
+                f"Latest project workspace: `{(_builders[0].get('result_envelope') or {}).get('project_dir', '?')}`."
+            )
+
+        if _reviewers:
+            _last_rev = _reviewers[0]
+            _env = _last_rev.get("result_envelope") or {}
+            _rstatus = _env.get("status", "?")
+            _issues = _env.get("issues") or []
+            _fallback_lines.append(
+                f"\n**Last reviewer run**: status=`{_rstatus}` "
+                f"(build exit={_env.get('build_exit', '?')}, "
+                f"test exit={_env.get('test_exit', '?')})."
+            )
+            if _issues:
+                _fallback_lines.append(f"\nReviewer flagged {len(_issues)} issue(s):")
+                for _i, _iss in enumerate(_issues[:5], 1):
+                    _fallback_lines.append(
+                        f"  {_i}. [{_iss.get('severity', '?')}] "
+                        f"{_iss.get('file', '?')}"
+                        + (f":{','.join(str(x) for x in _iss.get('lines') or [])}" if _iss.get('lines') else "")
+                        + f" — {_iss.get('summary', '')[:160]}"
+                    )
+        elif _builders:
+            _fallback_lines.append(
+                "\nNo reviewer run was completed — the project's build/test status was not verified."
+            )
+
+        _fallback_lines.append(
+            "\n**To continue**: ask me to pick up where I left off, or refine the request. "
+            "The work that ran is durable — runs above survived the budget exhaustion."
+        )
+    except Exception as _fbe:
+        print(f"[CHAT] fallback summary failed (non-fatal): {_fbe}")
+        _fallback_lines.append(
+            "\nThe agent loop stopped before producing a final answer. "
+            "Try asking again or refining the request."
+        )
+
+    _fallback_content = "\n".join(_fallback_lines)
+    # Stream as a single token event so the frontend renders it live.
+    yield f"data: {json.dumps({'type': 'token', 'content': _fallback_content})}\n\n"
+
+    # Persist into the assistant message so refresh / reopen shows it too.
+    if _assistant_msg_id is not None:
+        try:
+            await db.update_message(
+                _assistant_msg_id,
+                content=_fallback_content,
+                metadata={
+                    "stream_started_at": _stream_started_at,
+                    "in_progress": False,
+                    "max_rounds_reached": True,
+                    "round": MAX_ROUNDS,
+                },
+            )
+        except Exception as _pe:
+            print(f"[CHAT] fallback persist failed (non-fatal): {_pe}")
+
     await events.emit(conv_id, "complete", {"status": "Complete (max rounds)"})
-    _done_payload = {"type": "done", "model": req.model}
+    _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id}
     if _review_round > 0:
         _done_payload["refinements"] = _review_round
     yield f"data: {json.dumps(_done_payload)}\n\n"
