@@ -272,16 +272,40 @@ async def run_fixer(http, events, conv_id: str, *,
     diffs: list[dict] = []
     errors: list[str] = []
 
+    # Helper: normalize a path that may be relative (./tests/Foo.java) or
+    # workspace-relative (com/pong/Foo.java) into absolute form rooted at
+    # project_dir. Reviewer LLM output is inconsistent — sometimes it copies
+    # paths from javac error messages verbatim (relative because the build
+    # command uses `find .`), other times it prepends the project_dir.
+    def _normalize_path(p: str) -> str:
+        if not p:
+            return ""
+        p = p.strip()
+        if p.startswith("/"):
+            return p
+        # Strip a single leading "./"
+        if p.startswith("./"):
+            p = p[2:]
+        # Refuse paths that try to escape the project root
+        if ".." in p.split("/"):
+            return ""
+        return f"{project_dir.rstrip('/')}/{p}"
+
     # 2. Process issues sequentially. Future: parallelize when scopes are disjoint.
     for i, issue in enumerate(issues, 1):
-        scope = issue.get("suggested_fix_scope") or []
+        raw_scope = issue.get("suggested_fix_scope") or []
         # Always include the issue's primary file even if scope didn't list it.
-        if issue.get("file") and issue["file"] not in scope:
-            scope = [issue["file"]] + scope
-        # Only allow files inside the project_dir, defensively.
-        scope = [p for p in scope if p and p.startswith(project_dir)]
+        if issue.get("file") and issue["file"] not in raw_scope:
+            raw_scope = [issue["file"]] + raw_scope
+        # Normalize all paths to absolute, then keep only files inside project_dir.
+        scope: list[str] = []
+        for p in raw_scope:
+            ap = _normalize_path(p)
+            if ap and ap.startswith(project_dir.rstrip("/")) and ap not in scope:
+                scope.append(ap)
         if not scope:
-            errors.append(f"Issue {i}: no in-scope files to edit; skipping "
+            errors.append(f"Issue {i}: no in-scope files to edit "
+                          f"(raw={raw_scope}, project_dir={project_dir}); skipping "
                           f"(severity={issue.get('severity','?')})")
             continue
 

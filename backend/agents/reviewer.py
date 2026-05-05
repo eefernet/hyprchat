@@ -58,8 +58,15 @@ _PROJECT_MARKERS = [
 # pick the language with the most source files in the tree.
 _PLAIN_LANG_PROFILES = {
     "java":   {"glob": "*.java",
-               "build": "rm -rf out && mkdir -p out && find . -path ./out -prune -o -name '*.java' -print "
-                        "| xargs javac -d out 2>&1",
+               # Compile production sources only — exclude ./test, ./tests,
+               # *Test.java, *Tests.java. JUnit is rarely on the bare classpath
+               # without a build file, so trying to compile tests blows up the
+               # whole build. This matches `mvn compile` semantics.
+               "build": ("rm -rf out && mkdir -p out && "
+                         "find . -path ./out -prune -o "
+                         "-path ./test -prune -o -path ./tests -prune -o "
+                         "-name '*Test.java' -prune -o -name '*Tests.java' -prune -o "
+                         "-name '*.java' -print | xargs -r javac -d out 2>&1"),
                "test":  "(test -d out && find out -name '*Test*.class' -print | head -1 | grep -q . "
                         "&& cd out && java -cp . org.junit.runner.JUnitCore $(find . -name '*Test*.class' "
                         "| sed 's|^\\./||;s|\\.class$||;s|/|.|g')) || echo '(no JUnit tests)'",
