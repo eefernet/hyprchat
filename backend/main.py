@@ -863,9 +863,16 @@ async def upload_coder_project(
     # Upload to codebox via chunked /command calls (command line can't hold
     # tens of MB at once). Each chunk appends base64 to a temp file; final
     # command decodes + extracts into /root/projects/{project_id}.
+    #
+    # CHUNK size note: Linux's MAX_ARG_STRLEN (per-argv-string limit) is
+    # 131072 bytes (32 pages × 4KB). The shell command we build is
+    # `printf '%s' '<chunk>' >> file`, so the chunk + ~40 chars of wrapping
+    # must fit under that limit. 130KB barely passes, 150KB fails with E2BIG
+    # ("Argument list too long"). 100KB gives a safe margin and still keeps
+    # round-trips reasonable (a 10MB tarball → ~100 chunks).
     remote_dir = f"/root/projects/{project_id}"
     remote_tmp = f"/tmp/{project_id}.tar.gz.b64"
-    CHUNK = 400_000  # ~400KB of base64 per HTTP call
+    CHUNK = 100_000  # ~100KB of base64 per HTTP call (safe under MAX_ARG_STRLEN)
     total_chunks = (len(tar_b64) + CHUNK - 1) // CHUNK
 
     try:
@@ -937,6 +944,43 @@ async def upload_coder_project(
     except Exception as e:
         print(f"[CoderUpload] DB save failed (non-fatal): {e}")
 
+    # Phase 4.2 — fire the Project Indexer in the background. It walks the
+    # uploaded tree, detects build system, and seeds ChromaDB code_memory so
+    # that subsequent ask_project / generate_code calls have semantic
+    # retrieval over the uploaded code. Non-blocking: even if it fails, the
+    # upload itself succeeds.
+    indexer_run_id = ""
+    try:
+        from agents import project_indexer
+        indexer_envelope = await project_indexer.run_project_indexer(
+            http, events, conv_id,
+            project_id=project_id,
+            project_dir=remote_dir,
+            project_name=project_name,
+        )
+        indexer_run_id = indexer_envelope.get("run_id", "") or ""
+        # The indexer may also have detected a more accurate language than the
+        # upload-time mime/extension heuristic. If so, update the
+        # coding_projects row so downstream tools see the corrected value.
+        detected_lang = (indexer_envelope.get("language") or "").strip()
+        if detected_lang and detected_lang != language:
+            try:
+                await db.upsert_coding_project(
+                    project_id=project_id,
+                    name=project_name,
+                    conversation_id=conv_id,
+                    description=description,
+                    language=detected_lang,
+                    file_manifest=manifest,
+                    openhands_project_id=project_id,
+                )
+                language = detected_lang
+                print(f"[CoderUpload] Indexer corrected language → {detected_lang}")
+            except Exception as e:
+                print(f"[CoderUpload] language correction failed (non-fatal): {e}")
+    except Exception as e:
+        print(f"[CoderUpload] Indexer failed (non-fatal): {e}")
+
     # Keep the local staging copy as a backup we can re-push if needed.
     return {
         "project_id": project_id,
@@ -946,6 +990,7 @@ async def upload_coder_project(
         "files": manifest[:30],
         "sandbox_path": remote_dir,
         "size_bytes": len(content),
+        "indexer_run_id": indexer_run_id,
     }
 
 

@@ -102,7 +102,8 @@ def detect_template_family(model_name: str) -> str:
 CODEAGENT_TOOLS_SET = {"execute_code", "run_shell", "write_file", "read_file",
                        "list_files", "download_file", "download_project", "delete_file",
                        "search_files", "diff_files", "git_init", "git_diff", "git_commit",
-                       "run_tests", "lint_code", "resume_project", "run_review", "run_fixer"}
+                       "run_tests", "lint_code", "resume_project", "run_review", "run_fixer",
+                       "ask_project"}
 
 # Tools safe to run in parallel (read-only or independent-target writes)
 _PARALLEL_SAFE_TOOLS = {"read_file", "list_files", "search_files", "diff_files",
@@ -123,9 +124,11 @@ _TOOL_ICONS = {
     "fetch_url": ("globe", "🌐 Fetching URL"),
     "deep_research": ("microscope", "🔬 Deep research in progress"),
     "conspiracy_research": ("eye", "🕵️ Investigating"),
-    "plan_project": ("activity", "🧠 Planning architecture"),
+    "plan_project": ("compass", "📐 Architect designing plan"),
     "run_review": ("search-check", "🔍 Reviewing project"),
     "run_fixer": ("wrench", "🛠 Fixer applying scoped edits"),
+    "ask_project": ("help-circle", "❓ Investigating project"),
+    "project_indexer": ("database", "📚 Indexing project"),
     "run_tests": ("code", "🧪 Running tests"),
     "lint_code": ("code", "🧹 Linting code"),
     "git_init": ("terminal", "📁 Initializing git"),
@@ -1095,9 +1098,11 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 # run_review and run_fixer are designed to be called multiple
                 # times with identical arguments. The v2 workflow gate (in
                 # tools.py) enforces correctness here; the duplicate detector
-                # should NOT second-guess it. Exempt these two from both
-                # exact and near-duplicate checks.
-                _LOOP_TOOLS = {"run_review", "run_fixer"}
+                # should NOT second-guess it. Exempt these from both exact
+                # and near-duplicate checks. ask_project is also exempted
+                # because Q&A is naturally multi-turn (follow-up questions
+                # often share keywords/topics).
+                _LOOP_TOOLS = {"run_review", "run_fixer", "ask_project"}
                 _all_loop_tools = bool(_tc_names_dup) and all(
                     n in _LOOP_TOOLS for n in _tc_names_dup
                 )

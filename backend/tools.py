@@ -196,6 +196,17 @@ CODEAGENT_TOOLS = {
             }, "required": []},
         },
     },
+    "ask_project": {
+        "type": "function",
+        "function": {
+            "name": "ask_project",
+            "description": "Answer a question about an existing project's code (e.g. 'how does the ball physics work?', 'where is the score tracked?', 'what does GameEngine do?'). Read-only — never modifies files. The agent greps the project for relevant terms, reads the matching code, and produces a grounded answer with file:line citations. Use this INSTEAD of hand-rolling read_file + search_files when the user asks a question about the code. If the question is actually a change request (e.g. 'add a pause feature'), the result will flag it so you know to call generate_code or write_file instead.",
+            "parameters": {"type": "object", "properties": {
+                "question": {"type": "string", "description": "The user's question, verbatim or lightly cleaned. Be specific — pass the user's actual words rather than paraphrasing."},
+                "project_dir": {"type": "string", "description": "Absolute path to the project root (e.g. '/root/projects/pong'). If omitted, the most recent successful builder run's project_dir is used."},
+            }, "required": ["question"]},
+        },
+    },
     "search_files": {
         "type": "function",
         "function": {
@@ -852,12 +863,20 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
         #     run_fixer (and run_review, in case the model wants to re-check).
         #     This is what stops the model from ignoring reviewer findings
         #     and shipping (or hand-editing one file at a time).
-        if conv_id and name not in ("run_review", "run_fixer"):
+        #
+        #   State 3 — Q&A TERMINAL: the most recent run is a successful `qa`
+        #     and the question wasn't a change request. The model should be
+        #     producing a plain-text response, not running more tools. Block
+        #     everything except ask_project itself (so follow-up questions
+        #     still work). If the user actually wants a change, they need to
+        #     say so — ask_project will flag it and the gate will release.
+        if conv_id and name not in ("run_review", "run_fixer", "ask_project"):
             try:
                 _runs_for_v2_gate = await db.get_runs_by_conversation(conv_id, limit=20)
                 _pending_run = None    # state 1 trigger
                 _pending_kind = ""
                 _pending_review = None  # state 2 trigger
+                _terminal_qa = None    # state 3 trigger
 
                 # Walk newest-first.
                 # Builder/fixer runs in ANY non-trivial state require verification.
@@ -870,6 +889,13 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 _FIXER_GATING = {"succeeded", "failed", "partial"}
                 for _r in _runs_for_v2_gate:
                     _role = _r.get("role", "")
+                    if _role == "qa":
+                        # Most recent qa: state 3 if it succeeded and isn't a change request.
+                        _env_q = _r.get("result_envelope") or {}
+                        if (_r.get("status") == "succeeded"
+                                and not _env_q.get("looks_like_change_request", False)):
+                            _terminal_qa = _r
+                        break
                     if _role == "reviewer":
                         # Most recent reviewer: state 2 is whether it has issues.
                         _env_r = _r.get("result_envelope") or {}
@@ -922,6 +948,24 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         f"run_review again to verify.",
                         f"⛔ Blocked — call run_fixer first (review {_rid[:14]}… has issues)",
                         _rid,
+                    )
+                elif _terminal_qa is not None:
+                    _qid = _terminal_qa.get("id", "?")
+                    _gate_msg = (
+                        "state", "qa-terminal",
+                        f"BLOCKED — ask_project ({_qid}) just answered the user's question. "
+                        f"The user asked something; you have the answer. Your VERY NEXT output "
+                        f"MUST be plain text relaying that answer to the user.\n\n"
+                        f"Do NOT call run_review, run_fixer, generate_code, read_file, "
+                        f"write_file, run_shell, download_project, or any other tool. The "
+                        f"build is already done; the user is asking ABOUT it, not asking you "
+                        f"to redo it.\n\n"
+                        f"If they follow up with another question, call ask_project again. "
+                        f"If they explicitly request a change ('add X', 'fix Y', 'refactor Z'), "
+                        f"call generate_code or write_file then. But for THIS turn, just "
+                        f"answer the user.",
+                        f"⛔ Blocked — answer the user (ask_project {_qid[:14]}… is terminal)",
+                        _qid,
                     )
 
                 if _gate_msg is not None:
@@ -1782,12 +1826,150 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         f"You may need to fix manually with read_file + write_file (one round per "
                         f"file), then call run_review to verify.")
 
+        elif name == "ask_project":
+            # Coder Bot v2 Phase 4 — read-only Q&A over an existing project.
+            # Greps the tree for keywords from the question, reads matching
+            # snippets, asks the model to compose a grounded answer with
+            # file:line citations. Detects change requests and flags them so
+            # the chat agent can route follow-ups appropriately.
+            from agents import project_qa
+            question = (args.get("question") or "").strip()
+            project_dir = (args.get("project_dir") or "").strip()
+            if not question:
+                return "ERROR: ask_project requires a `question` argument."
+
+            # Resolve project_dir using the same lookup chain as run_review:
+            # most recent succeeded builder run → coding_projects fallback.
+            language = ""
+            if not project_dir and conv_id:
+                try:
+                    _runs = await db.get_runs_by_conversation(conv_id, limit=20)
+                    for _r in _runs:
+                        if _r.get("role", "").startswith("builder") and _r.get("status") == "succeeded":
+                            _env = _r.get("result_envelope") or {}
+                            _pd = (_env.get("project_dir") or "").strip()
+                            if _pd:
+                                project_dir = _pd
+                                language = _env.get("language", "") or language
+                                print(f"[ask_project] resolved project_dir={project_dir} from builder run {_r.get('id')}")
+                                break
+                except Exception as _bre:
+                    print(f"[ask_project] builder run lookup failed: {_bre}")
+            if not project_dir and conv_id:
+                try:
+                    _active = await db.get_coding_project_by_conv(conv_id)
+                    if _active:
+                        _ohp = _active.get("openhands_project_id") or _active.get("id")
+                        if _ohp:
+                            project_dir = f"/root/projects/{_ohp}"
+                            language = _active.get("language") or language
+                except Exception:
+                    pass
+            if not project_dir:
+                return ("ERROR: ask_project needs project_dir, and no active project was "
+                        "found on this conversation. Pass it explicitly: "
+                        "ask_project(question='...', project_dir='/root/projects/<name>')")
+
+            await events.emit(conv_id, "tool_start", {
+                "tool": "ask_project", "icon": "help-circle",
+                "status": f"❓ Investigating: {question[:80]}",
+            })
+
+            envelope = await project_qa.run_project_qa(
+                http, events, conv_id,
+                project_dir=project_dir, question=question,
+                language=language,
+                conv_model=conv_model,
+            )
+
+            answer = envelope.get("answer", "")
+            files = envelope.get("files_examined") or []
+            looks_change = envelope.get("looks_like_change_request", False)
+
+            if envelope.get("status") != "ok" or not answer:
+                return (f"ASK_PROJECT FAILED: {envelope.get('summary', 'no answer produced')}.\n\n"
+                        f"You can fall back to read_file + search_files manually if needed.")
+
+            lines = [f"ANSWER (from {len(files)} file{'s' if len(files) != 1 else ''} examined):",
+                     "",
+                     answer]
+            if looks_change:
+                lines += [
+                    "",
+                    "**NOTE:** This question was flagged as a likely CHANGE REQUEST, not just a "
+                    "question. If the user wants you to actually make the change, your next tool "
+                    "call should be generate_code (for substantial changes) or read_file + "
+                    "write_file (for 1-2 file edits) — NOT another ask_project.",
+                ]
+            else:
+                # Make the terminal contract explicit. The model has a strong
+                # bias to keep calling tools after every result; for Q&A this
+                # is wrong — the user asked a question, the answer is above,
+                # the next output should be a plain-text response.
+                lines += [
+                    "",
+                    "**TERMINAL — STOP CALLING TOOLS.** This was a question, not a build "
+                    "request. Your VERY NEXT output MUST be plain text relaying the answer "
+                    "above to the user. Do NOT call run_review, run_fixer, generate_code, "
+                    "read_file, write_file, run_shell, download_project, or any other tool. "
+                    "If the user follows up with a new question, call ask_project again. "
+                    "If they ask for a change, call generate_code or write_file then. "
+                    "But for THIS response, just answer the user.",
+                ]
+            return "\n".join(lines)
+
         elif name == "plan_project":
             task = args.get("task", "")
             language = args.get("language", "python")
             constraints = args.get("constraints", "")
             if not task:
                 return "ERROR: task is required"
+
+            # ─── v2: route through structured Architect agent ─────────
+            # The Architect produces a JSON manifest the Builder/Reviewer
+            # consume directly, instead of the v1 prose plan that every
+            # downstream agent has to re-parse from markdown. v1 personas
+            # keep the existing prose path below.
+            _is_v2_for_plan = False
+            if conv_id:
+                try:
+                    _conv_row = await db.get_conversation(conv_id)
+                    _mc_id = (_conv_row or {}).get("model_config_id") if _conv_row else None
+                    if _mc_id:
+                        _all_mc = await db.get_model_configs()
+                        _mc = next((m for m in _all_mc if m.get("id") == _mc_id), None)
+                        if _mc and "v2" in (_mc.get("name") or "").lower():
+                            _is_v2_for_plan = True
+                except Exception as _pe:
+                    print(f"[plan_project] persona lookup failed (non-fatal): {_pe}")
+
+            if _is_v2_for_plan:
+                from agents import architect
+                await events.emit(conv_id, "tool_start", {
+                    "tool": "plan_project", "icon": "activity",
+                    "status": "🧠 Architect planning structured manifest...",
+                })
+                # KB chunks for the planning model: filter by language hints
+                # using the existing rag plumbing. Best effort — if RAG isn't
+                # configured or fails, the architect just runs without KB.
+                _kb_chunks = []
+                if kb_ids:
+                    try:
+                        import rag
+                        _kb_chunks = await rag.query(
+                            kb_ids, query_text=task[:500], top_k=3,
+                            prefer_filename_hints=_kb_filename_hints_for_language(language, task),
+                        )
+                    except Exception as _rge:
+                        print(f"[plan_project] RAG query failed (non-fatal): {_rge}")
+                plan = await architect.run_architect(
+                    http, events, conv_id,
+                    task=task, language_hint=language,
+                    kb_chunks=_kb_chunks,
+                )
+                return architect.format_plan_for_chat(plan)
+
+            # ─── v1 path: existing prose plan_project ─────────────────
             planning_model = config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL
             await events.emit(conv_id, "tool_start", {"tool": "plan_project", "icon": "activity", "status": f"🧠 Planning architecture with {planning_model}..."})
             plan_prompt = f"""You are a senior software architect. Design a complete implementation plan for this project.
@@ -2087,6 +2269,74 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                         print(f"[CODEGEN:OH] Auto-attached active project {_oh_project_id} for conv {conv_id}")
                 except Exception as _ap_e:
                     print(f"[CODEGEN:OH] Active project lookup failed (non-fatal): {_ap_e}")
+
+            # Phase 3 — inject the most recent Architect manifest into the
+            # context so OpenHands follows the structured plan (file list,
+            # build/test commands, success criteria) instead of re-deriving
+            # them from prose. Best effort: only fires if v2 plan_project
+            # was called this conv and produced a successful architect run.
+            if conv_id:
+                try:
+                    _runs_for_arch = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _arch_run = next(
+                        (r for r in _runs_for_arch
+                         if r.get("role") == "architect" and r.get("status") == "succeeded"),
+                        None,
+                    )
+                    if _arch_run:
+                        _arch_env = _arch_run.get("result_envelope") or {}
+                        _manifest = _arch_env.get("manifest") or []
+                        _success = _arch_env.get("success_criteria") or []
+                        _build_cmd = _arch_env.get("build_cmd", "")
+                        _test_cmd = _arch_env.get("test_cmd", "")
+                        if _manifest:
+                            _arch_section = ["\n\n--- Architect Manifest (FOLLOW THIS PLAN) ---"]
+                            _arch_section.append(
+                                f"Project: {_arch_env.get('project_id','?')} "
+                                f"({_arch_env.get('language','?')}, "
+                                f"build_system={_arch_env.get('build_system','?')})"
+                            )
+                            if _build_cmd:
+                                _arch_section.append(f"Build command: {_build_cmd}")
+                            if _test_cmd:
+                                _arch_section.append(f"Test command: {_test_cmd}")
+                            _arch_section.append("")
+                            _arch_section.append(f"Files to create ({len(_manifest)}):")
+                            for _m in _manifest[:30]:
+                                _arch_section.append(
+                                    f"  - {_m.get('path','?')} — {_m.get('purpose','')}"
+                                )
+                            if _success:
+                                _arch_section.append("")
+                                _arch_section.append("Success criteria (project is done when ALL pass):")
+                                for _c in _success[:8]:
+                                    _arch_section.append(f"  - {_c}")
+                            _deps = _arch_env.get("external_deps") or []
+                            if _deps:
+                                _arch_section.append("")
+                                _arch_section.append("External dependencies:")
+                                for _d in _deps[:10]:
+                                    _arch_section.append(
+                                        f"  - {_d.get('name','?')} {_d.get('version','')}"
+                                    )
+                            _risks = _arch_env.get("risk_notes") or []
+                            if _risks:
+                                _arch_section.append("")
+                                _arch_section.append("Risk notes:")
+                                for _r in _risks[:5]:
+                                    _arch_section.append(f"  - {_r}")
+                            _arch_section.append(
+                                "\nFollow the manifest exactly — create every listed file, "
+                                "use the listed build/test commands, satisfy the success "
+                                "criteria. The Reviewer will verify against this plan."
+                            )
+                            _arch_text = "\n".join(_arch_section)
+                            context = (context + _arch_text) if context else _arch_text.strip()
+                            print(f"[CODEGEN] Injected architect manifest from "
+                                  f"{_arch_run.get('id')}: {len(_manifest)} files, "
+                                  f"{len(_success)} criteria")
+                except Exception as _ame:
+                    print(f"[CODEGEN] Architect manifest injection failed (non-fatal): {_ame}")
 
             oh_payload = {
                 "task": task, "model": coder_model,

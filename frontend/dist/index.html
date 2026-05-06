@@ -512,7 +512,7 @@ const PlanPanel = ({plan,t,streaming,md,onCopy})=>{
   };
   return <div style={{marginBottom:6,animation:"fadeIn .3s",borderRadius:10,border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%",boxShadow:streaming?`0 0 12px ${t.acc}22`:"none",transition:"all .3s"}}>
     <div onClick={()=>setExpanded(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none",animation:streaming?"pillGlow 2s ease-in-out infinite":"none"}}>
-      <span style={{fontSize:13,lineHeight:1,animation:streaming?"bop 2s ease-in-out infinite":"none",transformOrigin:"center"}}>🧠</span>
+      <span style={{fontSize:13,lineHeight:1,animation:streaming?"bop 2s ease-in-out infinite":"none",transformOrigin:"center"}}>📐</span>
       <span style={{fontWeight:700,fontSize:11,color:tc,letterSpacing:.3}}>Architecture Plan</span>
       {streaming&&<span style={{fontSize:10,color:tc,opacity:.6,fontStyle:"italic"}}>building…</span>}
       <button onClick={copy} title="Copy plan" style={{marginLeft:"auto",background:copied?`${t.ok}22`:"transparent",border:`1px solid ${copied?t.ok:`${tc}33`}`,color:copied?t.ok:tc,padding:"2px 8px",borderRadius:6,fontSize:9,fontFamily:"inherit",cursor:"pointer",fontWeight:600,opacity:.85}}>{copied?"copied":"copy"}</button>
@@ -529,7 +529,7 @@ const PlanPanel = ({plan,t,streaming,md,onCopy})=>{
 // status + collapsible event timeline. Survives browser disconnects: on mount
 // it fetches /api/runs/{runId} so the timeline rebuilds even if the SSE chat
 // stream dropped while the agent was still running.
-const RunCard = ({runId, liveEvts, t, font})=>{
+const RunCard = ({runId, liveEvts, t, font, md})=>{
   const [run, setRun] = useState(null);
   const [expanded, setExpanded] = useState(false);
   const [err, setErr] = useState(null);
@@ -611,6 +611,11 @@ const RunCard = ({runId, liveEvts, t, font})=>{
       {env.summary && <div style={{marginTop:8,padding:"6px 8px",borderRadius:6,background:`${colour}10`,color:t.dim,fontStyle:"italic"}}>{env.summary}</div>}
       {env.error && <div style={{marginTop:8,padding:"6px 8px",borderRadius:6,background:`${t.err}10`,color:t.err}}>⚠ {env.error}</div>}
       {(env.manifest_missing||[]).length>0 && <div style={{marginTop:6,fontSize:10,color:t.mut}}>missing: {(env.manifest_missing||[]).slice(0,8).join(", ")}</div>}
+      {role==="qa" && env.answer && <div style={{marginTop:10,padding:"10px 12px",borderRadius:8,background:`${colour}08`,border:`1px solid ${colour}22`,color:t.dim,fontSize:12,lineHeight:1.6}}>
+        {md?<MDWrap>{md(env.answer)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit"}}>{env.answer}</pre>}
+        {env.looks_like_change_request && <div style={{marginTop:8,padding:"4px 8px",borderRadius:5,background:`${t.acc}18`,color:t.acc,fontSize:10,fontWeight:600,display:"inline-block"}}>⚡ Flagged as change request</div>}
+        {(env.files_examined||[]).length>0 && <div style={{marginTop:8,fontSize:10,color:t.mut}}>📂 examined: {(env.files_examined||[]).slice(0,5).join(", ")}{(env.files_examined||[]).length>5?` +${(env.files_examined||[]).length-5} more`:""}</div>}
+      </div>}
     </div>}
   </div>;
 };
@@ -5581,7 +5586,7 @@ function HyprChat(){
                     }
                     if(!runIds.length) return null;
                     return runIds.map(rid =>
-                      <RunCard key={rid} runId={rid} liveEvts={isLast?evts:[]} t={t} font={font}/>
+                      <RunCard key={rid} runId={rid} liveEvts={isLast?evts:[]} t={t} font={font} md={md}/>
                     );
                   })()}
                   {/* Inline code execution output */}

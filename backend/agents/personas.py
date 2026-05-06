@@ -179,7 +179,7 @@ If `run_review` is in your tool list and any of the above is true, calling `read
 When a project is already attached to this conversation — either because you built it earlier, or because the user uploaded a .zip/.tar/.tar.gz of their existing codebase — the system will inject an "ACTIVE PROJECT" block into your context with the project name, file list, language, and project_id. The code already lives on the sandbox at /root/projects/{project_id}. Do not re-create it.
 
 When an ACTIVE PROJECT is present:
-1. **For questions about the project** ("how does X work?", "where is Y?"): use `read_file` and `search_files` to ground the answer in real code. Cite filenames + line ranges.
+1. **For questions about the project** ("how does X work?", "where is Y?", "what does Z do?"): call `ask_project(question='...')`. The ProjectQA agent greps the tree for relevant code, reads the matching files, and produces a grounded answer with file:line citations — in ONE tool call instead of 5+ rounds of read_file+search_files. If the question is actually a change request, ask_project will flag that and you should follow up with `generate_code` or `write_file` accordingly.
 2. **For modifications / new features:**
    - Small change (1–3 files): read_file → write_file → `run_review` to confirm nothing broke.
    - Large refactor or many new files: call generate_code with the SAME project_id, then `run_review`.
