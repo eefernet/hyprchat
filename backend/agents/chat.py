@@ -162,13 +162,22 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     # reply still saves below. Upsert if the most recent user message in
     # the DB doesn't match the incoming one.
     if conv_id and last_user_msg:
+        # Prefer the explicit display_content sent by the frontend (user's typed text,
+        # without the `[Attached N image: ...]` hint that goes to the model). Fall back
+        # to last_user_msg for older clients.
+        _display = getattr(req, "display_content", None)
+        _user_meta = getattr(req, "user_metadata", None)
+        _content_to_save = _display if _display is not None else last_user_msg
         try:
             existing = await db.get_conversation(conv_id)
             if existing:
                 msgs = existing.get("messages") or []
                 recent_user = next((m for m in reversed(msgs) if m.get("role") == "user"), None)
-                if not recent_user or (recent_user.get("content") or "") != last_user_msg:
-                    await db.add_message(conv_id, "user", last_user_msg)
+                # Match by either the clean display content or the raw model-facing content
+                # so we don't double-save when the previous turn already persisted one.
+                _recent_content = (recent_user.get("content") or "") if recent_user else ""
+                if not recent_user or (_recent_content != _content_to_save and _recent_content != last_user_msg):
+                    await db.add_message(conv_id, "user", _content_to_save, metadata=_user_meta)
         except Exception:
             pass
     if last_user_msg.startswith("/run "):

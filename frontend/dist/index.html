@@ -2221,9 +2221,18 @@ function HyprChat(){
     try{
       const cv=convs.find(c=>c.id===cid);
       let am = messagesToSend.map(m=>{
-        const out={role:m.role,content:m._fullContent||m.content};
+        let baseContent=m._fullContent||m.content||"";
+        // After reload _fullContent is gone; reconstruct the `[Attached N image: ...]` hint
+        // from persisted metadata so non-vision models still know an image was attached.
+        const metaImgs=(m.metadata&&Array.isArray(m.metadata.images))?m.metadata.images:null;
+        if(!m._fullContent&&metaImgs&&metaImgs.length){
+          const names=metaImgs.map(im=>im.name||"image").join(", ");
+          const hint=`[Attached ${metaImgs.length} image${metaImgs.length>1?"s":""}: ${names}]`;
+          baseContent=baseContent?`${baseContent}\n\n${hint}`:hint;
+        }
+        const out={role:m.role,content:baseContent};
         // Pass images from current send (_images) or persisted user metadata (metadata.images)
-        const persistedImgs=(m.metadata&&Array.isArray(m.metadata.images))?m.metadata.images.map(im=>(im.dataUrl||"").split(",")[1]||"").filter(Boolean):null;
+        const persistedImgs=metaImgs?metaImgs.map(im=>(im.dataUrl||"").split(",")[1]||"").filter(Boolean):null;
         const imgs=(Array.isArray(m._images)&&m._images.length)?m._images:(persistedImgs&&persistedImgs.length?persistedImgs:null);
         if(imgs)out.images=imgs;
         return out;
@@ -2262,6 +2271,19 @@ function HyprChat(){
 
       const ctrl=new AbortController();abortR.current=ctrl;
       const body={conversation_id:cid,model:modelName,messages:am,system_prompt:cv?.system_prompt||"",tool_ids:cv?.tool_ids||[],persona_id:overrides.persona_id!==undefined?overrides.persona_id:(cv?.model_config_id||null)};
+      // Send the user's typed text + attachment metadata separately so the backend's
+      // defensive save persists the clean content + image previews (not the bloated
+      // `[Attached N image: ...]` model-facing string).
+      const _lastUser=[...messagesToSend].reverse().find(mm=>mm.role==="user");
+      if(_lastUser){
+        const _md=_lastUser.metadata||null;
+        const _cleanMeta=(_md&&((_md.images&&_md.images.length)||(_md.pdfs&&_md.pdfs.length)))?{
+          ...(_md.images?{images:_md.images}:{}),
+          ...(_md.pdfs?{pdfs:_md.pdfs}:{}),
+        }:null;
+        if(typeof _lastUser.content==="string")body.display_content=_lastUser.content;
+        if(_cleanMeta)body.user_metadata=_cleanMeta;
+      }
       if(sendNumCtx)body.num_ctx=sendNumCtx;
       if(sendTemp!==undefined)body.temperature=sendTemp;
       if(sendTopP!==undefined)body.top_p=sendTopP;

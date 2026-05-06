@@ -252,6 +252,14 @@ class ChatRequest(BaseModel):
     repeat_penalty: Optional[float] = None
     think_budget: Optional[int] = None  # None=auto, 0=disable thinking, 1=enable thinking
     effort_rounds: Optional[int] = None  # 0=off, 1-3=extra self-review passes after the initial answer
+    # Clean user-visible content for the latest user message (without the appended
+    # `[Attached N image: ...]` hint that messages[].content carries for the model).
+    # Used by chat.py's defensive user-message save so the persisted row matches what
+    # the user typed, not the bloated model-facing string.
+    display_content: Optional[str] = None
+    # Metadata for the latest user message (e.g. {"images":[{name,dataUrl,mime}], "pdfs":[...]})
+    # so image previews survive page reload.
+    user_metadata: Optional[dict] = None
 
 class ExecuteRequest(BaseModel):
     conversation_id: Optional[str] = None
