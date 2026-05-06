@@ -858,56 +858,45 @@ async def upload_coder_project(
     with tarfile.open(fileobj=tar_buf, mode="w:gz") as out_tf:
         out_tf.add(staging_root, arcname=".")
     tar_bytes = tar_buf.getvalue()
-    tar_b64 = base64.b64encode(tar_bytes).decode()
 
-    # Upload to codebox via chunked /command calls (command line can't hold
-    # tens of MB at once). Each chunk appends base64 to a temp file; final
-    # command decodes + extracts into /root/projects/{project_id}.
-    #
-    # CHUNK size note: Linux's MAX_ARG_STRLEN (per-argv-string limit) is
-    # 131072 bytes (32 pages × 4KB). The shell command we build is
-    # `printf '%s' '<chunk>' >> file`, so the chunk + ~40 chars of wrapping
-    # must fit under that limit. 130KB barely passes, 150KB fails with E2BIG
-    # ("Argument list too long"). 100KB gives a safe margin and still keeps
-    # round-trips reasonable (a 10MB tarball → ~100 chunks).
+    # Upload to codebox via the dedicated /upload-chunk endpoint. Sends raw
+    # tarball bytes in chunks via multipart — bypasses both pitfalls of
+    # routing-via-/command:
+    #   1. No shell involved → no MAX_ARG_STRLEN limit (was capped at 100KB).
+    #   2. No deny-list collisions (random bytes can contain "mkfs" without
+    #      being mistaken for a system-format command).
+    # 1MB chunks are an order of magnitude faster (10× fewer round-trips than
+    # the old 100KB-of-base64 approach).
     remote_dir = f"/root/projects/{project_id}"
-    remote_tmp = f"/tmp/{project_id}.tar.gz.b64"
-    CHUNK = 100_000  # ~100KB of base64 per HTTP call (safe under MAX_ARG_STRLEN)
-    total_chunks = (len(tar_b64) + CHUNK - 1) // CHUNK
+    remote_tmp = f"/tmp/{project_id}.tar.gz"
+    CHUNK = 1_000_000  # 1MB of raw bytes per multipart POST
+    total_chunks = max(1, (len(tar_bytes) + CHUNK - 1) // CHUNK)
 
     try:
-        async with httpx.AsyncClient() as http_client:
-            # Reset temp file + ensure project dir
-            init_cmd = (
-                f"rm -f {shlex.quote(remote_tmp)} && "
-                f"mkdir -p {shlex.quote(remote_dir)} && "
-                f"touch {shlex.quote(remote_tmp)}"
-            )
-            r = await http_client.post(
-                f"{config.CODEBOX_URL}/command",
-                json={"command": init_cmd, "timeout": 15},
-                timeout=25,
-            )
-            if r.json().get("exit_code", 1) != 0:
-                raise HTTPException(500, "Failed to prep sandbox directory")
-
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as http_client:
             for i in range(total_chunks):
-                chunk = tar_b64[i * CHUNK : (i + 1) * CHUNK]
-                append_cmd = (
-                    f"printf '%s' {shlex.quote(chunk)} >> {shlex.quote(remote_tmp)}"
-                )
+                chunk = tar_bytes[i * CHUNK : (i + 1) * CHUNK]
+                files = {"file": (f"chunk-{i}", chunk, "application/octet-stream")}
+                # truncate=true on first chunk wipes any partial leftover from
+                # a previous failed upload; subsequent chunks append.
+                form = {"path": remote_tmp, "truncate": "true" if i == 0 else "false"}
                 r = await http_client.post(
-                    f"{config.CODEBOX_URL}/command",
-                    json={"command": append_cmd, "timeout": 30},
-                    timeout=45,
+                    f"{config.CODEBOX_URL}/upload-chunk",
+                    files=files, data=form,
+                    timeout=60,
                 )
-                if r.json().get("exit_code", 1) != 0:
-                    raise HTTPException(500, f"Chunk {i+1}/{total_chunks} upload failed")
+                if r.status_code != 200:
+                    raise HTTPException(
+                        500,
+                        f"Chunk {i+1}/{total_chunks} upload failed: "
+                        f"HTTP {r.status_code} — {r.text[:200]}",
+                    )
 
-            # Decode + extract + cleanup
+            # Make sure the project directory exists, then extract directly
+            # from the file we just wrote. No base64 in this command.
             extract_cmd = (
-                f"base64 -d {shlex.quote(remote_tmp)} | "
-                f"tar -xzf - -C {shlex.quote(remote_dir)} && "
+                f"mkdir -p {shlex.quote(remote_dir)} && "
+                f"tar -xzf {shlex.quote(remote_tmp)} -C {shlex.quote(remote_dir)} && "
                 f"rm -f {shlex.quote(remote_tmp)}"
             )
             r = await http_client.post(
