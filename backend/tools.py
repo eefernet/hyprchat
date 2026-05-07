@@ -870,6 +870,80 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
         #     everything except ask_project itself (so follow-up questions
         #     still work). If the user actually wants a change, they need to
         #     say so — ask_project will flag it and the gate will release.
+        #
+        #   State 4 — CYCLE LIMIT (run_fixer only): if there are already ≥3
+        #     succeeded fixer runs on this conv, the same class of issue is
+        #     persisting and another fixer call won't help. Refuse and tell
+        #     the model to summarize for the user. The persona prompt has
+        #     said "Hard cap: 3 review/fix cycles" since Phase 2; this
+        #     enforces it server-side instead of trusting the model to obey.
+        if conv_id and name == "run_fixer":
+            try:
+                _runs_for_cap = await db.get_runs_by_conversation(conv_id, limit=20)
+                _fixer_succ = sum(
+                    1 for r in _runs_for_cap
+                    if r.get("role") == "fixer" and r.get("status") == "succeeded"
+                )
+                if _fixer_succ >= 3:
+                    # Detect v2 persona; v1 doesn't run this loop, so no need
+                    # to enforce the cap there.
+                    _is_v2_cap = False
+                    try:
+                        _conv_row = await db.get_conversation(conv_id)
+                        _mc_id = (_conv_row or {}).get("model_config_id") if _conv_row else None
+                        if _mc_id:
+                            _all_mc = await db.get_model_configs()
+                            _mc = next((m for m in _all_mc if m.get("id") == _mc_id), None)
+                            if _mc and "v2" in (_mc.get("name") or "").lower():
+                                _is_v2_cap = True
+                    except Exception as _pe:
+                        print(f"[v2-gate] cap persona lookup failed (non-fatal): {_pe}")
+
+                    if _is_v2_cap:
+                        # Pull the latest reviewer's summary so the model has
+                        # specifics to relay to the user.
+                        _last_rev = next(
+                            (r for r in _runs_for_cap if r.get("role") == "reviewer"),
+                            None,
+                        )
+                        _rev_sum = ""
+                        _rev_issues = []
+                        if _last_rev:
+                            _rev_env = _last_rev.get("result_envelope") or {}
+                            _rev_sum = (_rev_env.get("summary") or "")[:300]
+                            _rev_issues = _rev_env.get("issues") or []
+                        _issue_lines = []
+                        for _i, _iss in enumerate(_rev_issues[:3], 1):
+                            _issue_lines.append(
+                                f"  {_i}. [{_iss.get('severity','?')}] "
+                                f"{_iss.get('file','?')}"
+                                + (f":{','.join(str(x) for x in _iss.get('lines') or [])}" if _iss.get('lines') else "")
+                                + f" — {(_iss.get('summary','') or '')[:160]}"
+                            )
+                        await events.emit(conv_id, "tool_end", {
+                            "tool": "run_fixer", "icon": "wrench",
+                            "status": f"⛔ Cycle cap reached ({_fixer_succ}/3) — summarize and stop",
+                        })
+                        print(f"[v2-gate] CYCLE CAP: blocking run_fixer (already "
+                              f"{_fixer_succ} succeeded fixer runs on this conv)", flush=True)
+                        return (
+                            f"BLOCKED — Hard cap of 3 review/fix cycles already attempted "
+                            f"on this conversation ({_fixer_succ} successful fixer runs).\n\n"
+                            f"The same class of issue is persisting and another fixer call "
+                            f"will not help. Your VERY NEXT output MUST be plain text to the "
+                            f"user that:\n"
+                            f"  1. Summarizes what was changed across the {_fixer_succ} fix cycles\n"
+                            f"  2. States the remaining issue with file:line references"
+                            + (f"\n     (latest reviewer: \"{_rev_sum}\")" if _rev_sum else "")
+                            + (("\n" + "\n".join(_issue_lines)) if _issue_lines else "")
+                            + "\n  3. Asks the user for guidance — what behavior they actually "
+                            f"want, or whether to skip this issue and ship anyway.\n\n"
+                            f"Do NOT call run_fixer, run_review, generate_code, write_file, or "
+                            f"any other tool. Respond to the user with text."
+                        )
+            except Exception as _ce:
+                print(f"[v2-gate] cycle cap check failed (non-fatal): {_ce}")
+
         if conv_id and name not in ("run_review", "run_fixer", "ask_project"):
             try:
                 _runs_for_v2_gate = await db.get_runs_by_conversation(conv_id, limit=20)
@@ -1763,17 +1837,41 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             from agents import fixer
             reviewer_run_id = (args.get("reviewer_run_id") or "").strip()
 
-            # If not given, find the most recent reviewer run for this conv.
-            if not reviewer_run_id and conv_id:
+            # Helper: pull the most recent reviewer run id for this conv.
+            async def _latest_reviewer_id() -> str:
+                if not conv_id:
+                    return ""
                 try:
                     _runs = await db.get_runs_by_conversation(conv_id, limit=20)
                     for _r in _runs:
                         if _r.get("role") == "reviewer":
-                            reviewer_run_id = _r["id"]
-                            print(f"[run_fixer] resolved reviewer_run_id={reviewer_run_id}")
-                            break
+                            return _r["id"]
                 except Exception as _re:
                     print(f"[run_fixer] reviewer lookup failed: {_re}")
+                return ""
+
+            # If not given, resolve from runs.
+            if not reviewer_run_id:
+                reviewer_run_id = await _latest_reviewer_id()
+                if reviewer_run_id:
+                    print(f"[run_fixer] resolved reviewer_run_id={reviewer_run_id} (omitted by model)")
+            else:
+                # Validate that the id passed by the model actually exists.
+                # qwen3-coder occasionally fabricates run-ids instead of
+                # copying from the prior run_review tool result; in that
+                # case fall back to the most recent reviewer run rather
+                # than failing the whole fix step.
+                try:
+                    _exists = await db.get_run(reviewer_run_id)
+                except Exception:
+                    _exists = None
+                if not _exists:
+                    print(f"[run_fixer] passed reviewer_run_id={reviewer_run_id} not found — "
+                          f"falling back to most recent reviewer")
+                    _fallback = await _latest_reviewer_id()
+                    if _fallback:
+                        reviewer_run_id = _fallback
+                        print(f"[run_fixer] using {reviewer_run_id} instead")
 
             if not reviewer_run_id:
                 return ("ERROR: run_fixer needs reviewer_run_id (the run_id from a prior "
@@ -1838,33 +1936,73 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             if not question:
                 return "ERROR: ask_project requires a `question` argument."
 
-            # Resolve project_dir using the same lookup chain as run_review:
-            # most recent succeeded builder run → coding_projects fallback.
             language = ""
-            if not project_dir and conv_id:
+
+            async def _resolve_project_dir() -> tuple[str, str]:
+                """Auto-resolve project_dir + language from runs/coding_projects."""
+                _pd = ""
+                _lang = ""
+                if not conv_id:
+                    return _pd, _lang
                 try:
                     _runs = await db.get_runs_by_conversation(conv_id, limit=20)
                     for _r in _runs:
                         if _r.get("role", "").startswith("builder") and _r.get("status") == "succeeded":
                             _env = _r.get("result_envelope") or {}
-                            _pd = (_env.get("project_dir") or "").strip()
-                            if _pd:
-                                project_dir = _pd
-                                language = _env.get("language", "") or language
-                                print(f"[ask_project] resolved project_dir={project_dir} from builder run {_r.get('id')}")
-                                break
+                            _candidate = (_env.get("project_dir") or "").strip()
+                            if _candidate:
+                                _pd = _candidate
+                                _lang = _env.get("language", "") or _lang
+                                print(f"[ask_project] resolved project_dir={_pd} from builder run {_r.get('id')}")
+                                return _pd, _lang
                 except Exception as _bre:
                     print(f"[ask_project] builder run lookup failed: {_bre}")
-            if not project_dir and conv_id:
+                # coding_projects fallback
                 try:
                     _active = await db.get_coding_project_by_conv(conv_id)
                     if _active:
                         _ohp = _active.get("openhands_project_id") or _active.get("id")
                         if _ohp:
-                            project_dir = f"/root/projects/{_ohp}"
-                            language = _active.get("language") or language
+                            _pd = f"/root/projects/{_ohp}"
+                            _lang = _active.get("language") or _lang
                 except Exception:
                     pass
+                return _pd, _lang
+
+            async def _project_dir_exists(path: str) -> bool:
+                """Best-effort check that path is a real directory on Codebox."""
+                if not path:
+                    return False
+                try:
+                    _r = await http.post(
+                        f"{config.CODEBOX_URL}/command",
+                        json={"command": f"test -d {shlex.quote(path)} && echo OK || echo NO",
+                              "timeout": 5},
+                        timeout=10,
+                    )
+                    if _r.status_code == 200:
+                        return "OK" in (_r.json().get("stdout") or "")
+                except Exception:
+                    pass
+                return False
+
+            if project_dir:
+                # Validate that the passed path actually exists. qwen-style
+                # models occasionally fabricate names like "/root/projects/
+                # todo-api" by guessing from the user's description instead
+                # of looking up the real path. If that happens, fall back to
+                # auto-resolution from the latest builder run.
+                if not await _project_dir_exists(project_dir):
+                    print(f"[ask_project] passed project_dir={project_dir} does not exist — "
+                          f"falling back to auto-resolve")
+                    _real_pd, _real_lang = await _resolve_project_dir()
+                    if _real_pd:
+                        project_dir = _real_pd
+                        language = _real_lang or language
+                        print(f"[ask_project] using {project_dir} instead")
+            else:
+                project_dir, language = await _resolve_project_dir()
+
             if not project_dir:
                 return ("ERROR: ask_project needs project_dir, and no active project was "
                         "found on this conversation. Pass it explicitly: "

@@ -529,9 +529,77 @@ const PlanPanel = ({plan,t,streaming,md,onCopy})=>{
 // status + collapsible event timeline. Survives browser disconnects: on mount
 // it fetches /api/runs/{runId} so the timeline rebuilds even if the SSE chat
 // stream dropped while the agent was still running.
+
+// Role → (emoji, friendly label). Each agent gets a distinct visual identity
+// so a stack of cards reads as a sequence of distinct phases instead of
+// "🤖 Run · builder.feature succeeded" × N. Lookup tolerates minor variants
+// (builder.legacy, builder.scaffold, builder.feature, builder.continue) by
+// falling back to the role's prefix before the dot.
+const _ROLE_VISUALS = {
+  "architect":         {icon: "📐", label: "Designing plan"},
+  "builder":           {icon: "🏗", label: "Building project"},
+  "builder.scaffold":  {icon: "🏗", label: "Building project"},
+  "builder.continue":  {icon: "🔄", label: "Resuming build"},
+  "builder.feature":   {icon: "✨", label: "Adding feature"},
+  "builder.bugfix":    {icon: "🩹", label: "Bug fix build"},
+  "builder.legacy":    {icon: "🤖", label: "OpenHands build"},
+  "reviewer":          {icon: "🔍", label: "Reviewing"},
+  "fixer":             {icon: "🛠", label: "Fixing issues"},
+  "qa":                {icon: "❓", label: "Investigating"},
+  "indexer":           {icon: "📚", label: "Indexing project"},
+};
+const _roleVisual = (role)=>{
+  if(_ROLE_VISUALS[role]) return _ROLE_VISUALS[role];
+  // Try the prefix before "." (e.g. unknown "builder.X" → "builder")
+  const base = (role||"").split(".")[0];
+  if(_ROLE_VISUALS[base]) return _ROLE_VISUALS[base];
+  return {icon: "🤖", label: role || "Run"};
+};
+
+// Map OpenHands action names → small leading icon for step rows. Keeps the
+// timeline scannable.
+const _STEP_ACTION_ICONS = {
+  "starting": "🚀",
+  "thinking": "🧠",
+  "terminal": "⚡",  "terminal_result": "📤",
+  "file_create": "📄",  "file_edit": "✏️",  "file_view": "👁",
+  "file_str_replace": "🔁",  "file_editor_result": "✅",
+  "glob": "🔎",  "glob_result": "🔎",
+  "grep": "🔎",  "grep_result": "🔎",
+  "finish": "🏁",
+  // Reviewer
+  "detect": "🧭",  "detected": "🧭",
+  "build": "🔨",  "build_done": "🔨",
+  "test": "🧪",  "test_done": "🧪",
+  "lint": "🧹",  "lint_done": "🧹",
+  "read_files": "📖",
+  "analyze": "🔬",
+  "parse_fallback": "⚠",
+  // Architect
+  "planning": "📐",  "retry": "🔄",
+  "language": "🌐",  "build_cmd": "🔨",  "test_cmd": "🧪",  "lint_cmd": "🧹",
+  "manifest": "📋",  "file": "📄",
+  "tests_required": "🧪",  "dependencies": "📦",  "dep": "📦",
+  "risk": "⚠",  "success_criteria": "🎯",  "criterion": "🎯",
+  // Fixer
+  "issue": "🩹",  "writing": "✏️",  "calling": "🧠",
+  // Indexer
+  "indexing": "📚",  "found_files": "📁",  "reading": "📖",  "read_done": "📖",
+  // QA
+  "question": "❓",  "list_files": "📁",  "keywords": "🏷",  "grep": "🔎",
+  "filename_targets": "🎯",  "matched_files": "🎯",  "snippets": "📑",
+  "compose": "✍️",  "fallback": "↩",  "no_match": "❌",
+  // Generic
+  "start": "🚀",  "done": "✅",  "error": "❌",
+};
+
 const RunCard = ({runId, liveEvts, t, font, md})=>{
   const [run, setRun] = useState(null);
+  // expanded starts false; flips to true automatically once we've loaded the
+  // run and detect it needs attention (failed, or reviewer-with-issues). The
+  // user can still toggle either way after that.
   const [expanded, setExpanded] = useState(false);
+  const [autoExpanded, setAutoExpanded] = useState(false);
   const [err, setErr] = useState(null);
   // Initial fetch + when run terminal status changes, refetch for envelope.
   useEffect(()=>{
@@ -583,17 +651,31 @@ const RunCard = ({runId, liveEvts, t, font, md})=>{
     failed:"failed", partial:"partial", loading:"loading…",
   }[status] || status;
   const role = run?.role || "builder";
+  const visual = _roleVisual(role);
   const env = run?.result_envelope || {};
-  const filesN = (env.files_written||[]).length;
+  const filesN = (env.files_written||env.files_touched||[]).length;
   const dur = env.duration_s;
   const isStreaming = status==="running" || status==="queued";
+  // Auto-expand cards that need attention: any failed run, OR a reviewer
+  // that returned issues/error. Only fires once per card, and only after the
+  // run has loaded — so a streaming run doesn't pre-pop open and then close
+  // when it succeeds.
+  const needsAttention = (
+    status === "failed" ||
+    (role === "reviewer" && (env.status === "issues" || env.status === "error"))
+  );
+  if (run && needsAttention && !autoExpanded) {
+    setAutoExpanded(true);
+    setExpanded(true);
+  }
   const bc = isStreaming ? `${colour}66` : `${colour}38`;
   const bg = `${colour}0c`;
   return <div style={{marginTop:6,marginBottom:6,animation:"fadeIn .3s",borderRadius:10,border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%",boxShadow:isStreaming?`0 0 12px ${colour}22`:"none",transition:"all .3s"}}>
     <div onClick={()=>setExpanded(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none",animation:isStreaming?"pillGlow 2s ease-in-out infinite":"none"}}>
-      <span style={{fontSize:13,lineHeight:1,animation:isStreaming?"bop 2s ease-in-out infinite":"none"}}>🤖</span>
-      <span style={{fontWeight:700,fontSize:11,color:colour,letterSpacing:.3}}>Run · {role}</span>
-      <span style={{fontSize:10,color:colour,opacity:.7,fontStyle:isStreaming?"italic":"normal"}}>{statusLabel}</span>
+      <span style={{fontSize:13,lineHeight:1,animation:isStreaming?"bop 2s ease-in-out infinite":"none"}}>{visual.icon}</span>
+      <span style={{fontWeight:700,fontSize:11,color:colour,letterSpacing:.3}}>{visual.label}</span>
+      <span style={{fontSize:10,color:t.mut,opacity:.6}}>· {role}</span>
+      <span style={{fontSize:10,color:colour,opacity:.7,fontStyle:isStreaming?"italic":"normal"}}>· {statusLabel}</span>
       {filesN>0 && <span style={{fontSize:10,color:t.mut}}>· {filesN} file{filesN===1?"":"s"}</span>}
       {dur && <span style={{fontSize:10,color:t.mut}}>· {dur}s</span>}
       {err && <span style={{fontSize:10,color:t.err}}>· {err}</span>}
@@ -601,13 +683,15 @@ const RunCard = ({runId, liveEvts, t, font, md})=>{
     </div>
     {expanded && <div style={{padding:"8px 12px",fontSize:11,lineHeight:1.55,color:t.dim,maxHeight:320,overflowY:"auto",fontFamily:font}}>
       {allSteps.length===0 && <div style={{color:t.mut,fontStyle:"italic"}}>No steps recorded yet…</div>}
-      {allSteps.map((s,i)=>(
-        <div key={i} style={{padding:"3px 0",borderBottom:i<allSteps.length-1?`1px solid ${t.brd}12`:"none"}}>
-          <span style={{color:t.mut,marginRight:6}}>#{s.step}</span>
-          <span style={{color:colour,fontWeight:600,marginRight:6}}>{s.action||"?"}</span>
-          <span style={{color:t.dim}}>{(s.detail||"").slice(0,160)}</span>
-        </div>
-      ))}
+      {allSteps.map((s,i)=>{
+        const stepIcon = _STEP_ACTION_ICONS[s.action] || "·";
+        return <div key={i} style={{padding:"3px 0",borderBottom:i<allSteps.length-1?`1px solid ${t.brd}12`:"none",display:"flex",alignItems:"baseline",gap:6}}>
+          <span style={{color:t.mut,fontSize:10,minWidth:24,textAlign:"right"}}>#{s.step}</span>
+          <span style={{fontSize:11,opacity:.85,minWidth:16,textAlign:"center"}}>{stepIcon}</span>
+          <span style={{color:colour,fontWeight:600}}>{s.action||"?"}</span>
+          <span style={{color:t.dim,flex:1,wordBreak:"break-word"}}>{(s.detail||"").slice(0,160)}</span>
+        </div>;
+      })}
       {env.summary && <div style={{marginTop:8,padding:"6px 8px",borderRadius:6,background:`${colour}10`,color:t.dim,fontStyle:"italic"}}>{env.summary}</div>}
       {env.error && <div style={{marginTop:8,padding:"6px 8px",borderRadius:6,background:`${t.err}10`,color:t.err}}>⚠ {env.error}</div>}
       {(env.manifest_missing||[]).length>0 && <div style={{marginTop:6,fontSize:10,color:t.mut}}>missing: {(env.manifest_missing||[]).slice(0,8).join(", ")}</div>}
@@ -634,7 +718,7 @@ const _runIdsFromEvents = (evts)=>{
 };
 
 // Inline tool status: shows latest pill, expands to show all
-const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical,md})=>{
+const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical,md,savedEvts})=>{
   const [showAll,setShowAll]=useState(false);
   if(!evts.length) return null;
 
@@ -709,10 +793,15 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical,md
   // Surface reasoning + architecture plan above the pill row.
   // Reasoning: latest thinking/thought_done event with detail.thinking
   // Plan: latest plan_project tool_end with detail.plan
+  // Live `evts` is a sliding window (last 200) so on long runs the early
+  // plan_project / thought_done events get evicted. `savedEvts` (passed when
+  // the parent has msg.metadata.saved_events) is the durable full record;
+  // we merge it in here to make sure the panels survive multi-cycle runs.
   const _parseDetail = (ev)=>{const d=ev?.data?.detail;if(!d)return null;try{return typeof d==="string"?JSON.parse(d):d;}catch{return null;}};
-  const _thinkEvts = evts.filter(e=>(e.type==="thinking"||e.type==="thought_done")&&_parseDetail(e)?.thinking);
+  const _evtPool = (savedEvts && savedEvts.length) ? savedEvts.concat(evts) : evts;
+  const _thinkEvts = _evtPool.filter(e=>(e.type==="thinking"||e.type==="thought_done")&&_parseDetail(e)?.thinking);
   const reasoningText = _thinkEvts.length ? (_parseDetail(_thinkEvts[_thinkEvts.length-1])?.thinking||"") : "";
-  const _planEvts = evts.filter(e=>(e.type==="tool_end"||e.type==="tool_done")&&e.data?.tool==="plan_project"&&_parseDetail(e)?.plan);
+  const _planEvts = _evtPool.filter(e=>(e.type==="tool_end"||e.type==="tool_done")&&e.data?.tool==="plan_project"&&_parseDetail(e)?.plan);
   const planText = _planEvts.length ? (_parseDetail(_planEvts[_planEvts.length-1])?.plan||"") : "";
   const isStreaming = !historical;
   const Panels = (reasoningText||planText) ? <div style={{display:"flex",flexDirection:"column",gap:0,marginBottom:reasoningText||planText?4:0}}>
@@ -5562,10 +5651,10 @@ function HyprChat(){
                       </span>)}
                     </div>}
                     {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                    {msg.isS&&!msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
+                    {msg.isS&&!msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
                   </div>
-                  {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:null;})()}
-                  {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:null;})()}
+                  {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:null;})()}
+                  {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:null;})()}
                   {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>;})()}
                   {/* Coder Bot v2 — durable run cards. Render one card per unique run_id.
                       Sources, in priority: explicit metadata.run_ids (written server-side at

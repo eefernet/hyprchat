@@ -1,14 +1,154 @@
 ## Alpha v17 — May 5, 2026
 
-### Coder Bot v2 — Reviewer / Fixer Agents
-- **New `Reviewer` agent (`backend/agents/reviewer.py`)** — Replaces the v1 pattern of "orchestrator manually reads files and rewrites them in 28+ chat rounds." A single stateless run that detects the project's build / test / lint commands from on-disk markers, executes them inside Codebox, reads files referenced in any failure output, and asks the planning-model LLM for a structured issue list. Read-only — never modifies code.
-- **Project-marker auto-detection** — `pom.xml` → Maven, `Cargo.toml` → cargo + clippy, `go.mod` → go build / vet, `package.json` → npm install + build + test, `pyproject.toml` / `requirements.txt` → pip + pytest + py_compile, `Makefile`, `CMakeLists.txt`, `build.gradle(.kts)`. More-specific markers checked first so monorepos hit the right one.
-- **Plain-source fallbacks** — When no formal build file exists, the Reviewer picks the language with the most source files in the tree and runs a sensible compile/test command (Java javac excluding test sources, Python py_compile, Go build, etc.). Java fallback explicitly excludes `*Test.java` / `./test` / `./tests` so a missing JUnit classpath doesn't blow up the whole build.
-- **New `Fixer` agent (`backend/agents/fixer.py`)** — Loads the prior Reviewer envelope from the run store, reads each issue's `suggested_fix_scope`, asks a coder-class LLM for minimal targeted edits as structured JSON, validates the model only edits files within scope, and writes via Codebox. Does NOT re-run the build itself — that's the Reviewer's job. Clean separation of responsibilities.
-- **Two new chat tools — `run_review` and `run_fixer`** — Exposed to the agent loop so coding sessions can review → fix → review → fix in tight cycles instead of the v1 manual rewrite path. The chat agent calls `run_review` after a build, then `run_fixer` with the reviewer's `run_id`, then `run_review` again to verify.
-- **Loop-tool exemption from duplicate detection** — `run_review` / `run_fixer` are designed to be called multiple times back-to-back with identical arguments, so the chat-loop's near-duplicate detector now treats them as `_LOOP_TOOLS` and exempts them from both exact and near-duplicate checks. Workflow correctness is enforced by the v2 gate in `tools.py` instead.
-- **Independent critic pass on `generate_code` output** — When `CRITIC_ENABLED` is on, the post-build flow runs a second reviewer pass using a different model (`CRITIC_MODEL` falling back to `PLANNING_MODEL` / `DEFAULT_MODEL`) so it can't rationalize its own mistakes. Catches runtime bugs that pass syntax / compile checks but break behavior. Live "🔍 Reviewing code with…" pill while it runs.
-- **Reviewer-agent bug fixes** — Edge cases in `fixer.py` and `reviewer.py` around scope validation and run-envelope shape.
+### Coder Bot v2 — Multi-Agent Rebuild
+
+The v1 Coder Bot was a single chat agent that did everything: planning, building, reviewing, fixing, packaging — all crammed into one round-by-round loop. It worked, but every step depended on the model "remembering" prompt rules, and a single misstep (manual `write_file` instead of `generate_code`, refusing to call `run_review`, ignoring the fix-loop cap) sent the whole thing into a 28-round death spiral. v2 is a **deterministic multi-agent pipeline**: each role is a stateless run with a structured envelope, and a server-side gate enforces the workflow instead of trusting the model to obey.
+
+#### Agent roster
+
+| Role | File | Responsibility | Model |
+|---|---|---|---|
+| **Architect** | `backend/agents/architect.py` | Single-shot structured plan (JSON manifest, build/test cmds, deps, success criteria) | `PLANNING_MODEL` |
+| **Builder** | `backend/openhands_worker.py` | OpenHands SDK on Codebox; profile-aware (scaffold/continue/feature/bugfix) | `CODER_MODEL` |
+| **Reviewer** | `backend/agents/reviewer.py` | Read-only — runs build + test + lint, returns structured issues with file:line | `PLANNING_MODEL` |
+| **Fixer** | `backend/agents/fixer.py` | Stateless scoped edits driven by a Reviewer envelope; marker-format output | `CODER_MODEL` |
+| **ProjectQA** | `backend/agents/project_qa.py` | Read-only Q&A over an existing project; greps + reads + cites file:line | chat/persona model |
+| **Indexer** | `backend/agents/project_indexer.py` | One-shot at upload time; walks tree, detects build system, indexes ChromaDB | `nomic-embed-text` |
+
+Every agent invocation is a row in the `runs` table with a structured `result_envelope`, persisted to SQLite and exposed via `/api/runs/{id}`. Browser disconnects can't lose work; the UI rebuilds the timeline on reload.
+
+#### Phase 1 — Reviewer
+
+- **Stateless build/test/lint runner** that replaces the v1 antipattern of "orchestrator reads files and rewrites them across 28 chat rounds." Detects project markers, runs the real build commands inside Codebox, parses output, asks the planning model for a structured issue list with severity / file:line / `suggested_fix_scope`. Read-only by contract.
+- **Project marker auto-detection** — checked in this order so monorepos hit the right one:
+
+| Marker | Build system | Build cmd | Test cmd |
+|---|---|---|---|
+| `pom.xml` | maven | `mvn -q -DskipTests compile` | `mvn -q test` |
+| `build.gradle(.kts)` | gradle | `./gradlew build -q -x test` | `./gradlew test -q` |
+| `Cargo.toml` | cargo | `cargo build --quiet` | `cargo test --quiet` |
+| `go.mod` | go | `go build ./...` | `go test ./...` |
+| `package.json` | npm | `npm install && npm run build` | `npm test` |
+| `pyproject.toml` / `requirements.txt` | pip | `pip install -e .` | `pytest -q` |
+| `CMakeLists.txt` | cmake | `cmake -B build && cmake --build build` | `ctest --output-on-failure` |
+| `Makefile` | make | `make` | `make test` |
+
+- **Plain-source fallback** — when no formal build file exists, walks the tree and picks the dominant language (`*.java`, `*.py`, `*.rs`, `*.go`, `*.js`, `*.ts`, `*.c`, `*.cpp`). Java fallback excludes `*Test.java` / `./test` / `./tests` so a missing JUnit classpath doesn't fail the whole compile.
+- **Hard fail on `(none)` marker** — if the Reviewer can't identify a project at the given path, returns `status="error"` instead of trivially "clean." A reviewer that silently passes a missing project is worse than no reviewer.
+- **`run_review` tool** — the chat agent invokes it after each build/edit. Tool result includes the `reviewer_run_id` so the Fixer can pick up where it left off.
+
+#### Phase 2 — Fixer
+
+- **Stateless minimal-edit applier.** Loads a Reviewer envelope from the run store, reads each issue's fix-scope files, asks the coder LLM for targeted edits, writes via Codebox. Validates that the model only touches files in scope. Does NOT re-run the build — that's the Reviewer's job. Clean separation: Reviewer verifies, Fixer edits, neither does the other's job.
+- **Marker-delimited output format** — replaced JSON with `### EDIT: <path>` + ` ```lang ` fenced full-file replacements. JSON-with-code routinely breaks because models don't escape newlines/quotes inside string values; markers don't need escaping. Robust across every language we tested.
+- **Path normalization** — relative paths from reviewer output (`./tests/Foo.java`, `com/pong/Bar.java`) get resolved to absolute paths under `project_dir`. Defensive against models that copy paths verbatim from compiler error messages.
+- **Validate-and-fallback shim** — if the model passes a fabricated `reviewer_run_id` that doesn't exist in the runs table, the dispatch falls back to the most recent reviewer for the conv instead of erroring out.
+- **Hard 3-cycle cap, server-enforced** — `tools.py` exec_tool gate refuses a 4th `run_fixer` call if 3 succeeded fixer runs already exist on the conv. Forces the model to stop and ask the user instead of looping forever. Includes the latest reviewer's summary + first 3 issues in the gate message so the model has specifics to relay.
+
+#### Phase 3 — Architect (structured planning)
+
+- **Replaces v1's prose `plan_project`** with a single LLM call to `PLANNING_MODEL` that produces a JSON object the Builder/Reviewer/Overseer all consume directly:
+
+```
+project_id, language, build_system, build_cmd, test_cmd, lint_cmd,
+manifest [{path, purpose, estimated_loc}],
+tests_required, external_deps, risk_notes, success_criteria
+```
+
+- **Validate + retry once on parse failure** — if the model emits invalid JSON or misses required keys, the parse error is fed back into the prompt for one retry. Fail loudly on second miss; no regex hacks.
+- **Manifest injection into Builder context** — when `generate_code` runs and a recent successful Architect envelope exists, the manifest + build/test commands + success criteria + deps + risk notes get prepended to the OpenHands task prompt. Builder follows the structured plan instead of re-deriving it from prose.
+- **Rich plan visualization** — `format_plan_for_chat()` renders the JSON as styled markdown: file tree drawn with box-drawing characters in a code fence, deps as build-system-specific snippets (XML for Maven, `npm install` for npm, TOML for Cargo, `pip install` for Python, Groovy for Gradle), success criteria as a checkbox list, tests as a markdown table.
+- **Architecture Plan panel restored** — Architect's `tool_end` event includes `detail.plan` with the rendered markdown, so the frontend's `PlanPanel` component renders the styled "Architecture Plan" panel above the agent run cards (📐 icon, copy button, expand/collapse).
+
+#### Phase 4 — ProjectQA + Project Indexer
+
+- **`ProjectQA` agent** for "how does X work?", "walk me through Y", "show me Z" questions. Steps: list_files → keyword extraction → grep across the tree → read snippets → ask LLM to compose grounded answer with `file:line` citations.
+- **Filename-targeted reads** — extracts file mentions from the question (`ScoreTracker.java`, `Ball.rs`, even `score tracker.java` with a stopword-filtered space split → `scoretracker.java`), fuzzy-matches against the project tree, reads the full file (up to 30KB) so the model can do a line-by-line breakdown.
+- **Change-request detection** — flags questions that look like change requests (`add X`, `fix Y`, `refactor Z`) so the chat agent can route to `generate_code` instead of more `ask_project` calls.
+- **Path validation shim** — if the model fabricates a `project_dir` that doesn't exist on Codebox, the dispatch falls back to the auto-resolved path from the latest builder run. Same pattern as the `run_fixer` shim.
+- **`ask_project` tool** with `❓ Investigating project` icon. Uses chat/persona model so the answer voice matches the assistant the user is actually talking to (was hardcoded to `DEFAULT_MODEL` before; now respects `conv_model`).
+- **`Project Indexer` agent** — runs once at upload time. Walks the uploaded project tree, detects build system from markers, reads up to 100 source files (excludes node_modules, .git, target, build, dist, __pycache__, venv), pushes contents into ChromaDB's `code_memory` collection via the existing `rag.index_generated_code` pipeline. Future `ask_project` / `generate_code` calls have semantic retrieval over the uploaded code.
+- **`/upload-chunk` endpoint added to codebox-api** — accepts raw bytes via multipart instead of base64-in-shell-command. Bypasses two pre-existing pitfalls of the chunked upload path: (1) Linux `MAX_ARG_STRLEN` (~128KB per argv string) when chunks exceeded ~130KB, and (2) the `mkfs` substring in codebox's deny-list which any random base64 chunk could trigger. Uploads now use 1MB raw chunks instead of 100KB base64 chunks — ~10× faster, no false positives.
+
+#### Phase 5 — Builder profiles
+
+- **Single `generate_code` tool, four profile prompts** based on conversation state:
+
+| Profile | Trigger | Builder behavior |
+|---|---|---|
+| `scaffold` | No active project (fresh build) | "Create ALL files from scratch" + git init |
+| `continue` | Last builder ran `partial`/`stuck` | "Resume — these files in `manifest_missing` aren't written yet, do NOT rewrite existing files" |
+| `feature` | Last builder `succeeded`, user asks for change | "EXISTING WORKING project at `/root/projects/X`, here's the tree + relevant files, edit minimally, do NOT regenerate working code" |
+| `bugfix` | Internal — used by run_fixer | n/a (Fixer doesn't go through OpenHands) |
+
+- **Profile detection from runs table** (authoritative; bypasses stale `coding_projects` rows) — walks newest-first, finds most recent builder with status in `(succeeded, partial, stuck)`, pulls `project_dir` + `project_id` from its envelope. Skips cancelled/failed/running entries that would otherwise mask the real prior build.
+- **Feature-profile context prep** — when the profile is `feature`, the dispatch packages the existing file tree (60 paths) + 1-3 inlined files mentioned in the user's task into the OpenHands `context` field. Builder reads what already exists out of its prompt and edits surgically instead of walking the tree itself.
+- **Run cards distinguish profiles** — `Run · builder.scaffold` / `Run · builder.continue` / `Run · builder.feature` show in the UI with role-specific icons. Frontend `RunCard` renders the right label per profile.
+
+#### Phase 6 — Frontend UX polish
+
+- **Role-specific run-card icons + labels** — every agent type is visually distinct in the timeline:
+
+| Role | Icon | Label |
+|---|---|---|
+| `architect` | 📐 | Designing plan |
+| `builder.scaffold` | 🏗 | Building project |
+| `builder.continue` | 🔄 | Resuming build |
+| `builder.feature` | ✨ | Adding feature |
+| `builder.bugfix` | 🩹 | Bug fix build |
+| `reviewer` | 🔍 | Reviewing |
+| `fixer` | 🛠 | Fixing issues |
+| `qa` | ❓ | Investigating |
+| `indexer` | 📚 | Indexing project |
+
+- **Auto-expand cards that need attention** — `failed` runs and reviewers with `status=issues`/`error` default to expanded so the user sees the problem immediately. Other cards stay collapsed (default).
+- **Step row icons** — OpenHands action names (`file_create`, `file_edit`, `terminal`, `glob`, `finish`, etc.), Reviewer phases (`detect`, `build`, `test`, `lint`, `read_files`, `analyze`), Architect phases (`planning`, `manifest`, `criterion`, `risk`), Fixer phases (`writing`, `calling`), Indexer phases, QA phases — all get small leading emoji so the timeline reads as a build log instead of a wall of words.
+- **QA answer rendered inside the run card** — for `qa` role cards, `env.answer` renders as styled markdown (full code blocks + file:line citations) inside the expanded card body, with a "📂 examined: ..." footer listing inspected files and a "⚡ Flagged as change request" pill when the QA detected one.
+- **Plan panel survives long runs** — live event stream is a 200-event sliding window, so on long multi-cycle builds the early `tool_end plan_project` event used to roll off and the Architecture Plan panel would disappear. Fixed by passing `savedEvts={msg.metadata?.saved_events}` to `ToolStatus`; the panel now reads from the merged pool, falling back to the persistent message metadata when the live window has aged out.
+- **Brain → compass icon swap** — `🧠 Planning architecture` is now `📐 Architect designing plan` everywhere (live pill, run card, PlanPanel header). The `🧠` was carryover from the v1 prose `plan_project`; the `📐` ruler reads as architect/blueprint.
+
+#### Workflow gate — deterministic over persuasion
+
+A four-state gate in `tools.py:exec_tool` enforces the v2 workflow without trusting the model's prompt compliance. Fires only for v2 personas (detected via `model_config.name` containing `"v2"`); v1 personas pass through unchanged.
+
+| State | Trigger | Allowed | Blocked |
+|---|---|---|---|
+| **PENDING REVIEW** | Last run is `succeeded`/`partial`/`stuck` builder OR `succeeded`/`failed` fixer with no reviewer after | `run_review` only | everything else (incl. read_file, write_file, generate_code) |
+| **PENDING FIX** | Last reviewer has `status=issues` or `error` | `run_fixer` (or `run_review` to re-check) | everything else |
+| **Q&A TERMINAL** | Last `qa` run succeeded, `looks_like_change_request=False` | `ask_project` (for follow-up questions) | everything else — model must respond with text |
+| **CYCLE LIMIT** | ≥3 succeeded `fixer` runs on this conv | nothing for `run_fixer` | `run_fixer` itself; instructs model to summarize and ask user |
+
+Each gate state's tool result tells the model exactly what to call next, with the relevant `run_id` / `project_dir` / fix-scope info embedded so it doesn't have to guess.
+
+#### Other v2 hardening
+
+- **QA short-circuit** — when `ask_project` succeeds with a non-change-request answer, the chat agent bypasses the next LLM round entirely and streams the QA envelope's `answer` field verbatim as the assistant message. Avoids the model paraphrasing the grounded answer and losing code blocks. The QA card and the chat-side message now show identical content.
+- **Stop button cancels OpenHands** — frontend abort propagates through chat stream cancellation → `POST /cancel/{run_id}` to OpenHands worker → `_RunCancelled` raised in the event callback → `conversation.pause()` + `close()` to terminate the SDK + child bash session. Worker registers active runs in a thread-safe `_ACTIVE_RUNS` dict keyed by `run_id`. Idempotent — calling cancel on a finished run returns `{"status": "not_found"}` rather than 404.
+- **SSE → /run fallback no longer resurrects dead runs** — when the SSE stream from OpenHands drops mid-run, the dispatch used to fall back to the non-streaming `/run` endpoint, which spawned a *second* concurrent run on the same task. Fixed: fallback only fires for connect-time failures (no first event received). Mid-run drops signal cancel to the worker instead.
+- **Active project injection v2-aware** — `chat.py`'s `ACTIVE PROJECT` system message used to say "use read_file → write_file/generate_code" (v1 antipattern). For v2 personas it now says "questions → `ask_project`, change requests → `generate_code(project_id=...)`, bug reports → `run_review` first, do NOT auto-package."
+- **Loop-tool exemption** — `run_review` / `run_fixer` / `ask_project` are designed to be called multiple times back-to-back with identical args. Chat-loop's near-duplicate detector now treats them as `_LOOP_TOOLS` and exempts them from both exact and near-duplicate checks. Workflow correctness is enforced by the gate, not the dedupe logic.
+- **MAX_ROUNDS fallback message** — when the chat agent's round budget runs out without producing final user-facing text, a synthesized markdown summary is streamed: builder runs created, last reviewer status, any flagged issues with file:line refs, and a "ran out of budget" line. Replaces the previous blank-message ghost-out.
+- **Model routing verified** — Architect uses `PLANNING_MODEL`, Builder/Fixer use `CODER_MODEL`, Reviewer uses `PLANNING_MODEL`, ProjectQA uses chat/persona model. Each falls back through `PLANNING_MODEL → DEFAULT_MODEL → CODER_MODEL` if its primary is empty.
+
+#### Verification (10/10 passing)
+
+| # | Test | Result |
+|---|---|---|
+| 1a | Java pong fresh build | ✅ mvn compile + test exit 0 |
+| 1b | Python Flask API fresh build | ✅ 3.1m, 4/4 pytest pass, no fixer cycle |
+| 1c | Rust CLI fresh build | ✅ cargo build + test exit 0, fixer-loop-once-then-clean |
+| 2 | Disconnect resilience | ✅ RunCard rebuilds via `/api/runs/{id}` on reload |
+| 3 | Hostile context growth | ✅ "the Java pong from earlier?" → correctly says "not in this code" |
+| 4 | Failed-tests recovery | ✅ reviewer→fixer→reviewer cycles converge to clean |
+| 5 | VRAM headroom | ✅ 41.94 GB / 48 GB during build (devstral + qwen3-coder both hot) |
+| 6 | Token tracking | ✅ `token_usage` table populates per run |
+| 7 | Project Q&A with citations | ✅ "walk me through Ball.java" with file:line refs |
+| 8 | Cross-language port (Python → Go) | ✅ 5.4m, 4/4 Go tests pass on first try, no fixer cycle |
+| 9 | Settings fallback (all empty) | ✅ persona's pinned model used everywhere |
+| 10 | Settings specialization | ✅ Architect/Reviewer → planning, Builder/Fixer → coder, QA → chat |
+
+### Coder Bot v2 — Independent Critic Pass
+- **Independent critic on `generate_code` output** — When `CRITIC_ENABLED` is on, the post-build flow runs a second reviewer pass using a different model (`CRITIC_MODEL` falling back to `PLANNING_MODEL` / `DEFAULT_MODEL`) so it can't rationalize its own mistakes. Catches runtime bugs that pass syntax / compile checks but break behavior. Live "🔍 Reviewing code with…" pill while it runs.
 
 ### Quick Search Overhaul
 - **New shared module `backend/quick_search.py`** — Both the chat-injection path (`agents/chat.py`) and the standalone `/api/quick-search` endpoint (`main.py`) now flow through one helper, so quality fixes apply to both. Replaced ~150 lines of duplicated SearXNG-call boilerplate.
