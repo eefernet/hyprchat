@@ -109,6 +109,12 @@ class RunRequest(BaseModel):
     context: str = ""
     project_id: str = ""
     run_id: str = ""
+    # Phase 5 — Builder profile. Default "scaffold" preserves prior behavior
+    # for any caller that doesn't pass one.
+    profile: str = "scaffold"  # scaffold | continue | feature
+    # Only meaningful when profile == "continue": list of manifest files the
+    # last builder run failed to write. The worker focuses on these.
+    manifest_missing: list[str] = []
 
 
 class RunResponse(BaseModel):
@@ -734,7 +740,14 @@ async def run_task_stream(req: RunRequest):
 
 
 def _build_task_prompt(req: RunRequest, work_dir: str = "/root", continuing: bool = False) -> str:
-    """Build the task prompt with verification requirements."""
+    """Build the task prompt with verification requirements.
+
+    Phase 5 — the prompt branches on `req.profile`:
+      scaffold (default): create everything from scratch.
+      continue:           resume — focus on the manifest_missing files.
+      feature:            add to an existing tree — read before editing,
+                          edit minimally, do NOT rewrite working files.
+    """
 
     lang = req.language.lower()
 
@@ -752,14 +765,65 @@ def _build_task_prompt(req: RunRequest, work_dir: str = "/root", continuing: boo
 
     verify_cmd = _VERIFY_CMDS.get(lang, f"Run the appropriate syntax check / compiler for {lang}.")
 
-    prompt = f"""## WORKSPACE
-Working directory: `{work_dir}` — {'continue working on existing files here' if continuing else 'create ALL files here'}.
+    profile = (req.profile or "scaffold").lower()
+
+    # Profile-specific opening directives. The base WORKSPACE/CONTEXT/TASK/
+    # VERIFICATION blocks are shared.
+    if profile == "continue":
+        missing_block = ""
+        if req.manifest_missing:
+            missing_lines = "\n".join(f"  - {p}" for p in req.manifest_missing[:30])
+            missing_block = (
+                f"\n## MANIFEST FILES STILL MISSING (focus on these)\n"
+                f"{missing_lines}\n"
+            )
+        opening = f"""## PROFILE: continue
+This is a CONTINUATION of an earlier scaffold run that didn't finish. The
+project tree at `{work_dir}` already has most files written; you are filling
+in what's missing. Do NOT rewrite or restructure files that already exist.
+Read them with `cat` if you need to understand interfaces, then write only
+the missing pieces.{missing_block}
+"""
+    elif profile == "feature":
+        opening = f"""## PROFILE: feature
+This is an EXISTING, working project at `{work_dir}`. The user is asking for
+an additive change. Your job is to make the SMALLEST coherent edit that
+satisfies the task — not to rebuild or refactor the project.
+
+Required first steps:
+  1. `find {work_dir} -type f -not -path '*/target/*' -not -path '*/build/*' \\
+        -not -path '*/node_modules/*' -not -path '*/.git/*' | head -50`
+     to see the existing tree.
+  2. Read the files most relevant to the task before editing them.
+  3. Edit only what's needed. Add new files only if the change genuinely
+     requires new modules. Do NOT regenerate working files just to "tidy" them.
+  4. Re-run the project's build/test command after your edits to confirm
+     nothing regressed.
+
+If the task is genuinely large enough that a refactor is required, say so
+in your finish message and identify the affected files explicitly.
+"""
+    else:  # scaffold (default)
+        opening = f"""## PROFILE: scaffold
+Create ALL files from scratch at `{work_dir}`. The TASK below describes the
+target project; build it.
+"""
+
+    prompt = opening + f"""
+## WORKSPACE
+Working directory: `{work_dir}` — {'continue working on existing files here' if (continuing or profile in ('continue', 'feature')) else 'create ALL files here'}.
 Language: {req.language}
-IMPORTANT: ALL files MUST be created inside `{work_dir}`. Do NOT create files in /root/ directly. Use `{work_dir}/` as the base path for everything.
+IMPORTANT: ALL files MUST live inside `{work_dir}`. Do NOT create files in /root/ directly. Use `{work_dir}/` as the base path for everything.
 """
 
     if req.context:
         prompt += f"\n## CONTEXT\n{req.context}\n"
+
+    git_step = (
+        "5. **Git**: `git init && git add -A && git commit -m 'Initial commit'` "
+        "after the project compiles."
+        if profile == "scaffold" else ""
+    )
 
     prompt += f"""
 ## TASK
@@ -772,7 +836,7 @@ You MUST complete every step before calling `finish`. `finish` is a gate, not a 
 2. **Compile / parse**: {verify_cmd}
 3. **Resolve missing references**: If step 2 fails because a referenced class, module, function, type, or import does not exist, you MUST create the missing file(s) with their full contents and re-run step 2. Do NOT stub them out, do NOT call `finish` with unresolved references.
 4. **Dependencies**: Make sure imports reference real libraries (declared in pom.xml/package.json/requirements.txt etc.) or files you created.
-5. **Git**: `git init && git add -A && git commit -m 'Initial commit'` after the project compiles.
+{git_step}
 
 Only call `finish` after step 2 exits 0 with every expected file present. Calling `finish` early — with compile errors, missing files, or unresolved references — counts as task failure.
 """

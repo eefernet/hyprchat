@@ -2229,17 +2229,13 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                     "You can still write code directly using write_file + run_shell to test it."
                 )
 
-            # Phase 0: create a durable run row for this generate_code invocation.
-            # Survives browser disconnects; the frontend's RunCard reads this row
-            # by run_id (passed via the tool_start event below) and can rebuild
-            # the build timeline on reconnect even if the SSE chat stream dropped.
+            # Phase 0: durable run row for this generate_code invocation. The
+            # actual role (builder.scaffold / continue / feature) gets set
+            # later, after profile detection — but we reserve the run_id
+            # immediately so the rest of the dispatch can reference it.
+            # Phase 5: role is filled in once we know the profile.
             _run_id = f"run-{uuid.uuid4().hex[:12]}"
-            try:
-                await db.create_run(_run_id, conv_id, role="builder.legacy",
-                                    project_id="", status="running")
-            except Exception as _re:
-                print(f"[RUN] create_run failed (non-fatal): {_re}")
-                _run_id = ""
+            _run_row_created = False
 
             async def _finalize_run(status: str, envelope: dict):
                 """Mark the run terminal with the given status + envelope. Safe to no-op."""
@@ -2260,15 +2256,147 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
             # Auto-resolve project_id: if model didn't pass one, check for an
             # active uploaded project on this conversation so OpenHands works
             # inside the user's uploaded project directory.
+            #
+            # Phase 5 — combined active-project + builder-profile detection.
+            # The authoritative source for "is there an existing project" is
+            # the runs table — specifically, the most recent succeeded
+            # builder.* run, whose envelope carries the real project_dir on
+            # disk. coding_projects.openhands_project_id is unreliable
+            # (sometimes empty even when the project exists; a fresh row may
+            # be created by plan_project before the build runs).
+            #
+            # Profile mapping:
+            #   scaffold  — no prior builder run for this conv (fresh build)
+            #   continue  — most recent builder ran partial / stuck
+            #               (manifest_missing has unfinished files)
+            #   feature   — most recent builder succeeded
+            #               (user is asking for an additive change)
             _oh_project_id = args.get("project_id", "")
-            if not _oh_project_id and conv_id:
+            _has_active_project = bool(_oh_project_id)
+            _builder_profile = "scaffold"
+            _profile_continue_missing: list[str] = []
+
+            if conv_id:
+                try:
+                    _runs_for_profile = await db.get_runs_by_conversation(conv_id, limit=30)
+                    # Find the most recent builder run with a MEANINGFUL state.
+                    # Skip running/queued (in-flight, has no envelope yet),
+                    # cancelled (operator killed before it produced anything),
+                    # and failed (no usable project state to amend). What we
+                    # want is the most recent builder that actually wrote
+                    # files we can build on.
+                    _MEANINGFUL = {"succeeded", "partial", "stuck"}
+                    _last_builder = next(
+                        (r for r in _runs_for_profile
+                         if r.get("role", "").startswith("builder")
+                         and (r.get("status") or "").lower() in _MEANINGFUL),
+                        None,
+                    )
+                    if _last_builder:
+                        _lb_env = _last_builder.get("result_envelope") or {}
+                        _lb_status = (_last_builder.get("status") or "").lower()
+                        _lb_pdir = (_lb_env.get("project_dir") or "").strip()
+                        _lb_pid = (_lb_env.get("project_id") or "").strip()
+                        if not _oh_project_id:
+                            if _lb_pid:
+                                _oh_project_id = _lb_pid
+                            elif _lb_pdir.startswith("/root/projects/"):
+                                _oh_project_id = _lb_pdir.split("/")[-1]
+                        if _oh_project_id or _lb_pdir:
+                            _has_active_project = True
+                            print(f"[CODEGEN:OH] Auto-attached active project "
+                                  f"{_oh_project_id or _lb_pdir} (from builder run "
+                                  f"{_last_builder.get('id')} status={_lb_status})")
+                        if _lb_status in ("partial", "stuck"):
+                            _builder_profile = "continue"
+                            _profile_continue_missing = (
+                                _lb_env.get("manifest_missing") or []
+                            )
+                        elif _lb_status == "succeeded":
+                            _builder_profile = "feature"
+                except Exception as _bp_e:
+                    print(f"[CODEGEN:OH] Profile detection failed (non-fatal): {_bp_e}")
+
+            # Fallback to coding_projects only if the runs table didn't have
+            # a builder run yet (truly fresh upload + first generate_code).
+            if not _has_active_project and conv_id:
                 try:
                     _active = await db.get_coding_project_by_conv(conv_id)
-                    if _active and _active.get("openhands_project_id"):
-                        _oh_project_id = _active["openhands_project_id"]
-                        print(f"[CODEGEN:OH] Auto-attached active project {_oh_project_id} for conv {conv_id}")
+                    if _active:
+                        _ohp = _active.get("openhands_project_id") or _active.get("id")
+                        if _ohp:
+                            _oh_project_id = _ohp
+                            _has_active_project = True
+                            # Stays "scaffold" — no prior builder run means
+                            # the project either was uploaded but never built,
+                            # or the row is a placeholder. Either way the next
+                            # generate_code is creating, not amending.
+                            print(f"[CODEGEN:OH] Active project {_oh_project_id} via coding_projects fallback")
                 except Exception as _ap_e:
-                    print(f"[CODEGEN:OH] Active project lookup failed (non-fatal): {_ap_e}")
+                    print(f"[CODEGEN:OH] coding_projects lookup failed (non-fatal): {_ap_e}")
+
+            print(f"[CODEGEN:OH] Profile: {_builder_profile} "
+                  f"(active_project={_has_active_project}, project_id={_oh_project_id or '?'}"
+                  + (f", missing={len(_profile_continue_missing)}" if _builder_profile == 'continue' else '')
+                  + ")")
+
+            # Phase 5.3 — feature-profile context prep. For an additive change
+            # to an existing project, the Builder should not re-discover the
+            # file tree by walking it manually. Instead, package the tree +
+            # 1-2 directly relevant files into the context now so the Builder
+            # can read them out of its prompt and edit minimally.
+            if _builder_profile == "feature" and _oh_project_id:
+                try:
+                    from agents import project_qa as _pqa
+                    _proj_dir = f"/root/projects/{_oh_project_id}"
+                    _existing_files = await _pqa._list_files(http, _proj_dir)
+                    if _existing_files:
+                        _ctx_lines = [
+                            "\n--- EXISTING PROJECT (do not rewrite working files) ---",
+                            f"Project root: {_proj_dir}",
+                            "File tree (truncated to 60 paths):",
+                        ]
+                        for _f in _existing_files[:60]:
+                            _ctx_lines.append(f"  {_f}")
+                        if len(_existing_files) > 60:
+                            _ctx_lines.append(f"  ... ({len(_existing_files) - 60} more files)")
+
+                        # If the user's task mentions specific filenames,
+                        # inline a short head of those files. Reuses the QA
+                        # filename-targeting helper so the heuristic is shared.
+                        _targets = _pqa._extract_filename_targets(task)
+                        _matched = await _pqa._resolve_filename_targets(_existing_files, _targets) if _targets else []
+                        if _matched:
+                            _ctx_lines.append("")
+                            _ctx_lines.append(f"Files mentioned in the task ({len(_matched)}):")
+                            for _f in _matched[:3]:
+                                _head = await _pqa._read_file_full(http, _proj_dir, _f, max_bytes=8000)
+                                if _head:
+                                    _ctx_lines.append(f"\n### {_f}\n```\n{_head[:6000]}\n```")
+                        _ctx_lines.append(
+                            "\nRead these files BEFORE editing. Make the smallest "
+                            "edit that satisfies the task. Do NOT rewrite the whole "
+                            "project."
+                        )
+                        _feature_ctx = "\n".join(_ctx_lines)
+                        context = (context + _feature_ctx) if context else _feature_ctx.strip()
+                        print(f"[CODEGEN:OH] Feature context: {len(_existing_files)} files in tree, "
+                              f"{len(_matched)} inlined")
+                except Exception as _fce:
+                    print(f"[CODEGEN:OH] Feature context prep failed (non-fatal): {_fce}")
+
+            # Now that we know the profile, create the durable run row with
+            # the matching role so the frontend RunCard renders the right
+            # label (builder.scaffold / builder.continue / builder.feature).
+            try:
+                await db.create_run(_run_id, conv_id,
+                                    role=f"builder.{_builder_profile}",
+                                    project_id=_oh_project_id or "",
+                                    status="running")
+                _run_row_created = True
+            except Exception as _re:
+                print(f"[RUN] create_run failed (non-fatal): {_re}")
+                _run_id = ""
 
             # Phase 3 — inject the most recent Architect manifest into the
             # context so OpenHands follows the structured plan (file list,
@@ -2349,6 +2477,11 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 # Pass our run_id through so the worker registers the run under
                 # this key. POST /cancel/{run_id} can then abort it cleanly.
                 "run_id": _run_id or "",
+                # Phase 5 — profile drives the worker's task-prompt template.
+                # `manifest_missing` is only meaningful for the continue profile;
+                # other profiles ignore it.
+                "profile": _builder_profile,
+                "manifest_missing": _profile_continue_missing,
             }
 
             async def _signal_oh_cancel(reason: str):
