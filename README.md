@@ -26,29 +26,49 @@ Built with FastAPI + a single-file React SPA. No build step, no cloud dependenci
 - Project archives (`.zip`, `.tar.gz`) route to Coder Bot automatically
 - Text files attached inline with syntax highlighting
 
-### 🤖 Coder Bot
-- **Plan-first architecture** — configurable planning model analyzes the task before writing code
-- **Smart routing** — automatically decides between direct tool use and the full OpenHands agent based on project complexity
-- **Overseer verification** — reviews agent output against user specs, re-prompts if needed
-- **Project uploads** — drop a `.zip`/`.tar.gz` and the agent works inside your existing codebase
-- Live progress pills with real-time status from the coding agent
-- Sandboxed execution via Codebox (LXC) with 30+ language support
-- Code-block rescue, error recovery hints, dev-server detection, and context pruning
+### 🤖 Coder Bot v2 — Multi-Agent Pipeline
+
+A deterministic build pipeline where each phase is an isolated, stateless agent. Workflow correctness is enforced by a server-side gate, not by hoping the model follows a prompt:
+
+| Agent | What it does |
+|-------|-------------|
+| 📐 **Architect** | Single-shot structured plan — JSON manifest, build/test commands, dependencies, success criteria |
+| 🏗 **Builder** | OpenHands SDK on Codebox — 4 profiles (`scaffold` for new builds, `continue` to resume partials, `feature` for additive changes, `bugfix` for surgical edits) |
+| 🔍 **Reviewer** | Read-only — runs the project's real build/test/lint commands, returns structured issues with `file:line` references |
+| 🛠 **Fixer** | Stateless minimal-edit applier — reads each issue's fix scope, applies targeted edits via Codebox |
+| ❓ **ProjectQA** | Read-only Q&A — "walk me through X", "show me Y" — grounded answers with file:line citations, change-request detection |
+| 📚 **Indexer** | Runs once at upload time — walks tree, detects build system, indexes into ChromaDB for semantic retrieval |
+
+- **Workflow gate** — server-side state machine enforces *review-after-build*, *fix-after-issues*, *answer-after-QA*, and a hard *3-cycle cap* on review/fix loops. The model can't skip steps or get stuck.
+- **Durable runs** — every agent invocation is a row in the `runs` table. Browser disconnects can't lose work; the UI rebuilds the timeline on reload.
+- **Project uploads** — drop a `.zip`/`.tar.gz` and the Indexer runs automatically. Subsequent questions and changes operate on the uploaded code with full project awareness.
+- **Architecture Plan panel** — rich markdown rendering of the Architect's plan: file tree, build commands, dependencies as build-system snippets, success criteria as a checklist.
+- **Cross-language support** — verified end-to-end on Java (Maven), Python (Flask + pytest), Rust (Cargo), Go (gorilla/mux). Builder profiles + Reviewer markers cover most ecosystems.
+- Sandboxed execution via Codebox (LXC) with 30+ language support, live progress pills, role-specific run cards (📐 → 🏗 → 🔍 → 🛠 → 🔍 timeline), and the original v1 Coder Bot still selectable as a persona.
 
 ### 🛠️ Tool Suites
+
+**Coder Bot v2 multi-agent tools:**
+
+| Tool | Description |
+|------|-------------|
+| `plan_project` | Routes through the **Architect** for v2 personas — produces structured JSON manifest (file tree, build/test cmds, deps, success criteria); rich markdown plan panel in chat |
+| `generate_code` | **Builder** via OpenHands — auto-detects profile (scaffold / continue / feature) from conversation state; manifest + existing tree injected into context |
+| `run_review` | **Reviewer** — runs build/test/lint, returns structured issue list with `suggested_fix_scope` |
+| `run_fixer` | **Fixer** — applies scoped edits driven by a Reviewer envelope; marker-format LLM output |
+| `ask_project` | **ProjectQA** — grounded Q&A with file:line citations; auto-resolves `project_dir`; flags change requests |
+
+**Other tools:**
 
 | Tool | Description |
 |------|-------------|
 | `execute_code` | Sandboxed code execution in 30+ languages with package installs |
-| `generate_code` | Agentic project generation via OpenHands — writes, tests, and fixes code |
-| `plan_project` | Architecture planning with dedicated thinking model |
 | `deep_research` | Multi-phase parallel web research with 5 depth levels and cross-referencing |
 | `quick_search` | Instant SearXNG search with OG image cards, YouTube previews, and favicon badges |
 | `research` | Web search + full page reading for grounded answers |
 | `conspiracy_research` | Alt-source deep dive — FOIA vaults, CIA reading room, FBI vault, whistleblower sites |
 | `fetch_url` | Fetch and read any URL directly |
-| `write_file` | Write files to the sandbox |
-| `read_file` | Read files from sandbox projects |
+| `write_file` / `read_file` | Direct file ops on the sandbox |
 | `search_files` | Grep/regex across project files |
 | `run_shell` | Execute shell commands in the sandbox |
 
@@ -124,27 +144,43 @@ Built with FastAPI + a single-file React SPA. No build step, no cloud dependenci
 User → HyprChat Server (:8000)
          ├── Frontend:  Single-file React SPA (inline Babel, no build step)
          ├── Backend:   FastAPI + SSE streaming + SQLite
+         │
+         │   Coder Bot v2 — multi-agent pipeline (each is a stateless run,
+         │   persisted in `runs` table, exposed at /api/runs/{id}):
+         │     📐 Architect    → JSON plan
+         │     🏗 Builder      → 4 profiles (scaffold/continue/feature/bugfix)
+         │     🔍 Reviewer     → build/test/lint, structured issues
+         │     🛠 Fixer        → scoped edits, marker-format output
+         │     ❓ ProjectQA    → grounded Q&A with citations
+         │     📚 Indexer      → upload-time tree → ChromaDB
+         │
          ├── Ollama     (:11434) — local LLM inference
          ├── Codebox    (:8585)  — sandboxed code execution (LXC)
          │     └── OpenHands Worker (:8586) — agentic code generation
          ├── SearXNG    (:8888)  — private web search
-         └── ChromaDB              — vector storage for RAG
+         └── ChromaDB              — vector storage for RAG (incl. uploaded-project memory)
 ```
 
 ### Key Backend Modules
 | File | Purpose |
 |------|---------|
-| `backend/main.py` | FastAPI routes, SSE endpoints, model/workflow management |
-| `backend/agents/chat.py` | Multi-round streaming chat agent with tool calling |
-| `backend/agents/personas.py` | Seed bot definitions |
-| `backend/tools.py` | Tool execution engine (code, research, OpenHands) |
+| `backend/main.py` | FastAPI routes, SSE endpoints, model/workflow management, project upload |
+| `backend/agents/chat.py` | Multi-round streaming chat agent with tool calling, QA short-circuit, ACTIVE PROJECT injection |
+| `backend/agents/personas.py` | Seed bot definitions (Coder Bot v1 + v2, Conspiracy Bot, Based Bot) |
+| `backend/agents/architect.py` | **v2** Architect — structured plan as JSON, rich markdown rendering |
+| `backend/agents/reviewer.py` | **v2** Reviewer — read-only build/test/lint with marker auto-detection |
+| `backend/agents/fixer.py` | **v2** Fixer — scoped edits via marker-delimited LLM output |
+| `backend/agents/project_qa.py` | **v2** ProjectQA — grounded Q&A with file:line citations |
+| `backend/agents/project_indexer.py` | **v2** Indexer — uploaded-project tree walk → ChromaDB |
+| `backend/tools.py` | Tool execution engine + v2 workflow gate (4 states) + Builder profile detection |
+| `backend/openhands_worker.py` | OpenHands SDK bridge on Codebox; profile-aware prompts; `/cancel/{run_id}` for stop button |
 | `backend/research.py` | Deep research engine |
 | `backend/council.py` | Council debate, voting, and synthesis |
 | `backend/events.py` | Async SSE EventBus (pub/sub with `asyncio.Lock`) |
 | `backend/rag.py` | RAG pipeline (chunking, embedding, retrieval) |
 | `backend/workflows.py` | Workflow executor and cron scheduler |
 | `backend/hf.py` | HuggingFace model browser and download |
-| `backend/database.py` | SQLite schema, migrations, and queries |
+| `backend/database.py` | SQLite schema, migrations, and queries — incl. `runs` table for v2 |
 | `backend/config.py` | Configuration and environment variables |
 | `frontend/dist/index.html` | Entire frontend — React SPA with inline Babel |
 
@@ -159,16 +195,30 @@ OLLAMA_URL          = "http://<OLLAMA_IP>:11434"
 CODEBOX_URL         = "http://<CODEBOX_IP>:8585"
 OPENHANDS_URL       = "http://<CODEBOX_IP>:8586"
 SEARXNG_URL         = "http://<SEARXNG_IP>:8888"
-DEFAULT_MODEL       = "qwen3.5:27b"
-CODER_MODEL         = ""              # empty = use chat model
-WORKSPACE_MODEL     = "qwen3.5:4b"   # used for auto-title and topic analysis
+
+# Models — each v2 agent picks one of these:
+DEFAULT_MODEL       = "qwen3.5:27b"   # chat / persona fallback
+PLANNING_MODEL      = ""               # Architect + Reviewer (empty = DEFAULT_MODEL)
+CODER_MODEL         = ""               # Builder + Fixer    (empty = DEFAULT_MODEL)
+WORKSPACE_MODEL     = "qwen3.5:4b"    # auto-title, topic analysis, query rewriting
+
+# Resources
 OPENHANDS_ENABLED   = True
-OPENHANDS_MAX_ROUNDS = 20
+OPENHANDS_MAX_ROUNDS = 40
 OPENHANDS_NUM_CTX   = 16384
-MAX_AGENT_ROUNDS    = 12
+DEFAULT_NUM_CTX     = 16384            # used by Architect / Reviewer / Fixer / QA
+MAX_AGENT_ROUNDS    = 12               # chat-side cap (non-coder personas)
+MAX_AGENT_ROUNDS_CODER = 30            # chat-side cap for Coder Bot personas
 ```
 
-Ollama URL, coder model, planning model, and OpenHands settings can also be changed at runtime from the Settings panel.
+All model and OpenHands settings can be changed at runtime from the Settings panel.
+
+**Recommended model setup (dual-3090 / 48 GB VRAM):**
+- `PLANNING_MODEL` = `qwen3-coder:30b` (Architect / Reviewer planning)
+- `CODER_MODEL` = `devstral:24b` (Builder / Fixer)
+- Default chat = `qwen3-coder:30b` or another general model
+
+Two large models stay hot simultaneously (~42 GB), eviction kicks in if a third is needed. Verified across Java / Python / Rust / Go builds.
 
 ---
 
@@ -196,9 +246,18 @@ systemctl daemon-reload && systemctl enable --now hyprchat
 
 ```bash
 scp backend/*.py root@<SERVER_IP>:/opt/hyprchat/backend/
+scp backend/agents/*.py root@<SERVER_IP>:/opt/hyprchat/backend/agents/
 scp frontend/dist/index.html root@<SERVER_IP>:/opt/hyprchat/frontend/dist/
 ssh root@<SERVER_IP> "systemctl restart hyprchat"
 ```
+
+Or use the file-watching deployer that auto-pushes changes and restarts the service:
+
+```bash
+python3 deploy_monitor.py
+```
+
+The monitor reads `.deploy_config.json` for SSH credentials and watches every backend / frontend / agent file. Backend changes trigger a service restart; frontend changes deploy without restart.
 
 ---
 

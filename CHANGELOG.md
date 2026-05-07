@@ -1,6 +1,8 @@
-## Alpha v17 — May 5, 2026
+## Alpha v17 — May 7, 2026
 
 ### Coder Bot v2 — Multi-Agent Rebuild
+
+Introducing a completely rebuilt from the ground up replacement for Coderbot. For right now, coderbot v1 will still be present in builds until v2 is more battle tested. Coderbot v1 is deprecated and will be removed in a later release. Coderbot v2 is faster, more effecient and more accurate. Its more feature packed than coderbot v1 would ever dream to be. Coderbot v2 is intended to be used for full projects or investigating existing user uploaded projects or generating any code.
 
 The v1 Coder Bot was a single chat agent that did everything: planning, building, reviewing, fixing, packaging — all crammed into one round-by-round loop. It worked, but every step depended on the model "remembering" prompt rules, and a single misstep (manual `write_file` instead of `generate_code`, refusing to call `run_review`, ignoring the fix-loop cap) sent the whole thing into a 28-round death spiral. v2 is a **deterministic multi-agent pipeline**: each role is a stateless run with a structured envelope, and a server-side gate enforces the workflow instead of trusting the model to obey.
 
@@ -185,8 +187,6 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Fixed Bash render error where `$VAR` and command-substitution `$(cmd)` inside a `bash` code fence prematurely terminated rendering.
 - Fixed `num_ctx` from user settings being silently ignored by OpenHands runs after the first model load — now evict-and-reload guarantees the runtime context matches the requested value.
 
-### Housekeeping
-- **`claude.md` (lowercase) explicitly gitignored** — `.gitignore` already had `CLAUDE.md`, but gitignore patterns are case-sensitive on Linux / case-sensitive APFS. Adding the lowercase variant prevents the file from being accidentally committed if the repo is ever cloned on a case-sensitive filesystem.
 
 
 ## Alpha v16.2 — April 22, 2026

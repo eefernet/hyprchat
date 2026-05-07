@@ -685,7 +685,6 @@ async def list_builtin_tools():
         {"id": "codeagent", "name": "⚡ CodeAgent", "description": "Code execution, shell, file management, downloads", "icon": "cpu", "builtin": True},
         {"id": "deep_research", "name": "🔬 Deep Research", "description": "Multi-source parallel research with AI synthesis", "icon": "search", "builtin": True},
         {"id": "conspiracy_research", "name": "🕵️ Conspiracy Research", "description": "Uncensored deep-dive into theories, cover-ups, and hidden agendas", "icon": "search", "builtin": True},
-        {"id": "generate_code", "name": "🧬 Code Generator", "description": "Delegate code writing to a code-specialized model sub-agent", "icon": "code", "builtin": True},
     ]
 
 
