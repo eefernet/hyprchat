@@ -143,8 +143,7 @@ async def _call_planning_model(http, model: str, prompt: str,
 async def run_architect(http, events, conv_id: str, *,
                         task: str, language_hint: str = "",
                         kb_chunks: list | None = None,
-                        parent_run_id: str = "",
-                        conv_model: str = "") -> dict:
+                        parent_run_id: str = "") -> dict:
     """Execute an Architect run. Returns the structured plan envelope.
 
     Side effects:
@@ -180,7 +179,7 @@ async def run_architect(http, events, conv_id: str, *,
             except Exception:
                 pass
 
-    model = (config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL or "")
+    model = (config.PLANNING_MODEL or config.DEFAULT_MODEL or "")
     if not model:
         envelope = {"status": "error",
                     "summary": "No planning model configured for Architect",

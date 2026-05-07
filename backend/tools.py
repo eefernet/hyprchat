@@ -1793,8 +1793,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
 
             envelope = await reviewer.run_review(http, events, conv_id,
                                                   project_dir=project_dir,
-                                                  project_id=project_id,
-                                                  conv_model=conv_model)
+                                                  project_id=project_id)
             # Format the envelope as a tool-result string the chat agent can read
             # without needing to know the JSON schema. Keep it compact.
             status = envelope.get("status", "?")
@@ -1885,8 +1884,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             })
 
             envelope = await fixer.run_fixer(http, events, conv_id,
-                                              reviewer_run_id=reviewer_run_id,
-                                              conv_model=conv_model)
+                                              reviewer_run_id=reviewer_run_id)
 
             f_status = envelope.get("status", "?")
             files = envelope.get("files_touched") or []
@@ -2106,7 +2104,6 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     http, events, conv_id,
                     task=task, language_hint=language,
                     kb_chunks=_kb_chunks,
-                    conv_model=conv_model,
                 )
                 return architect.format_plan_for_chat(plan)
 
@@ -2949,7 +2946,7 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 # Uses a separate model from the coder so it can't rationalize its own mistakes.
                 critique = ""
                 if code_review and config.CRITIC_ENABLED:
-                    critic_model = config.CRITIC_MODEL or conv_model or config.CODER_MODEL or config.DEFAULT_MODEL
+                    critic_model = config.CRITIC_MODEL or config.PLANNING_MODEL or config.DEFAULT_MODEL
                     await events.emit(conv_id, "tool_progress", {
                         "tool": "generate_code", "icon": "wand",
                         "status": f"🔍 Reviewing code with {critic_model}...",
