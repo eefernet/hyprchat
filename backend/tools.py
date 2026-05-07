@@ -2104,6 +2104,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     http, events, conv_id,
                     task=task, language_hint=language,
                     kb_chunks=_kb_chunks,
+                    conv_model=conv_model,
                 )
                 return architect.format_plan_for_chat(plan)
 
