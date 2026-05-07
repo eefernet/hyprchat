@@ -6,13 +6,16 @@ import asyncio
 import json
 import os
 import re
+import traceback
 import urllib.parse
+from datetime import datetime
 
 import config
 import database as db
 import rag
 from tools import CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls, strip_tool_calls
 from events import inject_text_tool_prompt, parse_tool_params
+from quick_search import run_quick_search_for_chat
 
 
 # ── Tool-calling templates keyed by model family ──
@@ -99,7 +102,8 @@ def detect_template_family(model_name: str) -> str:
 CODEAGENT_TOOLS_SET = {"execute_code", "run_shell", "write_file", "read_file",
                        "list_files", "download_file", "download_project", "delete_file",
                        "search_files", "diff_files", "git_init", "git_diff", "git_commit",
-                       "run_tests", "lint_code", "resume_project"}
+                       "run_tests", "lint_code", "resume_project", "run_review", "run_fixer",
+                       "ask_project"}
 
 # Tools safe to run in parallel (read-only or independent-target writes)
 _PARALLEL_SAFE_TOOLS = {"read_file", "list_files", "search_files", "diff_files",
@@ -120,7 +124,11 @@ _TOOL_ICONS = {
     "fetch_url": ("globe", "🌐 Fetching URL"),
     "deep_research": ("microscope", "🔬 Deep research in progress"),
     "conspiracy_research": ("eye", "🕵️ Investigating"),
-    "plan_project": ("activity", "🧠 Planning architecture"),
+    "plan_project": ("compass", "📐 Architect designing plan"),
+    "run_review": ("search-check", "🔍 Reviewing project"),
+    "run_fixer": ("wrench", "🛠 Fixer applying scoped edits"),
+    "ask_project": ("help-circle", "❓ Investigating project"),
+    "project_indexer": ("database", "📚 Indexing project"),
     "run_tests": ("code", "🧪 Running tests"),
     "lint_code": ("code", "🧹 Linting code"),
     "git_init": ("terminal", "📁 Initializing git"),
@@ -157,13 +165,22 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     # reply still saves below. Upsert if the most recent user message in
     # the DB doesn't match the incoming one.
     if conv_id and last_user_msg:
+        # Prefer the explicit display_content sent by the frontend (user's typed text,
+        # without the `[Attached N image: ...]` hint that goes to the model). Fall back
+        # to last_user_msg for older clients.
+        _display = getattr(req, "display_content", None)
+        _user_meta = getattr(req, "user_metadata", None)
+        _content_to_save = _display if _display is not None else last_user_msg
         try:
             existing = await db.get_conversation(conv_id)
             if existing:
                 msgs = existing.get("messages") or []
                 recent_user = next((m for m in reversed(msgs) if m.get("role") == "user"), None)
-                if not recent_user or (recent_user.get("content") or "") != last_user_msg:
-                    await db.add_message(conv_id, "user", last_user_msg)
+                # Match by either the clean display content or the raw model-facing content
+                # so we don't double-save when the previous turn already persisted one.
+                _recent_content = (recent_user.get("content") or "") if recent_user else ""
+                if not recent_user or (_recent_content != _content_to_save and _recent_content != last_user_msg):
+                    await db.add_message(conv_id, "user", _content_to_save, metadata=_user_meta)
         except Exception:
             pass
     if last_user_msg.startswith("/run "):
@@ -238,11 +255,14 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     kb_context = ""
     persona_system_prompt = None
     persona_kb_ids = []
+    _is_v2_persona = False
     if req.persona_id:
         all_configs = await db.get_model_configs()
         mc = next((c for c in all_configs if c["id"] == req.persona_id), None)
         if mc:
             persona_system_prompt = mc.get("system_prompt") or None
+            if "v2" in (mc.get("name") or "").lower():
+                _is_v2_persona = True
             params = mc.get("parameters", {})
             for key in ("temperature", "num_ctx", "top_p", "top_k"):
                 if params.get(key) is not None:
@@ -368,13 +388,47 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         "role": "system",
         "content": (
             "## RENDERING\n"
-            "The chat UI renders two rich formats inline — use them directly in your response text:\n"
+            "\n"
+            "### Visualisation — emit inline fences, never save image files\n"
+            "The chat UI renders these formats directly in your response text:\n"
             "- **Diagrams**: wrap Mermaid source in a ```mermaid code fence. Flowcharts, sequence diagrams, "
             "class/state/ER diagrams, gantt, mindmap, and pie all render as live SVG. Example: "
             "```mermaid\\nflowchart LR\\nA --> B\\n```\n"
             "- **Math**: use `$...$` for inline math and `$$...$$` for display equations. KaTeX renders both.\n"
-            "Do NOT call write_file, generate_code, or any other tool to produce a diagram or equation. "
-            "Emit them inline in your chat text — the user sees the rendered output immediately.\n"
+            "- **Charts**: wrap Chart.js JSON in a ```chart code fence for inline data viz. "
+            "Supported types: `bar`, `line`, `pie`, `doughnut`, `scatter`, `radar`, `polarArea`. "
+            "Simple form: `{\"type\":\"bar\",\"labels\":[\"A\",\"B\",\"C\"],\"data\":[4,7,2],\"title\":\"optional\"}`. "
+            "Multi-series: use `\"datasets\":[{\"label\":\"X\",\"data\":[...]},{\"label\":\"Y\",\"data\":[...]}]` instead of `\"data\"`. "
+            "Colors auto-pick from the active theme palette. Use charts for quantitative comparisons or trends "
+            "instead of dumping raw numbers or ASCII art.\n"
+            "- **Callouts**: start a blockquote with `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, "
+            "`> [!WARNING]`, or `> [!CAUTION]` to render a coloured admonition box. Subsequent `> ` lines are body. "
+            "Use these for important caveats, tips, or warnings — don't over-use.\n"
+            "- **Keyboard keys**: wrap key names in `<kbd>` tags (e.g. `<kbd>Ctrl</kbd>+<kbd>K</kbd>`) for "
+            "styled key caps when describing shortcuts.\n"
+            "- **Colors**: hex codes (`#ff0088`), `rgb(...)`, and `hsl(...)` values are auto-detected and "
+            "render with a small color-swatch chip inline. No special syntax required.\n"
+            "\n"
+            "**For visualisation, never save image files.** Do NOT call `write_file` to produce a PNG/SVG. "
+            "Do NOT write Python/R/JS with matplotlib, seaborn, plotly, pandas.plot, ggplot, or any charting "
+            "library that calls `savefig` / `write_image` / similar. The ```chart fence renders interactively, "
+            "theme-matched, with zero latency — a saved image cannot match that. If your first instinct is "
+            "`import matplotlib`, stop and emit a ```chart fence instead.\n"
+            "\n"
+            "### Computation — `execute_code` IS the right tool\n"
+            "Use `execute_code` freely for actual arithmetic, aggregation, statistics, parsing, scraping, "
+            "growth-rate/CAGR/variance/weighted-average calculations — anything you'd get wrong by doing it "
+            "in your head. LLM mental math is unreliable past trivial cases; trust the sandbox. Code tools "
+            "are explicitly encouraged for computation, transformation, and fetching data you don't have. "
+            "The prohibition above is purely about saving image files, not about running code.\n"
+            "\n"
+            "### The compute-then-chart pattern\n"
+            "When a task needs both math AND a visual:\n"
+            "  1. Call `execute_code` to COMPUTE the numbers. Print the final values to stdout so you can "
+            "read them back (e.g. `print(json.dumps({\"labels\": [...], \"data\": [...]}))`).\n"
+            "  2. Emit a ```chart fence using those computed values.\n"
+            "Never present a chart of numbers you estimated when `execute_code` could have computed them "
+            "exactly.\n"
             "\n"
             "### Combining diagrams and math\n"
             "Mermaid does NOT render LaTeX inside node labels. Keep node labels as plain text "
@@ -411,16 +465,45 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 _ap_lines.append(f"  - {_f}")
             if len(_ap_files) > 25:
                 _ap_lines.append(f"  - ... and {len(_ap_files) - 25} more")
-        _ap_lines.append(
-            "\nIf the user reports a bug, error, or asks for changes to this project: "
-            "use read_file on the relevant files first to see the current code, then fix "
-            "with write_file (small changes) or generate_code with project_id="
-            f"'{_ap_id}' (large changes). Do NOT start a new project."
-        )
+        if _is_v2_persona:
+            _ap_lines.append(
+                "\n## How to handle this project\n"
+                "1. **For QUESTIONS** about the code (\"how does X work?\", \"walk me "
+                "through Y\", \"show me Z\", \"break down W line by line\", \"what does "
+                "this do?\"): your VERY FIRST tool call MUST be `ask_project(question='...')`. "
+                "Do NOT call list_files, read_file, search_files, run_review, run_shell, "
+                "or download_project. The ProjectQA agent reads the code, finds what's "
+                "relevant, and produces a grounded answer with file:line citations in "
+                "ONE round. Hand-rolling read_file across many files is the v1 "
+                "antipattern that wastes rounds.\n"
+                "2. **For CHANGE REQUESTS** (\"add X\", \"fix Y\", \"refactor Z\", "
+                "\"implement W\"): use `generate_code(task='...', project_id="
+                f"'{_ap_id}')` for substantial changes, or `write_file` + `run_review` "
+                "for tweaks to 1-2 files.\n"
+                "3. **For BUG REPORTS** (\"the tests are failing\", \"it crashes when "
+                "...\"): call `run_review(project_dir='/root/projects/" + _ap_id + "')` "
+                "first — the Reviewer runs the build/tests and tells you what's broken.\n"
+                "4. **Do NOT auto-package or download** the project unless the user "
+                "explicitly asks for the tarball/zip. They already uploaded it."
+            )
+        else:
+            # v1 path — keep the existing read_file → write_file/generate_code flow.
+            _ap_lines.append(
+                "\nIf the user reports a bug, error, or asks for changes to this project: "
+                "use read_file on the relevant files first to see the current code, then fix "
+                "with write_file (small changes) or generate_code with project_id="
+                f"'{_ap_id}' (large changes). Do NOT start a new project."
+            )
         messages.append({"role": "system", "content": "\n".join(_ap_lines)})
         print(f"[CHAT] Injected active project context: {_active_project.get('name', '?')} ({len(_ap_files)} files)")
 
-    messages.extend([{"role": m["role"], "content": m["content"]} for m in req.messages])
+    for m in req.messages:
+        _msg = {"role": m["role"], "content": m["content"]}
+        # Pass image attachments through to vision-capable Ollama models.
+        # Non-vision models silently ignore the field.
+        if m.get("images"):
+            _msg["images"] = m["images"]
+        messages.append(_msg)
 
     # ── Build Ollama-native tool definitions ──
     available_tool_names = set()
@@ -474,61 +557,30 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
     print(f"[CHAT]   Tools: {sorted(available_tool_names)}")
 
-    # ── Quick Search: fetch SearXNG results and inject as context ──
+    # ── Quick Search: gate → rewrite → search → rank → fetch → inject ──
     if "quick_search" in req.tool_ids:
-        user_query = ""
-        for m in reversed(req.messages):
-            if m.get("role") == "user" and m.get("content"):
-                user_query = m["content"].strip()[:200]
-                break
-        if user_query:
+        try:
+            qs = await run_quick_search_for_chat(
+                http,
+                config.OLLAMA_URL,
+                config.WORKSPACE_MODEL or config.DEFAULT_MODEL,
+                events, conv_id, messages,
+                default_model=config.DEFAULT_MODEL,
+            )
+            if qs.get("context"):
+                for m in reversed(messages):
+                    if m["role"] == "user":
+                        m["content"] = (m.get("content") or "") + "\n\n" + qs["context"]
+                        break
+        except Exception as e:
+            print(f"[CHAT]   Quick search error: {e}")
             try:
-                await events.emit(conv_id, "tool_start", {
-                    "tool": "quick_search", "status": f"Searching: {user_query[:60]}",
-                    "icon": "search"
-                })
-                params = urllib.parse.urlencode({
-                    "q": user_query, "format": "json",
-                    "language": "en", "safesearch": "0",
-                })
-                r = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=10)
-                data = r.json()
-                results = data.get("results", [])[:6]
-                if results:
-                    search_ctx = "\n\n=== WEB SEARCH RESULTS ===\n"
-                    search_ctx += f"Query: {user_query}\n\n"
-                    for i, item in enumerate(results, 1):
-                        title = item.get("title", "")
-                        url = item.get("url", "")
-                        snippet = item.get("content", "")
-                        search_ctx += f"{i}. **{title}**\n   URL: {url}\n   {snippet}\n\n"
-                    search_ctx += (
-                        "IMPORTANT: Use the search results above to answer the user's question. "
-                        "Summarize the information from these results as if you know it. "
-                        "Do NOT say you lack real-time data or cannot access the internet — "
-                        "these results ARE your real-time data. Cite sources when relevant.\n"
-                    )
-                    # Inject into the last user message so model sees it in context
-                    for m in reversed(messages):
-                        if m["role"] == "user":
-                            m["content"] += search_ctx
-                            break
-                    await events.emit(conv_id, "tool_done", {
-                        "tool": "quick_search", "icon": "search",
-                        "status": f"Found {len(results)} results",
-                    })
-                    print(f"[CHAT]   Quick search: {len(results)} results for {user_query[:60]!r}")
-                else:
-                    await events.emit(conv_id, "tool_done", {
-                        "tool": "quick_search", "icon": "search",
-                        "status": "No results found",
-                    })
-            except Exception as e:
-                print(f"[CHAT]   Quick search error: {e}")
                 await events.emit(conv_id, "tool_done", {
                     "tool": "quick_search", "icon": "alert-circle",
                     "status": f"Search failed: {e}",
                 })
+            except Exception:
+                pass
 
     # Inject visualization hint for non-coder chats that have execute_code + download_file
     _has_full_codeagent = bool(available_tool_names & (CODEAGENT_TOOLS_SET - {"execute_code", "download_file"}))
@@ -591,6 +643,23 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     _is_coder = _has_full_codeagent
     MAX_ROUNDS = config.MAX_AGENT_ROUNDS_CODER if _is_coder else config.MAX_AGENT_ROUNDS
     MAX_CONTEXT_CHARS = 80000  # ~20k tokens — prune old tool results beyond this
+
+    # Phase 0.6: create the assistant-message stub at stream start so disconnects
+    # don't lose work. The agent updates this row at every round boundary; if the
+    # client closes the tab mid-stream, the most recent saved content is what
+    # the frontend sees on reload.
+    _assistant_msg_id = None
+    _stream_started_at = datetime.utcnow().isoformat()
+    try:
+        _assistant_msg_id = await db.add_message(conv_id, "assistant", "", metadata={
+            "stream_started_at": _stream_started_at,
+            "in_progress": True,
+        })
+        # Tell the frontend the message_id so it can PATCH the final state on
+        # stream-complete instead of POSTing a duplicate.
+        yield f"data: {json.dumps({'type': 'init', 'message_id': _assistant_msg_id})}\n\n"
+    except Exception as _ase:
+        print(f"[CHAT] Failed to create assistant message stub: {_ase}")
     _text_fallback_done = False
     _prev_tool_key = None  # Track previous tool call to detect loops
     _tool_history = []     # Last N tool keys for near-duplicate detection
@@ -601,6 +670,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     _generate_code_done = False    # Guard: stop tool calls after successful generate_code
     _rescue_count = 0              # How many times we rescued code blocks
     _oom_retries = 0               # OOM context halving retries
+    # Effort-level self-review rounds: 0=off, capped at 3
+    _review_round = 0
+    _review_budget = max(0, min(3, int(getattr(req, "effort_rounds", 0) or 0)))
+    _best_review_content = ""  # Longest detailed answer seen so far — used for anti-regression
 
     for round_num in range(MAX_ROUNDS):
         content = ""
@@ -608,6 +681,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         tool_calls = []
         gen_tokens = 0
         prompt_tokens = 0
+        _gen_pill_started = False  # First "generating" pill uses tool_start; subsequent ones use tool_progress so the frontend collapses them into one updating pill
 
         # ── Context window management: prune old tool results to stay under budget ──
         _ctx_size = sum(len(m.get("content", "")) for m in messages)
@@ -681,6 +755,19 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                             yield f"data: {json.dumps({'type': 'error', 'error': error_body[:300]})}\n\n"
                             return
                     else:
+                        err_lower = error_body.lower()
+                        print(f"[CHAT] Ollama HTTP {resp.status_code}: {error_body[:300]}")
+                        # Mirror the corrupt-model classification from the stream-chunk path —
+                        # Ollama can surface the same conditions either inline or as an HTTP error body.
+                        if any(s in err_lower for s in ("input stream", "failed to load", "invalid model", "ggml", "unexpected eof")):
+                            _corrupt_msg = (
+                                f"Model '{req.model}' failed to load — it may be corrupt, incomplete, "
+                                f"or hit a context-buffer issue. Try `ollama stop {req.model}` and retry, "
+                                f"or reduce num_ctx."
+                            )
+                            await events.emit(conv_id, "tool_end", {"tool": "processing", "status": _corrupt_msg, "icon": "alert"})
+                            yield f"data: {json.dumps({'type': 'error', 'error': _corrupt_msg})}\n\n"
+                            return
                         await events.emit(conv_id, "error", {"status": f"Ollama HTTP {resp.status_code}"})
                         yield f"data: {json.dumps({'type': 'error', 'error': error_body[:300]})}\n\n"
                         return
@@ -704,6 +791,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                             async for _ol in resp.aiter_lines():
                                 await _line_q.put(_ol)
                         except Exception as _drain_err:
+                            print(f"[CHAT]   drain_ollama exception: {type(_drain_err).__name__}: {_drain_err!r}")
                             await _line_q.put(("__error__", _drain_err))
                         finally:
                             await _line_q.put(_SENTINEL)
@@ -808,16 +896,23 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                 if _live_gen_tokens % 10 == 0:
                                     yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': _live_gen_tokens, 'prompt_tokens': prompt_tokens, 'live': True})}\n\n"
 
-                                # Repetition detection: check last 200 chars for short repeating patterns
+                                # Repetition detection: catch true degenerate loops (e.g. "the the the…")
+                                # without killing legitimate repeated structure (chart labels, JSON arrays,
+                                # tables). Skipped inside fenced blocks; outside, requires >85% window
+                                # coverage and higher counts for short patterns.
                                 _repeat_window = (_repeat_window + token)[-200:]
-                                if len(_repeat_window) >= 120:
+                                _in_fence = (content.count("```") % 2) == 1
+                                if not _in_fence and len(_repeat_window) >= 120:
                                     for plen in range(2, 25):
                                         pat = _repeat_window[-plen:]
-                                        # Skip whitespace-only patterns (common in ASCII art, tables, formatted output)
+                                        # Skip whitespace-only patterns (ASCII art, tables, formatted output)
                                         if not pat.strip():
                                             continue
                                         count = _repeat_window.count(pat)
-                                        if count >= 8 and count * plen > len(_repeat_window) * 0.5:
+                                        # Short patterns (≤4 chars) need much higher counts: separators
+                                        # like ", " or "}, {" repeat heavily in normal structured prose.
+                                        min_count = 20 if plen <= 4 else 8
+                                        if count >= min_count and count * plen > len(_repeat_window) * 0.85:
                                             print(f"[CHAT]   Repetition detected: {pat!r} x{count} — stopping generation")
                                             content = content[:content.rfind(pat)]
                                             break
@@ -830,7 +925,9 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                     # Buffer mode: emit a progress pill instead of streaming tokens
                                     # Show what the model is working on via SSE event
                                     if len(content) % 200 < len(token):
-                                        await events.emit(conv_id, "tool_start", {
+                                        _evt_type = "tool_start" if not _gen_pill_started else "tool_progress"
+                                        _gen_pill_started = True
+                                        await events.emit(conv_id, _evt_type, {
                                             "tool": "generating",
                                             "status": f"✍️ Generating... ({len(content)} chars)",
                                             "icon": "edit",
@@ -874,14 +971,22 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                             pass
 
         except Exception as e:
-            err_msg = str(e) or "Connection failed or timeout"
+            # Log the actual cause — previously this catch silently emitted str(e) to the
+            # client, leaving the journal blank when Ollama streams died in unexpected ways.
+            print(f"[CHAT]   Round {round_num} exception: {type(e).__name__}: {e!r}")
+            traceback.print_exc()
+            err_msg = str(e) or f"{type(e).__name__} (no message)"
+            err_lower = err_msg.lower()
             # Provide clearer error messages for common failures
-            if "peer closed" in err_msg.lower() or "incomplete chunked" in err_msg.lower():
+            if "peer closed" in err_lower or "incomplete chunked" in err_lower:
                 err_msg = (f"Ollama connection dropped while streaming model '{req.model}'. "
                            f"This usually means the model is too large for available GPU memory (VRAM). "
                            f"Try a smaller model or reduce num_ctx. Original: {err_msg[:200]}")
-            elif "timeout" in err_msg.lower() or "timed out" in err_msg.lower():
+            elif "timeout" in err_lower or "timed out" in err_lower:
                 err_msg = f"Ollama request timed out for model '{req.model}'. The model may be too slow or overloaded. {err_msg[:200]}"
+            elif "input stream" in err_lower or "failed to load" in err_lower or "ggml" in err_lower:
+                err_msg = (f"Model '{req.model}' failed mid-stream — it may be corrupt or hit a context-buffer issue. "
+                           f"Try `ollama stop {req.model}` and retry, or reduce num_ctx. Original: {err_msg[:200]}")
             await events.emit(conv_id, "error", {"status": f"Ollama: {err_msg[:200]}"})
             yield f"data: {json.dumps({'type': 'error', 'error': err_msg})}\n\n"
             return
@@ -979,6 +1084,26 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         if tool_calls:
             print(f"[CHAT]   tool_calls: {json.dumps(tool_calls)[:300]}")
 
+        # Phase 0.6: snapshot the assistant message at every round boundary.
+        # On disconnect, the most recent snapshot is what the frontend renders
+        # when the user reopens the conversation. We tag it with run_ids of any
+        # runs created during this stream so the RunCard component can rebuild.
+        if _assistant_msg_id is not None:
+            try:
+                _runs_now = await db.get_runs_by_conversation(conv_id, limit=20)
+                _stream_run_ids = [r["id"] for r in _runs_now
+                                    if r.get("started_at", "") >= _stream_started_at]
+                await db.update_message(_assistant_msg_id,
+                    content=content,
+                    metadata={
+                        "stream_started_at": _stream_started_at,
+                        "in_progress": True,
+                        "round": round_num,
+                        "run_ids": _stream_run_ids,
+                    })
+            except Exception as _use:
+                print(f"[CHAT]   round-save failed (non-fatal): {_use}")
+
         # Emit final thinking content
         if thinking:
             await events.emit(conv_id, "thought_done", {
@@ -995,6 +1120,19 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 _tool_key = json.dumps([(tc.get("function", {}).get("name"), json.dumps(tc.get("function", {}).get("arguments", {}), sort_keys=True)) for tc in tool_calls], sort_keys=True)
                 _tc_names_dup = [tc.get("function", {}).get("name", "") for tc in tool_calls]
 
+                # The v2 fix loop is review → fixer → review → fixer …, so
+                # run_review and run_fixer are designed to be called multiple
+                # times with identical arguments. The v2 workflow gate (in
+                # tools.py) enforces correctness here; the duplicate detector
+                # should NOT second-guess it. Exempt these from both exact
+                # and near-duplicate checks. ask_project is also exempted
+                # because Q&A is naturally multi-turn (follow-up questions
+                # often share keywords/topics).
+                _LOOP_TOOLS = {"run_review", "run_fixer", "ask_project"}
+                _all_loop_tools = bool(_tc_names_dup) and all(
+                    n in _LOOP_TOOLS for n in _tc_names_dup
+                )
+
                 # Exact duplicate: same as immediately previous round
                 _is_dup = _tool_key == _prev_tool_key
                 # Near-duplicate: same tool key seen in last 3 rounds
@@ -1008,9 +1146,18 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     ) if _tool_key in _tool_history else False
                     if _is_test_rerun and _had_write_since:
                         print(f"[CHAT]   Allowing re-test after file modification")
+                    elif _all_loop_tools:
+                        print(f"[CHAT]   Allowing re-run of v2 loop tool(s): {_tc_names_dup}")
                     else:
                         _is_dup = True
                         print(f"[CHAT]   Near-duplicate detected (seen in last 3 rounds)")
+
+                # Even an exact back-to-back duplicate is fine for loop tools —
+                # the gate will refuse if the workflow is wrong.
+                if _is_dup and _all_loop_tools:
+                    print(f"[CHAT]   Allowing exact re-run of v2 loop tool(s) "
+                          f"(gate enforces workflow): {_tc_names_dup}")
+                    _is_dup = False
 
                 if _is_dup:
                     _dup_break_count += 1
@@ -1256,6 +1403,59 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     except Exception as _rag_e:
                         print(f"[RAG] Auto-index error: {_rag_e}")
 
+            # Short-circuit: if ask_project succeeded as a non-change-request
+            # in this round, stream the QA envelope's answer verbatim and exit
+            # the agent loop. The QA run card already renders the rich grounded
+            # answer with code blocks and citations; without this, the LLM
+            # would paraphrase it on the next round and lose that detail.
+            _called_ask_project = any(
+                _f[2] == "ask_project" for _f in (_futures or [])
+            )
+            if _called_ask_project:
+                try:
+                    _qa_runs = await db.get_runs_by_conversation(conv_id, limit=10)
+                    for _qr in _qa_runs:
+                        if _qr.get("role") != "qa":
+                            continue
+                        _qa_env = _qr.get("result_envelope") or {}
+                        # Only short-circuit when the QA succeeded AND wasn't a
+                        # change request. Change requests should fall through to
+                        # the LLM round so it can route to generate_code/etc.
+                        if (_qr.get("status") == "succeeded"
+                                and not _qa_env.get("looks_like_change_request")
+                                and (_qa_env.get("answer") or "").strip()):
+                            _qa_answer = _qa_env["answer"]
+                            print(f"[CHAT]   QA short-circuit: streaming "
+                                  f"{len(_qa_answer)} chars from {_qr.get('id')}")
+                            for _i in range(0, len(_qa_answer), 8):
+                                yield f"data: {json.dumps({'type': 'token', 'content': _qa_answer[_i:_i+8]})}\n\n"
+                                await asyncio.sleep(0)
+                            if _assistant_msg_id is not None:
+                                try:
+                                    await db.update_message(
+                                        _assistant_msg_id,
+                                        content=_qa_answer,
+                                        metadata={
+                                            "stream_started_at": _stream_started_at,
+                                            "in_progress": False,
+                                            "qa_short_circuit": True,
+                                            "qa_run_id": _qr.get("id"),
+                                        },
+                                    )
+                                except Exception as _pe:
+                                    print(f"[CHAT]   QA persist failed (non-fatal): {_pe}")
+                            await events.emit(conv_id, "complete", {"status": "Complete"})
+                            _done_payload = {
+                                "type": "done", "model": req.model,
+                                "message_id": _assistant_msg_id,
+                            }
+                            yield f"data: {json.dumps(_done_payload)}\n\n"
+                            return
+                        # Latest qa run didn't qualify — fall through to LLM
+                        break
+                except Exception as _qe:
+                    print(f"[CHAT]   QA short-circuit lookup failed (non-fatal): {_qe}")
+
             continue
 
         # No tool calls — we have a final response
@@ -1265,6 +1465,64 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 for i in range(0, len(content), 8):
                     yield f"data: {json.dumps({'type': 'token', 'content': content[i:i+8]})}\n\n"
                     await asyncio.sleep(0)
+
+            # ── Effort-level self-review: loop back with a critique prompt ──
+            if _review_round < _review_budget:
+                # ── Anti-regression guard ──
+                # When the first answer was already correct, later review rounds
+                # tend to shrink into terse meta-commentary ("the original is
+                # accurate, no changes needed"). If the just-produced content is
+                # drastically shorter than the best detailed answer we've seen,
+                # treat this round as a "nothing to fix" confirmation: restore
+                # the best content, skip further review, and emit the done event.
+                if (len(_best_review_content) >= 500
+                        and len(content) < int(0.5 * len(_best_review_content))):
+                    print(f"[CHAT]   Review round {_review_round + 1} regressed "
+                          f"({len(content)} vs best {len(_best_review_content)} chars) — "
+                          f"keeping best answer, stopping refinement")
+                    yield f"data: {json.dumps({'type': 'clear'})}\n\n"
+                    for i in range(0, len(_best_review_content), 8):
+                        yield f"data: {json.dumps({'type': 'token', 'content': _best_review_content[i:i+8]})}\n\n"
+                        await asyncio.sleep(0)
+                    content = _best_review_content
+                    msg["content"] = _best_review_content
+                    # Fall through to the finalization block below
+                else:
+                    # Update best-seen content if this round is at least as good
+                    if len(content) >= len(_best_review_content):
+                        _best_review_content = content
+                    _review_round += 1
+                    print(f"[CHAT]   Review round {_review_round}/{_review_budget} — re-examining answer")
+                    # Commit the just-finished answer to history so the model sees what it said
+                    messages.append(msg)
+                    # Frontend: wipe the streamed answer, then show refinement progress.
+                    # Only emit via the chat stream — the frontend synthesizes the pill
+                    # from refinement_start. An extra EventBus emit would duplicate it.
+                    yield f"data: {json.dumps({'type': 'clear'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'refinement_start', 'round': _review_round, 'total': _review_budget})}\n\n"
+                    # Inject the critique prompt as a user turn
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Re-examine your previous response for factual errors, logical "
+                            "gaps, inaccurate claims, unclear phrasing, missing context, or "
+                            "overlooked angles. Then output the FINAL user-facing answer.\n\n"
+                            "CRITICAL RULES for your output:\n"
+                            "1. Your output IS the final answer shown to the user. It replaces "
+                            "the previous answer entirely.\n"
+                            "2. Do NOT write meta-commentary like 'the previous answer is "
+                            "correct', 'no changes needed', 'I verified...' — just output "
+                            "the answer itself.\n"
+                            "3. If the previous answer was already accurate and complete, "
+                            "output it AGAIN in full (same level of detail, tables, examples) "
+                            "— do not shorten or summarize it.\n"
+                            "4. If you found issues, output the improved full answer.\n"
+                            "5. You may call tools (research, fetch_url, execute_code) first "
+                            "to verify facts before writing the final answer."
+                        ),
+                    })
+                    continue
+
             messages.append(msg)
             # Record token usage for analytics
             if gen_tokens or prompt_tokens:
@@ -1273,13 +1531,19 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 except Exception as _te:
                     print(f"[CHAT] Token recording error: {_te}")
             await events.emit(conv_id, "complete", {"status": "Complete"})
-            yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
+            _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id}
+            if _review_round > 0:
+                _done_payload["refinements"] = _review_round
+            yield f"data: {json.dumps(_done_payload)}\n\n"
             return
         else:
             # Empty content — try to recover
             if round_num >= 3:
                 await events.emit(conv_id, "complete", {"status": "Complete"})
-                yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
+                _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id}
+                if _review_round > 0:
+                    _done_payload["refinements"] = _review_round
+                yield f"data: {json.dumps(_done_payload)}\n\n"
                 return
             print(f"[CHAT]   Empty content (round {round_num}), gen_tokens={gen_tokens}, thinking={len(thinking)}")
 
@@ -1309,5 +1573,87 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 messages.append({"role": "user", "content": "Please provide a response."})
             continue
 
+    # Reached MAX_ROUNDS without the model emitting final user-facing text.
+    # Synthesize a fallback summary so the conversation isn't a blank message —
+    # tell the user we ran out of round budget, list the runs created, and
+    # what the last reviewer (if any) reported. Stream + persist.
+    _fallback_lines = [
+        f"⚠️ **Ran out of round budget** ({MAX_ROUNDS} rounds) before reaching a final answer.",
+    ]
+    try:
+        _all_runs = await db.get_runs_by_conversation(conv_id, limit=30)
+        # Only count runs that were created during this stream.
+        _stream_runs = [r for r in _all_runs if r.get("started_at", "") >= _stream_started_at]
+
+        _builders = [r for r in _stream_runs if r.get("role", "").startswith("builder")]
+        _reviewers = [r for r in _stream_runs if r.get("role") == "reviewer"]
+
+        if _builders:
+            _b_succ = sum(1 for r in _builders if r.get("status") == "succeeded")
+            _b_fail = len(_builders) - _b_succ
+            _fallback_lines.append(
+                f"\n**Builder runs**: {len(_builders)} "
+                f"({_b_succ} succeeded, {_b_fail} failed). "
+                f"Latest project workspace: `{(_builders[0].get('result_envelope') or {}).get('project_dir', '?')}`."
+            )
+
+        if _reviewers:
+            _last_rev = _reviewers[0]
+            _env = _last_rev.get("result_envelope") or {}
+            _rstatus = _env.get("status", "?")
+            _issues = _env.get("issues") or []
+            _fallback_lines.append(
+                f"\n**Last reviewer run**: status=`{_rstatus}` "
+                f"(build exit={_env.get('build_exit', '?')}, "
+                f"test exit={_env.get('test_exit', '?')})."
+            )
+            if _issues:
+                _fallback_lines.append(f"\nReviewer flagged {len(_issues)} issue(s):")
+                for _i, _iss in enumerate(_issues[:5], 1):
+                    _fallback_lines.append(
+                        f"  {_i}. [{_iss.get('severity', '?')}] "
+                        f"{_iss.get('file', '?')}"
+                        + (f":{','.join(str(x) for x in _iss.get('lines') or [])}" if _iss.get('lines') else "")
+                        + f" — {_iss.get('summary', '')[:160]}"
+                    )
+        elif _builders:
+            _fallback_lines.append(
+                "\nNo reviewer run was completed — the project's build/test status was not verified."
+            )
+
+        _fallback_lines.append(
+            "\n**To continue**: ask me to pick up where I left off, or refine the request. "
+            "The work that ran is durable — runs above survived the budget exhaustion."
+        )
+    except Exception as _fbe:
+        print(f"[CHAT] fallback summary failed (non-fatal): {_fbe}")
+        _fallback_lines.append(
+            "\nThe agent loop stopped before producing a final answer. "
+            "Try asking again or refining the request."
+        )
+
+    _fallback_content = "\n".join(_fallback_lines)
+    # Stream as a single token event so the frontend renders it live.
+    yield f"data: {json.dumps({'type': 'token', 'content': _fallback_content})}\n\n"
+
+    # Persist into the assistant message so refresh / reopen shows it too.
+    if _assistant_msg_id is not None:
+        try:
+            await db.update_message(
+                _assistant_msg_id,
+                content=_fallback_content,
+                metadata={
+                    "stream_started_at": _stream_started_at,
+                    "in_progress": False,
+                    "max_rounds_reached": True,
+                    "round": MAX_ROUNDS,
+                },
+            )
+        except Exception as _pe:
+            print(f"[CHAT] fallback persist failed (non-fatal): {_pe}")
+
     await events.emit(conv_id, "complete", {"status": "Complete (max rounds)"})
-    yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
+    _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id}
+    if _review_round > 0:
+        _done_payload["refinements"] = _review_round
+    yield f"data: {json.dumps(_done_payload)}\n\n"

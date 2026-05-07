@@ -175,6 +175,38 @@ CODEAGENT_TOOLS = {
             }, "required": ["task", "language"]},
         },
     },
+    "run_review": {
+        "type": "function",
+        "function": {
+            "name": "run_review",
+            "description": "Review a project after generate_code (or after manual changes) by running its real build, test, and lint commands in the sandbox and analysing the output. Returns a structured issue list (compile / test / lint / smell). Use this INSTEAD of manually reading and rewriting files round-by-round — it's faster, more thorough, and produces actionable scoped fixes. Reviewer is read-only — it never edits code.",
+            "parameters": {"type": "object", "properties": {
+                "project_dir": {"type": "string", "description": "Absolute path to the project root in the sandbox, e.g. '/root/projects/pong-game'. If omitted, uses the conversation's active project."},
+                "project_id": {"type": "string", "description": "Optional project_id from a previous generate_code run, used for run-graph linkage."},
+            }, "required": []},
+        },
+    },
+    "run_fixer": {
+        "type": "function",
+        "function": {
+            "name": "run_fixer",
+            "description": "Apply targeted edits for issues identified by run_review. The Fixer reads each issue's fix-scope files, asks a coder LLM for minimal complete-file replacements, and writes the edits back. Use this AFTER run_review returns issues, INSTEAD OF manually reading + writing each file in chat rounds. After run_fixer completes, call run_review AGAIN to verify the fixes worked. Hard cap on fixer cycles: 3.",
+            "parameters": {"type": "object", "properties": {
+                "reviewer_run_id": {"type": "string", "description": "The run_id of the run_review call whose issues you want to fix (e.g. 'run-bd6f9dc7b4e3'). If omitted, the most recent reviewer run on this conversation is used."},
+            }, "required": []},
+        },
+    },
+    "ask_project": {
+        "type": "function",
+        "function": {
+            "name": "ask_project",
+            "description": "Answer a question about an existing project's code (e.g. 'how does the ball physics work?', 'where is the score tracked?', 'what does GameEngine do?'). Read-only — never modifies files. The agent greps the project for relevant terms, reads the matching code, and produces a grounded answer with file:line citations. Use this INSTEAD of hand-rolling read_file + search_files when the user asks a question about the code. If the question is actually a change request (e.g. 'add a pause feature'), the result will flag it so you know to call generate_code or write_file instead.",
+            "parameters": {"type": "object", "properties": {
+                "question": {"type": "string", "description": "The user's question, verbatim or lightly cleaned. Be specific — pass the user's actual words rather than paraphrasing."},
+                "project_dir": {"type": "string", "description": "Absolute path to the project root (e.g. '/root/projects/pong'). If omitted, the most recent successful builder run's project_dir is used."},
+            }, "required": ["question"]},
+        },
+    },
     "search_files": {
         "type": "function",
         "function": {
@@ -624,6 +656,7 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
         "download_project": ["filenames", "project_name"],
         "delete_file": ["path"],
         "plan_project": ["task", "language", "constraints"],
+        "run_review": ["project_dir", "project_id"],
         "search_files": ["pattern", "path", "file_pattern"],
         "diff_files": ["path_a", "path_b"],
         "git_init": ["path", "language"],
@@ -701,6 +734,92 @@ async def _ensure_venv(http):
     return False
 
 
+# Language → filename substring hints for KB retrieval bias. Each entry lists the filename
+# fragments (case-insensitive) that should be preferred when the task targets that language.
+# Frameworks/runtimes commonly used WITH a language are included so e.g. a Java task biases
+# toward javafx_ / swing_ / spring_ chunks even though those aren't "the Java language" itself.
+# Substrings are matched against the chunk's source filename via rag.query(prefer_filename_hints).
+_KB_LANG_HINTS: dict[str, list[str]] = {
+    "python":     ["python_", "django_", "flask_", "fastapi_", "pandas_", "numpy_",
+                   "pytorch_", "sqlalchemy_"],
+    "java":       ["java_", "javafx_", "swing_", "spring_"],
+    "kotlin":     ["kotlin_", "android_", "spring_"],
+    "javascript": ["javascript_", "nodejs_", "express_", "react_", "vue_", "angular_",
+                   "nextjs_", "svelte_", "jquery_", "npm_"],
+    "typescript": ["typescript_", "nextjs_", "react_", "angular_", "nodejs_", "express_"],
+    "rust":       ["rust_"],
+    "go":         ["go_", "gin_"],
+    "c":          ["c_reference", "cpp_"],
+    "cpp":        ["cpp_", "c_reference", "cmake_"],
+    "c++":        ["cpp_", "c_reference", "cmake_"],
+    "csharp":     ["csharp_", "aspnet_", "unity_"],
+    "c#":         ["csharp_", "aspnet_", "unity_"],
+    "swift":      ["swift_", "swiftui_", "ios_"],
+    "ruby":       ["ruby_", "rails_"],
+    "php":        ["php_", "laravel_"],
+    "lua":        ["lua_"],
+    "elixir":     ["elixir_"],
+    "haskell":    ["haskell_"],
+    "scala":      ["scala_"],
+    "dart":       ["dart_", "flutter_"],
+    "perl":       ["perl_"],
+    "html":       ["html_", "css_", "tailwind_", "bootstrap_"],
+    "css":        ["css_", "tailwind_", "bootstrap_"],
+    "bash":       ["bash_", "linux_", "vim_"],
+    "sh":         ["bash_", "linux_"],
+    "powershell": ["powershell_"],
+    "sql":        ["sql_", "postgres_", "mysql_", "mongodb_", "redis_", "sqlalchemy_"],
+}
+
+# Free-form tokens that hint at a framework even if they don't appear in the language field.
+# Searched in the task text (lowercased) when the language map alone doesn't pick a hint.
+_KB_TASK_HINTS: dict[str, list[str]] = {
+    "javafx":      ["javafx_"],
+    "swing":       ["swing_"],
+    "spring boot": ["spring_"],
+    "react":       ["react_"],
+    "vue":         ["vue_"],
+    "angular":     ["angular_"],
+    "next.js":     ["nextjs_"],
+    "tailwind":    ["tailwind_"],
+    "django":      ["django_"],
+    "flask":       ["flask_"],
+    "fastapi":     ["fastapi_"],
+    "unity":       ["unity_"],
+    "unreal":      ["unreal_"],
+    "godot":       ["godot_"],
+    "kubernetes":  ["kubernetes_"],
+    "docker":      ["docker_"],
+    "terraform":   ["terraform_"],
+    "ansible":     ["ansible_"],
+}
+
+
+def _kb_filename_hints_for_language(language: str, task: str = "") -> list[str] | None:
+    """Pick filename substring hints that should be preferred when retrieving KB chunks.
+
+    Returns None when no hints apply, so callers can pass through to unbiased retrieval.
+    """
+    hints: list[str] = []
+    lang_key = (language or "").lower().strip()
+    if lang_key in _KB_LANG_HINTS:
+        hints.extend(_KB_LANG_HINTS[lang_key])
+    task_lower = (task or "").lower()
+    for keyword, more in _KB_TASK_HINTS.items():
+        if keyword in task_lower:
+            hints.extend(more)
+    if not hints:
+        return None
+    # De-duplicate while preserving order.
+    seen = set()
+    out = []
+    for h in hints:
+        if h not in seen:
+            seen.add(h)
+            out.append(h)
+    return out
+
+
 def _get_run_cmd(language: str, filepath: str) -> str:
     """Return the shell command to run a file for the given language."""
     lang = language.lower()
@@ -729,6 +848,229 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
     """Execute a built-in or custom tool and return the result string."""
     custom_tool_map = custom_tool_map or {}
     try:
+        # ─── v2 workflow gate (deterministic over persuasion) ───────────────
+        # Two interlocking states gate every non-meta tool call. Both fire
+        # only for v2 personas (detected by model_config.name containing "v2").
+        # v1 stays untouched.
+        #
+        #   State 1 — PENDING REVIEW: a builder or fixer just succeeded but
+        #     no reviewer ran after it. Block everything except run_review.
+        #     This is what stops the v1 antipattern of read_file → write_file
+        #     → javac chains after generate_code.
+        #
+        #   State 2 — PENDING FIX: the most recent run is a reviewer with
+        #     status=issues or status=error. Block everything except
+        #     run_fixer (and run_review, in case the model wants to re-check).
+        #     This is what stops the model from ignoring reviewer findings
+        #     and shipping (or hand-editing one file at a time).
+        #
+        #   State 3 — Q&A TERMINAL: the most recent run is a successful `qa`
+        #     and the question wasn't a change request. The model should be
+        #     producing a plain-text response, not running more tools. Block
+        #     everything except ask_project itself (so follow-up questions
+        #     still work). If the user actually wants a change, they need to
+        #     say so — ask_project will flag it and the gate will release.
+        #
+        #   State 4 — CYCLE LIMIT (run_fixer only): if there are already ≥3
+        #     succeeded fixer runs on this conv, the same class of issue is
+        #     persisting and another fixer call won't help. Refuse and tell
+        #     the model to summarize for the user. The persona prompt has
+        #     said "Hard cap: 3 review/fix cycles" since Phase 2; this
+        #     enforces it server-side instead of trusting the model to obey.
+        if conv_id and name == "run_fixer":
+            try:
+                _runs_for_cap = await db.get_runs_by_conversation(conv_id, limit=20)
+                _fixer_succ = sum(
+                    1 for r in _runs_for_cap
+                    if r.get("role") == "fixer" and r.get("status") == "succeeded"
+                )
+                if _fixer_succ >= 3:
+                    # Detect v2 persona; v1 doesn't run this loop, so no need
+                    # to enforce the cap there.
+                    _is_v2_cap = False
+                    try:
+                        _conv_row = await db.get_conversation(conv_id)
+                        _mc_id = (_conv_row or {}).get("model_config_id") if _conv_row else None
+                        if _mc_id:
+                            _all_mc = await db.get_model_configs()
+                            _mc = next((m for m in _all_mc if m.get("id") == _mc_id), None)
+                            if _mc and "v2" in (_mc.get("name") or "").lower():
+                                _is_v2_cap = True
+                    except Exception as _pe:
+                        print(f"[v2-gate] cap persona lookup failed (non-fatal): {_pe}")
+
+                    if _is_v2_cap:
+                        # Pull the latest reviewer's summary so the model has
+                        # specifics to relay to the user.
+                        _last_rev = next(
+                            (r for r in _runs_for_cap if r.get("role") == "reviewer"),
+                            None,
+                        )
+                        _rev_sum = ""
+                        _rev_issues = []
+                        if _last_rev:
+                            _rev_env = _last_rev.get("result_envelope") or {}
+                            _rev_sum = (_rev_env.get("summary") or "")[:300]
+                            _rev_issues = _rev_env.get("issues") or []
+                        _issue_lines = []
+                        for _i, _iss in enumerate(_rev_issues[:3], 1):
+                            _issue_lines.append(
+                                f"  {_i}. [{_iss.get('severity','?')}] "
+                                f"{_iss.get('file','?')}"
+                                + (f":{','.join(str(x) for x in _iss.get('lines') or [])}" if _iss.get('lines') else "")
+                                + f" — {(_iss.get('summary','') or '')[:160]}"
+                            )
+                        await events.emit(conv_id, "tool_end", {
+                            "tool": "run_fixer", "icon": "wrench",
+                            "status": f"⛔ Cycle cap reached ({_fixer_succ}/3) — summarize and stop",
+                        })
+                        print(f"[v2-gate] CYCLE CAP: blocking run_fixer (already "
+                              f"{_fixer_succ} succeeded fixer runs on this conv)", flush=True)
+                        return (
+                            f"BLOCKED — Hard cap of 3 review/fix cycles already attempted "
+                            f"on this conversation ({_fixer_succ} successful fixer runs).\n\n"
+                            f"The same class of issue is persisting and another fixer call "
+                            f"will not help. Your VERY NEXT output MUST be plain text to the "
+                            f"user that:\n"
+                            f"  1. Summarizes what was changed across the {_fixer_succ} fix cycles\n"
+                            f"  2. States the remaining issue with file:line references"
+                            + (f"\n     (latest reviewer: \"{_rev_sum}\")" if _rev_sum else "")
+                            + (("\n" + "\n".join(_issue_lines)) if _issue_lines else "")
+                            + "\n  3. Asks the user for guidance — what behavior they actually "
+                            f"want, or whether to skip this issue and ship anyway.\n\n"
+                            f"Do NOT call run_fixer, run_review, generate_code, write_file, or "
+                            f"any other tool. Respond to the user with text."
+                        )
+            except Exception as _ce:
+                print(f"[v2-gate] cycle cap check failed (non-fatal): {_ce}")
+
+        if conv_id and name not in ("run_review", "run_fixer", "ask_project"):
+            try:
+                _runs_for_v2_gate = await db.get_runs_by_conversation(conv_id, limit=20)
+                _pending_run = None    # state 1 trigger
+                _pending_kind = ""
+                _pending_review = None  # state 2 trigger
+                _terminal_qa = None    # state 3 trigger
+
+                # Walk newest-first.
+                # Builder/fixer runs in ANY non-trivial state require verification.
+                # `partial` and `stuck` mean the build wrote some files but didn't
+                # finish — the model needs run_review to find out what's there.
+                # `failed` means the build crashed; run_review will fail fast and
+                # tell the model so. Same logic for fixer. Only "queued"/"running"
+                # (in-flight) and unknown statuses are skipped.
+                _BUILDER_GATING = {"succeeded", "partial", "stuck", "failed"}
+                _FIXER_GATING = {"succeeded", "failed", "partial"}
+                for _r in _runs_for_v2_gate:
+                    _role = _r.get("role", "")
+                    if _role == "qa":
+                        # Most recent qa: state 3 if it succeeded and isn't a change request.
+                        _env_q = _r.get("result_envelope") or {}
+                        if (_r.get("status") == "succeeded"
+                                and not _env_q.get("looks_like_change_request", False)):
+                            _terminal_qa = _r
+                        break
+                    if _role == "reviewer":
+                        # Most recent reviewer: state 2 is whether it has issues.
+                        _env_r = _r.get("result_envelope") or {}
+                        _rstatus = (_env_r.get("status") or "").lower()
+                        if _rstatus in ("issues", "error"):
+                            _pending_review = _r
+                        break
+                    if _role.startswith("builder") and _r.get("status") in _BUILDER_GATING:
+                        _pending_run = _r
+                        _pending_kind = "builder"
+                        break
+                    if _role == "fixer" and _r.get("status") in _FIXER_GATING:
+                        _pending_run = _r
+                        _pending_kind = "fixer"
+                        break
+
+                # If neither state triggers, fall through and run normally.
+                _gate_msg = None
+                if _pending_run is not None:
+                    _env = _pending_run.get("result_envelope") or {}
+                    _pd = (_env.get("project_dir") or "").strip()
+                    _pid = _pending_run.get("id", "?")
+                    _why = ("generate_code" if _pending_kind == "builder" else "run_fixer")
+                    _gate_msg = (
+                        "state", "review-needed",
+                        f"BLOCKED — {_why} ({_pid}) just completed but "
+                        f"run_review has not been called yet.\n\n"
+                        f"Your VERY NEXT tool call MUST be:\n"
+                        f"  run_review(project_dir='{_pd}')\n\n"
+                        f"Do not call {name}, read_file, write_file, run_shell, javac, "
+                        f"or any other tool first. The Reviewer runs the project's real "
+                        f"build / tests / lint and tells you exactly what (if anything) "
+                        f"still needs fixing — with file:line references and a fix scope.",
+                        f"⛔ Blocked — call run_review first (after {_why} {_pid[:14]}…)",
+                        _pid,
+                    )
+                elif _pending_review is not None:
+                    _rid = _pending_review.get("id", "?")
+                    _rstatus_disp = (_pending_review.get("result_envelope") or {}).get("status", "?")
+                    _gate_msg = (
+                        "state", "fix-needed",
+                        f"BLOCKED — run_review ({_rid}) returned status='{_rstatus_disp}' "
+                        f"with issues that have not been addressed.\n\n"
+                        f"Your VERY NEXT tool call MUST be:\n"
+                        f"  run_fixer(reviewer_run_id='{_rid}')\n\n"
+                        f"The Fixer reads each issue's fix-scope files, generates targeted "
+                        f"edits via the coder model, and writes them back. Do NOT manually "
+                        f"call read_file / write_file for these issues — that's the v1 "
+                        f"antipattern that burns rounds. After run_fixer completes, call "
+                        f"run_review again to verify.",
+                        f"⛔ Blocked — call run_fixer first (review {_rid[:14]}… has issues)",
+                        _rid,
+                    )
+                elif _terminal_qa is not None:
+                    _qid = _terminal_qa.get("id", "?")
+                    _gate_msg = (
+                        "state", "qa-terminal",
+                        f"BLOCKED — ask_project ({_qid}) just answered the user's question. "
+                        f"The user asked something; you have the answer. Your VERY NEXT output "
+                        f"MUST be plain text relaying that answer to the user.\n\n"
+                        f"Do NOT call run_review, run_fixer, generate_code, read_file, "
+                        f"write_file, run_shell, download_project, or any other tool. The "
+                        f"build is already done; the user is asking ABOUT it, not asking you "
+                        f"to redo it.\n\n"
+                        f"If they follow up with another question, call ask_project again. "
+                        f"If they explicitly request a change ('add X', 'fix Y', 'refactor Z'), "
+                        f"call generate_code or write_file then. But for THIS turn, just "
+                        f"answer the user.",
+                        f"⛔ Blocked — answer the user (ask_project {_qid[:14]}… is terminal)",
+                        _qid,
+                    )
+
+                if _gate_msg is not None:
+                    # Detect v2 persona before actually blocking. v1 has no
+                    # run_review or run_fixer in its workflow.
+                    _is_v2 = False
+                    try:
+                        _conv_row = await db.get_conversation(conv_id)
+                        _mc_id = (_conv_row or {}).get("model_config_id") if _conv_row else None
+                        if _mc_id:
+                            _all_mc = await db.get_model_configs()
+                            _mc = next((m for m in _all_mc if m.get("id") == _mc_id), None)
+                            if _mc and "v2" in (_mc.get("name") or "").lower():
+                                _is_v2 = True
+                    except Exception as _pe:
+                        print(f"[v2-gate] persona lookup failed (non-fatal): {_pe}")
+
+                    if _is_v2:
+                        _, _state_label, _body, _short_status, _trigger_id = _gate_msg
+                        await events.emit(conv_id, "tool_end", {
+                            "tool": name, "icon": "code",
+                            "status": _short_status,
+                        })
+                        print(f"[v2-gate] state={_state_label} blocked tool={name} "
+                              f"trigger={_trigger_id}", flush=True)
+                        return _body
+            except Exception as _gge:
+                # Gate is best-effort — don't crash legitimate work if the
+                # runs/persona lookup fails. Log and proceed.
+                print(f"[v2-gate] gate check failed (non-fatal): {_gge}")
+
         if name == "execute_code":
             code = args.get("code", "")
             language = args.get("language", "python")
@@ -1057,6 +1399,60 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
 
         elif name == "download_project":
             directory = args.get("directory", "/root")
+
+            # Reviewer gate (Coder Bot v2): if the most recent reviewer run on
+            # this conversation reported issues or could not identify the
+            # project, refuse to ship until the orchestrator runs a fixer pass
+            # and re-runs run_review. v1 personas don't produce reviewer runs,
+            # so this is naturally inert for them.
+            if conv_id:
+                try:
+                    _runs_for_gate = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _latest_reviewer = None
+                    for _r in _runs_for_gate:
+                        if _r.get("role") == "reviewer":
+                            _latest_reviewer = _r
+                            break
+                    if _latest_reviewer:
+                        _env = _latest_reviewer.get("result_envelope") or {}
+                        _rstatus = (_env.get("status") or "").lower()
+                        if _rstatus in ("issues", "error"):
+                            issues = _env.get("issues") or []
+                            n = len(issues)
+                            lines = [
+                                f"BLOCKED — last run_review on this project returned status='{_rstatus}'.",
+                                f"Build: `{_env.get('build_cmd','')}` exit={_env.get('build_exit','?')}. "
+                                f"Tests: `{_env.get('test_cmd','')}` exit={_env.get('test_exit','?')}.",
+                                "",
+                                f"You CANNOT call download_project until the project passes review. "
+                                f"Reviewer flagged {n} issue{'s' if n != 1 else ''}:",
+                            ]
+                            for i, iss in enumerate(issues[:5], 1):
+                                lines.append(
+                                    f"  {i}. [{iss.get('severity','?')}] {iss.get('file','?')}"
+                                    + (f":{','.join(str(x) for x in iss.get('lines') or [])}" if iss.get('lines') else "")
+                                    + f" — {iss.get('summary','')}"
+                                )
+                                scope = iss.get("suggested_fix_scope") or []
+                                if scope:
+                                    lines.append(f"     fix scope: {', '.join(scope[:5])}")
+                            lines.append("")
+                            lines.append(
+                                "REQUIRED NEXT STEPS: 1) read each file in 'fix scope', 2) edit it with "
+                                "write_file to address the listed summary, 3) call run_review again. "
+                                "Repeat until run_review returns CLEAN. THEN call download_project."
+                            )
+                            await events.emit(conv_id, "tool_end", {
+                                "tool": "download_project", "icon": "code",
+                                "status": f"⛔ Blocked — last review had {n} issue{'s' if n != 1 else ''}",
+                            })
+                            print(f"[CHAT] download_project blocked: latest reviewer={_latest_reviewer.get('id')} status={_rstatus} issues={n}")
+                            return "\n".join(lines)
+                except Exception as _ge:
+                    # Gate is best-effort — don't crash legitimate downloads if
+                    # the runs query fails. Log and proceed.
+                    print(f"[CHAT] download_project gate check failed (non-fatal): {_ge}")
+
             await events.emit(conv_id, "tool_start", {"tool": "download_project", "icon": "code", "status": f"Packaging: {directory}"})
             dirname = directory.rstrip("/").split("/")[-1] or "project"
             # Clean up auto-generated UUIDs from directory names (project-abc12345 → project)
@@ -1348,13 +1744,371 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             parts.append("\nYou can now continue working on this project. Read any file to see its current state.")
             return "\n".join(parts)
 
+        elif name == "run_review":
+            # Coder Bot v2 — run the Reviewer agent on a project. Returns a structured
+            # issue list the chat agent can react to (instead of doing 28 rounds of
+            # manual file reading + rewriting). The Reviewer is read-only.
+            from agents import reviewer
+            project_dir = (args.get("project_dir") or "").strip()
+            project_id = (args.get("project_id") or "").strip()
+
+            # Preferred lookup: most recent succeeded builder run for this conv.
+            # The builder envelope records the actual workspace path (e.g.
+            # /root/projects/pong) — this is the one that matters. coding_projects
+            # is a less reliable source because openhands_project_id is sometimes
+            # blank when the run finished via a path we don't track.
+            if not project_dir and conv_id:
+                try:
+                    _runs = await db.get_runs_by_conversation(conv_id, limit=20)
+                    for _r in _runs:
+                        if _r.get("role", "").startswith("builder") and _r.get("status") == "succeeded":
+                            _env = _r.get("result_envelope") or {}
+                            _pd = (_env.get("project_dir") or "").strip()
+                            if _pd:
+                                project_dir = _pd
+                                if not project_id:
+                                    project_id = (_env.get("project_id") or "").strip()
+                                print(f"[run_review] resolved project_dir={project_dir} from builder run {_r.get('id')}")
+                                break
+                except Exception as _bre:
+                    print(f"[run_review] builder run lookup failed: {_bre}")
+
+            # Secondary fallback: coding_projects.
+            if not project_dir and conv_id:
+                try:
+                    _active = await db.get_coding_project_by_conv(conv_id)
+                    if _active:
+                        # Active project's working dir on Codebox is /root/projects/{openhands_project_id}
+                        _ohp = _active.get("openhands_project_id") or _active.get("id")
+                        if _ohp:
+                            project_dir = f"/root/projects/{_ohp}"
+                            if not project_id:
+                                project_id = _ohp
+                except Exception as _ape:
+                    print(f"[run_review] active project lookup failed: {_ape}")
+            if not project_dir:
+                return ("ERROR: run_review needs project_dir (e.g. '/root/projects/pong-game') "
+                        "or an active project on this conversation. Pass it explicitly: "
+                        "run_review(project_dir='/root/projects/<name>')")
+
+            envelope = await reviewer.run_review(http, events, conv_id,
+                                                  project_dir=project_dir,
+                                                  project_id=project_id)
+            # Format the envelope as a tool-result string the chat agent can read
+            # without needing to know the JSON schema. Keep it compact.
+            status = envelope.get("status", "?")
+            summary = envelope.get("summary", "")
+            issues = envelope.get("issues") or []
+            reviewer_run_id = envelope.get("run_id", "")
+            if status == "clean":
+                return (f"REVIEW CLEAN. {summary}\n"
+                        f"Build: `{envelope.get('build_cmd','')}` exit={envelope.get('build_exit','?')}. "
+                        f"Tests: `{envelope.get('test_cmd','')}` exit={envelope.get('test_exit','?')}. "
+                        f"Project is ready — package and deliver with download_project.")
+            lines = [f"REVIEW FOUND {len(issues)} ISSUE(S). {summary}",
+                     f"Build: `{envelope.get('build_cmd','')}` exit={envelope.get('build_exit','?')}. "
+                     f"Tests: `{envelope.get('test_cmd','')}` exit={envelope.get('test_exit','?')}.",
+                     f"reviewer_run_id: {reviewer_run_id}",
+                     ""]
+            for i, iss in enumerate(issues, 1):
+                lines.append(f"{i}. [{iss.get('severity','?')}] {iss.get('file','?')}"
+                             + (f":{','.join(str(x) for x in iss.get('lines') or [])}" if iss.get('lines') else "")
+                             + f" — {iss.get('summary','')}")
+                scope = iss.get("suggested_fix_scope") or []
+                if scope:
+                    lines.append(f"   fix scope: {', '.join(scope[:5])}")
+            lines.append("")
+            lines.append(
+                f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
+                f"  run_fixer(reviewer_run_id='{reviewer_run_id}')\n"
+                f"This runs the Fixer agent which reads the fix-scope files, generates "
+                f"targeted edits, and writes them back. AFTER run_fixer returns, call "
+                f"run_review again to verify the project is now CLEAN. Do NOT manually "
+                f"read_file / write_file for these issues — that's the v1 antipattern that "
+                f"burns rounds. Hard cap: 3 review/fix cycles."
+            )
+            return "\n".join(lines)
+
+        elif name == "run_fixer":
+            # Coder Bot v2 Phase 2 — apply targeted edits for issues from a prior
+            # run_review. Stateless agent: reads scope files, generates JSON edits
+            # via the coder model, writes them back. Does not re-run the build —
+            # the chat agent calls run_review again afterwards to verify.
+            from agents import fixer
+            reviewer_run_id = (args.get("reviewer_run_id") or "").strip()
+
+            # Helper: pull the most recent reviewer run id for this conv.
+            async def _latest_reviewer_id() -> str:
+                if not conv_id:
+                    return ""
+                try:
+                    _runs = await db.get_runs_by_conversation(conv_id, limit=20)
+                    for _r in _runs:
+                        if _r.get("role") == "reviewer":
+                            return _r["id"]
+                except Exception as _re:
+                    print(f"[run_fixer] reviewer lookup failed: {_re}")
+                return ""
+
+            # If not given, resolve from runs.
+            if not reviewer_run_id:
+                reviewer_run_id = await _latest_reviewer_id()
+                if reviewer_run_id:
+                    print(f"[run_fixer] resolved reviewer_run_id={reviewer_run_id} (omitted by model)")
+            else:
+                # Validate that the id passed by the model actually exists.
+                # qwen3-coder occasionally fabricates run-ids instead of
+                # copying from the prior run_review tool result; in that
+                # case fall back to the most recent reviewer run rather
+                # than failing the whole fix step.
+                try:
+                    _exists = await db.get_run(reviewer_run_id)
+                except Exception:
+                    _exists = None
+                if not _exists:
+                    print(f"[run_fixer] passed reviewer_run_id={reviewer_run_id} not found — "
+                          f"falling back to most recent reviewer")
+                    _fallback = await _latest_reviewer_id()
+                    if _fallback:
+                        reviewer_run_id = _fallback
+                        print(f"[run_fixer] using {reviewer_run_id} instead")
+
+            if not reviewer_run_id:
+                return ("ERROR: run_fixer needs reviewer_run_id (the run_id from a prior "
+                        "run_review call), and no reviewer run was found on this conversation. "
+                        "Call run_review first.")
+
+            await events.emit(conv_id, "tool_start", {
+                "tool": "run_fixer", "icon": "wrench",
+                "status": f"🛠 Starting Fixer for review {reviewer_run_id[:14]}…",
+            })
+
+            envelope = await fixer.run_fixer(http, events, conv_id,
+                                              reviewer_run_id=reviewer_run_id)
+
+            f_status = envelope.get("status", "?")
+            files = envelope.get("files_touched") or []
+            errors = envelope.get("errors") or []
+            n_issues = envelope.get("issues_addressed", 0)
+
+            if f_status == "applied":
+                lines = [
+                    f"FIXER APPLIED EDITS to {len(files)} file(s) across {n_issues} issue(s).",
+                    "Files touched:",
+                ] + [f"  - {f}" for f in files[:10]]
+                if errors:
+                    lines.append("")
+                    lines.append("Non-fatal errors:")
+                    lines += [f"  - {e}" for e in errors[:5]]
+                lines.append("")
+                lines.append("REQUIRED NEXT TOOL CALL: run_review (no args needed — uses the "
+                             "active project). It will re-run the build/tests and tell you "
+                             "whether the fixes worked.")
+                return "\n".join(lines)
+            elif f_status == "partial":
+                lines = [
+                    f"FIXER PARTIAL: applied {len(files)} edit(s) but {len(errors)} error(s) occurred.",
+                    "Files touched:",
+                ] + [f"  - {f}" for f in files[:10]]
+                lines.append("")
+                lines.append("Errors:")
+                lines += [f"  - {e}" for e in errors[:5]]
+                lines.append("")
+                lines.append("REQUIRED NEXT TOOL CALL: run_review to see the current state of the project.")
+                return "\n".join(lines)
+            elif f_status == "skipped":
+                return f"FIXER SKIPPED: {envelope.get('summary', 'no issues to fix')}."
+            else:
+                err_str = "; ".join(errors[:5]) or envelope.get("summary", "no edits applied")
+                return (f"FIXER FAILED: no edits applied. Reasons: {err_str}\n\n"
+                        f"You may need to fix manually with read_file + write_file (one round per "
+                        f"file), then call run_review to verify.")
+
+        elif name == "ask_project":
+            # Coder Bot v2 Phase 4 — read-only Q&A over an existing project.
+            # Greps the tree for keywords from the question, reads matching
+            # snippets, asks the model to compose a grounded answer with
+            # file:line citations. Detects change requests and flags them so
+            # the chat agent can route follow-ups appropriately.
+            from agents import project_qa
+            question = (args.get("question") or "").strip()
+            project_dir = (args.get("project_dir") or "").strip()
+            if not question:
+                return "ERROR: ask_project requires a `question` argument."
+
+            language = ""
+
+            async def _resolve_project_dir() -> tuple[str, str]:
+                """Auto-resolve project_dir + language from runs/coding_projects."""
+                _pd = ""
+                _lang = ""
+                if not conv_id:
+                    return _pd, _lang
+                try:
+                    _runs = await db.get_runs_by_conversation(conv_id, limit=20)
+                    for _r in _runs:
+                        if _r.get("role", "").startswith("builder") and _r.get("status") == "succeeded":
+                            _env = _r.get("result_envelope") or {}
+                            _candidate = (_env.get("project_dir") or "").strip()
+                            if _candidate:
+                                _pd = _candidate
+                                _lang = _env.get("language", "") or _lang
+                                print(f"[ask_project] resolved project_dir={_pd} from builder run {_r.get('id')}")
+                                return _pd, _lang
+                except Exception as _bre:
+                    print(f"[ask_project] builder run lookup failed: {_bre}")
+                # coding_projects fallback
+                try:
+                    _active = await db.get_coding_project_by_conv(conv_id)
+                    if _active:
+                        _ohp = _active.get("openhands_project_id") or _active.get("id")
+                        if _ohp:
+                            _pd = f"/root/projects/{_ohp}"
+                            _lang = _active.get("language") or _lang
+                except Exception:
+                    pass
+                return _pd, _lang
+
+            async def _project_dir_exists(path: str) -> bool:
+                """Best-effort check that path is a real directory on Codebox."""
+                if not path:
+                    return False
+                try:
+                    _r = await http.post(
+                        f"{config.CODEBOX_URL}/command",
+                        json={"command": f"test -d {shlex.quote(path)} && echo OK || echo NO",
+                              "timeout": 5},
+                        timeout=10,
+                    )
+                    if _r.status_code == 200:
+                        return "OK" in (_r.json().get("stdout") or "")
+                except Exception:
+                    pass
+                return False
+
+            if project_dir:
+                # Validate that the passed path actually exists. qwen-style
+                # models occasionally fabricate names like "/root/projects/
+                # todo-api" by guessing from the user's description instead
+                # of looking up the real path. If that happens, fall back to
+                # auto-resolution from the latest builder run.
+                if not await _project_dir_exists(project_dir):
+                    print(f"[ask_project] passed project_dir={project_dir} does not exist — "
+                          f"falling back to auto-resolve")
+                    _real_pd, _real_lang = await _resolve_project_dir()
+                    if _real_pd:
+                        project_dir = _real_pd
+                        language = _real_lang or language
+                        print(f"[ask_project] using {project_dir} instead")
+            else:
+                project_dir, language = await _resolve_project_dir()
+
+            if not project_dir:
+                return ("ERROR: ask_project needs project_dir, and no active project was "
+                        "found on this conversation. Pass it explicitly: "
+                        "ask_project(question='...', project_dir='/root/projects/<name>')")
+
+            await events.emit(conv_id, "tool_start", {
+                "tool": "ask_project", "icon": "help-circle",
+                "status": f"❓ Investigating: {question[:80]}",
+            })
+
+            envelope = await project_qa.run_project_qa(
+                http, events, conv_id,
+                project_dir=project_dir, question=question,
+                language=language,
+                conv_model=conv_model,
+            )
+
+            answer = envelope.get("answer", "")
+            files = envelope.get("files_examined") or []
+            looks_change = envelope.get("looks_like_change_request", False)
+
+            if envelope.get("status") != "ok" or not answer:
+                return (f"ASK_PROJECT FAILED: {envelope.get('summary', 'no answer produced')}.\n\n"
+                        f"You can fall back to read_file + search_files manually if needed.")
+
+            lines = [f"ANSWER (from {len(files)} file{'s' if len(files) != 1 else ''} examined):",
+                     "",
+                     answer]
+            if looks_change:
+                lines += [
+                    "",
+                    "**NOTE:** This question was flagged as a likely CHANGE REQUEST, not just a "
+                    "question. If the user wants you to actually make the change, your next tool "
+                    "call should be generate_code (for substantial changes) or read_file + "
+                    "write_file (for 1-2 file edits) — NOT another ask_project.",
+                ]
+            else:
+                # Make the terminal contract explicit. The model has a strong
+                # bias to keep calling tools after every result; for Q&A this
+                # is wrong — the user asked a question, the answer is above,
+                # the next output should be a plain-text response.
+                lines += [
+                    "",
+                    "**TERMINAL — STOP CALLING TOOLS.** This was a question, not a build "
+                    "request. Your VERY NEXT output MUST be plain text relaying the answer "
+                    "above to the user. Do NOT call run_review, run_fixer, generate_code, "
+                    "read_file, write_file, run_shell, download_project, or any other tool. "
+                    "If the user follows up with a new question, call ask_project again. "
+                    "If they ask for a change, call generate_code or write_file then. "
+                    "But for THIS response, just answer the user.",
+                ]
+            return "\n".join(lines)
+
         elif name == "plan_project":
             task = args.get("task", "")
             language = args.get("language", "python")
             constraints = args.get("constraints", "")
             if not task:
                 return "ERROR: task is required"
-            planning_model = config.PLANNING_MODEL or config.DEFAULT_MODEL
+
+            # ─── v2: route through structured Architect agent ─────────
+            # The Architect produces a JSON manifest the Builder/Reviewer
+            # consume directly, instead of the v1 prose plan that every
+            # downstream agent has to re-parse from markdown. v1 personas
+            # keep the existing prose path below.
+            _is_v2_for_plan = False
+            if conv_id:
+                try:
+                    _conv_row = await db.get_conversation(conv_id)
+                    _mc_id = (_conv_row or {}).get("model_config_id") if _conv_row else None
+                    if _mc_id:
+                        _all_mc = await db.get_model_configs()
+                        _mc = next((m for m in _all_mc if m.get("id") == _mc_id), None)
+                        if _mc and "v2" in (_mc.get("name") or "").lower():
+                            _is_v2_for_plan = True
+                except Exception as _pe:
+                    print(f"[plan_project] persona lookup failed (non-fatal): {_pe}")
+
+            if _is_v2_for_plan:
+                from agents import architect
+                await events.emit(conv_id, "tool_start", {
+                    "tool": "plan_project", "icon": "activity",
+                    "status": "🧠 Architect planning structured manifest...",
+                })
+                # KB chunks for the planning model: filter by language hints
+                # using the existing rag plumbing. Best effort — if RAG isn't
+                # configured or fails, the architect just runs without KB.
+                _kb_chunks = []
+                if kb_ids:
+                    try:
+                        import rag
+                        _kb_chunks = await rag.query(
+                            kb_ids, query_text=task[:500], top_k=3,
+                            prefer_filename_hints=_kb_filename_hints_for_language(language, task),
+                        )
+                    except Exception as _rge:
+                        print(f"[plan_project] RAG query failed (non-fatal): {_rge}")
+                plan = await architect.run_architect(
+                    http, events, conv_id,
+                    task=task, language_hint=language,
+                    kb_chunks=_kb_chunks,
+                )
+                return architect.format_plan_for_chat(plan)
+
+            # ─── v1 path: existing prose plan_project ─────────────────
+            planning_model = config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL
             await events.emit(conv_id, "tool_start", {"tool": "plan_project", "icon": "activity", "status": f"🧠 Planning architecture with {planning_model}..."})
             plan_prompt = f"""You are a senior software architect. Design a complete implementation plan for this project.
 
@@ -1379,14 +2133,19 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
             try:
                 r = await http.post(
                     f"{config.OLLAMA_URL}/api/chat",
-                    json={"model": planning_model, "messages": [{"role": "user", "content": plan_prompt}], "stream": False, "options": {"temperature": 0.3, "num_ctx": 16384}},
+                    json={"model": planning_model, "messages": [{"role": "user", "content": plan_prompt}], "stream": False, "options": {"temperature": 0.3, "num_ctx": config.DEFAULT_NUM_CTX}},
                     timeout=180,
                 )
                 if r.status_code == 200:
                     data = r.json()
                     plan = data.get("message", {}).get("content", "")
                     if plan:
-                        await events.emit(conv_id, "tool_end", {"tool": "plan_project", "icon": "activity", "status": "🧠 Architecture plan ready"})
+                        await events.emit(conv_id, "tool_end", {
+                            "tool": "plan_project",
+                            "icon": "activity",
+                            "status": "🧠 Architecture plan ready",
+                            "detail": json.dumps({"plan": plan[:12000], "language": language, "task": task[:200]}),
+                        })
                         # Save plan to project memory
                         try:
                             proj_id = f"proj-{uuid.uuid4().hex[:12]}"
@@ -1514,19 +2273,29 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 context = (context + "\n\nReference code:\n" + args["code"]).strip()
             coder_model = config.CODER_MODEL or conv_model or config.DEFAULT_MODEL
 
-            # Inject KB context so OpenHands agent has access to uploaded documentation
+            # Inject KB context so OpenHands agent has access to uploaded documentation.
+            # Bias retrieval toward filenames matching the requested language/framework so a
+            # Java task pulls java_/javafx_/spring_ chunks instead of competing for the same
+            # top_k slots with unrelated languages (swift, ruby, etc.).
             if kb_ids and task:
                 try:
                     import rag
-                    chunks = await rag.query(kb_ids, task, top_k=4)
+                    chunks = await rag.query(
+                        kb_ids, task, top_k=6,
+                        prefer_filename_hints=_kb_filename_hints_for_language(language, task),
+                    )
                     if chunks:
-                        kb_prior = rag.format_context(chunks, max_chars=3000)
+                        kb_prior = rag.format_context(chunks, max_chars=4500)
                         kb_section = (
                             "\n\n--- Knowledge Base (uploaded reference docs) ---\n"
                             + kb_prior
                         )
                         context = (context + kb_section) if context else kb_section.strip()
-                        print(f"[CODEGEN RAG] Pre-loaded {len(chunks)} KB chunks for generate_code: {task[:60]}")
+                        _matched = sum(1 for c in chunks
+                                       if any(h in (c.get("filename") or "").lower()
+                                              for h in (_kb_filename_hints_for_language(language, task) or [])))
+                        print(f"[CODEGEN RAG] Pre-loaded {len(chunks)} KB chunks "
+                              f"({_matched} lang-matched) for generate_code: {task[:60]}")
                 except Exception as e:
                     print(f"[CODEGEN RAG] KB pre-query failed: {e}")
 
@@ -1598,24 +2367,242 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                     "You can still write code directly using write_file + run_shell to test it."
                 )
 
+            # Phase 0: durable run row for this generate_code invocation. The
+            # actual role (builder.scaffold / continue / feature) gets set
+            # later, after profile detection — but we reserve the run_id
+            # immediately so the rest of the dispatch can reference it.
+            # Phase 5: role is filled in once we know the profile.
+            _run_id = f"run-{uuid.uuid4().hex[:12]}"
+            _run_row_created = False
+
+            async def _finalize_run(status: str, envelope: dict):
+                """Mark the run terminal with the given status + envelope. Safe to no-op."""
+                if not _run_id:
+                    return
+                try:
+                    await db.update_run(_run_id, status=status, result_envelope=envelope, ended=True)
+                except Exception as _fre:
+                    print(f"[RUN] finalize failed (non-fatal): {_fre}")
+
             await events.emit(conv_id, "tool_start", {
                 "tool": "generate_code", "icon": "wand",
                 "status": f"🤖 OpenHands agent building {language} project...",
+                "run_id": _run_id,
             })
-            print(f"[CODEGEN:OH] model={coder_model} lang={language} num_ctx={num_ctx} task={task[:100]!r}")
+            print(f"[CODEGEN:OH] model={coder_model} lang={language} num_ctx={num_ctx} task={task[:100]!r} run_id={_run_id}")
 
             # Auto-resolve project_id: if model didn't pass one, check for an
             # active uploaded project on this conversation so OpenHands works
             # inside the user's uploaded project directory.
+            #
+            # Phase 5 — combined active-project + builder-profile detection.
+            # The authoritative source for "is there an existing project" is
+            # the runs table — specifically, the most recent succeeded
+            # builder.* run, whose envelope carries the real project_dir on
+            # disk. coding_projects.openhands_project_id is unreliable
+            # (sometimes empty even when the project exists; a fresh row may
+            # be created by plan_project before the build runs).
+            #
+            # Profile mapping:
+            #   scaffold  — no prior builder run for this conv (fresh build)
+            #   continue  — most recent builder ran partial / stuck
+            #               (manifest_missing has unfinished files)
+            #   feature   — most recent builder succeeded
+            #               (user is asking for an additive change)
             _oh_project_id = args.get("project_id", "")
-            if not _oh_project_id and conv_id:
+            _has_active_project = bool(_oh_project_id)
+            _builder_profile = "scaffold"
+            _profile_continue_missing: list[str] = []
+
+            if conv_id:
+                try:
+                    _runs_for_profile = await db.get_runs_by_conversation(conv_id, limit=30)
+                    # Find the most recent builder run with a MEANINGFUL state.
+                    # Skip running/queued (in-flight, has no envelope yet),
+                    # cancelled (operator killed before it produced anything),
+                    # and failed (no usable project state to amend). What we
+                    # want is the most recent builder that actually wrote
+                    # files we can build on.
+                    _MEANINGFUL = {"succeeded", "partial", "stuck"}
+                    _last_builder = next(
+                        (r for r in _runs_for_profile
+                         if r.get("role", "").startswith("builder")
+                         and (r.get("status") or "").lower() in _MEANINGFUL),
+                        None,
+                    )
+                    if _last_builder:
+                        _lb_env = _last_builder.get("result_envelope") or {}
+                        _lb_status = (_last_builder.get("status") or "").lower()
+                        _lb_pdir = (_lb_env.get("project_dir") or "").strip()
+                        _lb_pid = (_lb_env.get("project_id") or "").strip()
+                        if not _oh_project_id:
+                            if _lb_pid:
+                                _oh_project_id = _lb_pid
+                            elif _lb_pdir.startswith("/root/projects/"):
+                                _oh_project_id = _lb_pdir.split("/")[-1]
+                        if _oh_project_id or _lb_pdir:
+                            _has_active_project = True
+                            print(f"[CODEGEN:OH] Auto-attached active project "
+                                  f"{_oh_project_id or _lb_pdir} (from builder run "
+                                  f"{_last_builder.get('id')} status={_lb_status})")
+                        if _lb_status in ("partial", "stuck"):
+                            _builder_profile = "continue"
+                            _profile_continue_missing = (
+                                _lb_env.get("manifest_missing") or []
+                            )
+                        elif _lb_status == "succeeded":
+                            _builder_profile = "feature"
+                except Exception as _bp_e:
+                    print(f"[CODEGEN:OH] Profile detection failed (non-fatal): {_bp_e}")
+
+            # Fallback to coding_projects only if the runs table didn't have
+            # a builder run yet (truly fresh upload + first generate_code).
+            if not _has_active_project and conv_id:
                 try:
                     _active = await db.get_coding_project_by_conv(conv_id)
-                    if _active and _active.get("openhands_project_id"):
-                        _oh_project_id = _active["openhands_project_id"]
-                        print(f"[CODEGEN:OH] Auto-attached active project {_oh_project_id} for conv {conv_id}")
+                    if _active:
+                        _ohp = _active.get("openhands_project_id") or _active.get("id")
+                        if _ohp:
+                            _oh_project_id = _ohp
+                            _has_active_project = True
+                            # Stays "scaffold" — no prior builder run means
+                            # the project either was uploaded but never built,
+                            # or the row is a placeholder. Either way the next
+                            # generate_code is creating, not amending.
+                            print(f"[CODEGEN:OH] Active project {_oh_project_id} via coding_projects fallback")
                 except Exception as _ap_e:
-                    print(f"[CODEGEN:OH] Active project lookup failed (non-fatal): {_ap_e}")
+                    print(f"[CODEGEN:OH] coding_projects lookup failed (non-fatal): {_ap_e}")
+
+            print(f"[CODEGEN:OH] Profile: {_builder_profile} "
+                  f"(active_project={_has_active_project}, project_id={_oh_project_id or '?'}"
+                  + (f", missing={len(_profile_continue_missing)}" if _builder_profile == 'continue' else '')
+                  + ")")
+
+            # Phase 5.3 — feature-profile context prep. For an additive change
+            # to an existing project, the Builder should not re-discover the
+            # file tree by walking it manually. Instead, package the tree +
+            # 1-2 directly relevant files into the context now so the Builder
+            # can read them out of its prompt and edit minimally.
+            if _builder_profile == "feature" and _oh_project_id:
+                try:
+                    from agents import project_qa as _pqa
+                    _proj_dir = f"/root/projects/{_oh_project_id}"
+                    _existing_files = await _pqa._list_files(http, _proj_dir)
+                    if _existing_files:
+                        _ctx_lines = [
+                            "\n--- EXISTING PROJECT (do not rewrite working files) ---",
+                            f"Project root: {_proj_dir}",
+                            "File tree (truncated to 60 paths):",
+                        ]
+                        for _f in _existing_files[:60]:
+                            _ctx_lines.append(f"  {_f}")
+                        if len(_existing_files) > 60:
+                            _ctx_lines.append(f"  ... ({len(_existing_files) - 60} more files)")
+
+                        # If the user's task mentions specific filenames,
+                        # inline a short head of those files. Reuses the QA
+                        # filename-targeting helper so the heuristic is shared.
+                        _targets = _pqa._extract_filename_targets(task)
+                        _matched = await _pqa._resolve_filename_targets(_existing_files, _targets) if _targets else []
+                        if _matched:
+                            _ctx_lines.append("")
+                            _ctx_lines.append(f"Files mentioned in the task ({len(_matched)}):")
+                            for _f in _matched[:3]:
+                                _head = await _pqa._read_file_full(http, _proj_dir, _f, max_bytes=8000)
+                                if _head:
+                                    _ctx_lines.append(f"\n### {_f}\n```\n{_head[:6000]}\n```")
+                        _ctx_lines.append(
+                            "\nRead these files BEFORE editing. Make the smallest "
+                            "edit that satisfies the task. Do NOT rewrite the whole "
+                            "project."
+                        )
+                        _feature_ctx = "\n".join(_ctx_lines)
+                        context = (context + _feature_ctx) if context else _feature_ctx.strip()
+                        print(f"[CODEGEN:OH] Feature context: {len(_existing_files)} files in tree, "
+                              f"{len(_matched)} inlined")
+                except Exception as _fce:
+                    print(f"[CODEGEN:OH] Feature context prep failed (non-fatal): {_fce}")
+
+            # Now that we know the profile, create the durable run row with
+            # the matching role so the frontend RunCard renders the right
+            # label (builder.scaffold / builder.continue / builder.feature).
+            try:
+                await db.create_run(_run_id, conv_id,
+                                    role=f"builder.{_builder_profile}",
+                                    project_id=_oh_project_id or "",
+                                    status="running")
+                _run_row_created = True
+            except Exception as _re:
+                print(f"[RUN] create_run failed (non-fatal): {_re}")
+                _run_id = ""
+
+            # Phase 3 — inject the most recent Architect manifest into the
+            # context so OpenHands follows the structured plan (file list,
+            # build/test commands, success criteria) instead of re-deriving
+            # them from prose. Best effort: only fires if v2 plan_project
+            # was called this conv and produced a successful architect run.
+            if conv_id:
+                try:
+                    _runs_for_arch = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _arch_run = next(
+                        (r for r in _runs_for_arch
+                         if r.get("role") == "architect" and r.get("status") == "succeeded"),
+                        None,
+                    )
+                    if _arch_run:
+                        _arch_env = _arch_run.get("result_envelope") or {}
+                        _manifest = _arch_env.get("manifest") or []
+                        _success = _arch_env.get("success_criteria") or []
+                        _build_cmd = _arch_env.get("build_cmd", "")
+                        _test_cmd = _arch_env.get("test_cmd", "")
+                        if _manifest:
+                            _arch_section = ["\n\n--- Architect Manifest (FOLLOW THIS PLAN) ---"]
+                            _arch_section.append(
+                                f"Project: {_arch_env.get('project_id','?')} "
+                                f"({_arch_env.get('language','?')}, "
+                                f"build_system={_arch_env.get('build_system','?')})"
+                            )
+                            if _build_cmd:
+                                _arch_section.append(f"Build command: {_build_cmd}")
+                            if _test_cmd:
+                                _arch_section.append(f"Test command: {_test_cmd}")
+                            _arch_section.append("")
+                            _arch_section.append(f"Files to create ({len(_manifest)}):")
+                            for _m in _manifest[:30]:
+                                _arch_section.append(
+                                    f"  - {_m.get('path','?')} — {_m.get('purpose','')}"
+                                )
+                            if _success:
+                                _arch_section.append("")
+                                _arch_section.append("Success criteria (project is done when ALL pass):")
+                                for _c in _success[:8]:
+                                    _arch_section.append(f"  - {_c}")
+                            _deps = _arch_env.get("external_deps") or []
+                            if _deps:
+                                _arch_section.append("")
+                                _arch_section.append("External dependencies:")
+                                for _d in _deps[:10]:
+                                    _arch_section.append(
+                                        f"  - {_d.get('name','?')} {_d.get('version','')}"
+                                    )
+                            _risks = _arch_env.get("risk_notes") or []
+                            if _risks:
+                                _arch_section.append("")
+                                _arch_section.append("Risk notes:")
+                                for _r in _risks[:5]:
+                                    _arch_section.append(f"  - {_r}")
+                            _arch_section.append(
+                                "\nFollow the manifest exactly — create every listed file, "
+                                "use the listed build/test commands, satisfy the success "
+                                "criteria. The Reviewer will verify against this plan."
+                            )
+                            _arch_text = "\n".join(_arch_section)
+                            context = (context + _arch_text) if context else _arch_text.strip()
+                            print(f"[CODEGEN] Injected architect manifest from "
+                                  f"{_arch_run.get('id')}: {len(_manifest)} files, "
+                                  f"{len(_success)} criteria")
+                except Exception as _ame:
+                    print(f"[CODEGEN] Architect manifest injection failed (non-fatal): {_ame}")
 
             oh_payload = {
                 "task": task, "model": coder_model,
@@ -1625,7 +2612,28 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 "language": language,
                 "context": context,
                 "project_id": _oh_project_id,
+                # Pass our run_id through so the worker registers the run under
+                # this key. POST /cancel/{run_id} can then abort it cleanly.
+                "run_id": _run_id or "",
+                # Phase 5 — profile drives the worker's task-prompt template.
+                # `manifest_missing` is only meaningful for the continue profile;
+                # other profiles ignore it.
+                "profile": _builder_profile,
+                "manifest_missing": _profile_continue_missing,
             }
+
+            async def _signal_oh_cancel(reason: str):
+                """Best-effort cancel signal to the OpenHands worker."""
+                if not _run_id:
+                    return
+                try:
+                    await http.post(
+                        f"{openhands_url}/cancel/{_run_id}",
+                        timeout=5.0,
+                    )
+                    print(f"[CODEGEN:OH] Cancel signal sent to worker for {_run_id} ({reason})", flush=True)
+                except Exception as ce:
+                    print(f"[CODEGEN:OH] Cancel signal failed for {_run_id}: {ce}", flush=True)
 
             # Action → emoji mapping for progress pills
             _ACTION_ICONS = {
@@ -1642,7 +2650,10 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
             }
             _agent_steps = []  # Accumulate steps for expandable detail
 
-            # Try SSE streaming first, fall back to blocking /run
+            # Try SSE streaming first. Fall back to blocking /run ONLY if the
+            # connect failed before the first event (transport issue) — never
+            # if the stream dropped mid-run, which would resurrect a fresh
+            # OpenHands session the user can't see or stop.
             result = None
             _sse_first_event = False
             try:
@@ -1678,12 +2689,48 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                                     "tool": "generate_code", "icon": "wand",
                                     "status": f"Step {step_num}/{max_rounds}: {icon} {label} — {detail}",
                                     "detail": json.dumps({"steps": _agent_steps}),
+                                    "run_id": _run_id,
                                 })
-                            elif evt.get("type") in ("done", "error"):
+                                # Append to durable run log for reconnect-time rebuild.
+                                if _run_id:
+                                    try:
+                                        await db.append_run_event(_run_id, {
+                                            "type": "step", "step": step_num,
+                                            "action": action, "detail": detail,
+                                        })
+                                    except Exception:
+                                        pass
+                            elif evt.get("type") in ("done", "error", "cancelled"):
                                 result = evt
                                 break
+            except asyncio.CancelledError:
+                # User pressed stop (or browser closed). Tell the worker to
+                # abort, then re-raise so the chat stream unwinds cleanly.
+                # Critically: do NOT fall back to /run here.
+                await _signal_oh_cancel("chat stream cancelled")
+                await _finalize_run("cancelled", {"error": "Run cancelled by user"})
+                raise
             except Exception as sse_err:
-                print(f"[CODEGEN:OH] SSE stream failed ({type(sse_err).__name__}: {sse_err}), falling back to /run", flush=True)
+                if _sse_first_event:
+                    # Stream dropped after work began. The OpenHands run on the
+                    # other end is still alive; the right move is to tell it to
+                    # stop, not to silently start a second concurrent run.
+                    print(f"[CODEGEN:OH] SSE stream failed mid-run "
+                          f"({type(sse_err).__name__}: {sse_err}); cancelling worker side, NOT falling back",
+                          flush=True)
+                    await _signal_oh_cancel("SSE dropped mid-run")
+                    await events.emit(conv_id, "tool_end", {
+                        "tool": "generate_code", "icon": "code",
+                        "status": f"OpenHands stream interrupted: {sse_err}",
+                        "run_id": _run_id,
+                    })
+                    await _finalize_run("failed", {"error": f"SSE stream interrupted: {sse_err}"})
+                    return (f"ERROR: OpenHands stream interrupted mid-run ({type(sse_err).__name__}). "
+                            f"The worker run was cancelled. Try generate_code again, or use write_file + run_shell.")
+                # No first event yet → genuine connect/transport failure → fall back.
+                print(f"[CODEGEN:OH] SSE stream failed before first event "
+                      f"({type(sse_err).__name__}: {sse_err}), falling back to /run",
+                      flush=True)
                 await events.emit(conv_id, "tool_progress", {
                     "tool": "generate_code", "icon": "wand",
                     "status": "⚡ Running agent (non-streaming)...",
@@ -1696,21 +2743,34 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                         await events.emit(conv_id, "tool_end", {
                             "tool": "generate_code", "icon": "code",
                             "status": f"OpenHands HTTP {oh_resp.status_code}",
+                            "run_id": _run_id,
+                        })
+                        await _finalize_run("failed", {
+                            "error": f"OpenHands returned HTTP {oh_resp.status_code}",
+                            "stderr_tail": oh_resp.text[:500],
                         })
                         return f"ERROR: OpenHands returned HTTP {oh_resp.status_code}: {oh_resp.text[:200]}"
                     result = oh_resp.json()
+                except asyncio.CancelledError:
+                    await _signal_oh_cancel("chat stream cancelled during /run fallback")
+                    await _finalize_run("cancelled", {"error": "Run cancelled by user"})
+                    raise
                 except Exception as oh_e:
                     await events.emit(conv_id, "tool_end", {
                         "tool": "generate_code", "icon": "code",
                         "status": f"OpenHands request failed: {oh_e}",
+                        "run_id": _run_id,
                     })
+                    await _finalize_run("failed", {"error": f"OpenHands request failed: {oh_e}"})
                     return f"ERROR: OpenHands request failed: {oh_e}. Try write_file + run_shell instead."
 
             if not result:
                 await events.emit(conv_id, "tool_end", {
                     "tool": "generate_code", "icon": "code",
                     "status": "OpenHands returned no result",
+                    "run_id": _run_id,
                 })
+                await _finalize_run("failed", {"error": "OpenHands returned no result"})
                 return "ERROR: OpenHands returned no result. Try write_file + run_shell instead."
             if result.get("status") == "ok":
                 files = result.get("files_created", [])
@@ -1772,33 +2832,12 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 })
                 print(f"[CODEGEN:OH] Done: {len(files)} files in {duration}s, project_dir={project_dir}, project_id={_project_id}")
 
-                # Auto-package project for download
+                # Auto-packaging removed — the chat agent typically keeps working past
+                # generate_code (filling in missing files, fixing critic-flagged bugs, etc.),
+                # so a tarball produced here was almost always stale by the time the user
+                # downloaded it. The agent must now call download_project / download_file
+                # explicitly once the project is verified complete.
                 download_result = ""
-                if files:
-                    try:
-                        if len(files) == 1:
-                            # Single file — use download_file
-                            await events.emit(conv_id, "tool_start", {
-                                "tool": "download_file", "icon": "code",
-                                "status": f"Preparing: {files[0]}",
-                            })
-                            download_result = await exec_tool(
-                                http, events, "download_file",
-                                {"path": files[0]}, conv_id, {}, conv_model=conv_model
-                            )
-                        else:
-                            # Multi-file — package as tar.gz
-                            await events.emit(conv_id, "tool_start", {
-                                "tool": "download_project", "icon": "package",
-                                "status": "Packaging project for download...",
-                            })
-                            download_result = await exec_tool(
-                                http, events, "download_project",
-                                {"directory": project_dir}, conv_id, {}, conv_model=conv_model
-                            )
-                        print(f"[CODEGEN:OH] Auto-download: {download_result[:100]}")
-                    except Exception as dl_e:
-                        print(f"[CODEGEN:OH] Auto-download failed: {dl_e}")
 
                 # Format progress steps from OpenHands
                 steps = result.get("steps", [])
@@ -1859,30 +2898,161 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                         if review_parts:
                             code_review = "\n\n".join(review_parts)
 
+                # ── Plan-vs-actual undershoot check ──
+                # If the task description listed expected files and the agent created
+                # significantly fewer, flag the result as INCOMPLETE so the chat agent
+                # fixes it before delivering. Catches coder models that call `finish` early.
+                undershoot_warning = ""
+                _expected_files = []
+                try:
+                    # Parse task body for filenames in "File structure:" / "- foo.java" / "├── foo.java" patterns
+                    _task_text = task or ""
+                    # Match basenames with common code extensions in list-like positions.
+                    _ext_re = r"\.(?:java|py|js|ts|tsx|jsx|go|rs|c|cpp|h|hpp|rb|php|cs|kt|swift|html|css|sql|sh|toml|yaml|yml|json|md|xml)"
+                    _name_re = re.compile(
+                        r"(?:^|[\s├└│─\-\*•])([A-Za-z][\w\-]*" + _ext_re + r")\b",
+                        re.MULTILINE,
+                    )
+                    for _m in _name_re.finditer(_task_text):
+                        _fn = _m.group(1)
+                        if _fn not in _expected_files:
+                            _expected_files.append(_fn)
+                except Exception as _ef_e:
+                    print(f"[CODEGEN:OH] Expected-file parse failed (non-fatal): {_ef_e}")
+
+                if _expected_files:
+                    _actual_basenames = {(f.rsplit("/", 1)[-1] if "/" in f else f) for f in (files or [])}
+                    _missing = [n for n in _expected_files if n not in _actual_basenames]
+                    _present = len(_expected_files) - len(_missing)
+                    print(f"[CODEGEN:OH] Manifest check: {_present}/{len(_expected_files)} expected files present, missing={_missing[:8]}")
+                    # Trigger if any of: <50% present, or 3+ missing files
+                    if _expected_files and (_present / len(_expected_files) < 0.5 or len(_missing) >= 3):
+                        undershoot_warning = (
+                            f"⚠ INCOMPLETE: agent created {_present}/{len(_expected_files)} expected files. "
+                            f"Missing: {', '.join(_missing[:12])}{'…' if len(_missing) > 12 else ''}. "
+                            f"DO NOT deliver the project to the user yet. Either: "
+                            f"(a) call generate_code again with project_id='{_project_id}' and a task that "
+                            f"explicitly lists ONLY the missing files to create, or "
+                            f"(b) write each missing file directly with write_file. "
+                            f"After all expected files exist, re-verify with run_shell (e.g. compile/parse) "
+                            f"before download_project."
+                        )
+                        await events.emit(conv_id, "tool_progress", {
+                            "tool": "generate_code", "icon": "wand",
+                            "status": f"⚠ Agent undershot: {_present}/{len(_expected_files)} files",
+                        })
+
+                # ── Independent critic pass: catch runtime bugs that pass syntax/compile checks ──
+                # Uses a separate model from the coder so it can't rationalize its own mistakes.
+                critique = ""
+                if code_review and config.CRITIC_ENABLED:
+                    critic_model = config.CRITIC_MODEL or config.PLANNING_MODEL or config.DEFAULT_MODEL
+                    await events.emit(conv_id, "tool_progress", {
+                        "tool": "generate_code", "icon": "wand",
+                        "status": f"🔍 Reviewing code with {critic_model}...",
+                    })
+                    critic_prompt = f"""You are a senior code reviewer. An autonomous coding agent was asked to build:
+
+"{task}"
+
+Language: {language}
+
+The agent says it's done. Your job: catch RUNTIME bugs the agent missed — issues that pass syntax/compile checks but break behavior. Read carefully. Ignore stylistic concerns; focus on correctness.
+
+## Files
+{code_review}
+
+## What to look for
+- Setter/getter mismatches (e.g. `setStroke(color)` then `fillRect(...)` — fill color is never set)
+- Constants defined but ignored downstream (e.g. SPEED=5 but the move function hardcodes 500)
+- Math/units that produce nonsense values at runtime (e.g. 5 px/sec at 60fps barely moves)
+- Missing background fills, focus calls, init, lifecycle hooks, event listener registration
+- Off-by-one, wrong sign, wrong variable used in a formula
+- API misuse (wrong method, wrong order, missing required setup call)
+- Missing wiring between components (handler exists but never registered)
+- User requirements that don't appear in the code
+
+## Output format
+If you find issues, list them as numbered items:
+1. **path/to/file.ext** — what's wrong (one sentence) — why it breaks at runtime
+
+List every concrete bug you can find, max 10. Be specific: name the variable, function, or method.
+If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
+                    try:
+                        cr = await http.post(
+                            f"{config.OLLAMA_URL}/api/chat",
+                            json={
+                                "model": critic_model,
+                                "messages": [{"role": "user", "content": critic_prompt}],
+                                "stream": False,
+                                "options": {"temperature": 0.2, "num_ctx": config.DEFAULT_NUM_CTX},
+                            },
+                            timeout=600,
+                        )
+                        if cr.status_code == 200:
+                            critique = cr.json().get("message", {}).get("content", "").strip()
+                            # Strip <think> blocks if the critic model emits them
+                            critique = re.sub(r"<think>[\s\S]*?</think>", "", critique).strip()
+                            issues_found = bool(critique) and "NO RUNTIME ISSUES FOUND" not in critique.upper()
+                            await events.emit(conv_id, "tool_progress", {
+                                "tool": "generate_code", "icon": "wand",
+                                "status": f"🔍 Review complete — {'issues found' if issues_found else 'no issues'}",
+                                "detail": json.dumps({"method": "code_review", "args": {"reviewer": critic_model}, "result": critique[:4000]}),
+                            })
+                        else:
+                            print(f"[CODEGEN:CRITIC] Critic call failed HTTP {cr.status_code}: {cr.text[:200]}")
+                            await events.emit(conv_id, "tool_progress", {
+                                "tool": "generate_code", "icon": "wand",
+                                "status": f"⚠ Critic skipped (HTTP {cr.status_code})",
+                            })
+                    except Exception as critic_e:
+                        print(f"[CODEGEN:CRITIC] Critic call failed ({type(critic_e).__name__}): {critic_e}")
+                        await events.emit(conv_id, "tool_progress", {
+                            "tool": "generate_code", "icon": "wand",
+                            "status": f"⚠ Critic skipped ({type(critic_e).__name__})",
+                        })
+
                 if files:
+                    _status_word = "INCOMPLETE" if undershoot_warning else "COMPLETE"
                     resp = (
-                        f"PROJECT COMPLETE. OpenHands agent built the project "
+                        f"PROJECT {_status_word}. OpenHands agent ran "
                         f"(model: {coder_model}, {duration}s, {len(steps)} steps, project_id: {_project_id}).\n\n"
                         f"**Files created ({len(files)}):**\n{file_list}\n"
                     )
+                    if undershoot_warning:
+                        resp += f"\n{undershoot_warning}\n"
                     if steps_summary:
                         resp += f"\n**Agent activity (last steps):**\n{steps_summary}\n"
-                    if download_result and "Download" in download_result:
-                        resp += f"\n{download_result}\n"
+                    # download_result is intentionally always empty now — see comment near line 1780.
+                    # The chat agent is expected to call download_project explicitly after verification.
                     if summary:
                         resp += f"\n**Agent summary:** {summary[:300]}\n"
                     if code_review:
                         resp += f"\n**Key file contents for review:**\n{code_review}\n"
+                    if critique:
+                        _has_issues = "NO RUNTIME ISSUES FOUND" not in critique.upper()
+                        resp += f"\n**Independent code review (reviewer model):**\n{critique}\n"
+                        if _has_issues:
+                            resp += (
+                                f"\n⚠ The reviewer flagged runtime bugs that pass `mvn compile` / "
+                                f"`tsc --noEmit` but break behavior. You MUST fix each one before "
+                                f"delivering. For each issue: open the file with read_file, edit "
+                                f"with write_file, and re-verify. Do NOT call download_file or "
+                                f"download_project until the flagged bugs are addressed.\n"
+                            )
                     resp += (
                         f"\nREVIEW the file contents above. Evaluate whether the code actually "
                         f"fulfills the user's request — not just scaffolding/boilerplate. "
                         f"If the output is incomplete or doesn't match what was asked, call "
                         f"generate_code again with project_id='{_project_id}' and a MORE DETAILED "
-                        f"task description explaining exactly what's wrong and what to fix.\n"
-                        f"If the output looks good, respond to the user with:\n"
-                        f"1. What was built and its features\n"
-                        f"2. The download link\n"
-                        f"3. How to run it locally\n"
+                        f"task description explaining exactly what's wrong and what to fix.\n\n"
+                        f"## DELIVERY (REQUIRED — no auto-download)\n"
+                        f"NO tarball has been packaged yet. When (and only when) the project is verified complete:\n"
+                        f"1. Make sure all expected files exist and any reviewer-flagged issues are fixed.\n"
+                        f"2. Verify it builds/runs (e.g. `mvn compile`, `python -c 'import ...'`, etc.) via run_shell.\n"
+                        f"3. Call download_project(directory='{project_dir}') to package the FINAL sandbox state.\n"
+                        f"4. THEN respond to the user with: what was built, the download link returned by step 3, and how to run it locally.\n"
+                        f"Calling download_project before the project is complete will deliver a broken project.\n"
                     )
                     # Save project metadata to DB for resume_project
                     try:
@@ -1921,6 +3091,24 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                                 ))
                         except Exception as _rag_e:
                             print(f"[CODEGEN] Code RAG indexing failed (non-fatal): {_rag_e}")
+                    # Finalize the durable run with a structured envelope summarising
+                    # what got built. Mark partial when the agent undershot the manifest;
+                    # the build itself can still be considered a success otherwise.
+                    _final_status = "partial" if undershoot_warning else "succeeded"
+                    await _finalize_run(_final_status, {
+                        "files_written": files,
+                        "manifest_satisfied": [n for n in _expected_files
+                                                if n in {(f.rsplit("/", 1)[-1] if "/" in f else f)
+                                                         for f in (files or [])}],
+                        "manifest_missing": _missing if _expected_files else [],
+                        "build_summary": summary,
+                        "project_id": _project_id,
+                        "project_dir": project_dir,
+                        "duration_s": duration,
+                        "critique": critique,
+                        "model": coder_model,
+                        "language": language,
+                    })
                     return resp
                 else:
                     # Agent ran but produced no files — treat as failure
@@ -1928,8 +3116,16 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                     await events.emit(conv_id, "tool_end", {
                         "tool": "generate_code", "icon": "wand",
                         "status": f"🤖 OpenHands: 0 files (model may not support tools)",
+                        "run_id": _run_id,
                     })
                     error_detail = summary[:200] if summary else "Agent completed but produced no files"
+                    await _finalize_run("failed", {
+                        "error": "Agent finished but created 0 files",
+                        "model": coder_model,
+                        "language": language,
+                        "duration_s": duration,
+                        "summary": error_detail,
+                    })
                     return (
                         f"ERROR: OpenHands agent finished but created 0 files "
                         f"(model: {coder_model}, {duration}s). "
@@ -1956,6 +3152,7 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                         "status": f"🔄 Retrying with simplified approach...",
                     })
                     _agent_steps = []
+                    _retry_first_event = False
                     try:
                         import httpx as _httpx
                         async with _httpx.AsyncClient(timeout=_httpx.Timeout(connect=10, read=600, write=10, pool=10)) as retry_client:
@@ -1968,6 +3165,7 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                                             evt = json.loads(line[6:])
                                         except (json.JSONDecodeError, ValueError):
                                             continue
+                                        _retry_first_event = True
                                         if evt.get("type") == "step":
                                             step_num = evt.get("step", 0)
                                             action = evt.get("action", "")
@@ -1979,21 +3177,37 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                                                 "tool": "generate_code", "icon": "wand",
                                                 "status": f"Retry step {step_num}: {icon} {label} — {detail}",
                                             })
-                                        elif evt.get("type") in ("done", "error"):
+                                        elif evt.get("type") in ("done", "error", "cancelled"):
                                             result = evt
                                             break
                                 else:
                                     result = None
+                    except asyncio.CancelledError:
+                        await _signal_oh_cancel("chat stream cancelled during retry")
+                        await _finalize_run("cancelled", {"error": "Run cancelled by user"})
+                        raise
                     except Exception as retry_err:
-                        print(f"[CODEGEN:OH] SSE retry failed, trying blocking /run: {retry_err}")
-                        try:
-                            oh_resp = await http.post(f"{openhands_url}/run", json=oh_payload, timeout=600)
-                            if oh_resp.status_code == 200:
-                                result = oh_resp.json()
-                            else:
-                                result = None
-                        except Exception:
+                        if _retry_first_event:
+                            # Same rule: don't resurrect with /run after a mid-stream drop.
+                            print(f"[CODEGEN:OH] Retry SSE dropped mid-run "
+                                  f"({type(retry_err).__name__}: {retry_err}); cancelling worker side")
+                            await _signal_oh_cancel("retry SSE dropped mid-run")
                             result = None
+                        else:
+                            print(f"[CODEGEN:OH] Retry SSE failed before first event "
+                                  f"({type(retry_err).__name__}: {retry_err}), trying blocking /run")
+                            try:
+                                oh_resp = await http.post(f"{openhands_url}/run", json=oh_payload, timeout=600)
+                                if oh_resp.status_code == 200:
+                                    result = oh_resp.json()
+                                else:
+                                    result = None
+                            except asyncio.CancelledError:
+                                await _signal_oh_cancel("chat stream cancelled during retry /run")
+                                await _finalize_run("cancelled", {"error": "Run cancelled by user"})
+                                raise
+                            except Exception:
+                                result = None
 
                     # If retry produced a successful result, process it above
                     if result and result.get("status") == "ok":
@@ -2006,6 +3220,16 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                             await events.emit(conv_id, "tool_end", {
                                 "tool": "generate_code", "icon": "wand",
                                 "status": f"🤖 OpenHands (retry): {len(files)} file(s) built ({duration}s)",
+                                "run_id": _run_id,
+                            })
+                            await _finalize_run("succeeded", {
+                                "files_written": files,
+                                "build_summary": "Retry succeeded after initial failure",
+                                "project_id": _project_id,
+                                "duration_s": duration,
+                                "model": coder_model,
+                                "language": language,
+                                "retried": True,
                             })
                             return (
                                 f"PROJECT COMPLETE (retry succeeded). OpenHands agent built the project "
@@ -2018,6 +3242,7 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 await events.emit(conv_id, "tool_end", {
                     "tool": "generate_code", "icon": "wand",
                     "status": f"🤖 OpenHands agent {status}",
+                    "run_id": _run_id,
                 })
                 print(f"[CODEGEN:OH] Agent {status}: {error}")
                 err_resp = f"ERROR: OpenHands agent {status}: {error}."
@@ -2028,6 +3253,14 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                     "\n\nThe coding agent failed. You MUST now write the code yourself directly "
                     "using write_file and run_shell tools. Do NOT call generate_code again."
                 )
+                await _finalize_run("failed", {
+                    "error": error,
+                    "agent_status": status,
+                    "model": coder_model,
+                    "language": language,
+                    "last_steps": [{"action": s.get("action", ""), "detail": s.get("detail", "")[:200]}
+                                    for s in (steps[-5:] if steps else [])],
+                })
                 return err_resp
 
         elif name in custom_tool_map:

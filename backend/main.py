@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException, Query, Body
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -30,8 +30,9 @@ import database as db
 from tools import CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls, strip_tool_calls
 from council import stream_council_chat
 from events import EventBus, parse_tool_params
+import quick_search as qs_module
 from agents.chat import chat_stream_generate, TOOL_TEMPLATES, detect_template_family
-from agents.personas import seed_coder_bot as _seed_coder_bot, seed_conspiracy_bot as _seed_conspiracy_bot, seed_based_bot as _seed_based_bot, seed_all_defaults as _seed_all_defaults
+from agents.personas import seed_coder_bot as _seed_coder_bot, seed_coder_bot_v2 as _seed_coder_bot_v2, seed_conspiracy_bot as _seed_conspiracy_bot, seed_based_bot as _seed_based_bot, seed_all_defaults as _seed_all_defaults
 import hf as hf_module
 from hf import parse_ollama_progress
 import rag
@@ -191,6 +192,12 @@ async def lifespan(app: FastAPI):
     if "openhands_max_rounds" in _settings:
         config.OPENHANDS_MAX_ROUNDS = int(_settings["openhands_max_rounds"])
         print(f"[Config] Loaded OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
+    if "default_num_ctx" in _settings:
+        # Single knob the user controls. Drives the chat-side fallback in chat.py and
+        # every internal LLM call (plan_project, critic) — so increasing the chat ctx
+        # in Settings doesn't get silently capped by a hardcoded 16K downstream.
+        config.DEFAULT_NUM_CTX = int(_settings["default_num_ctx"])
+        print(f"[Config] Loaded default num_ctx: {config.DEFAULT_NUM_CTX}")
     # Run cleanup once on startup to clear any stale files
     _run_cleanup_sync()
     # Start background cleanup loop
@@ -244,6 +251,15 @@ class ChatRequest(BaseModel):
     top_k: Optional[int] = None
     repeat_penalty: Optional[float] = None
     think_budget: Optional[int] = None  # None=auto, 0=disable thinking, 1=enable thinking
+    effort_rounds: Optional[int] = None  # 0=off, 1-3=extra self-review passes after the initial answer
+    # Clean user-visible content for the latest user message (without the appended
+    # `[Attached N image: ...]` hint that messages[].content carries for the model).
+    # Used by chat.py's defensive user-message save so the persisted row matches what
+    # the user typed, not the bloated model-facing string.
+    display_content: Optional[str] = None
+    # Metadata for the latest user message (e.g. {"images":[{name,dataUrl,mime}], "pdfs":[...]})
+    # so image previews survive page reload.
+    user_metadata: Optional[dict] = None
 
 class ExecuteRequest(BaseModel):
     conversation_id: Optional[str] = None
@@ -669,7 +685,6 @@ async def list_builtin_tools():
         {"id": "codeagent", "name": "⚡ CodeAgent", "description": "Code execution, shell, file management, downloads", "icon": "cpu", "builtin": True},
         {"id": "deep_research", "name": "🔬 Deep Research", "description": "Multi-source parallel research with AI synthesis", "icon": "search", "builtin": True},
         {"id": "conspiracy_research", "name": "🕵️ Conspiracy Research", "description": "Uncensored deep-dive into theories, cover-ups, and hidden agendas", "icon": "search", "builtin": True},
-        {"id": "generate_code", "name": "🧬 Code Generator", "description": "Delegate code writing to a code-specialized model sub-agent", "icon": "code", "builtin": True},
     ]
 
 
@@ -680,6 +695,10 @@ async def seed_all_defaults():
 @app.post("/api/seed/coder-bot")
 async def seed_coder_bot():
     return await _seed_coder_bot()
+
+@app.post("/api/seed/coder-bot-v2")
+async def seed_coder_bot_v2():
+    return await _seed_coder_bot_v2()
 
 @app.post("/api/seed/conspiracy-bot")
 async def seed_conspiracy_bot():
@@ -838,49 +857,45 @@ async def upload_coder_project(
     with tarfile.open(fileobj=tar_buf, mode="w:gz") as out_tf:
         out_tf.add(staging_root, arcname=".")
     tar_bytes = tar_buf.getvalue()
-    tar_b64 = base64.b64encode(tar_bytes).decode()
 
-    # Upload to codebox via chunked /command calls (command line can't hold
-    # tens of MB at once). Each chunk appends base64 to a temp file; final
-    # command decodes + extracts into /root/projects/{project_id}.
+    # Upload to codebox via the dedicated /upload-chunk endpoint. Sends raw
+    # tarball bytes in chunks via multipart — bypasses both pitfalls of
+    # routing-via-/command:
+    #   1. No shell involved → no MAX_ARG_STRLEN limit (was capped at 100KB).
+    #   2. No deny-list collisions (random bytes can contain "mkfs" without
+    #      being mistaken for a system-format command).
+    # 1MB chunks are an order of magnitude faster (10× fewer round-trips than
+    # the old 100KB-of-base64 approach).
     remote_dir = f"/root/projects/{project_id}"
-    remote_tmp = f"/tmp/{project_id}.tar.gz.b64"
-    CHUNK = 400_000  # ~400KB of base64 per HTTP call
-    total_chunks = (len(tar_b64) + CHUNK - 1) // CHUNK
+    remote_tmp = f"/tmp/{project_id}.tar.gz"
+    CHUNK = 1_000_000  # 1MB of raw bytes per multipart POST
+    total_chunks = max(1, (len(tar_bytes) + CHUNK - 1) // CHUNK)
 
     try:
-        async with httpx.AsyncClient() as http_client:
-            # Reset temp file + ensure project dir
-            init_cmd = (
-                f"rm -f {shlex.quote(remote_tmp)} && "
-                f"mkdir -p {shlex.quote(remote_dir)} && "
-                f"touch {shlex.quote(remote_tmp)}"
-            )
-            r = await http_client.post(
-                f"{config.CODEBOX_URL}/command",
-                json={"command": init_cmd, "timeout": 15},
-                timeout=25,
-            )
-            if r.json().get("exit_code", 1) != 0:
-                raise HTTPException(500, "Failed to prep sandbox directory")
-
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as http_client:
             for i in range(total_chunks):
-                chunk = tar_b64[i * CHUNK : (i + 1) * CHUNK]
-                append_cmd = (
-                    f"printf '%s' {shlex.quote(chunk)} >> {shlex.quote(remote_tmp)}"
-                )
+                chunk = tar_bytes[i * CHUNK : (i + 1) * CHUNK]
+                files = {"file": (f"chunk-{i}", chunk, "application/octet-stream")}
+                # truncate=true on first chunk wipes any partial leftover from
+                # a previous failed upload; subsequent chunks append.
+                form = {"path": remote_tmp, "truncate": "true" if i == 0 else "false"}
                 r = await http_client.post(
-                    f"{config.CODEBOX_URL}/command",
-                    json={"command": append_cmd, "timeout": 30},
-                    timeout=45,
+                    f"{config.CODEBOX_URL}/upload-chunk",
+                    files=files, data=form,
+                    timeout=60,
                 )
-                if r.json().get("exit_code", 1) != 0:
-                    raise HTTPException(500, f"Chunk {i+1}/{total_chunks} upload failed")
+                if r.status_code != 200:
+                    raise HTTPException(
+                        500,
+                        f"Chunk {i+1}/{total_chunks} upload failed: "
+                        f"HTTP {r.status_code} — {r.text[:200]}",
+                    )
 
-            # Decode + extract + cleanup
+            # Make sure the project directory exists, then extract directly
+            # from the file we just wrote. No base64 in this command.
             extract_cmd = (
-                f"base64 -d {shlex.quote(remote_tmp)} | "
-                f"tar -xzf - -C {shlex.quote(remote_dir)} && "
+                f"mkdir -p {shlex.quote(remote_dir)} && "
+                f"tar -xzf {shlex.quote(remote_tmp)} -C {shlex.quote(remote_dir)} && "
                 f"rm -f {shlex.quote(remote_tmp)}"
             )
             r = await http_client.post(
@@ -917,6 +932,43 @@ async def upload_coder_project(
     except Exception as e:
         print(f"[CoderUpload] DB save failed (non-fatal): {e}")
 
+    # Phase 4.2 — fire the Project Indexer in the background. It walks the
+    # uploaded tree, detects build system, and seeds ChromaDB code_memory so
+    # that subsequent ask_project / generate_code calls have semantic
+    # retrieval over the uploaded code. Non-blocking: even if it fails, the
+    # upload itself succeeds.
+    indexer_run_id = ""
+    try:
+        from agents import project_indexer
+        indexer_envelope = await project_indexer.run_project_indexer(
+            http, events, conv_id,
+            project_id=project_id,
+            project_dir=remote_dir,
+            project_name=project_name,
+        )
+        indexer_run_id = indexer_envelope.get("run_id", "") or ""
+        # The indexer may also have detected a more accurate language than the
+        # upload-time mime/extension heuristic. If so, update the
+        # coding_projects row so downstream tools see the corrected value.
+        detected_lang = (indexer_envelope.get("language") or "").strip()
+        if detected_lang and detected_lang != language:
+            try:
+                await db.upsert_coding_project(
+                    project_id=project_id,
+                    name=project_name,
+                    conversation_id=conv_id,
+                    description=description,
+                    language=detected_lang,
+                    file_manifest=manifest,
+                    openhands_project_id=project_id,
+                )
+                language = detected_lang
+                print(f"[CoderUpload] Indexer corrected language → {detected_lang}")
+            except Exception as e:
+                print(f"[CoderUpload] language correction failed (non-fatal): {e}")
+    except Exception as e:
+        print(f"[CoderUpload] Indexer failed (non-fatal): {e}")
+
     # Keep the local staging copy as a backup we can re-push if needed.
     return {
         "project_id": project_id,
@@ -926,6 +978,7 @@ async def upload_coder_project(
         "files": manifest[:30],
         "sandbox_path": remote_dir,
         "size_bytes": len(content),
+        "indexer_run_id": indexer_run_id,
     }
 
 
@@ -1263,6 +1316,38 @@ async def event_stream(conversation_id: str):
 
 
 # ============================================================
+# RUNS — Coder Bot v2 durable agent invocations
+# ============================================================
+# Live updates flow through the existing /api/events/{conversation_id} stream;
+# run-tagged events carry a `run_id` field that the frontend filters on.
+# These endpoints exist so the UI can rebuild a run's state on reconnect.
+
+@app.get("/api/runs/{run_id}")
+async def get_run(run_id: str):
+    """Full run state including parsed result_envelope and events_log."""
+    run = await db.get_run(run_id)
+    if not run:
+        raise HTTPException(404, "Run not found")
+    return run
+
+
+@app.get("/api/runs")
+async def list_runs(conversation_id: str = Query(None), project_id: str = Query(None),
+                    limit: int = Query(100)):
+    """List runs filtered by conversation or project. Newest first.
+
+    Exactly one of conversation_id / project_id must be provided.
+    """
+    if conversation_id and project_id:
+        raise HTTPException(400, "Provide only one of conversation_id, project_id")
+    if conversation_id:
+        return await db.get_runs_by_conversation(conversation_id, limit=limit)
+    if project_id:
+        return await db.get_runs_by_project(project_id, limit=limit)
+    raise HTTPException(400, "conversation_id or project_id is required")
+
+
+# ============================================================
 # CONVERSATIONS
 # ============================================================
 @app.post("/api/conversations")
@@ -1343,8 +1428,22 @@ async def add_message(conv_id: str, request: Request):
                 pass
     if not role or content is None:
         raise HTTPException(400, "role and content are required")
-    await db.add_message(conv_id, role, content, metadata=meta)
-    return {"status": "added"}
+    msg_id = await db.add_message(conv_id, role, content, metadata=meta)
+    return {"status": "added", "message_id": msg_id}
+
+
+@app.patch("/api/conversations/{conv_id}/messages/{msg_id}")
+async def update_message(conv_id: str, msg_id: int, body: dict = Body(...)):
+    """Update content and/or metadata of an existing message. Used by the frontend's
+    stream-complete handler to finalize a message the chat agent created at stream-start —
+    keeps the row count to one per assistant turn even if the chat agent already persisted
+    progressive snapshots from the server side."""
+    content = body.get("content")
+    meta = body.get("metadata")
+    if content is None and meta is None:
+        raise HTTPException(400, "content or metadata required")
+    await db.update_message(msg_id, content=content, metadata=meta)
+    return {"status": "updated"}
 
 
 @app.delete("/api/conversations/{conv_id}/messages/{msg_id}")
@@ -2621,103 +2720,48 @@ async def council_chat_stream_ep(req: CouncilChatRequest):
 # ============================================================
 # QUICK SEARCH
 # ============================================================
+@app.get("/api/img-proxy")
+async def img_proxy(u: str):
+    """Proxy a remote image so the user's browser never hits the source.
+    Hides user IP/referrer/cookies from third-party servers, bypasses most
+    hotlink protection (we send a domain-matched Referer), and resolves
+    mixed-content warnings for http images on https pages.
+    """
+    parsed = urllib.parse.urlparse(u)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="bad url")
+    try:
+        r = await http.get(
+            u, timeout=8, follow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; image-proxy)",
+                "Accept": "image/*",
+                "Referer": f"{parsed.scheme}://{parsed.netloc}/",
+            },
+        )
+    except Exception:
+        raise HTTPException(status_code=502, detail="fetch failed")
+    ct = r.headers.get("content-type", "")
+    if r.status_code != 200 or not ct.lower().startswith("image/"):
+        raise HTTPException(status_code=404, detail="not found")
+    if len(r.content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="too large")
+    return Response(
+        content=r.content, media_type=ct,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.post("/api/quick-search")
 async def quick_search(req: QuickSearchRequest):
-    """Fast web search via SearXNG — returns structured results with type detection."""
+    """Fast web search via SearXNG — returns structured results with type detection
+    and OG-image enrichment for the frontend carousel. Delegates to the shared
+    helper in `quick_search.py`.
+    """
     try:
-        params = urllib.parse.urlencode({
-            "q": req.query,
-            "format": "json",
-            "language": "en",
-            "time_range": "",
-            "safesearch": "0",
-        })
-        r = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=10)
-        data = r.json()
+        return await qs_module.run_quick_search_for_api(http, req.query, count=req.count)
     except Exception as e:
         return {"results": [], "query": req.query, "error": str(e)}
-
-    results = []
-    for item in data.get("results", [])[:req.count]:
-        url = item.get("url", "")
-        url_lower = url.lower()
-        thumbnail = item.get("thumbnail") or item.get("img_src") or ""
-        result_type = "web"
-
-        if "youtube.com/watch" in url_lower or "youtu.be/" in url_lower:
-            result_type = "youtube"
-            vid_id = None
-            if "youtube.com/watch" in url_lower:
-                qs = url.split("?", 1)[1] if "?" in url else ""
-                for part in qs.split("&"):
-                    if part.startswith("v="):
-                        vid_id = part[2:].split("&")[0]
-                        break
-            elif "youtu.be/" in url_lower:
-                vid_id = url.split("youtu.be/")[1].split("?")[0].split("/")[0]
-            if vid_id:
-                thumbnail = f"https://img.youtube.com/vi/{vid_id}/mqdefault.jpg"
-        elif thumbnail or any(url_lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
-            result_type = "image"
-
-        results.append({
-            "title": item.get("title", ""),
-            "url": url,
-            "snippet": item.get("content", "")[:300],
-            "thumbnail": thumbnail,
-            "engine": item.get("engine", ""),
-            "type": result_type,
-        })
-
-    # ── Fetch OG images for results missing thumbnails (parallel, fast timeout) ──
-    async def _fetch_og_image(idx: int, page_url: str):
-        skip = ["youtube.com", "twitter.com", "x.com", "facebook.com", "instagram.com",
-                "linkedin.com", "tiktok.com", ".pdf"]
-        if any(s in page_url.lower() for s in skip):
-            return idx, ""
-        try:
-            resp = await http.get(page_url, timeout=6, follow_redirects=True,
-                                  headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                                           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                                           "Accept-Language": "en-US,en;q=0.5"})
-            html = resp.text[:30000]  # scan more of the page
-            # Try og:image first, then twitter:image, then generic image meta
-            for pattern in [
-                r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
-                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
-                r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
-                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
-                r'<meta[^>]+name=["\']twitter:image:src["\'][^>]+content=["\']([^"\']+)["\']',
-                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image:src["\']',
-                r'<meta[^>]+property=["\']og:image:secure_url["\'][^>]+content=["\']([^"\']+)["\']',
-                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image:secure_url["\']',
-                r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)["\']',
-            ]:
-                m = re.search(pattern, html, re.IGNORECASE)
-                if m:
-                    img = m.group(1).strip()
-                    if img.startswith("//"):
-                        img = "https:" + img
-                    elif img.startswith("/"):
-                        # Relative URL — resolve against page domain
-                        from urllib.parse import urlparse
-                        parsed = urlparse(page_url)
-                        img = f"{parsed.scheme}://{parsed.netloc}{img}"
-                    if img.startswith("http"):
-                        return idx, img
-            return idx, ""
-        except Exception:
-            return idx, ""
-
-    needs_og = [(i, r["url"]) for i, r in enumerate(results) if not r["thumbnail"] and r["type"] == "web"]
-    if needs_og:
-        tasks = [_fetch_og_image(i, u) for i, u in needs_og[:6]]
-        og_results = await asyncio.gather(*tasks, return_exceptions=True)
-        for res in og_results:
-            if isinstance(res, tuple) and res[1]:
-                results[res[0]]["thumbnail"] = res[1]
-
-    return {"results": results, "query": req.query}
 
 
 # ============================================================
@@ -2740,6 +2784,7 @@ async def get_app_settings():
         "openhands_enabled": config.OPENHANDS_ENABLED,
         "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
         "openhands_num_ctx": config.OPENHANDS_NUM_CTX,
+        "default_num_ctx": config.DEFAULT_NUM_CTX,
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
         "sandbox_size_bytes": size,
@@ -2751,7 +2796,7 @@ async def get_app_settings():
 @app.patch("/api/settings")
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
-    allowed = {"file_cleanup_days", "ollama_url", "rag", "planning_model", "coder_model", "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx"}
+    allowed = {"file_cleanup_days", "ollama_url", "rag", "planning_model", "coder_model", "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx", "default_num_ctx"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
@@ -2785,6 +2830,9 @@ async def update_app_settings(body: dict = Body(...)):
     if "openhands_num_ctx" in body:
         config.OPENHANDS_NUM_CTX = int(body["openhands_num_ctx"])
         print(f"[Config] OpenHands num_ctx: {config.OPENHANDS_NUM_CTX}")
+    if "default_num_ctx" in body:
+        config.DEFAULT_NUM_CTX = int(body["default_num_ctx"])
+        print(f"[Config] Default num_ctx: {config.DEFAULT_NUM_CTX}")
     save_settings(settings)
     return {**settings, "current_ollama_url": config.OLLAMA_URL, "current_planning_model": config.PLANNING_MODEL, "current_coder_model": config.CODER_MODEL}
 

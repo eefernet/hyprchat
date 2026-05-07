@@ -247,6 +247,7 @@
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css">
 <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js" data-manual></script>
 <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" data-autoloader-path="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/"></script>
@@ -329,6 +330,8 @@ const TIC = {code:IC.Code,search:IC.Search,terminal:IC.Terminal,globe:IC.Globe,w
 
 // Status pill - inline with chat, expressive and geeky
 const Pill = ({ev,t,expanded,onToggle})=>{
+  const scrollRef = useRef(null);
+  const stickRef = useRef(true);  // sticky-bottom: auto-scroll to new steps unless user scrolled up
   const isS = ev.type==="tool_start"||ev.type==="tool_progress"||ev.type==="thinking"||ev.type==="streaming";
   const isE = ev.type==="tool_error"||ev.type==="error";
   const isD = ev.type==="tool_end"||ev.type==="tool_done"||ev.type==="complete"||ev.type==="thought_done";
@@ -339,6 +342,25 @@ const Pill = ({ev,t,expanded,onToggle})=>{
   let detail = null;
   if(expanded && ev.data?.detail){try{detail=JSON.parse(ev.data.detail);}catch{detail=ev.data.detail;}}
   const isClickable = !!(ev.data?.detail) || isThink;
+  const stepsLen = (detail && typeof detail==="object" && Array.isArray(detail.steps)) ? detail.steps.length : 0;
+  // Reset sticky + jump to bottom when the panel is (re)opened.
+  useEffect(()=>{
+    if(!expanded)return;
+    stickRef.current = true;
+    const el=scrollRef.current;
+    if(el)el.scrollTop = el.scrollHeight;
+  },[expanded]);
+  // When new steps arrive, auto-scroll only if user hasn't scrolled up.
+  useEffect(()=>{
+    if(!expanded||!stickRef.current)return;
+    const el=scrollRef.current;
+    if(el)el.scrollTop = el.scrollHeight;
+  },[stepsLen,expanded]);
+  const handlePanelScroll = (e)=>{
+    const el=e.currentTarget;
+    // 24px tolerance — treat "almost at bottom" as still sticky
+    stickRef.current = (el.scrollHeight - el.scrollTop - el.clientHeight) < 24;
+  };
   
   const toolName = ev.data?.tool||ev.type;
   const status = ev.data?.status||"";
@@ -367,12 +389,26 @@ const Pill = ({ev,t,expanded,onToggle})=>{
     "memory": isD ? ["🧠", "Recalled"] : ["🧠", "Remembering"],
     "generate_code": isD ? ["🧬", "Code Ready"] : ["🧬", "Agent Coding"],
     "generating": ["✍️", "Generating"],
+    "refinement": isD ? ["✨", "Refined"] : ["✨", "Refining"],
     "error": ["❌", "Error"],
     "tool_error": ["❌", "Error"],
   };
   const [icon, label] = labelMap[toolName] || (isE ? ["❌", toolName] : isD ? ["✓", toolName] : ["⏳", toolName]);
   const isActive = isS && !isD;
-  const showMarquee = isThink && isActive && !expanded && status.length > 15;
+  // De-duplicate status: backend often emits "🔮 Connecting to neural oracle..." while the
+  // labelMap also renders "🔮 Connecting" — strip a leading emoji and the label word from
+  // the status so the pill doesn't read "Connecting Connecting...".
+  const displayStatus = (()=>{
+    if(!status)return "";
+    // Strip leading emoji (incl. ZWJ U+200D and VS16 U+FE0F) and whitespace.
+    let s = status.replace(/^[\p{Extended_Pictographic}‍️\s]+/u,"");
+    if(label){
+      const re = new RegExp("^" + label.replace(/[.*+?^${}()|[\]\\]/g,"\\$&") + "\\s*[:—\\-]?\\s*","i");
+      s = s.replace(re,"");
+    }
+    return s.trim();
+  })();
+  const showMarquee = isThink && isActive && !expanded && displayStatus.length > 15;
   const getIconAnim = (name) => {
     if(name==="execute_code"||name==="run_shell") return "spin 1.2s linear infinite";
     if(name==="research"||name==="deep_research"||name==="fetch_url"||name==="conspiracy_research"||name==="kb") return "swing 1.5s ease-in-out infinite";
@@ -383,7 +419,7 @@ const Pill = ({ev,t,expanded,onToggle})=>{
     if(name==="thinking"||name==="streaming") return "bop 2s ease-in-out infinite";
     return "bop 1.5s ease-in-out infinite";
   };
-  const marqueeKey = Math.floor(status.length / 30);
+  const marqueeKey = Math.floor(displayStatus.length / 30);
 
   return <div style={{animation:"fadeIn .3s",marginBottom:2}}>
     <div onClick={isClickable?onToggle:undefined} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 12px",background:bg,border:`1px solid ${bc}`,borderRadius:expanded?"9px 9px 0 0":9,fontSize:12,color:tc,cursor:isClickable?"pointer":"default",maxWidth:"100%",transition:"all .2s",animation:isActive?`fadeIn .3s, pillGlow 2s ease-in-out infinite`:"fadeIn .3s",boxShadow:isActive?`0 0 8px ${bc}`:"none"}}>
@@ -393,14 +429,14 @@ const Pill = ({ev,t,expanded,onToggle})=>{
       {showMarquee
         ? <span className="pill-marquee-wrap">
             <span key={marqueeKey} className="pill-marquee-inner" style={{color:tc,opacity:.75,fontStyle:"italic"}}>
-              {status}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{status}
+              {displayStatus}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{displayStatus}
             </span>
           </span>
-        : <span style={{opacity:.6,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:350,fontStyle:isThink?"italic":"normal"}}>{status}</span>
+        : displayStatus&&<span style={{opacity:.6,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:350,fontStyle:isThink?"italic":"normal"}}>{displayStatus}</span>
       }
       {isClickable&&<span style={{opacity:.3,flexShrink:0,fontSize:8,marginLeft:2}}>{expanded?"▴":"▾"}</span>}
     </div>
-    {expanded&&(detail||isThink)&&<div style={{background:`${t.bgDeep}`,border:`1px solid ${bc}`,borderTop:"none",borderRadius:"0 0 8px 8px",padding:10,fontSize:11,maxHeight:300,overflowY:"auto",maxWidth:600}}>
+    {expanded&&(detail||isThink)&&<div ref={scrollRef} onScroll={handlePanelScroll} style={{background:`${t.bgDeep}`,border:`1px solid ${bc}`,borderTop:"none",borderRadius:"0 0 8px 8px",padding:10,fontSize:11,maxHeight:300,overflowY:"auto",maxWidth:600}}>
       {!detail?<div style={{color:t.dim,fontStyle:"italic",lineHeight:1.6,whiteSpace:"pre-wrap",opacity:.7}}>{status||"Thinking..."}</div>
       :typeof detail==="string"?<pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontFamily:"inherit"}}>{detail}</pre>
       :detail.thinking?<div ref={el=>{if(el&&isActive)el.scrollTop=el.scrollHeight;}} style={{color:t.dim,fontStyle:"italic",lineHeight:1.6,whiteSpace:"pre-wrap",maxHeight:250,overflowY:"auto"}}>{detail.thinking}</div>
@@ -441,8 +477,248 @@ const Pill = ({ev,t,expanded,onToggle})=>{
   </div>;
 };
 
+// Reasoning + Plan panels: surface model thinking & architecture plan above the pill row
+// during agent coding so the user can see what the bot decided to do while waiting.
+const ReasoningPanel = ({text,t,streaming})=>{
+  const [expanded,setExpanded]=useState(streaming);
+  useEffect(()=>{setExpanded(streaming);},[streaming]);
+  if(!text) return null;
+  const bc=`${t.f4}33`;
+  const bg=`${t.f4}0a`;
+  const tc=t.f4;
+  return <div style={{marginBottom:6,animation:"fadeIn .3s",borderRadius:10,border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%"}}>
+    <div onClick={()=>setExpanded(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none"}}>
+      <span style={{fontSize:13,lineHeight:1,animation:streaming?"bop 2s ease-in-out infinite":"none",transformOrigin:"center"}}>💡</span>
+      <span style={{fontWeight:700,fontSize:11,color:tc,letterSpacing:.3}}>Reasoning</span>
+      {streaming&&<span style={{fontSize:10,color:tc,opacity:.55,fontStyle:"italic"}}>thinking…</span>}
+      <span style={{marginLeft:"auto",fontSize:9,color:tc,opacity:.45}}>{expanded?"▴":"▾"}</span>
+    </div>
+    {expanded&&<div ref={el=>{if(el&&streaming)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 14px",fontSize:11,lineHeight:1.65,color:t.dim,fontStyle:"italic",whiteSpace:"pre-wrap",maxHeight:260,overflowY:"auto",opacity:.92}}>{text}</div>}
+  </div>;
+};
+
+const PlanPanel = ({plan,t,streaming,md,onCopy})=>{
+  const [expanded,setExpanded]=useState(streaming);
+  const [copied,setCopied]=useState(false);
+  useEffect(()=>{setExpanded(streaming);},[streaming]);
+  if(!plan) return null;
+  const bc=streaming?`${t.acc}66`:`${t.acc}38`;
+  const bg=`${t.acc}0c`;
+  const tc=t.acc;
+  const copy=async(e)=>{
+    e.stopPropagation();
+    try{await navigator.clipboard.writeText(plan);setCopied(true);setTimeout(()=>setCopied(false),1400);}catch{}
+    onCopy&&onCopy();
+  };
+  return <div style={{marginBottom:6,animation:"fadeIn .3s",borderRadius:10,border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%",boxShadow:streaming?`0 0 12px ${t.acc}22`:"none",transition:"all .3s"}}>
+    <div onClick={()=>setExpanded(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none",animation:streaming?"pillGlow 2s ease-in-out infinite":"none"}}>
+      <span style={{fontSize:13,lineHeight:1,animation:streaming?"bop 2s ease-in-out infinite":"none",transformOrigin:"center"}}>📐</span>
+      <span style={{fontWeight:700,fontSize:11,color:tc,letterSpacing:.3}}>Architecture Plan</span>
+      {streaming&&<span style={{fontSize:10,color:tc,opacity:.6,fontStyle:"italic"}}>building…</span>}
+      <button onClick={copy} title="Copy plan" style={{marginLeft:"auto",background:copied?`${t.ok}22`:"transparent",border:`1px solid ${copied?t.ok:`${tc}33`}`,color:copied?t.ok:tc,padding:"2px 8px",borderRadius:6,fontSize:9,fontFamily:"inherit",cursor:"pointer",fontWeight:600,opacity:.85}}>{copied?"copied":"copy"}</button>
+      <span style={{fontSize:9,color:tc,opacity:.45,marginLeft:4}}>{expanded?"▴":"▾"}</span>
+    </div>
+    {expanded&&<div style={{padding:"10px 14px",fontSize:12,lineHeight:1.65,color:t.dim,maxHeight:420,overflowY:"auto"}}>
+      {md?<MDWrap>{md(plan)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit",color:t.dim}}>{plan}</pre>}
+    </div>}
+  </div>;
+};
+
+// Coder Bot v2 — durable run card. Reads a `runs` row by id, subscribes to
+// run-tagged live events from the parent's events stream, and renders
+// status + collapsible event timeline. Survives browser disconnects: on mount
+// it fetches /api/runs/{runId} so the timeline rebuilds even if the SSE chat
+// stream dropped while the agent was still running.
+
+// Role → (emoji, friendly label). Each agent gets a distinct visual identity
+// so a stack of cards reads as a sequence of distinct phases instead of
+// "🤖 Run · builder.feature succeeded" × N. Lookup tolerates minor variants
+// (builder.legacy, builder.scaffold, builder.feature, builder.continue) by
+// falling back to the role's prefix before the dot.
+const _ROLE_VISUALS = {
+  "architect":         {icon: "📐", label: "Designing plan"},
+  "builder":           {icon: "🏗", label: "Building project"},
+  "builder.scaffold":  {icon: "🏗", label: "Building project"},
+  "builder.continue":  {icon: "🔄", label: "Resuming build"},
+  "builder.feature":   {icon: "✨", label: "Adding feature"},
+  "builder.bugfix":    {icon: "🩹", label: "Bug fix build"},
+  "builder.legacy":    {icon: "🤖", label: "OpenHands build"},
+  "reviewer":          {icon: "🔍", label: "Reviewing"},
+  "fixer":             {icon: "🛠", label: "Fixing issues"},
+  "qa":                {icon: "❓", label: "Investigating"},
+  "indexer":           {icon: "📚", label: "Indexing project"},
+};
+const _roleVisual = (role)=>{
+  if(_ROLE_VISUALS[role]) return _ROLE_VISUALS[role];
+  // Try the prefix before "." (e.g. unknown "builder.X" → "builder")
+  const base = (role||"").split(".")[0];
+  if(_ROLE_VISUALS[base]) return _ROLE_VISUALS[base];
+  return {icon: "🤖", label: role || "Run"};
+};
+
+// Map OpenHands action names → small leading icon for step rows. Keeps the
+// timeline scannable.
+const _STEP_ACTION_ICONS = {
+  "starting": "🚀",
+  "thinking": "🧠",
+  "terminal": "⚡",  "terminal_result": "📤",
+  "file_create": "📄",  "file_edit": "✏️",  "file_view": "👁",
+  "file_str_replace": "🔁",  "file_editor_result": "✅",
+  "glob": "🔎",  "glob_result": "🔎",
+  "grep": "🔎",  "grep_result": "🔎",
+  "finish": "🏁",
+  // Reviewer
+  "detect": "🧭",  "detected": "🧭",
+  "build": "🔨",  "build_done": "🔨",
+  "test": "🧪",  "test_done": "🧪",
+  "lint": "🧹",  "lint_done": "🧹",
+  "read_files": "📖",
+  "analyze": "🔬",
+  "parse_fallback": "⚠",
+  // Architect
+  "planning": "📐",  "retry": "🔄",
+  "language": "🌐",  "build_cmd": "🔨",  "test_cmd": "🧪",  "lint_cmd": "🧹",
+  "manifest": "📋",  "file": "📄",
+  "tests_required": "🧪",  "dependencies": "📦",  "dep": "📦",
+  "risk": "⚠",  "success_criteria": "🎯",  "criterion": "🎯",
+  // Fixer
+  "issue": "🩹",  "writing": "✏️",  "calling": "🧠",
+  // Indexer
+  "indexing": "📚",  "found_files": "📁",  "reading": "📖",  "read_done": "📖",
+  // QA
+  "question": "❓",  "list_files": "📁",  "keywords": "🏷",  "grep": "🔎",
+  "filename_targets": "🎯",  "matched_files": "🎯",  "snippets": "📑",
+  "compose": "✍️",  "fallback": "↩",  "no_match": "❌",
+  // Generic
+  "start": "🚀",  "done": "✅",  "error": "❌",
+};
+
+const RunCard = ({runId, liveEvts, t, font, md})=>{
+  const [run, setRun] = useState(null);
+  // expanded starts false; flips to true automatically once we've loaded the
+  // run and detect it needs attention (failed, or reviewer-with-issues). The
+  // user can still toggle either way after that.
+  const [expanded, setExpanded] = useState(false);
+  const [autoExpanded, setAutoExpanded] = useState(false);
+  const [err, setErr] = useState(null);
+  // Initial fetch + when run terminal status changes, refetch for envelope.
+  useEffect(()=>{
+    if(!runId) return;
+    let cancelled = false;
+    const load = async ()=>{
+      try{
+        const r = await fetch(`${API}/api/runs/${runId}`);
+        if(!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if(!cancelled) setRun(d);
+      }catch(e){if(!cancelled) setErr(e.message||"load failed");}
+    };
+    load();
+    // Light poll while the run is still in flight — covers reconnect mid-run
+    // when liveEvts haven't yet filled in. Stops as soon as we see a terminal status.
+    const id = setInterval(()=>{
+      setRun(cur=>{
+        if(cur && (cur.status==="succeeded"||cur.status==="failed"||cur.status==="partial")){clearInterval(id);return cur;}
+        load(); return cur;
+      });
+    }, 4000);
+    return ()=>{cancelled=true; clearInterval(id);};
+  },[runId]);
+  // Merge persisted events with live events that arrived for this run after mount.
+  const persistedEvts = run?.events_log || [];
+  const liveForRun = (liveEvts||[]).filter(e=>{
+    const rid = e?.data?.run_id || e?.run_id;
+    return rid && rid===runId && (e.type==="tool_progress"||e.type==="tool_start"||e.type==="step");
+  });
+  // Dedupe live events by step number against persisted log (persisted is ground truth on reconnect).
+  const persistedSteps = new Set(persistedEvts.filter(p=>p.type==="step").map(p=>p.step));
+  const newLive = liveForRun.filter(e=>{
+    const step = e?.data?.step ?? e?.step;
+    return step!==undefined && !persistedSteps.has(step);
+  });
+  const allSteps = [...persistedEvts.filter(p=>p.type==="step"),
+                    ...newLive.map(e=>({type:"step", step:e.data?.step ?? e.step,
+                                        action:e.data?.action ?? e.action,
+                                        detail:e.data?.detail ?? e.detail}))];
+  // Visual status colour
+  const status = run?.status || "loading";
+  const colour = status==="succeeded" ? t.ok :
+                 status==="failed" ? t.err :
+                 status==="partial" ? "#e9a45a" :
+                 t.acc;
+  const statusLabel = {
+    queued:"queued", running:"running…", succeeded:"succeeded",
+    failed:"failed", partial:"partial", loading:"loading…",
+  }[status] || status;
+  const role = run?.role || "builder";
+  const visual = _roleVisual(role);
+  const env = run?.result_envelope || {};
+  const filesN = (env.files_written||env.files_touched||[]).length;
+  const dur = env.duration_s;
+  const isStreaming = status==="running" || status==="queued";
+  // Auto-expand cards that need attention: any failed run, OR a reviewer
+  // that returned issues/error. Only fires once per card, and only after the
+  // run has loaded — so a streaming run doesn't pre-pop open and then close
+  // when it succeeds.
+  const needsAttention = (
+    status === "failed" ||
+    (role === "reviewer" && (env.status === "issues" || env.status === "error"))
+  );
+  if (run && needsAttention && !autoExpanded) {
+    setAutoExpanded(true);
+    setExpanded(true);
+  }
+  const bc = isStreaming ? `${colour}66` : `${colour}38`;
+  const bg = `${colour}0c`;
+  return <div style={{marginTop:6,marginBottom:6,animation:"fadeIn .3s",borderRadius:10,border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%",boxShadow:isStreaming?`0 0 12px ${colour}22`:"none",transition:"all .3s"}}>
+    <div onClick={()=>setExpanded(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none",animation:isStreaming?"pillGlow 2s ease-in-out infinite":"none"}}>
+      <span style={{fontSize:13,lineHeight:1,animation:isStreaming?"bop 2s ease-in-out infinite":"none"}}>{visual.icon}</span>
+      <span style={{fontWeight:700,fontSize:11,color:colour,letterSpacing:.3}}>{visual.label}</span>
+      <span style={{fontSize:10,color:t.mut,opacity:.6}}>· {role}</span>
+      <span style={{fontSize:10,color:colour,opacity:.7,fontStyle:isStreaming?"italic":"normal"}}>· {statusLabel}</span>
+      {filesN>0 && <span style={{fontSize:10,color:t.mut}}>· {filesN} file{filesN===1?"":"s"}</span>}
+      {dur && <span style={{fontSize:10,color:t.mut}}>· {dur}s</span>}
+      {err && <span style={{fontSize:10,color:t.err}}>· {err}</span>}
+      <span style={{fontSize:9,color:colour,opacity:.45,marginLeft:"auto"}}>{expanded?"▴":"▾"}</span>
+    </div>
+    {expanded && <div style={{padding:"8px 12px",fontSize:11,lineHeight:1.55,color:t.dim,maxHeight:320,overflowY:"auto",fontFamily:font}}>
+      {allSteps.length===0 && <div style={{color:t.mut,fontStyle:"italic"}}>No steps recorded yet…</div>}
+      {allSteps.map((s,i)=>{
+        const stepIcon = _STEP_ACTION_ICONS[s.action] || "·";
+        return <div key={i} style={{padding:"3px 0",borderBottom:i<allSteps.length-1?`1px solid ${t.brd}12`:"none",display:"flex",alignItems:"baseline",gap:6}}>
+          <span style={{color:t.mut,fontSize:10,minWidth:24,textAlign:"right"}}>#{s.step}</span>
+          <span style={{fontSize:11,opacity:.85,minWidth:16,textAlign:"center"}}>{stepIcon}</span>
+          <span style={{color:colour,fontWeight:600}}>{s.action||"?"}</span>
+          <span style={{color:t.dim,flex:1,wordBreak:"break-word"}}>{(s.detail||"").slice(0,160)}</span>
+        </div>;
+      })}
+      {env.summary && <div style={{marginTop:8,padding:"6px 8px",borderRadius:6,background:`${colour}10`,color:t.dim,fontStyle:"italic"}}>{env.summary}</div>}
+      {env.error && <div style={{marginTop:8,padding:"6px 8px",borderRadius:6,background:`${t.err}10`,color:t.err}}>⚠ {env.error}</div>}
+      {(env.manifest_missing||[]).length>0 && <div style={{marginTop:6,fontSize:10,color:t.mut}}>missing: {(env.manifest_missing||[]).slice(0,8).join(", ")}</div>}
+      {role==="qa" && env.answer && <div style={{marginTop:10,padding:"10px 12px",borderRadius:8,background:`${colour}08`,border:`1px solid ${colour}22`,color:t.dim,fontSize:12,lineHeight:1.6}}>
+        {md?<MDWrap>{md(env.answer)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit"}}>{env.answer}</pre>}
+        {env.looks_like_change_request && <div style={{marginTop:8,padding:"4px 8px",borderRadius:5,background:`${t.acc}18`,color:t.acc,fontSize:10,fontWeight:600,display:"inline-block"}}>⚡ Flagged as change request</div>}
+        {(env.files_examined||[]).length>0 && <div style={{marginTop:8,fontSize:10,color:t.mut}}>📂 examined: {(env.files_examined||[]).slice(0,5).join(", ")}{(env.files_examined||[]).length>5?` +${(env.files_examined||[]).length-5} more`:""}</div>}
+      </div>}
+    </div>}
+  </div>;
+};
+
+// Pluck unique run_ids out of a list of saved/live events. Each is an
+// independent agent invocation that should render its own RunCard.
+const _runIdsFromEvents = (evts)=>{
+  if(!Array.isArray(evts)) return [];
+  const seen = new Set();
+  const out = [];
+  for(const e of evts){
+    const rid = e?.data?.run_id || e?.run_id;
+    if(rid && !seen.has(rid)){seen.add(rid); out.push(rid);}
+  }
+  return out;
+};
+
 // Inline tool status: shows latest pill, expands to show all
-const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=>{
+const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical,md,savedEvts})=>{
   const [showAll,setShowAll]=useState(false);
   if(!evts.length) return null;
 
@@ -514,7 +790,28 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=
   const searchResultEvts = evts.filter(e=>e.type==="search_results");
   const sourceLinkEvts = evts.filter(e=>e.type==="source_links");
 
-  const CodeOutputCards = ()=><>{codeOutputEvts.map((e,i)=>{
+  // Surface reasoning + architecture plan above the pill row.
+  // Reasoning: latest thinking/thought_done event with detail.thinking
+  // Plan: latest plan_project tool_end with detail.plan
+  // Live `evts` is a sliding window (last 200) so on long runs the early
+  // plan_project / thought_done events get evicted. `savedEvts` (passed when
+  // the parent has msg.metadata.saved_events) is the durable full record;
+  // we merge it in here to make sure the panels survive multi-cycle runs.
+  const _parseDetail = (ev)=>{const d=ev?.data?.detail;if(!d)return null;try{return typeof d==="string"?JSON.parse(d):d;}catch{return null;}};
+  const _evtPool = (savedEvts && savedEvts.length) ? savedEvts.concat(evts) : evts;
+  const _thinkEvts = _evtPool.filter(e=>(e.type==="thinking"||e.type==="thought_done")&&_parseDetail(e)?.thinking);
+  const reasoningText = _thinkEvts.length ? (_parseDetail(_thinkEvts[_thinkEvts.length-1])?.thinking||"") : "";
+  const _planEvts = _evtPool.filter(e=>(e.type==="tool_end"||e.type==="tool_done")&&e.data?.tool==="plan_project"&&_parseDetail(e)?.plan);
+  const planText = _planEvts.length ? (_parseDetail(_planEvts[_planEvts.length-1])?.plan||"") : "";
+  const isStreaming = !historical;
+  const Panels = (reasoningText||planText) ? <div style={{display:"flex",flexDirection:"column",gap:0,marginBottom:reasoningText||planText?4:0}}>
+    {reasoningText && <ReasoningPanel text={reasoningText} t={t} streaming={isStreaming}/>}
+    {planText && <PlanPanel plan={planText} t={t} streaming={isStreaming} md={md}/>}
+  </div> : null;
+
+  // Historical renders: the per-message block at msg.metadata.saved_events renders
+  // collapsible code output, so ToolStatus shouldn't render another copy here.
+  const CodeOutputCards = ()=>historical?null:<>{codeOutputEvts.map((e,i)=>{
     const d=e.data||{};
     return <div key={i} style={{marginTop:6,borderRadius:8,overflow:"hidden",border:`1px solid ${d.success?t.ok:t.err}33`,background:t.bgDeep,fontSize:11}}>
       <div style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:`${d.success?t.ok:t.err}10`,borderBottom:`1px solid ${d.success?t.ok:t.err}22`}}>
@@ -632,6 +929,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=
     const activeThinking = merged.find(e=>e.type==="thinking");
     const primaryPill = activeThinking || latest;
     return <div style={{padding:"4px 0"}}>
+      {Panels}
       {primaryPill&&<div style={{display:"flex",flexDirection:"column",gap:3}}>
         <Pill ev={primaryPill} t={t} expanded={expandedPill===getPillKey(primaryPill)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(primaryPill)?null:getPillKey(primaryPill))}/>
         {primaryPill!==latest&&latest&&<Pill ev={latest} t={t} expanded={expandedPill===getPillKey(latest)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(latest)?null:getPillKey(latest))}/>}
@@ -647,6 +945,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical})=
   }
 
   return <div style={{padding:"4px 0"}}>
+    {Panels}
     <button onClick={()=>setShowAll(false)} style={{background:`${t.surface}60`,border:`1px solid ${t.brd}22`,color:t.mut,padding:"2px 8px",borderRadius:10,fontSize:10,cursor:"pointer",fontFamily:"inherit",marginBottom:4}}>
       Hide steps ▴
     </button>
@@ -1124,6 +1423,79 @@ function MermaidBlock({code,theme,font,epoch}){
   </div>;
 }
 
+// Chart.js block — renders ```chart JSON fences as inline charts
+function ChartBlock({code,theme,font,epoch}){
+  const t=theme;
+  const canvasRef=useRef(null);
+  const chartRef=useRef(null);
+  const [err,setErr]=useState(null);
+  const [cpd,setCpd]=useState(false);
+  const [showSrc,setShowSrc]=useState(false);
+  useEffect(()=>{
+    if(!window.Chart||!canvasRef.current||showSrc)return;
+    let cfg;
+    try{cfg=JSON.parse(code);}
+    catch(e){setErr("Invalid JSON: "+String(e.message));return;}
+    if(cfg.data&&!cfg.datasets){cfg.datasets=[{label:cfg.label||"Value",data:cfg.data}];delete cfg.data;}
+    const palette=[t.acc,t.ok,t.warm,t.err||"#e06c75","#b39ddb","#80cbc4","#ffab91","#90caf9"];
+    const type=cfg.type||"bar";
+    const isCircular=["pie","doughnut","polarArea"].includes(type);
+    const datasets=(cfg.datasets||[]).map((ds,i)=>{
+      const color=ds.color||ds.borderColor||palette[i%palette.length];
+      const out={label:ds.label||`Dataset ${i+1}`,data:ds.data||[],borderWidth:ds.borderWidth??2,tension:ds.tension??0.25,...ds};
+      if(isCircular){
+        out.backgroundColor=ds.backgroundColor||(ds.data||[]).map((_,k)=>palette[k%palette.length]+"CC");
+        out.borderColor=ds.borderColor||t.bgDeep;
+        out.borderWidth=ds.borderWidth??2;
+      }else{
+        out.backgroundColor=ds.backgroundColor||(type==="line"?color+"22":color+"AA");
+        out.borderColor=ds.borderColor||color;
+      }
+      return out;
+    });
+    if(chartRef.current){try{chartRef.current.destroy();}catch{}chartRef.current=null;}
+    try{
+      chartRef.current=new window.Chart(canvasRef.current,{
+        type,
+        data:{labels:cfg.labels||[],datasets},
+        options:{
+          responsive:true,
+          maintainAspectRatio:false,
+          plugins:{
+            legend:{labels:{color:t.dim,font:{family:font,size:11}}},
+            title:cfg.title?{display:true,text:cfg.title,color:t.text,font:{family:font,size:13,weight:"bold"},padding:{bottom:10}}:{display:false},
+            tooltip:{bodyFont:{family:font},titleFont:{family:font},backgroundColor:t.surface+"EE",borderColor:t.brd,borderWidth:1,titleColor:t.text,bodyColor:t.dim}
+          },
+          scales:isCircular?{}:{
+            x:{ticks:{color:t.mut,font:{family:font,size:10}},grid:{color:t.brd+"33"},title:cfg.xLabel?{display:true,text:cfg.xLabel,color:t.dim,font:{family:font,size:11}}:{display:false}},
+            y:{ticks:{color:t.mut,font:{family:font,size:10}},grid:{color:t.brd+"33"},title:cfg.yLabel?{display:true,text:cfg.yLabel,color:t.dim,font:{family:font,size:11}}:{display:false}}
+          },
+          ...(cfg.options||{})
+        }
+      });
+      setErr(null);
+    }catch(e){setErr("Chart error: "+String(e.message));}
+    return()=>{if(chartRef.current){try{chartRef.current.destroy();}catch{}chartRef.current=null;}};
+  },[code,epoch,showSrc,t,font]);
+  const copyCode=()=>{try{navigator.clipboard.writeText(code);setCpd(true);setTimeout(()=>setCpd(false),1500);}catch{}};
+  const headerBtn={background:"none",border:"none",cursor:"pointer",padding:"3px 6px",fontSize:10,fontFamily:font,borderRadius:5,display:"flex",alignItems:"center",gap:3};
+  return <div style={{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`}}>
+      <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ chart</span>
+      <div style={{display:"flex",gap:4}}>
+        <button onClick={()=>setShowSrc(s=>!s)} style={{...headerBtn,color:showSrc?t.acc:t.dim}} title={showSrc?"show chart":"show source"}>{showSrc?"◱ chart":"{ } source"}</button>
+        <button onClick={copyCode} style={{...headerBtn,color:cpd?t.ok:t.dim}} title="copy source">{cpd?"✓ copied":"⧉ copy"}</button>
+      </div>
+    </div>
+    {err?<div>
+      <div style={{padding:"8px 12px",background:`${t.err}12`,color:t.err,fontSize:11,fontFamily:font,borderBottom:`1px solid ${t.err}33`}}>⚠ Chart render error: {err}</div>
+      <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
+    </div>
+    :showSrc?<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
+    :<div style={{padding:14,height:320,position:"relative"}}><canvas ref={canvasRef}/></div>}
+  </div>;
+}
+
 // Syntax-highlighted code block (Prism)
 function CodeBlock({code,lang,t,font}){
   const ref=useRef(null);
@@ -1153,6 +1525,21 @@ function MDWrap({children}){
   useEffect(()=>{
     if(!window.renderMathInElement||!ref.current)return;
     try{
+      // Currency $-signs (e.g. "$94 ... $17.50") otherwise pair up as a math
+      // span. Swap them for a placeholder before auto-render, restore after.
+      const PH="";
+      const SKIP={SCRIPT:1,STYLE:1,CODE:1,PRE:1,TEXTAREA:1};
+      const walk=(n,fn)=>{
+        if(n.nodeType===3){fn(n);return;}
+        if(n.nodeType!==1||SKIP[n.tagName])return;
+        for(let c=n.firstChild;c;c=c.nextSibling)walk(c,fn);
+      };
+      walk(ref.current,n=>{
+        const v=n.nodeValue;
+        if(!v||v.indexOf("$")<0)return;
+        const out=v.replace(/(?<![\\$])\$(?=\d)/g,PH);
+        if(out!==v)n.nodeValue=out;
+      });
       window.renderMathInElement(ref.current,{
         delimiters:[
           {left:"$$",right:"$$",display:true},
@@ -1162,6 +1549,10 @@ function MDWrap({children}){
         ],
         throwOnError:false,
         ignoredTags:["script","noscript","style","textarea","pre","code"]
+      });
+      walk(ref.current,n=>{
+        const v=n.nodeValue;
+        if(v&&v.indexOf(PH)>=0)n.nodeValue=v.split(PH).join("$");
       });
     }catch{}
   });
@@ -1181,6 +1572,19 @@ function HyprChat(){
   const [scanlineEffect,setScanlineEffect]=useState(()=>{try{return localStorage.getItem("hc-scanline")==="1";}catch{return false;}});
   const [showNavLabels,setShowNavLabels]=useState(()=>{try{return localStorage.getItem("hc-nav-labels")!=="0";}catch{return true;}});
   const [thinkMode,setThinkMode]=useState(()=>{try{return localStorage.getItem("hc-think-mode")||"auto";}catch{return "auto";}});
+  // Effort Level — global default (0=Blurt, 1=Ponder, 2=Forge, 3=Galaxy Brain)
+  const [globalEffort,setGlobalEffort]=useState(()=>{try{return parseInt(localStorage.getItem("hc-effort-level")||"0")||0;}catch{return 0;}});
+  // Per-chat override map: { [convId]: 0|1|2|3 }. Absent entry = inherit globalEffort.
+  const [effortPerChat,setEffortPerChat]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-effort-per-chat")||"{}");}catch{return {};}});
+  // Creative level names with emoji — index == rounds count
+  const EFFORT_LEVELS=[
+    {emoji:"💭",name:"Blurt",desc:"Raw answer, no review"},
+    {emoji:"🧠",name:"Ponder",desc:"One self-review pass"},
+    {emoji:"🔥",name:"Forge",desc:"Two refinement passes"},
+    {emoji:"🌌",name:"Galaxy Brain",desc:"Max effort — three passes"},
+  ];
+  // Resolve effort for a given conv id (per-chat override, else global)
+  const resolveEffort=(cid)=>(cid&&effortPerChat[cid]!==undefined?effortPerChat[cid]:globalEffort);
   const [lastPersonaId,setLastPersonaId]=useState(()=>{try{return localStorage.getItem("hc-last-persona")||null;}catch{return null;}});
   const [fontSize,setFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font-size")||"14");}catch{return 14;}});
   const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"14");}catch{return 14;}});
@@ -1215,6 +1619,8 @@ function HyprChat(){
   const [modelSearch,setModelSearch]=useState("");
   const [prompts,setPrompts]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-prompts")||"[]");}catch{return [];}});
   const [showPromptPicker,setShowPromptPicker]=useState(false);
+  const [showEffortPicker,setShowEffortPicker]=useState(false);
+  const effortPickerRef=useRef(null);
   const [promptSearch,setPromptSearch]=useState("");
   const [editPrompt,setEditPrompt]=useState(null); // {id, title, content, category}
 
@@ -1308,6 +1714,8 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-scanline",scanlineEffect?"1":"0");}catch{}},[scanlineEffect]);
   useEffect(()=>{try{localStorage.setItem("hc-nav-labels",showNavLabels?"1":"0");}catch{}},[showNavLabels]);
   useEffect(()=>{try{localStorage.setItem("hc-think-mode",thinkMode);}catch{}},[thinkMode]);
+  useEffect(()=>{try{localStorage.setItem("hc-effort-level",String(globalEffort));}catch{}},[globalEffort]);
+  useEffect(()=>{try{localStorage.setItem("hc-effort-per-chat",JSON.stringify(effortPerChat));}catch{}},[effortPerChat]);
   useEffect(()=>{try{localStorage.setItem("hc-font-size",fontSize);}catch{}},[fontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-ui-font-size",uiFontSize);}catch{}},[uiFontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
@@ -1584,6 +1992,26 @@ function HyprChat(){
           fetchCouncilSuggestions(full.council_config_id);
         }
       }
+      // Phase 0.6: if a run is still in flight on this conversation (e.g. user closed
+      // the tab mid-stream), restore the streaming UI state so the stop button shows
+      // and the user knows the agent is still working in the background. Skip when
+      // we're already actively streaming this conversation locally.
+      if(streamingCidRef.current!==id){
+        try{
+          const rr = await fetch(`${API}/api/runs?conversation_id=${id}`);
+          if(rr.ok){
+            const runs = await rr.json();
+            const anyRunning = (runs||[]).some(r=>r.status==="running"||r.status==="queued");
+            if(anyRunning && reqId===loadReqRef.current){
+              // No local fetch to abort — set streaming=true so the input bar
+              // shows the stop button. Clicking stop will clear this UI state;
+              // the agent itself continues running on the backend until done.
+              setStreaming(true);
+              streamingCidRef.current = id;
+            }
+          }
+        }catch{}
+      }
     } catch(e) { console.error("Failed to load conversation:", e); }
     if(reqId===loadReqRef.current) setLoadingConv(false);
   }, []);
@@ -1616,6 +2044,12 @@ function HyprChat(){
     document.addEventListener("mousedown",handler);
     return()=>document.removeEventListener("mousedown",handler);
   },[showPromptPicker]);
+  useEffect(()=>{
+    if(!showEffortPicker)return;
+    const handler=(e)=>{if(effortPickerRef.current&&!effortPickerRef.current.contains(e.target))setShowEffortPicker(false);};
+    document.addEventListener("mousedown",handler);
+    return()=>document.removeEventListener("mousedown",handler);
+  },[showEffortPicker]);
   // Fetch council suggestions
   const fetchCouncilSuggestions=(cfgId)=>{
     if(!cfgId)return;
@@ -1880,7 +2314,23 @@ function HyprChat(){
     // doing it from the client too would race and create duplicates.
     try{
       const cv=convs.find(c=>c.id===cid);
-      let am = messagesToSend.map(m=>({role:m.role,content:m._fullContent||m.content}));
+      let am = messagesToSend.map(m=>{
+        let baseContent=m._fullContent||m.content||"";
+        // After reload _fullContent is gone; reconstruct the `[Attached N image: ...]` hint
+        // from persisted metadata so non-vision models still know an image was attached.
+        const metaImgs=(m.metadata&&Array.isArray(m.metadata.images))?m.metadata.images:null;
+        if(!m._fullContent&&metaImgs&&metaImgs.length){
+          const names=metaImgs.map(im=>im.name||"image").join(", ");
+          const hint=`[Attached ${metaImgs.length} image${metaImgs.length>1?"s":""}: ${names}]`;
+          baseContent=baseContent?`${baseContent}\n\n${hint}`:hint;
+        }
+        const out={role:m.role,content:baseContent};
+        // Pass images from current send (_images) or persisted user metadata (metadata.images)
+        const persistedImgs=metaImgs?metaImgs.map(im=>(im.dataUrl||"").split(",")[1]||"").filter(Boolean):null;
+        const imgs=(Array.isArray(m._images)&&m._images.length)?m._images:(persistedImgs&&persistedImgs.length?persistedImgs:null);
+        if(imgs)out.images=imgs;
+        return out;
+      });
       // Get model-specific params, falling back to globals
       let modelName=overrides.model||cv?.model||models[0]||"";
       // If the selected model is no longer available, fall back to first available
@@ -1915,16 +2365,36 @@ function HyprChat(){
 
       const ctrl=new AbortController();abortR.current=ctrl;
       const body={conversation_id:cid,model:modelName,messages:am,system_prompt:cv?.system_prompt||"",tool_ids:cv?.tool_ids||[],persona_id:overrides.persona_id!==undefined?overrides.persona_id:(cv?.model_config_id||null)};
+      // Send the user's typed text + attachment metadata separately so the backend's
+      // defensive save persists the clean content + image previews (not the bloated
+      // `[Attached N image: ...]` model-facing string).
+      const _lastUser=[...messagesToSend].reverse().find(mm=>mm.role==="user");
+      if(_lastUser){
+        const _md=_lastUser.metadata||null;
+        const _cleanMeta=(_md&&((_md.images&&_md.images.length)||(_md.pdfs&&_md.pdfs.length)))?{
+          ...(_md.images?{images:_md.images}:{}),
+          ...(_md.pdfs?{pdfs:_md.pdfs}:{}),
+        }:null;
+        if(typeof _lastUser.content==="string")body.display_content=_lastUser.content;
+        if(_cleanMeta)body.user_metadata=_cleanMeta;
+      }
       if(sendNumCtx)body.num_ctx=sendNumCtx;
       if(sendTemp!==undefined)body.temperature=sendTemp;
       if(sendTopP!==undefined)body.top_p=sendTopP;
       if(sendTopK!==undefined)body.top_k=sendTopK;
       if(sendRepeatPenalty!==undefined)body.repeat_penalty=sendRepeatPenalty;
       if(thinkMode!=="auto")body.think_budget=thinkMode==="off"?0:1;
+      const _effort=resolveEffort(cid);
+      if(_effort>0)body.effort_rounds=_effort;
       const res=await fetch(`${API}/api/chat/stream`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:ctrl.signal});
       if(!res.ok){const errText=await res.text().catch(()=>res.statusText);throw new Error(`HTTP ${res.status}: ${errText}`);}
       const rdr=res.body.getReader(),dec=new TextDecoder();
-      let full="",buf="";
+      let full="",buf="",refinementsCount=0;
+      // Phase 0.6: backend creates the assistant message at stream start and sends
+      // its id via an `init` SSE event. We PATCH this row on stream-complete instead
+      // of POSTing a duplicate, so disconnect-then-reload still leaves exactly one
+      // assistant message per turn.
+      let _streamMsgId=null;
       while(true){
         const{done,value}=await rdr.read();if(done)break;
         buf+=dec.decode(value,{stream:true});
@@ -1932,21 +2402,37 @@ function HyprChat(){
         for(const ln of lines){
           if(!ln.startsWith("data: "))continue;
           try{const d=JSON.parse(ln.slice(6));
-            if(d.type==="token"){full+=d.content;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:true};return{...c,messages:m};});}
+            if(d.type==="init"){_streamMsgId=d.message_id;}
+            else if(d.type==="token"){full+=d.content;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:true};return{...c,messages:m};});}
             else if(d.type==="clear"){full="";uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});}
-            else if(d.type==="done"){setTokS(d.speed);if(d.gen_tokens||d.tokens)setSessionTokens(p=>p+((d.gen_tokens||d.tokens)||0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens){setGenTokens(d.gen_tokens);setTokC(d.gen_tokens);}}
+            else if(d.type==="refinement_start"){full="";refinementsCount=d.round||refinementsCount;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});const _refEv={type:"tool_start",data:{tool:"refinement",status:`Refining answer (${d.round}/${d.total})...`,icon:"sparkles",round:d.round,total:d.total},timestamp:Date.now()/1000};streamSaveEvtsRef.current.push(_refEv);setEvts(p=>[...p.slice(-200),_refEv]);}
+            else if(d.type==="done"){if(d.message_id)_streamMsgId=d.message_id;setTokS(d.speed);if(d.gen_tokens||d.tokens)setSessionTokens(p=>p+((d.gen_tokens||d.tokens)||0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens){setGenTokens(d.gen_tokens);setTokC(d.gen_tokens);}if(d.refinements)refinementsCount=d.refinements;}
             else if(d.type==="ctx_update"){if(d.gen_tokens)setTokC(d.gen_tokens);if(d.prompt_tokens)setCtxTokens(d.prompt_tokens);}
-            else if(d.type==="error"){full=`\`\`\`\n⚠ ${d.error}\n\`\`\``;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:false};return{...c,messages:m};});}
+            else if(d.type==="error"){const _errBlock=(full?"\n\n":"")+"```\n⚠ "+d.error+"\n```";full=full+_errBlock;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:false};return{...c,messages:m};});}
           }catch{}}
       }
       // Capture relevant events into metadata for persistence (tool status + search results + source links)
       // Prefer the persistent stream-save buffer, which survives chat switches. Fall back to evtsRef for safety.
       const _rawEvts = streamSaveEvtsRef.current.length > 0 ? streamSaveEvtsRef.current : evtsRef.current;
       const _savedEvts = _rawEvts.filter(e=>["source_links","search_results","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
-      const _msgMeta = _savedEvts.length ? {saved_events: _savedEvts} : undefined;
-      uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:false,metadata:_msgMeta||{}};return{...c,messages:m};});
-      // Save assistant message to DB (user message was saved at stream start)
-      fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:full,metadata:_msgMeta})}).catch(()=>{});
+      // Pluck run_ids out of the saved events so the RunCard component can find them
+      // even after a reload (when live evts are gone).
+      const _streamRunIds = _runIdsFromEvents(_savedEvts);
+      const _msgMeta = (_savedEvts.length || refinementsCount > 0 || _streamRunIds.length) ? {
+        ...(_savedEvts.length?{saved_events:_savedEvts}:{}),
+        ...(refinementsCount>0?{refinements:refinementsCount}:{}),
+        ...(_streamRunIds.length?{run_ids:_streamRunIds}:{}),
+        in_progress: false,
+      } : {in_progress: false};
+      uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:full,isS:false,metadata:_msgMeta};return{...c,messages:m};});
+      // Save final assistant message state to DB. PATCH the row the backend already
+      // created at stream start (preferred — exactly one row per turn). Fall back to
+      // POST for older backends or if init/done didn't include a message_id.
+      if(_streamMsgId){
+        fetch(`${API}/api/conversations/${cid}/messages/${_streamMsgId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:full,metadata:_msgMeta})}).catch(()=>{});
+      }else{
+        fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:full,metadata:_msgMeta})}).catch(()=>{});
+      }
       // Auto-generate title after first exchange
       if(autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const curTitle=cv2?.title||"";if(!curTitle||curTitle==="New Chat"||curTitle===appendUser.slice(0,40))fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
     }catch(e){if(e.name!=="AbortError")uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:`\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false};return{...c,messages:m};});}
@@ -1964,11 +2450,20 @@ function HyprChat(){
     let displayContent = inp.trim();
     let modelContent = displayContent;
     const pdfAttachments = [];
+    const imageAttachments = []; // {name, dataUrl, mime} for UI render
+    const imageBase64s = [];      // raw base64 (no data: prefix) for Ollama images field
     if(attachments.length){
       const pdfParts = [];
       const fileParts = [];
+      const imageNames = [];
       for(const a of attachments){
-        if(a.type==="pdf"){
+        if(a.type==="image"){
+          imageAttachments.push({name:a.name,dataUrl:a.dataUrl,mime:a.mime});
+          // Strip "data:image/png;base64," prefix → raw base64 for Ollama
+          const b64=(a.dataUrl||"").split(",")[1]||"";
+          if(b64) imageBase64s.push(b64);
+          imageNames.push(a.name);
+        }else if(a.type==="pdf"){
           pdfParts.push(`📄 **${a.name}** (${a.pages||"?"} pages):\n${a.content}`);
           pdfAttachments.push({name:a.name,pages:a.pages||0});
         }else{
@@ -1977,6 +2472,11 @@ function HyprChat(){
       }
       const allFileCtx = [...fileParts,...pdfParts].join("\n\n");
       modelContent = modelContent ? `${modelContent}\n\n${allFileCtx}` : allFileCtx;
+      // Non-vision-capable models won't see images directly; give them a textual hint.
+      if(imageNames.length){
+        const imgHint = `[Attached ${imageNames.length} image${imageNames.length>1?"s":""}: ${imageNames.join(", ")}]`;
+        modelContent = modelContent ? `${modelContent}\n\n${imgHint}` : imgHint;
+      }
       // Non-PDF files still show inline
       if(fileParts.length){
         const nonPdfCtx = fileParts.join("\n\n");
@@ -1989,7 +2489,7 @@ function HyprChat(){
       fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:modelContent.trim().slice(0,200),count:6})}).then(r=>r.json()).then(d=>{setQuickResults(d.results||[]);setSearchLoading(false);}).catch(()=>{setQuickResults([]);setSearchLoading(false);});
     }else{setQuickResults([]);}
     const _now=new Date().toISOString();
-    const um={role:"user",content:displayContent,_fullContent:modelContent,metadata:{pdfs:pdfAttachments.length?pdfAttachments:undefined},created_at:_now};
+    const um={role:"user",content:displayContent,_fullContent:modelContent,_images:imageBase64s.length?imageBase64s:undefined,metadata:{pdfs:pdfAttachments.length?pdfAttachments:undefined,images:imageAttachments.length?imageAttachments:undefined},created_at:_now};
     uConv(cid,c=>({...c,title:(!c.messages||!c.messages.length)?(displayContent||pdfAttachments.map(p=>p.name).join(", ")).slice(0,40):c.title,messages:[...(c.messages||[]),um,{role:"assistant",content:"",isS:true,created_at:_now}]}));
     setInp("");setAttachments([]);if(inpRef.current){inpRef.current.style.height="auto";}
     setTimeout(()=>{if(chatScrollRef.current)chatScrollRef.current.scrollTop=chatScrollRef.current.scrollHeight;},0);
@@ -2048,6 +2548,7 @@ function HyprChat(){
     // project upload endpoint instead of treating them as text attachments.
     const isArchive=(f)=>{const n=(f.name||"").toLowerCase();return n.endsWith(".zip")||n.endsWith(".tar")||n.endsWith(".tar.gz")||n.endsWith(".tgz")||n.endsWith(".tar.bz2")||n.endsWith(".tbz2");};
     const isPdf=(f)=>(f.name||"").toLowerCase().endsWith(".pdf");
+    const isImage=(f)=>(f.type||"").startsWith("image/")||/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(f.name||"");
     const coderActive=act?.persona_name&&act.persona_name.includes("Coder");
     let remaining=files;
     if(coderActive){
@@ -2060,6 +2561,16 @@ function HyprChat(){
     }
     const newAttachments=[];
     for(const file of remaining){
+      if(isImage(file)){
+        if(file.size>20*1024*1024){console.warn(`Skipped ${file.name} — image too large (max 20MB)`);continue;}
+        try{
+          const dataUrl=await new Promise((res,rej)=>{const rd=new FileReader();rd.onload=()=>res(rd.result);rd.onerror=rej;rd.readAsDataURL(file);});
+          // Friendly default name for clipboard pastes (browser provides "image.png")
+          const niceName=file.name||`screenshot-${new Date().toISOString().replace(/[:.]/g,"-").slice(0,19)}.png`;
+          newAttachments.push({name:niceName,dataUrl,type:"image",size:file.size,mime:file.type||"image/png"});
+        }catch(e){console.error("Image read failed:",e);}
+        continue;
+      }
       if(isPdf(file)){
         if(file.size>50*1024*1024){console.warn(`Skipped ${file.name} — too large (max 50MB)`);continue;}
         // Add a loading placeholder immediately
@@ -2395,10 +2906,21 @@ function HyprChat(){
   const inlineParse=(text)=>{
     if(!text)return null;
     // Split by: inline-code, images, bold+link, bold, italic(*), italic(_), markdown link, bare URL, double-quoted strings (10+ chars)
-    return text.split(/(`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s"'<>\])\},]+|"[^"\n]{10,}"|[^]+)/g).map((s,k)=>{
+    return text.split(/(`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s"'<>\])\},]+|"[^"\n]{10,}"|<kbd>[^<]+<\/kbd>|rgba?\([^)]+\)|hsla?\([^)]+\)|#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6})\b|[^]+)/g).map((s,k)=>{
       if(!s)return null;
       const imgMatch=s.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
-      if(imgMatch){const[,alt,src]=imgMatch;return <img key={k} src={src} alt={alt||""} style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`}} onError={e=>e.target.style.display="none"}/>;}
+      if(imgMatch){const[,alt,src]=imgMatch;
+        // Force any third-party image URL through our proxy: privacy (no IP/cookies leaked
+        // to NYT/Wikipedia/etc), hotlink bypass (proxy sends domain-matched Referer), and
+        // mixed-content fix. /api/img-proxy URLs and same-origin /api/ URLs pass through.
+        let finalSrc = src;
+        if(/^https?:\/\//i.test(src)){
+          // Decode once if double-encoded (model sometimes encodes %28 → %2528)
+          let raw = src;
+          if(/%25[0-9A-F]{2}/i.test(raw)){try{raw = decodeURIComponent(raw);}catch{}}
+          finalSrc = `${API}/api/img-proxy?u=${encodeURIComponent(raw)}`;
+        }
+        return <img key={k} src={finalSrc} alt={alt||""} referrerPolicy="no-referrer" loading="lazy" style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`}} onError={e=>e.target.style.display="none"}/>;}
       if(s.startsWith("`")&&s.endsWith("`")&&s.length>1)
         return <code key={k} style={{background:`${t.surface}CC`,padding:"1px 5px",borderRadius:3,fontFamily:font,fontSize:"0.88em",color:t.warm}}>{s.slice(1,-1)}</code>;
       if(s.charCodeAt(0)===0xE010){
@@ -2470,6 +2992,18 @@ function HyprChat(){
       // Inline verbatim quote: "text 10+ chars" — highlight as word-for-word source
       if(s.startsWith('"')&&s.endsWith('"')&&s.length>11)
         return <span key={k} style={{color:t.warm,background:`${t.warm}15`,padding:"1px 4px",borderRadius:3,fontStyle:"italic",borderBottom:`1px dashed ${t.warm}66`}} title="Verbatim quote">{s}</span>;
+      // Keyboard keys: <kbd>Ctrl</kbd>
+      if(s.startsWith("<kbd>")&&s.endsWith("</kbd>")){
+        const kv=s.slice(5,-6);
+        return <kbd key={k} style={{display:"inline-block",padding:"1px 6px",background:`linear-gradient(180deg,${t.surface}EE,${t.bgDeep})`,border:`1px solid ${t.brd}AA`,borderBottomWidth:2,borderRadius:4,fontSize:"0.82em",fontFamily:font,color:t.text,boxShadow:`0 1px 0 ${t.brd}88`,verticalAlign:"baseline",margin:"0 1px",minWidth:14,textAlign:"center",lineHeight:1.4}}>{kv}</kbd>;
+      }
+      // Inline color swatch: #rrggbb, #rrggbbaa, rgb(), rgba(), hsl(), hsla()
+      if(s.match(/^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/)||s.match(/^(rgba?|hsla?)\(/)){
+        return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:4,padding:"1px 6px 1px 4px",background:`${t.surface}BB`,border:`1px solid ${t.brd}55`,borderRadius:4,verticalAlign:"middle",margin:"0 1px"}}>
+          <span style={{width:10,height:10,borderRadius:2,background:s,border:`1px solid ${t.brd}66`,flexShrink:0,boxShadow:"inset 0 0 0 1px rgba(255,255,255,.08)"}}/>
+          <code style={{fontSize:"0.85em",color:t.warm,background:"none",padding:0,fontFamily:font}}>{s}</code>
+        </span>;
+      }
       return s;
     });
   };
@@ -2478,7 +3012,8 @@ function HyprChat(){
   const mdStream=(text)=>{
     if(!text)return null;
     let t2=text;
-    const fences=(t2.match(/```/g)||[]).length;
+    // Only line-start ``` (allowing up to 3 spaces of CommonMark indent) counts as a fence delimiter.
+    const fences=(t2.match(/(?:^|\n)[ \t]{0,3}```/g)||[]).length;
     if(fences%2!==0)t2+="\n```";
     // Count single backticks (exclude triple backticks first)
     const stripped=t2.replace(/```/g,"");
@@ -2502,7 +3037,12 @@ function HyprChat(){
       if(!(lbl in _fnIdx)){_fnOrder.push(lbl);_fnIdx[lbl]=_fnOrder.length;}
       return ""+_fnPrefix+":"+_fnIdx[lbl]+"";
     });
-    const _rendered = text.split(/(```[\s\S]*?```|<details[\s\S]*?<\/details>)/g).map((p,i)=>{
+    // Auto-close unclosed fences so a model that opens ```chart and gets interrupted
+    // by a tool call (or just forgets) still renders as a block instead of raw text.
+    // Count only line-start ``` (allowing up to 3 spaces of CommonMark indent) so inline
+    // mentions like ` ```chart ` in prose don't throw off the balance.
+    if(((text.match(/(?:^|\n)[ \t]{0,3}```/g)||[]).length)%2!==0)text+="\n```";
+    const _rendered = text.split(/((?<=^|\n)[ \t]{0,3}```[\s\S]*?\n[ \t]{0,3}```[ \t]*(?=\n|$)|<details[\s\S]*?<\/details>)/g).map((p,i)=>{
       if(p.startsWith("<details")){
         const sm=p.match(/<summary[^>]*>([\s\S]*?)<\/summary>/i);
         const summary=sm?sm[1].trim():"Details";
@@ -2514,9 +3054,18 @@ function HyprChat(){
         const open=/^<details[^>]*\bopen\b/i.test(p);
         return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open}>{md(body)}</Collapsible>;
       }
-      if(p.startsWith("```")){
-        const m=p.match(/```(\w*)\n?([\s\S]*?)```/);const lang=m?.[1]||"",code=m?.[2]||p.slice(3,-3);const bid=`c${i}`;
+      if(/^[ \t]{0,3}```/.test(p)){
+        const m=p.match(/^[ \t]*```(\w*)\n?([\s\S]*?)\n?[ \t]*```[ \t]*$/);
+        const lang=m?.[1]||"";
+        let code=m?.[2]||p.replace(/^[ \t]*```[^\n]*\n?/,"").replace(/\n?[ \t]*```[ \t]*$/,"");
+        // Dedent: strip common leading whitespace (LLMs often indent fences inside list items)
+        const _codeLines=code.split("\n");
+        const _indents=_codeLines.filter(l=>l.trim()).map(l=>(l.match(/^[ \t]*/)?.[0].length)||0);
+        const _minIndent=_indents.length?Math.min(..._indents):0;
+        if(_minIndent>0)code=_codeLines.map(l=>l.slice(_minIndent)).join("\n");
+        const bid=`c${i}`;
         if(lang==="mermaid")return <MermaidBlock key={i} code={code} theme={t} font={font} epoch={mermaidEpoch}/>;
+        if(lang==="chart")return <ChartBlock key={i} code={code} theme={t} font={font} epoch={mermaidEpoch}/>;
         const isDiff=lang==="diff";
         return <div key={i} style={{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`}}>
@@ -2548,18 +3097,49 @@ function HyprChat(){
           return <div key={`m${si}`} style={{margin:"12px 0",textAlign:"center",overflowX:"auto",color:t.text,fontSize:"1.05em"}}>{seg}</div>;
         }
         seg=seg.split(_DD).join("$$").split(_SD).join("$");
-        return <React.Fragment key={`s${si}`}>{seg.split("\n").map((ln,j)=>{
+        const _lines=seg.split("\n");
+        const _consumed=new Set();
+        return <React.Fragment key={`s${si}`}>{_lines.map((ln,j)=>{
+        if(_consumed.has(j))return null;
         if(ln.match(/^---+$|^\*\*\*+$|^___+$/))return <hr key={j} style={{border:"none",borderTop:`1px solid ${t.brd}44`,margin:"10px 0"}}/>;
         if(ln.match(/^##### /))return <div key={j} style={{fontSize:12,fontWeight:700,color:t.acc,margin:"8px 0 3px"}}>{inlineParse(ln.slice(6))}</div>;
         if(ln.match(/^#### /))return <div key={j} style={{fontSize:13,fontWeight:700,color:t.acc,margin:"10px 0 4px"}}>{inlineParse(ln.slice(5))}</div>;
         if(ln.match(/^### /))return <div key={j} style={{fontSize:14,fontWeight:700,color:t.acc,margin:"12px 0 5px"}}>{inlineParse(ln.slice(4))}</div>;
         if(ln.match(/^## /))return <div key={j} style={{fontSize:15,fontWeight:700,color:t.acc,margin:"14px 0 6px"}}>{inlineParse(ln.slice(3))}</div>;
         if(ln.match(/^# /))return <div key={j} style={{fontSize:17,fontWeight:700,color:t.acc,margin:"16px 0 7px"}}>{inlineParse(ln.slice(2))}</div>;
+        /* GitHub-style callout: > [!NOTE|TIP|IMPORTANT|WARNING|CAUTION] */
+        const mCallout=ln.match(/^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$/i);
+        if(mCallout){
+          const ctype=mCallout[1].toUpperCase();
+          const firstRest=mCallout[2]||"";
+          const bodyLines=[];
+          if(firstRest.trim())bodyLines.push(firstRest);
+          let ck=j+1;
+          while(ck<_lines.length && _lines[ck].match(/^>\s?/)){
+            bodyLines.push(_lines[ck].replace(/^>\s?/,""));
+            _consumed.add(ck);
+            ck++;
+          }
+          const cfg={
+            NOTE:{color:t.acc,icon:"ℹ",label:"Note"},
+            TIP:{color:t.ok,icon:"💡",label:"Tip"},
+            IMPORTANT:{color:t.warm,icon:"★",label:"Important"},
+            WARNING:{color:"#f0a030",icon:"⚠",label:"Warning"},
+            CAUTION:{color:t.err,icon:"⛔",label:"Caution"}
+          }[ctype];
+          return <div key={j} style={{borderLeft:`3px solid ${cfg.color}`,background:`${cfg.color}12`,padding:"8px 12px 10px",borderRadius:"0 6px 6px 0",margin:"8px 0"}}>
+            <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:bodyLines.length?5:0,fontSize:10,fontWeight:700,color:cfg.color,textTransform:"uppercase",letterSpacing:0.8}}>
+              <span style={{fontSize:13,lineHeight:1}}>{cfg.icon}</span>
+              <span>{cfg.label}</span>
+            </div>
+            {bodyLines.length>0 && <div style={{color:t.text,fontSize:"0.95em",lineHeight:1.55}}>{bodyLines.map((bl,bi)=><div key={bi} style={{minHeight:bl===""?6:"auto"}}>{inlineParse(bl)}</div>)}</div>}
+          </div>;
+        }
         if(ln.match(/^>\s?/)){const qRaw=ln.replace(/^>\s?/,"");
         /* If this line is just an attribution (— Name...), skip — it was consumed by the previous quote line */
         if(qRaw.match(/^[—–]\s/))return null;
         /* Look ahead: if next line is "> — Attribution", grab it */
-        const allLines=seg.split("\n");const nextLn=(j+1<allLines.length)?allLines[j+1]:"";
+        const nextLn=(j+1<_lines.length)?_lines[j+1]:"";
         const nextAttr=nextLn.match(/^>\s?[—–]\s*(.+)/);
         const attrLabel=nextAttr?nextAttr[1]:"quoted source";
         return <div key={j} style={{borderLeft:`3px solid ${t.warm}`,paddingLeft:12,margin:"6px 0",background:`${t.warm}0D`,borderRadius:"0 6px 6px 0",padding:"8px 12px",borderLeftWidth:3,borderLeftStyle:"solid",borderLeftColor:t.warm}}>
@@ -2577,11 +3157,27 @@ function HyprChat(){
         }
         if(ln.match(/^\d+\.\s+/)){const num=ln.match(/^(\d+)\./)[1];return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:t.acc,minWidth:18,flexShrink:0,fontWeight:600,fontSize:"0.9em"}}>{num}.</span><span style={{flex:1}}>{inlineParse(ln.replace(/^\d+\.\s+/,""))}</span></div>;}
         if(ln.match(/^\|.+\|/)){
-          const isDivider=ln.replace(/[\s\-:|]/g,"").length===0;
-          if(isDivider)return null;
-          const cells=ln.split("|").slice(1,-1).map(c=>c.trim());
-          return <div key={j} style={{display:"flex",gap:0,borderBottom:`1px solid ${t.brd}22`,fontSize:11}}>
-            {cells.map((c,ci)=><div key={ci} style={{flex:1,padding:"3px 8px",borderRight:ci<cells.length-1?`1px solid ${t.brd}22`:"none",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{inlineParse(c)}</div>)}
+          /* Group contiguous pipe-rows into one <table> with header + alignment */
+          const tRows=[ln];
+          let tk=j+1;
+          while(tk<_lines.length && _lines[tk].match(/^\|.+\|/)){
+            tRows.push(_lines[tk]);_consumed.add(tk);tk++;
+          }
+          const parseRow=r=>r.split("|").slice(1,-1).map(c=>c.trim());
+          const isDivRow=r=>r.replace(/[\s\-:|]/g,"").length===0&&r.includes("-");
+          let header=null,aligns=[],body=[];
+          if(tRows.length>=2&&isDivRow(tRows[1])){
+            header=parseRow(tRows[0]);
+            aligns=parseRow(tRows[1]).map(c=>{const lf=c.startsWith(":"),rg=c.endsWith(":");return lf&&rg?"center":rg?"right":"left";});
+            body=tRows.slice(2).map(parseRow);
+          }else{
+            body=tRows.filter(r=>!isDivRow(r)).map(parseRow);
+          }
+          return <div key={j} style={{margin:"10px 0",overflowX:"auto",borderRadius:8,border:`1px solid ${t.brd}44`,background:`${t.bgDeep}66`}}>
+            <table style={{borderCollapse:"collapse",width:"100%",fontSize:12,fontFamily:font}}>
+              {header&&<thead><tr>{header.map((h,hi)=><th key={hi} style={{textAlign:aligns[hi]||"left",padding:"7px 12px",borderBottom:`1px solid ${t.brd}66`,background:`${t.surface}AA`,color:t.acc,fontWeight:700,fontSize:10,letterSpacing:0.5,textTransform:"uppercase",whiteSpace:"nowrap"}}>{inlineParse(h)}</th>)}</tr></thead>}
+              <tbody>{body.map((row,ri)=><tr key={ri} style={{borderBottom:ri<body.length-1?`1px solid ${t.brd}22`:"none"}}>{row.map((c,ci)=><td key={ci} style={{textAlign:aligns[ci]||"left",padding:"6px 12px",color:t.dim,verticalAlign:"top",lineHeight:1.5,wordBreak:"break-word"}}>{inlineParse(c)}</td>)}</tr>)}</tbody>
+            </table>
           </div>;
         }
         return <div key={j} style={{minHeight:ln===""?8:"auto"}}>{inlineParse(ln)}</div>;
@@ -4375,6 +4971,16 @@ function HyprChat(){
           <div style={{fontSize:10,color:t.mut,marginTop:4}}>Controls whether models use thinking tokens. Auto lets the model decide.</div>
         </div>
 
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Default Effort Level</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+            {EFFORT_LEVELS.map((lv,v)=><button key={v} title={lv.desc} onClick={()=>setGlobalEffort(v)} style={{padding:"6px 12px",borderRadius:7,border:`1px solid ${globalEffort===v?t.pink:t.brd}44`,background:globalEffort===v?`${t.pink}22`:t.bgDeep,color:globalEffort===v?t.pink:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:globalEffort===v?700:400,display:"inline-flex",alignItems:"center",gap:5}}>
+              <span style={{fontSize:14}}>{lv.emoji}</span>{lv.name}
+            </button>)}
+          </div>
+          <div style={{fontSize:10,color:t.mut,marginTop:4}}>After the initial answer, the model re-examines and refines it. {EFFORT_LEVELS[globalEffort].name} = {globalEffort===0?"no review":`${globalEffort} review pass${globalEffort>1?"es":""}`}. Each chat can override this.</div>
+        </div>
+
         <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
           <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Workspace Analysis Model</div>
           <ModelPicker value={wsModel} onChange={setWsModel} models={models} modelDetails={modelDetails} t={t} font={font}/>
@@ -4391,7 +4997,7 @@ function HyprChat(){
             <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Same as chat model</div><div style={{fontSize:9,color:t.dim}}>Click to select a dedicated planning model</div></div>
             <span style={{fontSize:9,color:t.mut}}>▾</span>
           </div>}
-          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Model used by plan_project to design architecture before coding. Best with a strong reasoning model.</div>
+          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Model used by plan_project to design architecture before coding. Empty = uses the active chat model.</div>
         </div>
 
         <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
@@ -4795,7 +5401,7 @@ function HyprChat(){
             // Compat: flatten all rounds into .responses for voting display
             for(const turn of turns){turn.responses=Object.values(turn.rounds).flat();}
             const isLastTurn=(ti)=>ti===turns.length-1;
-            return <div style={{maxWidth:"100%",padding:"0 20px",overflowY:"auto"}}>
+            return <div key={actId||"empty"} style={{maxWidth:"100%",padding:"0 20px",overflowY:"auto"}}>
               {turns.map((turn,ti)=><div key={ti} style={{marginBottom:28,animation:`fadeIn .3s both`}}>
                 {/* User message */}
                 <div style={{display:"flex",gap:9,alignItems:"flex-start",marginBottom:12}}>
@@ -4965,7 +5571,7 @@ function HyprChat(){
               </div>}
               <div ref={chatEnd}/>
             </div>;
-          })():<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 16px"}}>
+          })():<div key={actId||"empty"} style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 16px"}}>
             {(()=>{const filteredMsgs=(act.messages||[]).filter(msg=>msg.role==="user"||msg.role==="assistant");
               // Find the index of the last assistant message to place quick search results before it
               let lastAssistantFilteredIdx=-1;
@@ -5019,6 +5625,7 @@ function HyprChat(){
                       </span>
                       :<span style={{color:t.mut}}>{act.model||"assistant"}</span>}
                     {msg.created_at&&<span style={{fontSize:9,color:t.mut,opacity:.4,marginLeft:2}}>{new Date(msg.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
+                    {!isU&&!msg.isS&&(()=>{const meta=typeof msg.metadata==="string"?(()=>{try{return JSON.parse(msg.metadata);}catch{return{};}})():(msg.metadata||{});const n=meta.refinements||0;if(n<=0)return null;const lvl=EFFORT_LEVELS[n]||EFFORT_LEVELS[EFFORT_LEVELS.length-1];return <span title={`Refined ${n}× via ${lvl.name}`} style={{fontSize:9,padding:"1px 6px",borderRadius:8,background:`${t.pink}15`,border:`1px solid ${t.pink}30`,color:t.pink,display:"inline-flex",alignItems:"center",gap:3,fontWeight:600}}>✨ Refined {n}×</span>;})()}
                   </div>
                   <div style={{background:isU?`${t.surface}60`:"transparent",padding:isU?"10px 14px":"0",borderRadius:isU?10:0,border:isU?`1px solid ${t.brd}28`:"none",lineHeight:1.7,fontSize:fontSize,color:t.dim}}>
                     {isEditing?<div style={{display:"flex",flexDirection:"column",gap:6}}>
@@ -5030,6 +5637,12 @@ function HyprChat(){
                       </div>
                     </div>
                     :msg.isS?mdStream(msg.content):<MDWrap>{md(msg.content)}</MDWrap>}
+                    {isU&&msg.metadata?.images?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:msg.content?10:0}}>
+                      {msg.metadata.images.map((img,ii)=><div key={ii} title={img.name} style={{display:"inline-flex",flexDirection:"column",gap:4,alignItems:"flex-start",maxWidth:260}}>
+                        <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:8,border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:`0 2px 10px ${t.acc}18`}}/>
+                        <span style={{fontSize:9,color:t.mut,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:260}}>📷 {img.name}</span>
+                      </div>)}
+                    </div>}
                     {isU&&msg.metadata?.pdfs?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:msg.content?8:0}}>
                       {msg.metadata.pdfs.map((p,pi)=><span key={pi} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.err}10`,border:`1px solid ${t.err}25`,padding:"5px 12px",borderRadius:8,fontSize:11,fontWeight:500,color:t.text}}>
                         <span style={{fontSize:16}}>📄</span>
@@ -5038,11 +5651,33 @@ function HyprChat(){
                       </span>)}
                     </div>}
                     {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                    {msg.isS&&!msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
+                    {msg.isS&&!msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
                   </div>
-                  {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:null;})()}
-                  {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>:null;})()}
-                  {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/>;})()}
+                  {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:null;})()}
+                  {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:null;})()}
+                  {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>;})()}
+                  {/* Coder Bot v2 — durable run cards. Render one card per unique run_id.
+                      Sources, in priority: explicit metadata.run_ids (written server-side at
+                      each round boundary — survives mid-stream reload), then live events
+                      (current message), then saved_events (history). */}
+                  {(()=>{
+                    if(isU) return null;
+                    const msgs = act.messages||[];
+                    const lastAI = msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;
+                    const isLast = i===lastAI;
+                    // Merge run_ids from all three sources, dedup, preserve first-seen order.
+                    const ridsFromMeta = Array.isArray(msg.metadata?.run_ids) ? msg.metadata.run_ids : [];
+                    const ridsFromEvts = _runIdsFromEvents(isLast && evts.length>0 ? evts : (msg.metadata?.saved_events||[]));
+                    const seen = new Set();
+                    const runIds = [];
+                    for(const r of [...ridsFromMeta, ...ridsFromEvts]){
+                      if(r && !seen.has(r)){seen.add(r); runIds.push(r);}
+                    }
+                    if(!runIds.length) return null;
+                    return runIds.map(rid =>
+                      <RunCard key={rid} runId={rid} liveEvts={isLast?evts:[]} t={t} font={font} md={md}/>
+                    );
+                  })()}
                   {/* Inline code execution output */}
                   {(()=>{if(isU)return null;const savedEvts=msg.metadata?.saved_events||[];const codeOuts=savedEvts.filter(e=>e.type==="code_output");if(!codeOuts.length)return null;return codeOuts.map((e,ci)=>{const d=e.data||{};const ckey=`${i}-${ci}`;const collapsed=collapsedOutputs.has(ckey);const toggleCollapsed=()=>setCollapsedOutputs(s=>{const n=new Set(s);if(n.has(ckey))n.delete(ckey);else n.add(ckey);return n;});return <div key={ci} style={{margin:"8px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${d.success?`${t.ok}33`:`${t.err}33`}`,background:t.bgDeep}}>
                     <div onClick={toggleCollapsed} title={collapsed?"Show output":"Hide output"} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${d.success?t.ok:t.err}10`,borderBottom:collapsed?"none":`1px solid ${d.success?t.ok:t.err}22`,cursor:"pointer",userSelect:"none"}}>
@@ -5110,7 +5745,7 @@ function HyprChat(){
                 </div>
               </div></React.Fragment>;
             });})()}
-            {evts.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}><ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview}/></div>}
+            {evts.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}><ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/></div>}
             <div ref={chatEnd}/>
           </div>}
         </div>
@@ -5148,7 +5783,14 @@ function HyprChat(){
               {!councilSugLoading&&<button onClick={()=>fetchCouncilSuggestions(act?.council_config_id)} title="Regenerate suggestions" style={{background:"none",border:`1px solid ${t.brd}33`,borderRadius:"50%",width:24,height:24,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:11,flexShrink:0}}>↻</button>}
             </div>}
           {attachments.length>0&&<div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",flexWrap:"wrap",gap:6,padding:"6px 0"}}>
-            {attachments.map((a,i)=>a.type==="pdf"?
+            {attachments.map((a,i)=>a.type==="image"?
+              <span key={i} title={a.name} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.acc}10`,border:`1px solid ${t.acc}30`,padding:"3px 8px 3px 3px",borderRadius:10,fontSize:10,fontWeight:600,maxWidth:240}}>
+                <img src={a.dataUrl} alt={a.name} style={{height:32,width:32,objectFit:"cover",borderRadius:6,border:`1px solid ${t.acc}33`,display:"block",cursor:"pointer"}} onClick={()=>openPreview&&openPreview(a.name,a.dataUrl)}/>
+                <span style={{color:t.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:140}}>{a.name}</span>
+                <span style={{color:t.mut,fontWeight:400,fontSize:9}}>{(a.size/1024).toFixed(0)}KB</span>
+                <span onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} style={{cursor:"pointer",opacity:.6,marginLeft:2,color:t.acc}}>&times;</span>
+              </span>
+            :a.type==="pdf"?
               <span key={i} style={{display:"inline-flex",alignItems:"center",gap:6,background:a.loading?`${t.warm}12`:`${t.err}10`,border:`1px solid ${a.loading?t.warm:t.err}30`,color:a.loading?t.warm:t.err,padding:"4px 10px",borderRadius:10,fontSize:10,fontWeight:600,transition:"all .2s"}}>
                 <span style={{fontSize:13}}>{a.loading?"⏳":"📄"}</span>
                 <span style={{color:t.text,fontWeight:500}}>{a.name}</span>
@@ -5180,6 +5822,24 @@ function HyprChat(){
                 </div>
               </div>}
             </div>}
+            {!act?.is_council&&(()=>{const lvl=resolveEffort(actId);const L=EFFORT_LEVELS[lvl]||EFFORT_LEVELS[0];const overridden=actId&&effortPerChat[actId]!==undefined&&effortPerChat[actId]!==globalEffort;return <div ref={effortPickerRef} style={{position:"relative",flexShrink:0}}>
+              <button onClick={()=>setShowEffortPicker(p=>!p)} title={`Effort: ${L.name} — ${L.desc}${overridden?" (overrides global)":""}`} style={{background:showEffortPicker?`${t.pink}15`:"none",border:overridden?`1px solid ${t.pink}55`:"none",color:lvl>0?t.pink:t.mut,cursor:"pointer",padding:"3px 8px",borderRadius:8,display:"flex",alignItems:"center",gap:4,fontSize:11,flexShrink:0,opacity:lvl>0?1:.65,fontWeight:600}}>
+                <span style={{fontSize:13}}>{L.emoji}</span><span style={{fontSize:10}}>{L.name}</span>
+              </button>
+              {showEffortPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:50,background:t.bgDeep,border:`1px solid ${t.pink}33`,borderRadius:10,boxShadow:`0 4px 24px #0008`,minWidth:200,padding:6}}>
+                <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,padding:"3px 6px 5px",fontWeight:700}}>Effort — this chat</div>
+                {EFFORT_LEVELS.map((lv,v)=><button key={v} onClick={()=>{if(actId){setEffortPerChat(p=>({...p,[actId]:v}));}setShowEffortPicker(false);}} style={{display:"flex",alignItems:"center",gap:6,width:"100%",textAlign:"left",padding:"6px 8px",borderRadius:6,background:lvl===v?`${t.pink}18`:"transparent",border:"none",color:lvl===v?t.pink:t.dim,cursor:"pointer",fontSize:11,fontFamily:font,marginBottom:2}}>
+                  <span style={{fontSize:14}}>{lv.emoji}</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:600}}>{lv.name}{globalEffort===v&&<span style={{fontSize:8,color:t.mut,marginLeft:4,opacity:.7}}>default</span>}</div>
+                    <div style={{fontSize:9,color:t.mut}}>{lv.desc}</div>
+                  </div>
+                </button>)}
+                {actId&&effortPerChat[actId]!==undefined&&<div style={{borderTop:`1px solid ${t.brd}22`,marginTop:4,paddingTop:4}}>
+                  <button onClick={()=>{setEffortPerChat(p=>{const n={...p};delete n[actId];return n;});setShowEffortPicker(false);}} style={{width:"100%",background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:10,padding:"4px 0",fontFamily:font}}>Use global default →</button>
+                </div>}
+              </div>}
+            </div>;})()}
             </>}
             <textarea ref={inpRef} value={inp} onChange={e=>setInp(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
               placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":"What's on your mind?"}`} rows={1}

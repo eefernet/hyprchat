@@ -303,13 +303,20 @@ async def delete_kb_index(kb_id: str):
         print(f"[RAG] Error deleting collection {kb_id}: {e}")
 
 
-async def query(kb_ids: list[str], query_text: str, top_k: int = 6) -> list[dict]:
+async def query(kb_ids: list[str], query_text: str, top_k: int = 6,
+                prefer_filename_hints: list[str] | None = None) -> list[dict]:
     """Query multiple KBs and return the most relevant chunks.
 
     Args:
         kb_ids: List of KB IDs to search
         query_text: The user's question/query
         top_k: Number of chunks to return (total across all KBs)
+        prefer_filename_hints: Optional list of filename substrings (e.g. ["java_", "javafx_",
+            "spring_"]) used to bias retrieval toward language/framework-relevant files. Hints
+            are case-insensitive substring matches on the chunk's source filename. When set,
+            the function over-fetches (3× top_k) per KB, then partitions results into
+            "matching hint" and "other" groups and returns matching first (filling any leftover
+            slots with the best non-matching chunks). When unset, behavior is unchanged.
 
     Returns:
         List of dicts with keys: text, filename, kb_id, score, chunk_index
@@ -323,6 +330,9 @@ async def query(kb_ids: list[str], query_text: str, top_k: int = 6) -> list[dict
         print("[RAG] Query embedding failed — falling back to empty results")
         return []
 
+    # When biasing by filename hints, over-fetch so we have headroom to re-rank.
+    fetch_k = top_k * 3 if prefer_filename_hints else top_k
+
     # Query each KB's collection
     all_results = []
     for kb_id in kb_ids:
@@ -334,7 +344,7 @@ async def query(kb_ids: list[str], query_text: str, top_k: int = 6) -> list[dict
 
             results = collection.query(
                 query_embeddings=[query_embedding],
-                n_results=min(top_k, count),
+                n_results=min(fetch_k, count),
                 include=["documents", "metadatas", "distances"],
             )
 
@@ -354,8 +364,17 @@ async def query(kb_ids: list[str], query_text: str, top_k: int = 6) -> list[dict
         except Exception as e:
             print(f"[RAG] Query error for {kb_id}: {e}")
 
-    # Sort by score descending and take top_k
     all_results.sort(key=lambda x: x["score"], reverse=True)
+
+    if prefer_filename_hints:
+        hints = [h.lower() for h in prefer_filename_hints if h]
+        matched, other = [], []
+        for r in all_results:
+            fn = (r.get("filename") or "").lower()
+            (matched if any(h in fn for h in hints) else other).append(r)
+        ordered = matched + other
+        return ordered[:top_k]
+
     return all_results[:top_k]
 
 

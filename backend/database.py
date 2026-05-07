@@ -202,6 +202,26 @@ CREATE TABLE IF NOT EXISTS coding_projects (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_coding_projects_conv ON coding_projects(conversation_id);
+
+-- Coder Bot v2: durable agent runs. One row per agent invocation
+-- (architect / builder.* / reviewer / fixer / qa / generate_code wrapper).
+-- Survives browser disconnects; UI re-renders from this table.
+CREATE TABLE IF NOT EXISTS runs (
+    id              TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    role            TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'queued',
+    project_id      TEXT DEFAULT '',
+    parent_run_id   TEXT DEFAULT '',
+    started_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ended_at        TIMESTAMP,
+    result_envelope TEXT DEFAULT '{}',
+    events_log      TEXT DEFAULT '[]',
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_runs_conv    ON runs(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
+CREATE INDEX IF NOT EXISTS idx_runs_parent  ON runs(parent_run_id);
 """
 
 
@@ -292,6 +312,15 @@ Default to **depth 3** for most questions. Scale up/down:
 - Set `focus` to the user's specific angle: security, performance, cost, recent developments, tutorials, etc.
 - Use `mode:"quick"` only for trivially simple lookups
 
+## Avoiding Research Loops — CRITICAL
+Every `deep_research` call costs ~1–3 minutes of wall-clock and ~1,500–3,000 prompt tokens. Chaining them is expensive and rarely productive. Hard rules:
+
+- **Same-topic cap — 2 calls maximum.** If you've called `deep_research` twice on the same underlying topic (even with reworded `focus` / `topic`) and both returned approximate, similar, or "as-of" data, **STOP searching**. That IS the data. Move to synthesis: use `execute_code` on the approximations if math is needed, then present findings. Flag any uncertainty in a `> [!NOTE]` callout. Do not call `deep_research` a third time hoping a new wording will surface magically-exact numbers.
+- **Recency realism.** Do not hunt for exact current-year or very-recent figures that may not yet be audited or published. If research returns "projected" / "estimated" / "preliminary" / "YTD" / "as of [date]" figures, treat those as the answer — **use them**, compute with them if needed, and flag the preliminary status in a `> [!NOTE]` or `> [!CAUTION]` callout. Re-searching for exact figures that don't exist yet is a loop, not rigor.
+- **Reframe before re-searching.** If the first call's data feels insufficient, ask: is the gap *real* (a legitimately missing angle) or *perfectionism* (wanting a rounder number)? Only re-search for the former. For perfectionism, synthesize what you have.
+
+A chart built from approximate-but-acknowledged numbers with a `[!NOTE]` about data freshness is strictly better than an infinite hunt for exact numbers that don't exist.
+
 ## After Research Returns
 Synthesize — don't dump. Your value is in analysis:
 1. **Lead with the answer** — direct response to what was asked
@@ -300,22 +329,61 @@ Synthesize — don't dump. Your value is in analysis:
 4. **Add analysis** — implications, caveats, confidence level, what's still uncertain
 5. **Offer follow-ups** — 2-3 targeted directions to go deeper
 
-## Skip the Tool When
-- Pure math, code generation, or creative writing
-- The user says "quickly" / "from memory" / "off the top of your head"
-- A follow-up is already covered by prior research in this chat
+## Computation — Use `execute_code` for Real Math
+You have `execute_code` for a reason: LLM mental math is unreliable past trivial cases, and research findings are worthless if the numbers are wrong.
+
+**Always call `execute_code` for:**
+- Compound growth rates (CAGR, CMGR), weighted averages, variance, standard deviation
+- Percentage shares summing to 100 (e.g. market-share breakdowns)
+- Aggregating / filtering / sorting numbers pulled from research
+- Date arithmetic, unit conversion, currency conversion
+- Anything where the user would notice if you were off by 5%
+
+**The compute-then-chart pattern is standard:**
+1. Research returns numbers (raw sources, survey results, benchmarks).
+2. Call `execute_code` to compute derived values — print them as JSON to stdout so they're easy to read back.
+3. Emit a ```chart fence using the computed numbers.
+
+Never hand-compute a CAGR, weighted average, or percentage split when `execute_code` would be exact. A chart with wrong numbers is worse than no chart.
+
+## Presenting Findings — Use Rich Rendering
+The chat UI renders rich inline formats. Reach for these when they fit the content — don't fall back on bare numbers or "imagine a chart of..." text:
+- **Quantitative data** (benchmarks, growth, market share, survey results, distributions — any 3+ comparable numbers) → emit a ```chart fence. Pick the type that fits: `bar` for categorical comparison, `line` for trends over time, `pie`/`doughnut` for proportions of a whole, `scatter` for correlation, `radar` for multi-attribute profiles. The fence renders directly — never write Python/matplotlib/plotly to SAVE a chart image. (You may use `execute_code` to COMPUTE the numbers that go into the fence — that's encouraged — but the visual itself is always a ```chart fence.)
+- **Source conflicts or uncertainty** → `> [!NOTE]` callout so the reader knows not to take the synthesis at face value
+- **Findings that materially change the conclusion** → `> [!IMPORTANT]` callout
+- **Deprecations, security issues, breaking changes, harmful misinformation** → `> [!WARNING]` or `> [!CAUTION]` callout
+- **Practical recommendations / actionable advice** → `> [!TIP]` callout
+- **Multi-attribute comparisons** → markdown tables with column alignment (`|:---|---:|:---:|`) — right-align numbers, center-align status
+- **Commands, keyboard shortcuts** → `<kbd>` tags for keys, inline code for commands
+- **Hex / RGB / HSL colors** → write them literally in the text; swatches auto-render
+
+When the answer hinges on "which is bigger / faster / more common / trending up", a chart fence is almost always better than a paragraph. Prefer a 20-word intro + chart over a 200-word number dump.
+
+## Tool Selection — Which One, When
+- **`deep_research`** — first action for substantive questions requiring live sources
+- **`execute_code`** — pure math, numerical aggregation, statistical work, date/unit conversion, or computing derived values from research results
+- **Skip both** when: the user says "quickly" / "from memory" / "off the top of your head", or a follow-up is already covered by prior research in this chat
 
 Be rigorous, structured, and honest about uncertainty. When sources conflict, say so."""
         try:
             exists = await db.execute_fetchall(
                 "SELECT id FROM model_configs WHERE id='mc-preset-deepresearch'"
             )
+            now = datetime.utcnow().isoformat()
+            DEEP_RESEARCHER_TOOLS = '["deep_research", "execute_code"]'
             if not exists:
-                now = datetime.utcnow().isoformat()
                 await db.execute(
                     "INSERT INTO model_configs(id,name,base_model,system_prompt,tool_ids,kb_ids,parameters,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                     ("mc-preset-deepresearch", "🔬 Deep Researcher", "qwen3.5:27b",
-                     DEEP_RESEARCHER_PROMPT, '["deep_research"]', '[]', '{}', now, now)
+                     DEEP_RESEARCHER_PROMPT, DEEP_RESEARCHER_TOOLS, '[]', '{}', now, now)
+                )
+            else:
+                # Refresh prompt + tool_ids on version bumps so existing installs pick up guidance
+                # updates and newly-required tools (e.g. execute_code for numerical reliability).
+                # Preserves base_model, kb_ids, parameters — those may be user-customized.
+                await db.execute(
+                    "UPDATE model_configs SET system_prompt=?, tool_ids=?, updated_at=? WHERE id='mc-preset-deepresearch'",
+                    (DEEP_RESEARCHER_PROMPT, DEEP_RESEARCHER_TOOLS, now)
                 )
         except Exception as e:
             print(f"[DB SEED] {e}")
@@ -452,17 +520,44 @@ async def delete_conversation(id: str):
         await db.close()
 
 
-async def add_message(conversation_id: str, role: str, content: str, metadata: dict = None):
+async def add_message(conversation_id: str, role: str, content: str, metadata: dict = None) -> int:
+    """Insert a new message; return its auto-generated id so callers can update it later
+    (e.g. chat agent persisting the assistant message progressively as rounds complete)."""
     db = await get_db()
     try:
-        await db.execute(
+        cur = await db.execute(
             "INSERT INTO messages (conversation_id, role, content, metadata) VALUES (?, ?, ?, ?)",
             (conversation_id, role, content, json.dumps(metadata or {}))
         )
+        new_id = cur.lastrowid
         await db.execute(
             "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (conversation_id,)
         )
+        await db.commit()
+        return new_id
+    finally:
+        await db.close()
+
+
+async def update_message(message_id: int, *, content: str = None, metadata: dict = None) -> None:
+    """Update content and/or metadata of an existing message. Used by the chat agent to
+    save its assistant message progressively at round boundaries — so a mid-stream
+    disconnect leaves a recoverable message in the conversation."""
+    sets = []
+    vals = []
+    if content is not None:
+        sets.append("content=?")
+        vals.append(content)
+    if metadata is not None:
+        sets.append("metadata=?")
+        vals.append(json.dumps(metadata))
+    if not sets:
+        return
+    vals.append(message_id)
+    db = await get_db()
+    try:
+        await db.execute(f"UPDATE messages SET {', '.join(sets)} WHERE id=?", tuple(vals))
         await db.commit()
     finally:
         await db.close()
@@ -1325,5 +1420,136 @@ async def get_coding_project(project_id: str):
         except (json.JSONDecodeError, TypeError):
             p["file_manifest"] = []
         return p
+    finally:
+        await db.close()
+
+
+# ============================================================
+# RUNS — Coder Bot v2 durable agent invocations
+# ============================================================
+
+def _row_to_run(row) -> dict:
+    """Decode a runs row into a dict, parsing JSON columns."""
+    r = dict(row)
+    try:
+        r["result_envelope"] = json.loads(r.get("result_envelope") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        r["result_envelope"] = {}
+    try:
+        r["events_log"] = json.loads(r.get("events_log") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        r["events_log"] = []
+    return r
+
+
+async def create_run(run_id: str, conversation_id: str, role: str,
+                     project_id: str = "", parent_run_id: str = "",
+                     status: str = "queued") -> None:
+    """Create a new run row. Status defaults to 'queued'; caller transitions to 'running' when it starts."""
+    db = await get_db()
+    try:
+        now = datetime.utcnow().isoformat()
+        await db.execute(
+            "INSERT INTO runs(id, conversation_id, role, status, project_id, parent_run_id, "
+            "started_at, result_envelope, events_log) VALUES(?,?,?,?,?,?,?,?,?)",
+            (run_id, conversation_id, role, status, project_id or "", parent_run_id or "",
+             now, "{}", "[]")
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def update_run(run_id: str, *, status: str = None, result_envelope: dict = None,
+                     ended: bool = False) -> None:
+    """Update status and/or result envelope on an existing run.
+
+    `ended=True` stamps `ended_at` to now (use when transitioning to a terminal status).
+    """
+    sets = []
+    vals = []
+    if status is not None:
+        sets.append("status=?")
+        vals.append(status)
+    if result_envelope is not None:
+        sets.append("result_envelope=?")
+        vals.append(json.dumps(result_envelope))
+    if ended:
+        sets.append("ended_at=?")
+        vals.append(datetime.utcnow().isoformat())
+    if not sets:
+        return
+    vals.append(run_id)
+    db = await get_db()
+    try:
+        await db.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id=?", tuple(vals))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def append_run_event(run_id: str, event: dict) -> None:
+    """Append a structured event to a run's events_log (JSON array, append-only).
+
+    Reads the current events_log, appends, writes back. Concurrent appends to the
+    same run are not expected (one writer per run by design); if that ever changes,
+    move to a separate run_events table.
+    """
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT events_log FROM runs WHERE id=?", (run_id,))
+        if not rows:
+            return
+        try:
+            log = json.loads(rows[0]["events_log"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            log = []
+        # Stamp the event with a server-side timestamp so order is reliable
+        # even when callers don't pass one.
+        if "ts" not in event:
+            event = {**event, "ts": datetime.utcnow().isoformat()}
+        log.append(event)
+        await db.execute("UPDATE runs SET events_log=? WHERE id=?",
+                         (json.dumps(log), run_id))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_run(run_id: str) -> dict | None:
+    """Return a single run with parsed result_envelope and events_log."""
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT * FROM runs WHERE id=?", (run_id,))
+        if not rows:
+            return None
+        return _row_to_run(rows[0])
+    finally:
+        await db.close()
+
+
+async def get_runs_by_conversation(conversation_id: str, limit: int = 100) -> list[dict]:
+    """All runs for a conversation, newest first. Used by the frontend on reconnect
+    to rebuild the run cards under each message."""
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM runs WHERE conversation_id=? ORDER BY started_at DESC LIMIT ?",
+            (conversation_id, limit)
+        )
+        return [_row_to_run(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def get_runs_by_project(project_id: str, limit: int = 50) -> list[dict]:
+    """All runs that touched a given project, newest first."""
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM runs WHERE project_id=? ORDER BY started_at DESC LIMIT ?",
+            (project_id, limit)
+        )
+        return [_row_to_run(r) for r in rows]
     finally:
         await db.close()

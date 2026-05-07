@@ -8,6 +8,7 @@ Deploy to CodeBox LXC at /opt/openhands-worker/openhands_worker.py
 import asyncio
 import json
 import os
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -15,6 +16,28 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+
+class _RunCancelled(Exception):
+    """Raised inside on_event when the client requests cancellation."""
+
+
+_ACTIVE_RUNS: dict[str, dict] = {}
+_ACTIVE_RUNS_LOCK = threading.Lock()
+
+
+def _register_run(run_id: str, conversation, cancel_event: threading.Event) -> None:
+    if not run_id:
+        return
+    with _ACTIVE_RUNS_LOCK:
+        _ACTIVE_RUNS[run_id] = {"conversation": conversation, "cancel": cancel_event}
+
+
+def _deregister_run(run_id: str) -> None:
+    if not run_id:
+        return
+    with _ACTIVE_RUNS_LOCK:
+        _ACTIVE_RUNS.pop(run_id, None)
 
 app = FastAPI(title="OpenHands Worker")
 
@@ -85,6 +108,13 @@ class RunRequest(BaseModel):
     language: str = "python"
     context: str = ""
     project_id: str = ""
+    run_id: str = ""
+    # Phase 5 — Builder profile. Default "scaffold" preserves prior behavior
+    # for any caller that doesn't pass one.
+    profile: str = "scaffold"  # scaffold | continue | feature
+    # Only meaningful when profile == "continue": list of manifest files the
+    # last builder run failed to write. The worker focuses on these.
+    manifest_missing: list[str] = []
 
 
 class RunResponse(BaseModel):
@@ -116,6 +146,60 @@ def _persist_tool_cache():
         CACHE_PATH.write_text(json.dumps(_tool_support_cache))
     except Exception as e:
         print(f"[OH-Worker] Failed to persist tool cache: {e}")
+
+
+def _ensure_loaded(ollama_base: str, model: str, num_ctx: int) -> None:
+    """Force-load `model` into Ollama's VRAM with exactly `num_ctx` context.
+
+    Why this exists: litellm's ollama_chat provider doesn't reliably forward
+    options.num_ctx, and once Ollama has a model loaded with one num_ctx, it
+    keeps that loaded instance for subsequent requests regardless of what they
+    ask for. To make the user-set num_ctx authoritative, we evict any existing
+    load with the wrong context and preload with the desired value before the
+    agent run starts. Best-effort — failures don't block the run.
+    """
+    import requests
+
+    try:
+        ps = requests.get(f"{ollama_base}/api/ps", timeout=5).json()
+        for m in (ps.get("models") or []):
+            if m.get("name") == model:
+                cur = m.get("context_length")
+                if cur == num_ctx:
+                    print(f"[OH-Worker] {model} already loaded at num_ctx={num_ctx}, skipping preload")
+                    return
+                print(f"[OH-Worker] {model} loaded at num_ctx={cur}, evicting to reload at {num_ctx}")
+                break
+    except Exception as e:
+        print(f"[OH-Worker] _ensure_loaded ps check failed (non-fatal): {e}")
+
+    # Evict (best-effort) so the next load picks up the new num_ctx.
+    try:
+        requests.post(
+            f"{ollama_base}/api/generate",
+            json={"model": model, "keep_alive": 0},
+            timeout=30,
+        )
+    except Exception as e:
+        print(f"[OH-Worker] _ensure_loaded evict failed (non-fatal): {e}")
+
+    # Preload with empty prompt + the user's num_ctx. This is what binds the
+    # loaded instance to the requested context — Ollama caches options on first
+    # load. Empty prompt makes this nearly free aside from the model swap.
+    try:
+        requests.post(
+            f"{ollama_base}/api/generate",
+            json={
+                "model": model,
+                "prompt": "",
+                "options": {"num_ctx": num_ctx},
+                "keep_alive": "10m",
+            },
+            timeout=180,
+        )
+        print(f"[OH-Worker] Preloaded {model} at num_ctx={num_ctx}")
+    except Exception as e:
+        print(f"[OH-Worker] _ensure_loaded preload failed (non-fatal): {e}")
 
 
 def _check_tool_support(ollama_base: str, model: str) -> bool:
@@ -197,6 +281,8 @@ def run_task(req: RunRequest):
     _ensure_sdk()
     start = time.time()
     progress_log = []
+    cancel_event = threading.Event()
+    conversation = None
 
     try:
         ollama_base = req.ollama_url.rstrip("/")
@@ -206,8 +292,12 @@ def run_task(req: RunRequest):
         # Others (qwen2.5-coder) put JSON in content text → use prompt-based.
         native_tc = _check_tool_support(ollama_base, req.model)
 
-        # ── LLM config (scale context for complex tasks) ──
-        effective_ctx = _scale_num_ctx(req)
+        # ── LLM config ──
+        # The user's num_ctx from HyprChat settings is authoritative — we don't
+        # second-guess it based on task length / keywords. Force-load Ollama at
+        # exactly that value, and pass it nested under "options" so litellm
+        # forwards it as options.num_ctx (Ollama ignores top-level num_ctx).
+        _ensure_loaded(ollama_base, req.model, req.num_ctx)
         llm = _LLM(
             model=f"ollama_chat/{req.model}",
             api_key="ollama",
@@ -217,10 +307,8 @@ def run_task(req: RunRequest):
             num_retries=2,
             drop_params=True,
             native_tool_calling=native_tc,
-            litellm_extra_body={"num_ctx": effective_ctx},
+            litellm_extra_body={"options": {"num_ctx": req.num_ctx}},
         )
-        if effective_ctx != req.num_ctx:
-            print(f"[OH-Worker] Scaled num_ctx: {req.num_ctx} → {effective_ctx} (complex task)")
 
         # ── Agent with core tools ──
         tools = [
@@ -257,6 +345,8 @@ def run_task(req: RunRequest):
 
         # ── Event callback for live progress tracking ──
         def on_event(event):
+            if cancel_event.is_set():
+                raise _RunCancelled()
             try:
                 step_info = _parse_event(event)
                 if step_info:
@@ -292,9 +382,10 @@ def run_task(req: RunRequest):
         if _stuck_thresholds is not None:
             conv_kwargs["stuck_detection_thresholds"] = _stuck_thresholds
         conversation = _Conversation(**conv_kwargs)
+        _register_run(req.run_id, conversation, cancel_event)
 
         conversation.send_message(full_task)
-        print(f"[OH-Worker] Starting run (max_rounds={req.max_rounds}, num_ctx={req.num_ctx})...")
+        print(f"[OH-Worker] Starting run (run_id={req.run_id or '-'}, max_rounds={req.max_rounds}, num_ctx={req.num_ctx})...")
         conversation.run()
 
         status_str = str(conversation.state.execution_status)
@@ -366,6 +457,15 @@ def run_task(req: RunRequest):
             project_id=project_name,
         )
 
+    except _RunCancelled:
+        duration = time.time() - start
+        print(f"[OH-Worker] Run cancelled (run_id={req.run_id or '-'}) after {duration:.1f}s")
+        return RunResponse(
+            status="cancelled",
+            error="Run cancelled by client",
+            duration_seconds=round(duration, 1),
+            steps=progress_log[-20:],
+        )
     except Exception as e:
         duration = time.time() - start
         tb = traceback.format_exc()
@@ -376,6 +476,32 @@ def run_task(req: RunRequest):
             duration_seconds=round(duration, 1),
             steps=progress_log[-20:],
         )
+    finally:
+        _deregister_run(req.run_id)
+        if conversation is not None:
+            try:
+                conversation.close()
+            except Exception as ce:
+                print(f"[OH-Worker] conversation.close() failed (non-fatal): {ce}")
+
+
+@app.post("/cancel/{run_id}")
+def cancel_run(run_id: str):
+    """Cancel an in-flight run by run_id. Idempotent: returns 200 even if not found."""
+    with _ACTIVE_RUNS_LOCK:
+        entry = _ACTIVE_RUNS.get(run_id)
+    if not entry:
+        return {"status": "not_found", "run_id": run_id}
+    entry["cancel"].set()
+    # Also call pause() so the SDK exits at the next iteration even if the
+    # callback hasn't fired yet (e.g., model is mid-stream). close() runs in
+    # the worker thread's finally block.
+    try:
+        entry["conversation"].pause()
+    except Exception as e:
+        print(f"[OH-Worker] pause() during cancel failed (non-fatal): {e}")
+    print(f"[OH-Worker] Cancel signalled for run_id={run_id}")
+    return {"status": "cancelled", "run_id": run_id}
 
 
 @app.post("/run-stream")
@@ -392,6 +518,8 @@ async def run_task_stream(req: RunRequest):
     step_counter = [0]
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
+    cancel_event = threading.Event()
+    conversation_holder = [None]  # populated once Conversation is built
 
     def _send_sse(data):
         try:
@@ -406,6 +534,9 @@ async def run_task_stream(req: RunRequest):
         try:
             ollama_base = req.ollama_url.rstrip("/")
             native_tc = _check_tool_support(ollama_base, req.model)
+            # Force the loaded instance to match req.num_ctx — user setting wins
+            # over Modelfile defaults and over whatever litellm forwards (or fails to forward).
+            _ensure_loaded(ollama_base, req.model, req.num_ctx)
 
             llm = _LLM(
                 model=f"ollama_chat/{req.model}",
@@ -416,7 +547,12 @@ async def run_task_stream(req: RunRequest):
                 num_retries=2,
                 drop_params=True,
                 native_tool_calling=native_tc,
-                litellm_extra_body={"num_ctx": req.num_ctx},
+                # Pass num_ctx nested under "options" so litellm forwards it to
+                # Ollama's options.num_ctx field. A bare {"num_ctx": ...} lands at
+                # the body's top level, which Ollama silently ignores → it falls
+                # back to the modelfile default (often 131K), blowing VRAM and
+                # tripping the 180s timeout.
+                litellm_extra_body={"options": {"num_ctx": req.num_ctx}},
             )
 
             tools = [
@@ -445,6 +581,10 @@ async def run_task_stream(req: RunRequest):
             pre_snapshot = _snapshot_workspace(work_dir)
 
             def on_event(event):
+                # Cancellation check happens BEFORE the inner try/except so
+                # _RunCancelled propagates out of conversation.run().
+                if cancel_event.is_set():
+                    raise _RunCancelled()
                 try:
                     step_info = _parse_event(event)
                     if step_info:
@@ -481,11 +621,13 @@ async def run_task_stream(req: RunRequest):
             if _stuck_thresholds is not None:
                 conv_kwargs["stuck_detection_thresholds"] = _stuck_thresholds
             conversation = _Conversation(**conv_kwargs)
+            conversation_holder[0] = conversation
+            _register_run(req.run_id, conversation, cancel_event)
 
             conversation.send_message(full_task)
             _send_sse({"type": "step", "action": "starting", "detail": f"Agent starting (max {req.max_rounds} rounds)...", "step": 0})
 
-            print(f"[OH-Worker] Starting streamed run (max_rounds={req.max_rounds}, num_ctx={req.num_ctx})...")
+            print(f"[OH-Worker] Starting streamed run (run_id={req.run_id or '-'}, max_rounds={req.max_rounds}, num_ctx={req.num_ctx})...")
             conversation.run()
 
             # Post-run processing
@@ -538,6 +680,16 @@ async def run_task_stream(req: RunRequest):
                 "project_id": project_name,
             }
 
+        except _RunCancelled:
+            duration = time.time() - start
+            print(f"[OH-Worker] Run cancelled (run_id={req.run_id or '-'}) after {duration:.1f}s")
+            result_holder[0] = {
+                "type": "cancelled",
+                "status": "cancelled",
+                "error": "Run cancelled by client",
+                "duration_seconds": round(duration, 1),
+                "steps": progress_log[-20:],
+            }
         except Exception as e:
             duration = time.time() - start
             result_holder[0] = {
@@ -546,6 +698,14 @@ async def run_task_stream(req: RunRequest):
                 "duration_seconds": round(duration, 1),
                 "steps": progress_log[-20:],
             }
+        finally:
+            _deregister_run(req.run_id)
+            conv = conversation_holder[0]
+            if conv is not None:
+                try:
+                    conv.close()
+                except Exception as ce:
+                    print(f"[OH-Worker] conversation.close() failed (non-fatal): {ce}")
 
         # Signal completion
         _send_sse(None)
@@ -580,7 +740,14 @@ async def run_task_stream(req: RunRequest):
 
 
 def _build_task_prompt(req: RunRequest, work_dir: str = "/root", continuing: bool = False) -> str:
-    """Build the task prompt with verification requirements."""
+    """Build the task prompt with verification requirements.
+
+    Phase 5 — the prompt branches on `req.profile`:
+      scaffold (default): create everything from scratch.
+      continue:           resume — focus on the manifest_missing files.
+      feature:            add to an existing tree — read before editing,
+                          edit minimally, do NOT rewrite working files.
+    """
 
     lang = req.language.lower()
 
@@ -598,46 +765,85 @@ def _build_task_prompt(req: RunRequest, work_dir: str = "/root", continuing: boo
 
     verify_cmd = _VERIFY_CMDS.get(lang, f"Run the appropriate syntax check / compiler for {lang}.")
 
-    prompt = f"""## WORKSPACE
-Working directory: `{work_dir}` — {'continue working on existing files here' if continuing else 'create ALL files here'}.
+    profile = (req.profile or "scaffold").lower()
+
+    # Profile-specific opening directives. The base WORKSPACE/CONTEXT/TASK/
+    # VERIFICATION blocks are shared.
+    if profile == "continue":
+        missing_block = ""
+        if req.manifest_missing:
+            missing_lines = "\n".join(f"  - {p}" for p in req.manifest_missing[:30])
+            missing_block = (
+                f"\n## MANIFEST FILES STILL MISSING (focus on these)\n"
+                f"{missing_lines}\n"
+            )
+        opening = f"""## PROFILE: continue
+This is a CONTINUATION of an earlier scaffold run that didn't finish. The
+project tree at `{work_dir}` already has most files written; you are filling
+in what's missing. Do NOT rewrite or restructure files that already exist.
+Read them with `cat` if you need to understand interfaces, then write only
+the missing pieces.{missing_block}
+"""
+    elif profile == "feature":
+        opening = f"""## PROFILE: feature
+This is an EXISTING, working project at `{work_dir}`. The user is asking for
+an additive change. Your job is to make the SMALLEST coherent edit that
+satisfies the task — not to rebuild or refactor the project.
+
+Required first steps:
+  1. `find {work_dir} -type f -not -path '*/target/*' -not -path '*/build/*' \\
+        -not -path '*/node_modules/*' -not -path '*/.git/*' | head -50`
+     to see the existing tree.
+  2. Read the files most relevant to the task before editing them.
+  3. Edit only what's needed. Add new files only if the change genuinely
+     requires new modules. Do NOT regenerate working files just to "tidy" them.
+  4. Re-run the project's build/test command after your edits to confirm
+     nothing regressed.
+
+If the task is genuinely large enough that a refactor is required, say so
+in your finish message and identify the affected files explicitly.
+"""
+    else:  # scaffold (default)
+        opening = f"""## PROFILE: scaffold
+Create ALL files from scratch at `{work_dir}`. The TASK below describes the
+target project; build it.
+"""
+
+    prompt = opening + f"""
+## WORKSPACE
+Working directory: `{work_dir}` — {'continue working on existing files here' if (continuing or profile in ('continue', 'feature')) else 'create ALL files here'}.
 Language: {req.language}
-IMPORTANT: ALL files MUST be created inside `{work_dir}`. Do NOT create files in /root/ directly. Use `{work_dir}/` as the base path for everything.
+IMPORTANT: ALL files MUST live inside `{work_dir}`. Do NOT create files in /root/ directly. Use `{work_dir}/` as the base path for everything.
 """
 
     if req.context:
         prompt += f"\n## CONTEXT\n{req.context}\n"
 
+    git_step = (
+        "5. **Git**: `git init && git add -A && git commit -m 'Initial commit'` "
+        "after the project compiles."
+        if profile == "scaffold" else ""
+    )
+
     prompt += f"""
 ## TASK
 {req.task}
 
-## VERIFICATION
-After writing all code:
-1. **Syntax check**: {verify_cmd}
-2. **Fix errors**: If the check fails, fix the code and re-check.
-3. **Dependencies**: Make sure all imports reference real libraries or files you created.
-4. **Git**: Initialize a git repo with `git init && git add -A && git commit -m 'Initial commit'` after the project works.
+## VERIFICATION (REQUIRED BEFORE finish)
+You MUST complete every step before calling `finish`. `finish` is a gate, not a goal.
 
-Call `finish` once the code compiles/parses without errors.
+1. **Inventory**: Run `ls -R {work_dir}` and confirm every file mentioned in the TASK above exists. If the TASK lists a file structure, EVERY file in that list must be present. Missing any → you are not done.
+2. **Compile / parse**: {verify_cmd}
+3. **Resolve missing references**: If step 2 fails because a referenced class, module, function, type, or import does not exist, you MUST create the missing file(s) with their full contents and re-run step 2. Do NOT stub them out, do NOT call `finish` with unresolved references.
+4. **Dependencies**: Make sure imports reference real libraries (declared in pom.xml/package.json/requirements.txt etc.) or files you created.
+{git_step}
+
+Only call `finish` after step 2 exits 0 with every expected file present. Calling `finish` early — with compile errors, missing files, or unresolved references — counts as task failure.
 """
 
     return prompt
 
 
-def _scale_num_ctx(req: RunRequest) -> int:
-    """Scale num_ctx based on task complexity."""
-    base = req.num_ctx
-    task_len = len(req.task) + len(req.context)
-    # Multi-file keywords suggest more context needed
-    complex_keywords = ["multi-file", "full-stack", "microservice", "monorepo",
-                        "database", "authentication", "frontend and backend",
-                        "react", "vue", "angular", "django", "flask", "express"]
-    is_complex = any(kw in req.task.lower() for kw in complex_keywords)
-    if is_complex or task_len > 2000:
-        return max(base, 32768)
-    elif task_len > 1000:
-        return max(base, 24576)
-    return base
 
 
 def _parse_event(event) -> dict | None:
