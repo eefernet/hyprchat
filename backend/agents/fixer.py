@@ -176,7 +176,8 @@ def _parse_fixer_output(text: str) -> dict:
 
 async def run_fixer(http, events, conv_id: str, *,
                     reviewer_run_id: str = "",
-                    parent_run_id: str = "") -> dict:
+                    parent_run_id: str = "",
+                    conv_model: str = "") -> dict:
     """Execute a Fixer run that addresses every issue in a prior Reviewer envelope.
 
     Returns a structured envelope. Creates a `runs` row with role='fixer' and
@@ -255,7 +256,7 @@ async def run_fixer(http, events, conv_id: str, *,
         })
         return envelope
 
-    fixer_model = (config.CODER_MODEL or config.PLANNING_MODEL
+    fixer_model = (config.CODER_MODEL or conv_model
                    or config.DEFAULT_MODEL or "")
     if not fixer_model:
         envelope = {"status": "error",

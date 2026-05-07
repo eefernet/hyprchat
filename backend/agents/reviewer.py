@@ -344,7 +344,8 @@ def _try_parse_review_json(text: str) -> dict | None:
 
 
 async def run_review(http, events, conv_id: str, project_dir: str,
-                     project_id: str = "", parent_run_id: str = "") -> dict:
+                     project_id: str = "", parent_run_id: str = "",
+                     conv_model: str = "") -> dict:
     """Execute a Reviewer run on a project. Returns the result envelope.
 
     Side effects:
@@ -491,7 +492,7 @@ async def run_review(http, events, conv_id: str, project_dir: str,
         return envelope
 
     # 5. Slow path: feed everything to the planning-model LLM and parse JSON.
-    review_model = config.PLANNING_MODEL or config.DEFAULT_MODEL
+    review_model = config.CODER_MODEL or conv_model or config.DEFAULT_MODEL
     prompt = _REVIEW_PROMPT.format(
         build_cmd=build_cmd or "(none)",
         build_exit=build_result["exit_code"],
