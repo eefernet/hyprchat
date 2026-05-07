@@ -7,18 +7,18 @@ import os
 # ============================================================
 # INFRASTRUCTURE IPs
 # ============================================================
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://192.168.1.110:11434")
-CODEBOX_URL = os.getenv("CODEBOX_URL", "http://192.168.1.201:8585")
-OPENHANDS_URL = os.getenv("OPENHANDS_URL", "http://192.168.1.201:8586")
-SEARXNG_URL = os.getenv("SEARXNG_URL", "http://192.168.1.141:8888")
-N8N_URL = os.getenv("N8N_URL", "http://192.168.1.114:5678")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
+CODEBOX_URL = os.getenv("CODEBOX_URL", "http://127.0.0.1:8585")
+OPENHANDS_URL = os.getenv("OPENHANDS_URL", "http://127.0.0.1:8586")
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://127.0.0.1:8888")
+N8N_URL = os.getenv("N8N_URL", "http://127.0.0.1:5678")
 N8N_WEBHOOK_PATH = os.getenv("N8N_WEBHOOK_PATH", "/webhook/execute-code")
 N8N_RESEARCH_PATH = os.getenv("N8N_RESEARCH_PATH", "/webhook/deep-research")
 
 # ============================================================
 # SERVER
 # ============================================================
-HOST = os.getenv("HOST", "0.0.0.0")
+HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8000"))
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 

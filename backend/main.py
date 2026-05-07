@@ -224,15 +224,23 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="HyprChat", version="2.0.0", lifespan=lifespan)
 
+ALLOWED_ORIGINS = [
+    o.strip() for o in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:8000,http://127.0.0.1:8000",
+    ).split(",") if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
 
-http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0), verify=False)
+HTTP_VERIFY_SSL = os.getenv("HTTP_VERIFY_SSL", "true").lower() == "true"
+http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0), verify=HTTP_VERIFY_SSL)
 
 # ============================================================
 # PYDANTIC MODELS
@@ -2814,7 +2822,7 @@ async def update_app_settings(body: dict = Body(...)):
         config.OLLAMA_URL = body["ollama_url"]
         print(f"[Config] Updated Ollama URL to: {config.OLLAMA_URL}")
     elif "ollama_url" in body and not body["ollama_url"]:
-        config.OLLAMA_URL = os.getenv("OLLAMA_URL", "http://192.168.1.110:11434")
+        config.OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
     if "planning_model" in body:
         config.PLANNING_MODEL = body["planning_model"] or ""
         print(f"[Config] Updated Planning Model to: {config.PLANNING_MODEL or '(use chat model)'}")

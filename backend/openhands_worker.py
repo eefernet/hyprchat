@@ -102,7 +102,7 @@ def _derive_project_name(task: str, language: str) -> str:
 class RunRequest(BaseModel):
     task: str
     model: str = "qwen2.5:14b"
-    ollama_url: str = "http://192.168.1.110:11434"
+    ollama_url: str = "http://127.0.0.1:11434"
     max_rounds: int = 20
     num_ctx: int = 16384
     language: str = "python"
@@ -1095,4 +1095,6 @@ def clean_workspace():
 
 if __name__ == "__main__":
     import uvicorn
+    # Intentional 0.0.0.0 bind: this worker runs inside the Codebox LXC and must be
+    # reachable from the HyprChat host. Lock down at the network/firewall layer instead.
     uvicorn.run(app, host="0.0.0.0", port=8586)

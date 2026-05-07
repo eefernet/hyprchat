@@ -8,6 +8,12 @@ Built with FastAPI + a single-file React SPA. No build step, no cloud dependenci
 
 ---
 
+## ⚠️ Security Warning
+
+HyprChat can execute code, upload files, call local services, and drive coding agents. **Do not expose it directly to the public internet.** Run it behind Tailscale, a VPN, or a reverse proxy with authentication. The default configuration binds to `127.0.0.1` and assumes a trusted local network.
+
+---
+
 ## ✨ Core Features
 
 ### 💬 Chat
