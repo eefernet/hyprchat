@@ -203,6 +203,16 @@ def ssh_cmd(host, user, password, command, timeout=30):
 
 # ── Deploy logic ──
 
+def _show_journal(target, unit, lines=20):
+    """Print the last N journalctl lines for a unit on the given target."""
+    ok, out, _ = ssh_cmd(target["ip"], target["user"], target["pass"],
+        f"journalctl -u {unit} -n {lines} --no-pager 2>&1")
+    if ok and out:
+        print(f"  {DIM}── journalctl -u {unit} (last {lines} lines) ──{RST}")
+        for line in out.splitlines():
+            print(f"  {DIM}{line}{RST}")
+
+
 def deploy_changes(changed, cfg):
     """Deploy changed files and restart service only if needed."""
     hypr = cfg["hyprchat"]
@@ -263,15 +273,18 @@ def deploy_changes(changed, cfg):
         ok, out, err = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
             "systemctl restart hyprchat 2>&1", timeout=90)
         if ok:
-            time.sleep(1)
+            # Bind to a specific interface (e.g. Tailscale IP) can take a few seconds.
+            time.sleep(3)
             ok2, out2, _ = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
                 "systemctl is-active hyprchat 2>&1")
             if ok2 and "active" in out2:
                 print(f"  {G}\u2713{RST} Service running")
             else:
                 print(f"  {Y}!{RST} Service may not be active: {out2}")
+                _show_journal(hypr, "hyprchat")
         else:
             print(f"  {R}\u2717{RST} Restart failed: {err}")
+            _show_journal(hypr, "hyprchat")
 
     # Restart openhands worker on codebox if it was deployed
     if any(fp == "backend/openhands_worker.py" for fp, *_ in changed):
@@ -280,15 +293,17 @@ def deploy_changes(changed, cfg):
         ok, out, err = ssh_cmd(cb["ip"], cb["user"], cb["pass"],
             "systemctl restart openhands-worker 2>&1", timeout=30)
         if ok:
-            time.sleep(1)
+            time.sleep(3)
             ok2, out2, _ = ssh_cmd(cb["ip"], cb["user"], cb["pass"],
                 "systemctl is-active openhands-worker 2>&1")
             if ok2 and "active" in out2:
                 print(f"  {G}\u2713{RST} OpenHands worker running")
             else:
                 print(f"  {Y}!{RST} Worker may not be active: {out2}")
+                _show_journal(cb, "openhands-worker")
         else:
             print(f"  {R}\u2717{RST} Worker restart failed: {err}")
+            _show_journal(cb, "openhands-worker")
 
     print()
     print(f"  {bar('═', G)}")
