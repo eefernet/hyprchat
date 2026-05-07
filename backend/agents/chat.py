@@ -255,11 +255,14 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     kb_context = ""
     persona_system_prompt = None
     persona_kb_ids = []
+    _is_v2_persona = False
     if req.persona_id:
         all_configs = await db.get_model_configs()
         mc = next((c for c in all_configs if c["id"] == req.persona_id), None)
         if mc:
             persona_system_prompt = mc.get("system_prompt") or None
+            if "v2" in (mc.get("name") or "").lower():
+                _is_v2_persona = True
             params = mc.get("parameters", {})
             for key in ("temperature", "num_ctx", "top_p", "top_k"):
                 if params.get(key) is not None:
@@ -462,12 +465,35 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 _ap_lines.append(f"  - {_f}")
             if len(_ap_files) > 25:
                 _ap_lines.append(f"  - ... and {len(_ap_files) - 25} more")
-        _ap_lines.append(
-            "\nIf the user reports a bug, error, or asks for changes to this project: "
-            "use read_file on the relevant files first to see the current code, then fix "
-            "with write_file (small changes) or generate_code with project_id="
-            f"'{_ap_id}' (large changes). Do NOT start a new project."
-        )
+        if _is_v2_persona:
+            _ap_lines.append(
+                "\n## How to handle this project\n"
+                "1. **For QUESTIONS** about the code (\"how does X work?\", \"walk me "
+                "through Y\", \"show me Z\", \"break down W line by line\", \"what does "
+                "this do?\"): your VERY FIRST tool call MUST be `ask_project(question='...')`. "
+                "Do NOT call list_files, read_file, search_files, run_review, run_shell, "
+                "or download_project. The ProjectQA agent reads the code, finds what's "
+                "relevant, and produces a grounded answer with file:line citations in "
+                "ONE round. Hand-rolling read_file across many files is the v1 "
+                "antipattern that wastes rounds.\n"
+                "2. **For CHANGE REQUESTS** (\"add X\", \"fix Y\", \"refactor Z\", "
+                "\"implement W\"): use `generate_code(task='...', project_id="
+                f"'{_ap_id}')` for substantial changes, or `write_file` + `run_review` "
+                "for tweaks to 1-2 files.\n"
+                "3. **For BUG REPORTS** (\"the tests are failing\", \"it crashes when "
+                "...\"): call `run_review(project_dir='/root/projects/" + _ap_id + "')` "
+                "first — the Reviewer runs the build/tests and tells you what's broken.\n"
+                "4. **Do NOT auto-package or download** the project unless the user "
+                "explicitly asks for the tarball/zip. They already uploaded it."
+            )
+        else:
+            # v1 path — keep the existing read_file → write_file/generate_code flow.
+            _ap_lines.append(
+                "\nIf the user reports a bug, error, or asks for changes to this project: "
+                "use read_file on the relevant files first to see the current code, then fix "
+                "with write_file (small changes) or generate_code with project_id="
+                f"'{_ap_id}' (large changes). Do NOT start a new project."
+            )
         messages.append({"role": "system", "content": "\n".join(_ap_lines)})
         print(f"[CHAT] Injected active project context: {_active_project.get('name', '?')} ({len(_ap_files)} files)")
 
@@ -1376,6 +1402,59 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         )
                     except Exception as _rag_e:
                         print(f"[RAG] Auto-index error: {_rag_e}")
+
+            # Short-circuit: if ask_project succeeded as a non-change-request
+            # in this round, stream the QA envelope's answer verbatim and exit
+            # the agent loop. The QA run card already renders the rich grounded
+            # answer with code blocks and citations; without this, the LLM
+            # would paraphrase it on the next round and lose that detail.
+            _called_ask_project = any(
+                _f[2] == "ask_project" for _f in (_futures or [])
+            )
+            if _called_ask_project:
+                try:
+                    _qa_runs = await db.get_runs_by_conversation(conv_id, limit=10)
+                    for _qr in _qa_runs:
+                        if _qr.get("role") != "qa":
+                            continue
+                        _qa_env = _qr.get("result_envelope") or {}
+                        # Only short-circuit when the QA succeeded AND wasn't a
+                        # change request. Change requests should fall through to
+                        # the LLM round so it can route to generate_code/etc.
+                        if (_qr.get("status") == "succeeded"
+                                and not _qa_env.get("looks_like_change_request")
+                                and (_qa_env.get("answer") or "").strip()):
+                            _qa_answer = _qa_env["answer"]
+                            print(f"[CHAT]   QA short-circuit: streaming "
+                                  f"{len(_qa_answer)} chars from {_qr.get('id')}")
+                            for _i in range(0, len(_qa_answer), 8):
+                                yield f"data: {json.dumps({'type': 'token', 'content': _qa_answer[_i:_i+8]})}\n\n"
+                                await asyncio.sleep(0)
+                            if _assistant_msg_id is not None:
+                                try:
+                                    await db.update_message(
+                                        _assistant_msg_id,
+                                        content=_qa_answer,
+                                        metadata={
+                                            "stream_started_at": _stream_started_at,
+                                            "in_progress": False,
+                                            "qa_short_circuit": True,
+                                            "qa_run_id": _qr.get("id"),
+                                        },
+                                    )
+                                except Exception as _pe:
+                                    print(f"[CHAT]   QA persist failed (non-fatal): {_pe}")
+                            await events.emit(conv_id, "complete", {"status": "Complete"})
+                            _done_payload = {
+                                "type": "done", "model": req.model,
+                                "message_id": _assistant_msg_id,
+                            }
+                            yield f"data: {json.dumps(_done_payload)}\n\n"
+                            return
+                        # Latest qa run didn't qualify — fall through to LLM
+                        break
+                except Exception as _qe:
+                    print(f"[CHAT]   QA short-circuit lookup failed (non-fatal): {_qe}")
 
             continue
 
