@@ -190,6 +190,11 @@ async def lifespan(app: FastAPI):
     if "coder_model" in _settings:
         config.CODER_MODEL = _settings["coder_model"] or ""
         print(f"[Config] Loaded Coder Model from settings: {config.CODER_MODEL or '(use chat model)'}")
+    # Workspace model (small/fast model used for quick_search triage,
+    # auto-titles, and topic auto-detection). Empty = inherit chat model.
+    if "workspace_model" in _settings:
+        config.WORKSPACE_MODEL = _settings["workspace_model"] or ""
+        print(f"[Config] Loaded Workspace Model from settings: {config.WORKSPACE_MODEL or '(use chat model)'}")
     # Coder Bot v2 per-agent overrides — each empty by default; only seen here
     # when the user has explicitly pinned a model for that agent.
     for _key, _attr in (
@@ -2812,6 +2817,7 @@ async def get_app_settings():
         "current_ollama_url": config.OLLAMA_URL,
         "current_planning_model": config.PLANNING_MODEL,
         "current_coder_model": config.CODER_MODEL,
+        "current_workspace_model": config.WORKSPACE_MODEL,
         # Coder Bot v2 per-agent overrides — empty string = inherit from umbrella
         "current_architect_model": config.ARCHITECT_MODEL,
         "current_reviewer_model":  config.REVIEWER_MODEL,
@@ -2835,6 +2841,7 @@ async def get_app_settings():
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
     allowed = {"file_cleanup_days", "ollama_url", "rag", "planning_model", "coder_model",
+               "workspace_model",
                "architect_model", "reviewer_model", "builder_model", "fixer_model", "qa_model",
                "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
                "openhands_reasoning_effort", "default_num_ctx"}
@@ -2862,6 +2869,9 @@ async def update_app_settings(body: dict = Body(...)):
     if "coder_model" in body:
         config.CODER_MODEL = body["coder_model"] or ""
         print(f"[Config] Updated Coder Model to: {config.CODER_MODEL or '(use orchestrator model)'}")
+    if "workspace_model" in body:
+        config.WORKSPACE_MODEL = body["workspace_model"] or ""
+        print(f"[Config] Updated Workspace Model to: {config.WORKSPACE_MODEL or '(use chat model)'}")
     # Coder Bot v2 per-agent overrides
     for _key, _attr, _label in (
         ("architect_model", "ARCHITECT_MODEL", "Architect"),
@@ -2899,6 +2909,7 @@ async def update_app_settings(body: dict = Body(...)):
         "current_ollama_url": config.OLLAMA_URL,
         "current_planning_model": config.PLANNING_MODEL,
         "current_coder_model": config.CODER_MODEL,
+        "current_workspace_model": config.WORKSPACE_MODEL,
         "current_architect_model": config.ARCHITECT_MODEL,
         "current_reviewer_model":  config.REVIEWER_MODEL,
         "current_builder_model":   config.BUILDER_MODEL,

@@ -587,6 +587,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 config.WORKSPACE_MODEL or config.DEFAULT_MODEL,
                 events, conv_id, messages,
                 default_model=config.DEFAULT_MODEL,
+                chat_model=req.model or "",
             )
             if qs.get("context"):
                 for m in reversed(messages):

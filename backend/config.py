@@ -68,6 +68,13 @@ EXECUTION_TIMEOUT = int(os.getenv("EXECUTION_TIMEOUT", "60"))
 SEARCH_RESULTS_COUNT = int(os.getenv("SEARCH_RESULTS_COUNT", "15"))
 MAX_FETCH_CHARS = int(os.getenv("MAX_FETCH_CHARS", "8000"))
 
+# Multi-round search agent (replaces the old single-shot quick_search rewrite
+# pipeline). Triage runs against the chat model by default to avoid VRAM-swap
+# latency on single-GPU homelabs; set QUICK_SEARCH_TRIAGE_MODEL to override
+# with e.g. a small workspace model (only worthwhile if it stays co-resident
+# in VRAM with the chat model).
+QUICK_SEARCH_TRIAGE_MODEL = os.getenv("QUICK_SEARCH_TRIAGE_MODEL", "")
+
 # ============================================================
 # DEFAULTS
 # ============================================================

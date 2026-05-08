@@ -48,6 +48,7 @@ WATCHED = {
     "backend/rag.py":               ("RAG Pipeline",     REMOTE_BACKEND,            True),
     "backend/research.py":          ("Research",         REMOTE_BACKEND,            True),
     "backend/quick_search.py":      ("Quick Search",     REMOTE_BACKEND,            True),
+    "backend/search_agent.py":      ("Search Agent",     REMOTE_BACKEND,            True),
     "backend/events.py":            ("Events",           REMOTE_BACKEND,            True),
     "backend/council.py":           ("Council",          REMOTE_BACKEND,            True),
     "backend/hf.py":                ("HuggingFace",      REMOTE_BACKEND,            True),

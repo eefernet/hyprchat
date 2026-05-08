@@ -1728,7 +1728,7 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-ui-font-size",uiFontSize);}catch{}},[uiFontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
   useEffect(()=>{try{localStorage.setItem("hc-custom-quotes",JSON.stringify(customQuotes));}catch{}},[customQuotes]);
-  useEffect(()=>{try{localStorage.setItem("hc-ws-model",wsModel);}catch{}},[wsModel]);
+  useEffect(()=>{try{localStorage.setItem("hc-ws-model",wsModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({workspace_model:wsModel})}).catch(()=>{});}catch{}},[wsModel]);
   useEffect(()=>{try{localStorage.setItem("hc-planning-model",planningModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({planning_model:planningModel})}).catch(()=>{});}catch{}},[planningModel]);
   useEffect(()=>{try{localStorage.setItem("hc-coder-model",coderModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({coder_model:coderModel})}).catch(()=>{});}catch{}},[coderModel]);
   // Coder Bot v2 per-agent overrides — sync each to localStorage + PATCH /api/settings.
@@ -1924,7 +1924,7 @@ function HyprChat(){
     fetch(`${API}/api/tools`).then(r=>r.json()).then(setTools).catch(()=>{});
     fetch(`${API}/api/model-configs`).then(r=>r.json()).then(setMcs).catch(()=>{});
     fetch(`${API}/api/health`).then(r=>r.json()).then(d=>setHealth(d.services||{})).catch(()=>{});
-    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));if(d.current_planning_model!=null)setPlanningModel(d.current_planning_model);if(d.current_coder_model!=null)setCoderModel(d.current_coder_model);if(d.current_architect_model!=null)setArchitectModel(d.current_architect_model);if(d.current_reviewer_model!=null)setReviewerModel(d.current_reviewer_model);if(d.current_builder_model!=null)setBuilderModel(d.current_builder_model);if(d.current_fixer_model!=null)setFixerModel(d.current_fixer_model);if(d.current_qa_model!=null)setQaModel(d.current_qa_model);if(d.openhands_num_ctx!=null)setCoderNumCtx(d.openhands_num_ctx);if(d.openhands_enabled!=null)setOpenhandsEnabled(d.openhands_enabled);if(d.openhands_max_rounds!=null)setOpenhandsMaxRounds(d.openhands_max_rounds);if(d.openhands_reasoning_effort)setOpenhandsReasoningEffort(d.openhands_reasoning_effort);}).catch(()=>{});
+    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));if(d.current_planning_model!=null)setPlanningModel(d.current_planning_model);if(d.current_coder_model!=null)setCoderModel(d.current_coder_model);if(d.current_architect_model!=null)setArchitectModel(d.current_architect_model);if(d.current_reviewer_model!=null)setReviewerModel(d.current_reviewer_model);if(d.current_builder_model!=null)setBuilderModel(d.current_builder_model);if(d.current_fixer_model!=null)setFixerModel(d.current_fixer_model);if(d.current_qa_model!=null)setQaModel(d.current_qa_model);if(d.current_workspace_model!=null)setWsModel(d.current_workspace_model);if(d.openhands_num_ctx!=null)setCoderNumCtx(d.openhands_num_ctx);if(d.openhands_enabled!=null)setOpenhandsEnabled(d.openhands_enabled);if(d.openhands_max_rounds!=null)setOpenhandsMaxRounds(d.openhands_max_rounds);if(d.openhands_reasoning_effort)setOpenhandsReasoningEffort(d.openhands_reasoning_effort);}).catch(()=>{});
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
     fetch(`${API}/api/workspaces`).then(r=>r.json()).then(setWorkspaces).catch(()=>{});
     fetch(`${API}/api/councils`).then(r=>r.json()).then(setCouncils).catch(()=>{});
@@ -1947,7 +1947,11 @@ function HyprChat(){
     const connect=()=>{
       if(closed)return;
       const es=new EventSource(`${API}/api/events/${actId}`);
-      es.onmessage=e=>{try{const ev=JSON.parse(e.data);if(ev.type!=="heartbeat"&&ev.type!=="keepalive"){setEvts(p=>[...p.slice(-200),ev]);streamSaveEvtsRef.current.push(ev);}retryDelay=1000;}catch{}};
+      es.onmessage=e=>{try{const ev=JSON.parse(e.data);if(ev.type!=="heartbeat"&&ev.type!=="keepalive"){setEvts(p=>[...p.slice(-200),ev]);streamSaveEvtsRef.current.push(ev);
+        // Route search_agent results into the QUICK SEARCH carousel — same data
+        // the chat model saw, instead of the old parallel /api/quick-search call.
+        if(ev.type==="search_results"&&ev.data?.source==="quick_search"){setQuickResults(ev.data.results||[]);setSearchLoading(false);}
+        }retryDelay=1000;}catch{}};
       es.onerror=()=>{es.close();if(!closed){retryTimer=setTimeout(()=>{retryDelay=Math.min(retryDelay*2,30000);connect();},retryDelay);}};
       sseR.current=es;
     };
@@ -2499,10 +2503,12 @@ function HyprChat(){
         displayContent = displayContent ? `${displayContent}\n\n${nonPdfCtx}` : nonPdfCtx;
       }
     }
-    // Quick search fires in parallel — don't block the chat
+    // Quick search results now stream in via SSE (search_results event with
+    // source="quick_search") — same data the chat agent saw, no parallel
+    // fetch. Just clear the carousel and flip to loading; the SSE handler
+    // populates quickResults when the agent finishes its search.
     if(quickSearch&&modelContent.trim()){
       setSearchLoading(true);setQuickResults([]);
-      fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:modelContent.trim().slice(0,200),count:6})}).then(r=>r.json()).then(d=>{setQuickResults(d.results||[]);setSearchLoading(false);}).catch(()=>{setQuickResults([]);setSearchLoading(false);});
     }else{setQuickResults([]);}
     const _now=new Date().toISOString();
     const um={role:"user",content:displayContent,_fullContent:modelContent,_images:imageBase64s.length?imageBase64s:undefined,metadata:{pdfs:pdfAttachments.length?pdfAttachments:undefined,images:imageAttachments.length?imageAttachments:undefined},created_at:_now};
