@@ -180,18 +180,41 @@ async def lifespan(app: FastAPI):
     if _settings.get("ollama_url"):
         config.OLLAMA_URL = _settings["ollama_url"]
         print(f"[Config] Loaded Ollama URL from settings: {config.OLLAMA_URL}")
-    if _settings.get("planning_model"):
-        config.PLANNING_MODEL = _settings["planning_model"]
-        print(f"[Config] Loaded Planning Model from settings: {config.PLANNING_MODEL}")
-    if _settings.get("coder_model"):
-        config.CODER_MODEL = _settings["coder_model"]
-        print(f"[Config] Loaded Coder Model from settings: {config.CODER_MODEL}")
+    # Use `in _settings` (not `.get(...)` truthy check) so an explicitly-saved
+    # empty string — meaning "inherit from chat model" in the UI — is honored
+    # on startup. Otherwise the env default (e.g. PLANNING_MODEL=qwen3.5:27b
+    # in config.py) silently overrides the user's choice every restart.
+    if "planning_model" in _settings:
+        config.PLANNING_MODEL = _settings["planning_model"] or ""
+        print(f"[Config] Loaded Planning Model from settings: {config.PLANNING_MODEL or '(use chat model)'}")
+    if "coder_model" in _settings:
+        config.CODER_MODEL = _settings["coder_model"] or ""
+        print(f"[Config] Loaded Coder Model from settings: {config.CODER_MODEL or '(use chat model)'}")
+    # Coder Bot v2 per-agent overrides — each empty by default; only seen here
+    # when the user has explicitly pinned a model for that agent.
+    for _key, _attr in (
+        ("architect_model", "ARCHITECT_MODEL"),
+        ("reviewer_model",  "REVIEWER_MODEL"),
+        ("builder_model",   "BUILDER_MODEL"),
+        ("fixer_model",     "FIXER_MODEL"),
+        ("qa_model",        "QA_MODEL"),
+    ):
+        if _key in _settings:
+            setattr(config, _attr, _settings[_key] or "")
+            if _settings[_key]:
+                print(f"[Config] Loaded {_attr} from settings: {_settings[_key]}")
     if "openhands_enabled" in _settings:
         config.OPENHANDS_ENABLED = _settings["openhands_enabled"]
         print(f"[Config] Loaded OpenHands enabled: {config.OPENHANDS_ENABLED}")
     if "openhands_max_rounds" in _settings:
         config.OPENHANDS_MAX_ROUNDS = int(_settings["openhands_max_rounds"])
         print(f"[Config] Loaded OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
+    if "openhands_reasoning_effort" in _settings:
+        _re = (_settings["openhands_reasoning_effort"] or "medium").strip().lower()
+        if _re not in ("low", "medium", "high"):
+            _re = "medium"
+        config.OPENHANDS_REASONING_EFFORT = _re
+        print(f"[Config] Loaded OpenHands reasoning effort: {config.OPENHANDS_REASONING_EFFORT}")
     if "default_num_ctx" in _settings:
         # Single knob the user controls. Drives the chat-side fallback in chat.py and
         # every internal LLM call (plan_project, critic) — so increasing the chat ctx
@@ -1621,8 +1644,8 @@ async def extract_pdf(file: UploadFile = File(...)):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files are accepted")
     content = await file.read()
-    if len(content) > 50 * 1024 * 1024:
-        raise HTTPException(413, "PDF too large (max 50MB)")
+    if len(content) > config.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+        raise HTTPException(413, f"PDF too large (max {config.MAX_UPLOAD_SIZE_MB}MB)")
     try:
         from pypdf import PdfReader
         import io
@@ -2789,9 +2812,16 @@ async def get_app_settings():
         "current_ollama_url": config.OLLAMA_URL,
         "current_planning_model": config.PLANNING_MODEL,
         "current_coder_model": config.CODER_MODEL,
+        # Coder Bot v2 per-agent overrides — empty string = inherit from umbrella
+        "current_architect_model": config.ARCHITECT_MODEL,
+        "current_reviewer_model":  config.REVIEWER_MODEL,
+        "current_builder_model":   config.BUILDER_MODEL,
+        "current_fixer_model":     config.FIXER_MODEL,
+        "current_qa_model":        config.QA_MODEL,
         "openhands_enabled": config.OPENHANDS_ENABLED,
         "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
         "openhands_num_ctx": config.OPENHANDS_NUM_CTX,
+        "openhands_reasoning_effort": config.OPENHANDS_REASONING_EFFORT,
         "default_num_ctx": config.DEFAULT_NUM_CTX,
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
@@ -2804,7 +2834,10 @@ async def get_app_settings():
 @app.patch("/api/settings")
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
-    allowed = {"file_cleanup_days", "ollama_url", "rag", "planning_model", "coder_model", "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx", "default_num_ctx"}
+    allowed = {"file_cleanup_days", "ollama_url", "rag", "planning_model", "coder_model",
+               "architect_model", "reviewer_model", "builder_model", "fixer_model", "qa_model",
+               "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
+               "openhands_reasoning_effort", "default_num_ctx"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
@@ -2829,6 +2862,17 @@ async def update_app_settings(body: dict = Body(...)):
     if "coder_model" in body:
         config.CODER_MODEL = body["coder_model"] or ""
         print(f"[Config] Updated Coder Model to: {config.CODER_MODEL or '(use orchestrator model)'}")
+    # Coder Bot v2 per-agent overrides
+    for _key, _attr, _label in (
+        ("architect_model", "ARCHITECT_MODEL", "Architect"),
+        ("reviewer_model",  "REVIEWER_MODEL",  "Reviewer"),
+        ("builder_model",   "BUILDER_MODEL",   "Builder"),
+        ("fixer_model",     "FIXER_MODEL",     "Fixer"),
+        ("qa_model",        "QA_MODEL",        "ProjectQA"),
+    ):
+        if _key in body:
+            setattr(config, _attr, body[_key] or "")
+            print(f"[Config] Updated {_label} Model to: {body[_key] or '(inherit umbrella)'}")
     if "openhands_enabled" in body:
         config.OPENHANDS_ENABLED = bool(body["openhands_enabled"])
         print(f"[Config] OpenHands enabled: {config.OPENHANDS_ENABLED}")
@@ -2838,11 +2882,29 @@ async def update_app_settings(body: dict = Body(...)):
     if "openhands_num_ctx" in body:
         config.OPENHANDS_NUM_CTX = int(body["openhands_num_ctx"])
         print(f"[Config] OpenHands num_ctx: {config.OPENHANDS_NUM_CTX}")
+    if "openhands_reasoning_effort" in body:
+        _re_in = (body["openhands_reasoning_effort"] or "medium").strip().lower()
+        if _re_in not in ("low", "medium", "high"):
+            _re_in = "medium"
+        config.OPENHANDS_REASONING_EFFORT = _re_in
+        # Persist the validated value, not the raw input.
+        settings["openhands_reasoning_effort"] = _re_in
+        print(f"[Config] OpenHands reasoning effort: {config.OPENHANDS_REASONING_EFFORT}")
     if "default_num_ctx" in body:
         config.DEFAULT_NUM_CTX = int(body["default_num_ctx"])
         print(f"[Config] Default num_ctx: {config.DEFAULT_NUM_CTX}")
     save_settings(settings)
-    return {**settings, "current_ollama_url": config.OLLAMA_URL, "current_planning_model": config.PLANNING_MODEL, "current_coder_model": config.CODER_MODEL}
+    return {
+        **settings,
+        "current_ollama_url": config.OLLAMA_URL,
+        "current_planning_model": config.PLANNING_MODEL,
+        "current_coder_model": config.CODER_MODEL,
+        "current_architect_model": config.ARCHITECT_MODEL,
+        "current_reviewer_model":  config.REVIEWER_MODEL,
+        "current_builder_model":   config.BUILDER_MODEL,
+        "current_fixer_model":     config.FIXER_MODEL,
+        "current_qa_model":        config.QA_MODEL,
+    }
 
 
 @app.get("/api/rag/stats")

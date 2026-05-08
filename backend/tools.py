@@ -9,6 +9,7 @@ import re
 import shlex
 import time
 import uuid
+from datetime import datetime
 
 import config
 import database as db
@@ -18,6 +19,24 @@ from research import run_deep_research, run_conspiracy_research, _fetch_page, _s
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub('', text)
+
+
+def _parse_ts_loose(s) -> "datetime | None":
+    """Parse timestamps from either Python isoformat (runs.started_at, has 'T'
+    and microseconds) or SQLite CURRENT_TIMESTAMP (messages.created_at, space
+    separator, no microseconds, sometimes a trailing 'Z'). Returns None on
+    unrecognized input rather than raising — callers treat missing as 'before
+    the current turn' which is the safe default."""
+    if not s:
+        return None
+    s = str(s).strip().rstrip("Z")
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
 
 
 # ── Ollama-native tool definitions ──
@@ -938,11 +957,169 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             + (("\n" + "\n".join(_issue_lines)) if _issue_lines else "")
                             + "\n  3. Asks the user for guidance — what behavior they actually "
                             f"want, or whether to skip this issue and ship anyway.\n\n"
-                            f"Do NOT call run_fixer, run_review, generate_code, write_file, or "
-                            f"any other tool. Respond to the user with text."
+                            f"Do NOT call run_fixer, run_review, generate_code, write_file, "
+                            f"run_shell, or plan_project. You MAY call download_project / "
+                            f"download_file to deliver what was built so far if the user wants "
+                            f"to ship as-is. Otherwise, respond to the user with text."
                         )
             except Exception as _ce:
                 print(f"[v2-gate] cycle cap check failed (non-fatal): {_ce}")
+
+            # Phantom run_fixer guard: block run_fixer when the latest run
+            # isn't a reviewer with status='issues'/'error'. Without this,
+            # a hallucinated reviewer_run_id (the model sometimes invents
+            # one right after generate_code) falls through to fixer.py,
+            # which returns "no envelope to fix" — burning a cap slot for
+            # zero work AND giving the model false signal that a fix
+            # happened. State 2 of the gate (PENDING_FIX) covers the
+            # legitimate "reviewer just ran with issues → call run_fixer"
+            # case; this guard handles every other case.
+            try:
+                _is_v2_pf = False
+                try:
+                    _conv_row_pf = await db.get_conversation(conv_id)
+                    _mc_id_pf = (_conv_row_pf or {}).get("model_config_id") if _conv_row_pf else None
+                    if _mc_id_pf:
+                        _all_mc_pf = await db.get_model_configs()
+                        _mc_pf = next((m for m in _all_mc_pf if m.get("id") == _mc_id_pf), None)
+                        if _mc_pf and "v2" in (_mc_pf.get("name") or "").lower():
+                            _is_v2_pf = True
+                except Exception as _pe_inner:
+                    print(f"[v2-gate] phantom-fixer persona lookup failed (non-fatal): {_pe_inner}")
+
+                if _is_v2_pf:
+                    _runs_pf = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _latest_meaningful = None
+                    _MEANINGFUL_STATUSES = {"succeeded", "issues", "clean", "partial",
+                                            "stuck", "failed", "error"}
+                    for _r in _runs_pf:
+                        _role_pf = _r.get("role", "")
+                        _st_pf = (_r.get("status") or "").lower()
+                        if (_role_pf == "reviewer" or _role_pf.startswith("builder")
+                                or _role_pf == "fixer") and _st_pf in _MEANINGFUL_STATUSES:
+                            _latest_meaningful = _r
+                            break
+
+                    _allow_fixer = False
+                    if _latest_meaningful and _latest_meaningful.get("role") == "reviewer":
+                        _env_pf = _latest_meaningful.get("result_envelope") or {}
+                        _rstatus_pf = (_env_pf.get("status") or "").lower()
+                        if _rstatus_pf in ("issues", "error"):
+                            _allow_fixer = True
+
+                    if not _allow_fixer:
+                        _trig_role = (_latest_meaningful or {}).get("role", "(none)")
+                        _trig_id = (_latest_meaningful or {}).get("id", "?")
+                        _trig_status = (_latest_meaningful or {}).get("status", "?")
+                        # Surface a project_dir if we can find one.
+                        _pd_hint = ""
+                        for _r in _runs_pf:
+                            _env_h = _r.get("result_envelope") or {}
+                            _pd_try = (_env_h.get("project_dir") or "").strip()
+                            if _pd_try:
+                                _pd_hint = _pd_try
+                                break
+                        await events.emit(conv_id, "tool_end", {
+                            "tool": "run_fixer", "icon": "wrench",
+                            "status": "⛔ run_fixer needs a reviewer envelope first",
+                        })
+                        print(f"[v2-gate] PHANTOM FIXER: blocking run_fixer "
+                              f"(latest meaningful run is {_trig_role}/{_trig_status} "
+                              f"{(_trig_id or '')[:14]}, not a reviewer with issues)", flush=True)
+                        return (
+                            f"BLOCKED — run_fixer requires a recent reviewer envelope with "
+                            f"issues, but the most recent meaningful run is "
+                            f"'{_trig_role}' (status={_trig_status}). There is no "
+                            f"actionable envelope to fix.\n\n"
+                            f"Your VERY NEXT tool call MUST be:\n"
+                            f"  run_review(project_dir='{_pd_hint or '/root/projects/...'}')\n\n"
+                            f"Do not pass a hallucinated reviewer_run_id. Run the reviewer "
+                            f"first; if it returns issues, call run_fixer with that real id."
+                        )
+            except Exception as _pe:
+                print(f"[v2-gate] phantom-fixer check failed (non-fatal): {_pe}")
+
+        # ─── Anti-rebuild guard for generate_code (Bug 7) ────────────────
+        # If a builder.* run already succeeded since the most recent user
+        # message, refuse a 2nd generate_code in the same turn. The model
+        # otherwise tends to fall into "let me try generate_code again" for
+        # bug-fix turns where reviewer returned clean (because runtime bugs
+        # like unconnected Qt signals or invalid font strings compile fine).
+        # Re-running generate_code is ~60–90s of OpenHands work that almost
+        # always produces a worse result than 2 surgical write_file edits.
+        if conv_id and name == "generate_code":
+            try:
+                _is_v2_rb = False
+                _conv_full = None
+                try:
+                    _conv_full = await db.get_conversation(conv_id)
+                    _mc_id_rb = (_conv_full or {}).get("model_config_id")
+                    if _mc_id_rb:
+                        _all_mc_rb = await db.get_model_configs()
+                        _mc_rb = next((m for m in _all_mc_rb if m.get("id") == _mc_id_rb), None)
+                        if _mc_rb and "v2" in (_mc_rb.get("name") or "").lower():
+                            _is_v2_rb = True
+                except Exception as _pe_rb:
+                    print(f"[v2-gate] anti-rebuild persona lookup failed (non-fatal): {_pe_rb}")
+
+                if _is_v2_rb:
+                    # Find the most recent user message timestamp.
+                    _msgs_rb = (_conv_full or {}).get("messages") or []
+                    _latest_user_ts = None
+                    for _m in reversed(_msgs_rb):
+                        if _m.get("role") == "user":
+                            _latest_user_ts = _parse_ts_loose(_m.get("created_at"))
+                            break
+
+                    if _latest_user_ts is not None:
+                        _runs_rb = await db.get_runs_by_conversation(conv_id, limit=20)
+                        _builder_succ_this_turn = 0
+                        _last_builder_role = ""
+                        for _r in _runs_rb:
+                            if not (_r.get("role", "").startswith("builder")
+                                    and _r.get("status") == "succeeded"):
+                                continue
+                            _r_ts = _parse_ts_loose(_r.get("started_at"))
+                            if _r_ts and _r_ts >= _latest_user_ts:
+                                _builder_succ_this_turn += 1
+                                if not _last_builder_role:
+                                    _last_builder_role = _r.get("role", "builder")
+
+                        if _builder_succ_this_turn >= 1:
+                            # Surface a concrete project_dir for the
+                            # write_file / run_review next-step hint.
+                            _pd_rb = ""
+                            for _r in _runs_rb:
+                                _envrb = _r.get("result_envelope") or {}
+                                _pdrb = (_envrb.get("project_dir") or "").strip()
+                                if _pdrb:
+                                    _pd_rb = _pdrb
+                                    break
+                            await events.emit(conv_id, "tool_end", {
+                                "tool": "generate_code", "icon": "package",
+                                "status": "⛔ generate_code already ran this turn — use write_file",
+                            })
+                            print(f"[v2-gate] ANTI-REBUILD: blocking generate_code "
+                                  f"({_builder_succ_this_turn} {_last_builder_role} run(s) "
+                                  f"since user msg)", flush=True)
+                            return (
+                                f"BLOCKED — generate_code already ran "
+                                f"{_builder_succ_this_turn} time(s) this turn "
+                                f"(latest: {_last_builder_role}). The OpenHands "
+                                f"feature-builder is for substantial NEW functionality "
+                                f"(3+ new files, major refactor) — not for fixing 1–3 "
+                                f"line bugs in existing files. Re-running it almost "
+                                f"always produces a worse result than targeted edits.\n\n"
+                                f"For the current user request, do this instead:\n"
+                                f"  1. read_file(path='{_pd_rb or '/root/projects/.../main.py'}')\n"
+                                f"  2. write_file(path='...', content='...')  with the fix\n"
+                                f"  3. run_review(project_dir='{_pd_rb or '/root/projects/...'}')  to verify\n\n"
+                                f"If the user actually wants a major new feature you haven't "
+                                f"built yet, respond with plain text asking them to confirm — "
+                                f"don't silently rebuild what's already there."
+                            )
+            except Exception as _rbe:
+                print(f"[v2-gate] anti-rebuild check failed (non-fatal): {_rbe}")
 
         if conv_id and name not in ("run_review", "run_fixer", "ask_project"):
             try:
@@ -1009,20 +1186,41 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 elif _pending_review is not None:
                     _rid = _pending_review.get("id", "?")
                     _rstatus_disp = (_pending_review.get("result_envelope") or {}).get("status", "?")
-                    _gate_msg = (
-                        "state", "fix-needed",
-                        f"BLOCKED — run_review ({_rid}) returned status='{_rstatus_disp}' "
-                        f"with issues that have not been addressed.\n\n"
-                        f"Your VERY NEXT tool call MUST be:\n"
-                        f"  run_fixer(reviewer_run_id='{_rid}')\n\n"
-                        f"The Fixer reads each issue's fix-scope files, generates targeted "
-                        f"edits via the coder model, and writes them back. Do NOT manually "
-                        f"call read_file / write_file for these issues — that's the v1 "
-                        f"antipattern that burns rounds. After run_fixer completes, call "
-                        f"run_review again to verify.",
-                        f"⛔ Blocked — call run_fixer first (review {_rid[:14]}… has issues)",
-                        _rid,
+                    # Cap-aware release: once the 3-cycle fixer cap has been
+                    # hit, the same review issues will keep blocking the
+                    # conversation forever. Allow the model to deliver what
+                    # was actually built (download_project / download_file)
+                    # and to inspect the tree (read_file / list_files) so the
+                    # user gets the partial result instead of a dead session.
+                    # write_file / run_shell / generate_code stay blocked —
+                    # further code work won't help once we're past 3 cycles.
+                    _fixer_succ_gate = sum(
+                        1 for _r in _runs_for_v2_gate
+                        if _r.get("role") == "fixer" and _r.get("status") == "succeeded"
                     )
+                    _DELIVERY_OK_AFTER_CAP = {
+                        "download_project", "download_file",
+                        "read_file", "list_files",
+                    }
+                    if _fixer_succ_gate >= 3 and name in _DELIVERY_OK_AFTER_CAP:
+                        print(f"[v2-gate] cap-release: allowing {name} despite "
+                              f"fix-needed (cap reached, {_fixer_succ_gate} fixers)", flush=True)
+                        # Skip _gate_msg entirely → tool runs normally.
+                    else:
+                        _gate_msg = (
+                            "state", "fix-needed",
+                            f"BLOCKED — run_review ({_rid}) returned status='{_rstatus_disp}' "
+                            f"with issues that have not been addressed.\n\n"
+                            f"Your VERY NEXT tool call MUST be:\n"
+                            f"  run_fixer(reviewer_run_id='{_rid}')\n\n"
+                            f"The Fixer reads each issue's fix-scope files, generates targeted "
+                            f"edits via the coder model, and writes them back. Do NOT manually "
+                            f"call read_file / write_file for these issues — that's the v1 "
+                            f"antipattern that burns rounds. After run_fixer completes, call "
+                            f"run_review again to verify.",
+                            f"⛔ Blocked — call run_fixer first (review {_rid[:14]}… has issues)",
+                            _rid,
+                        )
                 elif _terminal_qa is not None:
                     _qid = _terminal_qa.get("id", "?")
                     _gate_msg = (
@@ -2273,7 +2471,9 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 context = (context + "\n\n" + args["code"]).strip()
             elif args.get("code") and task:
                 context = (context + "\n\nReference code:\n" + args["code"]).strip()
-            coder_model = config.CODER_MODEL or conv_model or config.DEFAULT_MODEL
+            # Per-agent override (config.BUILDER_MODEL) wins if pinned; else
+            # umbrella CODER_MODEL, then chat model, then default.
+            coder_model = config.BUILDER_MODEL or config.CODER_MODEL or conv_model or config.DEFAULT_MODEL
 
             # Inject KB context so OpenHands agent has access to uploaded documentation.
             # Bias retrieval toward filenames matching the requested language/framework so a
@@ -2467,11 +2667,15 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                         if _ohp:
                             _oh_project_id = _ohp
                             _has_active_project = True
-                            # Stays "scaffold" — no prior builder run means
-                            # the project either was uploaded but never built,
-                            # or the row is a placeholder. Either way the next
-                            # generate_code is creating, not amending.
-                            print(f"[CODEGEN:OH] Active project {_oh_project_id} via coding_projects fallback")
+                            # Promote profile to "feature": an active project
+                            # via coding_projects means files exist on disk
+                            # (uploaded by the user, or written by write_file
+                            # without a generate_code run). Calling generate_code
+                            # against it is amending an existing tree, NOT
+                            # scaffolding a new one. Scaffold-mode would
+                            # clobber the user's code (Bug 8).
+                            _builder_profile = "feature"
+                            print(f"[CODEGEN:OH] Active project {_oh_project_id} via coding_projects fallback (profile=feature)")
                 except Exception as _ap_e:
                     print(f"[CODEGEN:OH] coding_projects lookup failed (non-fatal): {_ap_e}")
 
@@ -2622,6 +2826,9 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 # other profiles ignore it.
                 "profile": _builder_profile,
                 "manifest_missing": _profile_continue_missing,
+                # User-tunable reasoning_effort — drops think-token overhead
+                # significantly on slow local models when set to "low".
+                "reasoning_effort": getattr(config, "OPENHANDS_REASONING_EFFORT", "medium"),
             }
 
             async def _signal_oh_cancel(reason: str):

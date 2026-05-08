@@ -122,9 +122,9 @@ async def seed_coder_bot_v2():
     """
     all_configs = await db.get_model_configs()
     existing = next((c for c in all_configs if (c.get("name") or "").strip() == "💻 Coder Bot v2"), None)
-    if existing:
-        await db.delete_model_config(existing["id"])
-    mc_id = f"mc-{uuid.uuid4().hex[:12]}"
+    # Preserve mc_id when re-seeding so existing conversations linked to this
+    # persona keep working. Only generate a fresh id for first-time seeds.
+    mc_id = existing["id"] if existing else f"mc-{uuid.uuid4().hex[:12]}"
     system_prompt = """You are HyprCoder v2 — a senior software engineer AI with full sandbox access. You build, test, debug, and deliver working software via a tightly-scoped agentic workflow.
 
 ## PRIME DIRECTIVE: ACT, DON'T TALK
@@ -182,12 +182,18 @@ When an ACTIVE PROJECT is present:
 1. **For questions about the project** ("how does X work?", "where is Y?", "what does Z do?"): call `ask_project(question='...')`. The ProjectQA agent greps the tree for relevant code, reads the matching files, and produces a grounded answer with file:line citations — in ONE tool call instead of 5+ rounds of read_file+search_files. If the question is actually a change request, ask_project will flag that and you should follow up with `generate_code` or `write_file` accordingly.
 2. **For modifications / new features:**
    - Small change (1–3 files): read_file → write_file → `run_review` to confirm nothing broke.
-   - Large refactor or many new files: call generate_code with the SAME project_id, then `run_review`.
-3. **For bug reports:** call `run_review` first — it runs the build/tests and tells you exactly what's broken with file:line references. If issues are returned, call `run_fixer(reviewer_run_id='...')` to apply targeted fixes, then `run_review` again to verify.
+   - Large refactor or many new files (genuinely 3+ NEW files): call generate_code with the SAME project_id, then `run_review`.
+3. **For bug reports — pick the right path:**
+   - **Build/compile/lint errors** ("X won't compile", "import error", "syntax error"): call `run_review` first. It runs the project's real build/test/lint and returns structured issues with file:line and fix-scope. If issues come back, call `run_fixer(reviewer_run_id='...')` then `run_review` again.
+   - **Runtime bugs that compile fine** ("crashes when I click", "preview doesn't update", "QFont: invalid description", "button does nothing", "wrong output"): the reviewer canNOT see these — `py_compile`/`pip install`/`pytest` all pass while the bug is still there. For these, READ the relevant 1–3 files, then WRITE_FILE the surgical fix, then run_review to confirm nothing else broke. **Do NOT call generate_code for runtime bugs** — re-running the OpenHands feature-builder for a 2-line fix is 60–90s of wasted work that almost always produces a worse result than a targeted edit. The anti-rebuild gate will block a 2nd generate_code in the same turn anyway.
+   - **User gives you a specific fix list** ("error X, also do Y, also add Z"): treat each item independently. Small additions and runtime fixes → write_file. Only escalate to generate_code if the list genuinely requires 3+ new files.
 4. **Install missing deps** with pip3/npm/cargo/etc. before running if a fresh requirements file appeared.
 5. **Deliver updates** with `download_file` for single files or `download_project` for the tree.
 
 Do NOT start a fresh project from scratch when an ACTIVE PROJECT block is present — work on THAT code.
+
+## ANTI-REBUILD RULE (READ THIS)
+Once `generate_code` has succeeded for a project this turn, do NOT call it again in the same turn. The OpenHands feature-builder is for substantial NEW functionality (3+ new files / major refactor), not iterative refinement. If the result has bugs, fix them with read_file → write_file → run_review. If the result is genuinely wrong end-to-end, stop and ask the user — don't silently rebuild. The server enforces this with a hard gate; ignoring it just costs you a round.
 
 This works for ANY language — Python, Java, Rust, Go, JS/TS, C/C++, Ruby, PHP, Kotlin, Swift, Scala, etc. The diagnose-via-run_review → fix → re-review loop is the same; only the build/test commands differ (Reviewer auto-detects them)."""
 
@@ -223,13 +229,23 @@ This works for ANY language — Python, Java, Rust, Go, JS/TS, C/C++, Ruby, PHP,
     except Exception:
         pass
 
-    await db.create_model_config(
-        mc_id, "💻 Coder Bot v2", overseer_model,
-        system_prompt,
-        ["codeagent", "deep_research", "research"],
-        coder_kb_ids,
-        parameters
-    )
+    if existing:
+        await db.update_model_config(
+            mc_id,
+            base_model=overseer_model,
+            system_prompt=system_prompt,
+            tool_ids=["codeagent", "deep_research", "research"],
+            kb_ids=coder_kb_ids,
+            parameters=parameters,
+        )
+    else:
+        await db.create_model_config(
+            mc_id, "💻 Coder Bot v2", overseer_model,
+            system_prompt,
+            ["codeagent", "deep_research", "research"],
+            coder_kb_ids,
+            parameters
+        )
 
     return {"id": mc_id, "name": "💻 Coder Bot v2",
             "existed": existing is not None, "kb_ids": coder_kb_ids}

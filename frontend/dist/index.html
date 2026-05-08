@@ -1592,9 +1592,17 @@ function HyprChat(){
   const [wsModel,setWsModel]=useState(()=>{try{return localStorage.getItem("hc-ws-model")||"qwen2.5:7b";}catch{return "qwen2.5:7b";}});
   const [planningModel,setPlanningModel]=useState(()=>{try{return localStorage.getItem("hc-planning-model")||"";}catch{return "";}});
   const [coderModel,setCoderModel]=useState(()=>{try{return localStorage.getItem("hc-coder-model")||"";}catch{return "";}});
+  // Coder Bot v2 — per-agent model overrides. Empty = inherit from umbrella (Planning/Coder) or chat model.
+  const [architectModel,setArchitectModel]=useState(()=>{try{return localStorage.getItem("hc-architect-model")||"";}catch{return "";}});
+  const [reviewerModel, setReviewerModel] =useState(()=>{try{return localStorage.getItem("hc-reviewer-model") ||"";}catch{return "";}});
+  const [builderModel,  setBuilderModel]  =useState(()=>{try{return localStorage.getItem("hc-builder-model")  ||"";}catch{return "";}});
+  const [fixerModel,    setFixerModel]    =useState(()=>{try{return localStorage.getItem("hc-fixer-model")    ||"";}catch{return "";}});
+  const [qaModel,       setQaModel]       =useState(()=>{try{return localStorage.getItem("hc-qa-model")       ||"";}catch{return "";}});
+  const [coderBotModelsOpen,setCoderBotModelsOpen]=useState(()=>{try{return localStorage.getItem("hc-coderbot-models-open")==="1";}catch{return false;}});
   const [coderNumCtx,setCoderNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-coder-num-ctx")||"8192");}catch{return 8192;}});
   const [openhandsEnabled,setOpenhandsEnabled]=useState(()=>{try{return localStorage.getItem("hc-openhands-enabled")!=="false";}catch{return true;}});
   const [openhandsMaxRounds,setOpenhandsMaxRounds]=useState(()=>{try{return parseInt(localStorage.getItem("hc-openhands-max-rounds")||"20");}catch{return 20;}});
+  const [openhandsReasoningEffort,setOpenhandsReasoningEffort]=useState(()=>{try{return localStorage.getItem("hc-openhands-reasoning-effort")||"medium";}catch{return "medium";}});
   const [ctxTokens,setCtxTokens]=useState(0);
   const [genTokens,setGenTokens]=useState(0);
   const [previewFile,setPreviewFile]=useState(null);
@@ -1723,9 +1731,17 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-ws-model",wsModel);}catch{}},[wsModel]);
   useEffect(()=>{try{localStorage.setItem("hc-planning-model",planningModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({planning_model:planningModel})}).catch(()=>{});}catch{}},[planningModel]);
   useEffect(()=>{try{localStorage.setItem("hc-coder-model",coderModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({coder_model:coderModel})}).catch(()=>{});}catch{}},[coderModel]);
+  // Coder Bot v2 per-agent overrides — sync each to localStorage + PATCH /api/settings.
+  useEffect(()=>{try{localStorage.setItem("hc-architect-model",architectModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({architect_model:architectModel})}).catch(()=>{});}catch{}},[architectModel]);
+  useEffect(()=>{try{localStorage.setItem("hc-reviewer-model", reviewerModel); fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({reviewer_model: reviewerModel})}).catch(()=>{});}catch{}},[reviewerModel]);
+  useEffect(()=>{try{localStorage.setItem("hc-builder-model",  builderModel);  fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({builder_model:  builderModel})}).catch(()=>{});}catch{}},[builderModel]);
+  useEffect(()=>{try{localStorage.setItem("hc-fixer-model",    fixerModel);    fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fixer_model:    fixerModel})}).catch(()=>{});}catch{}},[fixerModel]);
+  useEffect(()=>{try{localStorage.setItem("hc-qa-model",       qaModel);       fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({qa_model:       qaModel})}).catch(()=>{});}catch{}},[qaModel]);
+  useEffect(()=>{try{localStorage.setItem("hc-coderbot-models-open",coderBotModelsOpen?"1":"0");}catch{}},[coderBotModelsOpen]);
   useEffect(()=>{try{localStorage.setItem("hc-coder-num-ctx",coderNumCtx);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_num_ctx:coderNumCtx})}).catch(()=>{});}catch{}},[coderNumCtx]);
   useEffect(()=>{try{localStorage.setItem("hc-openhands-enabled",openhandsEnabled);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_enabled:openhandsEnabled})}).catch(()=>{});}catch{}},[openhandsEnabled]);
   useEffect(()=>{try{localStorage.setItem("hc-openhands-max-rounds",openhandsMaxRounds);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_max_rounds:openhandsMaxRounds})}).catch(()=>{});}catch{}},[openhandsMaxRounds]);
+  useEffect(()=>{try{localStorage.setItem("hc-openhands-reasoning-effort",openhandsReasoningEffort);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_reasoning_effort:openhandsReasoningEffort})}).catch(()=>{});}catch{}},[openhandsReasoningEffort]);
   useEffect(()=>{try{localStorage.setItem("hc-model-params",JSON.stringify(modelParams));}catch{}},[modelParams]);
   useEffect(()=>{try{localStorage.setItem("hc-prompts",JSON.stringify(prompts));}catch{}},[prompts]);
   useEffect(()=>{try{localStorage.setItem("hc-conv-tags",JSON.stringify(convTags));}catch{}},[convTags]);
@@ -1908,7 +1924,7 @@ function HyprChat(){
     fetch(`${API}/api/tools`).then(r=>r.json()).then(setTools).catch(()=>{});
     fetch(`${API}/api/model-configs`).then(r=>r.json()).then(setMcs).catch(()=>{});
     fetch(`${API}/api/health`).then(r=>r.json()).then(d=>setHealth(d.services||{})).catch(()=>{});
-    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));if(d.current_planning_model!=null)setPlanningModel(d.current_planning_model);if(d.current_coder_model!=null)setCoderModel(d.current_coder_model);if(d.openhands_num_ctx!=null)setCoderNumCtx(d.openhands_num_ctx);if(d.openhands_enabled!=null)setOpenhandsEnabled(d.openhands_enabled);if(d.openhands_max_rounds!=null)setOpenhandsMaxRounds(d.openhands_max_rounds);}).catch(()=>{});
+    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));if(d.current_planning_model!=null)setPlanningModel(d.current_planning_model);if(d.current_coder_model!=null)setCoderModel(d.current_coder_model);if(d.current_architect_model!=null)setArchitectModel(d.current_architect_model);if(d.current_reviewer_model!=null)setReviewerModel(d.current_reviewer_model);if(d.current_builder_model!=null)setBuilderModel(d.current_builder_model);if(d.current_fixer_model!=null)setFixerModel(d.current_fixer_model);if(d.current_qa_model!=null)setQaModel(d.current_qa_model);if(d.openhands_num_ctx!=null)setCoderNumCtx(d.openhands_num_ctx);if(d.openhands_enabled!=null)setOpenhandsEnabled(d.openhands_enabled);if(d.openhands_max_rounds!=null)setOpenhandsMaxRounds(d.openhands_max_rounds);if(d.openhands_reasoning_effort)setOpenhandsReasoningEffort(d.openhands_reasoning_effort);}).catch(()=>{});
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
     fetch(`${API}/api/workspaces`).then(r=>r.json()).then(setWorkspaces).catch(()=>{});
     fetch(`${API}/api/councils`).then(r=>r.json()).then(setCouncils).catch(()=>{});
@@ -2572,7 +2588,7 @@ function HyprChat(){
         continue;
       }
       if(isPdf(file)){
-        if(file.size>50*1024*1024){console.warn(`Skipped ${file.name} — too large (max 50MB)`);continue;}
+        if(file.size>250*1024*1024){console.warn(`Skipped ${file.name} — too large (max 250MB)`);continue;}
         // Add a loading placeholder immediately
         const placeholderIdx=attachments.length+newAttachments.length;
         setAttachments(p=>[...p,{name:file.name,content:"",type:"pdf",pages:0,loading:true}]);
@@ -2745,6 +2761,12 @@ function HyprChat(){
       // Clear planning/coder model if it was the deleted model
       if(planningModel===m){setPlanningModel("");}
       if(coderModel===m){setCoderModel("");}
+      // Coder Bot v2 per-agent overrides — clear if pinned to the deleted model
+      if(architectModel===m){setArchitectModel("");}
+      if(reviewerModel===m){setReviewerModel("");}
+      if(builderModel===m){setBuilderModel("");}
+      if(fixerModel===m){setFixerModel("");}
+      if(qaModel===m){setQaModel("");}
       // Clear workspace model if it was the deleted model
       if(wsModel===m){setWsModel(fallback);}
       if(modelParamsOpen===m)setModelParamsOpen(null);
@@ -3135,17 +3157,33 @@ function HyprChat(){
             {bodyLines.length>0 && <div style={{color:t.text,fontSize:"0.95em",lineHeight:1.55}}>{bodyLines.map((bl,bi)=><div key={bi} style={{minHeight:bl===""?6:"auto"}}>{inlineParse(bl)}</div>)}</div>}
           </div>;
         }
-        if(ln.match(/^>\s?/)){const qRaw=ln.replace(/^>\s?/,"");
-        /* If this line is just an attribution (— Name...), skip — it was consumed by the previous quote line */
-        if(qRaw.match(/^[—–]\s/))return null;
-        /* Look ahead: if next line is "> — Attribution", grab it */
-        const nextLn=(j+1<_lines.length)?_lines[j+1]:"";
-        const nextAttr=nextLn.match(/^>\s?[—–]\s*(.+)/);
-        const attrLabel=nextAttr?nextAttr[1]:"quoted source";
-        return <div key={j} style={{borderLeft:`3px solid ${t.warm}`,paddingLeft:12,margin:"6px 0",background:`${t.warm}0D`,borderRadius:"0 6px 6px 0",padding:"8px 12px",borderLeftWidth:3,borderLeftStyle:"solid",borderLeftColor:t.warm}}>
-          <div style={{display:"flex",alignItems:"flex-start",gap:6}}><span style={{color:t.warm,fontSize:16,lineHeight:1,flexShrink:0,marginTop:1}}>"</span><span style={{color:t.text,fontStyle:"italic",fontSize:"0.95em",lineHeight:1.6,flex:1}}>{inlineParse(qRaw)}</span><span style={{color:t.warm,fontSize:16,lineHeight:1,flexShrink:0,alignSelf:"flex-end"}}>"</span></div>
-          <div style={{marginTop:4,fontSize:9,color:t.warm,opacity:0.7,textTransform:"uppercase",letterSpacing:1}}>{inlineParse(attrLabel)}</div>
-        </div>;}
+        if(ln.match(/^>\s?/) && !ln.match(/^>\s?[—–]\s/)){
+          const qLines=[ln.replace(/^>\s?/,"")];
+          let attrLabel=null;
+          let qk=j+1;
+          while(qk<_lines.length && _lines[qk].match(/^>\s?/)){
+            const next=_lines[qk].replace(/^>\s?/,"");
+            const am=next.match(/^[—–]\s*(.+)/);
+            if(am){attrLabel=am[1];_consumed.add(qk);qk++;break;}
+            qLines.push(next);
+            _consumed.add(qk);
+            qk++;
+          }
+          while(qLines.length && qLines[qLines.length-1].trim()==="")qLines.pop();
+          while(qLines.length && qLines[0].trim()==="")qLines.shift();
+          if(!qLines.length)return null;
+          return <div key={j} style={{borderLeft:`3px solid ${t.warm}`,margin:"6px 0",background:`${t.warm}0D`,borderRadius:"0 6px 6px 0",padding:"8px 12px"}}>
+            <div style={{display:"flex",alignItems:"flex-start",gap:6}}>
+              <span style={{color:t.warm,fontSize:16,lineHeight:1,flexShrink:0,marginTop:1}}>"</span>
+              <div style={{color:t.text,fontStyle:"italic",fontSize:"0.95em",lineHeight:1.6,flex:1}}>
+                {qLines.map((ql,qi)=><div key={qi} style={{minHeight:ql.trim()===""?6:"auto"}}>{inlineParse(ql)}</div>)}
+              </div>
+              <span style={{color:t.warm,fontSize:16,lineHeight:1,flexShrink:0,alignSelf:"flex-end"}}>"</span>
+            </div>
+            {attrLabel && <div style={{marginTop:4,fontSize:9,color:t.warm,opacity:0.7,textTransform:"uppercase",letterSpacing:1}}>{inlineParse(attrLabel)}</div>}
+          </div>;
+        }
+        if(ln.match(/^>\s?[—–]\s/))return null;
         if(ln.match(/^[-*+]\s+/)){
           const rest=ln.replace(/^[-*+]\s+/,"");
           const taskMatch=rest.match(/^\[([ xX])\]\s+(.*)$/);
@@ -4981,13 +5019,20 @@ function HyprChat(){
           <div style={{fontSize:10,color:t.mut,marginTop:4}}>After the initial answer, the model re-examines and refines it. {EFFORT_LEVELS[globalEffort].name} = {globalEffort===0?"no review":`${globalEffort} review pass${globalEffort>1?"es":""}`}. Each chat can override this.</div>
         </div>
 
-        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
+        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:6}}>
           <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Workspace Analysis Model</div>
           <ModelPicker value={wsModel} onChange={setWsModel} models={models} modelDetails={modelDetails} t={t} font={font}/>
           <div style={{fontSize:10,color:t.mut,marginTop:6}}>Small, fast model for workspace topic auto-detection.</div>
         </div>
+      </div>
 
-        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
+      {/* TILE: Coder Bot — all coder-bot-related settings live here.
+          Includes the umbrella Planning/Coder model pickers, the new collapsible
+          per-agent model overrides card, and OpenHands runtime knobs. */}
+      <div style={{background:`${t.surface}33`,border:`1px solid ${t.brd}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
+        <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:14,display:"flex",alignItems:"center",gap:8}}>🤖 Coder Bot</div>
+
+        <div style={{marginBottom:14}}>
           <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Code Planning Model</div>
           {planningModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
             <div style={{flex:1}}><ModelPicker value={planningModel} onChange={setPlanningModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
@@ -4997,7 +5042,7 @@ function HyprChat(){
             <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Same as chat model</div><div style={{fontSize:9,color:t.dim}}>Click to select a dedicated planning model</div></div>
             <span style={{fontSize:9,color:t.mut}}>▾</span>
           </div>}
-          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Model used by plan_project to design architecture before coding. Empty = uses the active chat model.</div>
+          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Used by Architect + Reviewer agents. Empty = uses the active chat model.</div>
         </div>
 
         <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
@@ -5010,10 +5055,90 @@ function HyprChat(){
             <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Same as chat model</div><div style={{fontSize:9,color:t.dim}}>Click to select a dedicated coder model</div></div>
             <span style={{fontSize:9,color:t.mut}}>▾</span>
           </div>}
-          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Dedicated model for the generate_code sub-agent. Empty = uses the active chat model.</div>
+          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Used by Builder + Fixer agents. Empty = uses the active chat model.</div>
         </div>
 
-        <div style={{marginBottom:14,display:"flex",alignItems:"center",gap:10}}>
+        {/* Per-agent model overrides — collapsible advanced card.
+            Each picker defaults to "Inherits from <umbrella>" until clicked.
+            The reset button clears the override (returns to inheritance). */}
+        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
+          <div onClick={()=>setCoderBotModelsOpen(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",userSelect:"none"}}>
+            <span style={{fontSize:14}}>🎛</span>
+            <span style={{fontSize:12,fontWeight:700,color:t.fg,letterSpacing:.3}}>Per-Agent Model Overrides</span>
+            <span style={{flex:1}}/>
+            <span style={{fontSize:10,color:t.mut}}>{coderBotModelsOpen ? "▴ collapse" : "▾ expand"}</span>
+          </div>
+          <div style={{fontSize:10,color:t.mut,marginTop:4}}>Optional. Pin a specific model per agent; empty rows inherit from the umbrella above.</div>
+
+          {coderBotModelsOpen && <div style={{marginTop:14,paddingLeft:10,borderLeft:`2px solid ${t.acc}33`}}>
+            {/* Architect — inherits from Planning Model */}
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>📐 Architect Model</div>
+              {architectModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <div style={{flex:1}}><ModelPicker value={architectModel} onChange={setArchitectModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
+                <button onClick={()=>setArchitectModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
+              </div>:<div onClick={()=>setArchitectModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+                <span style={{fontSize:14}}>📐</span>
+                <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from Planning Model</div><div style={{fontSize:9,color:t.dim}}>Click to override for the Architect agent only</div></div>
+                <span style={{fontSize:9,color:t.mut}}>▾</span>
+              </div>}
+            </div>
+
+            {/* Reviewer — inherits from Planning Model */}
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>🔍 Reviewer Model</div>
+              {reviewerModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <div style={{flex:1}}><ModelPicker value={reviewerModel} onChange={setReviewerModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
+                <button onClick={()=>setReviewerModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
+              </div>:<div onClick={()=>setReviewerModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+                <span style={{fontSize:14}}>🔍</span>
+                <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from Planning Model</div><div style={{fontSize:9,color:t.dim}}>Click to override for the Reviewer agent only</div></div>
+                <span style={{fontSize:9,color:t.mut}}>▾</span>
+              </div>}
+            </div>
+
+            {/* Builder — inherits from Coder Model */}
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>🏗 Builder Model</div>
+              {builderModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <div style={{flex:1}}><ModelPicker value={builderModel} onChange={setBuilderModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
+                <button onClick={()=>setBuilderModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
+              </div>:<div onClick={()=>setBuilderModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+                <span style={{fontSize:14}}>🏗</span>
+                <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from Coder Model</div><div style={{fontSize:9,color:t.dim}}>Click to override the Builder (OpenHands) agent only</div></div>
+                <span style={{fontSize:9,color:t.mut}}>▾</span>
+              </div>}
+            </div>
+
+            {/* Fixer — inherits from Coder Model */}
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>🛠 Fixer Model</div>
+              {fixerModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <div style={{flex:1}}><ModelPicker value={fixerModel} onChange={setFixerModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
+                <button onClick={()=>setFixerModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
+              </div>:<div onClick={()=>setFixerModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+                <span style={{fontSize:14}}>🛠</span>
+                <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from Coder Model</div><div style={{fontSize:9,color:t.dim}}>Click to override the Fixer agent only</div></div>
+                <span style={{fontSize:9,color:t.mut}}>▾</span>
+              </div>}
+            </div>
+
+            {/* ProjectQA — inherits from chat/persona model */}
+            <div style={{marginBottom:6}}>
+              <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>❓ ProjectQA Model</div>
+              {qaModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <div style={{flex:1}}><ModelPicker value={qaModel} onChange={setQaModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
+                <button onClick={()=>setQaModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
+              </div>:<div onClick={()=>setQaModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+                <span style={{fontSize:14}}>❓</span>
+                <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from chat model</div><div style={{fontSize:9,color:t.dim}}>Click to override the ProjectQA agent only</div></div>
+                <span style={{fontSize:9,color:t.mut}}>▾</span>
+              </div>}
+            </div>
+          </div>}
+        </div>
+
+        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14,display:"flex",alignItems:"center",gap:10}}>
           <label style={{fontSize:12,color:t.dim,fontWeight:600,whiteSpace:"nowrap"}}>OpenHands Enabled</label>
           <div onClick={()=>setOpenhandsEnabled(!openhandsEnabled)} style={{width:36,height:20,borderRadius:10,background:openhandsEnabled?t.acc:`${t.mut}44`,cursor:"pointer",position:"relative",transition:"all .2s"}}>
             <div style={{width:16,height:16,borderRadius:8,background:t.fg,position:"absolute",top:2,left:openhandsEnabled?18:2,transition:"all .2s"}}/>
@@ -5027,10 +5152,20 @@ function HyprChat(){
           <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>2048</span><span>32768</span></div>
         </div>
 
-        <div style={{marginBottom:6}}>
+        <div style={{marginBottom:14}}>
           <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Max Agent Rounds: <span style={{color:t.acc}}>{openhandsMaxRounds}</span></label>
           <input type="range" min="5" max="40" step="1" value={openhandsMaxRounds} onChange={e=>setOpenhandsMaxRounds(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
           <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>5</span><span>40</span></div>
+        </div>
+
+        <div style={{marginBottom:6}}>
+          <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Reasoning Effort: <span style={{color:t.acc}}>{openhandsReasoningEffort}</span></label>
+          <select value={openhandsReasoningEffort} onChange={e=>setOpenhandsReasoningEffort(e.target.value)} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"8px 12px",borderRadius:8,fontFamily:font,fontSize:12,outline:"none",cursor:"pointer"}}>
+            <option value="low">Low — fastest, minimal think tokens</option>
+            <option value="medium">Medium — balanced (recommended for local Ollama)</option>
+            <option value="high">High — most thorough, slow on local models</option>
+          </select>
+          <div style={{fontSize:9,color:t.mut,marginTop:4}}>Controls how much the Builder LLM thinks before each tool call. Drop to <b>low</b> if generate_code is taking minutes per file.</div>
         </div>
       </div>
 

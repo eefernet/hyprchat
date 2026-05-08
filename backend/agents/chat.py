@@ -452,10 +452,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     if _active_project:
         _ap_files = _active_project.get("file_manifest") or []
         _ap_id = _active_project.get("id", "") or ""
+        _ap_path = f"/root/projects/{_ap_id}" if _ap_id else ""
         _ap_lines = [
             "## ACTIVE PROJECT (this conversation already has a built project)",
-            f"- name: {_active_project.get('name', '?')}",
+            f"- display name: {_active_project.get('name', '?')}  (NOT a directory — do NOT use this as a path)",
             f"- project_id: {_ap_id}",
+            f"- **ON-DISK PATH (use this for ALL tool calls): `{_ap_path}`**",
             f"- language: {_active_project.get('language', '?')}",
             f"- description: {(_active_project.get('description') or '')[:200]}",
         ]
@@ -468,6 +470,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         if _is_v2_persona:
             _ap_lines.append(
                 "\n## How to handle this project\n"
+                f"**The project lives at `{_ap_path}` — already extracted on disk. "
+                f"NEVER mkdir a new directory. NEVER use the display name "
+                f"('{_active_project.get('name', '?')}') as a path. ALWAYS pass "
+                f"`{_ap_path}` to any tool that takes a project_dir or path.**\n\n"
                 "1. **For QUESTIONS** about the code (\"how does X work?\", \"walk me "
                 "through Y\", \"show me Z\", \"break down W line by line\", \"what does "
                 "this do?\"): your VERY FIRST tool call MUST be `ask_project(question='...')`. "
@@ -476,13 +482,28 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 "relevant, and produces a grounded answer with file:line citations in "
                 "ONE round. Hand-rolling read_file across many files is the v1 "
                 "antipattern that wastes rounds.\n"
-                "2. **For CHANGE REQUESTS** (\"add X\", \"fix Y\", \"refactor Z\", "
-                "\"implement W\"): use `generate_code(task='...', project_id="
-                f"'{_ap_id}')` for substantial changes, or `write_file` + `run_review` "
-                "for tweaks to 1-2 files.\n"
+                "2. **For CHANGE REQUESTS — DEFAULT TO write_file, NOT generate_code.** "
+                "Only call generate_code when the user is genuinely asking you to add "
+                "3+ NEW files or do a major refactor. For ALL of these, use read_file + "
+                "write_file:\n"
+                "   - User pastes 1–5 lines of code (\"the fix is `x.foo()`\", \"replace "
+                "Y with Z\", \"use this API call\") → read_file the relevant file(s) → "
+                "write_file with the change.\n"
+                "   - 1–3 file tweaks, bug fixes, refactors of an existing function, "
+                "additions of small features.\n"
+                "   - Anything where you'd touch fewer than ~3 files.\n"
+                f"   When you DO need generate_code, pass `project_id='{_ap_id}'` so the "
+                f"Builder amends in place instead of scaffolding fresh. NEVER pass a "
+                f"task description that says \"create a complete X\" or \"build a Y\" "
+                f"for a project that already exists — that triggers a scaffold rebuild "
+                f"and clobbers the existing code.\n"
                 "3. **For BUG REPORTS** (\"the tests are failing\", \"it crashes when "
-                "...\"): call `run_review(project_dir='/root/projects/" + _ap_id + "')` "
-                "first — the Reviewer runs the build/tests and tells you what's broken.\n"
+                f"...\"): call `run_review(project_dir='{_ap_path}')` first — the "
+                f"Reviewer runs the build/tests and tells you what's broken. If the "
+                f"reviewer comes back clean but the user still reports a runtime bug "
+                f"(crashes, UI not updating, error that compiles fine): read the "
+                f"relevant 1–3 files and write_file the targeted fix. Do NOT call "
+                f"generate_code for runtime bugs.\n"
                 "4. **Do NOT auto-package or download** the project unless the user "
                 "explicitly asks for the tarball/zip. They already uploaded it."
             )
@@ -718,6 +739,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
         # Keepalive before Ollama call — prevents browser/proxy timeout during prompt eval
         yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+
+        # Estimate prompt tokens so the frontend counter reflects context-in-flight,
+        # not just live generation. Real prompt_eval_count arrives only at done=True.
+        _est_prompt_pre = sum(len(m.get("content", "")) for m in messages) // 4
+        if _est_prompt_pre:
+            yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': _est_prompt_pre, 'live': True})}\n\n"
 
         try:
             async with http.stream("POST", f"{config.OLLAMA_URL}/api/chat",

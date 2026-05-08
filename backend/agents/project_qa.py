@@ -528,7 +528,9 @@ async def run_project_qa(http, events, conv_id: str, *,
     # chat-dropdown choice) so the QA voice matches the assistant the user is
     # actually talking to. Fall back to settings only if the chat didn't pass
     # one through.
-    qa_model = (conv_model or config.DEFAULT_MODEL or config.PLANNING_MODEL or "").strip()
+    # Per-agent override (config.QA_MODEL) wins if explicitly pinned; else
+    # respect the chat/persona model, then settings defaults.
+    qa_model = (config.QA_MODEL or conv_model or config.DEFAULT_MODEL or config.PLANNING_MODEL or "").strip()
     if not qa_model:
         envelope = {"status": "error",
                     "summary": "No model configured for ProjectQA",

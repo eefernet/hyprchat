@@ -246,7 +246,10 @@ async def run_fixer(http, events, conv_id: str, *,
                     "issues_addressed": 0, "files_touched": [], "errors": [],
                     "project_dir": project_dir, "language": language}
         if run_id:
-            try: await db.update_run(run_id, status="succeeded", result_envelope=envelope, ended=True)
+            # Status="skipped" (not "succeeded") so this no-op doesn't count
+            # toward the 3-cycle cap in tools.py — a fixer call with nothing
+            # to fix shouldn't burn a quota slot.
+            try: await db.update_run(run_id, status="skipped", result_envelope=envelope, ended=True)
             except Exception: pass
         await events.emit(conv_id, "tool_end", {
             "tool": "run_fixer", "icon": "wrench",
@@ -255,7 +258,10 @@ async def run_fixer(http, events, conv_id: str, *,
         })
         return envelope
 
-    fixer_model = (config.CODER_MODEL or config.PLANNING_MODEL
+    # Per-agent override (config.FIXER_MODEL) wins if set; else umbrella
+    # CODER_MODEL → PLANNING_MODEL → default. Fixer is a code-editing agent so
+    # it intentionally does NOT fall back to the chat model.
+    fixer_model = (config.FIXER_MODEL or config.CODER_MODEL or config.PLANNING_MODEL
                    or config.DEFAULT_MODEL or "")
     if not fixer_model:
         envelope = {"status": "error",

@@ -1,3 +1,48 @@
+## Alpha v17.0.1 — May 8, 2026
+
+### Coder Bot v2 — workflow gate hardening
+
+A run-by-run debugging session against real user projects exposed ten edge cases in the v2 workflow gate, profile detection, and persona prompt. Each one would, on its own, derail a single conversation; together they explained why the same prompt ("fix the QFont error in this uploaded project") could swing between a clean 16-round bug fix and a 24-round rebuild loop that clobbered the user's edits. All ten are fixed and verified against the same prompt re-run.
+
+#### Reviewer/Fixer/gate fixes
+
+- **Phantom `run_fixer` guard** — `backend/tools.py` exec_tool gate now refuses `run_fixer` unless the latest meaningful run is a reviewer with `status="issues"` or `"error"`. Previously the gate's allow-list let `run_fixer` through after a builder, so a model that hallucinated a `reviewer_run_id` immediately after `generate_code` would burn a cycle-cap slot for zero work. Block message includes the actual most-recent run role/status and a `run_review` next-step hint with the on-disk project_dir.
+- **"Nothing to fix" no longer counts as a succeeded cycle** — `backend/agents/fixer.py:249` switched the no-envelope skip path from `status="succeeded"` to `status="skipped"`. The 3-cycle cap counts only real fix attempts now.
+- **`pytest` exit code 5 ("no tests collected") treated as benign** — `backend/agents/reviewer.py:43,47` appended `|| echo '(no tests)'` to the `pyproject.toml` and `requirements.txt` test commands, matching the plain-Python fallback at line 76. Greenfield scaffolds with no tests yet stop triggering an infinite review/fix loop where the Fixer writes `pytest.ini` over and over.
+- **Cycle cap allows graceful delivery** — when the 3-cycle fixer cap fires, `tools.py` PENDING_FIX gate now releases `download_project`, `download_file`, `read_file`, `list_files` so the model can ship what was built or inspect the tree. Cap message also explicitly suggests `download_project` as a "ship as-is" path instead of telling the model "respond with text only" (which qwen3-coder ignored).
+- **Anti-rebuild guard for `generate_code`** — `tools.py` blocks a second `generate_code` against the same project in the same conversation turn (since the latest user message). Detected via `runs.started_at >= latest_user_message.created_at`. Pushes the model toward `read_file` + `write_file` for iterative refinement instead of running the OpenHands feature-builder twice for ~150s of clobbering. Block message includes file-path hints so the model knows exactly what to do next.
+- **Profile auto-detection for write_file-edited uploaded projects** — `tools.py` coding_projects fallback now sets `_builder_profile = "feature"` when there's an active project but no prior builder run. Previously the fallback left it as `"scaffold"`, so a user who uploaded a project and then edited it via `write_file` would get their code clobbered the first time they triggered `generate_code`.
+
+#### `_parse_ts_loose()` helper
+
+- New helper in `tools.py` parses both Python `datetime.utcnow().isoformat()` (T-separator, microseconds) and SQLite `CURRENT_TIMESTAMP` (space separator, no microseconds, occasional trailing `Z`). The runs table and the messages table use different formats; without a unified parser, "is this run from the current turn?" comparisons would silently fail.
+
+#### ACTIVE PROJECT block — Bug 9 / 10
+
+- **Path-explicit project block** — `backend/agents/chat.py` injection now emits `**ON-DISK PATH (use this for ALL tool calls): /root/projects/{project_id}**` as a top-level field, with the human-readable name relabeled `display name (NOT a directory — do NOT use this as a path)`. Previously the model would `mkdir -p /root/projects/{display-name}` because it couldn't tell the difference between the human label and the slug.
+- **v2 active-project guidance — write_file is now the default**, not generate_code. Pasted 1–5 lines of code, 1–3 file tweaks, refactors of an existing function: all explicitly listed as `read_file` → `write_file`. `generate_code` only for genuinely 3+ NEW files or major refactors. Includes "NEVER pass a task description like 'create a complete X' for a project that already exists" — that wording was directly responsible for the scaffold rebuild that nearly clobbered a working font fix.
+- **Runtime-bug branch added** — split the bug-report path in two: build/compile/lint errors → `run_review` (existing behavior), but **runtime bugs that compile fine** (crashes when clicked, preview not updating, invalid font strings) → read the relevant 1–3 files and `write_file` directly, because the reviewer can't see them. Persona prompt updated to match.
+
+#### Persona prompt + re-seed plumbing
+
+- **Coder Bot v2 system prompt** — added the runtime-bug branch and a top-level **ANTI-REBUILD RULE** section: "Once `generate_code` has succeeded for a project this turn, do NOT call it again. … The server enforces this with a hard gate; ignoring it just costs you a round."
+- **`seed_coder_bot_v2()` now updates in-place** — `backend/agents/personas.py` stopped deleting and recreating the persona on re-seed. The `mc_id` is preserved if an existing row matches by name, so existing conversations keep their persona link across re-seeds. New `update_model_config` call replaces the `delete + create_model_config` pattern.
+
+#### Settings persistence — Bug 6
+
+- **Empty-string settings now respected on startup** — `backend/main.py:183` switched from `if _settings.get("planning_model"):` (truthy check, skips empty strings) to `if "planning_model" in _settings:` with `or ""` assignment. Previously a user setting Planning Model to "(use chat model)" → empty string → saved correctly via `PATCH /api/settings`, but on the next restart `config.PLANNING_MODEL` reverted to the env default (`qwen3.5:27b` in `config.py`). Now the user's choice survives restarts. Same fix applied to `coder_model`. Visible in startup logs: `[Config] Loaded Planning Model from settings: (use chat model)`.
+
+#### Upload size limit
+
+- **Default upload limit raised 50 MB → 250 MB** — `backend/config.py` `MAX_UPLOAD_SIZE_MB` (still env-overridable). 50 MB rejected most real projects once `.venv` was included; 250 MB fits a typical PyQt5 + dependencies venv with headroom and still buffers safely in a single uvicorn worker.
+- **Hardcoded 50 MB checks routed through the constant** — `backend/main.py:1641` (PDF route) was hardcoded; now uses `config.MAX_UPLOAD_SIZE_MB`. Frontend single-file attach guard at `frontend/dist/index.html:2589` bumped to match.
+
+### OpenHands — Reasoning Effort setting
+
+- **New "Reasoning Effort" dropdown in the OpenHands settings tile.** Three options: **Low** (fastest, minimal think tokens), **Medium** (balanced — new default for local Ollama), **High** (most thorough, what the SDK defaults to and what was making local builds take 5+ minutes per file). Helper text recommends Low when generate_code is taking minutes per file.
+- **End-to-end plumbing**: `OPENHANDS_REASONING_EFFORT` config in `backend/config.py` (env-overridable, default `medium`), load/save/expose via `backend/main.py` settings handlers, forwarded in `oh_payload` from `backend/tools.py`, received as `RunRequest.reasoning_effort` in `backend/openhands_worker.py`, passed to `_LLM(reasoning_effort=...)` with a graceful `TypeError` fallback for older SDK versions that don't accept the kwarg (logs a warning, uses SDK default — setting becomes a no-op for that case rather than crashing).
+- **Why this matters**: the OpenHands SDK defaults `reasoning_effort=high` and `extended_thinking_budget=200000`, which on a 30B Ollama model with `num_ctx=16384` (~46 GB VRAM) makes a single tool-decision round take 30+ seconds. Combined with model-swap thrashing (chat agent ↔ builder agent fighting for VRAM), a 3-file scaffold could take 5 minutes wall-clock. Dropping to `medium` or `low` cuts that significantly with no observable quality regression on standard CRUD/UI tasks.
+
 ## Alpha v17 — May 7, 2026
 
 ### Coder Bot v2 — Multi-Agent Rebuild
@@ -186,7 +231,6 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Fixed Reviewer / Fixer scope-validation edge case where issues with no `suggested_fix_scope` field caused the Fixer to error out instead of skipping the issue cleanly.
 - Fixed Bash render error where `$VAR` and command-substitution `$(cmd)` inside a `bash` code fence prematurely terminated rendering.
 - Fixed `num_ctx` from user settings being silently ignored by OpenHands runs after the first model load — now evict-and-reload guarantees the runtime context matches the requested value.
-
 
 
 ## Alpha v16.2 — April 22, 2026

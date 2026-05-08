@@ -39,12 +39,17 @@ _PROJECT_MARKERS = [
     ("go.mod",          "go build ./...",                  "go test ./...",          "go vet ./...",       "go"),
     ("package.json",    "npm install --silent && npm run build --if-present",
                                                             "npm test --if-present",  "",                   "javascript"),
+    # Tail `|| echo '(no tests)'` matches the plain-python profile below: pytest
+    # exits 5 when no tests are collected, and unittest discover can also exit
+    # non-zero on empty trees. Without the echo, a greenfield scaffold with no
+    # tests yet looks like a "test failure" → reviewer flags it → fixer can't
+    # conjure tests → infinite review/fix loop.
     ("pyproject.toml",  "python3 -m pip install -q -e . 2>/dev/null || true",
-                                                            "python3 -m pytest -q --no-header 2>/dev/null || python3 -m unittest discover -q",
+                                                            "python3 -m pytest -q --no-header 2>/dev/null || python3 -m unittest discover -q 2>/dev/null || echo '(no tests)'",
                                                                                       "python3 -m py_compile $(find . -name '*.py' -not -path '*/venv/*')",
                                                                                                             "python"),
     ("requirements.txt","python3 -m pip install -q -r requirements.txt 2>/dev/null || true",
-                                                            "python3 -m pytest -q --no-header 2>/dev/null || python3 -m unittest discover -q",
+                                                            "python3 -m pytest -q --no-header 2>/dev/null || python3 -m unittest discover -q 2>/dev/null || echo '(no tests)'",
                                                                                       "python3 -m py_compile $(find . -name '*.py' -not -path '*/venv/*')",
                                                                                                             "python"),
     ("Makefile",        "make -s 2>&1 | head -200",         "make -s test 2>&1 | head -200", "",            ""),
@@ -492,7 +497,9 @@ async def run_review(http, events, conv_id: str, project_dir: str,
         return envelope
 
     # 5. Slow path: feed everything to the planning-model LLM and parse JSON.
-    review_model = config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL
+    # Per-agent override wins if set; else umbrella PLANNING_MODEL, then chat,
+    # then default.
+    review_model = config.REVIEWER_MODEL or config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL
     prompt = _REVIEW_PROMPT.format(
         build_cmd=build_cmd or "(none)",
         build_exit=build_result["exit_code"],

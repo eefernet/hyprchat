@@ -180,7 +180,9 @@ async def run_architect(http, events, conv_id: str, *,
             except Exception:
                 pass
 
-    model = (config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL or "")
+    # Per-agent override (config.ARCHITECT_MODEL) wins if set; otherwise fall
+    # through to the umbrella PLANNING_MODEL, then the chat model, then default.
+    model = (config.ARCHITECT_MODEL or config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL or "")
     if not model:
         envelope = {"status": "error",
                     "summary": "No planning model configured for Architect",
