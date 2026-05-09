@@ -39,6 +39,119 @@ def _parse_ts_loose(s) -> "datetime | None":
     return None
 
 
+# In-process cache of the most recent deep_research result per conversation.
+# The full research report only exists in the orchestrator's in-memory tool
+# history for the current turn — saved_events keeps a summary but not the
+# body. Caching it here lets the Fixer dispatcher pick it up across the
+# orchestrator/fixer boundary without persisting research bodies to SQLite
+# or breaking the Fixer's network-free contract. Bounded to the most-recent
+# 32 conversations (LRU-ish via insertion order); freshness window enforced
+# at read time, not write time.
+_RECENT_RESEARCH: "dict[str, dict]" = {}
+_RECENT_RESEARCH_MAX = 32
+_RESEARCH_FRESH_SECONDS = 600  # 10 min — drop on next read past this
+
+
+def _stash_research_result(conv_id: str, topic: str, report: str) -> None:
+    """Record the most recent deep_research result for this conv. Bounded:
+    when the cache exceeds the cap, the oldest insertion is evicted."""
+    if not conv_id or not report:
+        return
+    _RECENT_RESEARCH[conv_id] = {
+        "topic": topic or "",
+        "report": report,
+        "ts": time.time(),
+    }
+    if len(_RECENT_RESEARCH) > _RECENT_RESEARCH_MAX:
+        # Drop oldest by insertion order (dict preserves it in 3.7+).
+        _oldest = next(iter(_RECENT_RESEARCH))
+        _RECENT_RESEARCH.pop(_oldest, None)
+
+
+def _get_recent_research(conv_id: str) -> "dict | None":
+    """Return the cached research entry for conv_id if it's still within the
+    freshness window, else None. Stale entries are dropped on read."""
+    entry = _RECENT_RESEARCH.get(conv_id)
+    if not entry:
+        return None
+    if (time.time() - entry.get("ts", 0)) > _RESEARCH_FRESH_SECONDS:
+        _RECENT_RESEARCH.pop(conv_id, None)
+        return None
+    return entry
+
+
+def _issue_signatures(envelope: dict) -> set:
+    """Reduce a reviewer envelope to a set of (file, summary_prefix) tuples
+    suitable for set-overlap comparison. Used by the v2 gate to detect
+    'same problem returned' across run_review cycles. Summary prefix is
+    lowercased + stripped + truncated to 60 chars so trivial wording diffs
+    don't defeat the overlap check, but the file path must match exactly."""
+    sigs = set()
+    for iss in (envelope or {}).get("issues") or []:
+        f = (iss.get("file") or "").strip()
+        s = (iss.get("summary") or "").strip().lower()[:60]
+        if f and s:
+            sigs.add((f, s))
+    return sigs
+
+
+async def _deep_research_called_since(conv_id: str, since_iso: str | None) -> bool:
+    """Return True iff at least one assistant message after `since_iso` has a
+    persisted tool_start event for the deep_research tool. Used by the v2
+    gate to verify the model actually researched a recurring error before
+    retrying run_fixer."""
+    if not since_iso:
+        return False
+    try:
+        conv = await db.get_conversation(conv_id)
+        msgs = (conv or {}).get("messages") or []
+        since_ts = _parse_ts_loose(since_iso)
+        for m in reversed(msgs):
+            if m.get("role") != "assistant":
+                continue
+            m_ts = _parse_ts_loose(m.get("created_at"))
+            if since_ts and m_ts and m_ts < since_ts:
+                # Once we walk past the trigger run, we can stop.
+                return False
+            md = m.get("metadata") or {}
+            if isinstance(md, str):
+                try:
+                    md = json.loads(md)
+                except Exception:
+                    md = {}
+            for ev in md.get("saved_events") or []:
+                if ev.get("type") != "tool_start":
+                    continue
+                if (ev.get("data") or {}).get("tool") == "deep_research":
+                    return True
+        return False
+    except Exception as _e:
+        print(f"[v2-gate] deep_research history check failed (non-fatal): {_e}")
+        return False
+
+
+async def _is_v2_persona(conv_id: str, conv_row: dict | None = None) -> bool:
+    """Return True iff this conversation's persona name contains 'v2'.
+
+    Centralised so the workflow gate doesn't repeat the same db lookup +
+    string match in five different places. Pass conv_row if the caller has
+    already fetched it to avoid a second db query. Failures are non-fatal
+    and return False (fail-safe — gate stays off rather than mis-firing on
+    a v1 persona)."""
+    try:
+        if conv_row is None:
+            conv_row = await db.get_conversation(conv_id)
+        _mc_id = (conv_row or {}).get("model_config_id") if conv_row else None
+        if not _mc_id:
+            return False
+        _all_mc = await db.get_model_configs()
+        _mc = next((m for m in _all_mc if m.get("id") == _mc_id), None)
+        return bool(_mc and "v2" in (_mc.get("name") or "").lower())
+    except Exception as _e:
+        print(f"[v2-gate] persona lookup failed (non-fatal): {_e}")
+        return False
+
+
 # ── Ollama-native tool definitions ──
 # Keep descriptions SHORT and CLEAR. Models perform better with concise tool docs.
 CODEAGENT_TOOLS = {
@@ -904,21 +1017,8 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     if r.get("role") == "fixer" and r.get("status") == "succeeded"
                 )
                 if _fixer_succ >= 3:
-                    # Detect v2 persona; v1 doesn't run this loop, so no need
-                    # to enforce the cap there.
-                    _is_v2_cap = False
-                    try:
-                        _conv_row = await db.get_conversation(conv_id)
-                        _mc_id = (_conv_row or {}).get("model_config_id") if _conv_row else None
-                        if _mc_id:
-                            _all_mc = await db.get_model_configs()
-                            _mc = next((m for m in _all_mc if m.get("id") == _mc_id), None)
-                            if _mc and "v2" in (_mc.get("name") or "").lower():
-                                _is_v2_cap = True
-                    except Exception as _pe:
-                        print(f"[v2-gate] cap persona lookup failed (non-fatal): {_pe}")
-
-                    if _is_v2_cap:
+                    # v1 doesn't run this loop, so cap only applies to v2.
+                    if await _is_v2_persona(conv_id):
                         # Pull the latest reviewer's summary so the model has
                         # specifics to relay to the user.
                         _last_rev = next(
@@ -965,6 +1065,113 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             except Exception as _ce:
                 print(f"[v2-gate] cycle cap check failed (non-fatal): {_ce}")
 
+            # ─── State 5+6 — STUCK_FIX / FINAL_CYCLE — research nudge ───────
+            # If the model is about to call run_fixer for the 2nd or 3rd time
+            # AND either (a) the same issue signatures returned across reviewer
+            # cycles, or (b) this would be the 3rd (last-allowed) fixer run,
+            # block until deep_research has been called. The persona prompt
+            # tells the model to do this; the gate enforces it server-side.
+            #
+            # Uses the same _runs_for_cap walk as the cycle cap — cheap because
+            # we already paid for that db hit above, but defensive in case the
+            # cap try-block bailed before populating it.
+            try:
+                _runs_sf = locals().get("_runs_for_cap")
+                if _runs_sf is None:
+                    _runs_sf = await db.get_runs_by_conversation(conv_id, limit=20)
+                _fsucc_sf = sum(
+                    1 for r in _runs_sf
+                    if r.get("role") == "fixer" and r.get("status") == "succeeded"
+                )
+                # 1 ≤ fixer_succ ≤ 2: between first failure and final cycle.
+                # 0 = first attempt, no gate. ≥3 = cap (handled above).
+                if 1 <= _fsucc_sf <= 2 and await _is_v2_persona(conv_id):
+                    _latest_rev_sf = next(
+                        (r for r in _runs_sf if r.get("role") == "reviewer"),
+                        None,
+                    )
+                    if _latest_rev_sf:
+                        _cur_iss = _issue_signatures(_latest_rev_sf.get("result_envelope") or {})
+                        _research_done = await _deep_research_called_since(
+                            conv_id, _latest_rev_sf.get("started_at")
+                        )
+
+                        # State 5 — STUCK: same issue signature seen in a prior
+                        # reviewer run AND no research call since.
+                        _is_stuck = False
+                        if _cur_iss:
+                            _prior_revs_sf = [
+                                r for r in _runs_sf
+                                if r.get("role") == "reviewer"
+                                and r.get("id") != _latest_rev_sf.get("id")
+                            ]
+                            if _prior_revs_sf:
+                                _prior_rev_sf = _prior_revs_sf[0]
+                                _prior_iss = _issue_signatures(
+                                    _prior_rev_sf.get("result_envelope") or {}
+                                )
+                                if _cur_iss & _prior_iss:
+                                    _is_stuck = True
+
+                        # State 6 — FINAL CYCLE: about to use the last fixer
+                        # slot (3rd attempt). Research before the last shot.
+                        _is_final = (_fsucc_sf == 2)
+
+                        if (_is_stuck or _is_final) and not _research_done:
+                            _why_label = ("STUCK" if _is_stuck else "FINAL_CYCLE")
+                            _gate_status = (
+                                "⛔ Same issue returned — call deep_research first"
+                                if _is_stuck else
+                                "⛔ Final fixer cycle — call deep_research first"
+                            )
+                            # Pull a representative error to seed the research topic.
+                            _seed_iss = (_latest_rev_sf.get("result_envelope") or {}).get("issues") or []
+                            _seed_lines = []
+                            for _i, _iss in enumerate(_seed_iss[:2], 1):
+                                _seed_lines.append(
+                                    f"  {_i}. [{_iss.get('severity','?')}] "
+                                    f"{_iss.get('file','?')}"
+                                    + (f":{','.join(str(x) for x in _iss.get('lines') or [])}" if _iss.get('lines') else "")
+                                    + f" — {(_iss.get('summary','') or '')[:160]}"
+                                )
+                            _seed_block = ("\n" + "\n".join(_seed_lines)) if _seed_lines else ""
+
+                            await events.emit(conv_id, "tool_end", {
+                                "tool": "run_fixer", "icon": "wrench",
+                                "status": _gate_status,
+                            })
+                            print(f"[v2-gate] {_why_label}: blocking run_fixer "
+                                  f"(fixer_succ={_fsucc_sf}, stuck={_is_stuck}, "
+                                  f"final={_is_final}, research_done={_research_done})", flush=True)
+
+                            if _is_stuck:
+                                _reason = (
+                                    f"BLOCKED — run_review returned the same issue(s) you already "
+                                    f"attempted to fix in a previous run_fixer cycle ({_fsucc_sf} fixer "
+                                    f"run(s) so far). Calling run_fixer again without new information "
+                                    f"will produce the same result.\n"
+                                )
+                            else:
+                                _reason = (
+                                    f"BLOCKED — this would be your 3rd (final) run_fixer call. "
+                                    f"After it, the cycle cap blocks any further fixer runs. "
+                                    f"Spend one round on web research before the last shot.\n"
+                                )
+
+                            return (
+                                _reason
+                                + "\nRecurring issue(s):" + _seed_block + "\n\n"
+                                + "Your VERY NEXT tool call MUST be:\n"
+                                + "  deep_research(topic='<exact error message + library/version>', depth=2)\n\n"
+                                + "After deep_research returns, call run_fixer — the Fixer will see the "
+                                + "research result in your conversation and use it to ground the next "
+                                + "edit. Use depth=2 (fast); only use depth=3 if the issue is genuinely "
+                                + "obscure. Do NOT call run_fixer, generate_code, write_file, run_shell, "
+                                + "or run_review until deep_research has run."
+                            )
+            except Exception as _sfe:
+                print(f"[v2-gate] stuck/final-cycle check failed (non-fatal): {_sfe}")
+
             # Phantom run_fixer guard: block run_fixer when the latest run
             # isn't a reviewer with status='issues'/'error'. Without this,
             # a hallucinated reviewer_run_id (the model sometimes invents
@@ -975,19 +1182,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             # legitimate "reviewer just ran with issues → call run_fixer"
             # case; this guard handles every other case.
             try:
-                _is_v2_pf = False
-                try:
-                    _conv_row_pf = await db.get_conversation(conv_id)
-                    _mc_id_pf = (_conv_row_pf or {}).get("model_config_id") if _conv_row_pf else None
-                    if _mc_id_pf:
-                        _all_mc_pf = await db.get_model_configs()
-                        _mc_pf = next((m for m in _all_mc_pf if m.get("id") == _mc_id_pf), None)
-                        if _mc_pf and "v2" in (_mc_pf.get("name") or "").lower():
-                            _is_v2_pf = True
-                except Exception as _pe_inner:
-                    print(f"[v2-gate] phantom-fixer persona lookup failed (non-fatal): {_pe_inner}")
-
-                if _is_v2_pf:
+                if await _is_v2_persona(conv_id):
                     _runs_pf = await db.get_runs_by_conversation(conv_id, limit=20)
                     _latest_meaningful = None
                     _MEANINGFUL_STATUSES = {"succeeded", "issues", "clean", "partial",
@@ -1049,20 +1244,8 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
         # always produces a worse result than 2 surgical write_file edits.
         if conv_id and name == "generate_code":
             try:
-                _is_v2_rb = False
-                _conv_full = None
-                try:
-                    _conv_full = await db.get_conversation(conv_id)
-                    _mc_id_rb = (_conv_full or {}).get("model_config_id")
-                    if _mc_id_rb:
-                        _all_mc_rb = await db.get_model_configs()
-                        _mc_rb = next((m for m in _all_mc_rb if m.get("id") == _mc_id_rb), None)
-                        if _mc_rb and "v2" in (_mc_rb.get("name") or "").lower():
-                            _is_v2_rb = True
-                except Exception as _pe_rb:
-                    print(f"[v2-gate] anti-rebuild persona lookup failed (non-fatal): {_pe_rb}")
-
-                if _is_v2_rb:
+                _conv_full = await db.get_conversation(conv_id)
+                if await _is_v2_persona(conv_id, conv_row=_conv_full):
                     # Find the most recent user message timestamp.
                     _msgs_rb = (_conv_full or {}).get("messages") or []
                     _latest_user_ts = None
@@ -1241,21 +1424,9 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     )
 
                 if _gate_msg is not None:
-                    # Detect v2 persona before actually blocking. v1 has no
-                    # run_review or run_fixer in its workflow.
-                    _is_v2 = False
-                    try:
-                        _conv_row = await db.get_conversation(conv_id)
-                        _mc_id = (_conv_row or {}).get("model_config_id") if _conv_row else None
-                        if _mc_id:
-                            _all_mc = await db.get_model_configs()
-                            _mc = next((m for m in _all_mc if m.get("id") == _mc_id), None)
-                            if _mc and "v2" in (_mc.get("name") or "").lower():
-                                _is_v2 = True
-                    except Exception as _pe:
-                        print(f"[v2-gate] persona lookup failed (non-fatal): {_pe}")
-
-                    if _is_v2:
+                    # v1 has no run_review or run_fixer in its workflow, so
+                    # the gate only blocks v2 personas.
+                    if await _is_v2_persona(conv_id):
                         _, _state_label, _body, _short_status, _trigger_id = _gate_msg
                         await events.emit(conv_id, "tool_end", {
                             "tool": name, "icon": "code",
@@ -2082,8 +2253,26 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 "status": f"🛠 Starting Fixer for review {reviewer_run_id[:14]}…",
             })
 
+            # If a recent deep_research call happened on this conv, hand its
+            # report to the Fixer as supporting context. Cached at the call
+            # site (see _stash_research_result), so this stays in-process and
+            # doesn't break the Fixer's network-free invariant. Stale entries
+            # (>10 min) are dropped on read by _get_recent_research.
+            _research_for_fixer = ""
+            try:
+                _r_entry = _get_recent_research(conv_id)
+                if _r_entry:
+                    _research_for_fixer = _r_entry.get("report", "") or ""
+                    if _research_for_fixer:
+                        print(f"[run_fixer] injecting research_context "
+                              f"({len(_research_for_fixer)} chars, "
+                              f"topic={(_r_entry.get('topic') or '')[:60]!r})")
+            except Exception as _re:
+                print(f"[run_fixer] research lookup failed (non-fatal): {_re}")
+
             envelope = await fixer.run_fixer(http, events, conv_id,
-                                              reviewer_run_id=reviewer_run_id)
+                                              reviewer_run_id=reviewer_run_id,
+                                              research_context=_research_for_fixer)
 
             f_status = envelope.get("status", "?")
             files = envelope.get("files_touched") or []
@@ -2267,18 +2456,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             # consume directly, instead of the v1 prose plan that every
             # downstream agent has to re-parse from markdown. v1 personas
             # keep the existing prose path below.
-            _is_v2_for_plan = False
-            if conv_id:
-                try:
-                    _conv_row = await db.get_conversation(conv_id)
-                    _mc_id = (_conv_row or {}).get("model_config_id") if _conv_row else None
-                    if _mc_id:
-                        _all_mc = await db.get_model_configs()
-                        _mc = next((m for m in _all_mc if m.get("id") == _mc_id), None)
-                        if _mc and "v2" in (_mc.get("name") or "").lower():
-                            _is_v2_for_plan = True
-                except Exception as _pe:
-                    print(f"[plan_project] persona lookup failed (non-fatal): {_pe}")
+            _is_v2_for_plan = bool(conv_id) and await _is_v2_persona(conv_id)
 
             if _is_v2_for_plan:
                 from agents import architect
@@ -2439,7 +2617,12 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 parts.append("\n\n---\n## Sources\n")
                 for s in sources[:20]:
                     parts.append(f"[{s.get('index','?')}] [{s.get('title','?')}]({s.get('url','')})")
-            return "\n".join(parts)
+            _full_report = "\n".join(parts)
+            # Cache the result so the Fixer dispatcher can inject it into
+            # the next run_fixer call without making the Fixer itself read
+            # the conversation. Keeps fixer.py network-free.
+            _stash_research_result(conv_id, topic, _full_report)
+            return _full_report
 
         elif name == "conspiracy_research":
             topic = args.get("topic", "")

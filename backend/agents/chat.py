@@ -634,6 +634,42 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         else:
             messages.insert(0, {"role": "system", "content": _viz_hint.strip()})
 
+    # Research-only sessions (deep_research / conspiracy_research enabled without
+    # codeagent) need an explicit nudge — without it the model sees the tool but
+    # just answers from memory. Skipped when full codeagent is on; that prompt
+    # already covers tool use.
+    _research_tools_present = available_tool_names & {"deep_research", "conspiracy_research"}
+    if _research_tools_present and not _has_full_codeagent:
+        _names = " or ".join(sorted(_research_tools_present))
+        _research_sys = (
+            "\n\n## RESEARCH PROTOCOL (MANDATORY)\n"
+            f"The user has explicitly enabled **{_names}** for this turn. That means "
+            "they want a multi-source web-researched answer, not your own analysis. "
+            f"Your FIRST response MUST be a call to {_names}.\n"
+            "\n"
+            "**This applies even when context is attached.** Attached PDFs, pasted "
+            "text, or knowledge-base excerpts describe the USER (their data, their "
+            "situation) — they are NOT a substitute for external research. The user "
+            "wants you to compare, benchmark, or contextualize that attached data "
+            "against external sources you fetch with the tool.\n"
+            "\n"
+            "- Call the tool with a clear `topic` derived from the user's question. "
+            "Pull comparison terms, entity names, or benchmarks out of the attached "
+            "context to make the topic specific.\n"
+            "- Use `depth` to match the user's request (1=quick, 3=standard, 5=exhaustive).\n"
+            "- Wait for the tool result, then synthesize a final report that "
+            "cross-references the attached data against what the tool returned. "
+            "Cite sources from the tool result.\n"
+            "- Do NOT write a written answer before calling the tool. Do NOT say "
+            "\"based on the attached document...\" as your first move.\n"
+            "- Only skip the tool for greetings, clarification questions, or trivial "
+            "definitional questions where external research adds nothing.\n"
+        )
+        if messages and messages[0]["role"] == "system":
+            messages[0]["content"] += _research_sys
+        else:
+            messages.insert(0, {"role": "system", "content": _research_sys.strip()})
+
     # Inject tool-use system prompt when full codeagent tools are available
     if _has_full_codeagent:
         tool_sys = "\n\n## CODING AGENT PROTOCOL (MANDATORY)\n"

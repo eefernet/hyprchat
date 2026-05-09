@@ -37,7 +37,7 @@ _FIXER_PROMPT = """You are the Fixer — a focused code-editing agent. You MUST 
 - Language: {language}
 - Build command: {build_cmd}
 - Test command: {test_cmd}
-
+{research_section}
 ## The issue you are fixing
 {issue_block}
 
@@ -176,11 +176,19 @@ def _parse_fixer_output(text: str) -> dict:
 
 async def run_fixer(http, events, conv_id: str, *,
                     reviewer_run_id: str = "",
-                    parent_run_id: str = "") -> dict:
+                    parent_run_id: str = "",
+                    research_context: str = "") -> dict:
     """Execute a Fixer run that addresses every issue in a prior Reviewer envelope.
 
     Returns a structured envelope. Creates a `runs` row with role='fixer' and
     parent_run_id set to the reviewer run, so the run graph stays linked.
+
+    `research_context`, if provided, is the (possibly-truncated) text of a
+    recent deep_research call on this conversation. The orchestrator-side
+    dispatcher in tools.py grabs it from a per-conv cache and passes it in
+    so the Fixer's coder LLM has additional grounding for tricky errors.
+    The Fixer itself does NOT make any network calls — research happens
+    entirely on the orchestrator side; this is just an injected reference.
     """
 
     run_id = f"run-{uuid.uuid4().hex[:12]}"
@@ -278,6 +286,27 @@ async def run_fixer(http, events, conv_id: str, *,
     diffs: list[dict] = []
     errors: list[str] = []
 
+    # Build the research section once, then reuse across issues. When no
+    # research context is supplied, the section is empty and disappears
+    # from the prompt entirely. Cap at 3000 chars to keep the per-issue
+    # LLM prompt size sane — the report is a reference, not the source
+    # of truth (the issue + scoped files are still the primary signal).
+    if research_context:
+        _research_excerpt = research_context.strip()
+        if len(_research_excerpt) > 3000:
+            _research_excerpt = _research_excerpt[:3000] + "\n\n[... truncated ...]"
+        research_section = (
+            "\n## Reference (recent web research from this conversation)\n"
+            "Use this as supporting context for HOW to fix the issue when training-cutoff "
+            "knowledge may be wrong (recent library versions, API changes, deprecations, "
+            "obscure errors). The issue + scoped file contents below are still the "
+            "primary signal — the research is just additional grounding.\n\n"
+            f"{_research_excerpt}\n"
+        )
+        await _step("research-context-injected", f"{len(_research_excerpt)} chars")
+    else:
+        research_section = ""
+
     # Helper: normalize a path that may be relative (./tests/Foo.java) or
     # workspace-relative (com/pong/Foo.java) into absolute form rooted at
     # project_dir. Reviewer LLM output is inconsistent — sometimes it copies
@@ -352,6 +381,7 @@ async def run_fixer(http, events, conv_id: str, *,
             language=language or "(unknown)",
             build_cmd=build_cmd or "(none)",
             test_cmd=test_cmd or "(none)",
+            research_section=research_section,
             issue_block=issue_block,
             allowed_paths_list="\n".join(f"  - {p}" for p in capped_scope),
             files_section="\n\n".join(files_section_lines),
@@ -442,6 +472,7 @@ async def run_fixer(http, events, conv_id: str, *,
         "project_dir": project_dir,
         "language": language,
         "reviewer_run_id": reviewer_run_id,
+        "research_used": bool(research_context),
     }
 
     await events.emit(conv_id, "tool_end", {
