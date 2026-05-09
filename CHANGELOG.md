@@ -31,6 +31,23 @@ Ten edge cases in the v2 gate, profile detection, and persona prompt that togeth
 - **Why it matters** — the SDK defaults `reasoning_effort=high` + `extended_thinking_budget=200000`. On a 30B model with `num_ctx=16384` that's 30+ s per tool round; with chat ↔ builder VRAM thrashing, a 3-file scaffold ran 5 min wall-clock. Medium/Low cuts that with no quality regression on CRUD/UI tasks.
 - **Plumbing** — `OPENHANDS_REASONING_EFFORT` in `config.py` → settings handlers in `main.py` → `oh_payload` in `tools.py` → `RunRequest.reasoning_effort` in `openhands_worker.py` → `_LLM(reasoning_effort=…)` with a `TypeError` fallback for older SDKs (logs a warning, no-op).
 
+### Quick Search — multi-round agent
+
+Replaced the single-shot rewrite-and-search pipeline with `backend/search_agent.py`. Same call site, smarter inside.
+
+- **Triage stage** — one Ollama call (`format=json`, `think=false`) returns `{needs_search, queries[1-3], category, reason}`. Replaces the old skip-classify / rewrite / pronoun-validate chain. Falls back to searching the raw user message on JSON-parse failure.
+- **Multi-query fanout** — compound questions get parallel SearXNG calls, results merged.
+- **Relevance check + optional refine** — if top-3 result tokens overlap < 30% with the user's message, refine the query and search once more (max 2 rounds).
+- **Domain bias** retained — news queries demote SO/GitHub, code queries demote news/recipe, etc.
+- **Anti-leak prompt** — triage examples now use disjoint domains (sourdough/Rust/Brazil/greeting/attached) with explicit "don't copy these entities" instruction; small models like dolphin-phi:2.7b were regurgitating the old UK-politics example verbatim.
+- **VRAM fix** — triage call hard-caps `num_ctx=4096`. Without it, qwen3.5:4b's 256K default allocated ~19GB of KV cache and evicted the chat model. Saved 12.5GB.
+- **Workspace model wired end-to-end** — the UI's "Workspace Analysis Model" dropdown now PATCHes `workspace_model` to `/api/settings`, persisted to `settings.json`, loaded into `config.WORKSPACE_MODEL` on boot. Was localStorage-only; backend never saw the user's choice. Triage priority: `QUICK_SEARCH_TRIAGE_MODEL` → workspace → chat model → default.
+- **Carousel reuses agent results** — agent emits `search_results` SSE event tagged `source: "quick_search"`; frontend renders that into the QUICK SEARCH RESULTS carousel directly. Removed the parallel `/api/quick-search` POST in the chat send path. One SearXNG round-trip per turn instead of two; carousel and chat answer can no longer disagree.
+- **Removed** — `_rewrite_query`, `_try_rewrite_call`, `_topic_phrase` legacy chain. `_should_skip` / `_content_tokens` / `_needs_context` / `_classify_query` / domain-bias / page-fetch / OG enrichment helpers stay (reused by the agent).
+- **Tests** — `backend/tests/test_search_agent.py`, 24 unit tests covering triage validation, relevance scoring, single/refine paths, max-rounds cap, skip-gate.
+- **Deploy monitor** — `backend/search_agent.py` added to `WATCHED` in `deploy_monitor.py`.
+
+
 ## Alpha v17 — May 7, 2026
 
 ### Coder Bot v2 — Multi-Agent Rebuild
