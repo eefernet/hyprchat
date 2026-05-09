@@ -57,13 +57,19 @@ async def _search_google_fallback(http, query: str, count: int = 10) -> list:
         return []
 
 
-async def _search_searxng(http, searxng_url: str, query: str, count: int = 10, categories: str = "general", safesearch: str | None = None) -> list:
-    """Search SearXNG and return structured results. Falls back to Google scrape if SearXNG returns nothing."""
+async def _search_searxng(http, searxng_url: str, query: str, count: int = 10, categories: str = "general", safesearch: str | None = None, time_range: str | None = None) -> list:
+    """Search SearXNG and return structured results. Falls back to Google scrape if SearXNG returns nothing.
+
+    `time_range`: SearXNG accepts day|week|month|year. Set to "month" for news
+    queries with explicit time-cues so 2019 articles don't outrank current ones.
+    """
     results = []
     try:
         _params = {"q": query, "format": "json", "language": "en", "categories": categories}
         if safesearch is not None:
             _params["safesearch"] = safesearch
+        if time_range:
+            _params["time_range"] = time_range
         params = urllib.parse.urlencode(_params)
         r = await http.get(f"{searxng_url}/search?{params}", timeout=12)
         if r.status_code == 429:
@@ -89,7 +95,10 @@ async def _search_searxng(http, searxng_url: str, query: str, count: int = 10, c
                     vid_id = url.split("youtu.be/")[1].split("?")[0].split("/")[0]
                 if vid_id:
                     thumbnail = f"https://img.youtube.com/vi/{vid_id}/mqdefault.jpg"
-            elif thumbnail or any(url_lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
+            elif any(url_lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
+                # The URL itself points at an image file. A web page that
+                # merely advertises an og:image thumbnail is still a "web"
+                # result — keep its type so the chat ranker doesn't drop it.
                 r_type = "image"
             results.append({
                 "title": item.get("title", ""), "url": url,

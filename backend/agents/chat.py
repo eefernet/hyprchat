@@ -603,6 +603,18 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 })
             except Exception:
                 pass
+            # Tell the model search is unavailable so it doesn't confidently
+            # hallucinate current-event facts. Prepended to the latest user
+            # message so it stays scoped to this turn.
+            _fail_note = (
+                "\n\n[SYSTEM: Web search was unavailable for this turn. "
+                "If asked about current events, recent news, or specific "
+                "factual claims, say you can't verify them rather than guessing.]"
+            )
+            for _m in reversed(messages):
+                if _m["role"] == "user":
+                    _m["content"] = (_m.get("content") or "") + _fail_note
+                    break
 
     # Inject visualization hint for non-coder chats that have execute_code + download_file
     _has_full_codeagent = bool(available_tool_names & (CODEAGENT_TOOLS_SET - {"execute_code", "download_file"}))

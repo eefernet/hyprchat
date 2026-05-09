@@ -1,22 +1,29 @@
 """
-Multi-round search agent — replaces single-shot `_rewrite_query` + search +
-fetch with an internal loop that:
+Multi-round search agent. Each chat turn runs:
 
-  1. triage()        — one LLM call (JSON-mode) returns {needs_search, queries,
-                        category}. Replaces today's three-stage rewrite chain.
-  2. parallel search — 1-3 SearXNG calls fanned out at once.
-  3. relevance check — cheap content-token overlap heuristic. No LLM.
-  4. refine          — if relevance is low and rounds remain, ask the model
+  1. triage()        — one LLM call (JSON-mode) returns
+                        {needs_search, standalone_query, queries, category}.
+  2. subquery dedup  — drop queries already searched this conversation.
+  3. parallel search — 1-3 SearXNG calls fanned out at once;
+                        time_range="month" when category=news + recency cue.
+  4. heuristic rank  — quality + domain dedup + category bias.
+  5. embedding rerank — cosine vs nomic-embed-text; drop sim<0.45;
+                         dedup pairs sim>0.85. Falls back to (4) on any
+                         embed failure.
+  6. relevance check — cheap content-token overlap (with prior_tokens
+                        folded in for follow-ups). No LLM.
+  7. refine          — if relevance is low and rounds remain, ask the model
                         for ONE different query and search once more.
-  5. fetch + context — same OG-image / page-text enrichment as legacy.
+  8. fetch + context — trafilatura-extracted page text + OG-image enrichment.
 
-Falls back to legacy `_rewrite_query` on any triage failure — never a
-regression vs today's behavior. Keeps the same return shape:
+Falls back to a raw-message search on any triage failure — never a
+regression vs today's behavior. Returns:
   {"context": str, "rewritten_query": str, "skipped": bool, "reason": str}
 
 Reuses helpers from `quick_search`: `_content_tokens`, `_cached_search`,
-`_rank_and_filter_for_chat`, `_enrich_with_pages`, `_enrich_og_images`,
-`_build_context`, `proxy_image_url`, `_rewrite_query`.
+`_rank_and_filter_for_chat`, `_embed_score_and_dedup`, `_enrich_with_pages`,
+`_enrich_og_images`, `_build_context`, `proxy_image_url`,
+`_filter_novel_queries`.
 """
 import asyncio
 import json
@@ -28,6 +35,31 @@ import quick_search as _qs
 
 _VALID_CATEGORIES = ("news", "code", "recipe", "general")
 _REFINE_THRESHOLD_DEFAULT = 0.30
+
+# Time-cues that indicate the user wants *current* news, not background.
+# Combined with category=="news" → pass time_range="month" to SearXNG so
+# 2019 articles don't outrank current ones.
+_NEWS_TIME_CUE_RE = re.compile(
+    r"\b(today|now|latest|current|currently|breaking|recent|recently|"
+    r"this\s+(?:week|month)|"
+    r"yesterday|last\s+(?:week|month)|"
+    r"happening|going\s+on|update|updates)\b",
+    re.IGNORECASE,
+)
+
+
+def _news_time_range(category: str, latest: str) -> str | None:
+    """Return SearXNG time_range when the query is news + has a recency cue."""
+    if category != "news":
+        return None
+    if _NEWS_TIME_CUE_RE.search(latest):
+        return "month"
+    # Bare-year mentions of the current/recent year imply recency
+    from datetime import datetime
+    yr = datetime.now().year
+    if str(yr) in latest or str(yr - 1) in latest:
+        return "month"
+    return None
 
 
 # ── JSON-mode Ollama call ──
@@ -106,15 +138,19 @@ def _build_triage_prompt(turns: list[str], latest: str) -> str:
         "You are a search planner. Given the conversation and the user's LATEST "
         "message, decide whether to search the web and what to search for.\n\n"
         "Output a single JSON object with EXACTLY these fields:\n"
-        '  "needs_search": boolean\n'
-        '  "queries":      array of 1-3 self-contained search query strings\n'
-        '  "category":     one of "news" | "code" | "recipe" | "general"\n'
-        '  "reason":       short string, ≤80 chars (telemetry only)\n\n'
+        '  "needs_search":     boolean\n'
+        '  "standalone_query": string — the LATEST message rephrased as a '
+        'context-independent question, with all pronouns/anaphora resolved '
+        'using prior turns. Empty string if needs_search=false.\n'
+        '  "queries":          array of 1-3 self-contained search query strings\n'
+        '  "category":         one of "news" | "code" | "recipe" | "general"\n'
+        '  "reason":           short string, ≤80 chars (telemetry only)\n\n'
         "RULES:\n"
         "1. The latest message continues the conversation. Resolve pronouns "
         "(she/he/it/they/this/that), vague references (\"the one\", \"the issue\"), "
         "and definite-article anaphora (\"the X\" referring to a prior-mentioned "
-        "topic) using the SPECIFIC noun from prior turns.\n"
+        "topic) using the SPECIFIC noun from prior turns. Both standalone_query "
+        "AND each search query MUST contain the resolved noun.\n"
         "2. Bare follow-ups — short messages without their own subject "
         "('whos winning?', 'any updates?', 'what next?') — inherit the topic "
         "from prior turns.\n"
@@ -128,7 +164,9 @@ def _build_triage_prompt(turns: list[str], latest: str) -> str:
         "5. Set needs_search=false for: greetings, pure arithmetic, requests "
         "to rewrite/translate/summarize/proofread attached text, and pure-"
         "opinion questions ('what do you think of X').\n"
-        "6. Each query: ≤12 words, no quotes, no URLs, no 'site:', no booleans.\n\n"
+        "6. Each query: ≤12 words, no quotes, no URLs, no 'site:', no booleans.\n"
+        "7. standalone_query may be longer than a search query — it should read "
+        "like a complete, self-contained question.\n\n"
         "EXAMPLES BELOW ARE TEMPLATES showing the rule pattern. The entities "
         "(sourdough, Rust, Brazil, etc.) are placeholders — DO NOT copy them "
         "into your output unless they actually appear in the user's conversation. "
@@ -136,26 +174,34 @@ def _build_triage_prompt(turns: list[str], latest: str) -> str:
         '  Pattern: pronoun anaphora\n'
         '    Prior: user asked about sourdough bread\n'
         '    Latest: "how do I store it?"\n'
-        '    → {"needs_search":true,"queries":["sourdough bread storage"],'
+        '    → {"needs_search":true,'
+        '"standalone_query":"how do I store sourdough bread?",'
+        '"queries":["sourdough bread storage"],'
         '"category":"recipe","reason":"pronoun it → sourdough bread"}\n\n'
         '  Pattern: bare follow-up inherits topic\n'
         '    Prior: user asked about Rust borrow checker\n'
         '    Latest: "any examples?"\n'
-        '    → {"needs_search":true,"queries":["Rust borrow checker examples"],'
+        '    → {"needs_search":true,'
+        '"standalone_query":"examples of the Rust borrow checker",'
+        '"queries":["Rust borrow checker examples"],'
         '"category":"code","reason":"bare follow-up"}\n\n'
         '  Pattern: topic shift — ignore prior\n'
         '    Prior: extended discussion about Python async\n'
         '    Latest: "what is the capital of Brazil?"\n'
-        '    → {"needs_search":true,"queries":["capital of Brazil"],'
+        '    → {"needs_search":true,'
+        '"standalone_query":"what is the capital of Brazil?",'
+        '"queries":["capital of Brazil"],'
         '"category":"general","reason":"topic shift"}\n\n'
         '  Pattern: skip greeting\n'
         '    Prior: (none)\n'
         '    Latest: "hi"\n'
-        '    → {"needs_search":false,"queries":[],"category":"general","reason":"greeting"}\n\n'
+        '    → {"needs_search":false,"standalone_query":"",'
+        '"queries":[],"category":"general","reason":"greeting"}\n\n'
         '  Pattern: skip operate-on-attached\n'
         '    Prior: discussing FastAPI deployment\n'
         '    Latest: "rewrite this paragraph: <paste>"\n'
-        '    → {"needs_search":false,"queries":[],"category":"general","reason":"operate on attached"}\n\n'
+        '    → {"needs_search":false,"standalone_query":"",'
+        '"queries":[],"category":"general","reason":"operate on attached"}\n\n'
         f"Recent conversation:\n{history_block}\n\n"
         f"Latest message: {latest}\n\n"
         "Output JSON only:"
@@ -207,20 +253,36 @@ def _validate_triage(out: Any, latest: str, prior_tokens: set[str]) -> dict | No
     if not isinstance(reason, str):
         reason = ""
 
+    # standalone_query: pronoun-resolved, context-independent rephrasing of
+    # the latest message. Used as the canonical query for ranking + carousel.
+    # Falls back to queries[0] if missing/empty/unsafe.
+    sq = out.get("standalone_query", "")
+    if not isinstance(sq, str):
+        sq = ""
+    sq = sq.strip().strip('"').strip("'")
+    if (
+        not sq
+        or len(sq) > 400
+        or "http://" in sq.lower()
+        or "https://" in sq.lower()
+    ):
+        sq = queries[0] if queries else ""
+
     return {
         "needs_search": needs,
+        "standalone_query": sq,
         "queries": queries,
         "category": cat,
         "reason": reason[:120],
     }
 
 
-async def triage(
-    http, ollama_url: str, model: str, messages: list, latest: str,
-) -> dict | None:
-    """Run the triage LLM call. Returns validated dict or None on any failure."""
-    if not model:
-        return None
+def _build_prior_tokens(messages: list, latest: str) -> tuple[list[str], set[str]]:
+    """Extract recent conversation turns and the union of their content tokens.
+
+    Used by triage (for the prompt + follow-up validation) and by the
+    orchestrator (for follow-up-aware relevance scoring).
+    """
     turns: list[str] = []
     for m in messages[-6:]:
         role = m.get("role", "")
@@ -234,7 +296,16 @@ async def triage(
     for t in turns[-4:]:
         body = t.split(":", 1)[-1] if ":" in t else t
         prior_tokens |= _qs._content_tokens(body)
+    return turns, prior_tokens
 
+
+async def triage(
+    http, ollama_url: str, model: str, messages: list, latest: str,
+) -> dict | None:
+    """Run the triage LLM call. Returns validated dict or None on any failure."""
+    if not model:
+        return None
+    turns, prior_tokens = _build_prior_tokens(messages, latest)
     prompt = _build_triage_prompt(turns, latest)
     raw = await _ask_ollama_json(http, ollama_url, prompt, model, max_tokens=240, timeout=45.0)
     if raw is None:
@@ -243,14 +314,26 @@ async def triage(
 
 
 # ── Relevance scoring (cheap heuristic) ──
-def relevance_score(user_message: str, queries: list[str], top_results: list[dict]) -> float:
+def relevance_score(
+    user_message: str,
+    queries: list[str],
+    top_results: list[dict],
+    prior_tokens: set[str] | None = None,
+) -> float:
     """Fraction of original-message content tokens that appear in the
     concatenated titles+snippets of the top results. 0.0..1.0.
 
     Compares against the user's message, NOT the rewritten queries — if the
     rewrite was bad, we want to detect that the results miss what was asked.
+
+    For follow-ups ("any updates?", "tell me more"), the user message itself
+    has no content tokens. When `prior_tokens` is supplied AND the message
+    looks like a follow-up, fold the prior topic in so we can still detect
+    off-topic results. Without this, refine never fires for follow-ups.
     """
     user_tokens = _qs._content_tokens(user_message)
+    if prior_tokens and _qs._needs_context(user_message, prior_tokens):
+        user_tokens = user_tokens | prior_tokens
     if not user_tokens:
         # Nothing to match against → assume results are fine; don't trigger refine.
         return 1.0
@@ -321,8 +404,7 @@ async def run_search_agent(
     Returns the same shape as `run_quick_search_for_chat`:
       {"context", "rewritten_query", "skipped", "reason"}
 
-    On triage failure, falls back to legacy `_rewrite_query` path so the new
-    architecture is strictly best-effort over today's behavior.
+    On triage failure, falls back to searching the raw user message.
     """
     latest = ""
     for m in reversed(messages):
@@ -345,6 +427,7 @@ async def run_search_agent(
     })
 
     # ── Triage ──
+    _, prior_tokens = _build_prior_tokens(messages, latest)
     plan = await triage(http, ollama_url, triage_model, messages, latest)
     triage_ok = plan is not None
     if not triage_ok:
@@ -354,6 +437,7 @@ async def run_search_agent(
         print(f"[SA]   triage failed; searching raw user message")
         plan = {
             "needs_search": True,
+            "standalone_query": latest[:400],
             "queries": [latest[:200]],
             "category": "general",
             "reason": "triage failed",
@@ -371,6 +455,10 @@ async def run_search_agent(
 
     queries: list[str] = list(plan["queries"])
     category: str = plan["category"]
+    standalone: str = plan.get("standalone_query") or (queries[0] if queries else latest)
+
+    # Filter out queries already searched earlier in this conversation.
+    queries = _qs._filter_novel_queries(conv_id, queries)
 
     progress_label = " | ".join(q[:40] for q in queries[:2])
     await _emit(events, conv_id, "tool_progress", {
@@ -380,8 +468,9 @@ async def run_search_agent(
 
     # ── Round 1: parallel search ──
     rounds_used = 1
+    time_range = _news_time_range(category, latest)
     raw_lists = await asyncio.gather(
-        *[_qs._cached_search(http, q) for q in queries],
+        *[_qs._cached_search(http, q, time_range=time_range) for q in queries],
         return_exceptions=True,
     )
     raw = _merge_unique([r for r in raw_lists if isinstance(r, list)])
@@ -393,10 +482,18 @@ async def run_search_agent(
         return {"context": "", "rewritten_query": queries[0],
                 "skipped": False, "reason": "no results"}
 
-    primary = queries[0]
-    top = _qs._rank_and_filter_for_chat(raw, primary)
-    score = relevance_score(latest, queries, top)
-    print(f"[SA]   triage_ok={triage_ok} round={rounds_used} q={queries!r} relevance={score:.2f}")
+    # Use standalone_query as the canonical query for ranking + carousel.
+    # It carries the pronoun-resolved form; queries[] are the (often shorter)
+    # search-optimized variants fanned out to SearXNG.
+    primary = standalone
+    top = _qs._rank_and_filter_for_chat(raw, primary, category=category)
+    # Embedding rerank + dedup. Cheap (~50ms with warm nomic-embed-text) and
+    # catches synonym/paraphrase mismatches the heuristic ranker misses,
+    # plus the SearXNG-mirror dup case. Falls back to `top` unchanged on
+    # any embed failure.
+    top = await _qs._embed_score_and_dedup(http, ollama_url, primary, top)
+    score = relevance_score(latest, queries, top, prior_tokens)
+    print(f"[SA]   triage_ok={triage_ok} round={rounds_used} sq={standalone!r} q={queries!r} relevance={score:.2f}")
 
     # ── Round 2: refine if relevance is low ──
     if (
@@ -411,16 +508,18 @@ async def run_search_agent(
                 "status": f"Round 2: refining → {refined[:60]}",
             })
             try:
-                more = await _qs._cached_search(http, refined)
+                more = await _qs._cached_search(http, refined, time_range=time_range)
             except Exception:
                 more = []
             if more:
                 raw = _merge_unique([raw, more])
                 queries = queries + [refined]
-                primary = refined  # the refined query is what found the answer
-                top = _qs._rank_and_filter_for_chat(raw, primary)
+                # Keep ranking against the standalone query — the refined query
+                # is just another search-optimized variant.
+                top = _qs._rank_and_filter_for_chat(raw, primary, category=category)
+                top = await _qs._embed_score_and_dedup(http, ollama_url, primary, top)
                 rounds_used = 2
-                new_score = relevance_score(latest, queries, top)
+                new_score = relevance_score(latest, queries, top, prior_tokens)
                 print(f"[SA]   round={rounds_used} refined={refined!r} relevance={new_score:.2f}")
 
     # ── Page-fetch + OG-image enrichment (parallel) ──
