@@ -787,7 +787,10 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical,md
 
   const codeOutputEvts = evts.filter(e=>e.type==="code_output");
   const fileReadyEvts = evts.filter(e=>e.type==="file_ready");
-  const searchResultEvts = evts.filter(e=>e.type==="search_results");
+  // Skip search_agent's events here — those render in the QUICK SEARCH RESULTS
+  // carousel above the message via quickResults state. SearchResultCards is
+  // for the `research` tool's mid-message results, which don't carry source.
+  const searchResultEvts = evts.filter(e=>e.type==="search_results"&&e.data?.source!=="quick_search");
   const sourceLinkEvts = evts.filter(e=>e.type==="source_links");
 
   // Surface reasoning + architecture plan above the pill row.
