@@ -2624,7 +2624,22 @@ function HyprChat(){
     if(newAttachments.length)setAttachments(p=>[...p,...newAttachments]);
   };
 
-  const stop=()=>{abortR.current?.abort();setStreaming(false);streamingCidRef.current=null;};
+  const stop=()=>{
+    // Tell the backend to abort any in-flight runs (architect, builder,
+    // reviewer, fixer) before we drop the SSE connection. Without this the
+    // run's ollama call keeps burning until its 600s timeout and the runs
+    // row stays status='running' forever.
+    try{
+      const rids=_runIdsFromEvents(evtsRef.current||evts);
+      for(const rid of rids){
+        // Fire-and-forget — we don't await, the backend route is idempotent.
+        fetch(`${API}/api/runs/${rid}/cancel`,{method:"POST"}).catch(()=>{});
+      }
+    }catch{}
+    abortR.current?.abort();
+    setStreaming(false);
+    streamingCidRef.current=null;
+  };
 
   const openPreview=async(filename,url)=>{
     const isExternal=url.startsWith("http://") || url.startsWith("https://");
@@ -5157,8 +5172,14 @@ function HyprChat(){
 
         <div style={{marginBottom:14}}>
           <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Coder Context Window: <span style={{color:t.acc}}>{coderNumCtx.toLocaleString()}</span></label>
-          <input type="range" min="2048" max="32768" step="1024" value={coderNumCtx} onChange={e=>setCoderNumCtx(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>2048</span><span>32768</span></div>
+          <input type="range" min="2048" max="262144" step="2048" value={coderNumCtx} onChange={e=>setCoderNumCtx(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>2048</span><span>262144</span></div>
+          <div style={{fontSize:9,color:t.mut,marginTop:4,lineHeight:1.5}}>
+            {coderNumCtx<=16384?<><b style={{color:t.acc}}>Compact (≤16K)</b> — small tasks, single-function edits. Fits comfortably with 3 models warm.</>
+            :coderNumCtx<=65536?<><b style={{color:t.acc}}>Recommended (32–64K)</b> — sweet spot for most Coder Bot work. Multi-file refactors fit, VRAM stays comfortable.</>
+            :coderNumCtx<=131072?<><b style={{color:t.acc}}>Large (64–128K)</b> — whole-file analysis, big refactors. Keep only 1–2 models warm or you may hit VRAM limits.</>
+            :<><b style={{color:t.err}}>Maximum (128–256K)</b> — whole-codebase context. Drop <code>OLLAMA_MAX_LOADED_MODELS</code> to 1 or expect OOM. First run after slider change reloads the model.</>}
+          </div>
         </div>
 
         <div style={{marginBottom:14}}>

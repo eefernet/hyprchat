@@ -28,6 +28,7 @@ import uuid
 
 import config
 import database as db
+import cancel_registry
 
 
 _FIXER_PROMPT = """You are the Fixer — a focused code-editing agent. You MUST only edit the files listed in 'allowed_paths' to address the specific issue described below. Do not touch any other files. Do not add new files. Do not refactor unrelated code.
@@ -200,6 +201,11 @@ async def run_fixer(http, events, conv_id: str, *,
         print(f"[FIXER] create_run failed (non-fatal): {e}")
         run_id = ""
 
+    # Register cancel event so POST /api/runs/{id}/cancel can interrupt the
+    # in-flight per-issue Ollama calls. Cleaned up at every return below.
+    if run_id:
+        cancel_registry.register(run_id)
+
     async def _step(action: str, detail: str = ""):
         await events.emit(conv_id, "tool_progress", {
             "tool": "run_fixer", "icon": "wrench",
@@ -221,6 +227,7 @@ async def run_fixer(http, events, conv_id: str, *,
         if run_id:
             try: await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
             except Exception: pass
+            cancel_registry.cleanup(run_id)
         return envelope
 
     reviewer = await db.get_run(reviewer_run_id)
@@ -231,6 +238,7 @@ async def run_fixer(http, events, conv_id: str, *,
         if run_id:
             try: await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
             except Exception: pass
+            cancel_registry.cleanup(run_id)
         return envelope
 
     rev_env = reviewer.get("result_envelope") or {}
@@ -259,6 +267,7 @@ async def run_fixer(http, events, conv_id: str, *,
             # to fix shouldn't burn a quota slot.
             try: await db.update_run(run_id, status="skipped", result_envelope=envelope, ended=True)
             except Exception: pass
+            cancel_registry.cleanup(run_id)
         await events.emit(conv_id, "tool_end", {
             "tool": "run_fixer", "icon": "wrench",
             "status": "🛠 No issues to fix — skipped",
@@ -278,6 +287,7 @@ async def run_fixer(http, events, conv_id: str, *,
         if run_id:
             try: await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
             except Exception: pass
+            cancel_registry.cleanup(run_id)
         return envelope
 
     await _step("start", f"{len(issues)} issue(s) to address with {fixer_model}")
@@ -392,7 +402,7 @@ async def run_fixer(http, events, conv_id: str, *,
         await _step(f"calling {fixer_model}", f"issue {i}/{len(issues)}")
         text = ""
         try:
-            r = await http.post(
+            coro = http.post(
                 f"{config.OLLAMA_URL}/api/chat",
                 json={
                     "model": fixer_model,
@@ -403,11 +413,45 @@ async def run_fixer(http, events, conv_id: str, *,
                 },
                 timeout=600,
             )
+            r = await cancel_registry.await_cancellable(coro, run_id)
             if r.status_code == 200:
                 text = (r.json().get("message", {}).get("content") or "").strip()
             else:
                 errors.append(f"Issue {i}: model HTTP {r.status_code}")
                 continue
+        except cancel_registry.RunCancelled:
+            # User pressed Stop mid-loop. Bail out of the issue loop and emit
+            # a cancelled envelope so the frontend run card flips to cancelled.
+            cancelled_env = {
+                "status": "cancelled",
+                "summary": (f"Fixer cancelled by user during issue {i}/{len(issues)}; "
+                            f"{len(files_touched)} file(s) already written before cancel."),
+                "issues_addressed": i - 1,
+                "files_touched": sorted(files_touched),
+                "diffs": diffs[:20],
+                "errors": errors[:10],
+                "fixer_model": fixer_model,
+                "project_dir": project_dir,
+                "language": language,
+                "reviewer_run_id": reviewer_run_id,
+                "research_used": bool(research_context),
+            }
+            try:
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "run_fixer", "icon": "wrench",
+                    "status": "⛔ Fixer cancelled by user",
+                    "run_id": run_id,
+                })
+            except Exception:
+                pass
+            if run_id:
+                try:
+                    await db.update_run(run_id, status="cancelled",
+                                        result_envelope=cancelled_env, ended=True)
+                except Exception:
+                    pass
+                cancel_registry.cleanup(run_id)
+            return cancelled_env
         except Exception as e:
             errors.append(f"Issue {i}: model call failed: {e}")
             continue
@@ -491,5 +535,6 @@ async def run_fixer(http, events, conv_id: str, *,
             )
         except Exception as e:
             print(f"[FIXER] update_run failed (non-fatal): {e}")
+        cancel_registry.cleanup(run_id)
 
     return envelope

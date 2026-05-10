@@ -24,6 +24,7 @@ import uuid
 
 import config
 import database as db
+import cancel_registry
 
 
 # Required top-level keys in the validated plan.
@@ -119,10 +120,17 @@ def _validate_plan(plan: dict) -> tuple[bool, str]:
 
 
 async def _call_planning_model(http, model: str, prompt: str,
-                                num_ctx: int = 16384) -> str:
-    """Single non-streaming call to Ollama, returns the message content."""
+                                num_ctx: int = 16384,
+                                run_id: str = "") -> str:
+    """Single non-streaming call to Ollama, returns the message content.
+
+    If `run_id` is registered with `cancel_registry`, the in-flight POST is
+    aborted when the user presses Stop and `RunCancelled` propagates up so
+    `run_architect` can mark the run cancelled instead of letting it dangle
+    on the 600s timeout.
+    """
     try:
-        r = await http.post(
+        coro = http.post(
             f"{config.OLLAMA_URL}/api/chat",
             json={
                 "model": model,
@@ -132,9 +140,12 @@ async def _call_planning_model(http, model: str, prompt: str,
             },
             timeout=600,
         )
+        r = await cancel_registry.await_cancellable(coro, run_id)
         if r.status_code == 200:
             return (r.json().get("message", {}).get("content") or "").strip()
         return ""
+    except cancel_registry.RunCancelled:
+        raise
     except Exception as e:
         print(f"[ARCHITECT] LLM call failed: {e}")
         return ""
@@ -159,8 +170,66 @@ async def run_architect(http, events, conv_id: str, *,
         print(f"[ARCHITECT] create_run failed (non-fatal): {e}")
         run_id = ""
 
-    # Step counter for the durable runs.events_log — frontend RunCard sorts
-    # and renders step events in order, so each event needs a stable step #.
+    # Per-agent override (config.ARCHITECT_MODEL) wins if set; otherwise fall
+    # through to the umbrella PLANNING_MODEL, then the chat model, then default.
+    model = (config.ARCHITECT_MODEL or config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL or "")
+    if not model:
+        envelope = {"status": "error",
+                    "summary": "No planning model configured for Architect",
+                    "manifest": [], "success_criteria": []}
+        if run_id:
+            try: await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
+            except Exception: pass
+        return envelope
+
+    # Register the cancel event keyed by run_id so the user's Stop button
+    # (POST /api/runs/{id}/cancel) can abort the in-flight Ollama call. The
+    # event is cleaned up after the inner run finishes (success, error, or
+    # cancel).
+    if run_id:
+        cancel_registry.register(run_id)
+    try:
+        return await _run_architect_inner(
+            http, events, conv_id, run_id=run_id, model=model,
+            task=task, language_hint=language_hint, kb_chunks=kb_chunks,
+        )
+    finally:
+        if run_id:
+            cancel_registry.cleanup(run_id)
+
+
+async def _emit_cancelled(events, conv_id: str, run_id: str, model: str) -> dict:
+    """Build + persist the cancelled-by-user envelope and emit a tool_end."""
+    envelope = {
+        "status": "cancelled",
+        "summary": "Architect cancelled by user (Stop pressed)",
+        "architect_model": model,
+        "manifest": [],
+        "success_criteria": [],
+    }
+    try:
+        await events.emit(conv_id, "tool_end", {
+            "tool": "plan_project", "icon": "compass",
+            "status": "⛔ Architect cancelled by user",
+            "run_id": run_id,
+        })
+    except Exception:
+        pass
+    if run_id:
+        try:
+            await db.update_run(run_id, status="cancelled",
+                                result_envelope=envelope, ended=True)
+        except Exception as e:
+            print(f"[ARCHITECT] cancelled update_run failed (non-fatal): {e}")
+    return envelope
+
+
+async def _run_architect_inner(http, events, conv_id: str, *, run_id: str,
+                                model: str, task: str, language_hint: str,
+                                kb_chunks: list | None) -> dict:
+    """Real body of run_architect — split out so the outer wrapper can do
+    the register/cleanup pair around it without mass-indenting everything."""
+
     _step_n = [0]
 
     async def _step(action: str, detail: str = ""):
@@ -179,18 +248,6 @@ async def run_architect(http, events, conv_id: str, *,
                 })
             except Exception:
                 pass
-
-    # Per-agent override (config.ARCHITECT_MODEL) wins if set; otherwise fall
-    # through to the umbrella PLANNING_MODEL, then the chat model, then default.
-    model = (config.ARCHITECT_MODEL or config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL or "")
-    if not model:
-        envelope = {"status": "error",
-                    "summary": "No planning model configured for Architect",
-                    "manifest": [], "success_criteria": []}
-        if run_id:
-            try: await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
-            except Exception: pass
-        return envelope
 
     # Build the kb_section. Each chunk is rendered as a labelled block, capped
     # so the prompt stays reasonable.
@@ -212,7 +269,10 @@ async def run_architect(http, events, conv_id: str, *,
     )
 
     await _step("planning", f"calling {model}")
-    text = await _call_planning_model(http, model, base_prompt)
+    try:
+        text = await _call_planning_model(http, model, base_prompt, run_id=run_id)
+    except cancel_registry.RunCancelled:
+        return await _emit_cancelled(events, conv_id, run_id, model)
     plan, parse_err = _try_parse_architect_json(text)
 
     if plan:
@@ -230,7 +290,10 @@ async def run_architect(http, events, conv_id: str, *,
             + "Output ONLY a valid JSON object that satisfies the schema above. "
             + "No prose, no fences. Try again now:"
         )
-        text = await _call_planning_model(http, model, retry_prompt)
+        try:
+            text = await _call_planning_model(http, model, retry_prompt, run_id=run_id)
+        except cancel_registry.RunCancelled:
+            return await _emit_cancelled(events, conv_id, run_id, model)
         plan, parse_err = _try_parse_architect_json(text)
         if plan:
             valid, validation_err = _validate_plan(plan)

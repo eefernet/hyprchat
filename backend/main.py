@@ -1383,6 +1383,54 @@ async def list_runs(conversation_id: str = Query(None), project_id: str = Query(
     raise HTTPException(400, "conversation_id or project_id is required")
 
 
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str):
+    """Signal an in-flight run to abort.
+
+    Two effects:
+      1. Sets the asyncio.Event in `cancel_registry` so any agent waiting on a
+         long Ollama / Codebox / OpenHands call via `await_cancellable` aborts
+         its in-flight request immediately.
+      2. Updates the `runs` row to `status='cancelled'` if it was still running
+         or pending. Frontend polling sees the new status on its next tick,
+         even if the in-process signal arrived too late (e.g. after restart).
+
+    Always returns 200. Unknown / already-finished runs are a no-op rather
+    than an error so the frontend can fan out cancels without per-run guards.
+    """
+    import cancel_registry
+
+    signaled = cancel_registry.signal(run_id)
+
+    db_marked = False
+    try:
+        row = await db.get_run(run_id)
+        if row and row.get("status") in ("running", "pending"):
+            envelope = row.get("result_envelope") or {}
+            if not isinstance(envelope, dict):
+                envelope = {}
+            envelope = {
+                **envelope,
+                "status": "cancelled",
+                "summary": envelope.get("summary") or "Cancelled by user (Stop pressed)",
+            }
+            await db.update_run(run_id, status="cancelled",
+                                result_envelope=envelope, ended=True)
+            try:
+                await db.append_run_event(run_id, {
+                    "type": "step",
+                    "action": "cancelled",
+                    "detail": "user pressed Stop",
+                })
+            except Exception:
+                pass
+            db_marked = True
+    except Exception as e:
+        print(f"[CANCEL] DB update failed for {run_id}: {e}")
+
+    return {"run_id": run_id, "signaled": signaled, "db_marked": db_marked}
+
+
 # ============================================================
 # CONVERSATIONS
 # ============================================================

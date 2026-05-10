@@ -13,6 +13,7 @@ from datetime import datetime
 
 import config
 import database as db
+import cancel_registry
 from research import run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
 
 # Strip ANSI escape codes from terminal output before feeding back to the model
@@ -96,10 +97,31 @@ def _issue_signatures(envelope: dict) -> set:
 
 
 async def _deep_research_called_since(conv_id: str, since_iso: str | None) -> bool:
-    """Return True iff at least one assistant message after `since_iso` has a
-    persisted tool_start event for the deep_research tool. Used by the v2
-    gate to verify the model actually researched a recurring error before
-    retrying run_fixer."""
+    """Return True iff deep_research has run on this conversation since the
+    trigger event at `since_iso`. Checks two sources:
+
+      1. In-process `_RECENT_RESEARCH` cache (10-min freshness, populated
+         immediately when deep_research's dispatcher returns). This is what
+         catches mid-stream calls — a model that calls deep_research and
+         then run_fixer in the same turn won't have the deep_research event
+         persisted to the conversation yet (assistant message is only saved
+         at stream end), so the DB walk below misses it. Without this check,
+         the FINAL_CYCLE / STUCK_FIX gates fire a second time, the model
+         dutifully re-runs deep_research, and the user sees duplicate
+         carousels and ~3 minutes of wasted research.
+      2. Persisted assistant messages' saved_events (cross-stream / restart
+         survival). Only consulted when (1) returns nothing.
+    """
+    # In-stream check first — matches what's already populated via
+    # `_stash_research_result` on deep_research completion. The cache is
+    # keyed by conv_id, so the freshness gate (10 min) is enough — we don't
+    # need to re-check the timestamp.
+    try:
+        if conv_id and _get_recent_research(conv_id):
+            return True
+    except Exception as _e:
+        print(f"[v2-gate] in-stream research cache check failed (non-fatal): {_e}")
+
     if not since_iso:
         return False
     try:
@@ -128,6 +150,158 @@ async def _deep_research_called_since(conv_id: str, since_iso: str | None) -> bo
     except Exception as _e:
         print(f"[v2-gate] deep_research history check failed (non-fatal): {_e}")
         return False
+
+
+# Pytest "FAILED tests/foo.py::test_x - reason" line, plus a fallback for
+# generic "FAILED <path>:<line>" / "ERROR tests/foo.py" forms. Captures the
+# file path so the synthesized reviewer envelope can route Fixer to the
+# right `suggested_fix_scope` files.
+_PYTEST_FAIL_RE = re.compile(
+    r"^(?:FAILED|ERROR)\s+([\w./\-]+\.py)(?:::([\w.\[\]<>:_-]+))?(?:\s*-\s*(.{0,200}))?",
+    re.MULTILINE,
+)
+_PYTEST_IMPORT_ERR_RE = re.compile(
+    r"(?:ModuleNotFoundError|ImportError):\s*(.{0,160})", re.MULTILINE,
+)
+
+
+async def _synthesize_reviewer_from_test_failure(
+    conv_id: str, test_output: str, project_dir: str,
+    framework: str, elapsed: float,
+) -> str:
+    """If the most recent reviewer on this conv reported clean but run_tests
+    just failed, persist a NEW reviewer-role run row whose envelope encodes
+    the test failures as a real `issues` list. Returns the new run_id, or ""
+    if no synthesis was warranted (e.g. no prior clean reviewer found).
+
+    The synthesized run is the same shape the real Reviewer would produce, so
+    `run_fixer(reviewer_run_id=...)` works without modification. Distinguished
+    from a real reviewer envelope only by `synthetic: True` in the envelope
+    (kept for diagnostics — Fixer ignores the field).
+    """
+    # Find the most recent run_review for this conversation.
+    try:
+        runs = await db.get_runs_by_conversation(conv_id, limit=20)
+    except Exception:
+        return ""
+    last_review = next(
+        (r for r in runs if r.get("role") == "reviewer"
+         and (r.get("status") or "").lower() == "succeeded"),
+        None,
+    )
+    if not last_review:
+        # No prior reviewer means there's no false negative to compensate for.
+        # Don't synthesize — just let run_tests' default response stand.
+        return ""
+
+    rev_env = last_review.get("result_envelope") or {}
+    rev_test_exit = rev_env.get("test_exit", -1)
+    rev_status = (rev_env.get("status") or "").lower()
+    # Only synthesize if reviewer claimed clean. If reviewer already reported
+    # issues, the model has a real envelope to fix against.
+    if rev_status != "clean" and rev_test_exit != 0:
+        return ""
+
+    # Parse test output into structured issues. Group by file so multiple
+    # failing tests in the same file collapse to a single fixer scope.
+    by_file: dict[str, list[dict]] = {}
+    for m in _PYTEST_FAIL_RE.finditer(test_output or ""):
+        f = m.group(1)
+        test_name = m.group(2) or ""
+        reason = (m.group(3) or "").strip()
+        by_file.setdefault(f, []).append({"test": test_name, "reason": reason})
+
+    issues = []
+    for f, fails in list(by_file.items())[:8]:  # cap
+        # Resolve relative path → absolute under project_dir for fixer scope.
+        abs_path = f if f.startswith("/") else f"{project_dir.rstrip('/')}/{f}"
+        summary_lines = [f"{x['test']}: {x['reason'][:120]}" for x in fails[:3] if x['reason']]
+        summary = (f"{len(fails)} failing test(s) in {f}: "
+                   + ("; ".join(summary_lines) if summary_lines else "see test output"))
+        issues.append({
+            "severity": "test",
+            "file": abs_path,
+            "lines": [],
+            "summary": summary[:300],
+            # Scope to the test file plus a guess at the source-under-test —
+            # if path is `tests/test_foo.py`, also include `src/foo.py` /
+            # `foo.py`. Fixer's scope check only writes files we list, so
+            # be conservative.
+            "suggested_fix_scope": _guess_fix_scope(abs_path, project_dir),
+        })
+
+    # If no FAILED lines parsed but pytest still exited non-zero, fall back to
+    # a single catch-all issue so the model has something to call run_fixer on.
+    if not issues:
+        ie_match = _PYTEST_IMPORT_ERR_RE.search(test_output or "")
+        ie_summary = (f"ImportError during test collection: {ie_match.group(1).strip()}"
+                      if ie_match else
+                      "Tests failed but no FAILED lines parsed — see test output")
+        issues.append({
+            "severity": "test",
+            "file": project_dir,
+            "lines": [],
+            "summary": ie_summary[:300],
+            "suggested_fix_scope": [],
+        })
+
+    # Persist the synthesized envelope as a real run row so Fixer + the
+    # frontend RunCard treat it identically to a normal reviewer run.
+    new_id = f"run-{uuid.uuid4().hex[:12]}"
+    envelope = {
+        "status": "issues",
+        "summary": (f"Synthesized from run_tests failure ({framework}, {elapsed:.1f}s) "
+                    f"after Reviewer reported clean. {len(issues)} issue(s) detected."),
+        "issues": issues,
+        "build_cmd": rev_env.get("build_cmd", ""),
+        "test_cmd": rev_env.get("test_cmd", ""),
+        "lint_cmd": rev_env.get("lint_cmd", ""),
+        "build_exit": rev_env.get("build_exit", 0),  # build wasn't re-run
+        "test_exit": 1,                              # synthesized failure
+        "lint_exit": rev_env.get("lint_exit", 0),
+        "language": rev_env.get("language", "python"),
+        "marker": rev_env.get("marker", ""),
+        "project_dir": project_dir,
+        "review_model": "(synthesized from run_tests)",
+        "synthetic": True,
+        "source_run_id": last_review.get("id", ""),
+        "run_id": new_id,
+    }
+    try:
+        await db.create_run(new_id, conv_id, role="reviewer",
+                            project_id=last_review.get("project_id", ""),
+                            parent_run_id=last_review.get("id", ""),
+                            status="succeeded")
+        await db.update_run(new_id, status="succeeded",
+                            result_envelope=envelope, ended=True)
+    except Exception as e:
+        print(f"[TRIPWIRE] persist synthesized review failed: {e}")
+        return ""
+    return new_id
+
+
+def _guess_fix_scope(test_file_abs: str, project_dir: str) -> list[str]:
+    """Given a failing test file, propose the source files Fixer should be
+    allowed to edit. Conservative — we list the test file itself plus the
+    most plausible source-under-test sibling, never a glob."""
+    pdir = project_dir.rstrip("/")
+    scope = [test_file_abs]
+    base = os.path.basename(test_file_abs)
+    # tests/test_foo.py → foo.py / src/foo.py / app/foo.py
+    if base.startswith("test_") and base.endswith(".py"):
+        stem = base[5:]  # foo.py
+        for cand in (f"{pdir}/src/{stem}", f"{pdir}/{stem}",
+                     f"{pdir}/app/{stem}", f"{pdir}/lib/{stem}"):
+            scope.append(cand)
+    elif base.endswith("_test.py"):
+        stem = base[:-len("_test.py")] + ".py"
+        for cand in (f"{pdir}/src/{stem}", f"{pdir}/{stem}"):
+            scope.append(cand)
+    # Dedup, preserve order.
+    seen = set(); out = []
+    for p in scope:
+        if p not in seen: seen.add(p); out.append(p)
+    return out
 
 
 async def _is_v2_persona(conv_id: str, conv_row: dict | None = None) -> bool:
@@ -1385,7 +1559,25 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         "download_project", "download_file",
                         "read_file", "list_files",
                     }
-                    if _fixer_succ_gate >= 3 and name in _DELIVERY_OK_AFTER_CAP:
+                    # Deadlock break: the FINAL_CYCLE gate (2 successful fixers,
+                    # no research since the last reviewer) blocks run_fixer with
+                    # the message "call deep_research first". The STUCK_FIX gate
+                    # does the same when issues recur after a fix cycle. But this
+                    # post-review gate then blocks deep_research itself ("call
+                    # run_fixer first") — circular. Whitelist deep_research once
+                    # at least one fixer cycle has run, so the model can satisfy
+                    # the research-first requirement and then retry run_fixer on
+                    # the next round. Below 1 fixer attempt the model should
+                    # actually try fixing before researching.
+                    if (name == "deep_research"
+                            and _fixer_succ_gate >= 1
+                            and not await _deep_research_called_since(
+                                conv_id, _pending_review.get("ended_at"))):
+                        print(f"[v2-gate] research-release: allowing deep_research "
+                              f"despite fix-needed (fixer_succ={_fixer_succ_gate}, "
+                              f"required by FINAL_CYCLE/STUCK_FIX)", flush=True)
+                        # Skip _gate_msg → deep_research runs.
+                    elif _fixer_succ_gate >= 3 and name in _DELIVERY_OK_AFTER_CAP:
                         print(f"[v2-gate] cap-release: allowing {name} despite "
                               f"fix-needed (cap reached, {_fixer_succ_gate} fixers)", flush=True)
                         # Skip _gate_msg entirely → tool runs normally.
@@ -2024,6 +2216,35 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             parts = [f"**{'TESTS PASSED' if ok else 'TESTS FAILED'}** | {framework} | {elapsed:.1f}s\n"]
             if output:
                 parts.append(f"```\n{output[:8000]}\n```")
+
+            # Post-clean tripwire: if run_tests just failed but the most recent
+            # run_review on this conversation reported test_exit=0 / status=clean,
+            # the reviewer is producing a false negative (e.g. its test_cmd
+            # swallowed pytest's exit code via `|| echo`). Synthesize a real
+            # reviewer envelope from this run_tests output so run_fixer becomes
+            # callable with a non-empty `issues` list. Without this, the model
+            # falls back to v1's manual write_file loop because `run_fixer`
+            # against a clean reviewer envelope returns status='skipped'.
+            if not ok and conv_id and framework == "pytest":
+                try:
+                    synth_id = await _synthesize_reviewer_from_test_failure(
+                        conv_id, output, path, framework, elapsed,
+                    )
+                    if synth_id:
+                        parts.append(
+                            f"\n\n⚠ **Reviewer false-negative detected.** "
+                            f"The latest `run_review` on this conversation reported "
+                            f"`status=clean / test_exit=0`, but `run_tests` just failed. "
+                            f"Synthesized a reviewer envelope from this failure: "
+                            f"`{synth_id}`.\n\n"
+                            f"**Next step — call `run_fixer(reviewer_run_id='{synth_id}')`** "
+                            f"to apply targeted fixes. Do NOT call `write_file` manually for "
+                            f"the failing files — that's the v1 antipattern v2 is meant to "
+                            f"replace, and the v2 gate will block it on the next round."
+                        )
+                except Exception as _twe:
+                    print(f"[TRIPWIRE] synthesize failed (non-fatal): {_twe}")
+
             return "\n".join(parts)
 
         elif name == "lint_code":
@@ -2471,10 +2692,25 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 if kb_ids:
                     try:
                         import rag
+                        _hints = _kb_filename_hints_for_language(language, task)
                         _kb_chunks = await rag.query(
                             kb_ids, query_text=task[:500], top_k=3,
-                            prefer_filename_hints=_kb_filename_hints_for_language(language, task),
+                            prefer_filename_hints=_hints,
                         )
+                        # Visibility for "is the KB actually being used" question.
+                        # Logs the filenames + scores so you can see at a glance
+                        # whether retrieval found anything relevant.
+                        if _kb_chunks:
+                            _kb_summary = ", ".join(
+                                f"{c.get('filename','?')}({c.get('score',0):.2f})"
+                                for c in _kb_chunks
+                            )
+                            print(f"[plan_project] KB chunks for architect: "
+                                  f"kb_ids={kb_ids} hints={_hints} → {_kb_summary}",
+                                  flush=True)
+                        else:
+                            print(f"[plan_project] No KB chunks returned "
+                                  f"(kb_ids={kb_ids}, hints={_hints})", flush=True)
                     except Exception as _rge:
                         print(f"[plan_project] RAG query failed (non-fatal): {_rge}")
                 plan = await architect.run_architect(
@@ -2761,13 +2997,33 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
             _run_row_created = False
 
             async def _finalize_run(status: str, envelope: dict):
-                """Mark the run terminal with the given status + envelope. Safe to no-op."""
+                """Mark the run terminal with the given status + envelope. Safe to no-op.
+
+                Also stops the cancel-watcher task and removes the cancel
+                event from the registry — every terminal path goes through
+                here, so this is the right place to release those resources.
+                """
                 if not _run_id:
                     return
                 try:
                     await db.update_run(_run_id, status=status, result_envelope=envelope, ended=True)
                 except Exception as _fre:
                     print(f"[RUN] finalize failed (non-fatal): {_fre}")
+                # Stop the cancel watcher (if it's still waiting) and drop
+                # the registry entry. Defined later in this block but bound
+                # via closure so we reference them by nonlocal lookup.
+                _watcher = _cancel_watcher_ref[0] if _cancel_watcher_ref else None
+                if _watcher and not _watcher.done():
+                    _watcher.cancel()
+                    try:
+                        await _watcher
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                cancel_registry.cleanup(_run_id)
+
+            # Container so _finalize_run (defined above) can see the watcher
+            # task even though it's created several blocks below.
+            _cancel_watcher_ref: list = [None]
 
             await events.emit(conv_id, "tool_start", {
                 "tool": "generate_code", "icon": "wand",
@@ -3026,6 +3282,21 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                     print(f"[CODEGEN:OH] Cancel signal sent to worker for {_run_id} ({reason})", flush=True)
                 except Exception as ce:
                     print(f"[CODEGEN:OH] Cancel signal failed for {_run_id}: {ce}", flush=True)
+
+            # Register the cancel event for this run so POST
+            # /api/runs/{id}/cancel from the frontend Stop button can fire
+            # _signal_oh_cancel without needing the chat stream to disconnect
+            # first. _finalize_run cancels the watcher + drops the registry
+            # entry on every terminal path.
+            _cancel_event = cancel_registry.register(_run_id) if _run_id else None
+            if _cancel_event is not None:
+                async def _on_user_cancel():
+                    try:
+                        await _cancel_event.wait()
+                    except asyncio.CancelledError:
+                        return
+                    await _signal_oh_cancel("user pressed Stop (POST /api/runs/{id}/cancel)")
+                _cancel_watcher_ref[0] = asyncio.create_task(_on_user_cancel())
 
             # Action → emoji mapping for progress pills
             _ACTION_ICONS = {

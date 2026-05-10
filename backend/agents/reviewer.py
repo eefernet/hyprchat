@@ -24,7 +24,44 @@ import uuid
 
 import config
 import database as db
+import cancel_registry
 
+
+# Pin the venv python that Codebox provisions — same binary `run_tests` uses
+# (tools.py:2009). Using bare `python3` here meant pip install -e . hit Arch's
+# externally-managed system Python (silently failed under `|| true`) and the
+# pytest run that followed had no project deps installed → ImportError → the
+# `|| echo` chain swallowed it → exit 0 → reviewer reported "clean" while the
+# project was actually broken.
+_VENV_PY = "/root/venv/bin/python3"
+
+# Python test command that:
+#   - Uses the venv python so installed deps are visible
+#   - Distinguishes pytest exit 5 (no tests collected) from 1/3/4 (real
+#     failures) — only exit 5 is converted to success-with-note. All other
+#     non-zero exits propagate so the reviewer can flag them.
+#   - Falls back to unittest discover ONLY when pytest itself isn't installed
+#     in the venv. Previously the chain treated "tests failed" the same as
+#     "pytest missing" and quietly succeeded.
+#   - Lets stderr through (no `2>/dev/null`) so the LLM analysis path sees
+#     real diagnostics. The reviewer combines stdout+stderr at the Codebox
+#     wrapper level via `2>&1` already.
+_PY_TEST_CMD = (
+    f"if {_VENV_PY} -c 'import pytest' 2>/dev/null; then "
+    f"{_VENV_PY} -m pytest -q --no-header; ec=$?; "
+    "if [ $ec -eq 5 ]; then echo '(no tests collected)'; exit 0; fi; "
+    "exit $ec; "
+    f"else {_VENV_PY} -m unittest discover -q; fi"
+)
+
+# Lint = a syntax sweep using the venv python (system python may not match
+# project syntax level, e.g. PEP 695 generics on python 3.12+). Kept separate
+# from build_cmd so its exit code surfaces as `lint_exit` in the envelope.
+_PY_LINT_CMD = (
+    f"{_VENV_PY} -m py_compile "
+    "$(find . -name '*.py' -not -path '*/venv/*' -not -path '*/.venv/*' "
+    "-not -path '*/.git/*' -not -path '*/__pycache__/*')"
+)
 
 # Project-marker → (build_cmd, test_cmd, lint_cmd, language).
 # Order matters: more-specific markers first so monorepos hit the right one.
@@ -39,18 +76,19 @@ _PROJECT_MARKERS = [
     ("go.mod",          "go build ./...",                  "go test ./...",          "go vet ./...",       "go"),
     ("package.json",    "npm install --silent && npm run build --if-present",
                                                             "npm test --if-present",  "",                   "javascript"),
-    # Tail `|| echo '(no tests)'` matches the plain-python profile below: pytest
-    # exits 5 when no tests are collected, and unittest discover can also exit
-    # non-zero on empty trees. Without the echo, a greenfield scaffold with no
-    # tests yet looks like a "test failure" → reviewer flags it → fixer can't
-    # conjure tests → infinite review/fix loop.
-    ("pyproject.toml",  "python3 -m pip install -q -e . 2>/dev/null || true",
-                                                            "python3 -m pytest -q --no-header 2>/dev/null || python3 -m unittest discover -q 2>/dev/null || echo '(no tests)'",
-                                                                                      "python3 -m py_compile $(find . -name '*.py' -not -path '*/venv/*')",
+    # Python markers: install deps into the venv that codebox provisions, then
+    # run pytest with proper exit-code discrimination (see _PY_TEST_CMD above).
+    # Pip's exit code is NOT swallowed — if install fails (missing pkg, syntax
+    # error in setup.py, etc.) the reviewer flags it as a build issue. That's
+    # the right behavior; previously `|| true` meant a broken pip step looked
+    # the same as a successful one.
+    ("pyproject.toml",  f"{_VENV_PY} -m pip install -q -e .",
+                                                            _PY_TEST_CMD,
+                                                                                      _PY_LINT_CMD,
                                                                                                             "python"),
-    ("requirements.txt","python3 -m pip install -q -r requirements.txt 2>/dev/null || true",
-                                                            "python3 -m pytest -q --no-header 2>/dev/null || python3 -m unittest discover -q 2>/dev/null || echo '(no tests)'",
-                                                                                      "python3 -m py_compile $(find . -name '*.py' -not -path '*/venv/*')",
+    ("requirements.txt",f"{_VENV_PY} -m pip install -q -r requirements.txt",
+                                                            _PY_TEST_CMD,
+                                                                                      _PY_LINT_CMD,
                                                                                                             "python"),
     ("Makefile",        "make -s 2>&1 | head -200",         "make -s test 2>&1 | head -200", "",            ""),
     ("CMakeLists.txt",  "cmake -B build -S . && cmake --build build --quiet",
@@ -77,8 +115,14 @@ _PLAIN_LANG_PROFILES = {
                         "| sed 's|^\\./||;s|\\.class$||;s|/|.|g')) || echo '(no JUnit tests)'",
                "lint":  ""},
     "python": {"glob": "*.py",
-               "build": "python3 -m py_compile $(find . -name '*.py' -not -path '*/venv/*' -not -path '*/.git/*' -not -path '*/__pycache__/*')",
-               "test":  "python3 -m pytest -q 2>/dev/null || python3 -m unittest discover -q 2>/dev/null || echo '(no tests)'",
+               # Plain-source python: no pyproject/requirements means no
+               # `pip install` step; we just sweep with py_compile to catch
+               # syntax errors. Use the venv python so 3.12+ syntax (PEP 695,
+               # type alias) doesn't fail on a system 3.11. Same exit-code
+               # discrimination as the marker-driven path above so a
+               # greenfield "no tests" project doesn't look like a failure.
+               "build": _PY_LINT_CMD,
+               "test":  _PY_TEST_CMD,
                "lint":  ""},
     "go":     {"glob": "*.go",
                "build": "go build ./... 2>&1 || (find . -name '*.go' -exec gofmt -l {} \\;)",
@@ -368,6 +412,11 @@ async def run_review(http, events, conv_id: str, project_dir: str,
         print(f"[REVIEWER] create_run failed (non-fatal): {e}")
         run_id = ""
 
+    # Register cancel event so POST /api/runs/{id}/cancel can abort the
+    # in-flight Codebox + Ollama work. Cleaned up at the end of this run.
+    if run_id:
+        cancel_registry.register(run_id)
+
     async def _step(action: str, detail: str = ""):
         """Emit one structured step on both the live SSE channel and the durable log."""
         await events.emit(conv_id, "tool_progress", {
@@ -432,6 +481,7 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                                     result_envelope=envelope, ended=True)
             except Exception:
                 pass
+            cancel_registry.cleanup(run_id)
         return envelope
 
     # 2. Run build / test / lint.
@@ -494,6 +544,7 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                                     result_envelope=envelope, ended=True)
             except Exception:
                 pass
+            cancel_registry.cleanup(run_id)
         return envelope
 
     # 5. Slow path: feed everything to the planning-model LLM and parse JSON.
@@ -517,7 +568,7 @@ async def run_review(http, events, conv_id: str, project_dir: str,
     await _step("analyze", f"calling {review_model}")
     review_text = ""
     try:
-        r = await http.post(
+        coro = http.post(
             f"{config.OLLAMA_URL}/api/chat",
             json={
                 "model": review_model,
@@ -527,8 +578,39 @@ async def run_review(http, events, conv_id: str, project_dir: str,
             },
             timeout=600,
         )
+        r = await cancel_registry.await_cancellable(coro, run_id)
         if r.status_code == 200:
             review_text = (r.json().get("message", {}).get("content") or "").strip()
+    except cancel_registry.RunCancelled:
+        cancelled_env = {
+            "status": "cancelled",
+            "summary": "Reviewer cancelled by user (Stop pressed) during analysis call.",
+            "issues": [],
+            "build_cmd": build_cmd, "test_cmd": test_cmd, "lint_cmd": lint_cmd,
+            "build_exit": build_result["exit_code"],
+            "test_exit": test_result["exit_code"],
+            "lint_exit": lint_result["exit_code"],
+            "language": language, "marker": marker,
+            "review_model": review_model,
+            "project_dir": project_dir,
+            "run_id": run_id,
+        }
+        try:
+            await events.emit(conv_id, "tool_end", {
+                "tool": "run_review", "icon": "search-check",
+                "status": "⛔ Review cancelled by user",
+                "run_id": run_id,
+            })
+        except Exception:
+            pass
+        if run_id:
+            try:
+                await db.update_run(run_id, status="cancelled",
+                                    result_envelope=cancelled_env, ended=True)
+            except Exception:
+                pass
+            cancel_registry.cleanup(run_id)
+        return cancelled_env
     except Exception as e:
         print(f"[REVIEWER] LLM call failed: {e}")
 
@@ -574,5 +656,6 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                                 result_envelope=envelope, ended=True)
         except Exception:
             pass
+        cancel_registry.cleanup(run_id)
 
     return envelope

@@ -31,21 +31,24 @@ Ten edge cases in the v2 gate, profile detection, and persona prompt that togeth
 - **Why it matters** — the SDK defaults `reasoning_effort=high` + `extended_thinking_budget=200000`. On a 30B model with `num_ctx=16384` that's 30+ s per tool round; with chat ↔ builder VRAM thrashing, a 3-file scaffold ran 5 min wall-clock. Medium/Low cuts that with no quality regression on CRUD/UI tasks.
 - **Plumbing** — `OPENHANDS_REASONING_EFFORT` in `config.py` → settings handlers in `main.py` → `oh_payload` in `tools.py` → `RunRequest.reasoning_effort` in `openhands_worker.py` → `_LLM(reasoning_effort=…)` with a `TypeError` fallback for older SDKs (logs a warning, no-op).
 
-### Quick Search — multi-round agent
+### Quick Search — best-of synthesis
 
-Replaced the single-shot rewrite-and-search pipeline with `backend/search_agent.py`. Same call site, smarter inside.
+Pulled the highest-ROI patterns from Perplexica (24k★), Khoj (18k★), and Open WebUI (70k★) into `backend/search_agent.py` + `backend/quick_search.py`.
 
-- **Triage stage** — one Ollama call (`format=json`, `think=false`) returns `{needs_search, queries[1-3], category, reason}`. Replaces the old skip-classify / rewrite / pronoun-validate chain. Falls back to searching the raw user message on JSON-parse failure.
-- **Multi-query fanout** — compound questions get parallel SearXNG calls, results merged.
-- **Relevance check + optional refine** — if top-3 result tokens overlap < 30% with the user's message, refine the query and search once more (max 2 rounds).
-- **Domain bias** retained — news queries demote SO/GitHub, code queries demote news/recipe, etc.
-- **Anti-leak prompt** — triage examples now use disjoint domains (sourdough/Rust/Brazil/greeting/attached) with explicit "don't copy these entities" instruction; small models like dolphin-phi:2.7b were regurgitating the old UK-politics example verbatim.
-- **VRAM fix** — triage call hard-caps `num_ctx=4096`. Without it, qwen3.5:4b's 256K default allocated ~19GB of KV cache and evicted the chat model. Saved 12.5GB.
-- **Workspace model wired end-to-end** — the UI's "Workspace Analysis Model" dropdown now PATCHes `workspace_model` to `/api/settings`, persisted to `settings.json`, loaded into `config.WORKSPACE_MODEL` on boot. Was localStorage-only; backend never saw the user's choice. Triage priority: `QUICK_SEARCH_TRIAGE_MODEL` → workspace → chat model → default.
-- **Carousel reuses agent results** — agent emits `search_results` SSE event tagged `source: "quick_search"`; frontend renders that into the QUICK SEARCH RESULTS carousel directly. Removed the parallel `/api/quick-search` POST in the chat send path. One SearXNG round-trip per turn instead of two; carousel and chat answer can no longer disagree.
-- **Removed** — `_rewrite_query`, `_try_rewrite_call`, `_topic_phrase` legacy chain. `_should_skip` / `_content_tokens` / `_needs_context` / `_classify_query` / domain-bias / page-fetch / OG enrichment helpers stay (reused by the agent).
-- **Tests** — `backend/tests/test_search_agent.py`, 24 unit tests covering triage validation, relevance scoring, single/refine paths, max-rounds cap, skip-gate.
-- **Deploy monitor** — `backend/search_agent.py` added to `WATCHED` in `deploy_monitor.py`.
+- **`standalone_query` in triage** (Perplexica) — triage now returns a context-independent rephrasing of the latest message alongside `queries[]`. Used as the canonical query for ranking, embedding, and the carousel — kills pronoun/anaphora bugs at the source.
+- **Embedding rerank + dedup** (Perplexica) — batched `nomic-embed-text` call scores snippets vs `standalone_query`; drops sim < 0.45, dedups pairs > 0.85. Catches synonym/paraphrase mismatches and the SearXNG-mirror dup case. Falls back to heuristic order on any embed failure.
+- **Trafilatura page extraction** — replaces the regex strip with `trafilatura.extract()` on top-N pages. JS-heavy and paywall-prelude pages now produce usable content. Falls back inline (same fetched HTML, no double round-trip) if trafilatura is unavailable.
+- **Per-conversation subquery dedup** (Khoj) — drops queries already searched earlier in the same conversation; preserves at least one query if all are dupes.
+- **Follow-up relevance fix** — `relevance_score` now folds prior-turn tokens into the user-token set when the message is a follow-up. Refine actually fires for "any updates?" instead of returning 1.0 every time.
+- **News freshness** — when triage's category is `news` and the user message has a recency cue (`today`/`latest`/`current year`), SearXNG gets `time_range=month`. Cache key becomes `(query, time_range)`.
+- **Triage category used for ranking** — was being computed and discarded; now drives `_apply_domain_bias` directly. Regex `_classify_query` becomes the triage-failure fallback only.
+- **SSRF guard** (Open WebUI) — `_url_safe()` resolves hostnames before fetch; rejects private/loopback/link-local IPs. Defends against malicious search results redirecting to internal services.
+- **Bounded LRU cache** — `_CACHE` capped at 512 entries with LRU eviction. Prevents long-running-process leak.
+- **Concurrency semaphore** — `_FETCH_SEMA(6)` around page-fetch + OG-image-fetch. Smooths bursts on the SearXNG LXC and ProtonVPN exit.
+- **Search-failure note** — when quick search throws, a system note ("web search was unavailable, don't guess") is appended to the user turn so the model doesn't hallucinate current events.
+- **Pre-existing `_search_searxng` bug** — any SearXNG result with a thumbnail was being marked `type="image"` and filtered out by the chat ranker. News results almost always carry an `og:image`; this was silently dropping ~60% of news results before they reached embedding rerank. Narrowed to URL-extension-only.
+- **Removed** — `_fetch_page` import in `quick_search.py` (replaced by `_fetch_clean_page`); stale `_rewrite_query` references in docstrings.
+- **New dep** — `trafilatura>=1.10.0` in `requirements.txt`.
 
 
 ## Alpha v17 — May 7, 2026
