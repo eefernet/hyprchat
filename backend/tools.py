@@ -2342,6 +2342,30 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             project_dir = (args.get("project_dir") or "").strip()
             project_id = (args.get("project_id") or "").strip()
 
+            # Validate the model-passed project_dir actually exists on Codebox.
+            # qwen-style models occasionally fabricate project paths — inheriting
+            # a name from training data or a prior conversation — instead of
+            # using the one generate_code just built. Without this guard the
+            # Reviewer runs against a non-existent path, fails with "no build
+            # markers found", and the Fixer then inherits the bad envelope.
+            # Same fabrication guard ask_project uses below.
+            if project_dir and conv_id:
+                try:
+                    _existsr = await http.post(
+                        f"{config.CODEBOX_URL}/command",
+                        json={"command": f"test -d {shlex.quote(project_dir)} && echo OK || echo NO",
+                              "timeout": 5},
+                        timeout=10,
+                    )
+                    _on_disk = (_existsr.status_code == 200
+                                and "OK" in (_existsr.json().get("stdout") or ""))
+                except Exception:
+                    _on_disk = False
+                if not _on_disk:
+                    print(f"[run_review] passed project_dir={project_dir} does not exist on "
+                          f"Codebox — falling back to auto-resolve from builder run")
+                    project_dir = ""
+
             # Preferred lookup: most recent succeeded builder run for this conv.
             # The builder envelope records the actual workspace path (e.g.
             # /root/projects/pong) — this is the one that matters. coding_projects
