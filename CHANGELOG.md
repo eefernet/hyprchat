@@ -1,4 +1,4 @@
-## Alpha v17.0.1 — May 8, 2026
+## Alpha v17.0.1 — May 26, 2026
 
 ### Coder Bot v2 — workflow gate hardening
 
