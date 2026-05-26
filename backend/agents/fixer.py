@@ -19,6 +19,7 @@ other's job.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -31,7 +32,7 @@ import database as db
 import cancel_registry
 
 
-_FIXER_PROMPT = """You are the Fixer — a focused code-editing agent. You MUST only edit the files listed in 'allowed_paths' to address the specific issue described below. Do not touch any other files. Do not add new files. Do not refactor unrelated code.
+_FIXER_PROMPT = """You are the Fixer — a focused code-editing agent. You MUST only edit the files listed in 'allowed_paths' to address the issues described below. Do not touch any other files. Do not add new files. Do not refactor unrelated code.
 
 ## Project context
 - Project root: {project_dir}
@@ -39,7 +40,7 @@ _FIXER_PROMPT = """You are the Fixer — a focused code-editing agent. You MUST 
 - Build command: {build_cmd}
 - Test command: {test_cmd}
 {research_section}
-## The issue you are fixing
+## Issues to fix
 {issue_block}
 
 ## Files you may edit (allowed_paths)
@@ -60,7 +61,7 @@ After all your EDIT sections (zero or more), write ONE summary line:
 
 ### SUMMARY: <one short line describing what you changed and why>
 
-If you genuinely cannot fix the issue (ambiguous, need info not provided, etc.), output ONLY:
+If you genuinely cannot fix any issue (ambiguous, need info not provided, etc.), output ONLY:
 
 ### CANNOT_FIX: <one-line reason>
 
@@ -69,6 +70,7 @@ If you genuinely cannot fix the issue (ambiguous, need info not provided, etc.),
 2. The contents inside ``` fences MUST be the COMPLETE file (every line). Not a diff. Not a snippet.
 3. NO prose, explanation, or commentary outside the EDIT sections. The first line of your response should be either `### EDIT:`, `### SUMMARY:`, or `### CANNOT_FIX:`.
 4. If a file in allowed_paths needs no change, simply do not include an EDIT section for it.
+5. Address ALL listed issues in a single pass. If two issues touch the same file, emit ONE EDIT section for that file with both fixes applied.
 
 Output your sections now:"""
 
@@ -138,7 +140,7 @@ async def _write_file_sandbox(http, path: str, content: str) -> tuple[bool, str]
 # - content captured lazily, terminated by closing fence
 # - tolerates an optional language tag after the opening fence
 _EDIT_RE = re.compile(
-    r"###\s*EDIT\s*:\s*([^\n]+?)\s*\n```[A-Za-z0-9_+\-]*\s*\n(.*?)\n```",
+    r"###\s*EDIT\s*:\s*([^\n]+?)\s*\n```[A-Za-z0-9_.+#\-]*\s*\n(.*?)\n```",
     re.DOTALL,
 )
 _SUMMARY_RE = re.compile(r"###\s*SUMMARY\s*:?\s*(.+?)(?=\n\s*###|\Z)", re.DOTALL)
@@ -246,7 +248,6 @@ async def run_fixer(http, events, conv_id: str, *,
 
     project_dir = (rev_env.get("project_dir") or "").strip()
     if not project_dir:
-        # Last resort: derive from first issue's file path (e.g. /root/projects/<name>/...).
         first_file = (issues[0].get("file") if issues else "") or ""
         if first_file.startswith("/root/projects/"):
             parts = first_file.split("/")
@@ -257,14 +258,36 @@ async def run_fixer(http, events, conv_id: str, *,
     build_cmd = rev_env.get("build_cmd", "")
     test_cmd = rev_env.get("test_cmd", "")
 
+    # Validate project_dir exists on Codebox before proceeding (#14).
+    if project_dir:
+        try:
+            _chk = await http.post(
+                f"{config.CODEBOX_URL}/command",
+                json={"command": f"test -d {shlex.quote(project_dir)} && echo OK || echo NO",
+                      "timeout": 5},
+                timeout=10,
+            )
+            if _chk.status_code != 200 or "OK" not in (_chk.json().get("stdout") or ""):
+                print(f"[FIXER] project_dir={project_dir} does not exist on Codebox")
+                envelope = {
+                    "status": "error",
+                    "summary": f"project_dir '{project_dir}' not found on Codebox (workspace may have been cleaned)",
+                    "issues_addressed": 0, "files_touched": [], "errors": [],
+                    "project_dir": project_dir, "language": language,
+                }
+                if run_id:
+                    try: await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
+                    except Exception: pass
+                    cancel_registry.cleanup(run_id)
+                return envelope
+        except Exception as _e:
+            print(f"[FIXER] project_dir check failed (non-fatal, proceeding): {_e}")
+
     if not issues:
         envelope = {"status": "skipped", "summary": "No issues in reviewer envelope — nothing to fix",
                     "issues_addressed": 0, "files_touched": [], "errors": [],
                     "project_dir": project_dir, "language": language}
         if run_id:
-            # Status="skipped" (not "succeeded") so this no-op doesn't count
-            # toward the 3-cycle cap in tools.py — a fixer call with nothing
-            # to fix shouldn't burn a quota slot.
             try: await db.update_run(run_id, status="skipped", result_envelope=envelope, ended=True)
             except Exception: pass
             cancel_registry.cleanup(run_id)
@@ -275,9 +298,6 @@ async def run_fixer(http, events, conv_id: str, *,
         })
         return envelope
 
-    # Per-agent override (config.FIXER_MODEL) wins if set; else umbrella
-    # CODER_MODEL → PLANNING_MODEL → default. Fixer is a code-editing agent so
-    # it intentionally does NOT fall back to the chat model.
     fixer_model = (config.FIXER_MODEL or config.CODER_MODEL or config.PLANNING_MODEL
                    or config.DEFAULT_MODEL or "")
     if not fixer_model:
@@ -296,11 +316,6 @@ async def run_fixer(http, events, conv_id: str, *,
     diffs: list[dict] = []
     errors: list[str] = []
 
-    # Build the research section once, then reuse across issues. When no
-    # research context is supplied, the section is empty and disappears
-    # from the prompt entirely. Cap at 3000 chars to keep the per-issue
-    # LLM prompt size sane — the report is a reference, not the source
-    # of truth (the issue + scoped files are still the primary signal).
     if research_context:
         _research_excerpt = research_context.strip()
         if len(_research_excerpt) > 3000:
@@ -317,183 +332,217 @@ async def run_fixer(http, events, conv_id: str, *,
     else:
         research_section = ""
 
-    # Helper: normalize a path that may be relative (./tests/Foo.java) or
-    # workspace-relative (com/pong/Foo.java) into absolute form rooted at
-    # project_dir. Reviewer LLM output is inconsistent — sometimes it copies
-    # paths from javac error messages verbatim (relative because the build
-    # command uses `find .`), other times it prepends the project_dir.
     def _normalize_path(p: str) -> str:
         if not p:
             return ""
         p = p.strip()
         if p.startswith("/"):
             return p
-        # Strip a single leading "./"
         if p.startswith("./"):
             p = p[2:]
-        # Refuse paths that try to escape the project root
         if ".." in p.split("/"):
             return ""
         return f"{project_dir.rstrip('/')}/{p}"
 
-    # 2. Process issues sequentially. Future: parallelize when scopes are disjoint.
+    # 2. Collect all scope files across all issues, dedup, then batch into
+    # a single LLM call. This replaces the old per-issue sequential loop
+    # that made N separate Ollama calls (one per issue).
+    _LANG_TAG = {
+        "java": "java", "python": "python", "go": "go", "rust": "rust",
+        "javascript": "javascript", "typescript": "typescript",
+        "c": "c", "cpp": "cpp", "kotlin": "kotlin",
+    }
+    lang_tag = _LANG_TAG.get((language or "").lower(), "")
+
+    # Build per-issue scopes and a union scope for the prompt.
+    all_scope: list[str] = []  # ordered, deduped union of scope files
+    _scope_set: set[str] = set()
+    _norm_pdir = os.path.normpath(project_dir)
+    issue_blocks: list[str] = []
+    skipped = 0
     for i, issue in enumerate(issues, 1):
         raw_scope = issue.get("suggested_fix_scope") or []
-        # Always include the issue's primary file even if scope didn't list it.
         if issue.get("file") and issue["file"] not in raw_scope:
             raw_scope = [issue["file"]] + raw_scope
-        # Normalize all paths to absolute, then keep only files inside project_dir.
         scope: list[str] = []
         for p in raw_scope:
             ap = _normalize_path(p)
-            if ap and ap.startswith(project_dir.rstrip("/")) and ap not in scope:
-                scope.append(ap)
+            if not ap:
+                continue
+            try:
+                if os.path.commonpath([_norm_pdir, os.path.normpath(ap)]) != _norm_pdir:
+                    continue
+            except ValueError:
+                continue
+            scope.append(ap)
+            if ap not in _scope_set:
+                _scope_set.add(ap)
+                all_scope.append(ap)
         if not scope:
             errors.append(f"Issue {i}: no in-scope files to edit "
                           f"(raw={raw_scope}, project_dir={project_dir}); skipping "
                           f"(severity={issue.get('severity','?')})")
+            skipped += 1
             continue
 
         await _step(f"issue {i}/{len(issues)}",
                     f"[{issue.get('severity','?')}] {issue.get('summary','')[:80]}")
 
-        # 2a. Read each scope file (cap at 5 to bound prompt size).
-        capped_scope = scope[:5]
-        files_section_lines = []
-        for path in capped_scope:
-            content = await _read_file_sandbox(http, path)
-            if content:
-                # Trim very long files so the prompt stays under context budget.
-                snippet = content[:8000]
-                if len(content) > 8000:
-                    snippet += f"\n\n... [truncated; full file is {len(content)} chars]"
-                files_section_lines.append(f"### {path}\n```\n{snippet}\n```")
-            else:
-                files_section_lines.append(f"### {path}\n(file is empty or unreadable)")
-
-        issue_block = "\n".join([
-            f"Severity: {issue.get('severity','?')}",
-            f"File: {issue.get('file','?')}"
-                + (f":{','.join(str(x) for x in issue.get('lines') or [])}" if issue.get('lines') else ""),
-            f"Summary: {issue.get('summary','')}",
-        ])
-
-        # Map our language guess to the typical markdown fence tag the model uses.
-        _LANG_TAG = {
-            "java": "java", "python": "python", "go": "go", "rust": "rust",
-            "javascript": "javascript", "typescript": "typescript",
-            "c": "c", "cpp": "cpp", "kotlin": "kotlin",
-        }
-        lang_tag = _LANG_TAG.get((language or "").lower(), "")
-
-        prompt = _FIXER_PROMPT.format(
-            project_dir=project_dir,
-            language=language or "(unknown)",
-            build_cmd=build_cmd or "(none)",
-            test_cmd=test_cmd or "(none)",
-            research_section=research_section,
-            issue_block=issue_block,
-            allowed_paths_list="\n".join(f"  - {p}" for p in capped_scope),
-            files_section="\n\n".join(files_section_lines),
-            lang_tag=lang_tag,
+        issue_blocks.append(
+            f"### Issue {i}\n"
+            f"- Severity: {issue.get('severity','?')}\n"
+            f"- File: {issue.get('file','?')}"
+            + (f":{','.join(str(x) for x in issue.get('lines') or [])}" if issue.get('lines') else "")
+            + f"\n- Summary: {issue.get('summary','')}\n"
+            f"- Fix scope: {', '.join(scope[:5])}"
         )
 
-        # 2b. Call coder model.
-        await _step(f"calling {fixer_model}", f"issue {i}/{len(issues)}")
-        text = ""
+    if not issue_blocks:
+        envelope = {"status": "no_op",
+                    "summary": "All issues had no in-scope files — nothing to fix",
+                    "issues_addressed": 0, "files_touched": [], "errors": errors[:10],
+                    "project_dir": project_dir, "language": language}
+        if run_id:
+            try: await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
+            except Exception: pass
+            cancel_registry.cleanup(run_id)
+        await events.emit(conv_id, "tool_end", {
+            "tool": "run_fixer", "icon": "wrench",
+            "status": f"🛠 No in-scope files — {len(errors)} error(s)",
+            "run_id": run_id,
+        })
+        return envelope
+
+    # Cap total scope files to keep prompt size bounded.
+    capped_scope = all_scope[:15]
+    _allowed_set = set(capped_scope)
+    if len(all_scope) > 15:
+        errors.append(f"Scope truncated from {len(all_scope)} to 15 files — "
+                      f"{len(all_scope) - 15} file(s) not shown to fixer")
+
+    issue_block = "\n\n".join(issue_blocks)
+
+    # Compute per-file character budget so the prompt fits the context window.
+    _fixer_ctx = config.DEFAULT_NUM_CTX or 16384
+    _char_budget = _fixer_ctx * 3
+    _overhead = len(issue_block) + len(research_section) + 2000
+    _file_budget = max(_char_budget - _overhead, 8000)
+    _per_file_cap = min(max(_file_budget // max(len(capped_scope), 1), 1000), 8000)
+    print(f"[FIXER] budget: num_ctx={_fixer_ctx}, files={len(capped_scope)}, "
+          f"per_file_cap={_per_file_cap}, file_budget={_file_budget}")
+
+    # 2a. Read all scope files in parallel.
+    await _step("reading", f"{len(capped_scope)} scope file(s)")
+    _read_tasks = [_read_file_sandbox(http, path) for path in capped_scope]
+    _read_results = await asyncio.gather(*_read_tasks, return_exceptions=True)
+
+    files_section_lines = []
+    for path, content in zip(capped_scope, _read_results):
+        if isinstance(content, str) and content:
+            snippet = content[:_per_file_cap]
+            if len(content) > _per_file_cap:
+                snippet += f"\n\n... [truncated; full file is {len(content)} chars]"
+            files_section_lines.append(f"### {path}\n```\n{snippet}\n```")
+        else:
+            files_section_lines.append(f"### {path}\n(file is empty or unreadable)")
+
+    prompt = _FIXER_PROMPT.format(
+        project_dir=project_dir,
+        language=language or "(unknown)",
+        build_cmd=build_cmd or "(none)",
+        test_cmd=test_cmd or "(none)",
+        research_section=research_section,
+        issue_block=issue_block,
+        allowed_paths_list="\n".join(f"  - {p}" for p in capped_scope),
+        files_section="\n\n".join(files_section_lines),
+        lang_tag=lang_tag,
+    )
+
+    # 2b. Single LLM call for all issues.
+    await _step(f"calling {fixer_model}", f"{len(issue_blocks)} issue(s) batched")
+    text = ""
+    try:
+        coro = http.post(
+            f"{config.OLLAMA_URL}/api/chat",
+            json={
+                "model": fixer_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+                "options": {"temperature": 0.2,
+                            "num_ctx": config.DEFAULT_NUM_CTX},
+            },
+            timeout=600,
+        )
+        r = await cancel_registry.await_cancellable(coro, run_id)
+        if r.status_code == 200:
+            text = (r.json().get("message", {}).get("content") or "").strip()
+        else:
+            errors.append(f"Model HTTP {r.status_code}")
+    except cancel_registry.RunCancelled:
+        cancelled_env = {
+            "status": "cancelled",
+            "summary": (f"Fixer cancelled by user during LLM call; "
+                        f"{len(files_touched)} file(s) already written before cancel."),
+            "issues_addressed": 0,
+            "files_touched": sorted(files_touched),
+            "diffs": diffs[:20],
+            "errors": errors[:10],
+            "fixer_model": fixer_model,
+            "project_dir": project_dir,
+            "language": language,
+            "reviewer_run_id": reviewer_run_id,
+            "research_used": bool(research_context),
+        }
         try:
-            coro = http.post(
-                f"{config.OLLAMA_URL}/api/chat",
-                json={
-                    "model": fixer_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False,
-                    "options": {"temperature": 0.2,
-                                "num_ctx": config.DEFAULT_NUM_CTX},
-                },
-                timeout=600,
-            )
-            r = await cancel_registry.await_cancellable(coro, run_id)
-            if r.status_code == 200:
-                text = (r.json().get("message", {}).get("content") or "").strip()
-            else:
-                errors.append(f"Issue {i}: model HTTP {r.status_code}")
-                continue
-        except cancel_registry.RunCancelled:
-            # User pressed Stop mid-loop. Bail out of the issue loop and emit
-            # a cancelled envelope so the frontend run card flips to cancelled.
-            cancelled_env = {
-                "status": "cancelled",
-                "summary": (f"Fixer cancelled by user during issue {i}/{len(issues)}; "
-                            f"{len(files_touched)} file(s) already written before cancel."),
-                "issues_addressed": i - 1,
-                "files_touched": sorted(files_touched),
-                "diffs": diffs[:20],
-                "errors": errors[:10],
-                "fixer_model": fixer_model,
-                "project_dir": project_dir,
-                "language": language,
-                "reviewer_run_id": reviewer_run_id,
-                "research_used": bool(research_context),
-            }
+            await events.emit(conv_id, "tool_end", {
+                "tool": "run_fixer", "icon": "wrench",
+                "status": "⛔ Fixer cancelled by user",
+                "run_id": run_id,
+            })
+        except Exception:
+            pass
+        if run_id:
             try:
-                await events.emit(conv_id, "tool_end", {
-                    "tool": "run_fixer", "icon": "wrench",
-                    "status": "⛔ Fixer cancelled by user",
-                    "run_id": run_id,
-                })
+                await db.update_run(run_id, status="cancelled",
+                                    result_envelope=cancelled_env, ended=True)
             except Exception:
                 pass
-            if run_id:
-                try:
-                    await db.update_run(run_id, status="cancelled",
-                                        result_envelope=cancelled_env, ended=True)
-                except Exception:
-                    pass
-                cancel_registry.cleanup(run_id)
-            return cancelled_env
-        except Exception as e:
-            errors.append(f"Issue {i}: model call failed: {e}")
-            continue
+            cancel_registry.cleanup(run_id)
+        return cancelled_env
+    except Exception as e:
+        errors.append(f"Model call failed: {e}")
 
+    # 2c. Parse and apply edits.
+    if text:
         parsed = _parse_fixer_output(text)
         edits = parsed.get("edits") or []
         edit_summary = (parsed.get("summary") or "")[:140]
 
         if parsed.get("cannot_fix"):
-            errors.append(f"Issue {i}: fixer declined — {edit_summary}")
-            continue
-        if not edits:
-            # No EDIT markers found in the output. Surface a sample of what the
-            # model produced so we can debug — first 200 chars.
+            errors.append(f"Fixer declined — {edit_summary}")
+        elif not edits:
             sample = text[:200].replace("\n", " \\n ")
             errors.append(
-                f"Issue {i}: model output had no `### EDIT:` sections "
+                f"Model output had no `### EDIT:` sections "
                 f"({len(text)} chars). Sample: {sample!r}"
             )
-            continue
-
-        # 2c. Apply edits — but only if the path is in scope.
-        applied_this_issue = 0
-        for edit in edits[:10]:  # safety cap
-            path = (edit.get("path") or "").strip()
-            content = edit.get("content")
-            if not path or content is None:
-                continue
-            if path not in capped_scope:
-                errors.append(f"Issue {i}: model tried out-of-scope edit on {path} — refused")
-                continue
-            await _step("writing", path[len(project_dir) + 1:] if path.startswith(project_dir + "/") else path)
-            ok, err_detail = await _write_file_sandbox(http, path, content)
-            if ok:
-                files_touched.add(path)
-                diffs.append({"path": path, "summary": edit_summary or "(no summary)"})
-                applied_this_issue += 1
-            else:
-                errors.append(f"Issue {i}: write failed for {path} — {err_detail}")
-
-        if applied_this_issue == 0:
-            errors.append(f"Issue {i}: model proposed edits but none could be written")
+        else:
+            for edit in edits[:20]:  # safety cap
+                path = (edit.get("path") or "").strip()
+                content = edit.get("content")
+                if not path or content is None:
+                    continue
+                if path not in _allowed_set:
+                    errors.append(f"Model tried out-of-scope edit on {path} — refused")
+                    continue
+                rel = path[len(project_dir) + 1:] if path.startswith(project_dir + "/") else path
+                await _step("writing", rel)
+                ok, err_detail = await _write_file_sandbox(http, path, content)
+                if ok:
+                    files_touched.add(path)
+                    diffs.append({"path": path, "summary": edit_summary or "(no summary)"})
+                else:
+                    errors.append(f"Write failed for {path} — {err_detail}")
 
     # 3. Build envelope.
     if files_touched and not errors:
@@ -508,7 +557,7 @@ async def run_fixer(http, events, conv_id: str, *,
         "summary": (f"Applied edits to {len(files_touched)} file(s) across "
                     f"{len(issues)} issue(s)") if files_touched
                    else "No edits applied — see errors",
-        "issues_addressed": len(issues),
+        "issues_addressed": len(issues) - skipped,
         "files_touched": sorted(files_touched),
         "diffs": diffs[:20],
         "errors": errors[:10],

@@ -19,12 +19,14 @@ row with role='qa' for the same durability story as builder/reviewer/fixer.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import shlex
 import uuid
 
 import config
 import database as db
+import cancel_registry
 
 
 # Common English "stopwords" that aren't useful as grep targets. Keep small —
@@ -379,6 +381,9 @@ async def run_project_qa(http, events, conv_id: str, *,
         print(f"[QA] create_run failed (non-fatal): {e}")
         run_id = ""
 
+    if run_id:
+        cancel_registry.register(run_id)
+
     _step_n = [0]
 
     async def _step(action: str, detail: str = ""):
@@ -397,212 +402,232 @@ async def run_project_qa(http, events, conv_id: str, *,
             except Exception:
                 pass
 
-    if not question:
-        envelope = {"status": "error", "summary": "ask_project requires a question",
-                    "answer": "", "files_examined": [],
-                    "looks_like_change_request": False}
-        if run_id:
-            try: await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
-            except Exception: pass
-        return envelope
+    try:  # try/finally ensures cancel_registry.cleanup on every exit path
 
-    if not project_dir:
-        envelope = {"status": "error",
-                    "summary": "ask_project requires project_dir; pass it explicitly or run after a builder run",
-                    "answer": "", "files_examined": [],
-                    "looks_like_change_request": False}
-        if run_id:
-            try: await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
-            except Exception: pass
-        return envelope
+        if not question:
+            envelope = {"status": "error", "summary": "ask_project requires a question",
+                        "answer": "", "files_examined": [],
+                        "looks_like_change_request": False}
+            if run_id:
+                try: await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
+                except Exception: pass
+            return envelope
 
-    await _step("question", question[:140])
+        if not project_dir:
+            envelope = {"status": "error",
+                        "summary": "ask_project requires project_dir; pass it explicitly or run after a builder run",
+                        "answer": "", "files_examined": [],
+                        "looks_like_change_request": False}
+            if run_id:
+                try: await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
+                except Exception: pass
+            return envelope
 
-    # Phase 1: orient with a file listing.
-    await _step("list_files", project_dir)
-    file_list = await _list_files(http, project_dir)
-    if not file_list:
+        await _step("question", question[:140])
+
+        # Phase 1: orient with a file listing.
+        await _step("list_files", project_dir)
+        file_list = await _list_files(http, project_dir)
+        if not file_list:
+            envelope = {
+                "status": "error",
+                "summary": f"Could not list files at {project_dir} (does the project exist?)",
+                "answer": f"I couldn't read the project at `{project_dir}`. The directory may not exist or be empty.",
+                "files_examined": [],
+                "looks_like_change_request": False,
+            }
+            await events.emit(conv_id, "tool_end", {
+                "tool": "ask_project", "icon": "help-circle",
+                "status": f"⚠ Project not accessible at {project_dir}",
+                "run_id": run_id,
+            })
+            if run_id:
+                try: await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
+                except Exception: pass
+            return envelope
+
+        snippet_blocks: list[str] = []
+        files_examined: list[str] = []
+
+        # Phase 2a — filename targeting.
+        targets = _extract_filename_targets(question)
+        target_paths: list[str] = []
+        if targets:
+            await _step("filename_targets", ", ".join(targets[:5]))
+            target_paths = await _resolve_filename_targets(file_list, targets)
+            if target_paths:
+                await _step("matched_files", f"{len(target_paths)} file(s): " + ", ".join(p.rsplit('/', 1)[-1] for p in target_paths))
+                for path in target_paths:
+                    full = await _read_file_full(http, project_dir, path)
+                    if full:
+                        snippet_blocks.append(
+                            f"### `{path}` (full contents — user asked for this file)\n"
+                            f"```\n{full[:12000]}\n```"
+                            + (f"\n[truncated; full file is {len(full)} chars]" if len(full) > 12000 else "")
+                        )
+                        files_examined.append(path)
+            else:
+                await _step("no_match", f"no files in tree match: {targets[:3]}")
+
+        # Phase 2b — keyword grep.
+        keywords = _extract_keywords(question)
+        await _step("keywords", ", ".join(keywords) if keywords else "(none — using head-of-file fallback)")
+        hits = await _grep_for_keywords(http, project_dir, keywords) if keywords else []
+        await _step("grep", f"{len(hits)} hit(s) across the tree")
+
+        # Phase 3: pick top grep-files by hit-count, read short snippets.
+        file_to_hits: dict[str, list[dict]] = {}
+        for h in hits:
+            if h["file"] in target_paths:
+                continue
+            file_to_hits.setdefault(h["file"], []).append(h)
+        ranked_files = sorted(
+            file_to_hits.items(),
+            key=lambda kv: (-len(kv[1]), min(h["line"] for h in kv[1])),
+        )
+        if not ranked_files and not target_paths:
+            await _step("fallback", "no grep hits; reading entry-point candidates")
+            candidates = []
+            for path in file_list:
+                base = path.rsplit("/", 1)[-1].lower()
+                if base in ("main.rs", "main.py", "main.go", "main.java",
+                            "index.js", "index.ts", "index.html",
+                            "lib.rs", "mod.rs", "app.py", "server.py"):
+                    candidates.append(path)
+                elif base.startswith("readme."):
+                    candidates.append(path)
+                if len(candidates) >= 4:
+                    break
+            _fb_tasks = [
+                _read_snippet(http, project_dir, p, line=0, radius=20)
+                for p in candidates[:4]
+            ]
+            _fb_results = await asyncio.gather(*_fb_tasks, return_exceptions=True)
+            for path, snip in zip(candidates[:4], _fb_results):
+                if isinstance(snip, str) and snip:
+                    snippet_blocks.append(f"### `{path}` (head)\n```\n{snip[:1800]}\n```")
+                    files_examined.append(path)
+        else:
+            _ranked_paths = [(p, fh[0]["line"], len(fh)) for p, fh in ranked_files[:5]]
+            _gr_tasks = [
+                _read_snippet(http, project_dir, p, line=anchor, radius=15)
+                for p, anchor, _ in _ranked_paths
+            ]
+            _gr_results = await asyncio.gather(*_gr_tasks, return_exceptions=True)
+            for (path, anchor, n_hits), snip in zip(_ranked_paths, _gr_results):
+                if isinstance(snip, str) and snip:
+                    snippet_blocks.append(
+                        f"### `{path}` (around line {anchor}; "
+                        f"{n_hits} hit{'s' if n_hits != 1 else ''})\n```\n{snip[:1800]}\n```"
+                    )
+                    files_examined.append(path)
+        snippets_section = "\n\n".join(snippet_blocks) if snippet_blocks else "(no snippets retrieved)"
+        await _step("snippets", f"{len(files_examined)} file(s) inspected")
+
+        # Phase 4: ask LLM to compose grounded answer.
+        qa_model = (config.QA_MODEL or conv_model or config.DEFAULT_MODEL or config.PLANNING_MODEL or "").strip()
+        if not qa_model:
+            envelope = {"status": "error",
+                        "summary": "No model configured for ProjectQA",
+                        "answer": "", "files_examined": files_examined,
+                        "looks_like_change_request": _is_change_request(question)}
+            if run_id:
+                try: await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
+                except Exception: pass
+            return envelope
+
+        tree_text = "\n".join(file_list[:80])
+        if len(file_list) > 80:
+            tree_text += f"\n... ({len(file_list) - 80} more files)"
+
+        prompt = _QA_PROMPT.format(
+            project_dir=project_dir,
+            language=language or "(unknown)",
+            file_tree=tree_text,
+            question=question,
+            snippets_section=snippets_section,
+        )
+
+        await _step("compose", f"calling {qa_model}")
+        answer = ""
+        try:
+            coro = http.post(
+                f"{config.OLLAMA_URL}/api/chat",
+                json={
+                    "model": qa_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                    "options": {"temperature": 0.3, "num_ctx": config.DEFAULT_NUM_CTX},
+                },
+                timeout=600,
+            )
+            r = await cancel_registry.await_cancellable(coro, run_id)
+            if r.status_code == 200:
+                answer = (r.json().get("message", {}).get("content") or "").strip()
+            else:
+                answer = f"(LLM call failed: HTTP {r.status_code})"
+        except cancel_registry.RunCancelled:
+            cancelled_env = {
+                "status": "cancelled",
+                "summary": "ProjectQA cancelled by user (Stop pressed) during LLM call.",
+                "answer": "",
+                "files_examined": files_examined,
+                "looks_like_change_request": False,
+                "qa_model": qa_model,
+                "project_dir": project_dir,
+                "language": language,
+            }
+            try:
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "ask_project", "icon": "help-circle",
+                    "status": "⛔ ProjectQA cancelled by user",
+                    "run_id": run_id,
+                })
+            except Exception:
+                pass
+            if run_id:
+                try:
+                    await db.update_run(run_id, status="cancelled",
+                                        result_envelope=cancelled_env, ended=True)
+                except Exception:
+                    pass
+            return cancelled_env
+        except Exception as e:
+            answer = f"(LLM call failed: {type(e).__name__}: {e})"
+
+        looks_like_change = _is_change_request(question)
         envelope = {
-            "status": "error",
-            "summary": f"Could not list files at {project_dir} (does the project exist?)",
-            "answer": f"I couldn't read the project at `{project_dir}`. The directory may not exist or be empty.",
-            "files_examined": [],
-            "looks_like_change_request": False,
+            "status": "ok" if answer and not answer.startswith("(LLM call failed") else "error",
+            "summary": (f"Answered question by examining {len(files_examined)} file(s)"
+                        if answer else "Failed to compose answer"),
+            "answer": answer,
+            "files_examined": files_examined,
+            "keywords": keywords,
+            "grep_hits": len(hits),
+            "looks_like_change_request": looks_like_change,
+            "qa_model": qa_model,
+            "project_dir": project_dir,
+            "language": language,
         }
+
         await events.emit(conv_id, "tool_end", {
             "tool": "ask_project", "icon": "help-circle",
-            "status": f"⚠ Project not accessible at {project_dir}",
+            "status": (f"❓ Answered using {len(files_examined)} file(s)"
+                       + (" — looks like a change request" if looks_like_change else "")),
             "run_id": run_id,
         })
         if run_id:
-            try: await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
-            except Exception: pass
-        return envelope
-
-    snippet_blocks: list[str] = []
-    files_examined: list[str] = []
-
-    # Phase 2a — filename targeting. If the user mentioned specific files
-    # ("score tracker.java", "ScoreTracker.java", "Ball.rs", etc.), find
-    # them in the project tree and read their FULL contents. This handles
-    # the "break down X line by line" / "show me Y" class of questions
-    # where keyword grep would miss the actual file.
-    targets = _extract_filename_targets(question)
-    target_paths: list[str] = []
-    if targets:
-        await _step("filename_targets", ", ".join(targets[:5]))
-        target_paths = await _resolve_filename_targets(file_list, targets)
-        if target_paths:
-            await _step("matched_files", f"{len(target_paths)} file(s): " + ", ".join(p.rsplit('/', 1)[-1] for p in target_paths))
-            for path in target_paths:
-                # For targeted reads, use a generous limit so the model can
-                # walk the user through the whole file. ~12KB ≈ 300 lines of
-                # typical source — enough for almost any single-class file
-                # without blowing the prompt budget.
-                full = await _read_file_full(http, project_dir, path)
-                if full:
-                    snippet_blocks.append(
-                        f"### `{path}` (full contents — user asked for this file)\n"
-                        f"```\n{full[:12000]}\n```"
-                        + (f"\n[truncated; full file is {len(full)} chars]" if len(full) > 12000 else "")
-                    )
-                    files_examined.append(path)
-        else:
-            await _step("no_match", f"no files in tree match: {targets[:3]}")
-
-    # Phase 2b — keyword grep (still useful even when targets matched, so
-    # the model has cross-references for cited symbols).
-    keywords = _extract_keywords(question)
-    await _step("keywords", ", ".join(keywords) if keywords else "(none — using head-of-file fallback)")
-    hits = await _grep_for_keywords(http, project_dir, keywords) if keywords else []
-    await _step("grep", f"{len(hits)} hit(s) across the tree")
-
-    # Phase 3: pick top grep-files by hit-count, read short snippets around
-    # each anchor. Skip files we already loaded in Phase 2a — no need to
-    # double-include.
-    file_to_hits: dict[str, list[dict]] = {}
-    for h in hits:
-        if h["file"] in target_paths:
-            continue
-        file_to_hits.setdefault(h["file"], []).append(h)
-    ranked_files = sorted(
-        file_to_hits.items(),
-        key=lambda kv: (-len(kv[1]), min(h["line"] for h in kv[1])),
-    )
-    if not ranked_files and not target_paths:
-        # No grep hits AND no filename matches — fall back to reading the
-        # head of likely entry-point files so the model has *something* to
-        # ground in.
-        await _step("fallback", "no grep hits; reading entry-point candidates")
-        candidates = []
-        for path in file_list:
-            base = path.rsplit("/", 1)[-1].lower()
-            if base in ("main.rs", "main.py", "main.go", "main.java",
-                        "index.js", "index.ts", "index.html",
-                        "lib.rs", "mod.rs", "app.py", "server.py"):
-                candidates.append(path)
-            elif base.startswith("readme."):
-                candidates.append(path)
-            if len(candidates) >= 4:
-                break
-        for path in candidates[:4]:
-            snip = await _read_snippet(http, project_dir, path, line=0, radius=20)
-            if snip:
-                snippet_blocks.append(f"### `{path}` (head)\n```\n{snip[:1800]}\n```")
-                files_examined.append(path)
-    else:
-        for path, file_hits in ranked_files[:5]:
-            anchor = file_hits[0]["line"]
-            snip = await _read_snippet(http, project_dir, path, line=anchor, radius=15)
-            if snip:
-                snippet_blocks.append(
-                    f"### `{path}` (around line {anchor}; "
-                    f"{len(file_hits)} hit{'s' if len(file_hits) != 1 else ''})\n```\n{snip[:1800]}\n```"
+            try:
+                await db.update_run(
+                    run_id,
+                    status="succeeded" if envelope["status"] == "ok" else "failed",
+                    result_envelope=envelope, ended=True,
                 )
-                files_examined.append(path)
-    snippets_section = "\n\n".join(snippet_blocks) if snippet_blocks else "(no snippets retrieved)"
-    await _step("snippets", f"{len(files_examined)} file(s) inspected")
+            except Exception as e:
+                print(f"[QA] update_run failed (non-fatal): {e}")
 
-    # Phase 4: ask LLM to compose grounded answer.
-    # Prefer the chat's current model (persona's pinned model or user's
-    # chat-dropdown choice) so the QA voice matches the assistant the user is
-    # actually talking to. Fall back to settings only if the chat didn't pass
-    # one through.
-    # Per-agent override (config.QA_MODEL) wins if explicitly pinned; else
-    # respect the chat/persona model, then settings defaults.
-    qa_model = (config.QA_MODEL or conv_model or config.DEFAULT_MODEL or config.PLANNING_MODEL or "").strip()
-    if not qa_model:
-        envelope = {"status": "error",
-                    "summary": "No model configured for ProjectQA",
-                    "answer": "", "files_examined": files_examined,
-                    "looks_like_change_request": _is_change_request(question)}
-        if run_id:
-            try: await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
-            except Exception: pass
         return envelope
 
-    # Build a compact file tree summary (just paths, not full content).
-    tree_text = "\n".join(file_list[:80])
-    if len(file_list) > 80:
-        tree_text += f"\n... ({len(file_list) - 80} more files)"
-
-    prompt = _QA_PROMPT.format(
-        project_dir=project_dir,
-        language=language or "(unknown)",
-        file_tree=tree_text,
-        question=question,
-        snippets_section=snippets_section,
-    )
-
-    await _step("compose", f"calling {qa_model}")
-    answer = ""
-    try:
-        r = await http.post(
-            f"{config.OLLAMA_URL}/api/chat",
-            json={
-                "model": qa_model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-                "options": {"temperature": 0.3, "num_ctx": config.DEFAULT_NUM_CTX},
-            },
-            timeout=600,
-        )
-        if r.status_code == 200:
-            answer = (r.json().get("message", {}).get("content") or "").strip()
-        else:
-            answer = f"(LLM call failed: HTTP {r.status_code})"
-    except Exception as e:
-        answer = f"(LLM call failed: {type(e).__name__}: {e})"
-
-    looks_like_change = _is_change_request(question)
-    envelope = {
-        "status": "ok" if answer and not answer.startswith("(LLM call failed") else "error",
-        "summary": (f"Answered question by examining {len(files_examined)} file(s)"
-                    if answer else "Failed to compose answer"),
-        "answer": answer,
-        "files_examined": files_examined,
-        "keywords": keywords,
-        "grep_hits": len(hits),
-        "looks_like_change_request": looks_like_change,
-        "qa_model": qa_model,
-        "project_dir": project_dir,
-        "language": language,
-    }
-
-    await events.emit(conv_id, "tool_end", {
-        "tool": "ask_project", "icon": "help-circle",
-        "status": (f"❓ Answered using {len(files_examined)} file(s)"
-                   + (" — looks like a change request" if looks_like_change else "")),
-        "run_id": run_id,
-    })
-    if run_id:
-        try:
-            await db.update_run(
-                run_id,
-                status="succeeded" if envelope["status"] == "ok" else "failed",
-                result_envelope=envelope, ended=True,
-            )
-        except Exception as e:
-            print(f"[QA] update_run failed (non-fatal): {e}")
-
-    return envelope
+    finally:
+        if run_id:
+            cancel_registry.cleanup(run_id)

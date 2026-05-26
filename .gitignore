@@ -9,6 +9,9 @@ __pycache__/
 # Internal infra inventory — homelab IPs and service map
 CLAUDE.md
 claude.md
+AGENTS.MD
+AGENTS.md
+agents.md
 
 # Environment / secrets
 .idea/misc.xml
@@ -42,3 +45,26 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# OpenAI / Ollama / API keys
+openai_api_key*
+anthropic_api_key*
+*_API_KEY*
+*_TOKEN*
+
+# -------------------------
+# AI agent local files
+# -------------------------
+.codex/
+.claude/
+.agents/
+.cursor/
+.windsurf/
+.ai/
+.agent/
+agent-output/
+agent-logs/
+codex-output/
+codex-logs/
+claude-output/
+claude-logs/

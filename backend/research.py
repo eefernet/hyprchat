@@ -443,11 +443,13 @@ def _rank_urls(findings: list, exclude: set = None) -> list:
 
 async def _ask_ollama(http, ollama_url: str, prompt: str, model: str = None, default_model: str = "qwen3.5:27b", max_tokens: int = 4096) -> str:
     """Call Ollama for AI synthesis."""
+    import config as _cfg
+    _num_ctx = _cfg.DEFAULT_NUM_CTX or 16384
     try:
         r = await http.post(f"{ollama_url}/api/generate", json={
             "model": model or default_model,
             "prompt": prompt, "stream": False,
-            "options": {"temperature": 0.3, "num_predict": max_tokens},
+            "options": {"temperature": 0.3, "num_predict": max_tokens, "num_ctx": _num_ctx},
         }, timeout=180)
         data = r.json()
         return (data.get("response", "") or "").strip()
@@ -461,13 +463,15 @@ async def _ask_ollama_streamed(
     max_tokens: int = 4096, status_prefix: str = "🧠 Synthesizing",
 ) -> str:
     """Stream from Ollama, emitting periodic status events so the user sees live progress."""
+    import config as _cfg
+    _num_ctx = _cfg.DEFAULT_NUM_CTX or 16384
     accumulated = ""
     last_emit_len = 0
     try:
         async with http.stream("POST", f"{ollama_url}/api/generate", json={
             "model": model or default_model,
             "prompt": prompt, "stream": True,
-            "options": {"temperature": 0.3, "num_predict": max_tokens},
+            "options": {"temperature": 0.3, "num_predict": max_tokens, "num_ctx": _num_ctx},
         }, timeout=300) as stream:
             async for line in stream.aiter_lines():
                 if not line.strip():

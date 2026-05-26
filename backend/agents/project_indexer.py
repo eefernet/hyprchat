@@ -21,6 +21,7 @@ Stateless. Single-shot. Does NOT modify the project. Does NOT call any LLM
 
 from __future__ import annotations
 
+import asyncio
 import shlex
 import uuid
 
@@ -222,15 +223,29 @@ async def run_project_indexer(http, events, conv_id: str, *,
 
     await _step("found_files", f"{len(paths)} source file(s) (capped at {file_cap})")
 
-    # 3. Read each file. We could batch-read via tar-stream but for ~100 small
-    # files the per-file `cat` is fine and keeps the code simple.
+    # 3. Read files in parallel batches (10 concurrent to avoid flooding Codebox).
+    _READ_CONCURRENCY = 10
+    _sema = asyncio.Semaphore(_READ_CONCURRENCY)
     file_contents: dict[str, str] = {}
-    for i, rel in enumerate(paths):
-        if i % 10 == 0 and i > 0:
-            await _step("reading", f"{i}/{len(paths)}")
-        body = await _read_file(http, project_dir, rel)
-        if body and len(body.strip()) >= 20:
-            file_contents[rel] = body
+
+    async def _read_one(rel: str) -> tuple[str, str]:
+        async with _sema:
+            body = await _read_file(http, project_dir, rel)
+            return rel, body
+
+    for batch_start in range(0, len(paths), _READ_CONCURRENCY):
+        batch = paths[batch_start:batch_start + _READ_CONCURRENCY]
+        if batch_start > 0:
+            await _step("reading", f"{batch_start}/{len(paths)}")
+        results = await asyncio.gather(
+            *[_read_one(rel) for rel in batch],
+            return_exceptions=True,
+        )
+        for res in results:
+            if isinstance(res, tuple):
+                rel, body = res
+                if body and len(body.strip()) >= 20:
+                    file_contents[rel] = body
     await _step("read_done", f"{len(file_contents)} file(s) with substantive content")
 
     if not file_contents:
