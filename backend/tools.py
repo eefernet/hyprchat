@@ -3,21 +3,383 @@ Tool definitions and execution dispatch for HyprChat's integrated CodeAgent.
 """
 import asyncio
 import base64
+import calendar
 import json
 import os
 import re
 import shlex
 import time
 import uuid
+from datetime import datetime
 
 import config
 import database as db
+import cancel_registry
 from research import run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
 
 # Strip ANSI escape codes from terminal output before feeding back to the model
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub('', text)
+
+
+def _parse_ts_loose(s) -> "datetime | None":
+    """Parse timestamps from either Python isoformat (runs.started_at, has 'T'
+    and microseconds) or SQLite CURRENT_TIMESTAMP (messages.created_at, space
+    separator, no microseconds, sometimes a trailing 'Z'). Returns None on
+    unrecognized input rather than raising — callers treat missing as 'before
+    the current turn' which is the safe default."""
+    if not s:
+        return None
+    s = str(s).strip().rstrip("Z")
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+# In-process cache of the most recent deep_research result per conversation.
+# The full research report only exists in the orchestrator's in-memory tool
+# history for the current turn — saved_events keeps a summary but not the
+# body. Caching it here lets the Fixer dispatcher pick it up across the
+# orchestrator/fixer boundary without persisting research bodies to SQLite
+# or breaking the Fixer's network-free contract. Bounded to 32 entries with
+# LRU eviction (move-to-end on read); freshness window enforced at read time.
+from collections import OrderedDict
+_RECENT_RESEARCH: OrderedDict[str, dict] = OrderedDict()
+_RECENT_RESEARCH_MAX = 32
+_RESEARCH_FRESH_SECONDS = 600  # 10 min — drop on next read past this
+
+
+def _stash_research_result(conv_id: str, topic: str, report: str) -> None:
+    """Record the most recent deep_research result for this conv. LRU-bounded:
+    accessed entries move to the end; eviction drops the least-recently-used."""
+    if not conv_id or not report:
+        return
+    _RECENT_RESEARCH[conv_id] = {
+        "topic": topic or "",
+        "report": report,
+        "ts": time.time(),
+    }
+    _RECENT_RESEARCH.move_to_end(conv_id)
+    while len(_RECENT_RESEARCH) > _RECENT_RESEARCH_MAX:
+        _RECENT_RESEARCH.popitem(last=False)
+
+
+def _get_recent_research(conv_id: str) -> "dict | None":
+    """Return the cached research entry for conv_id if it's still within the
+    freshness window, else None. Stale entries are dropped on read. Accessed
+    entries are promoted (LRU)."""
+    entry = _RECENT_RESEARCH.get(conv_id)
+    if not entry:
+        return None
+    if (time.time() - entry.get("ts", 0)) > _RESEARCH_FRESH_SECONDS:
+        _RECENT_RESEARCH.pop(conv_id, None)
+        return None
+    _RECENT_RESEARCH.move_to_end(conv_id)
+    return entry
+
+
+def _issue_signatures(envelope: dict) -> set:
+    """Reduce a reviewer envelope to a set of (file, summary_prefix) tuples
+    suitable for set-overlap comparison. Used by the v2 gate to detect
+    'same problem returned' across run_review cycles. Summary prefix is
+    lowercased + stripped + truncated to 60 chars so trivial wording diffs
+    don't defeat the overlap check, but the file path must match exactly."""
+    sigs = set()
+    for iss in (envelope or {}).get("issues") or []:
+        f = (iss.get("file") or "").strip()
+        s = (iss.get("summary") or "").strip().lower()[:60]
+        if f and s:
+            sigs.add((f, s))
+    return sigs
+
+
+async def _deep_research_called_since(conv_id: str, since_iso: str | None) -> bool:
+    """Return True iff deep_research has run on this conversation since the
+    trigger event at `since_iso`. Checks two sources:
+
+      1. In-process `_RECENT_RESEARCH` cache (10-min freshness, populated
+         immediately when deep_research's dispatcher returns). This is what
+         catches mid-stream calls — a model that calls deep_research and
+         then run_fixer in the same turn won't have the deep_research event
+         persisted to the conversation yet (assistant message is only saved
+         at stream end), so the DB walk below misses it. Without this check,
+         the FINAL_CYCLE / STUCK_FIX gates fire a second time, the model
+         dutifully re-runs deep_research, and the user sees duplicate
+         carousels and ~3 minutes of wasted research.
+      2. Persisted assistant messages' saved_events (cross-stream / restart
+         survival). Only consulted when (1) returns nothing.
+    """
+    # In-stream check first — matches what's already populated via
+    # `_stash_research_result` on deep_research completion. The cache is
+    # keyed by conv_id. When since_iso is provided, we also verify the
+    # cached entry is newer than the trigger event — pre-build research
+    # done before the latest reviewer run must not satisfy the gate.
+    try:
+        _cached = _get_recent_research(conv_id) if conv_id else None
+        if _cached:
+            if since_iso:
+                _since_dt = _parse_ts_loose(since_iso)
+                if _since_dt:
+                    _since_unix = calendar.timegm(_since_dt.timetuple()) + _since_dt.microsecond / 1_000_000
+                    if _cached.get("ts", 0) >= _since_unix:
+                        return True
+                # Cached research is older than since_iso — fall through to DB
+            else:
+                return True
+    except Exception as _e:
+        print(f"[v2-gate] in-stream research cache check failed (non-fatal): {_e}")
+
+    if not since_iso:
+        return False
+    try:
+        conv = await db.get_conversation(conv_id)
+        msgs = (conv or {}).get("messages") or []
+        since_ts = _parse_ts_loose(since_iso)
+        for m in reversed(msgs):
+            if m.get("role") != "assistant":
+                continue
+            m_ts = _parse_ts_loose(m.get("created_at"))
+            if since_ts and m_ts and m_ts < since_ts:
+                # Once we walk past the trigger run, we can stop.
+                return False
+            md = m.get("metadata") or {}
+            if isinstance(md, str):
+                try:
+                    md = json.loads(md)
+                except Exception:
+                    md = {}
+            for ev in md.get("saved_events") or []:
+                if ev.get("type") != "tool_start":
+                    continue
+                if (ev.get("data") or {}).get("tool") == "deep_research":
+                    return True
+        return False
+    except Exception as _e:
+        print(f"[v2-gate] deep_research history check failed (non-fatal): {_e}")
+        return False
+
+
+# Pytest "FAILED tests/foo.py::test_x - reason" line, plus a fallback for
+# generic "FAILED <path>:<line>" / "ERROR tests/foo.py" forms. Captures the
+# file path so the synthesized reviewer envelope can route Fixer to the
+# right `suggested_fix_scope` files.
+_PYTEST_FAIL_RE = re.compile(
+    r"^(?:FAILED|ERROR)\s+([\w./\-]+\.py)(?:::([\w.\[\]<>:_-]+))?(?:\s*-\s*(.{0,200}))?",
+    re.MULTILINE,
+)
+_PYTEST_IMPORT_ERR_RE = re.compile(
+    r"(?:ModuleNotFoundError|ImportError):\s*(.{0,160})", re.MULTILINE,
+)
+
+
+async def _synthesize_reviewer_from_test_failure(
+    conv_id: str, test_output: str, project_dir: str,
+    framework: str, elapsed: float,
+) -> str:
+    """If the most recent reviewer on this conv reported clean but run_tests
+    just failed, persist a NEW reviewer-role run row whose envelope encodes
+    the test failures as a real `issues` list. Returns the new run_id, or ""
+    if no synthesis was warranted (e.g. no prior clean reviewer found).
+
+    The synthesized run is the same shape the real Reviewer would produce, so
+    `run_fixer(reviewer_run_id=...)` works without modification. Distinguished
+    from a real reviewer envelope only by `synthetic: True` in the envelope
+    (kept for diagnostics — Fixer ignores the field).
+    """
+    # Find the most recent run_review for this conversation.
+    try:
+        runs = await db.get_runs_by_conversation(conv_id, limit=20)
+    except Exception:
+        return ""
+    last_review = next(
+        (r for r in runs if r.get("role") == "reviewer"
+         and (r.get("status") or "").lower() == "succeeded"),
+        None,
+    )
+    if not last_review:
+        # No prior reviewer means there's no false negative to compensate for.
+        # Don't synthesize — just let run_tests' default response stand.
+        return ""
+
+    rev_env = last_review.get("result_envelope") or {}
+    rev_test_exit = rev_env.get("test_exit", -1)
+    rev_status = (rev_env.get("status") or "").lower()
+    # Only synthesize if reviewer claimed clean. If reviewer already reported
+    # issues, the model has a real envelope to fix against.
+    if rev_status != "clean" and rev_test_exit != 0:
+        return ""
+
+    # Parse test output into structured issues. Group by file so multiple
+    # failing tests in the same file collapse to a single fixer scope.
+    by_file: dict[str, list[dict]] = {}
+    for m in _PYTEST_FAIL_RE.finditer(test_output or ""):
+        f = m.group(1)
+        test_name = m.group(2) or ""
+        reason = (m.group(3) or "").strip()
+        by_file.setdefault(f, []).append({"test": test_name, "reason": reason})
+
+    issues = []
+    for f, fails in list(by_file.items())[:8]:  # cap
+        # Resolve relative path → absolute under project_dir for fixer scope.
+        abs_path = f if f.startswith("/") else f"{project_dir.rstrip('/')}/{f}"
+        summary_lines = [f"{x['test']}: {x['reason'][:120]}" for x in fails[:3] if x['reason']]
+        summary = (f"{len(fails)} failing test(s) in {f}: "
+                   + ("; ".join(summary_lines) if summary_lines else "see test output"))
+        issues.append({
+            "severity": "test",
+            "file": abs_path,
+            "lines": [],
+            "summary": summary[:300],
+            # Scope to the test file plus a guess at the source-under-test —
+            # if path is `tests/test_foo.py`, also include `src/foo.py` /
+            # `foo.py`. Fixer's scope check only writes files we list, so
+            # be conservative.
+            "suggested_fix_scope": _guess_fix_scope(abs_path, project_dir),
+        })
+
+    # If no FAILED lines parsed but pytest still exited non-zero, fall back to
+    # a single catch-all issue so the model has something to call run_fixer on.
+    if not issues:
+        ie_match = _PYTEST_IMPORT_ERR_RE.search(test_output or "")
+        ie_summary = (f"ImportError during test collection: {ie_match.group(1).strip()}"
+                      if ie_match else
+                      "Tests failed but no FAILED lines parsed — see test output")
+        issues.append({
+            "severity": "test",
+            "file": project_dir,
+            "lines": [],
+            "summary": ie_summary[:300],
+            "suggested_fix_scope": [],
+        })
+
+    # Persist the synthesized envelope as a real run row so Fixer + the
+    # frontend RunCard treat it identically to a normal reviewer run.
+    new_id = f"run-{uuid.uuid4().hex[:12]}"
+    envelope = {
+        "status": "issues",
+        "summary": (f"Synthesized from run_tests failure ({framework}, {elapsed:.1f}s) "
+                    f"after Reviewer reported clean. {len(issues)} issue(s) detected."),
+        "issues": issues,
+        "build_cmd": rev_env.get("build_cmd", ""),
+        "test_cmd": rev_env.get("test_cmd", ""),
+        "lint_cmd": rev_env.get("lint_cmd", ""),
+        "build_exit": rev_env.get("build_exit", 0),  # build wasn't re-run
+        "test_exit": 1,                              # synthesized failure
+        "lint_exit": rev_env.get("lint_exit", 0),
+        "language": rev_env.get("language", "python"),
+        "marker": rev_env.get("marker", ""),
+        "project_dir": project_dir,
+        "review_model": "(synthesized from run_tests)",
+        "synthetic": True,
+        "source_run_id": last_review.get("id", ""),
+        "run_id": new_id,
+    }
+    try:
+        await db.create_run(new_id, conv_id, role="reviewer",
+                            project_id=last_review.get("project_id", ""),
+                            parent_run_id=last_review.get("id", ""),
+                            status="succeeded")
+        await db.update_run(new_id, status="succeeded",
+                            result_envelope=envelope, ended=True)
+    except Exception as e:
+        print(f"[TRIPWIRE] persist synthesized review failed: {e}")
+        return ""
+    return new_id
+
+
+def _guess_fix_scope(test_file_abs: str, project_dir: str) -> list[str]:
+    """Given a failing test file, propose the source files Fixer should be
+    allowed to edit. Conservative — we list the test file itself plus the
+    most plausible source-under-test sibling, never a glob.
+
+    Supports Python (test_foo.py, foo_test.py), Java/Kotlin (FooTest.java),
+    Go (foo_test.go), JavaScript/TypeScript (foo.test.js, foo.spec.ts),
+    and Rust (tests/ convention)."""
+    pdir = project_dir.rstrip("/")
+    scope = [test_file_abs]
+    base = os.path.basename(test_file_abs)
+    dname = os.path.dirname(test_file_abs)
+
+    # Python: test_foo.py → foo.py
+    if base.startswith("test_") and base.endswith(".py"):
+        stem = base[5:]
+        for cand in (f"{pdir}/src/{stem}", f"{pdir}/{stem}",
+                     f"{pdir}/app/{stem}", f"{pdir}/lib/{stem}"):
+            scope.append(cand)
+    elif base.endswith("_test.py"):
+        stem = base[:-len("_test.py")] + ".py"
+        for cand in (f"{pdir}/src/{stem}", f"{pdir}/{stem}"):
+            scope.append(cand)
+
+    # Java/Kotlin: FooTest.java → Foo.java, FooTests.java → Foo.java
+    elif base.endswith(("Test.java", "Tests.java", "Test.kt", "Tests.kt")):
+        for suffix in ("Tests.java", "Test.java", "Tests.kt", "Test.kt"):
+            if base.endswith(suffix):
+                src_base = base[:-len(suffix)] + base[base.rfind("."):]
+                # Common Maven/Gradle layout: src/test/java/... → src/main/java/...
+                src_dir = dname.replace("/src/test/", "/src/main/")
+                scope.append(f"{src_dir}/{src_base}")
+                scope.append(f"{pdir}/src/main/java/{src_base}")
+                scope.append(f"{pdir}/{src_base}")
+                break
+
+    # Go: foo_test.go → foo.go (same directory)
+    elif base.endswith("_test.go"):
+        src_base = base[:-len("_test.go")] + ".go"
+        scope.append(f"{dname}/{src_base}")
+        scope.append(f"{pdir}/{src_base}")
+
+    # JS/TS: foo.test.js → foo.js, foo.spec.ts → foo.ts
+    elif any(base.endswith(s) for s in (".test.js", ".test.ts", ".test.jsx", ".test.tsx",
+                                        ".spec.js", ".spec.ts", ".spec.jsx", ".spec.tsx")):
+        for mid in (".test.", ".spec."):
+            if mid in base:
+                src_base = base.replace(mid, ".")
+                scope.append(f"{pdir}/src/{src_base}")
+                scope.append(f"{pdir}/{src_base}")
+                scope.append(f"{dname}/{src_base}")
+                break
+
+    # Rust: tests/foo.rs → src/foo.rs or src/lib.rs
+    elif "/tests/" in test_file_abs and base.endswith(".rs"):
+        scope.append(f"{pdir}/src/{base}")
+        scope.append(f"{pdir}/src/lib.rs")
+        scope.append(f"{pdir}/src/main.rs")
+
+    # Dedup, preserve order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in scope:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+async def _is_v2_persona(conv_id: str, conv_row: dict | None = None) -> bool:
+    """Return True iff this conversation's persona name contains 'v2'.
+
+    Centralised so the workflow gate doesn't repeat the same db lookup +
+    string match in five different places. Pass conv_row if the caller has
+    already fetched it to avoid a second db query. Uses a direct by-id
+    query instead of loading all configs. Failures are non-fatal and return
+    False (fail-safe — gate stays off rather than mis-firing on a v1 persona)."""
+    try:
+        if conv_row is None:
+            conv_row = await db.get_conversation(conv_id)
+        _mc_id = (conv_row or {}).get("model_config_id") if conv_row else None
+        if not _mc_id:
+            return False
+        _mc = await db.get_model_config(_mc_id)
+        return bool(_mc and "v2" in (_mc.get("name") or "").lower())
+    except Exception as _e:
+        print(f"[v2-gate] persona lookup failed (non-fatal): {_e}")
+        return False
 
 
 # ── Ollama-native tool definitions ──
@@ -877,6 +1239,18 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
         #     the model to summarize for the user. The persona prompt has
         #     said "Hard cap: 3 review/fix cycles" since Phase 2; this
         #     enforces it server-side instead of trusting the model to obey.
+        #
+        # Cache the v2 check result once per exec_tool call so the gate
+        # doesn't hit the DB for each sub-state. Initialized to None =
+        # "not checked yet"; False/True = cached result.
+        _v2_cached: bool | None = None
+        async def _check_v2(cr=None) -> bool:
+            nonlocal _v2_cached
+            if _v2_cached is None:
+                _v2_cached = await _is_v2_persona(conv_id, conv_row=cr)
+            return _v2_cached
+
+        _runs_for_cap = None
         if conv_id and name == "run_fixer":
             try:
                 _runs_for_cap = await db.get_runs_by_conversation(conv_id, limit=20)
@@ -885,21 +1259,8 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     if r.get("role") == "fixer" and r.get("status") == "succeeded"
                 )
                 if _fixer_succ >= 3:
-                    # Detect v2 persona; v1 doesn't run this loop, so no need
-                    # to enforce the cap there.
-                    _is_v2_cap = False
-                    try:
-                        _conv_row = await db.get_conversation(conv_id)
-                        _mc_id = (_conv_row or {}).get("model_config_id") if _conv_row else None
-                        if _mc_id:
-                            _all_mc = await db.get_model_configs()
-                            _mc = next((m for m in _all_mc if m.get("id") == _mc_id), None)
-                            if _mc and "v2" in (_mc.get("name") or "").lower():
-                                _is_v2_cap = True
-                    except Exception as _pe:
-                        print(f"[v2-gate] cap persona lookup failed (non-fatal): {_pe}")
-
-                    if _is_v2_cap:
+                    # v1 doesn't run this loop, so cap only applies to v2.
+                    if await _check_v2():
                         # Pull the latest reviewer's summary so the model has
                         # specifics to relay to the user.
                         _last_rev = next(
@@ -938,11 +1299,253 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             + (("\n" + "\n".join(_issue_lines)) if _issue_lines else "")
                             + "\n  3. Asks the user for guidance — what behavior they actually "
                             f"want, or whether to skip this issue and ship anyway.\n\n"
-                            f"Do NOT call run_fixer, run_review, generate_code, write_file, or "
-                            f"any other tool. Respond to the user with text."
+                            f"Do NOT call run_fixer, run_review, generate_code, write_file, "
+                            f"run_shell, or plan_project. You MAY call download_project / "
+                            f"download_file to deliver what was built so far if the user wants "
+                            f"to ship as-is. Otherwise, respond to the user with text."
                         )
             except Exception as _ce:
                 print(f"[v2-gate] cycle cap check failed (non-fatal): {_ce}")
+
+            # ─── State 5+6 — STUCK_FIX / FINAL_CYCLE — research nudge ───────
+            # If the model is about to call run_fixer for the 2nd or 3rd time
+            # AND either (a) the same issue signatures returned across reviewer
+            # cycles, or (b) this would be the 3rd (last-allowed) fixer run,
+            # block until deep_research has been called. The persona prompt
+            # tells the model to do this; the gate enforces it server-side.
+            #
+            # Uses the same _runs_for_cap walk as the cycle cap — cheap because
+            # we already paid for that db hit above. _runs_for_cap is
+            # initialized to None before the first try block so it's always
+            # in scope here.
+            try:
+                _runs_sf = _runs_for_cap
+                if _runs_sf is None:
+                    _runs_sf = await db.get_runs_by_conversation(conv_id, limit=20)
+                _fsucc_sf = sum(
+                    1 for r in _runs_sf
+                    if r.get("role") == "fixer" and r.get("status") == "succeeded"
+                )
+                # 1 ≤ fixer_succ ≤ 2: between first failure and final cycle.
+                # 0 = first attempt, no gate. ≥3 = cap (handled above).
+                if 1 <= _fsucc_sf <= 2 and await _check_v2():
+                    _latest_rev_sf = next(
+                        (r for r in _runs_sf if r.get("role") == "reviewer"),
+                        None,
+                    )
+                    if _latest_rev_sf:
+                        _cur_iss = _issue_signatures(_latest_rev_sf.get("result_envelope") or {})
+                        _research_done = await _deep_research_called_since(
+                            conv_id, _latest_rev_sf.get("started_at")
+                        )
+
+                        # State 5 — STUCK: same issue signature seen in a prior
+                        # reviewer run AND no research call since.
+                        _is_stuck = False
+                        if _cur_iss:
+                            _prior_revs_sf = [
+                                r for r in _runs_sf
+                                if r.get("role") == "reviewer"
+                                and r.get("id") != _latest_rev_sf.get("id")
+                            ]
+                            if _prior_revs_sf:
+                                _prior_rev_sf = _prior_revs_sf[0]
+                                _prior_iss = _issue_signatures(
+                                    _prior_rev_sf.get("result_envelope") or {}
+                                )
+                                if _cur_iss & _prior_iss:
+                                    _is_stuck = True
+
+                        # State 6 — FINAL CYCLE: about to use the last fixer
+                        # slot (3rd attempt). Research before the last shot.
+                        _is_final = (_fsucc_sf == 2)
+
+                        if (_is_stuck or _is_final) and not _research_done:
+                            _why_label = ("STUCK" if _is_stuck else "FINAL_CYCLE")
+                            _gate_status = (
+                                "⛔ Same issue returned — call deep_research first"
+                                if _is_stuck else
+                                "⛔ Final fixer cycle — call deep_research first"
+                            )
+                            # Pull a representative error to seed the research topic.
+                            _seed_iss = (_latest_rev_sf.get("result_envelope") or {}).get("issues") or []
+                            _seed_lines = []
+                            for _i, _iss in enumerate(_seed_iss[:2], 1):
+                                _seed_lines.append(
+                                    f"  {_i}. [{_iss.get('severity','?')}] "
+                                    f"{_iss.get('file','?')}"
+                                    + (f":{','.join(str(x) for x in _iss.get('lines') or [])}" if _iss.get('lines') else "")
+                                    + f" — {(_iss.get('summary','') or '')[:160]}"
+                                )
+                            _seed_block = ("\n" + "\n".join(_seed_lines)) if _seed_lines else ""
+
+                            await events.emit(conv_id, "tool_end", {
+                                "tool": "run_fixer", "icon": "wrench",
+                                "status": _gate_status,
+                            })
+                            print(f"[v2-gate] {_why_label}: blocking run_fixer "
+                                  f"(fixer_succ={_fsucc_sf}, stuck={_is_stuck}, "
+                                  f"final={_is_final}, research_done={_research_done})", flush=True)
+
+                            if _is_stuck:
+                                _reason = (
+                                    f"BLOCKED — run_review returned the same issue(s) you already "
+                                    f"attempted to fix in a previous run_fixer cycle ({_fsucc_sf} fixer "
+                                    f"run(s) so far). Calling run_fixer again without new information "
+                                    f"will produce the same result.\n"
+                                )
+                            else:
+                                _reason = (
+                                    f"BLOCKED — this would be your 3rd (final) run_fixer call. "
+                                    f"After it, the cycle cap blocks any further fixer runs. "
+                                    f"Spend one round on web research before the last shot.\n"
+                                )
+
+                            return (
+                                _reason
+                                + "\nRecurring issue(s):" + _seed_block + "\n\n"
+                                + "Your VERY NEXT tool call MUST be:\n"
+                                + "  deep_research(topic='<exact error message + library/version>', depth=2)\n\n"
+                                + "After deep_research returns, call run_fixer — the Fixer will see the "
+                                + "research result in your conversation and use it to ground the next "
+                                + "edit. Use depth=2 (fast); only use depth=3 if the issue is genuinely "
+                                + "obscure. Do NOT call run_fixer, generate_code, write_file, run_shell, "
+                                + "or run_review until deep_research has run."
+                            )
+            except Exception as _sfe:
+                print(f"[v2-gate] stuck/final-cycle check failed (non-fatal): {_sfe}")
+
+            # Phantom run_fixer guard: block run_fixer when the latest run
+            # isn't a reviewer with status='issues'/'error'. Without this,
+            # a hallucinated reviewer_run_id (the model sometimes invents
+            # one right after generate_code) falls through to fixer.py,
+            # which returns "no envelope to fix" — burning a cap slot for
+            # zero work AND giving the model false signal that a fix
+            # happened. State 2 of the gate (PENDING_FIX) covers the
+            # legitimate "reviewer just ran with issues → call run_fixer"
+            # case; this guard handles every other case.
+            try:
+                if await _check_v2():
+                    _runs_pf = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _latest_meaningful = None
+                    _MEANINGFUL_STATUSES = {"succeeded", "issues", "clean", "partial",
+                                            "stuck", "failed", "error"}
+                    for _r in _runs_pf:
+                        _role_pf = _r.get("role", "")
+                        _st_pf = (_r.get("status") or "").lower()
+                        if (_role_pf == "reviewer" or _role_pf.startswith("builder")
+                                or _role_pf == "fixer") and _st_pf in _MEANINGFUL_STATUSES:
+                            _latest_meaningful = _r
+                            break
+
+                    _allow_fixer = False
+                    if _latest_meaningful and _latest_meaningful.get("role") == "reviewer":
+                        _env_pf = _latest_meaningful.get("result_envelope") or {}
+                        _rstatus_pf = (_env_pf.get("status") or "").lower()
+                        if _rstatus_pf in ("issues", "error"):
+                            _allow_fixer = True
+
+                    if not _allow_fixer:
+                        _trig_role = (_latest_meaningful or {}).get("role", "(none)")
+                        _trig_id = (_latest_meaningful or {}).get("id", "?")
+                        _trig_status = (_latest_meaningful or {}).get("status", "?")
+                        # Surface a project_dir if we can find one.
+                        _pd_hint = ""
+                        for _r in _runs_pf:
+                            _env_h = _r.get("result_envelope") or {}
+                            _pd_try = (_env_h.get("project_dir") or "").strip()
+                            if _pd_try:
+                                _pd_hint = _pd_try
+                                break
+                        await events.emit(conv_id, "tool_end", {
+                            "tool": "run_fixer", "icon": "wrench",
+                            "status": "⛔ run_fixer needs a reviewer envelope first",
+                        })
+                        print(f"[v2-gate] PHANTOM FIXER: blocking run_fixer "
+                              f"(latest meaningful run is {_trig_role}/{_trig_status} "
+                              f"{(_trig_id or '')[:14]}, not a reviewer with issues)", flush=True)
+                        return (
+                            f"BLOCKED — run_fixer requires a recent reviewer envelope with "
+                            f"issues, but the most recent meaningful run is "
+                            f"'{_trig_role}' (status={_trig_status}). There is no "
+                            f"actionable envelope to fix.\n\n"
+                            f"Your VERY NEXT tool call MUST be:\n"
+                            f"  run_review(project_dir='{_pd_hint or '/root/projects/...'}')\n\n"
+                            f"Do not pass a hallucinated reviewer_run_id. Run the reviewer "
+                            f"first; if it returns issues, call run_fixer with that real id."
+                        )
+            except Exception as _pe:
+                print(f"[v2-gate] phantom-fixer check failed (non-fatal): {_pe}")
+
+        # ─── Anti-rebuild guard for generate_code (Bug 7) ────────────────
+        # If a builder.* run already succeeded since the most recent user
+        # message, refuse a 2nd generate_code in the same turn. The model
+        # otherwise tends to fall into "let me try generate_code again" for
+        # bug-fix turns where reviewer returned clean (because runtime bugs
+        # like unconnected Qt signals or invalid font strings compile fine).
+        # Re-running generate_code is ~60–90s of OpenHands work that almost
+        # always produces a worse result than 2 surgical write_file edits.
+        if conv_id and name == "generate_code":
+            try:
+                _conv_full = await db.get_conversation(conv_id)
+                if await _check_v2(cr=_conv_full):
+                    # Find the most recent user message timestamp.
+                    _msgs_rb = (_conv_full or {}).get("messages") or []
+                    _latest_user_ts = None
+                    for _m in reversed(_msgs_rb):
+                        if _m.get("role") == "user":
+                            _latest_user_ts = _parse_ts_loose(_m.get("created_at"))
+                            break
+
+                    if _latest_user_ts is not None:
+                        _runs_rb = await db.get_runs_by_conversation(conv_id, limit=20)
+                        _builder_succ_this_turn = 0
+                        _last_builder_role = ""
+                        for _r in _runs_rb:
+                            if not (_r.get("role", "").startswith("builder")
+                                    and _r.get("status") == "succeeded"):
+                                continue
+                            _r_ts = _parse_ts_loose(_r.get("started_at"))
+                            if _r_ts and _r_ts >= _latest_user_ts:
+                                _builder_succ_this_turn += 1
+                                if not _last_builder_role:
+                                    _last_builder_role = _r.get("role", "builder")
+
+                        if _builder_succ_this_turn >= 1:
+                            # Surface a concrete project_dir for the
+                            # write_file / run_review next-step hint.
+                            _pd_rb = ""
+                            for _r in _runs_rb:
+                                _envrb = _r.get("result_envelope") or {}
+                                _pdrb = (_envrb.get("project_dir") or "").strip()
+                                if _pdrb:
+                                    _pd_rb = _pdrb
+                                    break
+                            await events.emit(conv_id, "tool_end", {
+                                "tool": "generate_code", "icon": "package",
+                                "status": "⛔ generate_code already ran this turn — use write_file",
+                            })
+                            print(f"[v2-gate] ANTI-REBUILD: blocking generate_code "
+                                  f"({_builder_succ_this_turn} {_last_builder_role} run(s) "
+                                  f"since user msg)", flush=True)
+                            return (
+                                f"BLOCKED — generate_code already ran "
+                                f"{_builder_succ_this_turn} time(s) this turn "
+                                f"(latest: {_last_builder_role}). The OpenHands "
+                                f"feature-builder is for substantial NEW functionality "
+                                f"(3+ new files, major refactor) — not for fixing 1–3 "
+                                f"line bugs in existing files. Re-running it almost "
+                                f"always produces a worse result than targeted edits.\n\n"
+                                f"For the current user request, do this instead:\n"
+                                f"  1. read_file(path='{_pd_rb or '/root/projects/.../main.py'}')\n"
+                                f"  2. write_file(path='...', content='...')  with the fix\n"
+                                f"  3. run_review(project_dir='{_pd_rb or '/root/projects/...'}')  to verify\n\n"
+                                f"If the user actually wants a major new feature you haven't "
+                                f"built yet, respond with plain text asking them to confirm — "
+                                f"don't silently rebuild what's already there."
+                            )
+            except Exception as _rbe:
+                print(f"[v2-gate] anti-rebuild check failed (non-fatal): {_rbe}")
 
         if conv_id and name not in ("run_review", "run_fixer", "ask_project"):
             try:
@@ -1009,20 +1612,67 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 elif _pending_review is not None:
                     _rid = _pending_review.get("id", "?")
                     _rstatus_disp = (_pending_review.get("result_envelope") or {}).get("status", "?")
-                    _gate_msg = (
-                        "state", "fix-needed",
-                        f"BLOCKED — run_review ({_rid}) returned status='{_rstatus_disp}' "
-                        f"with issues that have not been addressed.\n\n"
-                        f"Your VERY NEXT tool call MUST be:\n"
-                        f"  run_fixer(reviewer_run_id='{_rid}')\n\n"
-                        f"The Fixer reads each issue's fix-scope files, generates targeted "
-                        f"edits via the coder model, and writes them back. Do NOT manually "
-                        f"call read_file / write_file for these issues — that's the v1 "
-                        f"antipattern that burns rounds. After run_fixer completes, call "
-                        f"run_review again to verify.",
-                        f"⛔ Blocked — call run_fixer first (review {_rid[:14]}… has issues)",
-                        _rid,
+                    # Cap-aware release: once the fixer cycle budget is
+                    # exhausted, the same review issues will keep blocking
+                    # the conversation forever. Allow the model to deliver
+                    # what was built (download_project / download_file) and
+                    # inspect the tree (read_file / list_files) so the user
+                    # gets the partial result instead of a dead session.
+                    # Count total fixer attempts (succeeded + failed/no_op)
+                    # for the release — a fixer that declined still represents
+                    # an exhausted attempt. The cycle-cap check (which gates
+                    # run_fixer itself) still counts only successes.
+                    _FIXER_TERMINAL = {"succeeded", "failed", "partial", "no_op"}
+                    _fixer_attempts_gate = sum(
+                        1 for _r in _runs_for_v2_gate
+                        if _r.get("role") == "fixer" and _r.get("status") in _FIXER_TERMINAL
                     )
+                    _fixer_succ_gate = sum(
+                        1 for _r in _runs_for_v2_gate
+                        if _r.get("role") == "fixer" and _r.get("status") == "succeeded"
+                    )
+                    _DELIVERY_OK_AFTER_CAP = {
+                        "download_project", "download_file",
+                        "read_file", "list_files",
+                    }
+                    # Deadlock break: the FINAL_CYCLE gate (2 successful fixers,
+                    # no research since the last reviewer) blocks run_fixer with
+                    # the message "call deep_research first". The STUCK_FIX gate
+                    # does the same when issues recur after a fix cycle. But this
+                    # post-review gate then blocks deep_research itself ("call
+                    # run_fixer first") — circular. Whitelist deep_research once
+                    # at least one fixer cycle has run, so the model can satisfy
+                    # the research-first requirement and then retry run_fixer on
+                    # the next round. Below 1 fixer attempt the model should
+                    # actually try fixing before researching.
+                    if (name == "deep_research"
+                            and _fixer_attempts_gate >= 1
+                            and not await _deep_research_called_since(
+                                conv_id, _pending_review.get("ended_at"))):
+                        print(f"[v2-gate] research-release: allowing deep_research "
+                              f"despite fix-needed (fixer_attempts={_fixer_attempts_gate}, "
+                              f"required by FINAL_CYCLE/STUCK_FIX)", flush=True)
+                        # Skip _gate_msg → deep_research runs.
+                    elif _fixer_attempts_gate >= 3 and name in _DELIVERY_OK_AFTER_CAP:
+                        print(f"[v2-gate] cap-release: allowing {name} despite "
+                              f"fix-needed (attempts={_fixer_attempts_gate}, "
+                              f"succ={_fixer_succ_gate})", flush=True)
+                        # Skip _gate_msg entirely → tool runs normally.
+                    else:
+                        _gate_msg = (
+                            "state", "fix-needed",
+                            f"BLOCKED — run_review ({_rid}) returned status='{_rstatus_disp}' "
+                            f"with issues that have not been addressed.\n\n"
+                            f"Your VERY NEXT tool call MUST be:\n"
+                            f"  run_fixer(reviewer_run_id='{_rid}')\n\n"
+                            f"The Fixer reads each issue's fix-scope files, generates targeted "
+                            f"edits via the coder model, and writes them back. Do NOT manually "
+                            f"call read_file / write_file for these issues — that's the v1 "
+                            f"antipattern that burns rounds. After run_fixer completes, call "
+                            f"run_review again to verify.",
+                            f"⛔ Blocked — call run_fixer first (review {_rid[:14]}… has issues)",
+                            _rid,
+                        )
                 elif _terminal_qa is not None:
                     _qid = _terminal_qa.get("id", "?")
                     _gate_msg = (
@@ -1043,21 +1693,9 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     )
 
                 if _gate_msg is not None:
-                    # Detect v2 persona before actually blocking. v1 has no
-                    # run_review or run_fixer in its workflow.
-                    _is_v2 = False
-                    try:
-                        _conv_row = await db.get_conversation(conv_id)
-                        _mc_id = (_conv_row or {}).get("model_config_id") if _conv_row else None
-                        if _mc_id:
-                            _all_mc = await db.get_model_configs()
-                            _mc = next((m for m in _all_mc if m.get("id") == _mc_id), None)
-                            if _mc and "v2" in (_mc.get("name") or "").lower():
-                                _is_v2 = True
-                    except Exception as _pe:
-                        print(f"[v2-gate] persona lookup failed (non-fatal): {_pe}")
-
-                    if _is_v2:
+                    # v1 has no run_review or run_fixer in its workflow, so
+                    # the gate only blocks v2 personas.
+                    if await _check_v2():
                         _, _state_label, _body, _short_status, _trigger_id = _gate_msg
                         await events.emit(conv_id, "tool_end", {
                             "tool": name, "icon": "code",
@@ -1655,6 +2293,35 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             parts = [f"**{'TESTS PASSED' if ok else 'TESTS FAILED'}** | {framework} | {elapsed:.1f}s\n"]
             if output:
                 parts.append(f"```\n{output[:8000]}\n```")
+
+            # Post-clean tripwire: if run_tests just failed but the most recent
+            # run_review on this conversation reported test_exit=0 / status=clean,
+            # the reviewer is producing a false negative (e.g. its test_cmd
+            # swallowed pytest's exit code via `|| echo`). Synthesize a real
+            # reviewer envelope from this run_tests output so run_fixer becomes
+            # callable with a non-empty `issues` list. Without this, the model
+            # falls back to v1's manual write_file loop because `run_fixer`
+            # against a clean reviewer envelope returns status='skipped'.
+            if not ok and conv_id and framework == "pytest":
+                try:
+                    synth_id = await _synthesize_reviewer_from_test_failure(
+                        conv_id, output, path, framework, elapsed,
+                    )
+                    if synth_id:
+                        parts.append(
+                            f"\n\n⚠ **Reviewer false-negative detected.** "
+                            f"The latest `run_review` on this conversation reported "
+                            f"`status=clean / test_exit=0`, but `run_tests` just failed. "
+                            f"Synthesized a reviewer envelope from this failure: "
+                            f"`{synth_id}`.\n\n"
+                            f"**Next step — call `run_fixer(reviewer_run_id='{synth_id}')`** "
+                            f"to apply targeted fixes. Do NOT call `write_file` manually for "
+                            f"the failing files — that's the v1 antipattern v2 is meant to "
+                            f"replace, and the v2 gate will block it on the next round."
+                        )
+                except Exception as _twe:
+                    print(f"[TRIPWIRE] synthesize failed (non-fatal): {_twe}")
+
             return "\n".join(parts)
 
         elif name == "lint_code":
@@ -1752,6 +2419,30 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             project_dir = (args.get("project_dir") or "").strip()
             project_id = (args.get("project_id") or "").strip()
 
+            # Validate the model-passed project_dir actually exists on Codebox.
+            # qwen-style models occasionally fabricate project paths — inheriting
+            # a name from training data or a prior conversation — instead of
+            # using the one generate_code just built. Without this guard the
+            # Reviewer runs against a non-existent path, fails with "no build
+            # markers found", and the Fixer then inherits the bad envelope.
+            # Same fabrication guard ask_project uses below.
+            if project_dir and conv_id:
+                try:
+                    _existsr = await http.post(
+                        f"{config.CODEBOX_URL}/command",
+                        json={"command": f"test -d {shlex.quote(project_dir)} && echo OK || echo NO",
+                              "timeout": 5},
+                        timeout=10,
+                    )
+                    _on_disk = (_existsr.status_code == 200
+                                and "OK" in (_existsr.json().get("stdout") or ""))
+                except Exception:
+                    _on_disk = False
+                if not _on_disk:
+                    print(f"[run_review] passed project_dir={project_dir} does not exist on "
+                          f"Codebox — falling back to auto-resolve from builder run")
+                    project_dir = ""
+
             # Preferred lookup: most recent succeeded builder run for this conv.
             # The builder envelope records the actual workspace path (e.g.
             # /root/projects/pong) — this is the one that matters. coding_projects
@@ -1793,7 +2484,8 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
 
             envelope = await reviewer.run_review(http, events, conv_id,
                                                   project_dir=project_dir,
-                                                  project_id=project_id)
+                                                  project_id=project_id,
+                                                  conv_model=conv_model)
             # Format the envelope as a tool-result string the chat agent can read
             # without needing to know the JSON schema. Keep it compact.
             status = envelope.get("status", "?")
@@ -1883,8 +2575,26 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 "status": f"🛠 Starting Fixer for review {reviewer_run_id[:14]}…",
             })
 
+            # If a recent deep_research call happened on this conv, hand its
+            # report to the Fixer as supporting context. Cached at the call
+            # site (see _stash_research_result), so this stays in-process and
+            # doesn't break the Fixer's network-free invariant. Stale entries
+            # (>10 min) are dropped on read by _get_recent_research.
+            _research_for_fixer = ""
+            try:
+                _r_entry = _get_recent_research(conv_id)
+                if _r_entry:
+                    _research_for_fixer = _r_entry.get("report", "") or ""
+                    if _research_for_fixer:
+                        print(f"[run_fixer] injecting research_context "
+                              f"({len(_research_for_fixer)} chars, "
+                              f"topic={(_r_entry.get('topic') or '')[:60]!r})")
+            except Exception as _re:
+                print(f"[run_fixer] research lookup failed (non-fatal): {_re}")
+
             envelope = await fixer.run_fixer(http, events, conv_id,
-                                              reviewer_run_id=reviewer_run_id)
+                                              reviewer_run_id=reviewer_run_id,
+                                              research_context=_research_for_fixer)
 
             f_status = envelope.get("status", "?")
             files = envelope.get("files_touched") or []
@@ -2068,18 +2778,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             # consume directly, instead of the v1 prose plan that every
             # downstream agent has to re-parse from markdown. v1 personas
             # keep the existing prose path below.
-            _is_v2_for_plan = False
-            if conv_id:
-                try:
-                    _conv_row = await db.get_conversation(conv_id)
-                    _mc_id = (_conv_row or {}).get("model_config_id") if _conv_row else None
-                    if _mc_id:
-                        _all_mc = await db.get_model_configs()
-                        _mc = next((m for m in _all_mc if m.get("id") == _mc_id), None)
-                        if _mc and "v2" in (_mc.get("name") or "").lower():
-                            _is_v2_for_plan = True
-                except Exception as _pe:
-                    print(f"[plan_project] persona lookup failed (non-fatal): {_pe}")
+            _is_v2_for_plan = bool(conv_id) and await _is_v2_persona(conv_id)
 
             if _is_v2_for_plan:
                 from agents import architect
@@ -2094,16 +2793,32 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 if kb_ids:
                     try:
                         import rag
+                        _hints = _kb_filename_hints_for_language(language, task)
                         _kb_chunks = await rag.query(
                             kb_ids, query_text=task[:500], top_k=3,
-                            prefer_filename_hints=_kb_filename_hints_for_language(language, task),
+                            prefer_filename_hints=_hints,
                         )
+                        # Visibility for "is the KB actually being used" question.
+                        # Logs the filenames + scores so you can see at a glance
+                        # whether retrieval found anything relevant.
+                        if _kb_chunks:
+                            _kb_summary = ", ".join(
+                                f"{c.get('filename','?')}({c.get('score',0):.2f})"
+                                for c in _kb_chunks
+                            )
+                            print(f"[plan_project] KB chunks for architect: "
+                                  f"kb_ids={kb_ids} hints={_hints} → {_kb_summary}",
+                                  flush=True)
+                        else:
+                            print(f"[plan_project] No KB chunks returned "
+                                  f"(kb_ids={kb_ids}, hints={_hints})", flush=True)
                     except Exception as _rge:
                         print(f"[plan_project] RAG query failed (non-fatal): {_rge}")
                 plan = await architect.run_architect(
                     http, events, conv_id,
                     task=task, language_hint=language,
                     kb_chunks=_kb_chunks,
+                    conv_model=conv_model,
                 )
                 return architect.format_plan_for_chat(plan)
 
@@ -2239,7 +2954,12 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 parts.append("\n\n---\n## Sources\n")
                 for s in sources[:20]:
                     parts.append(f"[{s.get('index','?')}] [{s.get('title','?')}]({s.get('url','')})")
-            return "\n".join(parts)
+            _full_report = "\n".join(parts)
+            # Cache the result so the Fixer dispatcher can inject it into
+            # the next run_fixer call without making the Fixer itself read
+            # the conversation. Keeps fixer.py network-free.
+            _stash_research_result(conv_id, topic, _full_report)
+            return _full_report
 
         elif name == "conspiracy_research":
             topic = args.get("topic", "")
@@ -2271,7 +2991,9 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 context = (context + "\n\n" + args["code"]).strip()
             elif args.get("code") and task:
                 context = (context + "\n\nReference code:\n" + args["code"]).strip()
-            coder_model = config.CODER_MODEL or conv_model or config.DEFAULT_MODEL
+            # Per-agent override (config.BUILDER_MODEL) wins if pinned; else
+            # umbrella CODER_MODEL, then chat model, then default.
+            coder_model = config.BUILDER_MODEL or config.CODER_MODEL or conv_model or config.DEFAULT_MODEL
 
             # Inject KB context so OpenHands agent has access to uploaded documentation.
             # Bias retrieval toward filenames matching the requested language/framework so a
@@ -2376,13 +3098,33 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
             _run_row_created = False
 
             async def _finalize_run(status: str, envelope: dict):
-                """Mark the run terminal with the given status + envelope. Safe to no-op."""
+                """Mark the run terminal with the given status + envelope. Safe to no-op.
+
+                Also stops the cancel-watcher task and removes the cancel
+                event from the registry — every terminal path goes through
+                here, so this is the right place to release those resources.
+                """
                 if not _run_id:
                     return
                 try:
                     await db.update_run(_run_id, status=status, result_envelope=envelope, ended=True)
                 except Exception as _fre:
                     print(f"[RUN] finalize failed (non-fatal): {_fre}")
+                # Stop the cancel watcher (if it's still waiting) and drop
+                # the registry entry. Defined later in this block but bound
+                # via closure so we reference them by nonlocal lookup.
+                _watcher = _cancel_watcher_ref[0] if _cancel_watcher_ref else None
+                if _watcher and not _watcher.done():
+                    _watcher.cancel()
+                    try:
+                        await _watcher
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                cancel_registry.cleanup(_run_id)
+
+            # Container so _finalize_run (defined above) can see the watcher
+            # task even though it's created several blocks below.
+            _cancel_watcher_ref: list = [None]
 
             await events.emit(conv_id, "tool_start", {
                 "tool": "generate_code", "icon": "wand",
@@ -2465,11 +3207,15 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                         if _ohp:
                             _oh_project_id = _ohp
                             _has_active_project = True
-                            # Stays "scaffold" — no prior builder run means
-                            # the project either was uploaded but never built,
-                            # or the row is a placeholder. Either way the next
-                            # generate_code is creating, not amending.
-                            print(f"[CODEGEN:OH] Active project {_oh_project_id} via coding_projects fallback")
+                            # Promote profile to "feature": an active project
+                            # via coding_projects means files exist on disk
+                            # (uploaded by the user, or written by write_file
+                            # without a generate_code run). Calling generate_code
+                            # against it is amending an existing tree, NOT
+                            # scaffolding a new one. Scaffold-mode would
+                            # clobber the user's code (Bug 8).
+                            _builder_profile = "feature"
+                            print(f"[CODEGEN:OH] Active project {_oh_project_id} via coding_projects fallback (profile=feature)")
                 except Exception as _ap_e:
                     print(f"[CODEGEN:OH] coding_projects lookup failed (non-fatal): {_ap_e}")
 
@@ -2620,6 +3366,9 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 # other profiles ignore it.
                 "profile": _builder_profile,
                 "manifest_missing": _profile_continue_missing,
+                # User-tunable reasoning_effort — drops think-token overhead
+                # significantly on slow local models when set to "low".
+                "reasoning_effort": getattr(config, "OPENHANDS_REASONING_EFFORT", "medium"),
             }
 
             async def _signal_oh_cancel(reason: str):
@@ -2634,6 +3383,21 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                     print(f"[CODEGEN:OH] Cancel signal sent to worker for {_run_id} ({reason})", flush=True)
                 except Exception as ce:
                     print(f"[CODEGEN:OH] Cancel signal failed for {_run_id}: {ce}", flush=True)
+
+            # Register the cancel event for this run so POST
+            # /api/runs/{id}/cancel from the frontend Stop button can fire
+            # _signal_oh_cancel without needing the chat stream to disconnect
+            # first. _finalize_run cancels the watcher + drops the registry
+            # entry on every terminal path.
+            _cancel_event = cancel_registry.register(_run_id) if _run_id else None
+            if _cancel_event is not None:
+                async def _on_user_cancel():
+                    try:
+                        await _cancel_event.wait()
+                    except asyncio.CancelledError:
+                        return
+                    await _signal_oh_cancel("user pressed Stop (POST /api/runs/{id}/cancel)")
+                _cancel_watcher_ref[0] = asyncio.create_task(_on_user_cancel())
 
             # Action → emoji mapping for progress pills
             _ACTION_ICONS = {
@@ -2946,7 +3710,7 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 # Uses a separate model from the coder so it can't rationalize its own mistakes.
                 critique = ""
                 if code_review and config.CRITIC_ENABLED:
-                    critic_model = config.CRITIC_MODEL or config.PLANNING_MODEL or config.DEFAULT_MODEL
+                    critic_model = config.CRITIC_MODEL or config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL
                     await events.emit(conv_id, "tool_progress", {
                         "tool": "generate_code", "icon": "wand",
                         "status": f"🔍 Reviewing code with {critic_model}...",

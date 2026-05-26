@@ -727,6 +727,23 @@ async def get_model_configs():
         await db.close()
 
 
+async def get_model_config(mc_id: str) -> dict | None:
+    """Return a single model config by id, or None if not found."""
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT * FROM model_configs WHERE id = ?", (mc_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        c = dict(row)
+        c["tool_ids"] = json.loads(c["tool_ids"])
+        c["kb_ids"] = json.loads(c["kb_ids"])
+        c["parameters"] = json.loads(c["parameters"])
+        return c
+    finally:
+        await db.close()
+
+
 async def update_model_config(id: str, **kwargs):
     db = await get_db()
     try:

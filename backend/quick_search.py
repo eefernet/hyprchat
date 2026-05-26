@@ -2,26 +2,94 @@
 Quick search — shared helper for chat injection (`agents/chat.py`) and the
 standalone `/api/quick-search` endpoint (`main.py`).
 
-Pipeline (chat path):
-  skip-gate → query-rewrite (WORKSPACE_MODEL) → SearXNG (safesearch=0) →
-  rank/dedup → selective page fetch → build context with proxied image URLs.
+Pipeline (chat path): dispatches to `search_agent.run_search_agent`, which
+runs skip-gate → triage (LLM, JSON-mode, returns standalone_query +
+queries + category) → per-conversation subquery dedup → parallel SearXNG
+(time_range="month" for news + recency cue) → heuristic rank + category
+bias → embedding rerank/dedup against nomic-embed-text → relevance check
+(prior-tokens-aware for follow-ups) → optional refine → trafilatura page
+extraction + OG-image enrichment → context build.
 
-Standalone API path skips rewrite/page-fetch and returns carousel-shaped data
-(with OG-image enrichment for missing thumbnails).
+This module hosts the shared helpers the agent reuses: skip-gate regexes,
+content-token extraction, follow-up detection, bounded LRU SearXNG cache,
+per-conversation subquery dedup, ranking + domain bias, embedding-batch
+helper, fetch concurrency semaphore, SSRF guard, trafilatura page
+extraction, OG-image enrichment, context builder, image proxy URL builder.
+The agent itself lives in `search_agent.py`.
+
+Standalone API path (`run_quick_search_for_api`) skips triage and page-fetch
+and returns carousel-shaped data (with OG-image enrichment).
 """
 import asyncio
+import ipaddress
+import math
+import os
 import re
+import socket
 import time
 import urllib.parse
+from collections import OrderedDict
 from datetime import datetime
 
 import config
-from research import _search_searxng, _fetch_page, _rank_urls, _ask_ollama
+from research import _search_searxng, _rank_urls
 
 
-# ── 10-min TTL cache, keyed by query string ──
-_CACHE: dict[str, tuple[float, list]] = {}
+# ── 10-min TTL cache, keyed by (query, time_range), bounded LRU ──
+_CACHE: "OrderedDict[tuple[str, str | None], tuple[float, list]]" = OrderedDict()
 _CACHE_TTL = 600
+_CACHE_MAX = 512
+
+
+# ── Concurrency cap on outbound HTTP fetches ──
+# SearXNG fanout (3 queries) + page-fetch (3) + OG-image-fetch (4) +
+# refine-search (1) can hit ~11 concurrent outbound HTTPs against a
+# single LXC instance routed through ProtonVPN. Cap page+OG fetches
+# to smooth bursts. SearXNG already has internal 429 retry so we
+# don't gate it here.
+_FETCH_SEMA = asyncio.Semaphore(6)
+
+
+# ── Per-conversation subquery dedup (Khoj pattern) ──
+# When the user iterates on a topic, triage often re-emits queries already
+# searched in earlier turns. Track them per-conversation so we skip the
+# redundant SearXNG round-trip.
+_PREV_SUBQUERIES: "OrderedDict[str, tuple[float, set[str]]]" = OrderedDict()
+_PREV_SUBQUERIES_TTL = 3600  # 1 hour
+_PREV_SUBQUERIES_MAX = 256
+
+
+def _filter_novel_queries(conv_id: str, queries: list[str]) -> list[str]:
+    """Return queries not seen in this conversation. Adds them to the set.
+
+    Lowercase-normalized comparison. Always preserves at least one query —
+    if every query is a duplicate, we still let the latest one through so
+    the agent doesn't return empty-handed when the user repeats a question.
+    """
+    if not conv_id or not queries:
+        return queries
+    now = time.time()
+    entry = _PREV_SUBQUERIES.get(conv_id)
+    if entry and (now - entry[0]) < _PREV_SUBQUERIES_TTL:
+        seen = entry[1]
+    else:
+        seen = set()
+    novel: list[str] = []
+    for q in queries:
+        key = q.strip().lower()
+        if key and key not in seen:
+            novel.append(q)
+            seen.add(key)
+    if not novel:
+        # All duplicates — let the first one through anyway. Caches downstream
+        # will absorb the cost; the user gets fresh ranking against current
+        # standalone_query.
+        novel = [queries[0]]
+    _PREV_SUBQUERIES[conv_id] = (now, seen)
+    _PREV_SUBQUERIES.move_to_end(conv_id)
+    while len(_PREV_SUBQUERIES) > _PREV_SUBQUERIES_MAX:
+        _PREV_SUBQUERIES.popitem(last=False)
+    return novel
 
 
 # ── Skip-gate: only skip when search is clearly pointless ──
@@ -60,118 +128,90 @@ def _should_skip(query: str) -> tuple[bool, str]:
     return False, ""
 
 
-# ── Query rewrite via small/fast workspace model ──
-async def _try_rewrite_call(http, ollama_url: str, prompt: str, model: str, timeout: float) -> str:
-    """Single rewrite attempt. Returns sanitized output or empty string on any failure."""
-    try:
-        out = await asyncio.wait_for(
-            _ask_ollama(http, ollama_url, prompt, model=model, max_tokens=40),
-            timeout=timeout,
-        )
-    except Exception:
-        return ""
-    if not out:
-        return ""
-    # `_ask_ollama` returns "[AI synthesis failed: ...]" on error — treat as empty
-    if out.startswith("["):
-        return ""
-    out = re.sub(r"<think>[\s\S]*?</think>", "", out, flags=re.IGNORECASE).strip()
-    if not out:
-        return ""
-    out = out.splitlines()[0].strip().strip('"').strip("'").rstrip(".")
-    if (
-        not out
-        or len(out) > 200
-        or out.lower().startswith(("here", "the query", "search:", "query:", "rewritten", "i ", "i'", "as "))
-        or "http" in out.lower()
-    ):
-        return ""
-    return out
+# Pronouns / vague references that always need replacement with prior-turn nouns
+_PRONOUN_RE = re.compile(
+    r"\b(she|he|it|they|them|her|him|his|its|their|this|that|these|those)\b",
+    re.IGNORECASE,
+)
+_VAGUE_REF_RE = re.compile(
+    r"\b(the (one|version|issue|thing|topic|story|news|results?)|"
+    r"that (one|stuff|thing|kind))\b",
+    re.IGNORECASE,
+)
+# Common follow-up openers — bare questions that lean entirely on prior context
+_FOLLOWUP_STARTERS_RE = re.compile(
+    r"^\s*(any|more|whats?\s+about|hows?\s+about|whats?\s+new|whats?\s+next|"
+    r"tell\s+me\s+more|continue|next|whos?|whose|wheres?)\b",
+    re.IGNORECASE,
+)
+
+# Stopwords used for content-token extraction. Intentionally aggressive: we want
+# only nouns/proper-nouns/distinctive verbs to count as "topic anchors".
+_STOPWORDS = frozenset({
+    "the","a","an","is","are","was","were","be","been","being","am",
+    "do","does","did","done","doing",
+    "have","has","had","having",
+    "will","would","could","should","can","may","might","must","shall",
+    "this","that","these","those","it","its","they","them","their",
+    "i","me","my","mine","you","your","yours","we","us","our","ours",
+    "he","she","him","her","his","hers",
+    "and","or","but","so","if","of","to","in","on","at","by","for","from","with",
+    "as","about","into","over","under","than","then","now","not","no","yes",
+    "ok","okay","just","still","yet","also","too","very","really","quite",
+    "what","whats","who","whos","when","where","wheres","why","how","hows","which","whose",
+    "any","more","next","else","other","another","like",
+    "tell","show","explain","describe","said","says","say",
+})
 
 
-async def _rewrite_query(
-    http, ollama_url: str, workspace_model: str, default_model: str,
-    messages: list, latest: str,
-) -> str:
-    """Rewrite latest user message into a focused search query using last few turns.
-    Tries WORKSPACE_MODEL first (fast), falls back to DEFAULT_MODEL if that fails
-    (e.g. workspace model not installed). Returns raw `latest` on total failure.
+def _content_tokens(text: str) -> set[str]:
+    """Lowercased non-stopword content tokens from `text`.
+
+    Includes 3+ char words (with naive singularization so `elections` matches
+    `election`) plus 2-5 char ALL-CAPS acronyms (UK, US, EU, NASA) which would
+    otherwise fall under the length floor and get dropped.
     """
-    fallback = latest[:500]
-    turns: list[str] = []
-    for m in messages[-6:]:
-        role = m.get("role", "")
-        content = (m.get("content") or "").strip()
-        if role not in ("user", "assistant") or not content:
+    tokens: set[str] = set()
+    for t in re.findall(r"[a-zA-Z][a-zA-Z0-9-]{2,}", text.lower()):
+        if t in _STOPWORDS:
             continue
-        if content == latest:
-            continue
-        turns.append(f"{role}: {content[:300]}")
-    if not turns:
-        # No conversation history — nothing to expand. Skip the rewrite call.
-        return fallback
-    prompt = (
-        "You are a search query generator. Rewrite the user's latest message "
-        "into a complete, search-engine-friendly query.\n\n"
-        "CRITICAL RULE: If the latest message contains a pronoun "
-        "(she, he, it, they, this, that, these, those) or a vague reference "
-        "(the one, that thing, the version, the issue), you MUST replace it "
-        "with the specific noun from the prior turns. Pronouns are NEVER "
-        "acceptable in the output.\n\n"
-        "Examples:\n"
-        "  Conversation: user asked 'who is taylor swift?'\n"
-        "  Latest: 'what does she look like?'\n"
-        "  Output: Taylor Swift photos appearance\n\n"
-        "  Conversation: user asked 'what is React 19?'\n"
-        "  Latest: 'what about for v18?'\n"
-        "  Output: React v18 features release\n\n"
-        "  Conversation: discussion about Rust borrow checker\n"
-        "  Latest: 'how do I fix it?'\n"
-        "  Output: Rust borrow checker error fix\n\n"
-        "Output ONE line only, max 12 words, no quotes, no preamble, "
-        "no explanation, no 'Output:' prefix.\n\n"
-        "Recent turns:\n" + "\n".join(turns[-4:]) + "\n\n"
-        f"Latest: {latest}\n"
-        "Rewritten query:"
-    )
+        if t.endswith("s") and not t.endswith("ss") and len(t) > 3:
+            t = t[:-1]
+        tokens.add(t)
+    for t in re.findall(r"\b[A-Z]{2,5}\b", text):
+        tokens.add(t.lower())
+    return tokens
 
-    # If the latest message has a pronoun and the rewriter doesn't expand it,
-    # the rewrite is useless — retry with the bigger model.
-    has_pronoun = bool(re.search(
-        r"\b(she|he|it|they|them|her|him|its|their|this|that|these|those)\b",
-        latest, re.IGNORECASE,
-    ))
 
-    def _good(rewritten: str) -> bool:
-        if not rewritten:
-            return False
-        # Same as input → useless rewrite.
-        if rewritten.strip().lower() == latest.strip().lower():
-            return False
-        # Pronoun didn't get resolved.
-        if has_pronoun and re.search(
-            r"\b(she|he|it|they|them|her|him|its|their)\b",
-            rewritten, re.IGNORECASE,
-        ):
-            return False
+def _needs_context(latest: str, prior_tokens: set[str] | None = None) -> bool:
+    """True when `latest` is a follow-up that won't search well on its own.
+
+    Triggers on pronouns, vague references ("the one"), follow-up openers
+    ("whos winning?", "any updates?"), short messages (≤6 words), or
+    definite-article anaphora ("the reform party" when "reform" was discussed
+    earlier — the latest message is referring back to a prior topic).
+    """
+    if _PRONOUN_RE.search(latest) or _VAGUE_REF_RE.search(latest):
         return True
-
-    out = await _try_rewrite_call(http, ollama_url, prompt, workspace_model, timeout=8.0)
-    if _good(out):
-        print(f"[QS]   rewrite via {workspace_model!r}: {latest[:60]!r} → {out!r}")
-        return out
-
-    # Workspace model failed or didn't resolve pronouns — try the default model.
-    if default_model and default_model != workspace_model:
-        why = "didn't expand pronouns" if (out and has_pronoun) else "returned empty"
-        print(f"[QS]   rewrite via {workspace_model!r} {why}, retrying with {default_model!r}")
-        out = await _try_rewrite_call(http, ollama_url, prompt, default_model, timeout=15.0)
-        if _good(out):
-            print(f"[QS]   rewrite via {default_model!r}: {latest[:60]!r} → {out!r}")
-            return out
-
-    print(f"[QS]   rewrite failed, using raw query: {latest[:80]!r}")
-    return fallback
+    if _FOLLOWUP_STARTERS_RE.match(latest):
+        return True
+    if len(re.findall(r"\b\w+\b", latest)) <= 6:
+        return True
+    # Anaphoric "the X" / "that X" / "this X" where X was discussed earlier.
+    # Catches long messages like "what is the reform party and how does it
+    # compare to..." where the noun is anchored in prior turns rather than
+    # being a fresh topic introduction.
+    if prior_tokens:
+        for noun in re.findall(
+            r"\b(?:the|that|this)\s+([a-zA-Z][a-zA-Z-]{2,})\b",
+            latest, re.IGNORECASE,
+        ):
+            n = noun.lower()
+            if n.endswith("s") and not n.endswith("ss") and len(n) > 3:
+                n = n[:-1]
+            if n in prior_tokens:
+                return True
+    return False
 
 
 # ── Filtering / ranking / dedup ──
@@ -197,15 +237,232 @@ def _dedupe_by_domain(results: list, max_per_domain: int = 2) -> list:
     return out
 
 
-def _rank_and_filter_for_chat(results: list) -> list:
-    """For model context: drop YouTube/image, rank by quality, dedup, keep top 6."""
+# ── Query classification → domain-aware ranking ──
+# Each category maps to (a) keywords that detect it from the search query
+# and (b) domains we want to demote when results in that category come back.
+# We *demote*, not delete — sometimes a Stack Overflow link IS what someone
+# wants for a political question (e.g. data analysis of polling) — they just
+# shouldn't outrank actual news outlets.
+_NEWS_RE = re.compile(
+    r"\b(election|vote|votes|voter|poll|polls|polling|"
+    r"president|prime\s+minister|\bpm\b|government|parliament|"
+    r"congress|senate|cabinet|minister|"
+    r"war|attack|protest|economy|inflation|recession|"
+    r"news|breaking|recent|today|yesterday|"
+    r"labour|conservative|democrat|republican|tory|tories|reform|liberal|"
+    r"green\s+party|farage|starmer|biden|trump|harris|"
+    r"\b20[2-3]\d\b|"
+    r"died|killed|elected|resigned|appointed|sworn\s+in)\b",
+    re.IGNORECASE,
+)
+_CODE_RE = re.compile(
+    r"\b(function|method|variable|exception|stack\s+trace|traceback|"
+    r"compile|debug|syntax\s+error|regex|pip\b|npm\b|cargo|docker|kubernetes|k8s|"
+    r"python|javascript|typescript|rust|golang|kotlin|swift|ruby|"
+    r"react|vue|angular|node\.?js|django|flask|rails|spring|fastapi|"
+    r"github|gitlab|repo|commit|branch|merge|pull\s+request|"
+    r"sql|postgres|mysql|sqlite|mongodb|redis|"
+    r"endpoint|http\b|json|xml|yaml|"
+    r"linux|ubuntu|bash|zsh|terminal|"
+    r"\.py\b|\.js\b|\.ts\b|\.rs\b|\.cpp|\.java\b)\b",
+    re.IGNORECASE,
+)
+_RECIPE_RE = re.compile(
+    r"\b(recipe|cook|cooking|bake|baking|ingredient|calorie|"
+    r"breakfast|lunch|dinner|dessert|salad|soup|sauce|"
+    r"vegetarian|vegan|gluten[\s-]free|keto|paleo)\b",
+    re.IGNORECASE,
+)
+
+_DOWNRANK_DOMAINS: dict[str, frozenset[str]] = {
+    "news": frozenset({
+        "stackoverflow.com", "stackexchange.com", "askubuntu.com",
+        "serverfault.com", "superuser.com", "geeksforgeeks.org",
+        "tutorialspoint.com", "w3schools.com", "github.com", "gitlab.com",
+        "leetcode.com", "hackerrank.com", "freecodecamp.org",
+    }),
+    "code": frozenset({
+        "cnn.com", "bbc.com", "bbc.co.uk", "foxnews.com", "msnbc.com",
+        "nbcnews.com", "abcnews.go.com", "cbsnews.com",
+        "nytimes.com", "washingtonpost.com", "bloomberg.com",
+        "theguardian.com", "telegraph.co.uk", "dailymail.co.uk",
+        "allrecipes.com", "foodnetwork.com", "epicurious.com",
+    }),
+    "recipe": frozenset({
+        "stackoverflow.com", "github.com", "gitlab.com",
+        "cnn.com", "bbc.com", "reuters.com", "nytimes.com",
+    }),
+    "general": frozenset(),
+}
+
+
+def _classify_query(q: str) -> str:
+    """Rough query category for domain-aware ranking."""
+    if _NEWS_RE.search(q):
+        return "news"
+    if _CODE_RE.search(q):
+        return "code"
+    if _RECIPE_RE.search(q):
+        return "recipe"
+    return "general"
+
+
+def _apply_domain_bias(results: list, category: str) -> list:
+    """Push downranked-for-category domains to the bottom; keep order otherwise."""
+    bad = _DOWNRANK_DOMAINS.get(category) or frozenset()
+    if not bad:
+        return results
+    keep, defer = [], []
+    for r in results:
+        d = _registrable_domain(r.get("url", ""))
+        (defer if d in bad else keep).append(r)
+    return keep + defer
+
+
+def _rank_and_filter_for_chat(
+    results: list, query: str = "", category: str | None = None,
+) -> list:
+    """For model context: drop YouTube/image, rank by quality, dedup, apply
+    category bias against off-fit domains, keep top 6.
+
+    `category` should come from triage when available — it has full
+    conversation context. Falls back to regex query-classification when
+    not supplied (triage-failure path).
+    """
     text_only = [r for r in results if r.get("type", "web") not in ("youtube", "image")]
     ranked_urls = _rank_urls(text_only)
     by_url = {r.get("url"): r for r in text_only if r.get("url")}
     ranked = [by_url[u] for u in ranked_urls if u in by_url]
     seen = {r.get("url") for r in ranked}
     leftover = [r for r in text_only if r.get("url") not in seen]
-    return _dedupe_by_domain(ranked + leftover, max_per_domain=2)[:6]
+    deduped = _dedupe_by_domain(ranked + leftover, max_per_domain=2)
+    cat = category if category in _DOWNRANK_DOMAINS else _classify_query(query)
+    biased = _apply_domain_bias(deduped, cat)
+    return biased[:6]
+
+
+# ── Embedding-based rerank + dedup (Perplexica pattern) ──
+# Batched embed call against Ollama's nomic-embed-text. We score every
+# snippet against the standalone query (cosine sim, drop below 0.45),
+# then drop near-duplicate pairs (sim > 0.85) — catches the SearXNG
+# mirror problem where the same article comes back via 3 different
+# domains with different titles.
+#
+# Falls back to the input order on any Ollama error so the pipeline
+# is strictly best-effort over the legacy ranking.
+_EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
+_EMBED_QUERY_FLOOR = 0.45
+_EMBED_DUP_THRESHOLD = 0.85
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
+async def _ollama_embed_batch(http, ollama_url: str, texts: list[str]) -> list[list[float]] | None:
+    """Single batched embed call. Returns list of embeddings (same order as
+    input) or None on any failure. Tries the modern /api/embed endpoint
+    first, falls back to per-prompt /api/embeddings calls if the batch
+    endpoint is unavailable.
+    """
+    if not texts:
+        return []
+    try:
+        r = await http.post(
+            f"{ollama_url}/api/embed",
+            json={"model": _EMBED_MODEL, "input": texts, "keep_alive": "10m"},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            body = r.json()
+            embs = body.get("embeddings")
+            if isinstance(embs, list) and len(embs) == len(texts):
+                return embs
+    except Exception as e:
+        print(f"[QS]   /api/embed failed, falling back: {type(e).__name__}: {e!r}")
+    # Fallback: parallel per-prompt calls against the legacy endpoint
+    try:
+        results = await asyncio.gather(
+            *[
+                http.post(
+                    f"{ollama_url}/api/embeddings",
+                    json={"model": _EMBED_MODEL, "prompt": t, "keep_alive": "10m"},
+                    timeout=10,
+                )
+                for t in texts
+            ],
+            return_exceptions=True,
+        )
+        embs: list[list[float]] = []
+        for r in results:
+            if isinstance(r, Exception):
+                return None
+            if r.status_code != 200:
+                return None
+            e = r.json().get("embedding")
+            if not isinstance(e, list):
+                return None
+            embs.append(e)
+        return embs
+    except Exception as e:
+        print(f"[QS]   /api/embeddings fallback failed: {type(e).__name__}: {e!r}")
+        return None
+
+
+async def _embed_score_and_dedup(
+    http, ollama_url: str, query: str, results: list,
+) -> list:
+    """Score each result against `query`, drop sim < 0.45, dedup near-dups
+    (sim > 0.85), sort by query-similarity desc.
+
+    Returns the input list unchanged on any embed failure.
+    """
+    if not results or not query:
+        return results
+    snippet_texts = [
+        ((r.get("title") or "") + " " + (r.get("content") or r.get("snippet") or ""))[:600]
+        for r in results
+    ]
+    embs = await _ollama_embed_batch(http, ollama_url, [query] + snippet_texts)
+    if not embs or len(embs) != len(results) + 1:
+        return results
+    q_emb = embs[0]
+    snip_embs = embs[1:]
+
+    scored: list[tuple[float, int]] = []
+    for i, e in enumerate(snip_embs):
+        s = _cosine(q_emb, e)
+        if s >= _EMBED_QUERY_FLOOR:
+            scored.append((s, i))
+    if not scored:
+        # Everything scored below the floor — likely a tail-end query the
+        # embed model isn't great at. Keep input order rather than zero out.
+        print(f"[QS]   embed: all results below floor {_EMBED_QUERY_FLOOR}; preserving order")
+        return results
+    scored.sort(key=lambda x: -x[0])
+
+    # Dedup: walk in score order, drop any item whose snippet embedding is
+    # > _EMBED_DUP_THRESHOLD from a kept item.
+    kept_indices: list[int] = []
+    for score, idx in scored:
+        is_dup = False
+        for kept_i in kept_indices:
+            if _cosine(snip_embs[idx], snip_embs[kept_i]) > _EMBED_DUP_THRESHOLD:
+                is_dup = True
+                break
+        if not is_dup:
+            kept_indices.append(idx)
+
+    out = [results[i] for i in kept_indices]
+    print(f"[QS]   embed-rerank: {len(results)} → {len(out)} (top sim={scored[0][0]:.2f})")
+    return out
 
 
 # ── Selective page fetch when snippets are too thin to answer from ──
@@ -215,6 +472,15 @@ _MENU_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Trafilatura is the de-facto standard Python article extractor. Optional —
+# we fall back to the same regex strip _fetch_page uses if it's not installed
+# or fails on a particular page.
+try:
+    import trafilatura  # type: ignore
+    _HAS_TRAFILATURA = True
+except Exception:
+    _HAS_TRAFILATURA = False
+
 
 def _looks_thin(snippet: str) -> bool:
     s = (snippet or "").strip()
@@ -223,17 +489,91 @@ def _looks_thin(snippet: str) -> bool:
     return bool(_MENU_RE.search(s))
 
 
+def _regex_strip_html(text: str) -> str:
+    """Same strip logic as research._fetch_page — kept inline so we can run
+    trafilatura first on the same HTML we already fetched, falling back here
+    without paying for a second HTTP round-trip."""
+    for tag in ["script", "style", "nav", "header", "footer", "aside", "noscript"]:
+        text = re.sub(rf"<{tag}[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<h[1-3][^>]*>(.*?)</h[1-3]>", r"\n## \1\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<li[^>]*>(.*?)</li>", r"\n• \1", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<p[^>]*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"&amp;", "&", text)
+    text = re.sub(r"&lt;", "<", text)
+    text = re.sub(r"&gt;", ">", text)
+    text = re.sub(r"&nbsp;", " ", text)
+    text = re.sub(r"&\w+;", " ", text)
+    text = re.sub(r"-----BEGIN PGP [A-Z ]+-----.*?-----END PGP [A-Z ]+-----",
+                  "[PGP block removed]", text, flags=re.DOTALL)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text).strip()
+    return text
+
+
+_FETCH_SKIP = ["youtube.com", "twitter.com", "x.com", "facebook.com", "instagram.com",
+               ".pdf", "linkedin.com", "tiktok.com",
+               "snopes.com", "politifact.com", "factcheck.org", "leadstories.com",
+               "fullfact.org", "mediabiasfactcheck.com"]
+
+
+async def _fetch_clean_page(http, url: str) -> dict | None:
+    """Single-fetch page extraction. Tries trafilatura on the response HTML;
+    falls back to the same regex strip research._fetch_page uses, on the
+    same already-fetched HTML (no double round-trip).
+
+    Returns {"url", "content"} or None.
+    """
+    if any(s in url.lower() for s in _FETCH_SKIP):
+        return None
+    try:
+        async with _FETCH_SEMA:
+            r = await http.get(
+                url, timeout=15, follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                                       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"},
+            )
+        if r.status_code >= 400:
+            return None
+        ct = r.headers.get("content-type", "")
+        if "text" not in ct and "html" not in ct and "json" not in ct:
+            return None
+        html = r.text
+    except Exception:
+        return None
+
+    if _HAS_TRAFILATURA:
+        try:
+            extracted = trafilatura.extract(
+                html, include_comments=False, include_tables=True,
+                favor_precision=True, no_fallback=False,
+            )
+            if extracted and len(extracted) >= 200:
+                return {"url": url, "content": extracted[:6000]}
+        except Exception as e:
+            print(f"[QS]   trafilatura failed for {url}: {type(e).__name__}: {e!r}")
+
+    text = _regex_strip_html(html)
+    if len(text) < 200:
+        return None
+    return {"url": url, "content": text[:6000]}
+
+
 async def _enrich_with_pages(http, results: list, top_n: int = 3) -> dict[str, str]:
     targets = [
         r["url"] for r in results[:top_n]
-        if r.get("url") and _looks_thin(r.get("content") or r.get("snippet", ""))
+        if r.get("url")
+        and _looks_thin(r.get("content") or r.get("snippet", ""))
+        and _url_safe(r["url"])
     ]
     if not targets:
         return {}
+
     try:
         fetched = await asyncio.wait_for(
-            asyncio.gather(*[_fetch_page(http, u) for u in targets], return_exceptions=True),
-            timeout=4.0,
+            asyncio.gather(*[_fetch_clean_page(http, u) for u in targets], return_exceptions=True),
+            timeout=8.0,
         )
     except asyncio.TimeoutError:
         return {}
@@ -242,6 +582,61 @@ async def _enrich_with_pages(http, results: list, top_n: int = 3) -> dict[str, s
         if isinstance(f, dict) and f.get("url") and f.get("content"):
             out[f["url"]] = f["content"][:1500]
     return out
+
+
+# ── SSRF guard ──
+# A malicious search result can redirect to a private/internal address. Resolve
+# the hostname and reject if any answer is private, loopback, link-local, or
+# multicast. Resolution failures also reject (safe default).
+_DNS_CACHE: dict[str, tuple[float, bool]] = {}
+_DNS_CACHE_TTL = 300  # 5 min — DNS rarely flips faster than that for our use
+
+
+def _url_safe(url: str) -> bool:
+    """True if URL hostname resolves to public, routable IPs only."""
+    try:
+        host = urllib.parse.urlparse(url).hostname
+    except Exception:
+        return False
+    if not host:
+        return False
+    host = host.lower()
+
+    # Reject literal private IP hostnames before DNS lookup
+    try:
+        ip = ipaddress.ip_address(host)
+        return _ip_is_public(ip)
+    except ValueError:
+        pass  # not a literal IP — fall through to DNS
+
+    now = time.time()
+    cached = _DNS_CACHE.get(host)
+    if cached and (now - cached[0]) < _DNS_CACHE_TTL:
+        return cached[1]
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except (socket.gaierror, socket.herror, OSError):
+        _DNS_CACHE[host] = (now, False)
+        return False
+    safe = True
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            safe = False
+            break
+        if not _ip_is_public(ip):
+            safe = False
+            break
+    _DNS_CACHE[host] = (now, safe)
+    return safe
+
+
+def _ip_is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return not (
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_multicast or ip.is_reserved or ip.is_unspecified
+    )
 
 
 # ── Image proxy URL builder ──
@@ -287,16 +682,28 @@ def _build_context(results: list, query: str, page_text: dict[str, str], allowed
 
 
 # ── Cached SearXNG (safesearch=0 per project config) ──
-async def _cached_search(http, query: str, count: int = 10) -> list:
+async def _cached_search(
+    http, query: str, count: int = 10, time_range: str | None = None,
+) -> list:
+    """Cached SearXNG search. Cache key is (query, time_range) so news
+    queries with time_range=month don't collide with evergreen searches
+    of the same string.
+    """
     now = time.time()
-    cached = _CACHE.get(query)
+    key = (query, time_range)
+    cached = _CACHE.get(key)
     if cached and (now - cached[0]) < _CACHE_TTL:
+        _CACHE.move_to_end(key)
         return cached[1]
     results = await _search_searxng(
-        http, config.SEARXNG_URL, query, count=count, safesearch="0",
+        http, config.SEARXNG_URL, query, count=count,
+        safesearch="0", time_range=time_range,
     )
     if results:
-        _CACHE[query] = (now, results)
+        _CACHE[key] = (now, results)
+        _CACHE.move_to_end(key)
+        while len(_CACHE) > _CACHE_MAX:
+            _CACHE.popitem(last=False)
     return results
 
 
@@ -319,16 +726,19 @@ _OG_SKIP = ["youtube.com", "twitter.com", "x.com", "facebook.com", "instagram.co
 async def _fetch_og_image(http, page_url: str) -> str:
     if any(s in page_url.lower() for s in _OG_SKIP):
         return ""
+    if not _url_safe(page_url):
+        return ""
     try:
-        resp = await http.get(
-            page_url, timeout=6, follow_redirects=True,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                              "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-            },
-        )
+        async with _FETCH_SEMA:
+            resp = await http.get(
+                page_url, timeout=6, follow_redirects=True,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                  "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.5",
+                },
+            )
         html = resp.text[:30000]
         for pattern in _OG_PATTERNS:
             m = re.search(pattern, html, re.IGNORECASE)
@@ -365,104 +775,36 @@ async def _enrich_og_images(http, results: list, max_fetch: int = 6) -> None:
 
 async def run_quick_search_for_chat(
     http, ollama_url: str, workspace_model: str, events, conv_id: str, messages: list,
-    *, default_model: str = "",
+    *, default_model: str = "", chat_model: str = "",
 ) -> dict:
     """Used by `agents/chat.py` to inject fresh search context.
 
+    Dispatches to `search_agent.run_search_agent` for the full multi-round
+    pipeline (skip-gate → triage → parallel SearXNG → relevance check →
+    optional refine → fetch → context build).
+
+    Triage model selection: explicit `QUICK_SEARCH_TRIAGE_MODEL` override,
+    otherwise the small workspace model (fast — ~1-2s per call vs 10-30s on a
+    27B chat model — and on multi-GPU / sufficient-VRAM setups it stays
+    co-resident with the chat model so there's no swap penalty), otherwise
+    the chat model, otherwise the default.
+
     Returns: {"context": str, "rewritten_query": str, "skipped": bool, "reason": str}
     """
-    latest = ""
-    for m in reversed(messages):
-        if m.get("role") == "user" and m.get("content"):
-            latest = m["content"].strip()
-            break
-    if not latest:
-        return {"context": "", "rewritten_query": "", "skipped": True, "reason": "no user message"}
-
-    skip, reason = _should_skip(latest)
-    if skip:
-        if events and conv_id:
-            try:
-                await events.emit(conv_id, "tool_done", {
-                    "tool": "quick_search", "icon": "search",
-                    "status": f"Skipped ({reason})",
-                })
-            except Exception:
-                pass
-        return {"context": "", "rewritten_query": "", "skipped": True, "reason": reason}
-
-    if events and conv_id:
-        try:
-            await events.emit(conv_id, "tool_start", {
-                "tool": "quick_search",
-                "status": f"Searching: {latest[:60]}",
-                "icon": "search",
-            })
-        except Exception:
-            pass
-
-    rewritten = await _rewrite_query(
-        http, ollama_url, workspace_model, default_model or workspace_model, messages, latest,
+    triage_model = (
+        getattr(config, "QUICK_SEARCH_TRIAGE_MODEL", "")
+        or workspace_model
+        or chat_model
+        or default_model
     )
-
-    # Always show the actual search query in the UI — whether rewritten or raw.
-    if events and conv_id:
-        try:
-            label = (
-                f"→ {rewritten[:80]}" if rewritten.strip() != latest.strip()
-                else f"(no rewrite) {rewritten[:80]}"
-            )
-            await events.emit(conv_id, "tool_progress", {
-                "tool": "quick_search", "icon": "search", "status": label,
-            })
-        except Exception:
-            pass
-
-    raw = await _cached_search(http, rewritten)
-    if not raw:
-        if events and conv_id:
-            try:
-                await events.emit(conv_id, "tool_done", {
-                    "tool": "quick_search", "icon": "search",
-                    "status": "No results found",
-                })
-            except Exception:
-                pass
-        return {"context": "", "rewritten_query": rewritten, "skipped": False, "reason": "no results"}
-
-    top = _rank_and_filter_for_chat(raw)
-
-    # Page-fetch (for thin snippets) and OG-image enrichment run in parallel —
-    # they hit the same top URLs but extract different signals. Without OG
-    # enrichment, web-type SearXNG results often have no thumbnail and the
-    # model has no images to embed.
-    page_text, _ = await asyncio.gather(
-        _enrich_with_pages(http, top, top_n=3),
-        _enrich_og_images(http, top, max_fetch=4),
-        return_exceptions=False,
+    # Lazy import to avoid circular dependency — search_agent imports helpers
+    # from this module.
+    from search_agent import run_search_agent
+    return await run_search_agent(
+        http, ollama_url, triage_model, triage_model,
+        events, conv_id, messages,
+        default_model=default_model or workspace_model,
     )
-
-    # Top 2-3 image candidates (proxied) the model is allowed to embed
-    allowed: set[str] = set()
-    for r in top:
-        thumb = r.get("thumbnail")
-        if thumb and len(allowed) < 3:
-            allowed.add(proxy_image_url(thumb))
-    print(f"[QS]   image candidates: {len(allowed)} (of {sum(1 for r in top if r.get('thumbnail'))} thumbs)")
-
-    ctx = _build_context(top, rewritten, page_text, allowed)
-
-    if events and conv_id:
-        try:
-            await events.emit(conv_id, "tool_done", {
-                "tool": "quick_search", "icon": "search",
-                "status": f"Found {len(top)} result{'s' if len(top) != 1 else ''}",
-            })
-        except Exception:
-            pass
-
-    print(f"[QS]   {len(top)} results for {rewritten!r} (was {latest[:60]!r})")
-    return {"context": ctx, "rewritten_query": rewritten, "skipped": False, "reason": ""}
 
 
 async def run_quick_search_for_api(http, query: str, count: int = 6) -> dict:

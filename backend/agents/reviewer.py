@@ -17,6 +17,7 @@ existing run-store, EventBus, and Codebox plumbing.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import shlex
@@ -24,7 +25,44 @@ import uuid
 
 import config
 import database as db
+import cancel_registry
 
+
+# Pin the venv python that Codebox provisions — same binary `run_tests` uses
+# (tools.py:2009). Using bare `python3` here meant pip install -e . hit Arch's
+# externally-managed system Python (silently failed under `|| true`) and the
+# pytest run that followed had no project deps installed → ImportError → the
+# `|| echo` chain swallowed it → exit 0 → reviewer reported "clean" while the
+# project was actually broken.
+_VENV_PY = "/root/venv/bin/python3"
+
+# Python test command that:
+#   - Uses the venv python so installed deps are visible
+#   - Distinguishes pytest exit 5 (no tests collected) from 1/3/4 (real
+#     failures) — only exit 5 is converted to success-with-note. All other
+#     non-zero exits propagate so the reviewer can flag them.
+#   - Falls back to unittest discover ONLY when pytest itself isn't installed
+#     in the venv. Previously the chain treated "tests failed" the same as
+#     "pytest missing" and quietly succeeded.
+#   - Lets stderr through (no `2>/dev/null`) so the LLM analysis path sees
+#     real diagnostics. The reviewer combines stdout+stderr at the Codebox
+#     wrapper level via `2>&1` already.
+_PY_TEST_CMD = (
+    f"if {_VENV_PY} -c 'import pytest' 2>/dev/null; then "
+    f"{_VENV_PY} -m pytest -q --no-header; ec=$?; "
+    "if [ $ec -eq 5 ]; then echo '(no tests collected)'; exit 0; fi; "
+    "exit $ec; "
+    f"else {_VENV_PY} -m unittest discover -q; fi"
+)
+
+# Lint = a syntax sweep using the venv python (system python may not match
+# project syntax level, e.g. PEP 695 generics on python 3.12+). Kept separate
+# from build_cmd so its exit code surfaces as `lint_exit` in the envelope.
+_PY_LINT_CMD = (
+    f"{_VENV_PY} -m py_compile "
+    "$(find . -name '*.py' -not -path '*/venv/*' -not -path '*/.venv/*' "
+    "-not -path '*/.git/*' -not -path '*/__pycache__/*')"
+)
 
 # Project-marker → (build_cmd, test_cmd, lint_cmd, language).
 # Order matters: more-specific markers first so monorepos hit the right one.
@@ -39,13 +77,19 @@ _PROJECT_MARKERS = [
     ("go.mod",          "go build ./...",                  "go test ./...",          "go vet ./...",       "go"),
     ("package.json",    "npm install --silent && npm run build --if-present",
                                                             "npm test --if-present",  "",                   "javascript"),
-    ("pyproject.toml",  "python3 -m pip install -q -e . 2>/dev/null || true",
-                                                            "python3 -m pytest -q --no-header 2>/dev/null || python3 -m unittest discover -q",
-                                                                                      "python3 -m py_compile $(find . -name '*.py' -not -path '*/venv/*')",
+    # Python markers: install deps into the venv that codebox provisions, then
+    # run pytest with proper exit-code discrimination (see _PY_TEST_CMD above).
+    # Pip's exit code is NOT swallowed — if install fails (missing pkg, syntax
+    # error in setup.py, etc.) the reviewer flags it as a build issue. That's
+    # the right behavior; previously `|| true` meant a broken pip step looked
+    # the same as a successful one.
+    ("pyproject.toml",  f"{_VENV_PY} -m pip install -q -e .",
+                                                            _PY_TEST_CMD,
+                                                                                      _PY_LINT_CMD,
                                                                                                             "python"),
-    ("requirements.txt","python3 -m pip install -q -r requirements.txt 2>/dev/null || true",
-                                                            "python3 -m pytest -q --no-header 2>/dev/null || python3 -m unittest discover -q",
-                                                                                      "python3 -m py_compile $(find . -name '*.py' -not -path '*/venv/*')",
+    ("requirements.txt",f"{_VENV_PY} -m pip install -q -r requirements.txt",
+                                                            _PY_TEST_CMD,
+                                                                                      _PY_LINT_CMD,
                                                                                                             "python"),
     ("Makefile",        "make -s 2>&1 | head -200",         "make -s test 2>&1 | head -200", "",            ""),
     ("CMakeLists.txt",  "cmake -B build -S . && cmake --build build --quiet",
@@ -72,8 +116,14 @@ _PLAIN_LANG_PROFILES = {
                         "| sed 's|^\\./||;s|\\.class$||;s|/|.|g')) || echo '(no JUnit tests)'",
                "lint":  ""},
     "python": {"glob": "*.py",
-               "build": "python3 -m py_compile $(find . -name '*.py' -not -path '*/venv/*' -not -path '*/.git/*' -not -path '*/__pycache__/*')",
-               "test":  "python3 -m pytest -q 2>/dev/null || python3 -m unittest discover -q 2>/dev/null || echo '(no tests)'",
+               # Plain-source python: no pyproject/requirements means no
+               # `pip install` step; we just sweep with py_compile to catch
+               # syntax errors. Use the venv python so 3.12+ syntax (PEP 695,
+               # type alias) doesn't fail on a system 3.11. Same exit-code
+               # discrimination as the marker-driven path above so a
+               # greenfield "no tests" project doesn't look like a failure.
+               "build": _PY_LINT_CMD,
+               "test":  _PY_TEST_CMD,
                "lint":  ""},
     "go":     {"glob": "*.go",
                "build": "go build ./... 2>&1 || (find . -name '*.go' -exec gofmt -l {} \\;)",
@@ -186,26 +236,31 @@ async def _detect_project(http, project_dir: str) -> dict:
             "language": "", "files": sorted(files)[:30]}
 
 
-async def _run_in_sandbox(http, project_dir: str, command: str, timeout: int = 300) -> dict:
-    """Run a shell command at project_dir via Codebox. Returns truncated stdout/stderr."""
+async def _run_in_sandbox(http, project_dir: str, command: str,
+                          timeout: int = 300, run_id: str = "") -> dict:
+    """Run a shell command at project_dir via Codebox. Returns truncated stdout/stderr.
+    When run_id is provided, the HTTP call is wrapped in cancel_registry so the
+    user's Stop button can abort it mid-flight."""
     if not command:
         return {"exit_code": -1, "stdout": "", "stderr": "(no command)"}
     try:
-        r = await http.post(
+        coro = http.post(
             f"{config.CODEBOX_URL}/command",
             json={"command": f"cd {shlex.quote(project_dir)} && ({command}) 2>&1",
                   "timeout": timeout},
             timeout=timeout + 30,
         )
+        r = await (cancel_registry.await_cancellable(coro, run_id) if run_id else coro)
         if r.status_code != 200:
             return {"exit_code": -1, "stdout": "",
                     "stderr": f"Codebox HTTP {r.status_code}: {r.text[:200]}"}
         d = r.json()
         out = (d.get("stdout") or "")
-        # Truncate to 4 KB tail — that's where errors live.
         if len(out) > 4096:
             out = "... [truncated head] ...\n" + out[-4096:]
         return {"exit_code": d.get("exit_code", 0), "stdout": out, "stderr": d.get("stderr", "")}
+    except cancel_registry.RunCancelled:
+        raise
     except Exception as e:
         return {"exit_code": -1, "stdout": "", "stderr": f"Exception: {e}"}
 
@@ -299,7 +354,7 @@ Produce a JSON object with this exact shape:
 ```
 
 Rules:
-- If both build_exit=0 and test_exit=0, emit `status:"clean"` and `issues:[]`.
+- If build_exit=0 AND test_exit=0 AND lint_exit=0 (all three), emit `status:"clean"` and `issues:[]`.
 - Otherwise list every distinct failure as one item. Group failures with the same root cause.
 - Each issue must name a real file (use one from the build output if you can't be sure).
 - `suggested_fix_scope` lists ONLY the files a fixer should edit to resolve that one issue.
@@ -344,7 +399,8 @@ def _try_parse_review_json(text: str) -> dict | None:
 
 
 async def run_review(http, events, conv_id: str, project_dir: str,
-                     project_id: str = "", parent_run_id: str = "") -> dict:
+                     project_id: str = "", parent_run_id: str = "",
+                     conv_model: str = "") -> dict:
     """Execute a Reviewer run on a project. Returns the result envelope.
 
     Side effects:
@@ -361,6 +417,11 @@ async def run_review(http, events, conv_id: str, project_dir: str,
     except Exception as e:
         print(f"[REVIEWER] create_run failed (non-fatal): {e}")
         run_id = ""
+
+    # Register cancel event so POST /api/runs/{id}/cancel can abort the
+    # in-flight Codebox + Ollama work. Cleaned up at the end of this run.
+    if run_id:
+        cancel_registry.register(run_id)
 
     async def _step(action: str, detail: str = ""):
         """Emit one structured step on both the live SSE channel and the durable log."""
@@ -426,90 +487,119 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                                     result_envelope=envelope, ended=True)
             except Exception:
                 pass
+            cancel_registry.cleanup(run_id)
         return envelope
 
-    # 2. Run build / test / lint.
+    # 2. Run build / test / lint → snippets → fast path → LLM analysis.
+    # All wrapped in a single RunCancelled handler so Stop works during any phase.
     build_result = {"exit_code": 0, "stdout": "(skipped — no build command)"}
     test_result = {"exit_code": 0, "stdout": "(skipped — no test command)"}
     lint_result = {"exit_code": 0, "stdout": ""}
-
-    if build_cmd:
-        await _step("build", build_cmd)
-        build_result = await _run_in_sandbox(http, project_dir, build_cmd, timeout=300)
-        await _step("build_done", f"exit={build_result['exit_code']}")
-
-    if test_cmd:
-        await _step("test", test_cmd)
-        test_result = await _run_in_sandbox(http, project_dir, test_cmd, timeout=300)
-        await _step("test_done", f"exit={test_result['exit_code']}")
-
-    if lint_cmd:
-        await _step("lint", lint_cmd)
-        lint_result = await _run_in_sandbox(http, project_dir, lint_cmd, timeout=120)
-        await _step("lint_done", f"exit={lint_result['exit_code']}")
-
-    # 3. Pull file snippets for any failures.
-    failure_text = ""
-    if build_result["exit_code"] != 0:
-        failure_text += build_result.get("stdout", "")
-    if test_result["exit_code"] != 0:
-        failure_text += "\n" + test_result.get("stdout", "")
-    refs = _extract_file_refs(failure_text)
-    snippet_blocks = []
-    for ref in refs[:5]:
-        snip = await _read_file_snippet(http, project_dir, ref["file"], ref["line"])
-        if snip:
-            snippet_blocks.append(f"### {ref['file']}{':'+str(ref['line']) if ref['line'] else ''}\n```\n{snip[:1500]}\n```")
-    snippet_block = ""
-    if snippet_blocks:
-        await _step("read_files", f"{len(snippet_blocks)} files for context")
-        snippet_block = "\n\n## Failing-file snippets (for context only)\n\n" + "\n\n".join(snippet_blocks)
-
-    # 4. Fast path: clean build + tests → skip the LLM call entirely.
-    if build_result["exit_code"] == 0 and test_result["exit_code"] == 0 and not refs:
-        envelope = {
-            "status": "clean",
-            "summary": f"Build + tests pass for {marker} project",
-            "issues": [],
-            "build_exit": 0, "test_exit": 0,
-            "build_cmd": build_cmd, "test_cmd": test_cmd,
-            "language": language,
-            "project_dir": project_dir,
-            "run_id": run_id,
-        }
-        await events.emit(conv_id, "tool_end", {
-            "tool": "run_review", "icon": "search-check",
-            "status": "✅ Review clean — build + tests pass",
-            "run_id": run_id,
-        })
-        if run_id:
-            try:
-                await db.update_run(run_id, status="succeeded",
-                                    result_envelope=envelope, ended=True)
-            except Exception:
-                pass
-        return envelope
-
-    # 5. Slow path: feed everything to the planning-model LLM and parse JSON.
-    review_model = config.PLANNING_MODEL or config.DEFAULT_MODEL
-    prompt = _REVIEW_PROMPT.format(
-        build_cmd=build_cmd or "(none)",
-        build_exit=build_result["exit_code"],
-        test_cmd=test_cmd or "(none)",
-        test_exit=test_result["exit_code"],
-        lint_section=(f"Lint command: `{lint_cmd}`\nLint exit: {lint_result['exit_code']}" if lint_cmd else ""),
-        build_chars=len(build_result.get("stdout", "")),
-        test_chars=len(test_result.get("stdout", "")),
-        build_output=build_result.get("stdout", "")[:4000],
-        test_block=("\n## Test output\n```\n" + test_result.get("stdout", "")[:3000] + "\n```") if test_cmd else "",
-        lint_block=("\n## Lint output\n```\n" + lint_result.get("stdout", "")[:1500] + "\n```") if lint_cmd else "",
-        snippet_block=snippet_block,
-    )
-
-    await _step("analyze", f"calling {review_model}")
+    review_model = ""
     review_text = ""
+    _cancel_phase = "build"
+    _ticker = None
+
     try:
-        r = await http.post(
+        if build_cmd:
+            _cancel_phase = "build"
+            await _step("build", build_cmd)
+            build_result = await _run_in_sandbox(http, project_dir, build_cmd, timeout=300, run_id=run_id)
+            await _step("build_done", f"exit={build_result['exit_code']}")
+
+        if test_cmd:
+            _cancel_phase = "test"
+            await _step("test", test_cmd)
+            test_result = await _run_in_sandbox(http, project_dir, test_cmd, timeout=300, run_id=run_id)
+            await _step("test_done", f"exit={test_result['exit_code']}")
+
+        if lint_cmd:
+            _cancel_phase = "lint"
+            await _step("lint", lint_cmd)
+            lint_result = await _run_in_sandbox(http, project_dir, lint_cmd, timeout=120, run_id=run_id)
+            await _step("lint_done", f"exit={lint_result['exit_code']}")
+
+        # 3. Pull file snippets for any failures.
+        failure_text = ""
+        if build_result["exit_code"] != 0:
+            failure_text += build_result.get("stdout", "")
+        if test_result["exit_code"] != 0:
+            failure_text += "\n" + test_result.get("stdout", "")
+        if lint_result["exit_code"] != 0:
+            failure_text += "\n" + lint_result.get("stdout", "")
+        refs = _extract_file_refs(failure_text)
+        snippet_blocks = []
+        if refs:
+            _read_tasks = [
+                _read_file_snippet(http, project_dir, ref["file"], ref["line"])
+                for ref in refs[:5]
+            ]
+            _snippets = await asyncio.gather(*_read_tasks, return_exceptions=True)
+            for ref, snip in zip(refs[:5], _snippets):
+                if isinstance(snip, str) and snip:
+                    snippet_blocks.append(f"### {ref['file']}{':'+str(ref['line']) if ref['line'] else ''}\n```\n{snip[:1500]}\n```")
+        snippet_block = ""
+        if snippet_blocks:
+            await _step("read_files", f"{len(snippet_blocks)} files for context")
+            snippet_block = "\n\n## Failing-file snippets (for context only)\n\n" + "\n\n".join(snippet_blocks)
+
+        # 4. Fast path: clean build + tests + lint → skip the LLM call entirely.
+        if build_result["exit_code"] == 0 and test_result["exit_code"] == 0 and lint_result["exit_code"] == 0 and not refs:
+            envelope = {
+                "status": "clean",
+                "summary": f"Build + tests + lint pass for {marker} project",
+                "issues": [],
+                "build_exit": 0, "test_exit": 0, "lint_exit": 0,
+                "build_cmd": build_cmd, "test_cmd": test_cmd, "lint_cmd": lint_cmd,
+                "language": language, "marker": marker,
+                "project_dir": project_dir,
+                "run_id": run_id,
+            }
+            await events.emit(conv_id, "tool_end", {
+                "tool": "run_review", "icon": "search-check",
+                "status": "✅ Review clean — build + tests + lint pass",
+                "run_id": run_id,
+            })
+            if run_id:
+                try:
+                    await db.update_run(run_id, status="succeeded",
+                                        result_envelope=envelope, ended=True)
+                except Exception:
+                    pass
+                cancel_registry.cleanup(run_id)
+            return envelope
+
+        # 5. Slow path: feed everything to the planning-model LLM and parse JSON.
+        review_model = config.REVIEWER_MODEL or config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL
+        prompt = _REVIEW_PROMPT.format(
+            build_cmd=build_cmd or "(none)",
+            build_exit=build_result["exit_code"],
+            test_cmd=test_cmd or "(none)",
+            test_exit=test_result["exit_code"],
+            lint_section=(f"Lint command: `{lint_cmd}`\nLint exit: {lint_result['exit_code']}" if lint_cmd else ""),
+            build_chars=len(build_result.get("stdout", "")),
+            test_chars=len(test_result.get("stdout", "")),
+            build_output=build_result.get("stdout", "")[:4000],
+            test_block=("\n## Test output\n```\n" + test_result.get("stdout", "")[:3000] + "\n```") if test_cmd else "",
+            lint_block=("\n## Lint output\n```\n" + lint_result.get("stdout", "")[:1500] + "\n```") if lint_cmd else "",
+            snippet_block=snippet_block,
+        )
+
+        _cancel_phase = "analysis"
+        await _step("analyze", f"calling {review_model}")
+
+        async def _progress_ticker():
+            elapsed = 0
+            while True:
+                await asyncio.sleep(15)
+                elapsed += 15
+                try:
+                    await _step("analyzing", f"{elapsed}s elapsed…")
+                except Exception:
+                    pass
+
+        _ticker = asyncio.create_task(_progress_ticker())
+        coro = http.post(
             f"{config.OLLAMA_URL}/api/chat",
             json={
                 "model": review_model,
@@ -519,25 +609,112 @@ async def run_review(http, events, conv_id: str, project_dir: str,
             },
             timeout=600,
         )
+        r = await cancel_registry.await_cancellable(coro, run_id)
         if r.status_code == 200:
             review_text = (r.json().get("message", {}).get("content") or "").strip()
+
+    except cancel_registry.RunCancelled:
+        cancelled_env = {
+            "status": "cancelled",
+            "summary": f"Reviewer cancelled by user during {_cancel_phase}.",
+            "issues": [],
+            "build_cmd": build_cmd, "test_cmd": test_cmd, "lint_cmd": lint_cmd,
+            "build_exit": build_result["exit_code"],
+            "test_exit": test_result["exit_code"],
+            "lint_exit": lint_result["exit_code"],
+            "language": language, "marker": marker,
+            "review_model": review_model,
+            "project_dir": project_dir,
+            "run_id": run_id,
+        }
+        try:
+            await events.emit(conv_id, "tool_end", {
+                "tool": "run_review", "icon": "search-check",
+                "status": f"⛔ Review cancelled by user during {_cancel_phase}",
+                "run_id": run_id,
+            })
+        except Exception:
+            pass
+        if run_id:
+            try:
+                await db.update_run(run_id, status="cancelled",
+                                    result_envelope=cancelled_env, ended=True)
+            except Exception:
+                pass
+            cancel_registry.cleanup(run_id)
+        return cancelled_env
     except Exception as e:
-        print(f"[REVIEWER] LLM call failed: {e}")
+        print(f"[REVIEWER] review phase failed ({_cancel_phase}): {e}")
+    finally:
+        if _ticker:
+            _ticker.cancel()
+            try:
+                await _ticker
+            except asyncio.CancelledError:
+                pass
 
     parsed = _try_parse_review_json(review_text)
     if not parsed or "status" not in parsed:
         # Heuristic fallback when the model didn't emit clean JSON.
         await _step("parse_fallback", "model output was not valid JSON")
-        parsed = {
-            "status": "issues" if (build_result["exit_code"] != 0 or test_result["exit_code"] != 0) else "clean",
-            "summary": "Reviewer could not parse model output cleanly; reporting raw build/test exits.",
-            "issues": [{
-                "severity": "compile" if build_result["exit_code"] != 0 else "test",
+        _any_fail = (build_result["exit_code"] != 0
+                     or test_result["exit_code"] != 0
+                     or lint_result["exit_code"] != 0)
+        _fb_issues = []
+
+        # Extract FAILED/ERROR lines from test output for actionable summaries
+        # instead of using raw failure_text[:200] which grabs random traceback chunks.
+        _FAIL_LINE_RE = re.compile(
+            r"^(?:FAILED|ERROR)\s+([\w./\-]+\.py)(?:::([\w.\[\]<>:_\-]+))?(?:\s*-\s*(.{0,200}))?",
+            re.MULTILINE,
+        )
+
+        if build_result["exit_code"] != 0:
+            _fb_issues.append({
+                "severity": "compile",
                 "file": refs[0]["file"] if refs else "",
                 "lines": [refs[0]["line"]] if refs and refs[0]["line"] else [],
-                "summary": (failure_text[:200] or "build/test failed").strip(),
+                "summary": (build_result.get("stdout", "")[-500:].strip()[:200] or "build failed"),
                 "suggested_fix_scope": [r["file"] for r in refs[:3]],
-            }] if (build_result["exit_code"] != 0 or test_result["exit_code"] != 0) else [],
+            })
+        if test_result["exit_code"] != 0:
+            _test_out = test_result.get("stdout", "")
+            _fail_matches = _FAIL_LINE_RE.findall(_test_out)
+            if _fail_matches:
+                _by_file: dict[str, list[str]] = {}
+                for _fm_file, _fm_test, _fm_reason in _fail_matches:
+                    _by_file.setdefault(_fm_file, []).append(
+                        f"{_fm_test}: {_fm_reason}" if _fm_reason else _fm_test
+                    )
+                for _fm_file, _fm_descs in list(_by_file.items())[:3]:
+                    _fb_issues.append({
+                        "severity": "test",
+                        "file": _fm_file,
+                        "lines": [],
+                        "summary": f"{len(_fm_descs)} failing test(s): " + "; ".join(_fm_descs[:3])[:200],
+                        "suggested_fix_scope": [_fm_file],
+                    })
+            else:
+                _fb_issues.append({
+                    "severity": "test",
+                    "file": refs[0]["file"] if refs else "",
+                    "lines": [refs[0]["line"]] if refs and refs[0]["line"] else [],
+                    "summary": (_test_out[-500:].strip()[:200] or "tests failed"),
+                    "suggested_fix_scope": [r["file"] for r in refs[:3]],
+                })
+        if lint_result["exit_code"] != 0:
+            _lint_refs = _extract_file_refs(lint_result.get("stdout", ""))
+            _fb_issues.append({
+                "severity": "lint",
+                "file": _lint_refs[0]["file"] if _lint_refs else "",
+                "lines": [_lint_refs[0]["line"]] if _lint_refs and _lint_refs[0]["line"] else [],
+                "summary": (lint_result.get("stdout", "")[-500:].strip()[:200] or "lint failed"),
+                "suggested_fix_scope": [r["file"] for r in _lint_refs[:3]],
+            })
+        parsed = {
+            "status": "issues" if _any_fail else "clean",
+            "summary": "Reviewer could not parse model output cleanly; reporting raw build/test/lint exits.",
+            "issues": _fb_issues,
         }
 
     envelope = {
@@ -552,7 +729,7 @@ async def run_review(http, events, conv_id: str, project_dir: str,
         "run_id": run_id,
     }
 
-    final_status = "succeeded" if envelope.get("status") == "clean" else "succeeded"  # The Reviewer itself succeeded; the project state is what `status` reports.
+    final_status = "succeeded"  # The Reviewer itself succeeded; the project state is what envelope `status` reports.
     n_issues = len(envelope.get("issues") or [])
     await events.emit(conv_id, "tool_end", {
         "tool": "run_review", "icon": "search-check",
@@ -566,5 +743,6 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                                 result_envelope=envelope, ended=True)
         except Exception:
             pass
+        cancel_registry.cleanup(run_id)
 
     return envelope

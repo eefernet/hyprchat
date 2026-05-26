@@ -7,18 +7,18 @@ import os
 # ============================================================
 # INFRASTRUCTURE IPs
 # ============================================================
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://192.168.1.110:11434")
-CODEBOX_URL = os.getenv("CODEBOX_URL", "http://192.168.1.201:8585")
-OPENHANDS_URL = os.getenv("OPENHANDS_URL", "http://192.168.1.201:8586")
-SEARXNG_URL = os.getenv("SEARXNG_URL", "http://192.168.1.141:8888")
-N8N_URL = os.getenv("N8N_URL", "http://192.168.1.114:5678")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
+CODEBOX_URL = os.getenv("CODEBOX_URL", "http://127.0.0.1:8585")
+OPENHANDS_URL = os.getenv("OPENHANDS_URL", "http://127.0.0.1:8586")
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://127.0.0.1:8888")
+N8N_URL = os.getenv("N8N_URL", "http://127.0.0.1:5678")
 N8N_WEBHOOK_PATH = os.getenv("N8N_WEBHOOK_PATH", "/webhook/execute-code")
 N8N_RESEARCH_PATH = os.getenv("N8N_RESEARCH_PATH", "/webhook/deep-research")
 
 # ============================================================
 # SERVER
 # ============================================================
-HOST = os.getenv("HOST", "0.0.0.0")
+HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8000"))
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
@@ -33,7 +33,7 @@ DATABASE_PATH = os.getenv("DATABASE_PATH", "/opt/hyprchat/data/hyprchat.db")
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/opt/hyprchat/data/uploads")
 TOOLS_DIR = os.getenv("TOOLS_DIR", "/opt/hyprchat/data/tools")
 KB_DIR = os.getenv("KB_DIR", "/opt/hyprchat/data/knowledge_bases")
-MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "250"))
 
 # ============================================================
 # SANDBOX — isolated dir for all tool-generated output files
@@ -68,6 +68,13 @@ EXECUTION_TIMEOUT = int(os.getenv("EXECUTION_TIMEOUT", "60"))
 SEARCH_RESULTS_COUNT = int(os.getenv("SEARCH_RESULTS_COUNT", "15"))
 MAX_FETCH_CHARS = int(os.getenv("MAX_FETCH_CHARS", "8000"))
 
+# Multi-round search agent (replaces the old single-shot quick_search rewrite
+# pipeline). Triage runs against the chat model by default to avoid VRAM-swap
+# latency on single-GPU homelabs; set QUICK_SEARCH_TRIAGE_MODEL to override
+# with e.g. a small workspace model (only worthwhile if it stays co-resident
+# in VRAM with the chat model).
+QUICK_SEARCH_TRIAGE_MODEL = os.getenv("QUICK_SEARCH_TRIAGE_MODEL", "")
+
 # ============================================================
 # DEFAULTS
 # ============================================================
@@ -77,9 +84,25 @@ PLANNING_MODEL = os.getenv("PLANNING_MODEL", "qwen3.5:27b")
 CODER_MODEL = os.getenv("CODER_MODEL", "qwen2.5-coder:14b")
 CRITIC_MODEL = os.getenv("CRITIC_MODEL", "")  # Empty = falls back to PLANNING_MODEL. Independent code reviewer for generate_code output.
 CRITIC_ENABLED = os.getenv("CRITIC_ENABLED", "true").lower() == "true"
+
+# Coder Bot v2 — per-agent model overrides. Empty means each agent inherits
+# from its umbrella default (PLANNING_MODEL for analysis-style agents,
+# CODER_MODEL for code-writing agents) which in turn falls through to the
+# active chat model. Power users who want to pin a specific model per agent
+# can set these — most users leave them empty.
+ARCHITECT_MODEL = os.getenv("ARCHITECT_MODEL", "")  # Empty = use PLANNING_MODEL
+REVIEWER_MODEL  = os.getenv("REVIEWER_MODEL",  "")  # Empty = use PLANNING_MODEL
+BUILDER_MODEL   = os.getenv("BUILDER_MODEL",   "")  # Empty = use CODER_MODEL
+FIXER_MODEL     = os.getenv("FIXER_MODEL",     "")  # Empty = use CODER_MODEL
+QA_MODEL        = os.getenv("QA_MODEL",        "")  # Empty = use chat / persona model
 OPENHANDS_ENABLED = os.getenv("OPENHANDS_ENABLED", "true").lower() == "true"  # Toggle OpenHands for generate_code tool
 OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "20"))
 OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", "16384"))
+# Reasoning effort for the OpenHands builder LLM. The SDK passes this through
+# to litellm; for OpenAI-style models it's "low" | "medium" | "high"; local
+# Ollama models silently ignore unsupported values. Default "medium" — "high"
+# adds a lot of think-token overhead per round on small/medium local models.
+OPENHANDS_REASONING_EFFORT = os.getenv("OPENHANDS_REASONING_EFFORT", "medium").strip().lower()
 DEFAULT_NUM_CTX = int(os.getenv("DEFAULT_NUM_CTX", "16384"))
 MAX_AGENT_ROUNDS = int(os.getenv("MAX_AGENT_ROUNDS", "12"))
 MAX_AGENT_ROUNDS_CODER = int(os.getenv("MAX_AGENT_ROUNDS_CODER", "30"))

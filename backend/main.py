@@ -180,18 +180,46 @@ async def lifespan(app: FastAPI):
     if _settings.get("ollama_url"):
         config.OLLAMA_URL = _settings["ollama_url"]
         print(f"[Config] Loaded Ollama URL from settings: {config.OLLAMA_URL}")
-    if _settings.get("planning_model"):
-        config.PLANNING_MODEL = _settings["planning_model"]
-        print(f"[Config] Loaded Planning Model from settings: {config.PLANNING_MODEL}")
-    if _settings.get("coder_model"):
-        config.CODER_MODEL = _settings["coder_model"]
-        print(f"[Config] Loaded Coder Model from settings: {config.CODER_MODEL}")
+    # Use `in _settings` (not `.get(...)` truthy check) so an explicitly-saved
+    # empty string — meaning "inherit from chat model" in the UI — is honored
+    # on startup. Otherwise the env default (e.g. PLANNING_MODEL=qwen3.5:27b
+    # in config.py) silently overrides the user's choice every restart.
+    if "planning_model" in _settings:
+        config.PLANNING_MODEL = _settings["planning_model"] or ""
+        print(f"[Config] Loaded Planning Model from settings: {config.PLANNING_MODEL or '(use chat model)'}")
+    if "coder_model" in _settings:
+        config.CODER_MODEL = _settings["coder_model"] or ""
+        print(f"[Config] Loaded Coder Model from settings: {config.CODER_MODEL or '(use chat model)'}")
+    # Workspace model (small/fast model used for quick_search triage,
+    # auto-titles, and topic auto-detection). Empty = inherit chat model.
+    if "workspace_model" in _settings:
+        config.WORKSPACE_MODEL = _settings["workspace_model"] or ""
+        print(f"[Config] Loaded Workspace Model from settings: {config.WORKSPACE_MODEL or '(use chat model)'}")
+    # Coder Bot v2 per-agent overrides — each empty by default; only seen here
+    # when the user has explicitly pinned a model for that agent.
+    for _key, _attr in (
+        ("architect_model", "ARCHITECT_MODEL"),
+        ("reviewer_model",  "REVIEWER_MODEL"),
+        ("builder_model",   "BUILDER_MODEL"),
+        ("fixer_model",     "FIXER_MODEL"),
+        ("qa_model",        "QA_MODEL"),
+    ):
+        if _key in _settings:
+            setattr(config, _attr, _settings[_key] or "")
+            if _settings[_key]:
+                print(f"[Config] Loaded {_attr} from settings: {_settings[_key]}")
     if "openhands_enabled" in _settings:
         config.OPENHANDS_ENABLED = _settings["openhands_enabled"]
         print(f"[Config] Loaded OpenHands enabled: {config.OPENHANDS_ENABLED}")
     if "openhands_max_rounds" in _settings:
         config.OPENHANDS_MAX_ROUNDS = int(_settings["openhands_max_rounds"])
         print(f"[Config] Loaded OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
+    if "openhands_reasoning_effort" in _settings:
+        _re = (_settings["openhands_reasoning_effort"] or "medium").strip().lower()
+        if _re not in ("low", "medium", "high"):
+            _re = "medium"
+        config.OPENHANDS_REASONING_EFFORT = _re
+        print(f"[Config] Loaded OpenHands reasoning effort: {config.OPENHANDS_REASONING_EFFORT}")
     if "default_num_ctx" in _settings:
         # Single knob the user controls. Drives the chat-side fallback in chat.py and
         # every internal LLM call (plan_project, critic) — so increasing the chat ctx
@@ -224,15 +252,23 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="HyprChat", version="2.0.0", lifespan=lifespan)
 
+ALLOWED_ORIGINS = [
+    o.strip() for o in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:8000,http://127.0.0.1:8000",
+    ).split(",") if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
 
-http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0), verify=False)
+HTTP_VERIFY_SSL = os.getenv("HTTP_VERIFY_SSL", "true").lower() == "true"
+http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0), verify=HTTP_VERIFY_SSL)
 
 # ============================================================
 # PYDANTIC MODELS
@@ -1347,6 +1383,54 @@ async def list_runs(conversation_id: str = Query(None), project_id: str = Query(
     raise HTTPException(400, "conversation_id or project_id is required")
 
 
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str):
+    """Signal an in-flight run to abort.
+
+    Two effects:
+      1. Sets the asyncio.Event in `cancel_registry` so any agent waiting on a
+         long Ollama / Codebox / OpenHands call via `await_cancellable` aborts
+         its in-flight request immediately.
+      2. Updates the `runs` row to `status='cancelled'` if it was still running
+         or pending. Frontend polling sees the new status on its next tick,
+         even if the in-process signal arrived too late (e.g. after restart).
+
+    Always returns 200. Unknown / already-finished runs are a no-op rather
+    than an error so the frontend can fan out cancels without per-run guards.
+    """
+    import cancel_registry
+
+    signaled = cancel_registry.signal(run_id)
+
+    db_marked = False
+    try:
+        row = await db.get_run(run_id)
+        if row and row.get("status") in ("running", "pending"):
+            envelope = row.get("result_envelope") or {}
+            if not isinstance(envelope, dict):
+                envelope = {}
+            envelope = {
+                **envelope,
+                "status": "cancelled",
+                "summary": envelope.get("summary") or "Cancelled by user (Stop pressed)",
+            }
+            await db.update_run(run_id, status="cancelled",
+                                result_envelope=envelope, ended=True)
+            try:
+                await db.append_run_event(run_id, {
+                    "type": "step",
+                    "action": "cancelled",
+                    "detail": "user pressed Stop",
+                })
+            except Exception:
+                pass
+            db_marked = True
+    except Exception as e:
+        print(f"[CANCEL] DB update failed for {run_id}: {e}")
+
+    return {"run_id": run_id, "signaled": signaled, "db_marked": db_marked}
+
+
 # ============================================================
 # CONVERSATIONS
 # ============================================================
@@ -1613,8 +1697,8 @@ async def extract_pdf(file: UploadFile = File(...)):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files are accepted")
     content = await file.read()
-    if len(content) > 50 * 1024 * 1024:
-        raise HTTPException(413, "PDF too large (max 50MB)")
+    if len(content) > config.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+        raise HTTPException(413, f"PDF too large (max {config.MAX_UPLOAD_SIZE_MB}MB)")
     try:
         from pypdf import PdfReader
         import io
@@ -2781,9 +2865,17 @@ async def get_app_settings():
         "current_ollama_url": config.OLLAMA_URL,
         "current_planning_model": config.PLANNING_MODEL,
         "current_coder_model": config.CODER_MODEL,
+        "current_workspace_model": config.WORKSPACE_MODEL,
+        # Coder Bot v2 per-agent overrides — empty string = inherit from umbrella
+        "current_architect_model": config.ARCHITECT_MODEL,
+        "current_reviewer_model":  config.REVIEWER_MODEL,
+        "current_builder_model":   config.BUILDER_MODEL,
+        "current_fixer_model":     config.FIXER_MODEL,
+        "current_qa_model":        config.QA_MODEL,
         "openhands_enabled": config.OPENHANDS_ENABLED,
         "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
         "openhands_num_ctx": config.OPENHANDS_NUM_CTX,
+        "openhands_reasoning_effort": config.OPENHANDS_REASONING_EFFORT,
         "default_num_ctx": config.DEFAULT_NUM_CTX,
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
@@ -2796,7 +2888,11 @@ async def get_app_settings():
 @app.patch("/api/settings")
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
-    allowed = {"file_cleanup_days", "ollama_url", "rag", "planning_model", "coder_model", "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx", "default_num_ctx"}
+    allowed = {"file_cleanup_days", "ollama_url", "rag", "planning_model", "coder_model",
+               "workspace_model",
+               "architect_model", "reviewer_model", "builder_model", "fixer_model", "qa_model",
+               "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
+               "openhands_reasoning_effort", "default_num_ctx"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
@@ -2814,13 +2910,27 @@ async def update_app_settings(body: dict = Body(...)):
         config.OLLAMA_URL = body["ollama_url"]
         print(f"[Config] Updated Ollama URL to: {config.OLLAMA_URL}")
     elif "ollama_url" in body and not body["ollama_url"]:
-        config.OLLAMA_URL = os.getenv("OLLAMA_URL", "http://192.168.1.110:11434")
+        config.OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
     if "planning_model" in body:
         config.PLANNING_MODEL = body["planning_model"] or ""
         print(f"[Config] Updated Planning Model to: {config.PLANNING_MODEL or '(use chat model)'}")
     if "coder_model" in body:
         config.CODER_MODEL = body["coder_model"] or ""
         print(f"[Config] Updated Coder Model to: {config.CODER_MODEL or '(use orchestrator model)'}")
+    if "workspace_model" in body:
+        config.WORKSPACE_MODEL = body["workspace_model"] or ""
+        print(f"[Config] Updated Workspace Model to: {config.WORKSPACE_MODEL or '(use chat model)'}")
+    # Coder Bot v2 per-agent overrides
+    for _key, _attr, _label in (
+        ("architect_model", "ARCHITECT_MODEL", "Architect"),
+        ("reviewer_model",  "REVIEWER_MODEL",  "Reviewer"),
+        ("builder_model",   "BUILDER_MODEL",   "Builder"),
+        ("fixer_model",     "FIXER_MODEL",     "Fixer"),
+        ("qa_model",        "QA_MODEL",        "ProjectQA"),
+    ):
+        if _key in body:
+            setattr(config, _attr, body[_key] or "")
+            print(f"[Config] Updated {_label} Model to: {body[_key] or '(inherit umbrella)'}")
     if "openhands_enabled" in body:
         config.OPENHANDS_ENABLED = bool(body["openhands_enabled"])
         print(f"[Config] OpenHands enabled: {config.OPENHANDS_ENABLED}")
@@ -2830,11 +2940,30 @@ async def update_app_settings(body: dict = Body(...)):
     if "openhands_num_ctx" in body:
         config.OPENHANDS_NUM_CTX = int(body["openhands_num_ctx"])
         print(f"[Config] OpenHands num_ctx: {config.OPENHANDS_NUM_CTX}")
+    if "openhands_reasoning_effort" in body:
+        _re_in = (body["openhands_reasoning_effort"] or "medium").strip().lower()
+        if _re_in not in ("low", "medium", "high"):
+            _re_in = "medium"
+        config.OPENHANDS_REASONING_EFFORT = _re_in
+        # Persist the validated value, not the raw input.
+        settings["openhands_reasoning_effort"] = _re_in
+        print(f"[Config] OpenHands reasoning effort: {config.OPENHANDS_REASONING_EFFORT}")
     if "default_num_ctx" in body:
         config.DEFAULT_NUM_CTX = int(body["default_num_ctx"])
         print(f"[Config] Default num_ctx: {config.DEFAULT_NUM_CTX}")
     save_settings(settings)
-    return {**settings, "current_ollama_url": config.OLLAMA_URL, "current_planning_model": config.PLANNING_MODEL, "current_coder_model": config.CODER_MODEL}
+    return {
+        **settings,
+        "current_ollama_url": config.OLLAMA_URL,
+        "current_planning_model": config.PLANNING_MODEL,
+        "current_coder_model": config.CODER_MODEL,
+        "current_workspace_model": config.WORKSPACE_MODEL,
+        "current_architect_model": config.ARCHITECT_MODEL,
+        "current_reviewer_model":  config.REVIEWER_MODEL,
+        "current_builder_model":   config.BUILDER_MODEL,
+        "current_fixer_model":     config.FIXER_MODEL,
+        "current_qa_model":        config.QA_MODEL,
+    }
 
 
 @app.get("/api/rag/stats")

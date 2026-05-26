@@ -102,7 +102,7 @@ def _derive_project_name(task: str, language: str) -> str:
 class RunRequest(BaseModel):
     task: str
     model: str = "qwen2.5:14b"
-    ollama_url: str = "http://192.168.1.110:11434"
+    ollama_url: str = "http://127.0.0.1:11434"
     max_rounds: int = 20
     num_ctx: int = 16384
     language: str = "python"
@@ -112,6 +112,9 @@ class RunRequest(BaseModel):
     # Phase 5 — Builder profile. Default "scaffold" preserves prior behavior
     # for any caller that doesn't pass one.
     profile: str = "scaffold"  # scaffold | continue | feature
+    # Reasoning effort passed to the SDK LLM. Default "medium"; "high" is
+    # heavy-think-token mode and slow on local Ollama models, "low" is fastest.
+    reasoning_effort: str = "medium"  # low | medium | high
     # Only meaningful when profile == "continue": list of manifest files the
     # last builder run failed to write. The worker focuses on these.
     manifest_missing: list[str] = []
@@ -298,7 +301,10 @@ def run_task(req: RunRequest):
         # exactly that value, and pass it nested under "options" so litellm
         # forwards it as options.num_ctx (Ollama ignores top-level num_ctx).
         _ensure_loaded(ollama_base, req.model, req.num_ctx)
-        llm = _LLM(
+        _re = (req.reasoning_effort or "medium").strip().lower()
+        if _re not in ("low", "medium", "high"):
+            _re = "medium"
+        _llm_kwargs = dict(
             model=f"ollama_chat/{req.model}",
             api_key="ollama",
             base_url=ollama_base,
@@ -309,6 +315,15 @@ def run_task(req: RunRequest):
             native_tool_calling=native_tc,
             litellm_extra_body={"options": {"num_ctx": req.num_ctx}},
         )
+        # SDK accepts `reasoning_effort` as a top-level kwarg; older builds may
+        # not. Try with it; if it's rejected, retry without (SDK falls back to
+        # its built-in default of "high").
+        try:
+            llm = _LLM(reasoning_effort=_re, **_llm_kwargs)
+            print(f"[OH-Worker] reasoning_effort={_re}")
+        except TypeError:
+            print(f"[OH-Worker] SDK rejected reasoning_effort kwarg — using default")
+            llm = _LLM(**_llm_kwargs)
 
         # ── Agent with core tools ──
         tools = [
@@ -1095,4 +1110,6 @@ def clean_workspace():
 
 if __name__ == "__main__":
     import uvicorn
+    # Intentional 0.0.0.0 bind: this worker runs inside the Codebox LXC and must be
+    # reachable from the HyprChat host. Lock down at the network/firewall layer instead.
     uvicorn.run(app, host="0.0.0.0", port=8586)

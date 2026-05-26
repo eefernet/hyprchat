@@ -1,3 +1,56 @@
+## Alpha v17.0.1 — May 26, 2026
+
+### Coder Bot v2 — workflow gate hardening
+
+Ten edge cases in the v2 gate, profile detection, and persona prompt that together swung the same prompt between a clean 16-round bug fix and a 24-round rebuild loop. All fixed.
+
+#### Gate / Reviewer / Fixer
+- **Phantom `run_fixer` blocked** — `tools.py` gate refuses `run_fixer` unless the latest run is a reviewer with `status="issues"`/`"error"`. Stops cycle-cap burn from hallucinated `reviewer_run_id`s.
+- **"Nothing to fix" is `skipped`, not `succeeded`** — `agents/fixer.py:249`. The 3-cycle cap counts only real attempts now.
+- **`pytest` exit 5 ("no tests collected") treated as benign** — `agents/reviewer.py:43,47` append `|| echo '(no tests)'`. Greenfield scaffolds stop infinite-looping on a missing `pytest.ini`.
+- **Cycle cap delivers gracefully** — PENDING_FIX gate releases `download_project`, `download_file`, `read_file`, `list_files` once the cap fires, with the cap message suggesting `download_project` as the ship path.
+- **Anti-rebuild guard** — `tools.py` blocks a second `generate_code` against the same project in the same turn (detected via `runs.started_at >= latest_user_message.created_at`). Pushes the model toward `read_file` + `write_file` for refinement.
+- **Profile auto-detect for edited uploads** — `tools.py` fallback sets `_builder_profile = "feature"` when an active project has no prior builder run, so `write_file`-edited uploads aren't clobbered by a scaffold rebuild.
+- **`_parse_ts_loose()`** — new helper unifies SQLite `CURRENT_TIMESTAMP` (space, no µs) and Python `isoformat()` (T, with µs) for cross-table "is this run from the current turn?" comparisons.
+
+#### ACTIVE PROJECT block
+- **Path-explicit injection** — `agents/chat.py` emits `**ON-DISK PATH (use this for ALL tool calls): /root/projects/{project_id}**` and relabels the human name `display name (NOT a directory)`. Stops `mkdir -p /root/projects/{display-name}` mistakes.
+- **`write_file` is the default** — small edits, refactors, 1–5 line pastes all route to `read_file` → `write_file`. `generate_code` reserved for genuinely new 3+ files or major refactors.
+- **Runtime-bug branch** — runtime crashes that compile fine (font errors, bad preview state) skip `run_review` and go straight to `read_file` → `write_file`, since the reviewer can't see them. Persona prompt updated to match.
+
+#### Persona + seeding
+- **Coder Bot v2 prompt** — runtime-bug branch added; new top-level **ANTI-REBUILD RULE** explaining the gate.
+- **`seed_coder_bot_v2()` updates in-place** — `agents/personas.py` no longer deletes-and-recreates on re-seed, preserving `mc_id` so existing conversations keep their persona link.
+
+#### Settings & uploads
+- **Empty-string settings respected on restart** — `main.py:183` switched to `"key" in _settings` membership checks. Planning Model = "(use chat model)" now survives restarts instead of reverting to the env default. Same fix for `coder_model`.
+- **Upload limit 50 MB → 250 MB** — `config.MAX_UPLOAD_SIZE_MB` (env-overridable). Fits a typical PyQt5 + venv. `main.py:1641` PDF route and `frontend/dist/index.html:2589` attach guard now route through the constant.
+
+### OpenHands — Reasoning Effort
+- **New "Reasoning Effort" dropdown** in the OpenHands settings tile: **Low** / **Medium** (new default for local Ollama) / **High** (SDK default).
+- **Why it matters** — the SDK defaults `reasoning_effort=high` + `extended_thinking_budget=200000`. On a 30B model with `num_ctx=16384` that's 30+ s per tool round; with chat ↔ builder VRAM thrashing, a 3-file scaffold ran 5 min wall-clock. Medium/Low cuts that with no quality regression on CRUD/UI tasks.
+- **Plumbing** — `OPENHANDS_REASONING_EFFORT` in `config.py` → settings handlers in `main.py` → `oh_payload` in `tools.py` → `RunRequest.reasoning_effort` in `openhands_worker.py` → `_LLM(reasoning_effort=…)` with a `TypeError` fallback for older SDKs (logs a warning, no-op).
+
+### Quick Search — best-of synthesis
+
+Pulled the highest-ROI patterns from Perplexica (24k★), Khoj (18k★), and Open WebUI (70k★) into `backend/search_agent.py` + `backend/quick_search.py`.
+
+- **`standalone_query` in triage** (Perplexica) — triage now returns a context-independent rephrasing of the latest message alongside `queries[]`. Used as the canonical query for ranking, embedding, and the carousel — kills pronoun/anaphora bugs at the source.
+- **Embedding rerank + dedup** (Perplexica) — batched `nomic-embed-text` call scores snippets vs `standalone_query`; drops sim < 0.45, dedups pairs > 0.85. Catches synonym/paraphrase mismatches and the SearXNG-mirror dup case. Falls back to heuristic order on any embed failure.
+- **Trafilatura page extraction** — replaces the regex strip with `trafilatura.extract()` on top-N pages. JS-heavy and paywall-prelude pages now produce usable content. Falls back inline (same fetched HTML, no double round-trip) if trafilatura is unavailable.
+- **Per-conversation subquery dedup** (Khoj) — drops queries already searched earlier in the same conversation; preserves at least one query if all are dupes.
+- **Follow-up relevance fix** — `relevance_score` now folds prior-turn tokens into the user-token set when the message is a follow-up. Refine actually fires for "any updates?" instead of returning 1.0 every time.
+- **News freshness** — when triage's category is `news` and the user message has a recency cue (`today`/`latest`/`current year`), SearXNG gets `time_range=month`. Cache key becomes `(query, time_range)`.
+- **Triage category used for ranking** — was being computed and discarded; now drives `_apply_domain_bias` directly. Regex `_classify_query` becomes the triage-failure fallback only.
+- **SSRF guard** (Open WebUI) — `_url_safe()` resolves hostnames before fetch; rejects private/loopback/link-local IPs. Defends against malicious search results redirecting to internal services.
+- **Bounded LRU cache** — `_CACHE` capped at 512 entries with LRU eviction. Prevents long-running-process leak.
+- **Concurrency semaphore** — `_FETCH_SEMA(6)` around page-fetch + OG-image-fetch. Smooths bursts on the SearXNG LXC and ProtonVPN exit.
+- **Search-failure note** — when quick search throws, a system note ("web search was unavailable, don't guess") is appended to the user turn so the model doesn't hallucinate current events.
+- **Pre-existing `_search_searxng` bug** — any SearXNG result with a thumbnail was being marked `type="image"` and filtered out by the chat ranker. News results almost always carry an `og:image`; this was silently dropping ~60% of news results before they reached embedding rerank. Narrowed to URL-extension-only.
+- **Removed** — `_fetch_page` import in `quick_search.py` (replaced by `_fetch_clean_page`); stale `_rewrite_query` references in docstrings.
+- **New dep** — `trafilatura>=1.10.0` in `requirements.txt`.
+
+
 ## Alpha v17 — May 7, 2026
 
 ### Coder Bot v2 — Multi-Agent Rebuild
@@ -186,7 +239,6 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Fixed Reviewer / Fixer scope-validation edge case where issues with no `suggested_fix_scope` field caused the Fixer to error out instead of skipping the issue cleanly.
 - Fixed Bash render error where `$VAR` and command-substitution `$(cmd)` inside a `bash` code fence prematurely terminated rendering.
 - Fixed `num_ctx` from user settings being silently ignored by OpenHands runs after the first model load — now evict-and-reload guarantees the runtime context matches the requested value.
-
 
 
 ## Alpha v16.2 — April 22, 2026
