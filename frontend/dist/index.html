@@ -1598,6 +1598,7 @@ function HyprChat(){
   // Coder Bot v2 — per-agent model overrides. Empty = inherit from umbrella (Planning/Coder) or chat model.
   const [architectModel,setArchitectModel]=useState(()=>{try{return localStorage.getItem("hc-architect-model")||"";}catch{return "";}});
   const [reviewerModel, setReviewerModel] =useState(()=>{try{return localStorage.getItem("hc-reviewer-model") ||"";}catch{return "";}});
+  const [acceptanceModel,setAcceptanceModel]=useState(()=>{try{return localStorage.getItem("hc-acceptance-model")||"";}catch{return "";}});
   const [builderModel,  setBuilderModel]  =useState(()=>{try{return localStorage.getItem("hc-builder-model")  ||"";}catch{return "";}});
   const [fixerModel,    setFixerModel]    =useState(()=>{try{return localStorage.getItem("hc-fixer-model")    ||"";}catch{return "";}});
   const [qaModel,       setQaModel]       =useState(()=>{try{return localStorage.getItem("hc-qa-model")       ||"";}catch{return "";}});
@@ -1717,7 +1718,7 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-theme",tm);}catch{}},[tm]);
   useEffect(()=>{try{localStorage.setItem("hc-font",String(fi));}catch{}},[fi]);
   useEffect(()=>{try{localStorage.setItem("hc-token-limit",String(tokenLimit));}catch{}},[tokenLimit]);
-  useEffect(()=>{try{localStorage.setItem("hc-num-ctx",String(numCtx));}catch{}},[numCtx]);
+  useEffect(()=>{try{localStorage.setItem("hc-num-ctx",String(numCtx));fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({default_num_ctx:numCtx})}).catch(()=>{});}catch{}},[numCtx]);
   useEffect(()=>{try{localStorage.setItem("hc-temp",String(defaultTemp));}catch{}},[defaultTemp]);
   useEffect(()=>{try{localStorage.setItem("hc-top-p",String(defaultTopP));}catch{}},[defaultTopP]);
   useEffect(()=>{try{localStorage.setItem("hc-compact",compactMode?"1":"0");}catch{}},[compactMode]);
@@ -1737,6 +1738,7 @@ function HyprChat(){
   // Coder Bot v2 per-agent overrides — sync each to localStorage + PATCH /api/settings.
   useEffect(()=>{try{localStorage.setItem("hc-architect-model",architectModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({architect_model:architectModel})}).catch(()=>{});}catch{}},[architectModel]);
   useEffect(()=>{try{localStorage.setItem("hc-reviewer-model", reviewerModel); fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({reviewer_model: reviewerModel})}).catch(()=>{});}catch{}},[reviewerModel]);
+  useEffect(()=>{try{localStorage.setItem("hc-acceptance-model",acceptanceModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({acceptance_model:acceptanceModel})}).catch(()=>{});}catch{}},[acceptanceModel]);
   useEffect(()=>{try{localStorage.setItem("hc-builder-model",  builderModel);  fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({builder_model:  builderModel})}).catch(()=>{});}catch{}},[builderModel]);
   useEffect(()=>{try{localStorage.setItem("hc-fixer-model",    fixerModel);    fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fixer_model:    fixerModel})}).catch(()=>{});}catch{}},[fixerModel]);
   useEffect(()=>{try{localStorage.setItem("hc-qa-model",       qaModel);       fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({qa_model:       qaModel})}).catch(()=>{});}catch{}},[qaModel]);
@@ -1927,7 +1929,7 @@ function HyprChat(){
     fetch(`${API}/api/tools`).then(r=>r.json()).then(setTools).catch(()=>{});
     fetch(`${API}/api/model-configs`).then(r=>r.json()).then(setMcs).catch(()=>{});
     fetch(`${API}/api/health`).then(r=>r.json()).then(d=>setHealth(d.services||{})).catch(()=>{});
-    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));if(d.current_planning_model!=null)setPlanningModel(d.current_planning_model);if(d.current_coder_model!=null)setCoderModel(d.current_coder_model);if(d.current_architect_model!=null)setArchitectModel(d.current_architect_model);if(d.current_reviewer_model!=null)setReviewerModel(d.current_reviewer_model);if(d.current_builder_model!=null)setBuilderModel(d.current_builder_model);if(d.current_fixer_model!=null)setFixerModel(d.current_fixer_model);if(d.current_qa_model!=null)setQaModel(d.current_qa_model);if(d.current_workspace_model!=null)setWsModel(d.current_workspace_model);if(d.openhands_num_ctx!=null)setCoderNumCtx(d.openhands_num_ctx);if(d.openhands_enabled!=null)setOpenhandsEnabled(d.openhands_enabled);if(d.openhands_max_rounds!=null)setOpenhandsMaxRounds(d.openhands_max_rounds);if(d.openhands_reasoning_effort)setOpenhandsReasoningEffort(d.openhands_reasoning_effort);}).catch(()=>{});
+    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));if(d.default_num_ctx!=null)setNumCtx(d.default_num_ctx);if(d.current_planning_model!=null)setPlanningModel(d.current_planning_model);if(d.current_coder_model!=null)setCoderModel(d.current_coder_model);if(d.current_architect_model!=null)setArchitectModel(d.current_architect_model);if(d.current_reviewer_model!=null)setReviewerModel(d.current_reviewer_model);if(d.current_acceptance_model!=null)setAcceptanceModel(d.current_acceptance_model);if(d.current_builder_model!=null)setBuilderModel(d.current_builder_model);if(d.current_fixer_model!=null)setFixerModel(d.current_fixer_model);if(d.current_qa_model!=null)setQaModel(d.current_qa_model);if(d.current_workspace_model!=null)setWsModel(d.current_workspace_model);if(d.openhands_num_ctx!=null)setCoderNumCtx(d.openhands_num_ctx);if(d.openhands_enabled!=null)setOpenhandsEnabled(d.openhands_enabled);if(d.openhands_max_rounds!=null)setOpenhandsMaxRounds(d.openhands_max_rounds);if(d.openhands_reasoning_effort)setOpenhandsReasoningEffort(d.openhands_reasoning_effort);}).catch(()=>{});
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
     fetch(`${API}/api/workspaces`).then(r=>r.json()).then(setWorkspaces).catch(()=>{});
     fetch(`${API}/api/councils`).then(r=>r.json()).then(setCouncils).catch(()=>{});
@@ -2788,6 +2790,7 @@ function HyprChat(){
       // Coder Bot v2 per-agent overrides — clear if pinned to the deleted model
       if(architectModel===m){setArchitectModel("");}
       if(reviewerModel===m){setReviewerModel("");}
+      if(acceptanceModel===m){setAcceptanceModel("");}
       if(builderModel===m){setBuilderModel("");}
       if(fixerModel===m){setFixerModel("");}
       if(qaModel===m){setQaModel("");}
@@ -5066,7 +5069,7 @@ function HyprChat(){
             <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Same as chat model</div><div style={{fontSize:9,color:t.dim}}>Click to select a dedicated planning model</div></div>
             <span style={{fontSize:9,color:t.mut}}>▾</span>
           </div>}
-          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Used by Architect + Reviewer agents. Empty = uses the active chat model.</div>
+          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Used by Architect + Reviewer + Acceptance agents. Empty = uses the active chat model.</div>
         </div>
 
         <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
@@ -5117,6 +5120,19 @@ function HyprChat(){
               </div>:<div onClick={()=>setReviewerModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
                 <span style={{fontSize:14}}>🔍</span>
                 <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from Planning Model</div><div style={{fontSize:9,color:t.dim}}>Click to override for the Reviewer agent only</div></div>
+                <span style={{fontSize:9,color:t.mut}}>▾</span>
+              </div>}
+            </div>
+
+            {/* Acceptance — inherits from Planning Model */}
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>✅ Acceptance Model</div>
+              {acceptanceModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <div style={{flex:1}}><ModelPicker value={acceptanceModel} onChange={setAcceptanceModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
+                <button onClick={()=>setAcceptanceModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
+              </div>:<div onClick={()=>setAcceptanceModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+                <span style={{fontSize:14}}>✅</span>
+                <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from Planning Model</div><div style={{fontSize:9,color:t.dim}}>Click to override for the Acceptance agent only</div></div>
                 <span style={{fontSize:9,color:t.mut}}>▾</span>
               </div>}
             </div>

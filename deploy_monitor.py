@@ -59,6 +59,7 @@ WATCHED = {
     "backend/agents/personas.py":       ("Personas",           REMOTE_BACKEND + "agents/", True),
     "backend/agents/architect.py":      ("Architect Agent",    REMOTE_BACKEND + "agents/", True),
     "backend/agents/reviewer.py":       ("Reviewer Agent",     REMOTE_BACKEND + "agents/", True),
+    "backend/agents/acceptance.py":     ("Acceptance Agent",   REMOTE_BACKEND + "agents/", True),
     "backend/agents/fixer.py":          ("Fixer Agent",        REMOTE_BACKEND + "agents/", True),
     "backend/agents/project_qa.py":     ("ProjectQA Agent",    REMOTE_BACKEND + "agents/", True),
     "backend/agents/project_indexer.py":("Project Indexer",    REMOTE_BACKEND + "agents/", True),

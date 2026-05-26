@@ -5,7 +5,7 @@ Replaces the v1 pattern of "orchestrator manually reads files and rewrites
 them in 28+ chat rounds to address reviewer findings" with a single stateless
 Fixer run that:
 
-  1. Loads the prior reviewer envelope from the run store.
+  1. Loads the prior reviewer/acceptance envelope from the run store.
   2. For each reviewer issue, reads the files in the issue's `suggested_fix_scope`.
   3. Asks a coder-class LLM for minimal targeted edits as structured JSON.
   4. Validates that the model only edits scope files, then writes them via Codebox.
@@ -39,6 +39,7 @@ _FIXER_PROMPT = """You are the Fixer — a focused code-editing agent. You MUST 
 - Language: {language}
 - Build command: {build_cmd}
 - Test command: {test_cmd}
+- Issue source: {source_role}
 {research_section}
 ## Issues to fix
 {issue_block}
@@ -147,6 +148,20 @@ _SUMMARY_RE = re.compile(r"###\s*SUMMARY\s*:?\s*(.+?)(?=\n\s*###|\Z)", re.DOTALL
 _CANNOT_FIX_RE = re.compile(r"###\s*CANNOT[_\s]?FIX\s*:?\s*(.+?)(?=\n\s*###|\Z)", re.DOTALL)
 
 
+def _paths_are_docs_only(paths: list[str]) -> bool:
+    if not paths:
+        return False
+    doc_exts = {".md", ".rst", ".txt"}
+    doc_names = {"README", "README.md", "README.rst", "README.txt"}
+    for path in paths:
+        name = os.path.basename(path or "")
+        ext = os.path.splitext(name)[1].lower()
+        if name in doc_names or ext in doc_exts:
+            continue
+        return False
+    return True
+
+
 def _parse_fixer_output(text: str) -> dict:
     """Parse marker-delimited fixer output into {edits, summary, cannot_fix}.
 
@@ -181,7 +196,7 @@ async def run_fixer(http, events, conv_id: str, *,
                     reviewer_run_id: str = "",
                     parent_run_id: str = "",
                     research_context: str = "") -> dict:
-    """Execute a Fixer run that addresses every issue in a prior Reviewer envelope.
+    """Execute a Fixer run that addresses every issue in a prior Reviewer/Acceptance envelope.
 
     Returns a structured envelope. Creates a `runs` row with role='fixer' and
     parent_run_id set to the reviewer run, so the run graph stays linked.
@@ -222,7 +237,7 @@ async def run_fixer(http, events, conv_id: str, *,
             except Exception:
                 pass
 
-    # 1. Pull the reviewer envelope.
+    # 1. Pull the reviewer/acceptance envelope.
     if not reviewer_run_id:
         envelope = {"status": "error", "summary": "run_fixer needs reviewer_run_id",
                     "issues_addressed": 0, "files_touched": [], "errors": []}
@@ -245,6 +260,7 @@ async def run_fixer(http, events, conv_id: str, *,
 
     rev_env = reviewer.get("result_envelope") or {}
     issues = rev_env.get("issues") or []
+    source_role = reviewer.get("role", "reviewer")
 
     project_dir = (rev_env.get("project_dir") or "").strip()
     if not project_dir:
@@ -390,7 +406,9 @@ async def run_fixer(http, events, conv_id: str, *,
 
         issue_blocks.append(
             f"### Issue {i}\n"
-            f"- Severity: {issue.get('severity','?')}\n"
+            f"- Source: {source_role}\n"
+            f"- Category: {issue.get('category', issue.get('severity','?'))}\n"
+            f"- Severity: {issue.get('severity', issue.get('category','?'))}\n"
             f"- File: {issue.get('file','?')}"
             + (f":{','.join(str(x) for x in issue.get('lines') or [])}" if issue.get('lines') else "")
             + f"\n- Summary: {issue.get('summary','')}\n"
@@ -451,6 +469,7 @@ async def run_fixer(http, events, conv_id: str, *,
         language=language or "(unknown)",
         build_cmd=build_cmd or "(none)",
         test_cmd=test_cmd or "(none)",
+        source_role=source_role,
         research_section=research_section,
         issue_block=issue_block,
         allowed_paths_list="\n".join(f"  - {p}" for p in capped_scope),
@@ -468,6 +487,7 @@ async def run_fixer(http, events, conv_id: str, *,
                 "model": fixer_model,
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": False,
+                "think": False,
                 "options": {"temperature": 0.2,
                             "num_ctx": config.DEFAULT_NUM_CTX},
             },
@@ -565,6 +585,9 @@ async def run_fixer(http, events, conv_id: str, *,
         "project_dir": project_dir,
         "language": language,
         "reviewer_run_id": reviewer_run_id,
+        "source_run_id": reviewer_run_id,
+        "source_role": source_role,
+        "docs_only": _paths_are_docs_only(sorted(files_touched)),
         "research_used": bool(research_context),
     }
 

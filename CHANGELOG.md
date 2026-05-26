@@ -1,3 +1,15 @@
+## Alpha v17.0.2 — May 26, 2026
+
+### Coder Bot v2 — acceptance gate
+
+- Added `run_acceptance_review` as a required final gate after clean `run_review`.
+- Added `backend/agents/acceptance.py` for static spec/docs/tests/packaging checks.
+- `run_fixer` now handles acceptance issues, with docs-only fixes allowed to skip build review.
+- `download_project` now waits for accepted status and excludes common generated/cache/build artifacts.
+- Added Acceptance model override in Settings; empty inherits from Planning Model.
+- Acceptance now uses the user-configured default context window instead of Ollama defaults.
+- Deploy monitor now pushes the new Acceptance agent file.
+
 ## Alpha v17.0.1 — May 26, 2026
 
 ### Coder Bot v2 — workflow gate hardening

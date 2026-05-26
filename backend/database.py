@@ -204,7 +204,7 @@ CREATE TABLE IF NOT EXISTS coding_projects (
 CREATE INDEX IF NOT EXISTS idx_coding_projects_conv ON coding_projects(conversation_id);
 
 -- Coder Bot v2: durable agent runs. One row per agent invocation
--- (architect / builder.* / reviewer / fixer / qa / generate_code wrapper).
+-- (architect / builder.* / reviewer / acceptance / fixer / qa / generate_code wrapper).
 -- Survives browser disconnects; UI re-renders from this table.
 CREATE TABLE IF NOT EXISTS runs (
     id              TEXT PRIMARY KEY,

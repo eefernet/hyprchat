@@ -200,6 +200,7 @@ async def lifespan(app: FastAPI):
     for _key, _attr in (
         ("architect_model", "ARCHITECT_MODEL"),
         ("reviewer_model",  "REVIEWER_MODEL"),
+        ("acceptance_model", "ACCEPTANCE_MODEL"),
         ("builder_model",   "BUILDER_MODEL"),
         ("fixer_model",     "FIXER_MODEL"),
         ("qa_model",        "QA_MODEL"),
@@ -2869,6 +2870,7 @@ async def get_app_settings():
         # Coder Bot v2 per-agent overrides — empty string = inherit from umbrella
         "current_architect_model": config.ARCHITECT_MODEL,
         "current_reviewer_model":  config.REVIEWER_MODEL,
+        "current_acceptance_model": config.ACCEPTANCE_MODEL,
         "current_builder_model":   config.BUILDER_MODEL,
         "current_fixer_model":     config.FIXER_MODEL,
         "current_qa_model":        config.QA_MODEL,
@@ -2890,7 +2892,7 @@ async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
     allowed = {"file_cleanup_days", "ollama_url", "rag", "planning_model", "coder_model",
                "workspace_model",
-               "architect_model", "reviewer_model", "builder_model", "fixer_model", "qa_model",
+               "architect_model", "reviewer_model", "acceptance_model", "builder_model", "fixer_model", "qa_model",
                "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
                "openhands_reasoning_effort", "default_num_ctx"}
     for k, v in body.items():
@@ -2924,6 +2926,7 @@ async def update_app_settings(body: dict = Body(...)):
     for _key, _attr, _label in (
         ("architect_model", "ARCHITECT_MODEL", "Architect"),
         ("reviewer_model",  "REVIEWER_MODEL",  "Reviewer"),
+        ("acceptance_model", "ACCEPTANCE_MODEL", "Acceptance"),
         ("builder_model",   "BUILDER_MODEL",   "Builder"),
         ("fixer_model",     "FIXER_MODEL",     "Fixer"),
         ("qa_model",        "QA_MODEL",        "ProjectQA"),
@@ -2960,6 +2963,7 @@ async def update_app_settings(body: dict = Body(...)):
         "current_workspace_model": config.WORKSPACE_MODEL,
         "current_architect_model": config.ARCHITECT_MODEL,
         "current_reviewer_model":  config.REVIEWER_MODEL,
+        "current_acceptance_model": config.ACCEPTANCE_MODEL,
         "current_builder_model":   config.BUILDER_MODEL,
         "current_fixer_model":     config.FIXER_MODEL,
         "current_qa_model":        config.QA_MODEL,

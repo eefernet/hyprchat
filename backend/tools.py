@@ -98,6 +98,21 @@ def _issue_signatures(envelope: dict) -> set:
     return sigs
 
 
+def _paths_are_docs_only(paths: list[str]) -> bool:
+    """True when a fixer touched only documentation files."""
+    if not paths:
+        return False
+    doc_exts = {".md", ".rst", ".txt"}
+    doc_names = {"README", "README.md", "README.rst", "README.txt"}
+    for path in paths:
+        name = os.path.basename(path or "")
+        ext = os.path.splitext(name)[1].lower()
+        if name in doc_names or ext in doc_exts:
+            continue
+        return False
+    return True
+
+
 async def _deep_research_called_since(conv_id: str, since_iso: str | None) -> bool:
     """Return True iff deep_research has run on this conversation since the
     trigger event at `since_iso`. Checks two sources:
@@ -548,13 +563,25 @@ CODEAGENT_TOOLS = {
             }, "required": []},
         },
     },
+    "run_acceptance_review": {
+        "type": "function",
+        "function": {
+            "name": "run_acceptance_review",
+            "description": "Final acceptance gate after run_review is clean. Statically inspects the project against the user's request, README/docs, manifests, tests, entrypoints, and generated artifacts. Must pass before download_project. If it returns issues, call run_fixer with its run_id.",
+            "parameters": {"type": "object", "properties": {
+                "project_dir": {"type": "string", "description": "Absolute path to the project root in the sandbox. If omitted, uses the clean reviewer envelope."},
+                "reviewer_run_id": {"type": "string", "description": "Optional run_id from the clean run_review call."},
+                "project_id": {"type": "string", "description": "Optional project_id for run-graph linkage."},
+            }, "required": []},
+        },
+    },
     "run_fixer": {
         "type": "function",
         "function": {
             "name": "run_fixer",
-            "description": "Apply targeted edits for issues identified by run_review. The Fixer reads each issue's fix-scope files, asks a coder LLM for minimal complete-file replacements, and writes the edits back. Use this AFTER run_review returns issues, INSTEAD OF manually reading + writing each file in chat rounds. After run_fixer completes, call run_review AGAIN to verify the fixes worked. Hard cap on fixer cycles: 3.",
+            "description": "Apply targeted edits for issues identified by run_review or run_acceptance_review. The Fixer reads each issue's fix-scope files, asks a coder LLM for minimal complete-file replacements, and writes the edits back. Use this AFTER a review/acceptance envelope returns issues. After reviewer-driven fixes, call run_review again. After docs-only acceptance fixes, call run_acceptance_review again; otherwise call run_review. Hard caps: 3 reviewer-driven fix cycles, 2 acceptance-driven fix cycles.",
             "parameters": {"type": "object", "properties": {
-                "reviewer_run_id": {"type": "string", "description": "The run_id of the run_review call whose issues you want to fix (e.g. 'run-bd6f9dc7b4e3'). If omitted, the most recent reviewer run on this conversation is used."},
+                "reviewer_run_id": {"type": "string", "description": "The run_id of the run_review or run_acceptance_review call whose issues you want to fix (e.g. 'run-bd6f9dc7b4e3'). If omitted, the most recent actionable review/acceptance run is used."},
             }, "required": []},
         },
     },
@@ -1019,6 +1046,7 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
         "delete_file": ["path"],
         "plan_project": ["task", "language", "constraints"],
         "run_review": ["project_dir", "project_id"],
+        "run_acceptance_review": ["project_dir", "reviewer_run_id", "project_id"],
         "search_files": ["pattern", "path", "file_pattern"],
         "diff_files": ["path_a", "path_b"],
         "git_init": ["path", "language"],
@@ -1252,19 +1280,44 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
 
         _runs_for_cap = None
         if conv_id and name == "run_fixer":
+            _parent_role_for_cap = "reviewer"
             try:
                 _runs_for_cap = await db.get_runs_by_conversation(conv_id, limit=20)
+                _run_role_by_id_cap = {r.get("id"): r.get("role") for r in _runs_for_cap}
+                _requested_parent_id = (args.get("reviewer_run_id") or "").strip()
+                _parent_role_for_cap = ""
+                if _requested_parent_id:
+                    _parent_role_for_cap = _run_role_by_id_cap.get(_requested_parent_id, "")
+                if not _parent_role_for_cap:
+                    for _r in _runs_for_cap:
+                        if _r.get("role") not in {"reviewer", "acceptance"}:
+                            continue
+                        _env = _r.get("result_envelope") or {}
+                        if (_env.get("status") or "").lower() in {"issues", "error"}:
+                            _parent_role_for_cap = _r.get("role", "reviewer")
+                            break
+                if not _parent_role_for_cap:
+                    _parent_role_for_cap = "reviewer"
+
+                def _fixer_source_role_cap(_fr):
+                    _fenv = _fr.get("result_envelope") or {}
+                    return (_fenv.get("source_role")
+                            or _run_role_by_id_cap.get(_fr.get("parent_run_id"))
+                            or "reviewer")
+
                 _fixer_succ = sum(
                     1 for r in _runs_for_cap
-                    if r.get("role") == "fixer" and r.get("status") == "succeeded"
+                    if (r.get("role") == "fixer" and r.get("status") == "succeeded"
+                        and _fixer_source_role_cap(r) == _parent_role_for_cap)
                 )
-                if _fixer_succ >= 3:
+                _cap_limit = 2 if _parent_role_for_cap == "acceptance" else 3
+                if _fixer_succ >= _cap_limit:
                     # v1 doesn't run this loop, so cap only applies to v2.
                     if await _check_v2():
-                        # Pull the latest reviewer's summary so the model has
+                        # Pull the latest actionable summary so the model has
                         # specifics to relay to the user.
                         _last_rev = next(
-                            (r for r in _runs_for_cap if r.get("role") == "reviewer"),
+                            (r for r in _runs_for_cap if r.get("role") == _parent_role_for_cap),
                             None,
                         )
                         _rev_sum = ""
@@ -1283,13 +1336,15 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             )
                         await events.emit(conv_id, "tool_end", {
                             "tool": "run_fixer", "icon": "wrench",
-                            "status": f"⛔ Cycle cap reached ({_fixer_succ}/3) — summarize and stop",
+                            "status": f"⛔ Cycle cap reached ({_fixer_succ}/{_cap_limit}) — summarize and stop",
                         })
                         print(f"[v2-gate] CYCLE CAP: blocking run_fixer (already "
-                              f"{_fixer_succ} succeeded fixer runs on this conv)", flush=True)
+                              f"{_fixer_succ} succeeded {_parent_role_for_cap}-driven fixer runs "
+                              f"on this conv)", flush=True)
                         return (
-                            f"BLOCKED — Hard cap of 3 review/fix cycles already attempted "
-                            f"on this conversation ({_fixer_succ} successful fixer runs).\n\n"
+                            f"BLOCKED — Hard cap of {_cap_limit} {_parent_role_for_cap}/fix "
+                            f"cycles already attempted on this conversation "
+                            f"({_fixer_succ} successful fixer runs).\n\n"
                             f"The same class of issue is persisting and another fixer call "
                             f"will not help. Your VERY NEXT output MUST be plain text to the "
                             f"user that:\n"
@@ -1322,9 +1377,13 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 _runs_sf = _runs_for_cap
                 if _runs_sf is None:
                     _runs_sf = await db.get_runs_by_conversation(conv_id, limit=20)
+                if _parent_role_for_cap == "acceptance":
+                    raise StopAsyncIteration("acceptance fixes do not use research nudge")
                 _fsucc_sf = sum(
                     1 for r in _runs_sf
-                    if r.get("role") == "fixer" and r.get("status") == "succeeded"
+                    if (r.get("role") == "fixer" and r.get("status") == "succeeded"
+                        and ((r.get("result_envelope") or {}).get("source_role")
+                             or "reviewer") != "acceptance")
                 )
                 # 1 ≤ fixer_succ ≤ 2: between first failure and final cycle.
                 # 0 = first attempt, no gate. ≥3 = cap (handled above).
@@ -1412,11 +1471,13 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                 + "obscure. Do NOT call run_fixer, generate_code, write_file, run_shell, "
                                 + "or run_review until deep_research has run."
                             )
+            except StopAsyncIteration:
+                pass
             except Exception as _sfe:
                 print(f"[v2-gate] stuck/final-cycle check failed (non-fatal): {_sfe}")
 
             # Phantom run_fixer guard: block run_fixer when the latest run
-            # isn't a reviewer with status='issues'/'error'. Without this,
+            # isn't a reviewer/acceptance run with status='issues'/'error'. Without this,
             # a hallucinated reviewer_run_id (the model sometimes invents
             # one right after generate_code) falls through to fixer.py,
             # which returns "no envelope to fix" — burning a cap slot for
@@ -1433,13 +1494,14 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     for _r in _runs_pf:
                         _role_pf = _r.get("role", "")
                         _st_pf = (_r.get("status") or "").lower()
-                        if (_role_pf == "reviewer" or _role_pf.startswith("builder")
+                        if (_role_pf in {"reviewer", "acceptance"} or _role_pf.startswith("builder")
                                 or _role_pf == "fixer") and _st_pf in _MEANINGFUL_STATUSES:
                             _latest_meaningful = _r
                             break
 
                     _allow_fixer = False
-                    if _latest_meaningful and _latest_meaningful.get("role") == "reviewer":
+                    if (_latest_meaningful
+                            and _latest_meaningful.get("role") in {"reviewer", "acceptance"}):
                         _env_pf = _latest_meaningful.get("result_envelope") or {}
                         _rstatus_pf = (_env_pf.get("status") or "").lower()
                         if _rstatus_pf in ("issues", "error"):
@@ -1459,19 +1521,19 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                 break
                         await events.emit(conv_id, "tool_end", {
                             "tool": "run_fixer", "icon": "wrench",
-                            "status": "⛔ run_fixer needs a reviewer envelope first",
+                            "status": "⛔ run_fixer needs an actionable review envelope first",
                         })
                         print(f"[v2-gate] PHANTOM FIXER: blocking run_fixer "
                               f"(latest meaningful run is {_trig_role}/{_trig_status} "
-                              f"{(_trig_id or '')[:14]}, not a reviewer with issues)", flush=True)
+                              f"{(_trig_id or '')[:14]}, not review/acceptance with issues)", flush=True)
                         return (
-                            f"BLOCKED — run_fixer requires a recent reviewer envelope with "
+                            f"BLOCKED — run_fixer requires a recent reviewer or acceptance envelope with "
                             f"issues, but the most recent meaningful run is "
                             f"'{_trig_role}' (status={_trig_status}). There is no "
                             f"actionable envelope to fix.\n\n"
                             f"Your VERY NEXT tool call MUST be:\n"
                             f"  run_review(project_dir='{_pd_hint or '/root/projects/...'}')\n\n"
-                            f"Do not pass a hallucinated reviewer_run_id. Run the reviewer "
+                            f"Do not pass a hallucinated reviewer_run_id. Run review/acceptance "
                             f"first; if it returns issues, call run_fixer with that real id."
                         )
             except Exception as _pe:
@@ -1547,12 +1609,13 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             except Exception as _rbe:
                 print(f"[v2-gate] anti-rebuild check failed (non-fatal): {_rbe}")
 
-        if conv_id and name not in ("run_review", "run_fixer", "ask_project"):
+        if conv_id and name not in ("run_review", "run_acceptance_review", "run_fixer", "ask_project"):
             try:
                 _runs_for_v2_gate = await db.get_runs_by_conversation(conv_id, limit=20)
                 _pending_run = None    # state 1 trigger
                 _pending_kind = ""
                 _pending_review = None  # state 2 trigger
+                _pending_acceptance_needed = None  # clean review must be accepted before delivery
                 _terminal_qa = None    # state 3 trigger
 
                 # Walk newest-first.
@@ -1574,10 +1637,20 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             _terminal_qa = _r
                         break
                     if _role == "reviewer":
-                        # Most recent reviewer: state 2 is whether it has issues.
+                        # Most recent reviewer: issues need fixer; clean needs acceptance.
                         _env_r = _r.get("result_envelope") or {}
                         _rstatus = (_env_r.get("status") or "").lower()
                         if _rstatus in ("issues", "error"):
+                            _pending_review = _r
+                        elif _rstatus == "clean":
+                            _pending_acceptance_needed = _r
+                        break
+                    if _role == "acceptance":
+                        # Acceptance issues route through the same Fixer, but
+                        # accepted releases the delivery gate.
+                        _env_a = _r.get("result_envelope") or {}
+                        _astatus = (_env_a.get("status") or "").lower()
+                        if _astatus in ("issues", "error"):
                             _pending_review = _r
                         break
                     if _role.startswith("builder") and _r.get("status") in _BUILDER_GATING:
@@ -1585,8 +1658,13 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         _pending_kind = "builder"
                         break
                     if _role == "fixer" and _r.get("status") in _FIXER_GATING:
-                        _pending_run = _r
-                        _pending_kind = "fixer"
+                        _env_f = _r.get("result_envelope") or {}
+                        if (_env_f.get("source_role") == "acceptance"
+                                and _env_f.get("docs_only")):
+                            _pending_acceptance_needed = _r
+                        else:
+                            _pending_run = _r
+                            _pending_kind = "fixer"
                         break
 
                 # If neither state triggers, fall through and run normally.
@@ -1609,9 +1687,29 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         f"⛔ Blocked — call run_review first (after {_why} {_pid[:14]}…)",
                         _pid,
                     )
+                elif _pending_acceptance_needed is not None:
+                    _env = _pending_acceptance_needed.get("result_envelope") or {}
+                    _pd = (_env.get("project_dir") or "").strip()
+                    _rid = _pending_acceptance_needed.get("id", "?")
+                    _source_role = _pending_acceptance_needed.get("role", "")
+                    _reviewer_id = (_env.get("reviewer_run_id") or _rid)
+                    _gate_msg = (
+                        "state", "acceptance-needed",
+                        f"BLOCKED — run_review is clean, but final acceptance has not "
+                        f"passed yet.\n\n"
+                        f"Your VERY NEXT tool call MUST be:\n"
+                        f"  run_acceptance_review(project_dir='{_pd}', reviewer_run_id='{_reviewer_id}')\n\n"
+                        f"Acceptance verifies the generated project satisfies the user's "
+                        f"request, has accurate docs, sane tests, and clean packaging. "
+                        f"Do not call {name} or download_project until acceptance returns accepted.",
+                        f"⛔ Blocked — call run_acceptance_review first ({_source_role} {_rid[:14]}…)",
+                        _rid,
+                    )
                 elif _pending_review is not None:
                     _rid = _pending_review.get("id", "?")
-                    _rstatus_disp = (_pending_review.get("result_envelope") or {}).get("status", "?")
+                    _pending_role = _pending_review.get("role", "reviewer")
+                    _pending_env = _pending_review.get("result_envelope") or {}
+                    _rstatus_disp = _pending_env.get("status", "?")
                     # Cap-aware release: once the fixer cycle budget is
                     # exhausted, the same review issues will keep blocking
                     # the conversation forever. Allow the model to deliver
@@ -1623,13 +1721,21 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     # an exhausted attempt. The cycle-cap check (which gates
                     # run_fixer itself) still counts only successes.
                     _FIXER_TERMINAL = {"succeeded", "failed", "partial", "no_op"}
+                    _run_role_by_id = {r.get("id"): r.get("role") for r in _runs_for_v2_gate}
+                    def _fixer_source_role(_fr):
+                        _fenv = _fr.get("result_envelope") or {}
+                        return (_fenv.get("source_role")
+                                or _run_role_by_id.get(_fr.get("parent_run_id"))
+                                or "reviewer")
                     _fixer_attempts_gate = sum(
                         1 for _r in _runs_for_v2_gate
-                        if _r.get("role") == "fixer" and _r.get("status") in _FIXER_TERMINAL
+                        if (_r.get("role") == "fixer" and _r.get("status") in _FIXER_TERMINAL
+                            and _fixer_source_role(_r) == _pending_role)
                     )
                     _fixer_succ_gate = sum(
                         1 for _r in _runs_for_v2_gate
-                        if _r.get("role") == "fixer" and _r.get("status") == "succeeded"
+                        if (_r.get("role") == "fixer" and _r.get("status") == "succeeded"
+                            and _fixer_source_role(_r) == _pending_role)
                     )
                     _DELIVERY_OK_AFTER_CAP = {
                         "download_project", "download_file",
@@ -1645,7 +1751,9 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     # the research-first requirement and then retry run_fixer on
                     # the next round. Below 1 fixer attempt the model should
                     # actually try fixing before researching.
+                    _cap_limit_gate = 2 if _pending_role == "acceptance" else 3
                     if (name == "deep_research"
+                            and _pending_role != "acceptance"
                             and _fixer_attempts_gate >= 1
                             and not await _deep_research_called_since(
                                 conv_id, _pending_review.get("ended_at"))):
@@ -1653,15 +1761,17 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                               f"despite fix-needed (fixer_attempts={_fixer_attempts_gate}, "
                               f"required by FINAL_CYCLE/STUCK_FIX)", flush=True)
                         # Skip _gate_msg → deep_research runs.
-                    elif _fixer_attempts_gate >= 3 and name in _DELIVERY_OK_AFTER_CAP:
+                    elif _fixer_attempts_gate >= _cap_limit_gate and name in _DELIVERY_OK_AFTER_CAP:
                         print(f"[v2-gate] cap-release: allowing {name} despite "
                               f"fix-needed (attempts={_fixer_attempts_gate}, "
                               f"succ={_fixer_succ_gate})", flush=True)
                         # Skip _gate_msg entirely → tool runs normally.
                     else:
+                        _tool_name = "run_acceptance_review" if _pending_role == "acceptance" else "run_review"
+                        _issue_label = "run_acceptance_review" if _pending_role == "acceptance" else "run_review"
                         _gate_msg = (
                             "state", "fix-needed",
-                            f"BLOCKED — run_review ({_rid}) returned status='{_rstatus_disp}' "
+                            f"BLOCKED — {_issue_label} ({_rid}) returned status='{_rstatus_disp}' "
                             f"with issues that have not been addressed.\n\n"
                             f"Your VERY NEXT tool call MUST be:\n"
                             f"  run_fixer(reviewer_run_id='{_rid}')\n\n"
@@ -1669,8 +1779,9 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             f"edits via the coder model, and writes them back. Do NOT manually "
                             f"call read_file / write_file for these issues — that's the v1 "
                             f"antipattern that burns rounds. After run_fixer completes, call "
-                            f"run_review again to verify.",
-                            f"⛔ Blocked — call run_fixer first (review {_rid[:14]}… has issues)",
+                            f"{_tool_name if _pending_role == 'acceptance' else 'run_review'} "
+                            f"as instructed by the fixer result.",
+                            f"⛔ Blocked — call run_fixer first ({_pending_role} {_rid[:14]}… has issues)",
                             _rid,
                         )
                 elif _terminal_qa is not None:
@@ -2047,10 +2158,45 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 try:
                     _runs_for_gate = await db.get_runs_by_conversation(conv_id, limit=20)
                     _latest_reviewer = None
+                    _latest_acceptance = None
                     for _r in _runs_for_gate:
+                        if _r.get("role") == "acceptance":
+                            _latest_acceptance = _r
+                            break
                         if _r.get("role") == "reviewer":
                             _latest_reviewer = _r
                             break
+                    if _latest_acceptance:
+                        _env = _latest_acceptance.get("result_envelope") or {}
+                        _astatus = (_env.get("status") or "").lower()
+                        if _astatus != "accepted":
+                            issues = _env.get("issues") or []
+                            n = len(issues)
+                            lines = [
+                                f"BLOCKED — last run_acceptance_review returned status='{_astatus}'.",
+                                "You CANNOT call download_project until acceptance is accepted.",
+                                "",
+                                f"Acceptance flagged {n} issue{'s' if n != 1 else ''}:",
+                            ]
+                            for i, iss in enumerate(issues[:5], 1):
+                                lines.append(
+                                    f"  {i}. [{iss.get('category','?')}] {iss.get('file','?')}"
+                                    + (f":{','.join(str(x) for x in iss.get('lines') or [])}" if iss.get('lines') else "")
+                                    + f" — {iss.get('summary','')}"
+                                )
+                                scope = iss.get("suggested_fix_scope") or []
+                                if scope:
+                                    lines.append(f"     fix scope: {', '.join(scope[:5])}")
+                            lines.append("")
+                            lines.append(
+                                f"REQUIRED NEXT STEP: run_fixer(reviewer_run_id='{_latest_acceptance.get('id')}'), "
+                                "then re-run review/acceptance as instructed by the fixer."
+                            )
+                            await events.emit(conv_id, "tool_end", {
+                                "tool": "download_project", "icon": "code",
+                                "status": f"⛔ Blocked — acceptance has {n} issue{'s' if n != 1 else ''}",
+                            })
+                            return "\n".join(lines)
                     if _latest_reviewer:
                         _env = _latest_reviewer.get("result_envelope") or {}
                         _rstatus = (_env.get("status") or "").lower()
@@ -2086,6 +2232,17 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             })
                             print(f"[CHAT] download_project blocked: latest reviewer={_latest_reviewer.get('id')} status={_rstatus} issues={n}")
                             return "\n".join(lines)
+                        if _rstatus == "clean":
+                            await events.emit(conv_id, "tool_end", {
+                                "tool": "download_project", "icon": "code",
+                                "status": "⛔ Blocked — acceptance review required",
+                            })
+                            return (
+                                f"BLOCKED — run_review ({_latest_reviewer.get('id')}) is clean, "
+                                "but run_acceptance_review has not accepted the project yet.\n\n"
+                                "REQUIRED NEXT STEP:\n"
+                                f"  run_acceptance_review(reviewer_run_id='{_latest_reviewer.get('id')}')"
+                            )
                 except Exception as _ge:
                     # Gate is best-effort — don't crash legitimate downloads if
                     # the runs query fails. Log and proceed.
@@ -2100,8 +2257,66 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             tarname = f"{dirname}.tar.gz"
             qdir = shlex.quote(directory)
             qtarname = shlex.quote(f"/tmp/{tarname}")
+            exclude_args = (
+                "--exclude='.pytest_cache' --exclude='*/.pytest_cache/*' "
+                "--exclude='__pycache__' --exclude='*/__pycache__/*' "
+                "--exclude='*.pyc' --exclude='*.egg-info' --exclude='*.egg-info/*' "
+                "--exclude='.mypy_cache' --exclude='*/.mypy_cache/*' "
+                "--exclude='.ruff_cache' --exclude='*/.ruff_cache/*' "
+                "--exclude='.cache' --exclude='*/.cache/*' "
+                "--exclude='.git' --exclude='*/.git/*' "
+                "--exclude='node_modules' --exclude='*/node_modules/*' "
+                "--exclude='dist' --exclude='*/dist/*' "
+                "--exclude='build' --exclude='*/build/*' "
+                "--exclude='target' --exclude='*/target/*' "
+                "--exclude='.next' --exclude='*/.next/*' "
+                "--exclude='venv' --exclude='*/venv/*' "
+                "--exclude='.venv' --exclude='*/.venv/*' "
+                "--exclude='.npm' --exclude='*/.npm/*'"
+            )
+            summary_cmd = (
+                f"cd {qdir} && "
+                "included=$(find . -type f "
+                "! -path '*/.pytest_cache/*' ! -path '*/__pycache__/*' ! -name '*.pyc' "
+                "! -path '*.egg-info/*' ! -path '*/.mypy_cache/*' ! -path '*/.ruff_cache/*' "
+                "! -path '*/.cache/*' ! -path '*/.git/*' ! -path '*/node_modules/*' "
+                "! -path '*/dist/*' ! -path '*/build/*' ! -path '*/target/*' "
+                "! -path '*/.next/*' ! -path '*/venv/*' ! -path '*/.venv/*' "
+                "! -path '*/.npm/*' | wc -l); "
+                "excluded=$(find . \\( "
+                "-path '*/.pytest_cache/*' -o -path '*/__pycache__/*' -o -name '*.pyc' "
+                "-o -path '*.egg-info/*' -o -path '*/.mypy_cache/*' -o -path '*/.ruff_cache/*' "
+                "-o -path '*/.cache/*' -o -path '*/.git/*' -o -path '*/node_modules/*' "
+                "-o -path '*/dist/*' -o -path '*/build/*' -o -path '*/target/*' "
+                "-o -path '*/.next/*' -o -path '*/venv/*' -o -path '*/.venv/*' "
+                "-o -path '*/.npm/*' \\) -print | wc -l); "
+                "excluded_list=$(find . \\( "
+                "-path '*/.pytest_cache/*' -o -path '*/__pycache__/*' -o -name '*.pyc' "
+                "-o -path '*.egg-info/*' -o -path '*/.mypy_cache/*' -o -path '*/.ruff_cache/*' "
+                "-o -path '*/.cache/*' -o -path '*/.git/*' -o -path '*/node_modules/*' "
+                "-o -path '*/dist/*' -o -path '*/build/*' -o -path '*/target/*' "
+                "-o -path '*/.next/*' -o -path '*/venv/*' -o -path '*/.venv/*' "
+                "-o -path '*/.npm/*' \\) -print | sort | head -20); "
+                "printf 'PACKAGING_SUMMARY:%s:%s\\n' \"$included\" \"$excluded\"; "
+                "printf '%s\n' \"$excluded_list\" | sed '/^$/d' | sed 's/^/EXCLUDED_EXAMPLE:/'"
+            )
+            summary_r = await http.post(f"{config.CODEBOX_URL}/command", json={
+                "command": summary_cmd,
+                "timeout": 30,
+            }, timeout=40)
+            summary_out = summary_r.json().get("stdout", "") if summary_r.status_code == 200 else ""
+            included_count = 0
+            excluded_count = 0
+            excluded_examples = []
+            m_summary = re.search(r"PACKAGING_SUMMARY:(\d+):(\d+)", summary_out)
+            if m_summary:
+                included_count = int(m_summary.group(1))
+                excluded_count = int(m_summary.group(2))
+            for line in summary_out.splitlines():
+                if line.startswith("EXCLUDED_EXAMPLE:"):
+                    excluded_examples.append(line.split(":", 1)[1])
             r = await http.post(f"{config.CODEBOX_URL}/command", json={
-                "command": f"cd {qdir} && tar czf {qtarname} --exclude='node_modules' --exclude='.git' --exclude='__pycache__' --exclude='venv' --exclude='.cache' --exclude='.npm' --exclude='package-lock.json' . 2>&1 && base64 -w0 {qtarname}",
+                "command": f"cd {qdir} && tar czf {qtarname} {exclude_args} . 2>&1 && base64 -w0 {qtarname}",
                 "timeout": 60
             }, timeout=70)
             result = r.json()
@@ -2121,7 +2336,14 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 download_url = f"/api/downloads/{tarname}"
                 await events.emit(conv_id, "tool_end", {"tool": "download_project", "icon": "code",
                     "status": f"{tarname} ready",
-                    "detail": json.dumps({"file": tarname, "directory": directory, "download_url": download_url}),
+                    "detail": json.dumps({
+                        "file": tarname,
+                        "directory": directory,
+                        "download_url": download_url,
+                        "included_count": included_count,
+                        "excluded_count": excluded_count,
+                        "excluded_examples": excluded_examples[:10],
+                    }),
                 })
                 await events.emit(conv_id, "file_ready", {
                     "filename": tarname, "url": download_url,
@@ -2131,7 +2353,14 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     await db.add_conversation_file(cf_id, conv_id, tarname, download_url)
                 except Exception as e:
                     print(f"[FileTrack] {e}")
-                return f"**[Download {tarname}]({download_url})**"
+                summary_lines = [
+                    f"**[Download {tarname}]({download_url})**",
+                    "",
+                    f"Packaging summary: included {included_count} file(s), excluded {excluded_count} generated/cache/build artifact(s).",
+                ]
+                if excluded_examples:
+                    summary_lines.append("Excluded examples: " + ", ".join(excluded_examples[:5]))
+                return "\n".join(summary_lines)
             else:
                 await events.emit(conv_id, "tool_end", {"tool": "download_project", "icon": "code", "status": f"Could not package: {directory}"})
                 return f"ERROR: Could not package directory: {directory}"
@@ -2496,7 +2725,9 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 return (f"REVIEW CLEAN. {summary}\n"
                         f"Build: `{envelope.get('build_cmd','')}` exit={envelope.get('build_exit','?')}. "
                         f"Tests: `{envelope.get('test_cmd','')}` exit={envelope.get('test_exit','?')}. "
-                        f"Project is ready — package and deliver with download_project.")
+                        f"reviewer_run_id: {reviewer_run_id}\n"
+                        f"REQUIRED NEXT TOOL CALL: run_acceptance_review(reviewer_run_id='{reviewer_run_id}'). "
+                        f"Do not call download_project until acceptance is accepted.")
             lines = [f"REVIEW FOUND {len(issues)} ISSUE(S). {summary}",
                      f"Build: `{envelope.get('build_cmd','')}` exit={envelope.get('build_exit','?')}. "
                      f"Tests: `{envelope.get('test_cmd','')}` exit={envelope.get('test_exit','?')}.",
@@ -2521,6 +2752,125 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             )
             return "\n".join(lines)
 
+        elif name == "run_acceptance_review":
+            # Coder Bot v2 final gate — static acceptance inspection after a
+            # clean build/test/lint reviewer pass.
+            from agents import acceptance
+            project_dir = (args.get("project_dir") or "").strip()
+            reviewer_run_id = (args.get("reviewer_run_id") or "").strip()
+            project_id = (args.get("project_id") or "").strip()
+
+            if conv_id:
+                try:
+                    _runs_pre = await db.get_runs_by_conversation(conv_id, limit=10)
+                    _latest_pre = next(
+                        (r for r in _runs_pre
+                         if r.get("role") in {"fixer", "reviewer", "acceptance"}
+                         and (r.get("status") or "").lower() in {"succeeded", "failed", "partial"}),
+                        None,
+                    )
+                    if _latest_pre and _latest_pre.get("role") == "fixer":
+                        _env_pre = _latest_pre.get("result_envelope") or {}
+                        if not (_env_pre.get("source_role") == "acceptance"
+                                and _env_pre.get("docs_only")):
+                            return (
+                                "ERROR: run_acceptance_review cannot run immediately after "
+                                "source/test/manifest fixes. Call run_review first so build, "
+                                "tests, and lint are clean for the current files."
+                            )
+                except Exception as _pre_e:
+                    print(f"[run_acceptance_review] preflight failed (non-fatal): {_pre_e}")
+
+            async def _latest_clean_reviewer() -> dict | None:
+                if not conv_id:
+                    return None
+                try:
+                    _runs = await db.get_runs_by_conversation(conv_id, limit=30)
+                    for _r in _runs:
+                        if _r.get("role") != "reviewer":
+                            continue
+                        _env = _r.get("result_envelope") or {}
+                        if (_env.get("status") or "").lower() == "clean":
+                            return _r
+                        return _r
+                except Exception as _re:
+                    print(f"[run_acceptance_review] reviewer lookup failed: {_re}")
+                return None
+
+            reviewer_run = None
+            if reviewer_run_id:
+                try:
+                    reviewer_run = await db.get_run(reviewer_run_id)
+                except Exception:
+                    reviewer_run = None
+                if not reviewer_run or reviewer_run.get("role") != "reviewer":
+                    print(f"[run_acceptance_review] passed reviewer_run_id={reviewer_run_id} "
+                          "not found/not reviewer — falling back to latest reviewer")
+                    reviewer_run_id = ""
+                    reviewer_run = None
+
+            if not reviewer_run:
+                reviewer_run = await _latest_clean_reviewer()
+                if reviewer_run:
+                    reviewer_run_id = reviewer_run.get("id", "")
+
+            review_env = (reviewer_run or {}).get("result_envelope") or {}
+            if not project_dir:
+                project_dir = (review_env.get("project_dir") or "").strip()
+            if not project_id:
+                project_id = (review_env.get("project_id") or "").strip()
+
+            if not reviewer_run_id or (review_env.get("status") or "").lower() != "clean":
+                return (
+                    "ERROR: run_acceptance_review requires a clean run_review first. "
+                    "Call run_review(project_dir='/root/projects/<name>') and only run "
+                    "acceptance after it returns REVIEW CLEAN."
+                )
+            if not project_dir:
+                return "ERROR: run_acceptance_review needs project_dir or a clean reviewer envelope with project_dir."
+
+            envelope = await acceptance.run_acceptance_review(
+                http, events, conv_id,
+                project_dir=project_dir,
+                reviewer_run_id=reviewer_run_id,
+                project_id=project_id,
+                conv_model=conv_model,
+            )
+
+            a_status = envelope.get("status", "?")
+            summary = envelope.get("summary", "")
+            issues = envelope.get("issues") or []
+            acceptance_run_id = envelope.get("run_id", "")
+            if a_status == "accepted":
+                return (
+                    f"ACCEPTANCE ACCEPTED. {summary}\n"
+                    f"acceptance_run_id: {acceptance_run_id}\n"
+                    "Project is ready — package and deliver with download_project."
+                )
+
+            lines = [
+                f"ACCEPTANCE FOUND {len(issues)} ISSUE(S). {summary}",
+                f"acceptance_run_id: {acceptance_run_id}",
+                "",
+            ]
+            for i, iss in enumerate(issues, 1):
+                lines.append(f"{i}. [{iss.get('category','?')}] {iss.get('file','?')}"
+                             + (f":{','.join(str(x) for x in iss.get('lines') or [])}" if iss.get('lines') else "")
+                             + f" — {iss.get('summary','')}")
+                scope = iss.get("suggested_fix_scope") or []
+                if scope:
+                    lines.append(f"   fix scope: {', '.join(scope[:5])}")
+            lines.append("")
+            lines.append(
+                f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
+                f"  run_fixer(reviewer_run_id='{acceptance_run_id}')\n"
+                f"If the Fixer touches only docs, call run_acceptance_review again. "
+                f"If it touches source, tests, or manifests, call run_review first, "
+                f"then run_acceptance_review again. Do not call download_project until "
+                f"acceptance is accepted."
+            )
+            return "\n".join(lines)
+
         elif name == "run_fixer":
             # Coder Bot v2 Phase 2 — apply targeted edits for issues from a prior
             # run_review. Stateless agent: reads scope files, generates JSON edits
@@ -2529,22 +2879,25 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             from agents import fixer
             reviewer_run_id = (args.get("reviewer_run_id") or "").strip()
 
-            # Helper: pull the most recent reviewer run id for this conv.
-            async def _latest_reviewer_id() -> str:
+            # Helper: pull the most recent actionable reviewer/acceptance run id for this conv.
+            async def _latest_actionable_run_id() -> str:
                 if not conv_id:
                     return ""
                 try:
                     _runs = await db.get_runs_by_conversation(conv_id, limit=20)
                     for _r in _runs:
-                        if _r.get("role") == "reviewer":
+                        if _r.get("role") not in {"reviewer", "acceptance"}:
+                            continue
+                        _env = _r.get("result_envelope") or {}
+                        if (_env.get("status") or "").lower() in {"issues", "error"}:
                             return _r["id"]
                 except Exception as _re:
-                    print(f"[run_fixer] reviewer lookup failed: {_re}")
+                    print(f"[run_fixer] actionable run lookup failed: {_re}")
                 return ""
 
             # If not given, resolve from runs.
             if not reviewer_run_id:
-                reviewer_run_id = await _latest_reviewer_id()
+                reviewer_run_id = await _latest_actionable_run_id()
                 if reviewer_run_id:
                     print(f"[run_fixer] resolved reviewer_run_id={reviewer_run_id} (omitted by model)")
             else:
@@ -2559,16 +2912,16 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     _exists = None
                 if not _exists:
                     print(f"[run_fixer] passed reviewer_run_id={reviewer_run_id} not found — "
-                          f"falling back to most recent reviewer")
-                    _fallback = await _latest_reviewer_id()
+                          f"falling back to most recent actionable review/acceptance run")
+                    _fallback = await _latest_actionable_run_id()
                     if _fallback:
                         reviewer_run_id = _fallback
                         print(f"[run_fixer] using {reviewer_run_id} instead")
 
             if not reviewer_run_id:
                 return ("ERROR: run_fixer needs reviewer_run_id (the run_id from a prior "
-                        "run_review call), and no reviewer run was found on this conversation. "
-                        "Call run_review first.")
+                        "run_review or run_acceptance_review call with issues), and no "
+                        "actionable run was found on this conversation. Call run_review first.")
 
             await events.emit(conv_id, "tool_start", {
                 "tool": "run_fixer", "icon": "wrench",
@@ -2611,9 +2964,12 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     lines.append("Non-fatal errors:")
                     lines += [f"  - {e}" for e in errors[:5]]
                 lines.append("")
-                lines.append("REQUIRED NEXT TOOL CALL: run_review (no args needed — uses the "
-                             "active project). It will re-run the build/tests and tell you "
-                             "whether the fixes worked.")
+                if envelope.get("source_role") == "acceptance" and envelope.get("docs_only"):
+                    lines.append("REQUIRED NEXT TOOL CALL: run_acceptance_review (docs-only fix; build review may be skipped).")
+                else:
+                    lines.append("REQUIRED NEXT TOOL CALL: run_review (no args needed — uses the "
+                                 "active project). It will re-run the build/tests and tell you "
+                                 "whether the fixes worked before acceptance runs again.")
                 return "\n".join(lines)
             elif f_status == "partial":
                 lines = [
@@ -2624,7 +2980,10 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 lines.append("Errors:")
                 lines += [f"  - {e}" for e in errors[:5]]
                 lines.append("")
-                lines.append("REQUIRED NEXT TOOL CALL: run_review to see the current state of the project.")
+                if envelope.get("source_role") == "acceptance" and envelope.get("docs_only"):
+                    lines.append("REQUIRED NEXT TOOL CALL: run_acceptance_review to re-check docs-only acceptance fixes.")
+                else:
+                    lines.append("REQUIRED NEXT TOOL CALL: run_review to see the current state of the project.")
                 return "\n".join(lines)
             elif f_status == "skipped":
                 return f"FIXER SKIPPED: {envelope.get('summary', 'no issues to fix')}."

@@ -92,6 +92,7 @@ CRITIC_ENABLED = os.getenv("CRITIC_ENABLED", "true").lower() == "true"
 # can set these — most users leave them empty.
 ARCHITECT_MODEL = os.getenv("ARCHITECT_MODEL", "")  # Empty = use PLANNING_MODEL
 REVIEWER_MODEL  = os.getenv("REVIEWER_MODEL",  "")  # Empty = use PLANNING_MODEL
+ACCEPTANCE_MODEL = os.getenv("ACCEPTANCE_MODEL", "")  # Empty = use PLANNING_MODEL
 BUILDER_MODEL   = os.getenv("BUILDER_MODEL",   "")  # Empty = use CODER_MODEL
 FIXER_MODEL     = os.getenv("FIXER_MODEL",     "")  # Empty = use CODER_MODEL
 QA_MODEL        = os.getenv("QA_MODEL",        "")  # Empty = use chat / persona model
