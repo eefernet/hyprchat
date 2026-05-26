@@ -9,6 +9,7 @@
 - Added Acceptance model override in Settings; empty inherits from Planning Model.
 - Acceptance now uses the user-configured default context window instead of Ollama defaults.
 - Deploy monitor now pushes the new Acceptance agent file.
+- Architect, Reviewer, and Fixer structured model calls now set `think=false`, avoiding thinking-only review rounds and keeping JSON/envelope output in the message content.
 
 ## Alpha v17.0.1 — May 26, 2026
 

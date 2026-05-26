@@ -41,16 +41,18 @@ A deterministic build pipeline where each phase is an isolated, stateless agent.
 | 📐 **Architect** | Single-shot structured plan — JSON manifest, build/test commands, dependencies, success criteria |
 | 🏗 **Builder** | OpenHands SDK on Codebox — 4 profiles (`scaffold` for new builds, `continue` to resume partials, `feature` for additive changes, `bugfix` for surgical edits) |
 | 🔍 **Reviewer** | Read-only — runs the project's real build/test/lint commands, returns structured issues with `file:line` references |
+| ✅ **Acceptance** | Final quality gate after clean review — checks the delivered project against the user request, docs, tests, packaging, and generated artifacts |
 | 🛠 **Fixer** | Stateless minimal-edit applier — reads each issue's fix scope, applies targeted edits via Codebox |
 | ❓ **ProjectQA** | Read-only Q&A — "walk me through X", "show me Y" — grounded answers with file:line citations, change-request detection |
 | 📚 **Indexer** | Runs once at upload time — walks tree, detects build system, indexes into ChromaDB for semantic retrieval |
 
-- **Workflow gate** — server-side state machine enforces *review-after-build*, *fix-after-issues*, *answer-after-QA*, and a hard *3-cycle cap* on review/fix loops. The model can't skip steps or get stuck.
+- **Workflow gate** — server-side state machine enforces *review-after-build*, *acceptance-after-clean-review*, *fix-after-issues*, *answer-after-QA*, and hard caps on review/fix loops. The model can't skip steps or get stuck.
 - **Durable runs** — every agent invocation is a row in the `runs` table. Browser disconnects can't lose work; the UI rebuilds the timeline on reload.
 - **Project uploads** — drop a `.zip`/`.tar.gz` and the Indexer runs automatically. Subsequent questions and changes operate on the uploaded code with full project awareness.
 - **Architecture Plan panel** — rich markdown rendering of the Architect's plan: file tree, build commands, dependencies as build-system snippets, success criteria as a checklist.
+- **Accepted downloads only** — `download_project` is blocked until Acceptance returns `accepted`, then packages the project while excluding common cache/build artifacts.
 - **Cross-language support** — verified end-to-end on Java (Maven), Python (Flask + pytest), Rust (Cargo), Go (gorilla/mux). Builder profiles + Reviewer markers cover most ecosystems.
-- Sandboxed execution via Codebox (LXC) with 30+ language support, live progress pills, role-specific run cards (📐 → 🏗 → 🔍 → 🛠 → 🔍 timeline), and the original v1 Coder Bot still selectable as a persona.
+- Sandboxed execution via Codebox (LXC) with 30+ language support, live progress pills, role-specific run cards (📐 → 🏗 → 🔍 → ✅ → 🛠 → 🔍 → ✅ timeline), and the original v1 Coder Bot still selectable as a persona.
 
 ### 🛠️ Tool Suites
 
@@ -61,7 +63,8 @@ A deterministic build pipeline where each phase is an isolated, stateless agent.
 | `plan_project` | Routes through the **Architect** for v2 personas — produces structured JSON manifest (file tree, build/test cmds, deps, success criteria); rich markdown plan panel in chat |
 | `generate_code` | **Builder** via OpenHands — auto-detects profile (scaffold / continue / feature) from conversation state; manifest + existing tree injected into context |
 | `run_review` | **Reviewer** — runs build/test/lint, returns structured issue list with `suggested_fix_scope` |
-| `run_fixer` | **Fixer** — applies scoped edits driven by a Reviewer envelope; marker-format LLM output |
+| `run_acceptance_review` | **Acceptance** — final static quality gate after clean review; checks request fit, docs, tests, packaging, entrypoints, and generated artifacts |
+| `run_fixer` | **Fixer** — applies scoped edits driven by a Reviewer or Acceptance envelope; marker-format LLM output |
 | `ask_project` | **ProjectQA** — grounded Q&A with file:line citations; auto-resolves `project_dir`; flags change requests |
 
 **Other tools:**
@@ -156,6 +159,7 @@ User → HyprChat Server (:8000)
          │     📐 Architect    → JSON plan
          │     🏗 Builder      → 4 profiles (scaffold/continue/feature/bugfix)
          │     🔍 Reviewer     → build/test/lint, structured issues
+         │     ✅ Acceptance   → request/docs/tests/packaging quality gate
          │     🛠 Fixer        → scoped edits, marker-format output
          │     ❓ ProjectQA    → grounded Q&A with citations
          │     📚 Indexer      → upload-time tree → ChromaDB
@@ -175,10 +179,11 @@ User → HyprChat Server (:8000)
 | `backend/agents/personas.py` | Seed bot definitions (Coder Bot v1 + v2, Conspiracy Bot, Based Bot) |
 | `backend/agents/architect.py` | **v2** Architect — structured plan as JSON, rich markdown rendering |
 | `backend/agents/reviewer.py` | **v2** Reviewer — read-only build/test/lint with marker auto-detection |
+| `backend/agents/acceptance.py` | **v2** Acceptance — final static quality gate for request fit, docs, tests, packaging, and artifacts |
 | `backend/agents/fixer.py` | **v2** Fixer — scoped edits via marker-delimited LLM output |
 | `backend/agents/project_qa.py` | **v2** ProjectQA — grounded Q&A with file:line citations |
 | `backend/agents/project_indexer.py` | **v2** Indexer — uploaded-project tree walk → ChromaDB |
-| `backend/tools.py` | Tool execution engine + v2 workflow gate (4 states) + Builder profile detection |
+| `backend/tools.py` | Tool execution engine + v2 workflow/acceptance gate + Builder profile detection |
 | `backend/openhands_worker.py` | OpenHands SDK bridge on Codebox; profile-aware prompts; `/cancel/{run_id}` for stop button |
 | `backend/research.py` | Deep research engine |
 | `backend/council.py` | Council debate, voting, and synthesis |
@@ -202,17 +207,25 @@ CODEBOX_URL         = "http://<CODEBOX_IP>:8585"
 OPENHANDS_URL       = "http://<CODEBOX_IP>:8586"
 SEARXNG_URL         = "http://<SEARXNG_IP>:8888"
 
-# Models — each v2 agent picks one of these:
+# Models — each v2 agent inherits from these umbrella defaults:
 DEFAULT_MODEL       = "qwen3.5:27b"   # chat / persona fallback
-PLANNING_MODEL      = ""               # Architect + Reviewer (empty = DEFAULT_MODEL)
-CODER_MODEL         = ""               # Builder + Fixer    (empty = DEFAULT_MODEL)
+PLANNING_MODEL      = "qwen3.5:27b"   # Architect + Reviewer + Acceptance
+CODER_MODEL         = "qwen2.5-coder:14b" # Builder + Fixer
 WORKSPACE_MODEL     = "qwen3.5:4b"    # auto-title, topic analysis, query rewriting
+
+# Optional per-agent overrides; empty = inherit from the umbrella default
+ARCHITECT_MODEL     = ""               # empty = PLANNING_MODEL
+REVIEWER_MODEL      = ""               # empty = PLANNING_MODEL
+ACCEPTANCE_MODEL    = ""               # empty = PLANNING_MODEL
+BUILDER_MODEL       = ""               # empty = CODER_MODEL
+FIXER_MODEL         = ""               # empty = CODER_MODEL
+QA_MODEL            = ""               # empty = chat / persona model
 
 # Resources
 OPENHANDS_ENABLED   = True
 OPENHANDS_MAX_ROUNDS = 40
 OPENHANDS_NUM_CTX   = 16384
-DEFAULT_NUM_CTX     = 16384            # used by Architect / Reviewer / Fixer / QA
+DEFAULT_NUM_CTX     = 16384            # used by Architect / Reviewer / Acceptance / Fixer / QA
 MAX_AGENT_ROUNDS    = 12               # chat-side cap (non-coder personas)
 MAX_AGENT_ROUNDS_CODER = 30            # chat-side cap for Coder Bot personas
 ```
@@ -220,7 +233,7 @@ MAX_AGENT_ROUNDS_CODER = 30            # chat-side cap for Coder Bot personas
 All model and OpenHands settings can be changed at runtime from the Settings panel.
 
 **Recommended model setup (dual-3090 / 48 GB VRAM):**
-- `PLANNING_MODEL` = `qwen3-coder:30b` (Architect / Reviewer planning)
+- `PLANNING_MODEL` = `qwen3-coder:30b` (Architect / Reviewer / Acceptance)
 - `CODER_MODEL` = `devstral:24b` (Builder / Fixer)
 - Default chat = `qwen3-coder:30b` or another general model
 
