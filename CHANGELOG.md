@@ -10,6 +10,22 @@
 - Acceptance now uses the user-configured default context window instead of Ollama defaults.
 - Deploy monitor now pushes the new Acceptance agent file.
 - Architect, Reviewer, and Fixer structured model calls now set `think=false`, avoiding thinking-only review rounds and keeping JSON/envelope output in the message content.
+- Acceptance structured JSON calls now also set `think=false` and parse JSON from `message.content`, `message.thinking`, or top-level `thinking`.
+- Acceptance file scans now prune generated/dependency/cache folders instead of walking them before filtering.
+
+### Bug fixes
+
+- Settings no longer PATCH stale `localStorage` values over server-persisted v2 model/context settings during initial page load.
+- Workspace Model helper calls no longer load small analysis models at their native huge context; workspace topic analysis and council suggestions are capped at 4K, and title generation remains capped at 2K.
+
+### Removed
+- HyprChat already has n8n integration, no need to reinvent the wheel. Also at this point, I rarely use it.
+- Removed the legacy internal automation runner, its UI panel, REST/webhook APIs, scheduler, chat slash command, deploy watch entry, and tests. External automation should run through the existing n8n VM and `/api/n8n/execute`.
+- Startup DB cleanup now drops the legacy internal automation tables (`workflow_schedules`, `workflow_runs`, `workflows`) on existing installs.
+
+### Tests
+
+- Added focused Acceptance structured-output tests, frontend settings hydration guard tests, Workspace Model context-cap tests, and a Quick Search recency test for `time_range="month"`.
 
 ## Alpha v17.0.1 — May 26, 2026
 
@@ -386,14 +402,7 @@ Each gate state's tool result tells the model exactly what to call next, with th
 ## Alpha v16 — March 2026
 
 ### New Features
-- **Workflow Automation** — Deterministic tool-chain engine with visual step editor and chat trigger (`/run Name input`)
-  - 5 step types: tool, ai_completion, parallel, loop, run_workflow
-  - Conditionals, named variables (`{{input}}`, `{{vars.name}}`, `{{steps.N.result}}`, etc.)
-  - Per-step retry (0-3) with exponential backoff, per-step error handling (fail/skip/continue)
-  - Cron scheduling with enable/disable and run tracking
-  - Webhook triggers — each workflow gets a unique URL for external integrations
-  - Run history with per-step status, duration, and collapsible results
-  - 4 seed presets: Deep Research, System Health Check, Scrape & Analyze, Multi-URL Scraper
+- **Legacy internal automation runner** — Added in this release and removed in Alpha v17.0.2 in favor of external n8n automation.
 - **Full-Text Conversation Search** — SQLite FTS5 search across all messages with highlighted snippets and click-to-navigate
 - **Conversation Forking** — Branch from any message to explore alternatives; forked chats link back to the original
 - **Token Analytics Dashboard** — Track cumulative usage per model/persona/day with summary cards and bar charts
@@ -425,8 +434,8 @@ Each gate state's tool result tells the model exactly what to call next, with th
 
 
 ### Technical
-- New `backend/workflows.py` with WorkflowExecutor and hand-rolled cron parser
-- New DB tables: `token_usage`, `workflows`, `workflow_runs`, `workflow_schedules`
+- Added a legacy internal automation module and scheduler, later removed in Alpha v17.0.2.
+- New DB tables: `token_usage`; legacy internal automation tables were later removed in Alpha v17.0.2.
 - FTS5 virtual table `messages_fts` with INSERT/DELETE/UPDATE triggers
 - New columns: `forked_from`, `fork_point_msg_id`, `pinned` on conversations
 - 17 new API endpoints; 3 new nav rail icons

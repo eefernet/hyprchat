@@ -303,6 +303,33 @@ def test_run_search_agent_high_relevance_no_refine():
         assert mock_refine.await_count == 0   # no refinement
 
 
+def test_run_search_agent_news_recency_passes_month_time_range():
+    """News plans with recency cues pass time_range='month' into SearXNG."""
+    plan = json.dumps({
+        "needs_search": True,
+        "queries": ["UK general election latest updates"],
+        "category": "news",
+        "reason": "current news",
+    })
+    http = _FakeHTTP([_ollama_response(plan)])
+    fake_results = _searxng_results(
+        ("Latest UK general election updates", "https://bbc.co.uk/latest"),
+    )
+    messages = [{"role": "user", "content": "latest UK general election updates"}]
+
+    with patch.object(quick_search, "_cached_search", new=AsyncMock(return_value=fake_results)) as mock_search, \
+         patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
+         patch.object(search_agent, "refine_query", new=AsyncMock(return_value="should-not-be-called")):
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "test-model", "test-model",
+            events=None, conv_id=None, messages=messages,
+        ))
+        assert out["skipped"] is False
+        assert mock_search.await_count == 1
+        assert mock_search.await_args.kwargs["time_range"] == "month"
+
+
 def test_run_search_agent_low_relevance_refines():
     """Low relevance → refine_query is called once and the refined query is searched."""
     plan = json.dumps({
@@ -329,7 +356,7 @@ def test_run_search_agent_low_relevance_refines():
 
     cached_calls = {"n": 0}
 
-    async def fake_cached_search(http, query, count=10):
+    async def fake_cached_search(http, query, count=10, time_range=None):
         cached_calls["n"] += 1
         return off_topic if cached_calls["n"] == 1 else on_topic_after_refine
 
@@ -357,7 +384,7 @@ def test_run_search_agent_max_rounds_caps():
     off_topic = _searxng_results(("totally unrelated", "https://x.com/a"))
     messages = [{"role": "user", "content": "tell me about UK Reform Party 2026 elections politics"}]
 
-    async def fake_cached_search(http, query, count=10):
+    async def fake_cached_search(http, query, count=10, time_range=None):
         return off_topic  # always off topic
 
     with patch.object(quick_search, "_cached_search", new=fake_cached_search) as mock_search, \
@@ -399,7 +426,7 @@ def test_run_search_agent_triage_failure_searches_raw_message():
     fake_results = _searxng_results(("UK Reform results", "https://bbc.co.uk/x"))
     captured_queries: list[str] = []
 
-    async def fake_cached_search(http, query, count=10):
+    async def fake_cached_search(http, query, count=10, time_range=None):
         captured_queries.append(query)
         return fake_results
 

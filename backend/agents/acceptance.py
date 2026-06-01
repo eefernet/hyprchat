@@ -22,11 +22,14 @@ import cancel_registry
 
 
 _ARTIFACT_DIRS = {
-    ".pytest_cache", "__pycache__", ".mypy_cache", ".ruff_cache", ".cache",
-    ".git", "node_modules", "dist", "build", "target", ".next",
+    ".git", ".gradle", ".mypy_cache", ".next", ".nox", ".npm",
+    ".pytest_cache", ".ruff_cache", ".tox", ".venv", "__pycache__",
+    "build", "coverage", "dist", "env", "htmlcov", "node_modules",
+    "out", "target", "venv",
 }
-_ARTIFACT_FILE_SUFFIXES = (".pyc",)
-_ARTIFACT_FILE_MARKERS = (".egg-info/",)
+_ARTIFACT_DIR_PATTERNS = ("*.egg-info",)
+_ARTIFACT_FILE_PATTERNS = ("*.pyc", "*.pyo")
+_ARTIFACT_FILE_PATHS = ("*.egg-info/*",)
 
 _MANIFEST_NAMES = {
     "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
@@ -85,11 +88,26 @@ async def _run_command(http, command: str, timeout: int = 15,
         return {"exit_code": -1, "stdout": "", "stderr": f"{type(e).__name__}: {e}"}
 
 
+def _find_name_expr(names) -> str:
+    return " -o ".join(f"-name {shlex.quote(name)}" for name in sorted(names))
+
+
+def _artifact_dir_expr() -> str:
+    return _find_name_expr(set(_ARTIFACT_DIRS) | set(_ARTIFACT_DIR_PATTERNS))
+
+
+def _artifact_file_expr() -> str:
+    parts = [f"-name {shlex.quote(name)}" for name in _ARTIFACT_FILE_PATTERNS]
+    parts.extend(f"-path {shlex.quote(path)}" for path in _ARTIFACT_FILE_PATHS)
+    return " -o ".join(parts)
+
+
 async def _list_files(http, project_dir: str, run_id: str) -> list[str]:
+    ignored_dirs = _artifact_dir_expr()
     cmd = (
         f"cd {shlex.quote(project_dir)} && "
-        "find . -maxdepth 6 -type f "
-        "! -path '*/.git/*' ! -path '*/node_modules/*' "
+        f"find . -maxdepth 6 \\( -type d \\( {ignored_dirs} \\) -prune \\) "
+        "-o -type f -print "
         "| sort | head -300"
     )
     r = await _run_command(http, cmd, timeout=20, run_id=run_id)
@@ -97,12 +115,13 @@ async def _list_files(http, project_dir: str, run_id: str) -> list[str]:
 
 
 async def _scan_artifacts(http, project_dir: str, run_id: str) -> list[str]:
-    dir_names = " -o ".join(f"-name {shlex.quote(name)}" for name in sorted(_ARTIFACT_DIRS))
+    ignored_dirs = _artifact_dir_expr()
+    ignored_files = _artifact_file_expr()
     cmd = (
         f"cd {shlex.quote(project_dir)} && "
-        f"find . \\( -type d \\( {dir_names} \\) -o "
-        "-type f \\( -name '*.pyc' -o -path '*.egg-info/*' \\) \\) "
-        "-print | sort | head -80"
+        f"find . \\( -type d \\( {ignored_dirs} \\) -print -prune \\) "
+        f"-o \\( -type f \\( {ignored_files} \\) -print \\) "
+        "| sort | head -80"
     )
     r = await _run_command(http, cmd, timeout=20, run_id=run_id)
     return [line.strip() for line in (r.get("stdout") or "").splitlines() if line.strip()]
@@ -227,6 +246,25 @@ def _try_parse_json(text: str) -> dict | None:
                 except Exception:
                     start = -1
     return None
+
+
+def _ollama_response_text(body: dict) -> str:
+    """Extract structured output from Ollama chat responses.
+
+    Reasoning models can put JSON in a thinking field even when the request
+    asks for message content. Prefer content, then fall back to thinking.
+    """
+    if not isinstance(body, dict):
+        return ""
+    message = body.get("message") if isinstance(body.get("message"), dict) else {}
+    for val in (
+        message.get("content"),
+        message.get("thinking"),
+        body.get("thinking"),
+    ):
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
 
 
 def _configured_num_ctx() -> int:
@@ -569,6 +607,7 @@ async def run_acceptance_review(http, events, conv_id: str, *,
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": False,
+                "think": False,
                 "options": {"temperature": 0.2, "num_ctx": num_ctx},
             },
             timeout=600,
@@ -576,7 +615,7 @@ async def run_acceptance_review(http, events, conv_id: str, *,
         r = await cancel_registry.await_cancellable(coro, run_id)
         text = ""
         if r.status_code == 200:
-            text = (r.json().get("message", {}).get("content") or "").strip()
+            text = _ollama_response_text(r.json())
         parsed = _try_parse_json(text)
         if not parsed or "status" not in parsed:
             parsed = {

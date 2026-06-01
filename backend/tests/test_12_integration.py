@@ -1,12 +1,6 @@
 """
 Integration tests — end-to-end flows that combine multiple features.
 """
-import pytest
-import time
-import json
-import httpx
-
-
 class TestConversationLifecycle:
     """Create conv → add messages → search → generate title → fork → delete."""
 
@@ -85,60 +79,6 @@ class TestPersonaWithKB:
         # Cleanup
         client.delete(f"/api/model-configs/{mc['id']}")
         client.delete(f"/api/knowledge-bases/{kb['id']}")
-
-
-class TestWorkflowEndToEnd:
-    """Create workflow → run → poll → verify results → cleanup."""
-
-    def test_workflow_execution_pipeline(self, long_client):
-        # 1. Create workflow with multiple steps
-        wf = long_client.post("/api/workflows", json={
-            "name": "E2E Test Workflow",
-            "description": "Integration test",
-            "steps": [
-                {
-                    "name": "Compute",
-                    "type": "tool",
-                    "tool": "execute_code",
-                    "args": {"code": "print(2 + 2)", "language": "python"},
-                    "output_var": "math_result"
-                },
-                {
-                    "name": "Verify",
-                    "type": "tool",
-                    "tool": "execute_code",
-                    "args": {"code": "result = '{{vars.math_result}}'\nprint('Got:', result)\nassert '4' in result", "language": "python"},
-                }
-            ]
-        }).json()
-        wf_id = wf["id"]
-
-        # 2. Run
-        run = long_client.post(f"/api/workflows/{wf_id}/run", json={
-            "input": "integration test"
-        }).json()
-        run_id = run["run_id"]
-
-        # 3. Poll for completion
-        for _ in range(12):
-            time.sleep(5)
-            result = long_client.get(f"/api/workflow-runs/{run_id}").json()
-            if result["status"] in ("completed", "failed"):
-                break
-
-        assert result["status"] == "completed", f"Failed: {result.get('error', '')}"
-        steps = result.get("step_results", [])
-        assert len(steps) == 2
-        assert steps[0]["status"] == "completed"
-        assert steps[1]["status"] == "completed"
-
-        # 4. Verify run appears in history
-        runs = long_client.get(f"/api/workflows/{wf_id}/runs").json()
-        run_ids = [r["id"] for r in runs]
-        assert run_id in run_ids
-
-        # 5. Cleanup
-        long_client.delete(f"/api/workflows/{wf_id}")
 
 
 class TestCouncilWithMembers:

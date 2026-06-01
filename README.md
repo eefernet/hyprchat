@@ -1,6 +1,6 @@
 # 🧠 HyprChat
 
-**Self-hosted AI chat platform** — tool calling, agentic code generation, deep research, multi-model councils, workflow automation, and full model management. All running on your own hardware.
+**Self-hosted AI chat platform** — tool calling, agentic code generation, deep research, multi-model councils, n8n automation integration, and full model management. All running on your own hardware.
 
 Built with FastAPI + a single-file React SPA. No build step, no cloud dependencies.
 
@@ -115,15 +115,8 @@ A deterministic build pipeline where each phase is an isolated, stateless agent.
 - AI-powered topic analysis using configurable workspace model
 - Generate personas from workspace knowledge
 
-### ⚡ Workflow Automation
-- **5 step types** — `tool`, `ai_completion`, `parallel`, `loop`, `run_workflow`
-- **Conditionals** — skip steps based on previous results
-- **Variables** — `{{input}}`, `{{steps.N.result}}`, `{{vars.name}}`, `{{loop.item}}`, `{{webhook.field}}`
-- **Retry & error handling** — per-step retry with exponential backoff
-- **Cron scheduling** — automatic execution with enable/disable and run tracking
-- **Webhook triggers** — unique URL per workflow for external integrations (GitHub, Home Assistant, n8n)
-- **Chat trigger** — `/run Workflow Name input text`
-- Visual step editor and seed presets (Deep Research, System Health Check, Scrape & Analyze, Multi-URL Scraper)
+### ⚡ External Automation
+- Automation lives in the external n8n VM. HyprChat keeps the n8n health/proxy integration, including `/api/n8n/execute`, without maintaining an internal automation engine.
 
 ### 📊 Token Analytics
 - Cumulative usage tracking per model, persona, and day
@@ -174,7 +167,7 @@ User → HyprChat Server (:8000)
 ### Key Backend Modules
 | File | Purpose |
 |------|---------|
-| `backend/main.py` | FastAPI routes, SSE endpoints, model/workflow management, project upload |
+| `backend/main.py` | FastAPI routes, SSE endpoints, model management, project upload |
 | `backend/agents/chat.py` | Multi-round streaming chat agent with tool calling, QA short-circuit, ACTIVE PROJECT injection |
 | `backend/agents/personas.py` | Seed bot definitions (Coder Bot v1 + v2, Conspiracy Bot, Based Bot) |
 | `backend/agents/architect.py` | **v2** Architect — structured plan as JSON, rich markdown rendering |
@@ -189,7 +182,6 @@ User → HyprChat Server (:8000)
 | `backend/council.py` | Council debate, voting, and synthesis |
 | `backend/events.py` | Async SSE EventBus (pub/sub with `asyncio.Lock`) |
 | `backend/rag.py` | RAG pipeline (chunking, embedding, retrieval) |
-| `backend/workflows.py` | Workflow executor and cron scheduler |
 | `backend/hf.py` | HuggingFace model browser and download |
 | `backend/database.py` | SQLite schema, migrations, and queries — incl. `runs` table for v2 |
 | `backend/config.py` | Configuration and environment variables |
@@ -292,7 +284,7 @@ systemctl status hyprchat        # status
 
 ## 🧪 Testing
 
-101 tests covering all major features, running against a live server instance.
+Tests cover the major HyprChat features and run against a live server instance.
 
 ```bash
 cd backend
@@ -303,7 +295,6 @@ python -m pytest tests/ -v
 python -m pytest tests/ -v -k "chat"          # SSE streaming
 python -m pytest tests/ -v -k "tool"          # tools & execution
 python -m pytest tests/ -v -k "council"       # councils & debates
-python -m pytest tests/ -v -k "workflow"      # workflow automation
 python -m pytest tests/ -v -k "integration"   # end-to-end flows
 ```
 
@@ -317,10 +308,13 @@ python -m pytest tests/ -v -k "integration"   # end-to-end flows
 | Tools & Execution | 9 | Python/shell exec, fetch_url, web search |
 | Personas | 9 | CRUD, seed bots |
 | Workspaces | 7 | CRUD, conversation management |
-| Councils | 11 | CRUD, members, presets, analytics |
-| Workflows | 11 | CRUD, execution, webhooks, schedules |
+| Councils | 13 | CRUD, members, presets, analytics |
 | HuggingFace | 5 | GGUF search, model info |
-| Integration | 5 | Full lifecycle flows |
+| Integration | 4 | Full lifecycle flows |
+| Acceptance Agent | 3 | Structured output parsing and error handling |
+| Frontend Settings | 3 | Server-setting hydration and guarded persistence |
+| Quick Search Agent | 25 | Triage, relevance, recency, refinement, dedupe |
+| Workspace Model Caps | 4 | Helper context limits for workspace/title/council calls |
 
 ---
 

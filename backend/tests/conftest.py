@@ -30,7 +30,7 @@ def client():
 
 @pytest.fixture(scope="session")
 def long_client():
-    """Client with longer timeout for AI/workflow operations."""
+    """Client with longer timeout for AI operations."""
     with httpx.Client(base_url=BASE_URL, timeout=300.0, verify=False) as c:
         yield c
 
@@ -112,25 +112,3 @@ def created_council(client):
     council = r.json()
     yield council
     client.delete(f"/api/councils/{council['id']}")
-
-
-@pytest.fixture(scope="session")
-def created_workflow(client):
-    """Create a simple workflow once for the session, clean up after."""
-    r = client.post("/api/workflows", json={
-        "name": "Test Workflow",
-        "description": "Simple test workflow",
-        "steps": [
-            {
-                "name": "Echo Input",
-                "type": "tool",
-                "tool": "execute_code",
-                "args": {"code": "print('Hello from workflow: {{input}}')", "language": "python"},
-                "output_var": "result"
-            }
-        ]
-    })
-    assert r.status_code == 200
-    wf = r.json()
-    yield wf
-    client.delete(f"/api/workflows/{wf['id']}")

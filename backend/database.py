@@ -153,42 +153,6 @@ CREATE TABLE IF NOT EXISTS token_usage (
 CREATE INDEX IF NOT EXISTS idx_token_usage_model ON token_usage(model);
 CREATE INDEX IF NOT EXISTS idx_token_usage_date ON token_usage(created_at);
 
-CREATE TABLE IF NOT EXISTS workflows (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    steps TEXT NOT NULL DEFAULT '[]',
-    webhook_id TEXT DEFAULT '',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS workflow_runs (
-    id TEXT PRIMARY KEY,
-    workflow_id TEXT NOT NULL,
-    conversation_id TEXT,
-    status TEXT DEFAULT 'pending',
-    input TEXT DEFAULT '',
-    step_results TEXT DEFAULT '[]',
-    started_at TIMESTAMP,
-    completed_at TIMESTAMP,
-    error TEXT DEFAULT '',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS workflow_schedules (
-    id TEXT PRIMARY KEY,
-    workflow_id TEXT NOT NULL,
-    cron_expr TEXT NOT NULL,
-    input_template TEXT DEFAULT '',
-    enabled INTEGER DEFAULT 1,
-    last_run_at TIMESTAMP,
-    next_run_at TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
-);
-
 CREATE TABLE IF NOT EXISTS coding_projects (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -238,6 +202,10 @@ async def init_db():
     db = await get_db()
     try:
         await db.executescript(DB_SCHEMA)
+        # HyprChat automation now lives in external n8n; remove legacy internal
+        # tables on startup so old installs do not keep stale definitions/runs.
+        for table in ("workflow_schedules", "workflow_runs", "workflows"):
+            await db.execute(f"DROP TABLE IF EXISTS {table}")
         # Migrate: add new columns to existing tables if missing
         for col, default in [("tool_ids", "'[]'"), ("persona_name", "''"), ("persona_avatar", "''"),
                               ("is_council", "0"), ("council_config_id", "NULL"), ("use_memories", "0"),
@@ -255,12 +223,6 @@ async def init_db():
             except Exception as e:
                 if "duplicate column" not in str(e).lower():
                     print(f"[DB MIGRATION] Warning: {e}")
-        # Migrate workflows: add webhook_id column
-        try:
-            await db.execute("ALTER TABLE workflows ADD COLUMN webhook_id TEXT DEFAULT ''")
-        except Exception as e:
-            if "duplicate column" not in str(e).lower():
-                print(f"[DB MIGRATION] Warning: {e}")
         # Migrate conversations: add fork columns
         for col, default in [("forked_from", "NULL"), ("fork_point_msg_id", "NULL")]:
             try:
@@ -1157,220 +1119,6 @@ async def get_token_usage(days: int = 30, group_by: str = "day"):
                    GROUP BY date(created_at) ORDER BY date ASC"""
         cursor = await db.execute(q, (f"-{days} days",))
         return [dict(r) for r in await cursor.fetchall()]
-    finally:
-        await db.close()
-
-
-# ============================================================
-# WORKFLOW CRUD
-# ============================================================
-async def create_workflow(id: str, name: str, description: str, steps: str):
-    db = await get_db()
-    try:
-        now = datetime.utcnow().isoformat()
-        await db.execute(
-            "INSERT INTO workflows (id, name, description, steps, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (id, name, description, steps, now, now)
-        )
-        await db.commit()
-    finally:
-        await db.close()
-
-
-async def get_workflows():
-    db = await get_db()
-    try:
-        cursor = await db.execute("SELECT * FROM workflows ORDER BY updated_at DESC")
-        wfs = []
-        for r in await cursor.fetchall():
-            w = dict(r)
-            try:
-                w["steps"] = json.loads(w["steps"])
-            except (json.JSONDecodeError, TypeError):
-                w["steps"] = []
-            wfs.append(w)
-        return wfs
-    finally:
-        await db.close()
-
-
-async def get_workflow(id: str):
-    db = await get_db()
-    try:
-        cursor = await db.execute("SELECT * FROM workflows WHERE id = ?", (id,))
-        row = await cursor.fetchone()
-        if not row:
-            return None
-        w = dict(row)
-        try:
-            w["steps"] = json.loads(w["steps"])
-        except (json.JSONDecodeError, TypeError):
-            w["steps"] = []
-        return w
-    finally:
-        await db.close()
-
-
-async def update_workflow(id: str, **kwargs):
-    if not kwargs:
-        return
-    db = await get_db()
-    try:
-        if "steps" in kwargs and isinstance(kwargs["steps"], list):
-            kwargs["steps"] = json.dumps(kwargs["steps"])
-        sets = ", ".join(f"{k} = ?" for k in kwargs)
-        vals = list(kwargs.values()) + [id]
-        await db.execute(f"UPDATE workflows SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?", vals)
-        await db.commit()
-    finally:
-        await db.close()
-
-
-async def delete_workflow(id: str):
-    db = await get_db()
-    try:
-        await db.execute("DELETE FROM workflows WHERE id = ?", (id,))
-        await db.commit()
-    finally:
-        await db.close()
-
-
-async def create_workflow_run(id: str, workflow_id: str, conversation_id: str, input_text: str):
-    db = await get_db()
-    try:
-        now = datetime.utcnow().isoformat()
-        await db.execute(
-            "INSERT INTO workflow_runs (id, workflow_id, conversation_id, status, input, created_at) VALUES (?, ?, ?, 'pending', ?, ?)",
-            (id, workflow_id, conversation_id or "", input_text, now)
-        )
-        await db.commit()
-    finally:
-        await db.close()
-
-
-async def update_workflow_run(id: str, **kwargs):
-    if not kwargs:
-        return
-    db = await get_db()
-    try:
-        sets = ", ".join(f"{k} = ?" for k in kwargs)
-        vals = list(kwargs.values()) + [id]
-        await db.execute(f"UPDATE workflow_runs SET {sets} WHERE id = ?", vals)
-        await db.commit()
-    finally:
-        await db.close()
-
-
-async def get_workflow_runs(workflow_id: str = None, limit: int = 20):
-    db = await get_db()
-    try:
-        if workflow_id:
-            cursor = await db.execute(
-                "SELECT * FROM workflow_runs WHERE workflow_id = ? ORDER BY created_at DESC LIMIT ?",
-                (workflow_id, limit))
-        else:
-            cursor = await db.execute(
-                "SELECT * FROM workflow_runs ORDER BY created_at DESC LIMIT ?", (limit,))
-        runs = []
-        for r in await cursor.fetchall():
-            run = dict(r)
-            try:
-                run["step_results"] = json.loads(run.get("step_results", "[]"))
-            except (json.JSONDecodeError, TypeError):
-                run["step_results"] = []
-            runs.append(run)
-        return runs
-    finally:
-        await db.close()
-
-
-async def get_workflow_by_webhook(webhook_id: str):
-    db = await get_db()
-    try:
-        cursor = await db.execute("SELECT * FROM workflows WHERE webhook_id = ?", (webhook_id,))
-        row = await cursor.fetchone()
-        if not row:
-            return None
-        w = dict(row)
-        try:
-            w["steps"] = json.loads(w["steps"])
-        except (json.JSONDecodeError, TypeError):
-            w["steps"] = []
-        return w
-    finally:
-        await db.close()
-
-
-# ============================================================
-# WORKFLOW SCHEDULES
-# ============================================================
-async def create_workflow_schedule(id: str, workflow_id: str, cron_expr: str, input_template: str, next_run_at: str):
-    db = await get_db()
-    try:
-        now = datetime.utcnow().isoformat()
-        await db.execute(
-            "INSERT INTO workflow_schedules (id, workflow_id, cron_expr, input_template, enabled, next_run_at, created_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
-            (id, workflow_id, cron_expr, input_template, next_run_at, now)
-        )
-        await db.commit()
-    finally:
-        await db.close()
-
-
-async def get_workflow_schedules(workflow_id: str = None):
-    db = await get_db()
-    try:
-        if workflow_id:
-            cursor = await db.execute(
-                "SELECT * FROM workflow_schedules WHERE workflow_id = ? ORDER BY created_at DESC",
-                (workflow_id,))
-        else:
-            cursor = await db.execute("SELECT * FROM workflow_schedules ORDER BY created_at DESC")
-        return [dict(r) for r in await cursor.fetchall()]
-    finally:
-        await db.close()
-
-
-async def update_workflow_schedule(id: str, **kwargs):
-    if not kwargs:
-        return
-    db = await get_db()
-    try:
-        sets = ", ".join(f"{k} = ?" for k in kwargs)
-        vals = list(kwargs.values()) + [id]
-        await db.execute(f"UPDATE workflow_schedules SET {sets} WHERE id = ?", vals)
-        await db.commit()
-    finally:
-        await db.close()
-
-
-async def delete_workflow_schedule(id: str):
-    db = await get_db()
-    try:
-        await db.execute("DELETE FROM workflow_schedules WHERE id = ?", (id,))
-        await db.commit()
-    finally:
-        await db.close()
-
-
-async def get_due_schedules():
-    db = await get_db()
-    try:
-        now = datetime.utcnow().isoformat()
-        cursor = await db.execute(
-            "SELECT ws.*, w.name as workflow_name, w.steps as workflow_steps, w.description as workflow_description "
-            "FROM workflow_schedules ws JOIN workflows w ON ws.workflow_id = w.id "
-            "WHERE ws.enabled = 1 AND ws.next_run_at <= ?",
-            (now,))
-        schedules = []
-        for r in await cursor.fetchall():
-            s = dict(r)
-            try:
-                s["workflow_steps"] = json.loads(s["workflow_steps"])
-            except (json.JSONDecodeError, TypeError):
-                s["workflow_steps"] = []
-            schedules.append(s)
-        return schedules
     finally:
         await db.close()
 
