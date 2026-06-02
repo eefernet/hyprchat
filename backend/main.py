@@ -193,6 +193,24 @@ async def lifespan(app: FastAPI):
             _re = "medium"
         config.OPENHANDS_REASONING_EFFORT = _re
         print(f"[Config] Loaded OpenHands reasoning effort: {config.OPENHANDS_REASONING_EFFORT}")
+    if "aider_enabled" in _settings:
+        config.AIDER_ENABLED = bool(_settings["aider_enabled"])
+        print(f"[Config] Loaded Aider enabled: {config.AIDER_ENABLED}")
+    if "aider_model" in _settings:
+        config.AIDER_MODEL = _settings["aider_model"] or ""
+        print(f"[Config] Loaded Aider Model from settings: {config.AIDER_MODEL or '(inherit fixer/coder)'}")
+    if "aider_num_ctx" in _settings:
+        config.AIDER_NUM_CTX = config.coerce_num_ctx(
+            _settings["aider_num_ctx"],
+            fallback=config.AIDER_NUM_CTX,
+        )
+        print(f"[Config] Loaded Aider num_ctx: {config.AIDER_NUM_CTX}")
+    if "aider_auto_test" in _settings:
+        config.AIDER_AUTO_TEST = bool(_settings["aider_auto_test"])
+        print(f"[Config] Loaded Aider auto-test: {config.AIDER_AUTO_TEST}")
+    if "aider_worker_url" in _settings:
+        config.AIDER_WORKER_URL = _settings["aider_worker_url"] or config.OPENHANDS_URL
+        print(f"[Config] Loaded Aider worker URL: {config.AIDER_WORKER_URL}")
     if "default_num_ctx" in _settings:
         # Single knob the user controls. Drives the chat-side fallback in chat.py and
         # every internal LLM call (plan_project, critic) — so increasing the chat ctx
@@ -843,6 +861,13 @@ async def upload_coder_project(
         if lang:
             lang_totals[lang] = lang_totals.get(lang, 0) + n
     language = max(lang_totals, key=lang_totals.get) if lang_totals else "unknown"
+    try:
+        from agents import language_adapters
+        project_contract = language_adapters.detect_contract(manifest, language)
+        language = project_contract.get("language") or language
+    except Exception as e:
+        print(f"[CoderUpload] contract detection failed (non-fatal): {e}")
+        project_contract = {"language": language, "build_system": "unknown"}
 
     # Re-tar the sanitized tree (gzip) for transport to the sandbox
     tar_buf = _io.BytesIO()
@@ -860,6 +885,7 @@ async def upload_coder_project(
     # the old 100KB-of-base64 approach).
     remote_dir = f"/root/projects/{project_id}"
     remote_tmp = f"/tmp/{project_id}.tar.gz"
+    git_baseline_status = "not_started"
     CHUNK = 1_000_000  # 1MB of raw bytes per multipart POST
     total_chunks = max(1, (len(tar_bytes) + CHUNK - 1) // CHUNK)
 
@@ -901,6 +927,30 @@ async def upload_coder_project(
                     500,
                     f"Sandbox extraction failed: {(data.get('stderr') or '')[:300]}",
                 )
+            git_cmd = (
+                f"cd {shlex.quote(remote_dir)} && "
+                "if [ -d .git ]; then "
+                "  git status --short >/dev/null 2>&1 && echo GIT_BASELINE:existing; "
+                "else "
+                "  git init >/dev/null 2>&1 && "
+                "  git config user.email hyprchat.local && "
+                "  git config user.name HyprChat && "
+                "  git add -A && "
+                "  git commit --allow-empty -m 'Baseline upload' >/dev/null 2>&1 && "
+                "  echo GIT_BASELINE:created; "
+                "fi"
+            )
+            gr = await http_client.post(
+                f"{config.CODEBOX_URL}/command",
+                json={"command": git_cmd, "timeout": 120},
+                timeout=180,
+            )
+            gd = gr.json()
+            gout = gd.get("stdout") or ""
+            if gd.get("exit_code", 1) == 0 and "GIT_BASELINE:" in gout:
+                git_baseline_status = gout.split("GIT_BASELINE:", 1)[1].strip().splitlines()[0]
+            else:
+                git_baseline_status = "failed"
     except HTTPException:
         raise
     except Exception as e:
@@ -924,12 +974,29 @@ async def upload_coder_project(
     except Exception as e:
         print(f"[CoderUpload] DB save failed (non-fatal): {e}")
 
+    workflow_id = f"cw-{uuid.uuid4().hex[:12]}"
+    try:
+        await db.create_coder_workflow(
+            workflow_id,
+            conv_id,
+            project_id=project_id,
+            mode="fix_uploaded_project",
+            state="planning",
+            user_task=f"Uploaded project: {safe_name}",
+            contract=project_contract,
+            artifact_status="not_ready",
+        )
+    except Exception as e:
+        print(f"[CoderUpload] workflow create failed (non-fatal): {e}")
+        workflow_id = ""
+
     # Phase 4.2 — fire the Project Indexer in the background. It walks the
     # uploaded tree, detects build system, and seeds ChromaDB code_memory so
     # that subsequent ask_project / generate_code calls have semantic
     # retrieval over the uploaded code. Non-blocking: even if it fails, the
     # upload itself succeeds.
     indexer_run_id = ""
+    indexer_status = "not_started"
     try:
         from agents import project_indexer
         indexer_envelope = await project_indexer.run_project_indexer(
@@ -939,6 +1006,7 @@ async def upload_coder_project(
             project_name=project_name,
         )
         indexer_run_id = indexer_envelope.get("run_id", "") or ""
+        indexer_status = indexer_envelope.get("status", "ok") or "ok"
         # The indexer may also have detected a more accurate language than the
         # upload-time mime/extension heuristic. If so, update the
         # coding_projects row so downstream tools see the corrected value.
@@ -960,10 +1028,12 @@ async def upload_coder_project(
                 print(f"[CoderUpload] language correction failed (non-fatal): {e}")
     except Exception as e:
         print(f"[CoderUpload] Indexer failed (non-fatal): {e}")
+        indexer_status = "failed"
 
     # Keep the local staging copy as a backup we can re-push if needed.
     return {
         "project_id": project_id,
+        "workflow_id": workflow_id,
         "name": project_name,
         "language": language,
         "file_count": len(manifest),
@@ -971,6 +1041,12 @@ async def upload_coder_project(
         "sandbox_path": remote_dir,
         "size_bytes": len(content),
         "indexer_run_id": indexer_run_id,
+        "indexer_status": indexer_status,
+        "git_baseline_status": git_baseline_status,
+        "detected_build_system": project_contract.get("build_system", "unknown"),
+        "detected_build_cmd": project_contract.get("build_cmd", ""),
+        "detected_test_cmd": project_contract.get("test_cmd", ""),
+        "contract": project_contract,
     }
 
 
@@ -1310,6 +1386,43 @@ async def cancel_run(run_id: str):
         print(f"[CANCEL] DB update failed for {run_id}: {e}")
 
     return {"run_id": run_id, "signaled": signaled, "db_marked": db_marked}
+
+
+# ============================================================
+# CODER WORKFLOWS — workflow-level Coder Bot v2 state
+# ============================================================
+
+@app.get("/api/coder/workflows/{workflow_id}")
+async def get_coder_workflow(workflow_id: str):
+    wf = await db.get_coder_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "Workflow not found")
+    return wf
+
+
+@app.get("/api/coder/workflows")
+async def list_coder_workflows(conversation_id: str = Query(...),
+                               limit: int = Query(50)):
+    return await db.get_coder_workflows_by_conversation(conversation_id, limit=limit)
+
+
+@app.post("/api/coder/workflows/{workflow_id}/cancel")
+async def cancel_coder_workflow(workflow_id: str):
+    wf = await db.get_coder_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "Workflow not found")
+    active_run_id = wf.get("active_run_id") or ""
+    signaled = False
+    if active_run_id:
+        import cancel_registry
+        signaled = cancel_registry.signal(active_run_id)
+    await db.update_coder_workflow(
+        workflow_id,
+        state="cancelled",
+        cancel_requested=True,
+        artifact_status="cancelled",
+    )
+    return {"workflow_id": workflow_id, "active_run_id": active_run_id, "signaled": signaled}
 
 
 # ============================================================
@@ -2772,6 +2885,11 @@ async def get_app_settings():
         "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
         "openhands_num_ctx": config.OPENHANDS_NUM_CTX,
         "openhands_reasoning_effort": config.OPENHANDS_REASONING_EFFORT,
+        "aider_enabled": config.AIDER_ENABLED,
+        "aider_model": config.AIDER_MODEL,
+        "aider_num_ctx": config.AIDER_NUM_CTX,
+        "aider_auto_test": config.AIDER_AUTO_TEST,
+        "aider_worker_url": config.AIDER_WORKER_URL,
         "default_num_ctx": config.DEFAULT_NUM_CTX,
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
@@ -2788,7 +2906,9 @@ async def update_app_settings(body: dict = Body(...)):
                "workspace_model",
                "architect_model", "reviewer_model", "acceptance_model", "builder_model", "fixer_model", "qa_model",
                "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
-               "openhands_reasoning_effort", "default_num_ctx"}
+               "openhands_reasoning_effort",
+               "aider_enabled", "aider_model", "aider_num_ctx", "aider_auto_test", "aider_worker_url",
+               "default_num_ctx"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
@@ -2849,6 +2969,26 @@ async def update_app_settings(body: dict = Body(...)):
         # Persist the validated value, not the raw input.
         settings["openhands_reasoning_effort"] = _re_in
         print(f"[Config] OpenHands reasoning effort: {config.OPENHANDS_REASONING_EFFORT}")
+    if "aider_enabled" in body:
+        config.AIDER_ENABLED = bool(body["aider_enabled"])
+        print(f"[Config] Aider enabled: {config.AIDER_ENABLED}")
+    if "aider_model" in body:
+        config.AIDER_MODEL = body["aider_model"] or ""
+        print(f"[Config] Aider Model: {config.AIDER_MODEL or '(inherit fixer/coder)'}")
+    if "aider_num_ctx" in body:
+        config.AIDER_NUM_CTX = config.coerce_num_ctx(
+            body["aider_num_ctx"],
+            fallback=config.AIDER_NUM_CTX,
+        )
+        settings["aider_num_ctx"] = config.AIDER_NUM_CTX
+        print(f"[Config] Aider num_ctx: {config.AIDER_NUM_CTX}")
+    if "aider_auto_test" in body:
+        config.AIDER_AUTO_TEST = bool(body["aider_auto_test"])
+        print(f"[Config] Aider auto-test: {config.AIDER_AUTO_TEST}")
+    if "aider_worker_url" in body:
+        config.AIDER_WORKER_URL = body["aider_worker_url"] or config.OPENHANDS_URL
+        settings["aider_worker_url"] = config.AIDER_WORKER_URL
+        print(f"[Config] Aider worker URL: {config.AIDER_WORKER_URL}")
     if "default_num_ctx" in body:
         config.DEFAULT_NUM_CTX = config.coerce_num_ctx(
             body["default_num_ctx"],
@@ -2869,6 +3009,16 @@ async def update_app_settings(body: dict = Body(...)):
         "current_builder_model":   config.BUILDER_MODEL,
         "current_fixer_model":     config.FIXER_MODEL,
         "current_qa_model":        config.QA_MODEL,
+        "openhands_enabled": config.OPENHANDS_ENABLED,
+        "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
+        "openhands_num_ctx": config.OPENHANDS_NUM_CTX,
+        "openhands_reasoning_effort": config.OPENHANDS_REASONING_EFFORT,
+        "aider_enabled": config.AIDER_ENABLED,
+        "aider_model": config.AIDER_MODEL,
+        "aider_num_ctx": config.AIDER_NUM_CTX,
+        "aider_auto_test": config.AIDER_AUTO_TEST,
+        "aider_worker_url": config.AIDER_WORKER_URL,
+        "default_num_ctx": config.DEFAULT_NUM_CTX,
     }
 
 

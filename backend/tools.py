@@ -632,6 +632,52 @@ CODEAGENT_TOOLS = {
             }, "required": []},
         },
     },
+    "start_coder_workflow": {
+        "type": "function",
+        "function": {
+            "name": "start_coder_workflow",
+            "description": "Start a Coder Bot v2 workflow using the backend router. Modes: build_from_prompt uses OpenHands after planning; fix_uploaded_project uses Aider for existing uploaded-project edits; ask_uploaded_project uses read-only ProjectQA.",
+            "parameters": {"type": "object", "properties": {
+                "mode": {"type": "string", "description": "build_from_prompt | fix_uploaded_project | ask_uploaded_project"},
+                "task": {"type": "string", "description": "The user's build, fix, or question task."},
+                "project_id": {"type": "string", "description": "Optional uploaded project id. If omitted, uses the active project for this conversation."},
+                "language": {"type": "string", "description": "Optional primary language for new builds."},
+            }, "required": ["mode", "task"]},
+        },
+    },
+    "run_aider_fix": {
+        "type": "function",
+        "function": {
+            "name": "run_aider_fix",
+            "description": "Apply surgical edits to an existing uploaded project using Aider in the Codebox worker. Use this for uploaded-project fixes instead of generate_code/OpenHands. After it returns, call run_review to verify.",
+            "parameters": {"type": "object", "properties": {
+                "project_dir": {"type": "string", "description": "Absolute project root in Codebox, e.g. /root/projects/proj-... . If omitted, uses the active uploaded project."},
+                "task": {"type": "string", "description": "The user's requested fix/change, verbatim when possible."},
+                "issue_run_id": {"type": "string", "description": "Optional reviewer/acceptance run_id whose issues should guide Aider."},
+                "allowed_files": {"type": "array", "items": {"type": "string"}, "description": "Optional file scope Aider should focus on."},
+            }, "required": ["task"]},
+        },
+    },
+    "get_coder_workflow": {
+        "type": "function",
+        "function": {
+            "name": "get_coder_workflow",
+            "description": "Fetch workflow-level state for a Coder Bot v2 workflow.",
+            "parameters": {"type": "object", "properties": {
+                "workflow_id": {"type": "string", "description": "Workflow id returned by start_coder_workflow or upload-project."},
+            }, "required": ["workflow_id"]},
+        },
+    },
+    "cancel_coder_workflow": {
+        "type": "function",
+        "function": {
+            "name": "cancel_coder_workflow",
+            "description": "Cancel a Coder Bot v2 workflow and its active run, if any.",
+            "parameters": {"type": "object", "properties": {
+                "workflow_id": {"type": "string", "description": "Workflow id to cancel."},
+            }, "required": ["workflow_id"]},
+        },
+    },
     "ask_project": {
         "type": "function",
         "function": {
@@ -1105,6 +1151,10 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
         "research": ["query"],
         "fetch_url": ["url"],
         "generate_code": ["task", "language", "context"],
+        "start_coder_workflow": ["mode", "task", "project_id"],
+        "run_aider_fix": ["project_dir", "task", "issue_run_id"],
+        "get_coder_workflow": ["workflow_id"],
+        "cancel_coder_workflow": ["workflow_id"],
     }
 
     param_names = TOOL_PARAMS.get(tool_name)
@@ -1324,6 +1374,47 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             if _v2_cached is None:
                 _v2_cached = await _is_v2_persona(conv_id, conv_row=cr)
             return _v2_cached
+
+        # Q&A is read-only and terminal for the current turn. Some review/fix
+        # tools are whitelisted below so the normal state gate can allow the
+        # intended next step after builder/reviewer runs; block those explicitly
+        # when the most recent meaningful run is a non-change ProjectQA answer.
+        if conv_id and name not in {"ask_project", "get_coder_workflow", "cancel_coder_workflow"}:
+            try:
+                _runs_qt = await db.get_runs_by_conversation(conv_id, limit=12)
+                _terminal_qa_run = None
+                for _r in _runs_qt:
+                    _role_qt = _r.get("role", "")
+                    if _role_qt == "qa":
+                        _env_qt = _r.get("result_envelope") or {}
+                        if (_r.get("status") == "succeeded"
+                                and not _env_qt.get("looks_like_change_request", False)):
+                            _terminal_qa_run = _r
+                        break
+                    if (_role_qt in {"reviewer", "acceptance", "fixer", "aider.fix"}
+                            or _role_qt.startswith("builder")):
+                        break
+                if _terminal_qa_run is not None and await _check_v2():
+                    _qid = _terminal_qa_run.get("id", "?")
+                    await events.emit(conv_id, "tool_end", {
+                        "tool": name, "icon": "code",
+                        "status": f"⛔ Blocked — answer the user (ask_project {_qid[:14]}… is terminal)",
+                    })
+                    print(f"[v2-gate] state=qa-terminal blocked tool={name} "
+                          f"trigger={_qid}", flush=True)
+                    return (
+                        f"BLOCKED — ask_project ({_qid}) just answered the user's question. "
+                        f"The user asked something; you have the answer. Your VERY NEXT output "
+                        f"MUST be plain text relaying that answer to the user.\n\n"
+                        f"Do NOT call run_review, run_fixer, run_aider_fix, generate_code, "
+                        f"read_file, write_file, run_shell, download_project, or any other "
+                        f"tool. The project Q&A path is read-only.\n\n"
+                        f"If the user follows up with another question, call ask_project again. "
+                        f"If they explicitly request a change, route that new turn through "
+                        f"fix_uploaded_project or a write workflow."
+                    )
+            except Exception as _qte:
+                print(f"[v2-gate] qa-terminal check failed (non-fatal): {_qte}")
 
         _runs_for_cap = None
         if conv_id and name == "run_fixer":
@@ -1656,7 +1747,9 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             except Exception as _rbe:
                 print(f"[v2-gate] anti-rebuild check failed (non-fatal): {_rbe}")
 
-        if conv_id and name not in ("run_review", "run_acceptance_review", "run_fixer", "ask_project"):
+        if conv_id and name not in ("run_review", "run_acceptance_review", "run_fixer",
+                                    "run_aider_fix", "ask_project", "get_coder_workflow",
+                                    "cancel_coder_workflow"):
             try:
                 _runs_for_v2_gate = await db.get_runs_by_conversation(conv_id, limit=20)
                 _pending_run = None    # state 1 trigger
@@ -1704,7 +1797,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         _pending_run = _r
                         _pending_kind = "builder"
                         break
-                    if _role == "fixer" and _r.get("status") in _FIXER_GATING:
+                    if _role in {"fixer", "aider.fix"} and _r.get("status") in _FIXER_GATING:
                         _env_f = _r.get("result_envelope") or {}
                         if (_env_f.get("source_role") == "acceptance"
                                 and _env_f.get("docs_only")):
@@ -1786,12 +1879,12 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                 or "reviewer")
                     _fixer_attempts_gate = sum(
                         1 for _r in _runs_for_v2_gate
-                        if (_r.get("role") == "fixer" and _r.get("status") in _FIXER_TERMINAL
+                        if (_r.get("role") in {"fixer", "aider.fix"} and _r.get("status") in _FIXER_TERMINAL
                             and _fixer_source_role(_r) == _pending_role)
                     )
                     _fixer_succ_gate = sum(
                         1 for _r in _runs_for_v2_gate
-                        if (_r.get("role") == "fixer" and _r.get("status") == "succeeded"
+                        if (_r.get("role") in {"fixer", "aider.fix"} and _r.get("status") == "succeeded"
                             and _fixer_source_role(_r) == _pending_role)
                     )
                     _DELIVERY_OK_AFTER_CAP = {
@@ -2241,7 +2334,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     def _fixer_attempts_for_delivery(_role: str) -> int:
                         return sum(
                             1 for _r in _runs_for_gate
-                            if (_r.get("role") == "fixer"
+                            if (_r.get("role") in {"fixer", "aider.fix"}
                                 and _r.get("status") in _FIXER_TERMINAL_FOR_DELIVERY
                                 and _fixer_source_role_for_delivery(_r) == _role)
                         )
@@ -2486,6 +2579,20 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     await db.add_conversation_file(cf_id, conv_id, tarname, download_url)
                 except Exception as e:
                     print(f"[FileTrack] {e}")
+                try:
+                    _proj_for_wf = ""
+                    if directory.startswith("/root/projects/"):
+                        _proj_for_wf = directory.rstrip("/").rsplit("/", 1)[-1]
+                    _wf = await db.get_latest_coder_workflow(conv_id, project_id=_proj_for_wf)
+                    if _wf:
+                        _partial = bool(_download_warning_lines)
+                        await db.update_coder_workflow(
+                            _wf["id"],
+                            state="partial_delivered" if _partial else "accepted",
+                            artifact_status="partial_delivered" if _partial else "delivered",
+                        )
+                except Exception as _wfe:
+                    print(f"[WORKFLOW] delivery state update failed: {_wfe}")
                 summary_lines = [
                     f"**[Download {tarname}]({download_url})**",
                     "",
@@ -2775,6 +2882,226 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             parts.append("\nYou can now continue working on this project. Read any file to see its current state.")
             return "\n".join(parts)
 
+        elif name == "get_coder_workflow":
+            workflow_id = (args.get("workflow_id") or "").strip()
+            if not workflow_id:
+                return "ERROR: workflow_id is required"
+            wf = await db.get_coder_workflow(workflow_id)
+            if not wf:
+                return f"ERROR: workflow not found: {workflow_id}"
+            return "CODER WORKFLOW:\n" + json.dumps(wf, indent=2)
+
+        elif name == "cancel_coder_workflow":
+            workflow_id = (args.get("workflow_id") or "").strip()
+            if not workflow_id:
+                return "ERROR: workflow_id is required"
+            wf = await db.get_coder_workflow(workflow_id)
+            if not wf:
+                return f"ERROR: workflow not found: {workflow_id}"
+            active_run_id = wf.get("active_run_id") or ""
+            await db.update_coder_workflow(
+                workflow_id,
+                state="cancelled",
+                cancel_requested=True,
+                artifact_status="cancelled",
+            )
+            signaled = False
+            if active_run_id:
+                signaled = cancel_registry.signal(active_run_id)
+                try:
+                    run = await db.get_run(active_run_id)
+                    if run and run.get("status") in {"queued", "running", "pending"}:
+                        env = run.get("result_envelope") or {}
+                        env = {**env, "status": "cancelled", "summary": env.get("summary") or "Workflow cancelled"}
+                        await db.update_run(active_run_id, status="cancelled", result_envelope=env, ended=True)
+                except Exception as e:
+                    print(f"[WORKFLOW] active run cancel DB update failed: {e}")
+            await events.emit(conv_id, "tool_end", {
+                "tool": "cancel_coder_workflow", "icon": "activity",
+                "status": f"Workflow cancelled ({workflow_id})",
+            })
+            return f"WORKFLOW CANCELLED: {workflow_id}" + (f" (active run signaled: {signaled})" if active_run_id else "")
+
+        elif name == "start_coder_workflow":
+            mode = (args.get("mode") or "").strip().lower()
+            task = (args.get("task") or "").strip()
+            project_id = (args.get("project_id") or "").strip()
+            language = (args.get("language") or "python").strip() or "python"
+            if not task:
+                return "ERROR: start_coder_workflow requires task"
+            if mode not in {"build_from_prompt", "fix_uploaded_project", "ask_uploaded_project"}:
+                return "ERROR: mode must be build_from_prompt, fix_uploaded_project, or ask_uploaded_project"
+
+            if not project_id and mode != "build_from_prompt" and conv_id:
+                active = await db.get_coding_project_by_conv(conv_id)
+                if active:
+                    project_id = active.get("openhands_project_id") or active.get("id") or ""
+
+            workflow_id = f"cw-{uuid.uuid4().hex[:12]}"
+            contract = {}
+            if project_id:
+                try:
+                    active_project = await db.get_coding_project(project_id)
+                    if active_project:
+                        from agents import language_adapters
+                        contract = language_adapters.detect_contract(
+                            active_project.get("file_manifest") or [],
+                            active_project.get("language") or language,
+                        )
+                except Exception as e:
+                    print(f"[WORKFLOW] contract detection failed: {e}")
+            await db.create_coder_workflow(
+                workflow_id, conv_id, project_id=project_id, mode=mode,
+                state="planning" if mode == "build_from_prompt" else ("fixing" if mode == "fix_uploaded_project" else "answering"),
+                user_task=task, contract=contract,
+                artifact_status="not_ready",
+            )
+            await events.emit(conv_id, "tool_start", {
+                "tool": "start_coder_workflow", "icon": "activity",
+                "status": f"Started workflow {workflow_id} ({mode})",
+                "workflow_id": workflow_id,
+            })
+
+            if mode == "ask_uploaded_project":
+                answer = await exec_tool(
+                    http, events, "ask_project",
+                    {"question": task, "project_dir": f"/root/projects/{project_id}" if project_id else ""},
+                    conv_id, custom_tool_map, conv_model, kb_ids,
+                )
+                await db.update_coder_workflow(workflow_id, state="answering", artifact_status="not_applicable")
+                return f"workflow_id: {workflow_id}\n\n{answer}"
+
+            if mode == "fix_uploaded_project":
+                result = await exec_tool(
+                    http, events, "run_aider_fix",
+                    {"task": task, "project_dir": f"/root/projects/{project_id}" if project_id else ""},
+                    conv_id, custom_tool_map, conv_model, kb_ids,
+                )
+                return f"workflow_id: {workflow_id}\n\n{result}"
+
+            plan = await exec_tool(
+                http, events, "plan_project",
+                {"task": task, "language": language, "constraints": "Return a machine-checkable project contract for OpenHands before build."},
+                conv_id, custom_tool_map, conv_model, kb_ids,
+            )
+            await db.update_coder_workflow(workflow_id, state="planning", artifact_status="not_ready")
+            return (
+                f"workflow_id: {workflow_id}\n\n"
+                f"{plan}\n\n"
+                "NEXT STEP: call generate_code with the planned task. OpenHands remains the greenfield Builder; "
+                "run_review and run_acceptance_review must pass before download_project."
+            )
+
+        elif name == "run_aider_fix":
+            from agents import aider_fixer, language_adapters
+
+            if not getattr(config, "AIDER_ENABLED", True):
+                issue_run_id = (args.get("issue_run_id") or args.get("reviewer_run_id") or "").strip()
+                return await exec_tool(
+                    http, events, "run_fixer",
+                    {"reviewer_run_id": issue_run_id} if issue_run_id else {},
+                    conv_id, custom_tool_map, conv_model, kb_ids,
+                )
+
+            task = (args.get("task") or args.get("description") or "").strip()
+            project_dir = (args.get("project_dir") or "").strip()
+            issue_run_id = (args.get("issue_run_id") or args.get("reviewer_run_id") or "").strip()
+            allowed_files = args.get("allowed_files") or []
+            if isinstance(allowed_files, str):
+                allowed_files = [p.strip() for p in re.split(r"[,\n]", allowed_files) if p.strip()]
+            if not task:
+                return "ERROR: run_aider_fix requires task"
+
+            issue_run = None
+            if issue_run_id:
+                try:
+                    issue_run = await db.get_run(issue_run_id)
+                except Exception:
+                    issue_run = None
+            if not issue_run and conv_id:
+                runs = await db.get_runs_by_conversation(conv_id, limit=30)
+                issue_run = next(
+                    (r for r in runs
+                     if r.get("role") in {"reviewer", "acceptance"}
+                     and ((r.get("result_envelope") or {}).get("status") or "").lower() in {"issues", "error"}),
+                    None,
+                )
+                if issue_run:
+                    issue_run_id = issue_run.get("id", "")
+
+            issue_env = (issue_run or {}).get("result_envelope") or {}
+            if issue_run:
+                issue_env = {**issue_env, "_source_role": issue_run.get("role", "")}
+            if not project_dir:
+                project_dir = (issue_env.get("project_dir") or "").strip()
+
+            project_id = (issue_run or {}).get("project_id") or ""
+            active_project = None
+            if conv_id and (not project_dir or not project_id):
+                active_project = await db.get_coding_project_by_conv(conv_id)
+                if active_project:
+                    project_id = project_id or active_project.get("openhands_project_id") or active_project.get("id") or ""
+                    project_dir = project_dir or (f"/root/projects/{project_id}" if project_id else "")
+
+            if not project_dir:
+                return "ERROR: run_aider_fix needs project_dir or an active uploaded project on this conversation."
+
+            contract = {}
+            workflow_id = ""
+            if conv_id:
+                latest_wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
+                if latest_wf:
+                    workflow_id = latest_wf.get("id", "")
+                    contract = latest_wf.get("contract_json") or {}
+                elif active_project or project_id:
+                    if not active_project and project_id:
+                        active_project = await db.get_coding_project(project_id)
+                    if active_project:
+                        contract = language_adapters.detect_contract(
+                            active_project.get("file_manifest") or [],
+                            active_project.get("language") or "",
+                        )
+                    workflow_id = f"cw-{uuid.uuid4().hex[:12]}"
+                    await db.create_coder_workflow(
+                        workflow_id, conv_id, project_id=project_id,
+                        mode="fix_uploaded_project", state="fixing",
+                        user_task=task, contract=contract, artifact_status="not_ready",
+                    )
+                if workflow_id:
+                    await db.update_coder_workflow(workflow_id, state="fixing", artifact_status="not_ready")
+
+            envelope = await aider_fixer.run_aider_fix(
+                http, events, conv_id,
+                project_dir=project_dir, task=task,
+                issue_envelope=issue_env, contract=contract,
+                model=config.AIDER_MODEL or config.FIXER_MODEL or config.CODER_MODEL or conv_model or config.DEFAULT_MODEL,
+                test_cmd=contract.get("aider_test_cmd") or contract.get("test_cmd") or "",
+                lint_cmd=contract.get("aider_lint_cmd") if contract.get("safe_lint") else "",
+                allowed_files=allowed_files,
+                project_id=project_id,
+                parent_run_id=issue_run_id,
+                workflow_id=workflow_id,
+            )
+            files = envelope.get("files_touched") or []
+            status = envelope.get("status", "?")
+            if status == "applied":
+                return (
+                    f"AIDER APPLIED EDITS to {len(files)} file(s).\n"
+                    + "\n".join(f"  - {f}" for f in files[:12])
+                    + f"\nworkflow_id: {workflow_id or '(none)'}\n"
+                    "REQUIRED NEXT TOOL CALL: run_review. Aider only edits; Reviewer must verify build/tests before acceptance or delivery."
+                )
+            if status == "no_changes":
+                return (
+                    f"AIDER MADE NO CHANGES. {envelope.get('summary','')}\n"
+                    "Run review if you need to verify current state, or explain to the user why no patch was produced."
+                )
+            return (
+                f"AIDER FAILED ({status}): {envelope.get('summary','')}\n"
+                f"stderr: {(envelope.get('stderr_tail') or '')[-800:]}\n"
+                "Fallback path: call run_fixer with a reviewer_run_id, or make a manual targeted edit."
+            )
+
         elif name == "run_review":
             # Coder Bot v2 — run the Reviewer agent on a project. Returns a structured
             # issue list the chat agent can react to (instead of doing 28 rounds of
@@ -2850,6 +3177,17 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                                   project_dir=project_dir,
                                                   project_id=project_id,
                                                   conv_model=conv_model)
+            try:
+                wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
+                if wf:
+                    await db.update_coder_workflow(
+                        wf["id"],
+                        state="accepting" if (envelope.get("status") == "clean") else "fixing",
+                        active_run_id=envelope.get("run_id", ""),
+                        artifact_status="not_ready",
+                    )
+            except Exception as _wfe:
+                print(f"[WORKFLOW] review state update failed: {_wfe}")
             # Format the envelope as a tool-result string the chat agent can read
             # without needing to know the JSON schema. Keep it compact.
             status = envelope.get("status", "?")
@@ -2971,6 +3309,18 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 project_id=project_id,
                 conv_model=conv_model,
             )
+            try:
+                wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
+                if wf:
+                    _ast = (envelope.get("status") or "").lower()
+                    await db.update_coder_workflow(
+                        wf["id"],
+                        state="accepted" if _ast == "accepted" else "fixing",
+                        active_run_id=envelope.get("run_id", ""),
+                        artifact_status="accepted" if _ast == "accepted" else "not_ready",
+                    )
+            except Exception as _wfe:
+                print(f"[WORKFLOW] acceptance state update failed: {_wfe}")
 
             a_status = envelope.get("status", "?")
             summary = envelope.get("summary", "")
@@ -4370,6 +4720,18 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                         "model": coder_model,
                         "language": language,
                     })
+                    try:
+                        wf = await db.get_latest_coder_workflow(conv_id, project_id=_project_id)
+                        if wf:
+                            await db.update_coder_workflow(
+                                wf["id"],
+                                state="reviewing",
+                                active_run_id=_run_id,
+                                artifact_status="not_ready",
+                                project_id=_project_id,
+                            )
+                    except Exception as _wfe:
+                        print(f"[WORKFLOW] builder state update failed: {_wfe}")
                     return resp
                 else:
                     # Agent ran but produced no files — treat as failure

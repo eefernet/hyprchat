@@ -13,6 +13,14 @@
 - Acceptance structured JSON calls now also set `think=false` and parse JSON from `message.content`, `message.thinking`, or top-level `thinking`.
 - Acceptance file scans now prune generated/dependency/cache folders instead of walking them before filtering.
 
+### Coder Bot v2 — hybrid workflow router
+
+- Added workflow-level state via `coder_workflows` and `WorkflowCard`.
+- Routed greenfield builds to OpenHands, uploaded-project fixes to Aider, and uploaded-project questions to read-only ProjectQA.
+- Added `run_aider_fix` plus `/aider/*` worker endpoints on Codebox.
+- Uploads now create a local git baseline and return detected build/test contract metadata.
+- ProjectQA now mixes filename targets, grep, code-memory hits, and marker files for better citations.
+
 ### Bug fixes
 
 - Settings no longer PATCH stale `localStorage` values over server-persisted v2 model/context settings during initial page load.

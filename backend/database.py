@@ -186,6 +186,27 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE INDEX IF NOT EXISTS idx_runs_conv    ON runs(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_parent  ON runs(parent_run_id);
+
+-- Coder Bot v2 hybrid workflow state. A workflow is the user-facing unit of
+-- work; runs remain the per-agent invocations attached to that workflow.
+CREATE TABLE IF NOT EXISTS coder_workflows (
+    id               TEXT PRIMARY KEY,
+    conversation_id  TEXT NOT NULL,
+    project_id       TEXT DEFAULT '',
+    mode             TEXT NOT NULL,
+    state            TEXT NOT NULL DEFAULT 'planning',
+    user_task        TEXT DEFAULT '',
+    contract_json    TEXT DEFAULT '{}',
+    active_run_id    TEXT DEFAULT '',
+    artifact_status  TEXT DEFAULT 'not_ready',
+    cancel_requested INTEGER DEFAULT 0,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_coder_workflows_conv ON coder_workflows(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_coder_workflows_project ON coder_workflows(project_id);
+CREATE INDEX IF NOT EXISTS idx_coder_workflows_state ON coder_workflows(state);
 """
 
 
@@ -1316,5 +1337,129 @@ async def get_runs_by_project(project_id: str, limit: int = 50) -> list[dict]:
             (project_id, limit)
         )
         return [_row_to_run(r) for r in rows]
+    finally:
+        await db.close()
+
+
+# ============================================================
+# CODER WORKFLOWS — user-facing Coder Bot v2 workflow state
+# ============================================================
+
+def _row_to_coder_workflow(row) -> dict:
+    w = dict(row)
+    try:
+        w["contract_json"] = json.loads(w.get("contract_json") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        w["contract_json"] = {}
+    w["cancel_requested"] = bool(w.get("cancel_requested"))
+    return w
+
+
+async def create_coder_workflow(workflow_id: str, conversation_id: str, *,
+                                project_id: str = "", mode: str = "",
+                                state: str = "planning", user_task: str = "",
+                                contract: dict | None = None,
+                                active_run_id: str = "",
+                                artifact_status: str = "not_ready") -> None:
+    db = await get_db()
+    try:
+        now = datetime.utcnow().isoformat()
+        await db.execute(
+            "INSERT INTO coder_workflows(id, conversation_id, project_id, mode, state, "
+            "user_task, contract_json, active_run_id, artifact_status, cancel_requested, "
+            "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                workflow_id, conversation_id, project_id or "", mode or "",
+                state or "planning", user_task or "", json.dumps(contract or {}),
+                active_run_id or "", artifact_status or "not_ready", 0, now, now,
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def update_coder_workflow(workflow_id: str, *, state: str | None = None,
+                                contract: dict | None = None,
+                                active_run_id: str | None = None,
+                                artifact_status: str | None = None,
+                                cancel_requested: bool | None = None,
+                                project_id: str | None = None) -> None:
+    sets = []
+    vals = []
+    if state is not None:
+        sets.append("state=?")
+        vals.append(state)
+    if contract is not None:
+        sets.append("contract_json=?")
+        vals.append(json.dumps(contract))
+    if active_run_id is not None:
+        sets.append("active_run_id=?")
+        vals.append(active_run_id)
+    if artifact_status is not None:
+        sets.append("artifact_status=?")
+        vals.append(artifact_status)
+    if cancel_requested is not None:
+        sets.append("cancel_requested=?")
+        vals.append(1 if cancel_requested else 0)
+    if project_id is not None:
+        sets.append("project_id=?")
+        vals.append(project_id)
+    if not sets:
+        return
+    sets.append("updated_at=?")
+    vals.append(datetime.utcnow().isoformat())
+    vals.append(workflow_id)
+    db = await get_db()
+    try:
+        await db.execute(f"UPDATE coder_workflows SET {', '.join(sets)} WHERE id=?", tuple(vals))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_coder_workflow(workflow_id: str) -> dict | None:
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT * FROM coder_workflows WHERE id=?", (workflow_id,))
+        if not rows:
+            return None
+        return _row_to_coder_workflow(rows[0])
+    finally:
+        await db.close()
+
+
+async def get_coder_workflows_by_conversation(conversation_id: str,
+                                              limit: int = 50) -> list[dict]:
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM coder_workflows WHERE conversation_id=? ORDER BY updated_at DESC LIMIT ?",
+            (conversation_id, limit),
+        )
+        return [_row_to_coder_workflow(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def get_latest_coder_workflow(conversation_id: str,
+                                    project_id: str = "") -> dict | None:
+    db = await get_db()
+    try:
+        if project_id:
+            rows = await db.execute_fetchall(
+                "SELECT * FROM coder_workflows WHERE conversation_id=? AND project_id=? "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (conversation_id, project_id),
+            )
+        else:
+            rows = await db.execute_fetchall(
+                "SELECT * FROM coder_workflows WHERE conversation_id=? "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (conversation_id,),
+            )
+        if not rows:
+            return None
+        return _row_to_coder_workflow(rows[0])
     finally:
         await db.close()

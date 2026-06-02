@@ -8,6 +8,9 @@ Deploy to CodeBox LXC at /opt/openhands-worker/openhands_worker.py
 import asyncio
 import json
 import os
+import shlex
+import shutil
+import subprocess
 import threading
 import time
 import traceback
@@ -24,6 +27,8 @@ class _RunCancelled(Exception):
 
 _ACTIVE_RUNS: dict[str, dict] = {}
 _ACTIVE_RUNS_LOCK = threading.Lock()
+_ACTIVE_AIDER_RUNS: dict[str, dict] = {}
+_ACTIVE_AIDER_RUNS_LOCK = threading.Lock()
 
 
 def _register_run(run_id: str, conversation, cancel_event: threading.Event) -> None:
@@ -38,6 +43,20 @@ def _deregister_run(run_id: str) -> None:
         return
     with _ACTIVE_RUNS_LOCK:
         _ACTIVE_RUNS.pop(run_id, None)
+
+
+def _register_aider_run(run_id: str, process: subprocess.Popen, cancel_event: threading.Event) -> None:
+    if not run_id:
+        return
+    with _ACTIVE_AIDER_RUNS_LOCK:
+        _ACTIVE_AIDER_RUNS[run_id] = {"process": process, "cancel": cancel_event}
+
+
+def _deregister_aider_run(run_id: str) -> None:
+    if not run_id:
+        return
+    with _ACTIVE_AIDER_RUNS_LOCK:
+        _ACTIVE_AIDER_RUNS.pop(run_id, None)
 
 app = FastAPI(title="OpenHands Worker")
 
@@ -130,6 +149,36 @@ class RunResponse(BaseModel):
     project_id: str = ""
 
 
+class AiderRunRequest(BaseModel):
+    project_dir: str
+    task: str
+    issue_envelope: dict = {}
+    contract: dict = {}
+    model: str = "qwen2.5-coder:14b"
+    ollama_url: str = "http://127.0.0.1:11434"
+    num_ctx: int = 16384
+    test_cmd: str = ""
+    lint_cmd: str = ""
+    allowed_files: list[str] = []
+    run_id: str = ""
+    auto_test: bool = True
+
+
+class AiderRunResponse(BaseModel):
+    status: str
+    summary: str = ""
+    project_dir: str = ""
+    files_touched: list[str] = []
+    diff: str = ""
+    test_exit: int | None = None
+    test_stdout_tail: str = ""
+    test_stderr_tail: str = ""
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+    exit_code: int = 0
+    duration_seconds: float = 0.0
+
+
 CACHE_PATH = Path("/opt/openhands-worker/.tool_cache.json")
 _tool_support_cache: dict[str, bool] = {}
 
@@ -203,6 +252,407 @@ def _ensure_loaded(ollama_base: str, model: str, num_ctx: int) -> None:
         print(f"[OH-Worker] Preloaded {model} at num_ctx={num_ctx}")
     except Exception as e:
         print(f"[OH-Worker] _ensure_loaded preload failed (non-fatal): {e}")
+
+
+def _aider_bin() -> str:
+    configured = os.getenv("AIDER_BIN", "").strip()
+    if configured:
+        return configured
+    candidates = [
+        "/opt/openhands-worker/aider-venv/bin/aider",
+        "/root/aider-venv/bin/aider",
+        shutil.which("aider") or "",
+    ]
+    return next((c for c in candidates if c and Path(c).exists()), "aider")
+
+
+def _tail(text: str, limit: int = 6000) -> str:
+    text = text or ""
+    return text[-limit:] if len(text) > limit else text
+
+
+def _run_git(project_dir: Path, args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(project_dir),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _ensure_git_baseline(project_dir: Path) -> None:
+    """Create a local-only baseline commit if the uploaded project lacks git."""
+    if (project_dir / ".git").is_dir():
+        return
+    _run_git(project_dir, ["init"], timeout=20)
+    _run_git(project_dir, ["config", "user.email", "hyprchat.local"], timeout=10)
+    _run_git(project_dir, ["config", "user.name", "HyprChat"], timeout=10)
+    _run_git(project_dir, ["add", "-A"], timeout=30)
+    _run_git(project_dir, ["commit", "--allow-empty", "-m", "Baseline upload"], timeout=60)
+
+
+def _changed_files(project_dir: Path) -> list[str]:
+    try:
+        r = _run_git(project_dir, ["status", "--porcelain"], timeout=20)
+    except Exception:
+        return []
+    files = []
+    for line in (r.stdout or "").splitlines():
+        path = line[3:].strip()
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1].strip()
+        if path and path not in files:
+            files.append(path)
+    return files
+
+
+def _git_diff(project_dir: Path) -> str:
+    parts = []
+    for args in (["diff", "--no-ext-diff"], ["diff", "--cached", "--no-ext-diff"]):
+        try:
+            r = _run_git(project_dir, args, timeout=60)
+            if r.stdout:
+                parts.append(r.stdout)
+        except Exception as e:
+            parts.append(f"(git {' '.join(args)} failed: {e})")
+    return _tail("\n".join(parts), 50000)
+
+
+def _run_shell_capture(project_dir: Path, command: str, env: dict,
+                       timeout: int = 300) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command,
+        cwd=str(project_dir),
+        env=env,
+        shell=True,
+        executable="/bin/bash",
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _safe_allowed_files(project_dir: Path, files: list[str]) -> list[str]:
+    out = []
+    root = project_dir.resolve()
+    for raw in files or []:
+        if not raw:
+            continue
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = project_dir / candidate
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            continue
+        if resolved == root or root in resolved.parents:
+            rel = str(resolved.relative_to(root))
+            if rel and rel not in out and resolved.is_file():
+                out.append(rel)
+    return out
+
+
+def _write_aider_prompt(req: AiderRunRequest, prompt_dir: Path) -> Path:
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    path = prompt_dir / f"{req.run_id or 'aider'}-prompt.md"
+    issue_json = json.dumps(req.issue_envelope or {}, indent=2)[:12000]
+    contract_json = json.dumps(req.contract or {}, indent=2)[:12000]
+    allowed = "\n".join(f"- {p}" for p in (req.allowed_files or [])[:80]) or "(none specified)"
+    content = f"""You are editing an existing uploaded project. Make the smallest coherent patch that satisfies the task.
+
+## User Task
+{req.task}
+
+## Project Contract
+```json
+{contract_json}
+```
+
+## Issue Envelope / Prior Review
+```json
+{issue_json}
+```
+
+## Allowed / Relevant Files
+{allowed}
+
+Rules:
+- Work from the existing repository. Do not rebuild the project from scratch.
+- Prefer focused edits over broad rewrites.
+- Preserve existing behavior unless the task or review envelope requires a change.
+- If tests fail, fix the root cause and rerun the relevant command when possible.
+- Do not create commits. Leave changes in the working tree for HyprChat to inspect.
+"""
+    path.write_text(content)
+    return path
+
+
+def _write_aider_model_settings(req: AiderRunRequest, prompt_dir: Path) -> Path:
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    path = prompt_dir / f"{req.run_id or 'aider'}-model-settings.yml"
+    model = f"ollama_chat/{req.model}"
+    path.write_text(
+        "- name: aider/extra_params\n"
+        "  extra_params:\n"
+        f"    num_ctx: {int(req.num_ctx or 16384)}\n"
+        f"- name: {model}\n"
+        "  edit_format: diff\n"
+        "  use_repo_map: true\n"
+    )
+    return path
+
+
+def _build_aider_command(req: AiderRunRequest, prompt_file: Path,
+                         model_settings_file: Path, allowed_files: list[str]) -> list[str]:
+    cmd = [
+        _aider_bin(),
+        "--model", f"ollama_chat/{req.model}",
+        "--yes",
+        "--message-file", str(prompt_file),
+        "--no-auto-commits",
+        "--model-settings-file", str(model_settings_file),
+    ]
+    if req.auto_test and req.test_cmd:
+        cmd += ["--test-cmd", req.test_cmd, "--auto-test"]
+    if req.lint_cmd:
+        cmd += ["--lint-cmd", req.lint_cmd]
+    cmd += allowed_files
+    return cmd
+
+
+def _run_aider_blocking(req: AiderRunRequest, stream_cb=None) -> dict:
+    start = time.time()
+    project_dir = Path(req.project_dir)
+    if not project_dir.is_dir():
+        return {
+            "status": "error", "summary": f"Project directory not found: {req.project_dir}",
+            "project_dir": req.project_dir, "exit_code": -1,
+            "duration_seconds": round(time.time() - start, 1),
+        }
+
+    try:
+        _ensure_git_baseline(project_dir)
+    except Exception as e:
+        return {
+            "status": "error", "summary": f"Could not initialize git baseline: {e}",
+            "project_dir": str(project_dir), "exit_code": -1,
+            "duration_seconds": round(time.time() - start, 1),
+        }
+
+    prompt_dir = Path("/tmp/hyprchat-aider")
+    req.allowed_files = _safe_allowed_files(project_dir, req.allowed_files)
+    prompt_file = _write_aider_prompt(req, prompt_dir)
+    model_settings_file = _write_aider_model_settings(req, prompt_dir)
+    cmd = _build_aider_command(req, prompt_file, model_settings_file, req.allowed_files)
+
+    env = os.environ.copy()
+    env["OLLAMA_API_BASE"] = req.ollama_url.rstrip("/")
+    env.setdefault("AIDER_ANALYTICS_DISABLE", "true")
+
+    cancel_event = threading.Event()
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    proc = None
+
+    try:
+        if stream_cb:
+            stream_cb({"type": "step", "action": "starting", "detail": " ".join(shlex.quote(c) for c in cmd[:8])})
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(project_dir),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        _register_aider_run(req.run_id, proc, cancel_event)
+
+        def _reader(pipe, dest, label):
+            try:
+                for line in iter(pipe.readline, ""):
+                    dest.append(line)
+                    if stream_cb:
+                        stream_cb({"type": "step", "action": label, "detail": line.rstrip()[:240]})
+                    if cancel_event.is_set():
+                        break
+            finally:
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
+
+        threads = [
+            threading.Thread(target=_reader, args=(proc.stdout, stdout_lines, "stdout"), daemon=True),
+            threading.Thread(target=_reader, args=(proc.stderr, stderr_lines, "stderr"), daemon=True),
+        ]
+        for t in threads:
+            t.start()
+
+        while proc.poll() is None:
+            if cancel_event.is_set():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                break
+            time.sleep(0.2)
+
+        for t in threads:
+            t.join(timeout=2)
+
+        exit_code = proc.returncode if proc.returncode is not None else -1
+        files = _changed_files(project_dir)
+        diff = _git_diff(project_dir)
+        test_exit = None
+        test_stdout_tail = ""
+        test_stderr_tail = ""
+        if req.auto_test and req.test_cmd and exit_code == 0 and not cancel_event.is_set():
+            if stream_cb:
+                stream_cb({"type": "step", "action": "test", "detail": req.test_cmd[:240]})
+            try:
+                test_r = _run_shell_capture(project_dir, req.test_cmd, env, timeout=300)
+                test_exit = test_r.returncode
+                test_stdout_tail = _tail(test_r.stdout or "")
+                test_stderr_tail = _tail(test_r.stderr or "")
+                if stream_cb:
+                    stream_cb({
+                        "type": "step",
+                        "action": "test_result",
+                        "detail": f"exit={test_exit}",
+                    })
+            except subprocess.TimeoutExpired as e:
+                test_exit = -1
+                test_stdout_tail = _tail(e.stdout or "")
+                test_stderr_tail = _tail((e.stderr or "") + "\nTest command timed out after 300s.")
+
+        status = (
+            "cancelled" if cancel_event.is_set()
+            else "error" if exit_code != 0 or (test_exit is not None and test_exit != 0)
+            else "ok" if files
+            else "no_changes"
+        )
+        summary = (
+            f"Aider changed {len(files)} file(s)." if status == "ok"
+            else "Aider completed without changes." if status == "no_changes"
+            else "Aider cancelled by user." if status == "cancelled"
+            else f"Aider failed with exit {exit_code}." if exit_code != 0
+            else f"Aider edits left test command failing with exit {test_exit}."
+        )
+        return {
+            "status": status,
+            "summary": summary,
+            "project_dir": str(project_dir),
+            "files_touched": files,
+            "diff": diff,
+            "test_exit": test_exit,
+            "test_stdout_tail": test_stdout_tail,
+            "test_stderr_tail": test_stderr_tail,
+            "stdout_tail": _tail("".join(stdout_lines)),
+            "stderr_tail": _tail("".join(stderr_lines)),
+            "exit_code": exit_code,
+            "duration_seconds": round(time.time() - start, 1),
+        }
+    except FileNotFoundError:
+        return {
+            "status": "error",
+            "summary": f"Aider executable not found: {_aider_bin()}",
+            "project_dir": str(project_dir),
+            "files_touched": [],
+            "diff": "",
+            "stdout_tail": "",
+            "stderr_tail": "Install aider in the Codebox/OpenHands worker venv.",
+            "exit_code": 127,
+            "duration_seconds": round(time.time() - start, 1),
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "summary": f"{type(e).__name__}: {e}",
+            "project_dir": str(project_dir),
+            "files_touched": _changed_files(project_dir),
+            "diff": _git_diff(project_dir),
+            "stdout_tail": _tail("".join(stdout_lines)),
+            "stderr_tail": _tail("".join(stderr_lines) + "\n" + traceback.format_exc()),
+            "exit_code": -1,
+            "duration_seconds": round(time.time() - start, 1),
+        }
+    finally:
+        _deregister_aider_run(req.run_id)
+
+
+@app.get("/aider/health")
+def aider_health():
+    binary = _aider_bin()
+    installed = bool(shutil.which(binary) or Path(binary).exists())
+    version = ""
+    if installed:
+        try:
+            r = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=10)
+            version = (r.stdout or r.stderr or "").strip()
+        except Exception as e:
+            version = f"version check failed: {e}"
+    return {"status": "ok" if installed else "missing", "installed": installed, "binary": binary, "version": version}
+
+
+@app.post("/aider/run", response_model=AiderRunResponse)
+def run_aider(req: AiderRunRequest):
+    return AiderRunResponse(**_run_aider_blocking(req))
+
+
+@app.post("/aider/cancel/{run_id}")
+def cancel_aider_run(run_id: str):
+    with _ACTIVE_AIDER_RUNS_LOCK:
+        entry = _ACTIVE_AIDER_RUNS.get(run_id)
+    if not entry:
+        return {"status": "not_found", "run_id": run_id}
+    entry["cancel"].set()
+    proc = entry.get("process")
+    try:
+        if proc and proc.poll() is None:
+            proc.terminate()
+    except Exception as e:
+        print(f"[Aider-Worker] terminate during cancel failed: {e}")
+    return {"status": "cancelled", "run_id": run_id}
+
+
+@app.post("/aider/run-stream")
+async def run_aider_stream(req: AiderRunRequest):
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+    result_holder = [None]
+
+    def _send(data):
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, data)
+        except Exception:
+            pass
+
+    def _run_sync():
+        try:
+            result_holder[0] = _run_aider_blocking(req, stream_cb=_send)
+        finally:
+            _send(None)
+
+    async def generate():
+        fut = loop.run_in_executor(None, _run_sync)
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield f"data: {json.dumps(item)}\n\n"
+        await fut
+        if result_holder[0]:
+            payload = {"type": "done", **result_holder[0]}
+            yield f"data: {json.dumps(payload)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def _check_tool_support(ollama_base: str, model: str) -> bool:

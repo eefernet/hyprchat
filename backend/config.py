@@ -99,6 +99,11 @@ QA_MODEL        = os.getenv("QA_MODEL",        "")  # Empty = use chat / persona
 OPENHANDS_ENABLED = os.getenv("OPENHANDS_ENABLED", "true").lower() == "true"  # Toggle OpenHands for generate_code tool
 OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "20"))
 OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", "16384"))
+AIDER_ENABLED = os.getenv("AIDER_ENABLED", "true").lower() == "true"
+AIDER_MODEL = os.getenv("AIDER_MODEL", "")  # Empty = use FIXER_MODEL, then CODER_MODEL
+AIDER_NUM_CTX = int(os.getenv("AIDER_NUM_CTX", os.getenv("OPENHANDS_NUM_CTX", "16384")))
+AIDER_AUTO_TEST = os.getenv("AIDER_AUTO_TEST", "true").lower() == "true"
+AIDER_WORKER_URL = os.getenv("AIDER_WORKER_URL", OPENHANDS_URL)
 # Reasoning effort for the OpenHands builder LLM. The SDK passes this through
 # to litellm; for OpenAI-style models it's "low" | "medium" | "high"; local
 # Ollama models silently ignore unsupported values. Default "medium" — "high"

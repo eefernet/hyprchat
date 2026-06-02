@@ -521,6 +521,60 @@ async def run_project_qa(http, events, conv_id: str, *,
                         f"{n_hits} hit{'s' if n_hits != 1 else ''})\n```\n{snip[:1800]}\n```"
                     )
                     files_examined.append(path)
+
+        # Phase 3b: include semantic code-memory chunks for this uploaded
+        # project when the indexer has populated ChromaDB. This complements
+        # literal grep for questions phrased in domain/user language.
+        try:
+            import rag as _rag
+            project_id = project_dir.rstrip("/").rsplit("/", 1)[-1]
+            semantic = await _rag.query_code_memory(question, top_k=8, language=language)
+            semantic = [
+                s for s in semantic
+                if (not s.get("project_id") or s.get("project_id") == project_id)
+                and s.get("filename") in file_list
+            ][:4]
+            if semantic:
+                await _step("semantic", f"{len(semantic)} code-memory hit(s)")
+                for hit in semantic:
+                    path = hit.get("filename") or ""
+                    if not path or path in files_examined:
+                        continue
+                    snip = await _read_snippet(http, project_dir, path, line=0, radius=20)
+                    if snip:
+                        snippet_blocks.append(
+                            f"### `{path}` (semantic code-memory match; score={hit.get('score', 0):.2f})\n"
+                            f"```\n{snip[:1800]}\n```"
+                        )
+                        files_examined.append(path)
+        except Exception as e:
+            print(f"[QA] semantic retrieval failed (non-fatal): {e}")
+
+        # Phase 3c: add marker/entry files so answers can cite how the project
+        # starts, builds, and tests even when the user's keywords don't appear
+        # in those files.
+        marker_names = {
+            "pyproject.toml", "requirements.txt", "setup.py", "package.json",
+            "Cargo.toml", "go.mod", "pom.xml", "build.gradle", "build.gradle.kts",
+            "README.md", "README.rst", "Makefile",
+        }
+        marker_paths = []
+        for path in file_list:
+            base = path.rsplit("/", 1)[-1]
+            if base in marker_names and path not in files_examined:
+                marker_paths.append(path)
+            if len(marker_paths) >= 4:
+                break
+        if marker_paths:
+            await _step("markers", f"{len(marker_paths)} build/entry marker file(s)")
+            marker_results = await asyncio.gather(
+                *[_read_snippet(http, project_dir, p, line=0, radius=18) for p in marker_paths],
+                return_exceptions=True,
+            )
+            for path, snip in zip(marker_paths, marker_results):
+                if isinstance(snip, str) and snip:
+                    snippet_blocks.append(f"### `{path}` (build/entry marker)\n```\n{snip[:1600]}\n```")
+                    files_examined.append(path)
         snippets_section = "\n\n".join(snippet_blocks) if snippet_blocks else "(no snippets retrieved)"
         await _step("snippets", f"{len(files_examined)} file(s) inspected")
 

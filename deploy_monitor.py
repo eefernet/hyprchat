@@ -8,6 +8,7 @@ Saves server config after first setup so you never re-enter IPs.
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -35,8 +36,11 @@ BG_M = "\033[45m"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".deploy_config.json")
 
 # ── Remote paths ──
-REMOTE_BACKEND  = "/opt/hyprchat/backend/"
+REMOTE_BACKEND = "/opt/hyprchat/backend/"
+REMOTE_AGENTS = REMOTE_BACKEND + "agents/"
 REMOTE_FRONTEND = "/opt/hyprchat/frontend/dist/"
+REMOTE_OPENHANDS_WORKER = "/opt/openhands-worker/"
+REMOTE_AIDER_VENV = REMOTE_OPENHANDS_WORKER + "aider-venv"
 
 # ── Watched files → (label, remote_dir, needs_restart) ──
 # needs_restart: whether deploying this file requires restarting hyprchat service
@@ -53,16 +57,18 @@ WATCHED = {
     "backend/events.py":            ("Events",           REMOTE_BACKEND,            True),
     "backend/council.py":           ("Council",          REMOTE_BACKEND,            True),
     "backend/hf.py":                ("HuggingFace",      REMOTE_BACKEND,            True),
-    "backend/openhands_worker.py":  ("OpenHands",        REMOTE_BACKEND,            False),
-    "backend/agents/chat.py":           ("Chat Agent",         REMOTE_BACKEND + "agents/", True),
-    "backend/agents/personas.py":       ("Personas",           REMOTE_BACKEND + "agents/", True),
-    "backend/agents/architect.py":      ("Architect Agent",    REMOTE_BACKEND + "agents/", True),
-    "backend/agents/reviewer.py":       ("Reviewer Agent",     REMOTE_BACKEND + "agents/", True),
-    "backend/agents/acceptance.py":     ("Acceptance Agent",   REMOTE_BACKEND + "agents/", True),
-    "backend/agents/fixer.py":          ("Fixer Agent",        REMOTE_BACKEND + "agents/", True),
-    "backend/agents/project_qa.py":     ("ProjectQA Agent",    REMOTE_BACKEND + "agents/", True),
-    "backend/agents/project_indexer.py":("Project Indexer",    REMOTE_BACKEND + "agents/", True),
-    "backend/agents/__init__.py":       ("Agents Init",        REMOTE_BACKEND + "agents/", True),
+    "backend/openhands_worker.py":  ("OpenHands Worker", REMOTE_OPENHANDS_WORKER,   False),
+    "backend/agents/chat.py":           ("Chat Agent",         REMOTE_AGENTS, True),
+    "backend/agents/personas.py":       ("Personas",           REMOTE_AGENTS, True),
+    "backend/agents/architect.py":      ("Architect Agent",    REMOTE_AGENTS, True),
+    "backend/agents/reviewer.py":       ("Reviewer Agent",     REMOTE_AGENTS, True),
+    "backend/agents/acceptance.py":     ("Acceptance Agent",   REMOTE_AGENTS, True),
+    "backend/agents/fixer.py":          ("Fixer Agent",        REMOTE_AGENTS, True),
+    "backend/agents/aider_fixer.py":    ("Aider Fixer",        REMOTE_AGENTS, True),
+    "backend/agents/project_qa.py":     ("ProjectQA Agent",    REMOTE_AGENTS, True),
+    "backend/agents/project_indexer.py":("Project Indexer",    REMOTE_AGENTS, True),
+    "backend/agents/language_adapters.py":("Language Adapters", REMOTE_AGENTS, True),
+    "backend/agents/__init__.py":       ("Agents Init",        REMOTE_AGENTS, True),
     "backend/requirements.txt":     ("Requirements",     REMOTE_BACKEND,            True),
     "backend/hyprchat.service":     ("Systemd Service",  "/etc/systemd/system/",    True),
     "frontend/dist/index.html":     ("Frontend",         REMOTE_FRONTEND,           False),
@@ -102,11 +108,27 @@ def box(lines, color=C, width=None):
 
 # ── Config persistence ──
 
+def normalize_config(cfg):
+    """Accept both old deploy_monitor keys and the AGENTS.md template keys."""
+    if not cfg:
+        return cfg
+    for key in ("hyprchat", "codebox"):
+        server = cfg.get(key)
+        if not isinstance(server, dict):
+            continue
+        if not server.get("ip") and server.get("host"):
+            server["ip"] = server["host"]
+        if not server.get("pass") and server.get("password"):
+            server["pass"] = server["password"]
+        server.setdefault("user", "root")
+    return cfg
+
+
 def load_config():
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE) as f:
-                return json.load(f)
+                return normalize_config(json.load(f))
         except Exception:
             pass
     return None
@@ -136,21 +158,21 @@ def setup_servers():
     ], C))
     print()
 
-    cfg = load_config() or {}
+    cfg = normalize_config(load_config() or {})
     hypr_def = cfg.get("hyprchat", {})
     cb_def   = cfg.get("codebox", {})
 
     print(f"  {BLD}{Y}HyprChat Server{RST} {DIM}(backend + frontend){RST}")
     hypr = prompt_server("",
-        default_ip=hypr_def.get("ip", ""),
+        default_ip=hypr_def.get("ip") or hypr_def.get("host", ""),
         default_user=hypr_def.get("user", "root"),
-        default_pass=hypr_def.get("pass", ""))
+        default_pass=hypr_def.get("pass") or hypr_def.get("password", ""))
 
     print(f"  {BLD}{M}Codebox Server{RST} {DIM}(sandbox execution){RST}")
     cb = prompt_server("",
-        default_ip=cb_def.get("ip", ""),
+        default_ip=cb_def.get("ip") or cb_def.get("host", ""),
         default_user=cb_def.get("user", "root"),
-        default_pass=cb_def.get("pass", ""))
+        default_pass=cb_def.get("pass") or cb_def.get("password", ""))
 
     cfg = {"hyprchat": hypr, "codebox": cb}
     save_config(cfg)
@@ -164,11 +186,14 @@ def setup_servers():
 def scp(local, remote_host, remote_path, user, password):
     """Copy a file to remote via scp. Returns (ok, msg)."""
     dest = f"{user}@{remote_host}:{remote_path}"
-    cmd = [
-        "sshpass", "-p", password,
-        "scp", "-o", "StrictHostKeyChecking=no", "-q",
-        local, dest
-    ]
+    if password:
+        cmd = [
+            "sshpass", "-p", password,
+            "scp", "-o", "StrictHostKeyChecking=no", "-q",
+            local, dest
+        ]
+    else:
+        cmd = ["scp", "-o", "StrictHostKeyChecking=no", "-q", local, dest]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if r.returncode == 0:
@@ -187,11 +212,14 @@ def scp(local, remote_host, remote_path, user, password):
 
 def ssh_cmd(host, user, password, command, timeout=30):
     """Run a command on remote via ssh. Returns (ok, stdout, stderr)."""
-    cmd = [
-        "sshpass", "-p", password,
-        "ssh", "-o", "StrictHostKeyChecking=no",
-        f"{user}@{host}", command
-    ]
+    if password:
+        cmd = [
+            "sshpass", "-p", password,
+            "ssh", "-o", "StrictHostKeyChecking=no",
+            f"{user}@{host}", command
+        ]
+    else:
+        cmd = ["ssh", "-o", "StrictHostKeyChecking=no", f"{user}@{host}", command]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return r.returncode == 0, r.stdout.strip(), r.stderr.strip()
@@ -215,6 +243,58 @@ def _show_journal(target, unit, lines=20):
             print(f"  {DIM}{line}{RST}")
 
 
+def _deploy_target(filepath, remote_dir, hypr, cb):
+    """Return (target_server, remote_dir) for a watched file."""
+    if filepath == "backend/openhands_worker.py":
+        return cb, REMOTE_OPENHANDS_WORKER
+    return hypr, remote_dir
+
+
+def _ensure_remote_dir(target, remote_dir):
+    """Create the destination directory before scp, useful for new agents."""
+    ok, _out, err = ssh_cmd(
+        target["ip"],
+        target["user"],
+        target["pass"],
+        f"mkdir -p {shlex.quote(remote_dir)}",
+        timeout=20,
+    )
+    return ok, err
+
+
+def _ensure_aider_worker_venv(cb):
+    """Install/check Aider on Codebox, where uploaded-project fixes run."""
+    venv = REMOTE_AIDER_VENV.rstrip("/")
+    aider = f"{venv}/bin/aider"
+    pip = f"{venv}/bin/pip"
+    cmd = (
+        "set -u\n"
+        "log=/tmp/hyprchat-aider-install.log\n"
+        f"mkdir -p {shlex.quote(REMOTE_OPENHANDS_WORKER)}\n"
+        f"if [ ! -x {shlex.quote(aider)} ]; then\n"
+        f"  rm -rf {shlex.quote(venv)}\n"
+        "  : > \"$log\"\n"
+        f"  if ! python3 -m venv {shlex.quote(venv)} >>\"$log\" 2>&1; then\n"
+        "    if command -v apt-get >/dev/null 2>&1; then\n"
+        "      apt-get update -qq >>\"$log\" 2>&1 || true\n"
+        "      apt-get install -y -qq python3-venv >>\"$log\" 2>&1 || true\n"
+        "    fi\n"
+        f"    python3 -m venv {shlex.quote(venv)} >>\"$log\" 2>&1\n"
+        "  fi\n"
+        f"  {shlex.quote(pip)} install -U pip setuptools wheel >>\"$log\" 2>&1\n"
+        f"  {shlex.quote(pip)} install -U aider-chat >>\"$log\" 2>&1\n"
+        "fi\n"
+        f"if [ -x {shlex.quote(aider)} ]; then\n"
+        f"  {shlex.quote(aider)} --version 2>&1\n"
+        "else\n"
+        "  echo 'Aider binary missing after install attempt'\n"
+        "  tail -80 \"$log\" 2>/dev/null || true\n"
+        "  exit 1\n"
+        "fi"
+    )
+    return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=600)
+
+
 def deploy_changes(changed, cfg):
     """Deploy changed files and restart service only if needed."""
     hypr = cfg["hyprchat"]
@@ -223,14 +303,20 @@ def deploy_changes(changed, cfg):
     results = []
 
     cb = cfg["codebox"]
+    ensured_dirs = set()
 
     for filepath, (label, remote_dir, restart_flag) in changed:
-        # openhands_worker.py goes to codebox server
-        if filepath == "backend/openhands_worker.py":
-            target = cb
-            remote_dir = "/opt/openhands-worker/"
-        else:
-            target = hypr
+        target, remote_dir = _deploy_target(filepath, remote_dir, hypr, cb)
+
+        dir_key = (target["ip"], remote_dir)
+        if dir_key not in ensured_dirs:
+            dir_ok, dir_err = _ensure_remote_dir(target, remote_dir)
+            ensured_dirs.add(dir_key)
+            if not dir_ok:
+                results.append((label, filepath, False,
+                                f"Could not create remote dir {remote_dir}: {dir_err}",
+                                target))
+                continue
 
         ok, err = scp(filepath, target["ip"], remote_dir, target["user"], target["pass"])
         results.append((label, filepath, ok, err, target))
@@ -273,7 +359,7 @@ def deploy_changes(changed, cfg):
         print()
         print(f"  {Y}\u25b6{RST} Restarting hyprchat service...")
         ok, out, err = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
-            "systemctl restart hyprchat 2>&1", timeout=90)
+            "systemctl restart hyprchat 2>&1", timeout=150)
         if ok:
             # Bind to a specific interface (e.g. Tailscale IP) can take a few seconds.
             time.sleep(3)
@@ -286,10 +372,32 @@ def deploy_changes(changed, cfg):
                 _show_journal(hypr, "hyprchat")
         else:
             print(f"  {R}\u2717{RST} Restart failed: {err}")
-            _show_journal(hypr, "hyprchat")
+            print(f"  {Y}\u25b6{RST} Attempting start fallback...")
+            ok_start, out_start, err_start = ssh_cmd(
+                hypr["ip"], hypr["user"], hypr["pass"],
+                "systemctl reset-failed hyprchat 2>/dev/null || true; systemctl start hyprchat 2>&1",
+                timeout=90,
+            )
+            time.sleep(3)
+            ok2, out2, _ = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
+                "systemctl is-active hyprchat 2>&1")
+            if ok_start and ok2 and "active" in out2:
+                print(f"  {G}\u2713{RST} Service running after start fallback")
+            else:
+                print(f"  {R}\u2717{RST} Start fallback failed: {(err_start or out_start or out2)[:300]}")
+                _show_journal(hypr, "hyprchat")
 
     # Restart openhands worker on codebox if it was deployed
     if any(fp == "backend/openhands_worker.py" for fp, *_ in changed):
+        print()
+        print(f"  {Y}\u25b6{RST} Checking Aider worker venv on Codebox...")
+        ok, out, err = _ensure_aider_worker_venv(cb)
+        if ok:
+            print(f"  {G}\u2713{RST} Aider ready: {out.splitlines()[-1] if out else 'installed'}")
+        else:
+            print(f"  {Y}!{RST} Aider install/check failed: {(err or out)[:300]}")
+            print(f"     {DIM}Worker will still run; /aider/health reports missing until this is fixed.{RST}")
+
         print()
         print(f"  {Y}\u25b6{RST} Restarting OpenHands worker on Codebox...")
         ok, out, err = ssh_cmd(cb["ip"], cb["user"], cb["pass"],

@@ -703,6 +703,46 @@ const RunCard = ({runId, liveEvts, t, font, md})=>{
   </div>;
 };
 
+const WorkflowCard = ({workflow, t, font})=>{
+  const [wf,setWf]=useState(workflow);
+  useEffect(()=>{setWf(workflow);},[workflow?.id,workflow?.updated_at]);
+  useEffect(()=>{
+    if(!wf?.id)return;
+    const active=["planning","building","reviewing","fixing","answering","accepting","packaging"].includes(wf.state);
+    if(!active)return;
+    let stop=false;
+    const tick=async()=>{
+      try{
+        const r=await fetch(`${API}/api/coder/workflows/${wf.id}`);
+        if(r.ok&&!stop)setWf(await r.json());
+      }catch{}
+    };
+    const id=setInterval(tick,5000);tick();
+    return()=>{stop=true;clearInterval(id);};
+  },[wf?.id,wf?.state]);
+  if(!wf)return null;
+  const state=wf.state||"planning";
+  const artifact=wf.artifact_status||"not_ready";
+  const colour=state==="accepted"||artifact==="delivered"?t.ok:state==="blocked"||state==="cancelled"?t.err:artifact==="partial_delivered"?"#e9a45a":t.acc;
+  const modeLabel=(wf.mode||"workflow").replaceAll("_"," ");
+  const contract=wf.contract_json||{};
+  return <div style={{marginTop:6,marginBottom:6,borderRadius:10,border:`1px solid ${colour}38`,background:`${colour}0c`,padding:"7px 12px",fontFamily:font,maxWidth:"100%"}}>
+    <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
+      <span style={{fontSize:13}}>🧭</span>
+      <span style={{fontWeight:700,fontSize:11,color:colour,letterSpacing:.3}}>Workflow</span>
+      <span style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>· {modeLabel}</span>
+      <span style={{fontSize:10,color:colour}}>· {state}</span>
+      <span style={{fontSize:10,color:t.mut}}>· artifact: {artifact}</span>
+    </div>
+    <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:5,fontSize:10,color:t.mut}}>
+      {wf.project_id&&<span>project: {wf.project_id}</span>}
+      {contract.build_system&&<span>build: {contract.build_system}</span>}
+      {contract.test_cmd&&<span>test: {contract.test_cmd.slice(0,60)}</span>}
+      {wf.active_run_id&&<span>run: {wf.active_run_id}</span>}
+    </div>
+  </div>;
+};
+
 // Pluck unique run_ids out of a list of saved/live events. Each is an
 // independent agent invocation that should render its own RunCard.
 const _runIdsFromEvents = (evts)=>{
@@ -1606,6 +1646,9 @@ function HyprChat(){
   const [openhandsEnabled,setOpenhandsEnabled]=useState(()=>{try{return localStorage.getItem("hc-openhands-enabled")!=="false";}catch{return true;}});
   const [openhandsMaxRounds,setOpenhandsMaxRounds]=useState(()=>{try{return parseInt(localStorage.getItem("hc-openhands-max-rounds")||"20");}catch{return 20;}});
   const [openhandsReasoningEffort,setOpenhandsReasoningEffort]=useState(()=>{try{return localStorage.getItem("hc-openhands-reasoning-effort")||"medium";}catch{return "medium";}});
+  const [aiderEnabled,setAiderEnabled]=useState(()=>{try{return localStorage.getItem("hc-aider-enabled")!=="false";}catch{return true;}});
+  const [aiderModel,setAiderModel]=useState(()=>{try{return localStorage.getItem("hc-aider-model")||"";}catch{return "";}});
+  const [aiderAutoTest,setAiderAutoTest]=useState(()=>{try{return localStorage.getItem("hc-aider-auto-test")!=="false";}catch{return true;}});
   const [ctxTokens,setCtxTokens]=useState(0);
   const [genTokens,setGenTokens]=useState(0);
   const [previewFile,setPreviewFile]=useState(null);
@@ -1761,6 +1804,9 @@ function HyprChat(){
   useEffect(()=>{persistServerSetting("hc-openhands-enabled","openhands_enabled",openhandsEnabled,String(openhandsEnabled));},[openhandsEnabled]);
   useEffect(()=>{persistServerSetting("hc-openhands-max-rounds","openhands_max_rounds",openhandsMaxRounds,String(openhandsMaxRounds));},[openhandsMaxRounds]);
   useEffect(()=>{persistServerSetting("hc-openhands-reasoning-effort","openhands_reasoning_effort",openhandsReasoningEffort);},[openhandsReasoningEffort]);
+  useEffect(()=>{persistServerSetting("hc-aider-enabled","aider_enabled",aiderEnabled,String(aiderEnabled));},[aiderEnabled]);
+  useEffect(()=>{persistServerSetting("hc-aider-model","aider_model",aiderModel);},[aiderModel]);
+  useEffect(()=>{persistServerSetting("hc-aider-auto-test","aider_auto_test",aiderAutoTest,String(aiderAutoTest));},[aiderAutoTest]);
   useEffect(()=>{try{localStorage.setItem("hc-model-params",JSON.stringify(modelParams));}catch{}},[modelParams]);
   useEffect(()=>{try{localStorage.setItem("hc-prompts",JSON.stringify(prompts));}catch{}},[prompts]);
   useEffect(()=>{try{localStorage.setItem("hc-conv-tags",JSON.stringify(convTags));}catch{}},[convTags]);
@@ -1827,6 +1873,14 @@ function HyprChat(){
   const [attachments,setAttachments]=useState([]); // [{name, content}]
   const [coderProjUploading,setCoderProjUploading]=useState(false);
   const [coderProjInfo,setCoderProjInfo]=useState(null); // {name, file_count, language}
+  const [coderWorkflows,setCoderWorkflows]=useState([]);
+  const refreshCoderWorkflows=useCallback(async(cid=actId)=>{
+    if(!cid)return;
+    try{
+      const r=await fetch(`${API}/api/coder/workflows?conversation_id=${cid}`);
+      if(r.ok)setCoderWorkflows(await r.json());
+    }catch{}
+  },[actId]);
   const uploadCoderProject=async(f)=>{
     if(!actId||!f)return;
     setCoderProjUploading(true);setCoderProjInfo(null);
@@ -1838,11 +1892,12 @@ function HyprChat(){
       const r=await fetch(`${API}/api/coder/upload-project`,{method:"POST",body:fd});
       if(!r.ok){const err=await r.json().catch(()=>({detail:r.statusText}));throw new Error(err.detail||`HTTP ${r.status}`);}
       const data=await r.json();
-      setCoderProjInfo({name:data.name,file_count:data.file_count,language:data.language});
+      setCoderProjInfo({name:data.name,file_count:data.file_count,language:data.language,workflow_id:data.workflow_id,build_system:data.detected_build_system,test_cmd:data.detected_test_cmd,indexer_status:data.indexer_status});
       setAttachments(p=>[
         ...p.filter(a=>a.name!==placeholderName&&!a.name.startsWith("📦 project:")),
-        {name:`📦 project: ${data.name} (${data.file_count} ${data.language} files)`,content:`[Uploaded project attached to sandbox at ${data.sandbox_path}]`}
+        {name:`📦 project: ${data.name} (${data.file_count} ${data.language} files)`,content:`[Uploaded project attached to sandbox at ${data.sandbox_path}; workflow_id=${data.workflow_id||"n/a"}]`}
       ]);
+      refreshCoderWorkflows(actId);
     }catch(e){
       setAttachments(p=>p.filter(a=>a.name!==placeholderName));
       alert(`Project upload failed: ${e.message}`);
@@ -1952,6 +2007,9 @@ function HyprChat(){
       if(d.openhands_enabled!=null)hydrateServerSetting("openhands_enabled",setOpenhandsEnabled,d.openhands_enabled,openhandsEnabled);
       if(d.openhands_max_rounds!=null)hydrateServerSetting("openhands_max_rounds",setOpenhandsMaxRounds,d.openhands_max_rounds,openhandsMaxRounds);
       if(d.openhands_reasoning_effort)hydrateServerSetting("openhands_reasoning_effort",setOpenhandsReasoningEffort,d.openhands_reasoning_effort,openhandsReasoningEffort);
+      if(d.aider_enabled!=null)hydrateServerSetting("aider_enabled",setAiderEnabled,d.aider_enabled,aiderEnabled);
+      if(d.aider_model!=null)hydrateServerSetting("aider_model",setAiderModel,d.aider_model,aiderModel);
+      if(d.aider_auto_test!=null)hydrateServerSetting("aider_auto_test",setAiderAutoTest,d.aider_auto_test,aiderAutoTest);
       settingsLoadedRef.current=true;
     }).catch(()=>{settingsLoadedRef.current=true;});
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
@@ -1987,6 +2045,12 @@ function HyprChat(){
     connect();
     return()=>{closed=true;if(retryTimer)clearTimeout(retryTimer);sseR.current?.close();};
   },[actId]);
+  useEffect(()=>{if(actId)refreshCoderWorkflows(actId);},[actId,refreshCoderWorkflows]);
+  useEffect(()=>{
+    if(!actId||!evts.some(e=>e.data?.workflow_id||e.type==="tool_end"||e.type==="tool_progress"))return;
+    const id=setTimeout(()=>refreshCoderWorkflows(actId),500);
+    return()=>clearTimeout(id);
+  },[evts,actId,refreshCoderWorkflows]);
 
   // Auto-expand thinking pill when enabled
   useEffect(()=>{
@@ -4951,6 +5015,29 @@ function HyprChat(){
           <span style={{fontSize:10,color:t.mut}}>{openhandsEnabled?"On":"Off"}</span>
         </div>
 
+        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+            <label style={{fontSize:12,color:t.dim,fontWeight:600,whiteSpace:"nowrap"}}>Aider Enabled</label>
+            <div onClick={()=>setAiderEnabled(!aiderEnabled)} style={{width:36,height:20,borderRadius:10,background:aiderEnabled?t.acc:`${t.mut}44`,cursor:"pointer",position:"relative",transition:"all .2s"}}>
+              <div style={{width:16,height:16,borderRadius:8,background:t.fg,position:"absolute",top:2,left:aiderEnabled?18:2,transition:"all .2s"}}/>
+            </div>
+            <span style={{fontSize:10,color:t.mut}}>{aiderEnabled?"Uploaded-project fixes use Aider":"Fallback Fixer"}</span>
+          </div>
+          <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Aider/Fix Model</div>
+          {aiderModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <div style={{flex:1}}><ModelPicker value={aiderModel} onChange={setAiderModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
+            <button onClick={()=>setAiderModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
+          </div>:<div onClick={()=>setAiderModel(fixerModel||coderModel||models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+            <span style={{fontSize:14}}>🛠</span>
+            <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from Fixer/Coder Model</div><div style={{fontSize:9,color:t.dim}}>Click to pin the Aider edit model</div></div>
+            <span style={{fontSize:9,color:t.mut}}>▾</span>
+          </div>}
+          <label style={{display:"flex",alignItems:"center",gap:8,marginTop:10,fontSize:11,color:t.mut,cursor:"pointer"}}>
+            <input type="checkbox" checked={aiderAutoTest} onChange={e=>setAiderAutoTest(e.target.checked)} style={{accentColor:t.acc}}/>
+            Auto-run safe test command after Aider edits
+          </label>
+        </div>
+
         <div style={{marginBottom:14}}>
           <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Coder Context Window: <span style={{color:t.acc}}>{coderNumCtx.toLocaleString()}</span></label>
           <input type="range" min="2048" max="262144" step="2048" value={coderNumCtx} onChange={e=>setCoderNumCtx(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
@@ -5602,6 +5689,7 @@ function HyprChat(){
                   {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:null;})()}
                   {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:null;})()}
                   {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>;})()}
+                  {(()=>{if(isU)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;if(i!==lastAI||!coderWorkflows.length)return null;return coderWorkflows.slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font}/>);})()}
                   {/* Coder Bot v2 — durable run cards. Render one card per unique run_id.
                       Sources, in priority: explicit metadata.run_ids (written server-side at
                       each round boundary — survives mid-stream reload), then live events
