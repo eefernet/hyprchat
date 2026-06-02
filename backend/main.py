@@ -929,6 +929,7 @@ async def upload_coder_project(
                 )
             git_cmd = (
                 f"cd {shlex.quote(remote_dir)} && "
+                f"git config --global --add safe.directory {shlex.quote(remote_dir)} >/dev/null 2>&1 || true; "
                 "if [ -d .git ]; then "
                 "  git status --short >/dev/null 2>&1 && echo GIT_BASELINE:existing; "
                 "else "

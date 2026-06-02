@@ -283,6 +283,7 @@ def _run_git(project_dir: Path, args: list[str], timeout: int = 30) -> subproces
 
 def _ensure_git_baseline(project_dir: Path) -> None:
     """Create a local-only baseline commit if the uploaded project lacks git."""
+    _run_git(project_dir, ["config", "--global", "--add", "safe.directory", str(project_dir)], timeout=10)
     if (project_dir / ".git").is_dir():
         return
     _run_git(project_dir, ["init"], timeout=20)

@@ -243,6 +243,110 @@ def _show_journal(target, unit, lines=20):
             print(f"  {DIM}{line}{RST}")
 
 
+def _default_env_text(codebox_ip):
+    """Minimal .env for a fresh HyprChat host. Existing .env files are kept."""
+    return "\n".join([
+        "HOST=0.0.0.0",
+        "PORT=8000",
+        "DEBUG=false",
+        f"CODEBOX_URL=http://{codebox_ip}:8585",
+        f"OPENHANDS_URL=http://{codebox_ip}:8586",
+        f"AIDER_WORKER_URL=http://{codebox_ip}:8586",
+        "DATABASE_PATH=/opt/hyprchat/data/hyprchat.db",
+        "UPLOAD_DIR=/opt/hyprchat/data/uploads",
+        "TOOLS_DIR=/opt/hyprchat/data/tools",
+        "KB_DIR=/opt/hyprchat/data/knowledge_bases",
+        "SANDBOX_DIR=/opt/hyprchat/data/sandbox",
+        "SETTINGS_PATH=/opt/hyprchat/data/settings.json",
+        "",
+    ])
+
+
+def _hyprchat_host_ready(hypr):
+    cmd = (
+        "id -u hyprchat >/dev/null 2>&1 && "
+        "test -d /opt/hyprchat/backend && "
+        "test -d /opt/hyprchat/frontend/dist && "
+        "test -d /opt/hyprchat/data && "
+        "test -f /opt/hyprchat/.env && "
+        "python3 -m pip --version >/dev/null 2>&1"
+    )
+    return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], cmd, timeout=20)
+
+
+def _bootstrap_hyprchat_host(hypr, codebox_ip):
+    env_text = shlex.quote(_default_env_text(codebox_ip))
+    cmd = (
+        "set -u\n"
+        "if command -v apt-get >/dev/null 2>&1; then\n"
+        "  apt-get update -qq >/dev/null 2>&1 || true\n"
+        "  apt-get install -y -qq python3-pip python3-venv curl git sqlite3 >/dev/null 2>&1 || true\n"
+        "fi\n"
+        "if ! id -u hyprchat >/dev/null 2>&1; then\n"
+        "  useradd --system --home /opt/hyprchat --shell /usr/sbin/nologin hyprchat\n"
+        "fi\n"
+        "mkdir -p /opt/hyprchat/backend/agents /opt/hyprchat/frontend/dist "
+        "/opt/hyprchat/data/uploads/avatars /opt/hyprchat/data/tools "
+        "/opt/hyprchat/data/knowledge_bases /opt/hyprchat/data/sandbox\n"
+        f"if [ ! -f /opt/hyprchat/.env ]; then printf %s {env_text} > /opt/hyprchat/.env; fi\n"
+        "chmod 640 /opt/hyprchat/.env 2>/dev/null || true\n"
+        "chown -R hyprchat:hyprchat /opt/hyprchat/data 2>/dev/null || chown -R hyprchat /opt/hyprchat/data\n"
+    )
+    return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], cmd, timeout=180)
+
+
+def _codebox_host_ready(cb):
+    cmd = (
+        "test -d /opt/openhands-worker && "
+        "test -d /root/projects && "
+        "python3 -c 'import fastapi, uvicorn, pydantic' >/dev/null 2>&1"
+    )
+    return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=20)
+
+
+def _bootstrap_codebox_host(cb):
+    cmd = (
+        "set -u\n"
+        "if command -v apt-get >/dev/null 2>&1; then\n"
+        "  apt-get update -qq >/dev/null 2>&1 || true\n"
+        "  apt-get install -y -qq python3-pip python3-venv curl git >/dev/null 2>&1 || true\n"
+        "fi\n"
+        "mkdir -p /opt/openhands-worker /root/projects /tmp/hyprchat-aider\n"
+        "python3 -m pip install --break-system-packages -q -U "
+        "fastapi 'uvicorn[standard]' pydantic requests >/tmp/hyprchat-worker-pip.log 2>&1 || "
+        "python3 -m pip install --user -q -U fastapi 'uvicorn[standard]' pydantic requests "
+        ">>/tmp/hyprchat-worker-pip.log 2>&1\n"
+    )
+    return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=300)
+
+
+def _ensure_openhands_worker_service(cb):
+    cmd = (
+        "set -u\n"
+        "if [ ! -f /etc/systemd/system/openhands-worker.service ]; then\n"
+        "cat > /etc/systemd/system/openhands-worker.service <<'EOF'\n"
+        "[Unit]\n"
+        "Description=HyprChat OpenHands Worker\n"
+        "After=network.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        "WorkingDirectory=/opt/openhands-worker\n"
+        "Environment=PYTHONUNBUFFERED=1\n"
+        "ExecStart=/usr/bin/python3 /opt/openhands-worker/openhands_worker.py\n"
+        "Restart=always\n"
+        "RestartSec=5\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+        "EOF\n"
+        "fi\n"
+        "systemctl daemon-reload\n"
+        "systemctl enable openhands-worker >/dev/null 2>&1 || true\n"
+    )
+    return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=30)
+
+
 def _deploy_target(filepath, remote_dir, hypr, cb):
     """Return (target_server, remote_dir) for a watched file."""
     if filepath == "backend/openhands_worker.py":
@@ -263,29 +367,38 @@ def _ensure_remote_dir(target, remote_dir):
 
 
 def _ensure_aider_worker_venv(cb):
-    """Install/check Aider on Codebox, where uploaded-project fixes run."""
+    """Install/check Aider on Codebox, where uploaded-project fixes run.
+
+    Aider's dependency set is not reliable on Python 3.13. Use uv to create a
+    dedicated Python 3.12 venv at the path the worker checks first.
+    """
     venv = REMOTE_AIDER_VENV.rstrip("/")
     aider = f"{venv}/bin/aider"
-    pip = f"{venv}/bin/pip"
     cmd = (
         "set -u\n"
         "log=/tmp/hyprchat-aider-install.log\n"
+        f"venv={shlex.quote(venv)}\n"
+        f"aider={shlex.quote(aider)}\n"
         f"mkdir -p {shlex.quote(REMOTE_OPENHANDS_WORKER)}\n"
-        f"if [ ! -x {shlex.quote(aider)} ]; then\n"
-        f"  rm -rf {shlex.quote(venv)}\n"
+        "if [ ! -x \"$aider\" ]; then\n"
+        "  rm -rf \"$venv\"\n"
         "  : > \"$log\"\n"
-        f"  if ! python3 -m venv {shlex.quote(venv)} >>\"$log\" 2>&1; then\n"
-        "    if command -v apt-get >/dev/null 2>&1; then\n"
-        "      apt-get update -qq >>\"$log\" 2>&1 || true\n"
-        "      apt-get install -y -qq python3-venv >>\"$log\" 2>&1 || true\n"
-        "    fi\n"
-        f"    python3 -m venv {shlex.quote(venv)} >>\"$log\" 2>&1\n"
+        "  python3 -m pip install --break-system-packages -U uv >>\"$log\" 2>&1 || "
+        "python3 -m pip install --user -U uv >>\"$log\" 2>&1\n"
+        "  uvbin=$(command -v uv || true)\n"
+        "  if [ -z \"$uvbin\" ] && [ -x /root/.local/bin/uv ]; then uvbin=/root/.local/bin/uv; fi\n"
+        "  if [ -z \"$uvbin\" ]; then\n"
+        "    echo 'uv install failed'\n"
+        "    tail -80 \"$log\" 2>/dev/null || true\n"
+        "    exit 1\n"
         "  fi\n"
-        f"  {shlex.quote(pip)} install -U pip setuptools wheel >>\"$log\" 2>&1\n"
-        f"  {shlex.quote(pip)} install -U aider-chat >>\"$log\" 2>&1\n"
+        "  \"$uvbin\" python install 3.12 >>\"$log\" 2>&1\n"
+        "  \"$uvbin\" venv --seed --python 3.12 \"$venv\" >>\"$log\" 2>&1\n"
+        "  \"$venv/bin/python\" -m pip install -U pip setuptools wheel >>\"$log\" 2>&1\n"
+        "  \"$venv/bin/pip\" install -U aider-chat >>\"$log\" 2>&1\n"
         "fi\n"
-        f"if [ -x {shlex.quote(aider)} ]; then\n"
-        f"  {shlex.quote(aider)} --version 2>&1\n"
+        "if [ -x \"$aider\" ]; then\n"
+        "  \"$aider\" --version 2>&1\n"
         "else\n"
         "  echo 'Aider binary missing after install attempt'\n"
         "  tail -80 \"$log\" 2>/dev/null || true\n"
@@ -293,6 +406,12 @@ def _ensure_aider_worker_venv(cb):
         "fi"
     )
     return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=600)
+
+
+def _aider_worker_ready(cb):
+    aider = f"{REMOTE_AIDER_VENV.rstrip('/')}/bin/aider"
+    cmd = f"test -x {shlex.quote(aider)} && {shlex.quote(aider)} --version 2>&1"
+    return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=20)
 
 
 def deploy_changes(changed, cfg):
@@ -304,6 +423,28 @@ def deploy_changes(changed, cfg):
 
     cb = cfg["codebox"]
     ensured_dirs = set()
+
+    print()
+    print(f"  {Y}\u25b6{RST} Checking remote install prerequisites...")
+    hypr_ready, _out, hypr_err = _hyprchat_host_ready(hypr)
+    if not hypr_ready:
+        ok, out, err = _bootstrap_hyprchat_host(hypr, cb["ip"])
+        if ok:
+            print(f"  {G}\u2713{RST} HyprChat host bootstrapped")
+        else:
+            print(f"  {Y}!{RST} HyprChat bootstrap warning: {(err or out or hypr_err)[:300]}")
+    else:
+        print(f"  {G}\u2713{RST} HyprChat host ready")
+
+    cb_ready, _out, cb_err = _codebox_host_ready(cb)
+    if not cb_ready:
+        ok, out, err = _bootstrap_codebox_host(cb)
+        if ok:
+            print(f"  {G}\u2713{RST} Codebox host bootstrapped")
+        else:
+            print(f"  {Y}!{RST} Codebox bootstrap warning: {(err or out or cb_err)[:300]}")
+    else:
+        print(f"  {G}\u2713{RST} Codebox host ready")
 
     for filepath, (label, remote_dir, restart_flag) in changed:
         target, remote_dir = _deploy_target(filepath, remote_dir, hypr, cb)
@@ -349,9 +490,10 @@ def deploy_changes(changed, cfg):
     if any(fp == "backend/hyprchat.service" for fp, *_ in changed):
         print()
         print(f"  {Y}\u25b6{RST} Reloading systemd daemon...")
-        ok, out, err = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], "systemctl daemon-reload")
+        ok, out, err = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
+            "systemctl daemon-reload && systemctl enable hyprchat >/dev/null 2>&1")
         if ok:
-            print(f"  {G}\u2713{RST} Daemon reloaded")
+            print(f"  {G}\u2713{RST} Daemon reloaded; hyprchat enabled")
         else:
             print(f"  {R}\u2717{RST} daemon-reload failed: {err}")
 
@@ -387,8 +529,9 @@ def deploy_changes(changed, cfg):
                 print(f"  {R}\u2717{RST} Start fallback failed: {(err_start or out_start or out2)[:300]}")
                 _show_journal(hypr, "hyprchat")
 
-    # Restart openhands worker on codebox if it was deployed
-    if any(fp == "backend/openhands_worker.py" for fp, *_ in changed):
+    worker_deployed = any(fp == "backend/openhands_worker.py" for fp, *_ in changed)
+    aider_ready, aider_out, _ = _aider_worker_ready(cb)
+    if worker_deployed or not aider_ready:
         print()
         print(f"  {Y}\u25b6{RST} Checking Aider worker venv on Codebox...")
         ok, out, err = _ensure_aider_worker_venv(cb)
@@ -397,6 +540,15 @@ def deploy_changes(changed, cfg):
         else:
             print(f"  {Y}!{RST} Aider install/check failed: {(err or out)[:300]}")
             print(f"     {DIM}Worker will still run; /aider/health reports missing until this is fixed.{RST}")
+
+    if worker_deployed:
+        print()
+        print(f"  {Y}\u25b6{RST} Ensuring OpenHands worker service...")
+        svc_ok, svc_out, svc_err = _ensure_openhands_worker_service(cb)
+        if svc_ok:
+            print(f"  {G}\u2713{RST} OpenHands worker service ready")
+        else:
+            print(f"  {Y}!{RST} Worker service setup failed: {(svc_err or svc_out)[:300]}")
 
         print()
         print(f"  {Y}\u25b6{RST} Restarting OpenHands worker on Codebox...")
@@ -504,8 +656,10 @@ def push_all(cfg, file_states):
 
 def main():
     cfg = load_config()
+    first_setup = False
     if not cfg or not cfg.get("hyprchat", {}).get("ip"):
         cfg = setup_servers()
+        first_setup = True
     else:
         clear()
         print()
@@ -537,6 +691,11 @@ def main():
     for filepath in WATCHED:
         prev_times[filepath] = os.path.getmtime(filepath) if os.path.exists(filepath) else 0
         file_states[filepath] = "idle"
+
+    if first_setup:
+        choice = input(f"  {BLD}Run first-time full deploy now? {RST}[{G}Y{RST}/{R}n{RST}] > ").strip().lower()
+        if choice in ("", "y", "yes"):
+            push_all(cfg, file_states)
 
     last_event = f"{DIM}Watching for changes...{RST}"
     draw_monitor(file_states, prev_times, cfg, last_event)

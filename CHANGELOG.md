@@ -20,11 +20,13 @@
 - Added `run_aider_fix` plus `/aider/*` worker endpoints on Codebox.
 - Uploads now create a local git baseline and return detected build/test contract metadata.
 - ProjectQA now mixes filename targets, grep, code-memory hits, and marker files for better citations.
+- Deploy monitor now bootstraps fresh hosts and installs missing Aider worker support.
 
 ### Bug fixes
 
 - Settings no longer PATCH stale `localStorage` values over server-persisted v2 model/context settings during initial page load.
 - Workspace Model helper calls no longer load small analysis models at their native huge context; workspace topic analysis and council suggestions are capped at 4K, and title generation remains capped at 2K.
+- Uploaded-project git baselines now mark Codebox project paths as safe directories before status/init checks.
 
 ### Removed
 - HyprChat already has n8n integration, no need to reinvent the wheel. Also at this point, I rarely use it.

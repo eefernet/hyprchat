@@ -283,7 +283,7 @@ Or use the file-watching deployer that auto-pushes changes and restarts the serv
 python3 deploy_monitor.py
 ```
 
-The monitor reads `.deploy_config.json` for SSH credentials and watches every backend / frontend / agent file, including `aider_fixer.py` and `language_adapters.py`. Backend changes trigger a service restart; frontend changes deploy without restart. Deploying `backend/openhands_worker.py` also pushes the worker to Codebox, checks/installs Aider in `/opt/openhands-worker/aider-venv`, and restarts `openhands-worker`.
+The monitor reads `.deploy_config.json` for SSH credentials and watches every backend / frontend / agent file, including `aider_fixer.py` and `language_adapters.py`. On first setup it can run a full deploy, create missing remote directories/users/env defaults, install Python requirements, enable systemd units, and bootstrap Aider in `/opt/openhands-worker/aider-venv` when missing. Backend changes trigger a service restart; frontend changes deploy without restart.
 
 ---
 
