@@ -104,7 +104,29 @@ OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", "16384"))
 # Ollama models silently ignore unsupported values. Default "medium" — "high"
 # adds a lot of think-token overhead per round on small/medium local models.
 OPENHANDS_REASONING_EFFORT = os.getenv("OPENHANDS_REASONING_EFFORT", "medium").strip().lower()
-DEFAULT_NUM_CTX = int(os.getenv("DEFAULT_NUM_CTX", "16384"))
+MIN_NUM_CTX = int(os.getenv("MIN_NUM_CTX", "1024"))
+CODER_V2_MIN_NUM_CTX = int(os.getenv("CODER_V2_MIN_NUM_CTX", "32768"))
+
+
+def coerce_num_ctx(value, fallback=16384, minimum=None):
+    """Return a positive Ollama num_ctx, or a sane fallback for invalid values."""
+    minimum = MIN_NUM_CTX if minimum is None else int(minimum)
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = 0
+    if n >= minimum:
+        return n
+    if fallback is None:
+        return None
+    try:
+        fb = int(fallback)
+    except (TypeError, ValueError):
+        fb = 0
+    return fb if fb >= minimum else 16384
+
+
+DEFAULT_NUM_CTX = coerce_num_ctx(os.getenv("DEFAULT_NUM_CTX", "16384"))
 MAX_AGENT_ROUNDS = int(os.getenv("MAX_AGENT_ROUNDS", "12"))
 MAX_AGENT_ROUNDS_CODER = int(os.getenv("MAX_AGENT_ROUNDS_CODER", "30"))
 DEFAULT_SYSTEM_PROMPT = """You are CodeAgent, an autonomous coding assistant with a sandboxed Linux environment (CodeBox).

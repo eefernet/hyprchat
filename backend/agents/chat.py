@@ -219,7 +219,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             params = mc.get("parameters", {})
             for key in ("temperature", "num_ctx", "top_p", "top_k"):
                 if params.get(key) is not None:
-                    model_options[key] = params[key]
+                    if key == "num_ctx":
+                        _ctx = config.coerce_num_ctx(params[key], fallback=None)
+                        if _ctx:
+                            model_options[key] = _ctx
+                    else:
+                        model_options[key] = params[key]
 
             # Extract latest user message for RAG queries
             user_query = ""
@@ -306,8 +311,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     print(f"[RAG] Research memory query error: {e}")
 
     # Apply global overrides from request (when no persona overrides them)
-    if req.num_ctx and "num_ctx" not in model_options:
-        model_options["num_ctx"] = req.num_ctx
+    if req.num_ctx is not None and "num_ctx" not in model_options:
+        _ctx = config.coerce_num_ctx(req.num_ctx, fallback=None)
+        if _ctx:
+            model_options["num_ctx"] = _ctx
     if req.temperature is not None and "temperature" not in model_options:
         model_options["temperature"] = req.temperature
     if req.top_p is not None and "top_p" not in model_options:
@@ -317,9 +324,16 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     if req.repeat_penalty is not None and "repeat_penalty" not in model_options:
         model_options["repeat_penalty"] = req.repeat_penalty
 
-    # Ensure num_ctx always has a sane default to prevent unconstrained context
+    # Ensure num_ctx always has a sane positive default. Passing 0 through to
+    # Ollama collapses some models to their tiny native default context.
+    if "num_ctx" in model_options:
+        _ctx = config.coerce_num_ctx(model_options.get("num_ctx"), fallback=None)
+        if _ctx:
+            model_options["num_ctx"] = _ctx
+        else:
+            model_options.pop("num_ctx", None)
     if "num_ctx" not in model_options:
-        model_options["num_ctx"] = config.DEFAULT_NUM_CTX
+        model_options["num_ctx"] = config.coerce_num_ctx(config.DEFAULT_NUM_CTX)
 
     messages = []
     effective_system = persona_system_prompt if persona_system_prompt is not None else req.system_prompt
@@ -571,6 +585,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
     # Inject visualization hint for non-coder chats that have execute_code + download_file
     _has_full_codeagent = bool(available_tool_names & (CODEAGENT_TOOLS_SET - {"execute_code", "download_file"}))
+    if _is_v2_persona and _has_full_codeagent:
+        _current_ctx = config.coerce_num_ctx(model_options.get("num_ctx"), fallback=config.DEFAULT_NUM_CTX)
+        _v2_ctx = max(_current_ctx, config.CODER_V2_MIN_NUM_CTX)
+        if _v2_ctx != model_options.get("num_ctx"):
+            print(f"[CHAT] Coder Bot v2 num_ctx raised to {_v2_ctx} (was {model_options.get('num_ctx')})")
+        model_options["num_ctx"] = _v2_ctx
     if not _has_full_codeagent and "execute_code" in available_tool_names:
         _viz_hint = (
             "\n\n## Visualization Capability\n"

@@ -181,6 +181,12 @@ async def lifespan(app: FastAPI):
     if "openhands_max_rounds" in _settings:
         config.OPENHANDS_MAX_ROUNDS = int(_settings["openhands_max_rounds"])
         print(f"[Config] Loaded OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
+    if "openhands_num_ctx" in _settings:
+        config.OPENHANDS_NUM_CTX = config.coerce_num_ctx(
+            _settings["openhands_num_ctx"],
+            fallback=config.OPENHANDS_NUM_CTX,
+        )
+        print(f"[Config] Loaded OpenHands num_ctx: {config.OPENHANDS_NUM_CTX}")
     if "openhands_reasoning_effort" in _settings:
         _re = (_settings["openhands_reasoning_effort"] or "medium").strip().lower()
         if _re not in ("low", "medium", "high"):
@@ -191,7 +197,10 @@ async def lifespan(app: FastAPI):
         # Single knob the user controls. Drives the chat-side fallback in chat.py and
         # every internal LLM call (plan_project, critic) — so increasing the chat ctx
         # in Settings doesn't get silently capped by a hardcoded 16K downstream.
-        config.DEFAULT_NUM_CTX = int(_settings["default_num_ctx"])
+        config.DEFAULT_NUM_CTX = config.coerce_num_ctx(
+            _settings["default_num_ctx"],
+            fallback=config.DEFAULT_NUM_CTX,
+        )
         print(f"[Config] Loaded default num_ctx: {config.DEFAULT_NUM_CTX}")
     # Run cleanup once on startup to clear any stale files
     _run_cleanup_sync()
@@ -2826,7 +2835,11 @@ async def update_app_settings(body: dict = Body(...)):
         config.OPENHANDS_MAX_ROUNDS = int(body["openhands_max_rounds"])
         print(f"[Config] OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
     if "openhands_num_ctx" in body:
-        config.OPENHANDS_NUM_CTX = int(body["openhands_num_ctx"])
+        config.OPENHANDS_NUM_CTX = config.coerce_num_ctx(
+            body["openhands_num_ctx"],
+            fallback=config.OPENHANDS_NUM_CTX,
+        )
+        settings["openhands_num_ctx"] = config.OPENHANDS_NUM_CTX
         print(f"[Config] OpenHands num_ctx: {config.OPENHANDS_NUM_CTX}")
     if "openhands_reasoning_effort" in body:
         _re_in = (body["openhands_reasoning_effort"] or "medium").strip().lower()
@@ -2837,7 +2850,11 @@ async def update_app_settings(body: dict = Body(...)):
         settings["openhands_reasoning_effort"] = _re_in
         print(f"[Config] OpenHands reasoning effort: {config.OPENHANDS_REASONING_EFFORT}")
     if "default_num_ctx" in body:
-        config.DEFAULT_NUM_CTX = int(body["default_num_ctx"])
+        config.DEFAULT_NUM_CTX = config.coerce_num_ctx(
+            body["default_num_ctx"],
+            fallback=config.DEFAULT_NUM_CTX,
+        )
+        settings["default_num_ctx"] = config.DEFAULT_NUM_CTX
         print(f"[Config] Default num_ctx: {config.DEFAULT_NUM_CTX}")
     save_settings(settings)
     return {

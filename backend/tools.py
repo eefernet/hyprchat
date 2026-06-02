@@ -179,6 +179,53 @@ async def _deep_research_called_since(conv_id: str, since_iso: str | None) -> bo
         return False
 
 
+_SHIP_ANYWAY_ACTION_RE = re.compile(
+    r"\b(ship|package|download|deliver|export|archive|tarball|zip)\b"
+    r"|give\s+me\s+(?:a\s+)?download",
+    re.I,
+)
+_SHIP_ANYWAY_QUALIFIER_RE = re.compile(
+    r"\b(anyway|as[-\s]?is|even\s+if|despite|regardless|ignore|skip)\b"
+    r"|\b(tests?\s+(?:fail|failing|failed)|test\s+issues?|known\s+issues?|"
+    r"with\s+(?:the\s+)?issues?|broken|unverified)\b",
+    re.I,
+)
+_SHIP_ANYWAY_DIRECT_RE = re.compile(
+    r"\b(ship|package|download|deliver|export|archive)\s+"
+    r"(?:it|this|the\s+project|what\s+(?:you|was)\s+built)\b"
+    r"|give\s+me\s+(?:a\s+)?download",
+    re.I,
+)
+
+
+async def _latest_user_requested_ship_anyway(conv_id: str) -> bool:
+    """True when the latest user turn explicitly asks for delivery even
+    though the project may still have review/test issues.
+
+    This is intentionally narrow and only used to relax delivery gates. It
+    should not make repair/build tools bypass the v2 workflow.
+    """
+    if not conv_id:
+        return False
+    try:
+        conv = await db.get_conversation(conv_id)
+        msgs = (conv or {}).get("messages") or []
+        latest = next((m for m in reversed(msgs) if m.get("role") == "user"), None)
+        content = (latest or {}).get("content") or ""
+        if not isinstance(content, str):
+            content = json.dumps(content)
+        text = content.strip()
+        if not text or not _SHIP_ANYWAY_ACTION_RE.search(text):
+            return False
+        return bool(
+            _SHIP_ANYWAY_QUALIFIER_RE.search(text)
+            or _SHIP_ANYWAY_DIRECT_RE.search(text)
+        )
+    except Exception as _e:
+        print(f"[v2-gate] ship-anyway intent check failed (non-fatal): {_e}")
+        return False
+
+
 # Pytest "FAILED tests/foo.py::test_x - reason" line, plus a fallback for
 # generic "FAILED <path>:<line>" / "ERROR tests/foo.py" forms. Captures the
 # file path so the synthesized reviewer envelope can route Fixer to the
@@ -1674,37 +1721,47 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     _pd = (_env.get("project_dir") or "").strip()
                     _pid = _pending_run.get("id", "?")
                     _why = ("generate_code" if _pending_kind == "builder" else "run_fixer")
-                    _gate_msg = (
-                        "state", "review-needed",
-                        f"BLOCKED — {_why} ({_pid}) just completed but "
-                        f"run_review has not been called yet.\n\n"
-                        f"Your VERY NEXT tool call MUST be:\n"
-                        f"  run_review(project_dir='{_pd}')\n\n"
-                        f"Do not call {name}, read_file, write_file, run_shell, javac, "
-                        f"or any other tool first. The Reviewer runs the project's real "
-                        f"build / tests / lint and tells you exactly what (if anything) "
-                        f"still needs fixing — with file:line references and a fix scope.",
-                        f"⛔ Blocked — call run_review first (after {_why} {_pid[:14]}…)",
-                        _pid,
-                    )
+                    if (name in {"download_project", "download_file"}
+                            and await _latest_user_requested_ship_anyway(conv_id)):
+                        print(f"[v2-gate] ship-anyway: allowing {name} before "
+                              f"review because latest user requested delivery", flush=True)
+                    else:
+                        _gate_msg = (
+                            "state", "review-needed",
+                            f"BLOCKED — {_why} ({_pid}) just completed but "
+                            f"run_review has not been called yet.\n\n"
+                            f"Your VERY NEXT tool call MUST be:\n"
+                            f"  run_review(project_dir='{_pd}')\n\n"
+                            f"Do not call {name}, read_file, write_file, run_shell, javac, "
+                            f"or any other tool first. The Reviewer runs the project's real "
+                            f"build / tests / lint and tells you exactly what (if anything) "
+                            f"still needs fixing — with file:line references and a fix scope.",
+                            f"⛔ Blocked — call run_review first (after {_why} {_pid[:14]}…)",
+                            _pid,
+                        )
                 elif _pending_acceptance_needed is not None:
                     _env = _pending_acceptance_needed.get("result_envelope") or {}
                     _pd = (_env.get("project_dir") or "").strip()
                     _rid = _pending_acceptance_needed.get("id", "?")
                     _source_role = _pending_acceptance_needed.get("role", "")
                     _reviewer_id = (_env.get("reviewer_run_id") or _rid)
-                    _gate_msg = (
-                        "state", "acceptance-needed",
-                        f"BLOCKED — run_review is clean, but final acceptance has not "
-                        f"passed yet.\n\n"
-                        f"Your VERY NEXT tool call MUST be:\n"
-                        f"  run_acceptance_review(project_dir='{_pd}', reviewer_run_id='{_reviewer_id}')\n\n"
-                        f"Acceptance verifies the generated project satisfies the user's "
-                        f"request, has accurate docs, sane tests, and clean packaging. "
-                        f"Do not call {name} or download_project until acceptance returns accepted.",
-                        f"⛔ Blocked — call run_acceptance_review first ({_source_role} {_rid[:14]}…)",
-                        _rid,
-                    )
+                    if (name in {"download_project", "download_file"}
+                            and await _latest_user_requested_ship_anyway(conv_id)):
+                        print(f"[v2-gate] ship-anyway: allowing {name} before "
+                              f"acceptance because latest user requested delivery", flush=True)
+                    else:
+                        _gate_msg = (
+                            "state", "acceptance-needed",
+                            f"BLOCKED — run_review is clean, but final acceptance has not "
+                            f"passed yet.\n\n"
+                            f"Your VERY NEXT tool call MUST be:\n"
+                            f"  run_acceptance_review(project_dir='{_pd}', reviewer_run_id='{_reviewer_id}')\n\n"
+                            f"Acceptance verifies the generated project satisfies the user's "
+                            f"request, has accurate docs, sane tests, and clean packaging. "
+                            f"Do not call {name} or download_project until acceptance returns accepted.",
+                            f"⛔ Blocked — call run_acceptance_review first ({_source_role} {_rid[:14]}…)",
+                            _rid,
+                        )
                 elif _pending_review is not None:
                     _rid = _pending_review.get("id", "?")
                     _pending_role = _pending_review.get("role", "reviewer")
@@ -1741,6 +1798,11 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         "download_project", "download_file",
                         "read_file", "list_files",
                     }
+                    _DELIVERY_SHIP_TOOLS = {"download_project", "download_file"}
+                    _ship_anyway_gate = (
+                        name in _DELIVERY_SHIP_TOOLS
+                        and await _latest_user_requested_ship_anyway(conv_id)
+                    )
                     # Deadlock break: the FINAL_CYCLE gate (2 successful fixers,
                     # no research since the last reviewer) blocks run_fixer with
                     # the message "call deep_research first". The STUCK_FIX gate
@@ -1761,6 +1823,10 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                               f"despite fix-needed (fixer_attempts={_fixer_attempts_gate}, "
                               f"required by FINAL_CYCLE/STUCK_FIX)", flush=True)
                         # Skip _gate_msg → deep_research runs.
+                    elif _ship_anyway_gate:
+                        print(f"[v2-gate] ship-anyway: allowing {name} despite "
+                              f"fix-needed because latest user requested delivery", flush=True)
+                        # Skip _gate_msg entirely → delivery tool runs normally.
                     elif _fixer_attempts_gate >= _cap_limit_gate and name in _DELIVERY_OK_AFTER_CAP:
                         print(f"[v2-gate] cap-release: allowing {name} despite "
                               f"fix-needed (attempts={_fixer_attempts_gate}, "
@@ -2148,6 +2214,10 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
 
         elif name == "download_project":
             directory = args.get("directory", "/root")
+            _download_warning_lines = []
+            _ship_anyway_requested = (
+                await _latest_user_requested_ship_anyway(conv_id) if conv_id else False
+            )
 
             # Reviewer gate (Coder Bot v2): if the most recent reviewer run on
             # this conversation reported issues or could not identify the
@@ -2157,6 +2227,25 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             if conv_id:
                 try:
                     _runs_for_gate = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _FIXER_TERMINAL_FOR_DELIVERY = {"succeeded", "failed", "partial", "no_op"}
+                    _run_role_by_id_for_delivery = {
+                        r.get("id"): r.get("role") for r in _runs_for_gate
+                    }
+
+                    def _fixer_source_role_for_delivery(_fr):
+                        _fenv = _fr.get("result_envelope") or {}
+                        return (_fenv.get("source_role")
+                                or _run_role_by_id_for_delivery.get(_fr.get("parent_run_id"))
+                                or "reviewer")
+
+                    def _fixer_attempts_for_delivery(_role: str) -> int:
+                        return sum(
+                            1 for _r in _runs_for_gate
+                            if (_r.get("role") == "fixer"
+                                and _r.get("status") in _FIXER_TERMINAL_FOR_DELIVERY
+                                and _fixer_source_role_for_delivery(_r) == _role)
+                        )
+
                     _latest_reviewer = None
                     _latest_acceptance = None
                     for _r in _runs_for_gate:
@@ -2172,77 +2261,121 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         if _astatus != "accepted":
                             issues = _env.get("issues") or []
                             n = len(issues)
-                            lines = [
-                                f"BLOCKED — last run_acceptance_review returned status='{_astatus}'.",
-                                "You CANNOT call download_project until acceptance is accepted.",
-                                "",
-                                f"Acceptance flagged {n} issue{'s' if n != 1 else ''}:",
-                            ]
-                            for i, iss in enumerate(issues[:5], 1):
-                                lines.append(
-                                    f"  {i}. [{iss.get('category','?')}] {iss.get('file','?')}"
-                                    + (f":{','.join(str(x) for x in iss.get('lines') or [])}" if iss.get('lines') else "")
-                                    + f" — {iss.get('summary','')}"
-                                )
-                                scope = iss.get("suggested_fix_scope") or []
-                                if scope:
-                                    lines.append(f"     fix scope: {', '.join(scope[:5])}")
-                            lines.append("")
-                            lines.append(
-                                f"REQUIRED NEXT STEP: run_fixer(reviewer_run_id='{_latest_acceptance.get('id')}'), "
-                                "then re-run review/acceptance as instructed by the fixer."
+                            _acceptance_cap_exhausted = (
+                                _fixer_attempts_for_delivery("acceptance") >= 2
                             )
-                            await events.emit(conv_id, "tool_end", {
-                                "tool": "download_project", "icon": "code",
-                                "status": f"⛔ Blocked — acceptance has {n} issue{'s' if n != 1 else ''}",
-                            })
-                            return "\n".join(lines)
+                            if _ship_anyway_requested or _acceptance_cap_exhausted:
+                                _download_warning_lines = [
+                                    "WARNING: Shipped despite unresolved acceptance issues.",
+                                    f"Acceptance status: {_astatus or '?'}; issue count: {n}.",
+                                ]
+                                print(f"[CHAT] download_project allowing ship-anyway "
+                                      f"despite acceptance={_latest_acceptance.get('id')} "
+                                      f"status={_astatus} issues={n} "
+                                      f"requested={_ship_anyway_requested} "
+                                      f"cap={_acceptance_cap_exhausted}")
+                            else:
+                                lines = [
+                                    f"BLOCKED — last run_acceptance_review returned status='{_astatus}'.",
+                                    "You CANNOT call download_project until acceptance is accepted.",
+                                    "",
+                                    f"Acceptance flagged {n} issue{'s' if n != 1 else ''}:",
+                                ]
+                                for i, iss in enumerate(issues[:5], 1):
+                                    lines.append(
+                                        f"  {i}. [{iss.get('category','?')}] {iss.get('file','?')}"
+                                        + (f":{','.join(str(x) for x in iss.get('lines') or [])}" if iss.get('lines') else "")
+                                        + f" — {iss.get('summary','')}"
+                                    )
+                                    scope = iss.get("suggested_fix_scope") or []
+                                    if scope:
+                                        lines.append(f"     fix scope: {', '.join(scope[:5])}")
+                                lines.append("")
+                                lines.append(
+                                    f"REQUIRED NEXT STEP: run_fixer(reviewer_run_id='{_latest_acceptance.get('id')}'), "
+                                    "then re-run review/acceptance as instructed by the fixer."
+                                )
+                                await events.emit(conv_id, "tool_end", {
+                                    "tool": "download_project", "icon": "code",
+                                    "status": f"⛔ Blocked — acceptance has {n} issue{'s' if n != 1 else ''}",
+                                })
+                                return "\n".join(lines)
                     if _latest_reviewer:
                         _env = _latest_reviewer.get("result_envelope") or {}
                         _rstatus = (_env.get("status") or "").lower()
                         if _rstatus in ("issues", "error"):
                             issues = _env.get("issues") or []
                             n = len(issues)
-                            lines = [
-                                f"BLOCKED — last run_review on this project returned status='{_rstatus}'.",
-                                f"Build: `{_env.get('build_cmd','')}` exit={_env.get('build_exit','?')}. "
-                                f"Tests: `{_env.get('test_cmd','')}` exit={_env.get('test_exit','?')}.",
-                                "",
-                                f"You CANNOT call download_project until the project passes review. "
-                                f"Reviewer flagged {n} issue{'s' if n != 1 else ''}:",
-                            ]
-                            for i, iss in enumerate(issues[:5], 1):
+                            _reviewer_cap_exhausted = (
+                                _fixer_attempts_for_delivery("reviewer") >= 3
+                            )
+                            if _ship_anyway_requested or _reviewer_cap_exhausted:
+                                _download_warning_lines = [
+                                    "WARNING: Shipped despite unresolved review/test issues.",
+                                    f"Review status: {_rstatus}; issue count: {n}.",
+                                    f"Build exit={_env.get('build_exit','?')}; test exit={_env.get('test_exit','?')}; lint exit={_env.get('lint_exit','?')}.",
+                                ]
+                                if issues:
+                                    _download_warning_lines.append(
+                                        "Latest issue: "
+                                        + (issues[0].get("file") or "?")
+                                        + " - "
+                                        + (issues[0].get("summary") or "")[:220]
+                                    )
+                                print(f"[CHAT] download_project allowing ship-anyway "
+                                      f"despite reviewer={_latest_reviewer.get('id')} "
+                                      f"status={_rstatus} issues={n} "
+                                      f"requested={_ship_anyway_requested} "
+                                      f"cap={_reviewer_cap_exhausted}")
+                            else:
+                                lines = [
+                                    f"BLOCKED — last run_review on this project returned status='{_rstatus}'.",
+                                    f"Build: `{_env.get('build_cmd','')}` exit={_env.get('build_exit','?')}. "
+                                    f"Tests: `{_env.get('test_cmd','')}` exit={_env.get('test_exit','?')}.",
+                                    "",
+                                    f"You CANNOT call download_project until the project passes review. "
+                                    f"Reviewer flagged {n} issue{'s' if n != 1 else ''}:",
+                                ]
+                                for i, iss in enumerate(issues[:5], 1):
+                                    lines.append(
+                                        f"  {i}. [{iss.get('severity','?')}] {iss.get('file','?')}"
+                                        + (f":{','.join(str(x) for x in iss.get('lines') or [])}" if iss.get('lines') else "")
+                                        + f" — {iss.get('summary','')}"
+                                    )
+                                    scope = iss.get("suggested_fix_scope") or []
+                                    if scope:
+                                        lines.append(f"     fix scope: {', '.join(scope[:5])}")
+                                lines.append("")
                                 lines.append(
-                                    f"  {i}. [{iss.get('severity','?')}] {iss.get('file','?')}"
-                                    + (f":{','.join(str(x) for x in iss.get('lines') or [])}" if iss.get('lines') else "")
-                                    + f" — {iss.get('summary','')}"
+                                    "REQUIRED NEXT STEPS: 1) read each file in 'fix scope', 2) edit it with "
+                                    "write_file to address the listed summary, 3) call run_review again. "
+                                    "Repeat until run_review returns CLEAN. THEN call download_project."
                                 )
-                                scope = iss.get("suggested_fix_scope") or []
-                                if scope:
-                                    lines.append(f"     fix scope: {', '.join(scope[:5])}")
-                            lines.append("")
-                            lines.append(
-                                "REQUIRED NEXT STEPS: 1) read each file in 'fix scope', 2) edit it with "
-                                "write_file to address the listed summary, 3) call run_review again. "
-                                "Repeat until run_review returns CLEAN. THEN call download_project."
-                            )
-                            await events.emit(conv_id, "tool_end", {
-                                "tool": "download_project", "icon": "code",
-                                "status": f"⛔ Blocked — last review had {n} issue{'s' if n != 1 else ''}",
-                            })
-                            print(f"[CHAT] download_project blocked: latest reviewer={_latest_reviewer.get('id')} status={_rstatus} issues={n}")
-                            return "\n".join(lines)
+                                await events.emit(conv_id, "tool_end", {
+                                    "tool": "download_project", "icon": "code",
+                                    "status": f"⛔ Blocked — last review had {n} issue{'s' if n != 1 else ''}",
+                                })
+                                print(f"[CHAT] download_project blocked: latest reviewer={_latest_reviewer.get('id')} status={_rstatus} issues={n}")
+                                return "\n".join(lines)
                         if _rstatus == "clean":
-                            await events.emit(conv_id, "tool_end", {
-                                "tool": "download_project", "icon": "code",
-                                "status": "⛔ Blocked — acceptance review required",
-                            })
-                            return (
-                                f"BLOCKED — run_review ({_latest_reviewer.get('id')}) is clean, "
-                                "but run_acceptance_review has not accepted the project yet.\n\n"
-                                "REQUIRED NEXT STEP:\n"
-                                f"  run_acceptance_review(reviewer_run_id='{_latest_reviewer.get('id')}')"
-                            )
+                            if _ship_anyway_requested:
+                                _download_warning_lines = [
+                                    "WARNING: Shipped before final acceptance review.",
+                                    f"Clean reviewer run: {_latest_reviewer.get('id')}.",
+                                ]
+                                print(f"[CHAT] download_project allowing ship-anyway "
+                                      f"before acceptance after clean reviewer={_latest_reviewer.get('id')}")
+                            else:
+                                await events.emit(conv_id, "tool_end", {
+                                    "tool": "download_project", "icon": "code",
+                                    "status": "⛔ Blocked — acceptance review required",
+                                })
+                                return (
+                                    f"BLOCKED — run_review ({_latest_reviewer.get('id')}) is clean, "
+                                    "but run_acceptance_review has not accepted the project yet.\n\n"
+                                    "REQUIRED NEXT STEP:\n"
+                                    f"  run_acceptance_review(reviewer_run_id='{_latest_reviewer.get('id')}')"
+                                )
                 except Exception as _ge:
                     # Gate is best-effort — don't crash legitimate downloads if
                     # the runs query fails. Log and proceed.
@@ -2358,6 +2491,8 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     "",
                     f"Packaging summary: included {included_count} file(s), excluded {excluded_count} generated/cache/build artifact(s).",
                 ]
+                if _download_warning_lines:
+                    summary_lines.extend([""] + _download_warning_lines)
                 if excluded_examples:
                     summary_lines.append("Excluded examples: " + ", ".join(excluded_examples[:5]))
                 return "\n".join(summary_lines)
@@ -4068,7 +4203,10 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 # ── Independent critic pass: catch runtime bugs that pass syntax/compile checks ──
                 # Uses a separate model from the coder so it can't rationalize its own mistakes.
                 critique = ""
-                if code_review and config.CRITIC_ENABLED:
+                _skip_inline_critic = bool(conv_id) and await _check_v2()
+                if _skip_inline_critic:
+                    print("[CODEGEN:CRITIC] Skipping inline critic for Coder Bot v2; run_review is the verification gate")
+                if code_review and config.CRITIC_ENABLED and not _skip_inline_critic:
                     critic_model = config.CRITIC_MODEL or config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL
                     await events.emit(conv_id, "tool_progress", {
                         "tool": "generate_code", "icon": "wand",
