@@ -2073,15 +2073,49 @@ function HyprChat(){
   const [showChangelog,setShowChangelog]=useState(false);
   const [pendingTheme,setPendingTheme]=useState(null);
   const [pendingFont,setPendingFont]=useState(null);
-  const [customQuotes,setCustomQuotes]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-custom-quotes")||"[]");}catch{return [];}});
+  const DEFAULT_LOADING_QUOTES=[
+    {t:"The unexamined life is not worth living.",a:"Socrates"},
+    {t:"I know that I know nothing.",a:"Socrates"},
+    {t:"No great mind has ever existed without a touch of madness.",a:"Aristotle"},
+    {t:"Knowing yourself is the beginning of all wisdom.",a:"Aristotle"},
+    {t:"The soul becomes dyed with the colour of its thoughts.",a:"Marcus Aurelius"},
+    {t:"Waste no more time arguing what a good man should be. Be one.",a:"Marcus Aurelius"},
+    {t:"We suffer more often in imagination than in reality.",a:"Seneca"},
+    {t:"No man ever steps in the same river twice.",a:"Heraclitus"},
+    {t:"The journey of a thousand miles begins with one step.",a:"Lao Tzu"},
+    {t:"When I let go of what I am, I become what I might be.",a:"Lao Tzu"},
+    {t:"Be still, and know that I am God.",a:"Psalm 46:10"},
+    {t:"The light shineth in darkness; and the darkness comprehended it not.",a:"John 1:5"},
+    {t:"The kingdom of God is within you.",a:"Luke 17:21"},
+    {t:"Let there be light: and there was light.",a:"Genesis 1:3"},
+    {t:"And ye shall know the truth, and the truth shall make you free.",a:"John 8:32"},
+    {t:"For now we see through a glass, darkly.",a:"1 Corinthians 13:12"},
+    {t:"Sell your cleverness and buy bewilderment.",a:"Rumi"},
+    {t:"The wound is the place where the Light enters you.",a:"Rumi"},
+    {t:"Wherever you stand, be the soul of that place.",a:"Rumi"},
+    {t:"The eye through which I see God is the same eye through which God sees me.",a:"Meister Eckhart"},
+    {t:"If I have seen further it is by standing on the shoulders of Giants.",a:"Isaac Newton"},
+    {t:"What we know is a drop, what we don't know is an ocean.",a:"Isaac Newton"},
+    {t:"Mathematics is the language in which God has written the universe.",a:"Galileo Galilei"},
+    {t:"Measure what is measurable, and make measurable what is not so.",a:"Galileo Galilei"},
+    {t:"God does not play dice with the universe.",a:"Albert Einstein"},
+    {t:"Imagination is more important than knowledge.",a:"Albert Einstein"},
+    {t:"Science without religion is lame, religion without science is blind.",a:"Albert Einstein"},
+    {t:"Somewhere, something incredible is waiting to be known.",a:"Carl Sagan"},
+    {t:"We are a way for the cosmos to know itself.",a:"Carl Sagan"},
+    {t:"Equipped with his five senses, man explores the universe around him.",a:"Edwin Hubble"},
+  ];
+  const [customQuotes,setCustomQuotes]=useState(()=>{try{const q=JSON.parse(localStorage.getItem("hc-custom-quotes")||"[]");const cleaned=Array.isArray(q)?q.filter(x=>x&&x.t&&x.a!=="HyprChat"):[];return cleaned.length?cleaned:DEFAULT_LOADING_QUOTES;}catch{return DEFAULT_LOADING_QUOTES;}});
   const [newQuoteText,setNewQuoteText]=useState("");
   const [newQuoteAttr,setNewQuoteAttr]=useState("");
+  const [editQuoteIdx,setEditQuoteIdx]=useState(null);
+  const [editQuoteText,setEditQuoteText]=useState("");
+  const [editQuoteAttr,setEditQuoteAttr]=useState("");
   const [changelogContent,setChangelogContent]=useState(null);
   const [ollamaUrl,setOllamaUrl]=useState("");
   const [codeboxUrl,setCodeboxUrl]=useState("");
   const [searxngUrl,setSearxngUrl]=useState("");
   const [n8nUrl,setN8nUrl]=useState("");
-  const [connectionsOpen,setConnectionsOpen]=useState(false);
   const [connectionsSaving,setConnectionsSaving]=useState(false);
   const [ragSettings,setRagSettings]=useState({embed_model:"nomic-embed-text",chunk_size:500,chunk_overlap:50,top_k:6,max_context_chars:6000,research_top_k:4,research_max_chars:3000});
   const [kbPreview,setKbPreview]=useState(null);
@@ -2285,6 +2319,9 @@ function HyprChat(){
   const [tokS,setTokS]=useState(0);
   const [sessionTokens,setSessionTokens]=useState(0);
   const [panel,setPanel]=useState("chat");
+  const previousPanelRef=useRef("chat");
+  const [settingsTab,setSettingsTab]=useState("connections");
+  const [pendingToolIds,setPendingToolIds]=useState([]);
   const [evts,setEvts]=useState([]);
   const evtsRef=useRef([]);
   // Dedicated save buffer — accumulates events for the current stream regardless of chat switches
@@ -2397,8 +2434,9 @@ function HyprChat(){
     if((mc.kb_ids||[]).length)parts.push(`${(mc.kb_ids||[]).length} knowledge base${(mc.kb_ids||[]).length===1?"":"s"}`);
     return parts.length?`Custom persona with ${parts.join(", ")} enabled.`:"Custom persona with its own model, prompt, tools, and knowledge context.";
   };
-  // Quick search — derived from active conversation's tool_ids
-  const quickSearch = (act?.tool_ids||[]).includes("quick_search");
+  // Quick search — derived from active conversation tool_ids, or pending empty-chat selections.
+  const activeToolIds=act?(act.tool_ids||[]):pendingToolIds;
+  const quickSearch = activeToolIds.includes("quick_search");
 
   // Save helpers — persist to backend
   const saveTool=(tl)=>{fetch(`${API}/api/tools/${tl.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:tl.name,description:tl.description,code:tl.code})}).catch(()=>{});};
@@ -2675,6 +2713,7 @@ function HyprChat(){
 
     const lastModel=(()=>{try{return localStorage.getItem("hc-last-model")||"";}catch{return "";}})();
     const defaultModel=persona?.model||curConv?.model||lastModel||models[0]||"qwen3.5:27b";
+    const pendingTools=forceBlank?pendingToolIds:[];
     try{
       const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:"New Chat",model:defaultModel})});
       const c=await r.json();c.messages=[];
@@ -2683,12 +2722,16 @@ function HyprChat(){
         Object.assign(c,persona);
         fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(persona)}).catch(()=>{});
       }
+      if(pendingTools.length){
+        c.tool_ids=pendingTools;
+        fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({tool_ids:pendingTools})}).catch(()=>{});
+      }
       setConvs(p=>[c,...p]);setActId(c.id);
       setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
       return c.id;
     }catch{
       const newId=`l-${Date.now()}`;
-      const c={id:newId,title:"New Chat",messages:[],model:defaultModel,system_prompt:persona?.system_prompt||"",...(persona||{})};
+      const c={id:newId,title:"New Chat",messages:[],model:defaultModel,system_prompt:persona?.system_prompt||"",...(persona||{}),tool_ids:pendingTools};
       setConvs(p=>[c,...p]);setActId(newId);
       setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
       return newId;
@@ -2910,7 +2953,7 @@ function HyprChat(){
     // User message persistence is handled server-side by chat_stream_generate's defensive save —
     // doing it from the client too would race and create duplicates.
     try{
-      const cv=convs.find(c=>c.id===cid);
+      const cv=convs.find(c=>c.id===cid)||{tool_ids:pendingToolIds};
       let am = messagesToSend.map(m=>{
         let baseContent=m._fullContent||m.content||"";
         // After reload _fullContent is gone; reconstruct the `[Attached N image: ...]` hint
@@ -3835,6 +3878,8 @@ function HyprChat(){
 
   const glass={background:`${t.surface}F2`,backdropFilter:"none",border:`1px solid ${t.brd}55`,boxShadow:"none"};
   const _navShort={Chat:"Chat","Knowledge Bases":"KB",Tools:"Tools",Personas:"Personas","Prompt Library":"Prompts","Council of AI":"Council","Model Manager":"Models",Analytics:"Stats",Settings:"Settings"};
+  const openSettings=()=>{if(panel!=="settings")previousPanelRef.current=panel;setPanel("settings");};
+  const closeSettings=()=>{setShowHealthMonitor(false);setPanel(previousPanelRef.current||"chat");};
   const nb=(p,ico,lab)=><button onClick={()=>setPanel(p)} title={lab} style={{width:52,height:showNavLabels?48:46,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:8,cursor:"pointer",border:`1px solid ${panel===p?`${t.acc}55`:"transparent"}`,background:panel===p?`${t.acc}14`:"transparent",color:panel===p?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:"none",padding:showNavLabels?"3px 0 1px":0}}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{panel===p&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}</button>;
   const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?"#f0a030":t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${n}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
@@ -3861,6 +3906,17 @@ function HyprChat(){
   const composerActive=streaming||councilRunning;
   const composerColor=councilRunning?t.pink:streaming?t.warm:quickSearch?t.f1:t.acc;
   const sidebarSearchActive=showMessageSearch||sq||ftsQuery;
+  const settingsTabs=[
+    ["connections","🔌","Connections","Runtime endpoints and status"],
+    ["generation","⚙️","Model & Generation","Global model behavior"],
+    ["daedalus","🏛️","Daedalus","Coder-agent routing"],
+    ["appearance","🎨","Appearance","Theme, font, and density"],
+    ["rag","🧠","RAG Pipeline","Indexing and retrieval"],
+    ["quotes","💬","Loading Quotes","Custom waiting text"],
+    ["cleanup","🗃️","Sandbox & Cleanup","Storage maintenance"],
+    ["danger","⚠️","Danger Zone","Destructive actions"],
+  ];
+  const activeSettingsTitle=(settingsTabs.find(([id])=>id===settingsTab)||settingsTabs[0])[2];
 
   // ============================================================
   // PANELS
@@ -3902,7 +3958,11 @@ function HyprChat(){
       {nb("models",<IC.Layers/>,"Model Manager")}
       {nb("analytics",<IC.BarChart/>,"Analytics")}
       <div style={{flex:1}}/>
-      {nb("settings",<IC.Settings/>,"Settings")}
+      <button onClick={openSettings} title="Settings" style={{width:52,height:showNavLabels?48:46,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:8,cursor:"pointer",border:`1px solid ${panel==="settings"?`${t.acc}55`:"transparent"}`,background:panel==="settings"?`${t.acc}14`:"transparent",color:panel==="settings"?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:"none",padding:showNavLabels?"3px 0 1px":0}}>
+        <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Settings/></span>
+        {showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>Settings</div>}
+        {panel==="settings"&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}
+      </button>
       <button onClick={()=>setSidebar(p=>!p)} title={sidebar?"Hide conversations":"Show conversations"} style={{width:52,height:48,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:12,cursor:"pointer",border:"none",background:"transparent",color:t.mut,transition:"all .15s",marginTop:4}}>
         <IC.Sidebar/>
       </button>
@@ -5323,16 +5383,36 @@ function HyprChat(){
         </div>
       </div>
 
-      :panel==="settings"?<div style={{flex:1,display:"flex",overflow:"hidden"}}>
-    <div style={{flex:showHealthMonitor?"0 0 50%":"1 1 auto",overflowY:"auto",padding:"20px 28px",transition:"flex .3s ease"}}>
-    <div style={{maxWidth:860}}>
+      :panel==="settings"?ReactDOM.createPortal(<div style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)",fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)closeSettings();}}>
+    <div style={{width:"min(1100px,95vw)",maxHeight:"85vh",height:"85vh",display:"grid",gridTemplateColumns:"260px minmax(0,1fr)",background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,boxShadow:"0 8px 48px #0008",overflow:"hidden",animation:"fadeIn .25s"}}>
+      <div style={{borderRight:`1px solid ${t.brd}44`,background:`${t.surface}50`,padding:18,display:"flex",flexDirection:"column",gap:8,overflowY:"auto"}}>
+        <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:10}}>
+          <span style={{color:t.acc,display:"flex"}}><IC.Settings/></span>
+          <div>
+            <div style={{fontSize:15,fontWeight:800,color:t.text,letterSpacing:.4}}>Settings</div>
+          </div>
+        </div>
+        {settingsTabs.map(([id,icon,label,hint])=>{const active=settingsTab===id;return <button key={id} onClick={()=>{setSettingsTab(id);if(id!=="connections")setShowHealthMonitor(false);}} style={{width:"100%",display:"flex",alignItems:"center",gap:10,textAlign:"left",padding:"10px 11px",borderRadius:10,border:`1px solid ${active?t.acc:t.brd}33`,background:active?`${t.acc}18`:`${t.bgDeep}88`,color:active?t.acc:t.dim,cursor:"pointer",fontFamily:font,boxShadow:"none"}}>
+          <span style={{fontSize:16,width:20,textAlign:"center",flexShrink:0}}>{icon}</span>
+          <span style={{minWidth:0,flex:1}}>
+            <span style={{display:"block",fontSize:12,fontWeight:800,color:active?t.acc:t.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{label}</span>
+            <span style={{display:"block",fontSize:9,color:t.mut,marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{hint}</span>
+          </span>
+        </button>;})}
+      </div>
+      <div style={{display:"flex",overflow:"hidden",minWidth:0}}>
+    <div style={{flex:showHealthMonitor?"0 0 52%":"1 1 auto",overflowY:"auto",padding:"22px 30px",transition:"flex .3s ease",minWidth:0}}>
+    <div style={{maxWidth:980}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
-        <h3 style={{fontSize:16,fontWeight:700,color:t.acc,letterSpacing:1,textTransform:"uppercase",margin:0}}>Settings</h3>
-        <button onClick={async()=>{setShowChangelog(true);if(!changelogContent){try{const r=await fetch(`${API}/api/changelog`);const d=await r.json();setChangelogContent(d.content||"");}catch{setChangelogContent("# Changelog\n\nFailed to load.");};}}} style={{...btnS(t.f1),fontSize:12,padding:"6px 14px"}}>📋 Changelog</button>
+        <h3 style={{fontSize:16,fontWeight:700,color:t.acc,letterSpacing:1,textTransform:"uppercase",margin:0}}>{activeSettingsTitle}</h3>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <button onClick={async()=>{setShowChangelog(true);if(!changelogContent){try{const r=await fetch(`${API}/api/changelog`);const d=await r.json();setChangelogContent(d.content||"");}catch{setChangelogContent("# Changelog\n\nFailed to load.");};}}} style={{...btnS(t.f1),fontSize:12,padding:"6px 14px"}}>📋 Changelog</button>
+          <button onClick={closeSettings} style={{...btnS(t.mut),fontSize:12,padding:"6px 10px"}}>✕</button>
+        </div>
       </div>
 
       {/* TILE: Connections */}
-      <div style={settingsCardS}>
+      <div style={{...settingsCardS,display:settingsTab==="connections"?"block":"none"}}>
         <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"flex-start",marginBottom:12}}>
           <div>
             <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:.5,display:"flex",alignItems:"center",gap:8}}>🔌 Connections</div>
@@ -5346,12 +5426,9 @@ function HyprChat(){
             }} style={{padding:"5px 11px",borderRadius:7,border:`1px solid ${showHealthMonitor?t.acc:t.brd}44`,background:showHealthMonitor?`${t.acc}22`:t.bgDeep,color:showHealthMonitor?t.acc:t.dim,fontSize:11,cursor:"pointer",fontFamily:font,fontWeight:700,display:"flex",alignItems:"center",gap:5}}>
               <span style={{fontSize:13}}>{showHealthMonitor?"◂":"▸"}</span> Monitor
             </button>
-            <button onClick={()=>setConnectionsOpen(v=>!v)} style={{padding:"5px 11px",borderRadius:7,border:`1px solid ${connectionsOpen?t.f1:t.brd}44`,background:connectionsOpen?`${t.f1}18`:t.bgDeep,color:connectionsOpen?t.f1:t.dim,fontSize:11,cursor:"pointer",fontFamily:font,fontWeight:700,display:"flex",alignItems:"center",gap:5}}>
-              <span style={{fontSize:12}}>{connectionsOpen?"▾":"▸"}</span> Endpoints
-            </button>
           </div>
         </div>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:connectionsOpen?14:0}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:14}}>
           <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
             {["ollama","codebox","n8n","searxng"].map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?"#f0a030":s?.status?t.err:t.mut;const label={ollama:"Ollama",codebox:"Codebox",n8n:"N8N",searxng:"SearXNG"}[n];return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:7,border:`1px solid ${rl?`#f0a030`:t.brd}24`,fontSize:12}}>
               <div style={{width:8,height:8,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}66`}}/>
@@ -5361,19 +5438,22 @@ function HyprChat(){
             </div>;})}
           </div>
         </div>
-        {connectionsOpen&&<div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14}}>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
+        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr",gap:12}}>
             {[
               ["Ollama",ollamaUrl,setOllamaUrl,"http://192.168.1.110:11434","Model inference and model manager"],
               ["Codebox",codeboxUrl,setCodeboxUrl,"http://192.168.1.201:8585","Tool execution and project upload bridge"],
               ["N8N",n8nUrl,setN8nUrl,"http://192.168.1.114:5678","External workflow automation"],
               ["SearXNG",searxngUrl,setSearxngUrl,"http://192.168.1.141:8888","Search and research backend"],
-            ].map(([label,value,setter,placeholder,hint])=><label key={label} style={{display:"block"}}>
+            ].map(([label,value,setter,placeholder,hint])=><label key={label} style={{display:"grid",gridTemplateColumns:"120px minmax(0,1fr)",gap:12,alignItems:"center"}}>
               <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:8,marginBottom:5}}>
                 <span style={{fontSize:12,color:t.dim,fontWeight:700}}>{label}</span>
-                <span style={{fontSize:9,color:t.mut}}>{hint}</span>
+                <span style={{fontSize:9,color:t.mut,display:"none"}}>{hint}</span>
               </div>
-              <input value={value} onChange={e=>setter(e.target.value)} placeholder={placeholder} style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
+              <div>
+                <input value={value} onChange={e=>setter(e.target.value)} placeholder={placeholder} style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
+                <div style={{fontSize:9,color:t.mut,marginTop:4}}>{hint}</div>
+              </div>
             </label>)}
           </div>
           <div style={{display:"flex",justifyContent:"space-between",gap:10,alignItems:"center",marginTop:12}}>
@@ -5395,11 +5475,11 @@ function HyprChat(){
               {connectionsSaving?"Saving...":"Save Connections"}
             </button>
           </div>
-        </div>}
+        </div>
       </div>
 
       {/* TILE: Model & Generation */}
-      <div style={settingsCardS}>
+      <div style={{...settingsCardS,display:settingsTab==="generation"?"block":"none"}}>
         <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:.5,marginBottom:4,display:"flex",alignItems:"center",gap:8}}>Model & Generation</div>
         <div style={{...settingsKickerS,marginBottom:14}}>Global model behavior. Individual chats can still override effort and tools.</div>
 
@@ -5442,7 +5522,7 @@ function HyprChat(){
       {/* TILE: Daedalus — all coder-agent-related settings live here.
           Includes the umbrella Planning/Coder model pickers, the new collapsible
           per-agent model overrides card, and OpenHands runtime knobs. */}
-      <div style={settingsCardS}>
+      <div style={{...settingsCardS,display:settingsTab==="daedalus"?"block":"none"}}>
         <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:.5,marginBottom:4,display:"flex",alignItems:"center",gap:8}}>🏛️ Daedalus</div>
         <div style={{...settingsKickerS,marginBottom:14}}>Coder-agent routing, model inheritance, and uploaded-project repair behavior.</div>
 
@@ -5626,7 +5706,7 @@ function HyprChat(){
       </div>
 
       {/* TILE: Appearance */}
-      <div style={settingsCardS}>
+      <div style={{...settingsCardS,display:settingsTab==="appearance"?"block":"none"}}>
         <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:.5,marginBottom:4,display:"flex",alignItems:"center",gap:8}}>🎨 Appearance</div>
         <div style={{...settingsKickerS,marginBottom:14}}>Theme, background animation, font, and density preferences.</div>
         <div style={{marginBottom:12}}>
@@ -5725,7 +5805,7 @@ function HyprChat(){
       </div>
 
       {/* TILE: RAG Pipeline */}
-      <div style={settingsCardS}>
+      <div style={{...settingsCardS,display:settingsTab==="rag"?"block":"none"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
           <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:.5,display:"flex",alignItems:"center",gap:8}}>🧠 RAG Pipeline</div>
           <div style={{display:"flex",gap:8}}>
@@ -5855,31 +5935,50 @@ function HyprChat(){
       </div>
 
       {/* TILE: Loading Quotes */}
-      <div style={settingsCardS}>
-        <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:10,display:"flex",alignItems:"center",gap:8}}>💬 Loading Quotes <span style={{fontSize:11,color:t.mut,fontWeight:400}}>({customQuotes.length})</span></div>
-        {customQuotes.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:10,maxHeight:90,overflowY:"auto"}}>
-          {customQuotes.map((q,i)=><div key={i} style={{background:`${t.bgDeep}`,border:`1px solid ${t.brd}22`,borderRadius:6,padding:"4px 10px",display:"inline-flex",gap:6,alignItems:"center",fontSize:11}}>
-            <span style={{color:t.dim,fontStyle:"italic"}}>"{q.t.slice(0,35)}{q.t.length>35?"…":""}"</span>
-            <button onClick={()=>setCustomQuotes(p=>p.filter((_,j)=>j!==i))} style={{background:"none",border:"none",color:t.err,cursor:"pointer",fontSize:11,opacity:.6,padding:0,lineHeight:1}}>✕</button>
+      <div style={{...settingsCardS,display:settingsTab==="quotes"?"block":"none"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,marginBottom:12}}>
+          <div>
+            <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,display:"flex",alignItems:"center",gap:8}}>💬 Loading Quotes <span style={{fontSize:11,color:t.mut,fontWeight:400}}>({customQuotes.length})</span></div>
+            <div style={{...settingsKickerS,marginTop:4}}>Shown on the startup loading screen. Edit, remove, or add quotes below.</div>
+          </div>
+          <button onClick={()=>{setCustomQuotes(DEFAULT_LOADING_QUOTES);setEditQuoteIdx(null);}} style={{...btnS(t.mut),fontSize:12,padding:"6px 12px",whiteSpace:"nowrap"}}>Restore Defaults</button>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:"min(48vh,460px)",overflowY:"auto",paddingRight:4,marginBottom:14}}>
+          {customQuotes.map((q,i)=>editQuoteIdx===i?<div key={i} style={{background:t.bgDeep,border:`1px solid ${t.acc}33`,borderRadius:10,padding:12}}>
+            <textarea value={editQuoteText} onChange={e=>setEditQuoteText(e.target.value)} style={{...inputS,minHeight:72,resize:"vertical",fontSize:12,lineHeight:1.5,marginBottom:8}}/>
+            <input value={editQuoteAttr} onChange={e=>setEditQuoteAttr(e.target.value)} placeholder="Attribution" style={{...inputS,fontSize:12,padding:"8px 10px",marginBottom:10}}/>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+              <button onClick={()=>{setEditQuoteIdx(null);setEditQuoteText("");setEditQuoteAttr("");}} style={{...btnS(t.mut),fontSize:11}}>Cancel</button>
+              <button onClick={()=>{if(!editQuoteText.trim())return;setCustomQuotes(p=>p.map((x,j)=>j===i?{t:editQuoteText.trim(),a:editQuoteAttr.trim()}:x));setEditQuoteIdx(null);setEditQuoteText("");setEditQuoteAttr("");}} style={{...btnS(t.ok),fontSize:11}}>Save</button>
+            </div>
+          </div>:<div key={i} style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:12,alignItems:"start",background:t.bgDeep,border:`1px solid ${t.brd}22`,borderRadius:10,padding:"11px 12px"}}>
+            <div style={{minWidth:0}}>
+              <div style={{fontSize:13,color:t.text,lineHeight:1.55,fontStyle:"italic"}}>"{q.t}"</div>
+              <div style={{fontSize:11,color:t.acc,marginTop:6,fontWeight:700}}>— {q.a||"Unknown"}</div>
+            </div>
+            <div style={{display:"flex",gap:6}}>
+              <button onClick={()=>{setEditQuoteIdx(i);setEditQuoteText(q.t||"");setEditQuoteAttr(q.a||"");}} style={{...btnS(t.f1),padding:"5px 9px",fontSize:10}}>Edit</button>
+              <button onClick={()=>{setCustomQuotes(p=>p.filter((_,j)=>j!==i));if(editQuoteIdx===i)setEditQuoteIdx(null);}} style={{...btnS(t.err),padding:"5px 9px",fontSize:10}}>Remove</button>
+            </div>
           </div>)}
-        </div>}
-        <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          <input value={newQuoteText} onChange={e=>setNewQuoteText(e.target.value)} placeholder='Quote text...' style={{...inputS,flex:2,fontSize:12,padding:"8px 12px"}}/>
-          <input value={newQuoteAttr} onChange={e=>setNewQuoteAttr(e.target.value)} placeholder="By" style={{...inputS,flex:1,fontSize:12,padding:"8px 12px"}}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"minmax(0,2fr) minmax(180px,1fr) auto",gap:8,alignItems:"center",borderTop:`1px solid ${t.brd}22`,paddingTop:12}}>
+          <input value={newQuoteText} onChange={e=>setNewQuoteText(e.target.value)} placeholder='Quote text...' style={{...inputS,fontSize:12,padding:"8px 12px"}}/>
+          <input value={newQuoteAttr} onChange={e=>setNewQuoteAttr(e.target.value)} placeholder="By" style={{...inputS,fontSize:12,padding:"8px 12px"}}
             onKeyDown={e=>{if(e.key==="Enter"&&newQuoteText.trim()){setCustomQuotes(p=>[...p,{t:newQuoteText.trim(),a:newQuoteAttr.trim()}]);setNewQuoteText("");setNewQuoteAttr("");}}}/>
           <button onClick={()=>{if(!newQuoteText.trim())return;setCustomQuotes(p=>[...p,{t:newQuoteText.trim(),a:newQuoteAttr.trim()}]);setNewQuoteText("");setNewQuoteAttr("");}}
-            disabled={!newQuoteText.trim()} style={{...btnS(t.f1),opacity:newQuoteText.trim()?1:.4,flexShrink:0,fontSize:12,padding:"7px 14px"}}>+ Add</button>
+            disabled={!newQuoteText.trim()} style={{...btnS(t.f1),opacity:newQuoteText.trim()?1:.4,flexShrink:0,fontSize:12,padding:"7px 14px",whiteSpace:"nowrap"}}>+ Add</button>
         </div>
       </div>
 
       {/* TILE: Sandbox & Cleanup */}
-      <div style={settingsCardS}>
+      <div style={{...settingsCardS,display:settingsTab==="cleanup"?"block":"none"}}>
         <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:10,display:"flex",alignItems:"center",gap:8}}>🗃️ Sandbox & Cleanup</div>
         <SandboxSection t={t} btnS={btnS} labelS={labelS}/>
       </div>
 
       {/* TILE: Danger Zone */}
-      <div style={{background:`${t.err}06`,border:`1px solid ${t.err}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
+      <div style={{display:settingsTab==="danger"?"block":"none",background:`${t.err}06`,border:`1px solid ${t.err}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
         <div style={{fontSize:14,fontWeight:700,color:t.err,letterSpacing:.5,marginBottom:12,display:"flex",alignItems:"center",gap:8}}>⚠️ Danger Zone</div>
         <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
           <button onClick={async()=>{
@@ -5959,6 +6058,8 @@ function HyprChat(){
       }} style={{...btnS(t.f1),fontSize:12,padding:"6px 14px",marginTop:4}}>🔄 Refresh</button>
     </div>}
   </div>
+    </div>
+  </div>,document.body)
 
       :<>
         {/* CHAT - full width, pills inline */}
@@ -6368,11 +6469,14 @@ function HyprChat(){
         <div style={{padding:"0 16px",flexShrink:0}}>
           <div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",gap:6,overflowX:"auto",padding:"6px 0",alignItems:"center",minHeight:32}}>
             {!act?.is_council&&allTools.map(tl=>{
-              const on=(act?.tool_ids||[]).includes(tl.id);
+              const on=activeToolIds.includes(tl.id);
               const isQs=tl.id==="quick_search";
               const col=isQs?t.f1:t.warm;
               return <button key={tl.id} onClick={()=>{
-                if(!actId)return;
+                if(!actId){
+                  setPendingToolIds(ids=>on?ids.filter(x=>x!==tl.id):[...ids,tl.id]);
+                  return;
+                }
                 uConv(actId,c=>{const ids=c.tool_ids||[];return{...c,tool_ids:on?ids.filter(x=>x!==tl.id):[...ids,tl.id]};});
               }} style={{display:"flex",alignItems:"center",gap:4,padding:"4px 10px",borderRadius:8,fontSize:10,fontWeight:on?700:500,cursor:"pointer",whiteSpace:"nowrap",background:on?`${col}18`:`${t.surface}D9`,border:`1px solid ${on?col:t.brd}44`,color:on?col:t.mut,transition:"all .15s",boxShadow:"none"}}>
                 {isQs&&searchLoading?<span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span>:(on?<IC.ToggleOn/>:<IC.ToggleOff/>)}{tl.name}
@@ -6584,7 +6688,7 @@ function HyprChat(){
     </div>}
 
     {/* Changelog Modal */}
-    {showChangelog&&<div style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setShowChangelog(false);}}>
+    {showChangelog&&<div style={{position:"fixed",inset:0,zIndex:120,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setShowChangelog(false);}}>
       <div style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,width:"min(1100px,95vw)",maxHeight:"85vh",display:"flex",flexDirection:"column",boxShadow:`0 8px 48px #0008`,overflow:"hidden",animation:"fadeIn .25s"}}>
         <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:8,flexShrink:0,background:`${t.surface}88`}}>
           <span style={{fontSize:18}}>📋</span>

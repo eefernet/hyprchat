@@ -18,7 +18,11 @@
 - New Chat now opens the empty chat surface immediately; the composer keeps the smooth float up/down behavior, lands closer to the greeting, and delays textarea focus with `preventScroll` so the browser does not nudge it upward at the end.
 - Empty-chat daily greeting messages now use a more playful prompt and stronger fallback lines, with a cache version bump so browsers refresh stale generic copy.
 - Raised the composer control layer so Prompt Library and thinking-mode menus render above chat/chart content, made the Daedalus `</>` shortcut toggle off as well as on, and nudged the empty-chat composer closer to the greeting.
-- Cleaned up Settings with shared card styling and a collapsed **Connections** card that shows service health by default, expands to edit Ollama/Codebox/N8N/SearXNG endpoints, and persists those runtime URLs through `/api/settings`.
+- Reworked Settings into a centered modal overlay with left-side section navigation and a scrollable right-side editor, matching the Changelog modal behavior instead of replacing the chat surface.
+- Updated Settings modal layering so it renders above the app shell, preserves the active user-selected font/theme, and lets the Changelog modal stack above Settings when opened from inside it.
+- Reworked **Connections** into a vertically stacked endpoint editor with service status chips, always-visible Ollama/Codebox/N8N/SearXNG URL fields, and `/api/settings` persistence.
+- Rebuilt **Loading Quotes** as a scrollable editor with readable full quote rows, attribution display, inline edit/save/cancel/remove controls, restore defaults, and add-new-quote controls.
+- Added 30 default loading quotes from real philosophers, religious texts, mystics, and scientists, with cleanup for previously saved placeholder HyprChat-authored defaults.
 
 ## Alpha v17.0.2 — June 2, 2026
 
