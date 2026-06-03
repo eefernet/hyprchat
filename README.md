@@ -1,6 +1,6 @@
 # 🧠 HyprChat
 
-**Self-hosted AI chat platform** — tool calling, agentic code generation, deep research, multi-model councils, n8n automation integration, and full model management. All running on your own hardware.
+**Self-hosted AI chat platform** — tool calling, Daedalus agentic coding, deep research, multi-model councils, n8n automation integration, and full model management. All running on your own hardware.
 
 Built with FastAPI + a single-file React SPA. No build step, no cloud dependencies.
 
@@ -18,7 +18,9 @@ HyprChat can execute code, upload files, call local services, and drive coding a
 
 ### 💬 Chat
 - SSE streaming with live token counter, speed display, and thinking token visualization
+- Empty-chat greeting surface with selectable tools, Daedalus activation, and effort mode before the first message
 - Per-conversation model selection, system prompts, and parameter overrides
+- Per-chat effort modes — Blurt, Ponder, Forge, and Galaxy Brain
 - Conversation forking — branch from any message to explore alternatives
 - Full-text search (FTS5) across all messages with highlighted snippets
 - Conversation tags, pinning, and sidebar filtering
@@ -27,12 +29,12 @@ HyprChat can execute code, upload files, call local services, and drive coding a
 - Keyboard shortcuts — `Ctrl+K` search, `Ctrl+N` new chat, `Ctrl+/` toggle sidebar
 
 ### 📄 File Attachments
-- Drag-and-drop or paste files directly into chat
+- Drag-and-drop, paste, or attach files from the composer `+` quick-actions menu
 - **PDF support** — text extracted server-side via `pypdf`, displayed as a compact badge in chat while full content is sent to the model
-- Project archives (`.zip`, `.tar.gz`) route to Coder Bot automatically
+- Project archives (`.zip`, `.tar.gz`) route to Daedalus automatically
 - Text files attached inline with syntax highlighting
 
-### 🤖 Coder Bot v2 — Hybrid Agent Workflow
+### 🏛️ Daedalus — Hybrid Agent Workflow
 
 A deterministic coding workflow with three specialized paths: OpenHands for greenfield builds, Aider for uploaded-project fixes, and ProjectQA for read-only codebase questions. Workflow correctness is enforced by a server-side gate, not by hoping the model follows a prompt:
 
@@ -54,16 +56,16 @@ A deterministic coding workflow with three specialized paths: OpenHands for gree
 - **Architecture Plan panel** — rich markdown rendering of the Architect's plan: file tree, build commands, dependencies as build-system snippets, success criteria as a checklist.
 - **Accepted downloads only** — `download_project` is blocked until Acceptance returns `accepted`, then packages the project while excluding common cache/build artifacts.
 - **Cross-language support** — verified end-to-end on Java (Maven), Python (Flask + pytest), Rust (Cargo), Go (gorilla/mux). Builder profiles + Reviewer markers cover most ecosystems.
-- Sandboxed execution via Codebox (LXC) with 30+ language support, live progress pills, workflow cards, role-specific run cards, and the original v1 Coder Bot still selectable as a persona.
+- Sandboxed execution via Codebox (LXC) with 30+ language support, live progress pills, workflow cards, and role-specific run cards.
 
 ### 🛠️ Tool Suites
 
-**Coder Bot v2 multi-agent tools:**
+**Daedalus multi-agent tools:**
 
 | Tool | Description |
 |------|-------------|
 | `start_coder_workflow` | Backend router for `build_from_prompt`, `fix_uploaded_project`, or `ask_uploaded_project` |
-| `plan_project` | Routes through the **Architect** for v2 personas — produces structured JSON manifest (file tree, build/test cmds, deps, success criteria); rich markdown plan panel in chat |
+| `plan_project` | Routes through the **Architect** for Daedalus — produces structured JSON manifest (file tree, build/test cmds, deps, success criteria); rich markdown plan panel in chat |
 | `generate_code` | **Builder** via OpenHands — greenfield/full-project builds from the Architect contract |
 | `run_review` | **Reviewer** — runs build/test/lint, returns structured issue list with `suggested_fix_scope`, including deterministic stale-root and state/schema diagnostics |
 | `run_acceptance_review` | **Acceptance** — final static quality gate after clean review; checks request fit, docs, tests, packaging, entrypoints, and generated artifacts |
@@ -112,7 +114,7 @@ A deterministic coding workflow with three specialized paths: OpenHands for gree
 - Named AI personalities with avatars, model config, system prompts, and temperature/context settings
 - Linked knowledge bases and tool sets
 - Persona avatar and name displayed in chat messages
-- Seed bots: Coder Bot, Conspiracy Bot, Based Bot
+- Seed personas: Daedalus, legacy Coder Bot, Conspiracy Bot, Based Bot
 
 ### 🗂️ Workspaces
 - Group related conversations and track files across chats
@@ -129,18 +131,20 @@ A deterministic coding workflow with three specialized paths: OpenHands for gree
 
 ### 🔍 Prompt Library
 - Save and organize reusable prompts by category
-- Quick-insert via ⚡ button in input bar
+- Quick-insert from the composer `+` quick-actions menu
 - Apply as system prompt templates without creating a persona
 
 ### ⚙️ Settings
-- 🎨 14 themes (Terminal, Cyberpunk, Solarized, Dracula, Material Ocean, and more) and 9 monospace fonts
-- Font size, chat width, and UI size sliders
-- Per-model parameters (temperature, top_p, top_k, num_ctx, repeat_penalty)
-- Configurable workspace analysis model, planning model, and coder model
-- Runtime Ollama URL override
-- Thinking mode control (Auto / On / Off)
-- Auto-title toggle, scanline effect toggle, nav rail labels
-- Danger zone: bulk delete all chats, purge all RAG collections
+- Centered overlay with left-side section navigation and a scrollable right-side editor
+- 🎨 15 themes, 9 monospace fonts, chat width, UI font size, and chat font size controls
+- 23 background modes including Dot Grid, Pixel Rain, Aurora Lines, Neural Constellation, Sacred Geometry, Blackbox Terminal, Monastery Candlelight, and Off
+- Connections editor for Ollama, Codebox, n8n, and SearXNG URLs with live service status chips
+- Model & Generation settings for context window, thinking mode, default effort, and workspace analysis model
+- Daedalus settings for planning/coder umbrella models, per-agent overrides, OpenHands, Aider, context window, rounds, and reasoning effort
+- RAG pipeline settings for embedding model, chunking, retrieval top-K, context limits, stats, reindex, and purge
+- Loading Quotes editor with real attributed defaults, inline edit/remove, restore defaults, and add-new-quote controls
+- Changelog renders inside Settings as a bottom-pinned sidebar section with inline refresh
+- Danger Zone: bulk delete all chats
 
 ---
 
@@ -151,7 +155,7 @@ User → HyprChat Server (:8000)
          ├── Frontend:  Single-file React SPA (inline Babel, no build step)
          ├── Backend:   FastAPI + SSE streaming + SQLite
          │
-         │   Coder Bot v2 — hybrid workflow router:
+         │   Daedalus — hybrid workflow router:
          │   workflows persist in `coder_workflows`; agent calls persist in `runs`
          │     📐 Architect    → JSON plan
          │     🏗 Builder      → OpenHands greenfield builds
@@ -174,23 +178,23 @@ User → HyprChat Server (:8000)
 |------|---------|
 | `backend/main.py` | FastAPI routes, SSE endpoints, model management, project upload |
 | `backend/agents/chat.py` | Multi-round streaming chat agent with tool calling, QA short-circuit, ACTIVE PROJECT injection |
-| `backend/agents/personas.py` | Seed bot definitions (Coder Bot v1 + v2, Conspiracy Bot, Based Bot) |
-| `backend/agents/architect.py` | **v2** Architect — structured plan as JSON, rich markdown rendering |
-| `backend/agents/reviewer.py` | **v2** Reviewer — read-only build/test/lint with marker auto-detection |
-| `backend/agents/acceptance.py` | **v2** Acceptance — final static quality gate for request fit, docs, tests, packaging, and artifacts |
-| `backend/agents/fixer.py` | **v2** Fixer — scoped edits via marker-delimited LLM output |
-| `backend/agents/aider_fixer.py` | **v2** Aider Fixer — uploaded-project patch worker with diff/test capture |
-| `backend/agents/language_adapters.py` | **v2** uploaded-project build/test/smoke/lint contract detection |
-| `backend/agents/project_qa.py` | **v2** ProjectQA — grounded Q&A with file:line citations |
-| `backend/agents/project_indexer.py` | **v2** Indexer — uploaded-project tree walk → ChromaDB |
-| `backend/tools.py` | Tool execution engine + v2 workflow router/gate + OpenHands/Aider dispatch |
+| `backend/agents/personas.py` | Seed persona definitions (legacy Coder Bot, Daedalus, Conspiracy Bot, Based Bot) |
+| `backend/agents/architect.py` | Daedalus Architect — structured plan as JSON, rich markdown rendering |
+| `backend/agents/reviewer.py` | Daedalus Reviewer — read-only build/test/lint with marker auto-detection |
+| `backend/agents/acceptance.py` | Daedalus Acceptance — final static quality gate for request fit, docs, tests, packaging, and artifacts |
+| `backend/agents/fixer.py` | Daedalus Fixer — scoped edits via marker-delimited LLM output |
+| `backend/agents/aider_fixer.py` | Daedalus Aider Fixer — uploaded-project patch worker with diff/test capture |
+| `backend/agents/language_adapters.py` | Daedalus uploaded-project build/test/smoke/lint contract detection |
+| `backend/agents/project_qa.py` | Daedalus ProjectQA — grounded Q&A with file:line citations |
+| `backend/agents/project_indexer.py` | Daedalus Indexer — uploaded-project tree walk → ChromaDB |
+| `backend/tools.py` | Tool execution engine + Daedalus workflow router/gate + OpenHands/Aider dispatch |
 | `backend/openhands_worker.py` | OpenHands SDK + Aider bridge on Codebox; `/run*`, `/cancel/*`, and `/aider/*` endpoints |
 | `backend/research.py` | Deep research engine |
 | `backend/council.py` | Council debate, voting, and synthesis |
 | `backend/events.py` | Async SSE EventBus (pub/sub with `asyncio.Lock`) |
 | `backend/rag.py` | RAG pipeline (chunking, embedding, retrieval) |
 | `backend/hf.py` | HuggingFace model browser and download |
-| `backend/database.py` | SQLite schema, migrations, and queries — incl. `runs` and `coder_workflows` for v2 |
+| `backend/database.py` | SQLite schema, migrations, and queries — incl. `runs` and `coder_workflows` for Daedalus |
 | `backend/config.py` | Configuration and environment variables |
 | `frontend/dist/index.html` | Entire frontend — React SPA with inline Babel |
 
@@ -206,7 +210,7 @@ CODEBOX_URL         = "http://<CODEBOX_IP>:8585"
 OPENHANDS_URL       = "http://<CODEBOX_IP>:8586"
 SEARXNG_URL         = "http://<SEARXNG_IP>:8888"
 
-# Models — each v2 agent inherits from these umbrella defaults:
+# Models — each Daedalus agent inherits from these umbrella defaults:
 DEFAULT_MODEL       = "qwen3.5:27b"   # chat / persona fallback
 PLANNING_MODEL      = "qwen3.5:27b"   # Architect + Reviewer + Acceptance
 CODER_MODEL         = "qwen2.5-coder:14b" # Builder + Fixer
@@ -231,10 +235,10 @@ AIDER_AUTO_TEST     = True
 AIDER_WORKER_URL    = OPENHANDS_URL
 DEFAULT_NUM_CTX     = 16384            # used by Architect / Reviewer / Acceptance / Fixer / QA
 MAX_AGENT_ROUNDS    = 12               # chat-side cap (non-coder personas)
-MAX_AGENT_ROUNDS_CODER = 30            # chat-side cap for Coder Bot personas
+MAX_AGENT_ROUNDS_CODER = 30            # chat-side cap for Daedalus / coder personas
 ```
 
-All model, OpenHands, and Aider settings can be changed at runtime from the Settings panel.
+All model, OpenHands, Aider, connection, RAG, appearance, quote, and changelog settings can be changed at runtime from the Settings overlay.
 
 **Recommended model setup (dual-3090 / 48 GB VRAM):**
 - `PLANNING_MODEL` = `qwen3-coder:30b` (Architect / Reviewer / Acceptance)
