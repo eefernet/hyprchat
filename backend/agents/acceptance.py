@@ -49,6 +49,12 @@ _TEST_PATTERNS = (
     re.compile(r"(^|/)[^/]+(_test|\.test|\.spec)\.[A-Za-z0-9]+$"),
     re.compile(r"(^|/)[^/]+Test\.(java|kt|cs)$"),
 )
+_README_CONTEXT_BYTES = 12000
+_MANIFEST_CONTEXT_BYTES = 12000
+_TEST_CONTEXT_BYTES = 12000
+_SOURCE_CONTEXT_BYTES = 128000
+_SOURCE_SECTION_CAP_MIN = 90000
+_SOURCE_SECTION_CAP_MAX = 220000
 
 
 def is_docs_only_paths(paths: list[str]) -> bool:
@@ -131,10 +137,18 @@ async def _read_head(http, project_dir: str, rel_path: str, run_id: str,
                      max_bytes: int = 6000) -> str:
     rel = rel_path[2:] if rel_path.startswith("./") else rel_path
     full = f"{project_dir.rstrip('/')}/{rel}"
-    cmd = f"head -c {int(max_bytes)} {shlex.quote(full)}"
+    n = int(max_bytes)
+    qfull = shlex.quote(full)
+    cmd = (
+        f"bytes=$(wc -c < {qfull} 2>/dev/null || echo 0); "
+        f"head -c {n} {qfull}; "
+        f"if [ \"$bytes\" -gt {n} ]; then "
+        f"printf '\\n\\n[... TRUNCATED: showing first {n} of %s bytes; file continues ...]\\n' \"$bytes\"; "
+        "fi"
+    )
     r = await _run_command(http, cmd, timeout=10, run_id=run_id)
     if r.get("exit_code") == 0:
-        return (r.get("stdout") or "")[:max_bytes]
+        return (r.get("stdout") or "")[:n + 200]
     return ""
 
 
@@ -278,6 +292,17 @@ def _configured_num_ctx() -> int:
     return n if n > 0 else 16384
 
 
+def _source_section_cap(num_ctx: int) -> int:
+    """Approximate a source-character budget from the configured token context."""
+    try:
+        n = int(num_ctx)
+    except Exception:
+        n = 16384
+    if n <= 0:
+        n = 16384
+    return max(_SOURCE_SECTION_CAP_MIN, min(_SOURCE_SECTION_CAP_MAX, n * 4))
+
+
 def _normalize_issue(issue: dict, project_dir: str) -> dict:
     category = (issue.get("category") or issue.get("severity") or "spec").lower()
     if category not in {"spec", "docs", "packaging", "tests", "runtime"}:
@@ -410,6 +435,8 @@ Acceptance criteria:
 Rules:
 - If there are no blocking delivery issues, emit status "accepted" and issues [].
 - If static inspection is insufficient because critical files are missing/unreadable, emit status "error".
+- Some file excerpts may end with a TRUNCATED marker. That means the prompt excerpt ended, not that the real file ended.
+- The clean Reviewer result is authoritative for syntax/build/test/lint status. Do not report SyntaxError or EOF from an excerpt boundary when lint/build already passed.
 - Do not complain about preferences or nice-to-have polish.
 - Every issue must include a minimal suggested_fix_scope. Scope docs-only issues to docs only when possible.
 - Return JSON only. No markdown fences or prose.
@@ -534,18 +561,19 @@ async def run_acceptance_review(http, events, conv_id: str, *,
 
         await _step("read_context", "README, manifests, tests, and selected source")
         readmes, manifests, tests, source = await asyncio.gather(
-            _read_group(picked["readmes"], 6000),
-            _read_group(picked["manifests"], 6000),
-            _read_group(picked["tests"], 3000),
-            _read_group(picked["source"], 3500),
+            _read_group(picked["readmes"], _README_CONTEXT_BYTES),
+            _read_group(picked["manifests"], _MANIFEST_CONTEXT_BYTES),
+            _read_group(picked["tests"], _TEST_CONTEXT_BYTES),
+            _read_group(picked["source"], _SOURCE_CONTEXT_BYTES),
         )
         console_scripts = _extract_console_scripts(manifests)
 
-        def _sections(title_map: dict[str, str], cap: int = 18000) -> str:
+        def _sections(title_map: dict[str, str], cap: int = 18000,
+                      per_file_cap: int = 5000) -> str:
             parts = []
             used = 0
             for p, content in title_map.items():
-                block = f"### {p}\n```\n{content[:5000]}\n```"
+                block = f"### {p}\n```\n{content[:per_file_cap]}\n```"
                 if used + len(block) > cap:
                     break
                 parts.append(block)
@@ -555,6 +583,7 @@ async def run_acceptance_review(http, events, conv_id: str, *,
         conv = await db.get_conversation(conv_id) if conv_id else None
         original_task, latest_task = _latest_user_task(conv)
         plan = await _project_plan(conv_id, project_id=project_id)
+        num_ctx = _configured_num_ctx()
 
         review_summary = json.dumps({
             "reviewer_run_id": reviewer_run_id,
@@ -578,10 +607,10 @@ async def run_acceptance_review(http, events, conv_id: str, *,
             file_count=len(files),
             manifest="\n".join(files[:300]) or "(no files found)",
             artifact_block=artifact_block,
-            readme_sections=_sections(readmes),
-            manifest_sections=_sections(manifests),
-            test_sections=_sections(tests),
-            source_sections=_sections(source),
+            readme_sections=_sections(readmes, cap=24000, per_file_cap=_README_CONTEXT_BYTES),
+            manifest_sections=_sections(manifests, cap=24000, per_file_cap=_MANIFEST_CONTEXT_BYTES),
+            test_sections=_sections(tests, cap=36000, per_file_cap=_TEST_CONTEXT_BYTES),
+            source_sections=_sections(source, cap=_source_section_cap(num_ctx), per_file_cap=_SOURCE_CONTEXT_BYTES),
         )
 
         model = (getattr(config, "ACCEPTANCE_MODEL", "")
@@ -600,7 +629,6 @@ async def run_acceptance_review(http, events, conv_id: str, *,
             return envelope
 
         await _step("analyze", f"calling {model}")
-        num_ctx = _configured_num_ctx()
         coro = http.post(
             f"{config.OLLAMA_URL}/api/chat",
             json={
