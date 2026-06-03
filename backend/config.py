@@ -92,18 +92,46 @@ CRITIC_ENABLED = os.getenv("CRITIC_ENABLED", "true").lower() == "true"
 # can set these — most users leave them empty.
 ARCHITECT_MODEL = os.getenv("ARCHITECT_MODEL", "")  # Empty = use PLANNING_MODEL
 REVIEWER_MODEL  = os.getenv("REVIEWER_MODEL",  "")  # Empty = use PLANNING_MODEL
+ACCEPTANCE_MODEL = os.getenv("ACCEPTANCE_MODEL", "")  # Empty = use PLANNING_MODEL
 BUILDER_MODEL   = os.getenv("BUILDER_MODEL",   "")  # Empty = use CODER_MODEL
 FIXER_MODEL     = os.getenv("FIXER_MODEL",     "")  # Empty = use CODER_MODEL
 QA_MODEL        = os.getenv("QA_MODEL",        "")  # Empty = use chat / persona model
 OPENHANDS_ENABLED = os.getenv("OPENHANDS_ENABLED", "true").lower() == "true"  # Toggle OpenHands for generate_code tool
 OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "20"))
 OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", "16384"))
+AIDER_ENABLED = os.getenv("AIDER_ENABLED", "true").lower() == "true"
+AIDER_MODEL = os.getenv("AIDER_MODEL", "")  # Empty = use FIXER_MODEL, then CODER_MODEL
+AIDER_NUM_CTX = int(os.getenv("AIDER_NUM_CTX", os.getenv("OPENHANDS_NUM_CTX", "16384")))
+AIDER_AUTO_TEST = os.getenv("AIDER_AUTO_TEST", "true").lower() == "true"
+AIDER_WORKER_URL = os.getenv("AIDER_WORKER_URL", OPENHANDS_URL)
 # Reasoning effort for the OpenHands builder LLM. The SDK passes this through
 # to litellm; for OpenAI-style models it's "low" | "medium" | "high"; local
 # Ollama models silently ignore unsupported values. Default "medium" — "high"
 # adds a lot of think-token overhead per round on small/medium local models.
 OPENHANDS_REASONING_EFFORT = os.getenv("OPENHANDS_REASONING_EFFORT", "medium").strip().lower()
-DEFAULT_NUM_CTX = int(os.getenv("DEFAULT_NUM_CTX", "16384"))
+MIN_NUM_CTX = int(os.getenv("MIN_NUM_CTX", "1024"))
+CODER_V2_MIN_NUM_CTX = int(os.getenv("CODER_V2_MIN_NUM_CTX", "32768"))
+
+
+def coerce_num_ctx(value, fallback=16384, minimum=None):
+    """Return a positive Ollama num_ctx, or a sane fallback for invalid values."""
+    minimum = MIN_NUM_CTX if minimum is None else int(minimum)
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = 0
+    if n >= minimum:
+        return n
+    if fallback is None:
+        return None
+    try:
+        fb = int(fallback)
+    except (TypeError, ValueError):
+        fb = 0
+    return fb if fb >= minimum else 16384
+
+
+DEFAULT_NUM_CTX = coerce_num_ctx(os.getenv("DEFAULT_NUM_CTX", "16384"))
 MAX_AGENT_ROUNDS = int(os.getenv("MAX_AGENT_ROUNDS", "12"))
 MAX_AGENT_ROUNDS_CODER = int(os.getenv("MAX_AGENT_ROUNDS_CODER", "30"))
 DEFAULT_SYSTEM_PROMPT = """You are CodeAgent, an autonomous coding assistant with a sandboxed Linux environment (CodeBox).

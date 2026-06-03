@@ -98,6 +98,21 @@ def _issue_signatures(envelope: dict) -> set:
     return sigs
 
 
+def _paths_are_docs_only(paths: list[str]) -> bool:
+    """True when a fixer touched only documentation files."""
+    if not paths:
+        return False
+    doc_exts = {".md", ".rst", ".txt"}
+    doc_names = {"README", "README.md", "README.rst", "README.txt"}
+    for path in paths:
+        name = os.path.basename(path or "")
+        ext = os.path.splitext(name)[1].lower()
+        if name in doc_names or ext in doc_exts:
+            continue
+        return False
+    return True
+
+
 async def _deep_research_called_since(conv_id: str, since_iso: str | None) -> bool:
     """Return True iff deep_research has run on this conversation since the
     trigger event at `since_iso`. Checks two sources:
@@ -162,6 +177,248 @@ async def _deep_research_called_since(conv_id: str, since_iso: str | None) -> bo
     except Exception as _e:
         print(f"[v2-gate] deep_research history check failed (non-fatal): {_e}")
         return False
+
+
+_SHIP_ANYWAY_ACTION_RE = re.compile(
+    r"\b(ship|package|download|deliver|export|archive|tarball|zip)\b"
+    r"|give\s+me\s+(?:a\s+)?download",
+    re.I,
+)
+_SHIP_ANYWAY_QUALIFIER_RE = re.compile(
+    r"\b(anyway|as[-\s]?is|even\s+if|despite|regardless|ignore|skip)\b"
+    r"|\b(tests?\s+(?:fail|failing|failed)|test\s+issues?|known\s+issues?|"
+    r"with\s+(?:the\s+)?issues?|broken|unverified)\b",
+    re.I,
+)
+_SHIP_ANYWAY_DIRECT_RE = re.compile(
+    r"\b(ship|package|download|deliver|export|archive)\s+"
+    r"(?:it|this|the\s+project|what\s+(?:you|was)\s+built)\b"
+    r"|give\s+me\s+(?:a\s+)?download",
+    re.I,
+)
+
+
+async def _latest_user_requested_ship_anyway(conv_id: str) -> bool:
+    """True when the latest user turn explicitly asks for delivery even
+    though the project may still have review/test issues.
+
+    This is intentionally narrow and only used to relax delivery gates. It
+    should not make repair/build tools bypass the v2 workflow.
+    """
+    if not conv_id:
+        return False
+    try:
+        conv = await db.get_conversation(conv_id)
+        msgs = (conv or {}).get("messages") or []
+        latest = next((m for m in reversed(msgs) if m.get("role") == "user"), None)
+        content = (latest or {}).get("content") or ""
+        if not isinstance(content, str):
+            content = json.dumps(content)
+        text = content.strip()
+        if not text or not _SHIP_ANYWAY_ACTION_RE.search(text):
+            return False
+        return bool(
+            _SHIP_ANYWAY_QUALIFIER_RE.search(text)
+            or _SHIP_ANYWAY_DIRECT_RE.search(text)
+        )
+    except Exception as _e:
+        print(f"[v2-gate] ship-anyway intent check failed (non-fatal): {_e}")
+        return False
+
+
+def _project_id_from_dir(project_dir: str) -> str:
+    """Best-effort project id from a Codebox project path."""
+    if not project_dir:
+        return ""
+    name = os.path.basename(project_dir.rstrip("/"))
+    return name if name.startswith("proj-") else ""
+
+
+async def _latest_user_task_text(conv_id: str) -> str:
+    if not conv_id:
+        return ""
+    try:
+        conv = await db.get_conversation(conv_id)
+        msgs = (conv or {}).get("messages") or []
+        latest = next((m for m in reversed(msgs) if m.get("role") == "user"), None)
+        content = (latest or {}).get("content") or ""
+        if not isinstance(content, str):
+            content = json.dumps(content)
+        return content.strip()[:2000]
+    except Exception as _e:
+        print(f"[v2-gate] latest user task lookup failed (non-fatal): {_e}")
+        return ""
+
+
+async def _latest_actionable_issue_run(conv_id: str, requested_id: str = "") -> dict | None:
+    """Return the requested/latest reviewer or acceptance run with issues."""
+    if not conv_id and not requested_id:
+        return None
+    if requested_id:
+        try:
+            run = await db.get_run(requested_id)
+            if run:
+                return run
+        except Exception as _e:
+            print(f"[v2-gate] requested issue run lookup failed (non-fatal): {_e}")
+    if not conv_id:
+        return None
+    try:
+        runs = await db.get_runs_by_conversation(conv_id, limit=30)
+        return next(
+            (r for r in runs
+             if r.get("role") in {"reviewer", "acceptance"}
+             and ((r.get("result_envelope") or {}).get("status") or "").lower() in {"issues", "error"}),
+            None,
+        )
+    except Exception as _e:
+        print(f"[v2-gate] latest actionable issue lookup failed (non-fatal): {_e}")
+        return None
+
+
+def _task_from_issue_run(user_task: str, issue_run: dict | None) -> str:
+    env = (issue_run or {}).get("result_envelope") or {}
+    summary = (env.get("summary") or "").strip()
+    issues = env.get("issues") or []
+    issue_lines = []
+    for i, issue in enumerate(issues[:5], 1):
+        issue_lines.append(
+            f"{i}. {issue.get('file') or '?'}: {(issue.get('summary') or '')[:240]}"
+        )
+    parts = []
+    if user_task:
+        parts.append(user_task)
+    if summary:
+        parts.append(f"Reviewer summary: {summary}")
+    if issue_lines:
+        parts.append("Reviewer issues:\n" + "\n".join(issue_lines))
+    return "\n\n".join(parts).strip() or "Fix the uploaded project reviewer issues."
+
+
+async def _uploaded_project_aider_context(conv_id: str, *,
+                                          issue_run: dict | None = None,
+                                          project_dir: str = "",
+                                          project_id: str = "") -> dict | None:
+    """Return routing context when this conversation is an uploaded-project fix.
+
+    This intentionally does not classify all active coding projects as uploads:
+    greenfield OpenHands builds also create coding_projects rows. Uploaded
+    projects are identified by their workflow mode or upload-time description.
+    """
+    if not conv_id or not getattr(config, "AIDER_ENABLED", True):
+        return None
+    env = (issue_run or {}).get("result_envelope") or {}
+    project_dir = (project_dir or env.get("project_dir") or "").strip()
+    project_id = (project_id or (issue_run or {}).get("project_id") or "").strip()
+    project_id = project_id or _project_id_from_dir(project_dir)
+
+    try:
+        wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id) if project_id else None
+        if not wf:
+            wf = await db.get_latest_coder_workflow(conv_id)
+        if wf and wf.get("mode") == "fix_uploaded_project" and not wf.get("cancel_requested"):
+            project_id = project_id or wf.get("project_id") or ""
+            project_dir = project_dir or (f"/root/projects/{project_id}" if project_id else "")
+            return {"workflow": wf, "project_id": project_id, "project_dir": project_dir}
+    except Exception as _e:
+        print(f"[v2-gate] uploaded workflow lookup failed (non-fatal): {_e}")
+
+    try:
+        active = await db.get_coding_project_by_conv(conv_id)
+        if active:
+            active_pid = active.get("openhands_project_id") or active.get("id") or ""
+            desc = active.get("description") or ""
+            if desc.startswith("Uploaded project:") and (not project_id or project_id == active_pid):
+                project_id = project_id or active_pid
+                project_dir = project_dir or (f"/root/projects/{project_id}" if project_id else "")
+                return {"workflow": None, "project_id": project_id, "project_dir": project_dir}
+    except Exception as _e:
+        print(f"[v2-gate] uploaded project lookup failed (non-fatal): {_e}")
+    return None
+
+
+_UPLOADED_PROJECT_BOOTSTRAP_ALLOWED_TOOLS = {
+    "run_aider_fix",
+    "run_review",
+    "run_acceptance_review",
+    "get_coder_workflow",
+    "cancel_coder_workflow",
+}
+_UPLOADED_PROJECT_TERMINAL_STATES = {
+    "accepted", "delivered", "complete", "completed", "cancelled", "blocked",
+}
+_UPLOADED_PROJECT_TERMINAL_ARTIFACTS = {
+    "accepted", "delivered", "partial_delivered", "cancelled",
+}
+_UPLOADED_PROJECT_ACTIVE_RUN_STATUSES = {"queued", "running", "pending"}
+_UPLOADED_PROJECT_AGENT_ROLES = {"aider.fix", "reviewer", "acceptance", "fixer"}
+
+
+def _uploaded_project_tool_allowed_during_bootstrap(name: str) -> bool:
+    return name in _UPLOADED_PROJECT_BOOTSTRAP_ALLOWED_TOOLS
+
+
+def _uploaded_project_manual_gate_state(workflow: dict | None,
+                                        runs: list[dict] | None = None) -> str:
+    """Return bootstrap/inflight when an uploaded fix must not use manual tools."""
+    if not workflow or workflow.get("mode") != "fix_uploaded_project":
+        return ""
+    if workflow.get("cancel_requested"):
+        return ""
+    state = (workflow.get("state") or "").lower()
+    artifact = (workflow.get("artifact_status") or "").lower()
+    if state in _UPLOADED_PROJECT_TERMINAL_STATES:
+        return ""
+    if artifact in _UPLOADED_PROJECT_TERMINAL_ARTIFACTS:
+        return ""
+
+    runs = runs or []
+    active_run_id = workflow.get("active_run_id") or ""
+    for run in runs:
+        if active_run_id and run.get("id") == active_run_id:
+            if (run.get("status") or "").lower() in _UPLOADED_PROJECT_ACTIVE_RUN_STATUSES:
+                return "inflight"
+            break
+
+    for run in runs:
+        role = run.get("role") or ""
+        if role in _UPLOADED_PROJECT_AGENT_ROLES or role.startswith("builder"):
+            return ""
+    return "bootstrap"
+
+
+def _uploaded_project_bootstrap_block_message(name: str, workflow: dict,
+                                              project_dir: str,
+                                              task: str,
+                                              gate_state: str = "bootstrap") -> str:
+    project_id = (workflow or {}).get("project_id") or _project_id_from_dir(project_dir)
+    project_dir = project_dir or (f"/root/projects/{project_id}" if project_id else "/root/projects/<active-project>")
+    task_hint = (task or (workflow or {}).get("user_task") or "latest user request").strip()
+    task_hint = re.sub(r"\s+", " ", task_hint)[:700].replace("\\", "\\\\").replace("'", "\\'")
+    if gate_state == "inflight":
+        reason = (
+            "an uploaded-project Aider/Reviewer run is already in progress. "
+            "Wait for that run or inspect workflow status."
+        )
+        next_call = "get_coder_workflow(workflow_id='<workflow_id>')"
+    else:
+        reason = (
+            "uploaded-project fixes must start with Aider or Reviewer from the active "
+            "project root, not manual file tools."
+        )
+        next_call = (
+            f"run_aider_fix(project_dir='{project_dir}', task='{task_hint}')"
+        )
+    return (
+        f"BLOCKED — {reason}\n\n"
+        f"Active project path: `{project_dir}`"
+        + (f"\nProject id: `{project_id}`" if project_id else "")
+        + "\n\n"
+        f"Your VERY NEXT tool call MUST be:\n  {next_call}\n\n"
+        f"Do NOT call {name}, read_file, write_file, run_shell, execute_code, "
+        f"generate_code, run_fixer, list_files, or search_files for this uploaded-project "
+        f"fix. Aider owns the edit; Reviewer verifies it."
+    )
 
 
 # Pytest "FAILED tests/foo.py::test_x - reason" line, plus a fallback for
@@ -548,14 +805,73 @@ CODEAGENT_TOOLS = {
             }, "required": []},
         },
     },
+    "run_acceptance_review": {
+        "type": "function",
+        "function": {
+            "name": "run_acceptance_review",
+            "description": "Final acceptance gate after run_review is clean. Statically inspects the project against the user's request, README/docs, manifests, tests, entrypoints, and generated artifacts. Must pass before download_project. If it returns issues, call run_fixer with its run_id.",
+            "parameters": {"type": "object", "properties": {
+                "project_dir": {"type": "string", "description": "Absolute path to the project root in the sandbox. If omitted, uses the clean reviewer envelope."},
+                "reviewer_run_id": {"type": "string", "description": "Optional run_id from the clean run_review call."},
+                "project_id": {"type": "string", "description": "Optional project_id for run-graph linkage."},
+            }, "required": []},
+        },
+    },
     "run_fixer": {
         "type": "function",
         "function": {
             "name": "run_fixer",
-            "description": "Apply targeted edits for issues identified by run_review. The Fixer reads each issue's fix-scope files, asks a coder LLM for minimal complete-file replacements, and writes the edits back. Use this AFTER run_review returns issues, INSTEAD OF manually reading + writing each file in chat rounds. After run_fixer completes, call run_review AGAIN to verify the fixes worked. Hard cap on fixer cycles: 3.",
+            "description": "Fallback targeted editor for issues identified by run_review or run_acceptance_review. For uploaded-project fixes, prefer run_aider_fix; run_fixer is mainly for greenfield/OpenHands projects or when Aider is disabled/unavailable. After reviewer-driven fixes, call run_review again. After docs-only acceptance fixes, call run_acceptance_review again; otherwise call run_review. Hard caps: 3 reviewer-driven fix cycles, 2 acceptance-driven fix cycles.",
             "parameters": {"type": "object", "properties": {
-                "reviewer_run_id": {"type": "string", "description": "The run_id of the run_review call whose issues you want to fix (e.g. 'run-bd6f9dc7b4e3'). If omitted, the most recent reviewer run on this conversation is used."},
+                "reviewer_run_id": {"type": "string", "description": "The run_id of the run_review or run_acceptance_review call whose issues you want to fix (e.g. 'run-bd6f9dc7b4e3'). If omitted, the most recent actionable review/acceptance run is used."},
             }, "required": []},
+        },
+    },
+    "start_coder_workflow": {
+        "type": "function",
+        "function": {
+            "name": "start_coder_workflow",
+            "description": "Start a Coder Bot v2 workflow using the backend router. Modes: build_from_prompt uses OpenHands after planning; fix_uploaded_project uses Aider for existing uploaded-project edits; ask_uploaded_project uses read-only ProjectQA.",
+            "parameters": {"type": "object", "properties": {
+                "mode": {"type": "string", "description": "build_from_prompt | fix_uploaded_project | ask_uploaded_project"},
+                "task": {"type": "string", "description": "The user's build, fix, or question task."},
+                "project_id": {"type": "string", "description": "Optional uploaded project id. If omitted, uses the active project for this conversation."},
+                "language": {"type": "string", "description": "Optional primary language for new builds."},
+            }, "required": ["mode", "task"]},
+        },
+    },
+    "run_aider_fix": {
+        "type": "function",
+        "function": {
+            "name": "run_aider_fix",
+            "description": "Apply surgical edits to an existing uploaded project using Aider in the Codebox worker. Use this for uploaded-project fixes instead of generate_code/OpenHands. After it returns, call run_review to verify.",
+            "parameters": {"type": "object", "properties": {
+                "project_dir": {"type": "string", "description": "Absolute project root in Codebox, e.g. /root/projects/proj-... . If omitted, uses the active uploaded project."},
+                "task": {"type": "string", "description": "The user's requested fix/change, verbatim when possible."},
+                "issue_run_id": {"type": "string", "description": "Optional reviewer/acceptance run_id whose issues should guide Aider."},
+                "project_id": {"type": "string", "description": "Optional uploaded project id for workflow linkage."},
+                "allowed_files": {"type": "array", "items": {"type": "string"}, "description": "Optional file scope Aider should focus on."},
+            }, "required": ["task"]},
+        },
+    },
+    "get_coder_workflow": {
+        "type": "function",
+        "function": {
+            "name": "get_coder_workflow",
+            "description": "Fetch workflow-level state for a Coder Bot v2 workflow.",
+            "parameters": {"type": "object", "properties": {
+                "workflow_id": {"type": "string", "description": "Workflow id returned by start_coder_workflow or upload-project."},
+            }, "required": ["workflow_id"]},
+        },
+    },
+    "cancel_coder_workflow": {
+        "type": "function",
+        "function": {
+            "name": "cancel_coder_workflow",
+            "description": "Cancel a Coder Bot v2 workflow and its active run, if any.",
+            "parameters": {"type": "object", "properties": {
+                "workflow_id": {"type": "string", "description": "Workflow id to cancel."},
+            }, "required": ["workflow_id"]},
         },
     },
     "ask_project": {
@@ -1019,6 +1335,7 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
         "delete_file": ["path"],
         "plan_project": ["task", "language", "constraints"],
         "run_review": ["project_dir", "project_id"],
+        "run_acceptance_review": ["project_dir", "reviewer_run_id", "project_id"],
         "search_files": ["pattern", "path", "file_pattern"],
         "diff_files": ["path_a", "path_b"],
         "git_init": ["path", "language"],
@@ -1030,6 +1347,10 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
         "research": ["query"],
         "fetch_url": ["url"],
         "generate_code": ["task", "language", "context"],
+        "start_coder_workflow": ["mode", "task", "project_id"],
+        "run_aider_fix": ["project_dir", "task", "issue_run_id"],
+        "get_coder_workflow": ["workflow_id"],
+        "cancel_coder_workflow": ["workflow_id"],
     }
 
     param_names = TOOL_PARAMS.get(tool_name)
@@ -1250,21 +1571,153 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 _v2_cached = await _is_v2_persona(conv_id, conv_row=cr)
             return _v2_cached
 
+        # Q&A is read-only and terminal for the current turn. Some review/fix
+        # tools are whitelisted below so the normal state gate can allow the
+        # intended next step after builder/reviewer runs; block those explicitly
+        # when the most recent meaningful run is a non-change ProjectQA answer.
+        if conv_id and name not in {"ask_project", "get_coder_workflow", "cancel_coder_workflow"}:
+            try:
+                _runs_qt = await db.get_runs_by_conversation(conv_id, limit=12)
+                _terminal_qa_run = None
+                for _r in _runs_qt:
+                    _role_qt = _r.get("role", "")
+                    if _role_qt == "qa":
+                        _env_qt = _r.get("result_envelope") or {}
+                        if (_r.get("status") == "succeeded"
+                                and not _env_qt.get("looks_like_change_request", False)):
+                            _terminal_qa_run = _r
+                        break
+                    if (_role_qt in {"reviewer", "acceptance", "fixer", "aider.fix"}
+                            or _role_qt.startswith("builder")):
+                        break
+                if _terminal_qa_run is not None and await _check_v2():
+                    _qid = _terminal_qa_run.get("id", "?")
+                    await events.emit(conv_id, "tool_end", {
+                        "tool": name, "icon": "code",
+                        "status": f"⛔ Blocked — answer the user (ask_project {_qid[:14]}… is terminal)",
+                    })
+                    print(f"[v2-gate] state=qa-terminal blocked tool={name} "
+                          f"trigger={_qid}", flush=True)
+                    return (
+                        f"BLOCKED — ask_project ({_qid}) just answered the user's question. "
+                        f"The user asked something; you have the answer. Your VERY NEXT output "
+                        f"MUST be plain text relaying that answer to the user.\n\n"
+                        f"Do NOT call run_review, run_fixer, run_aider_fix, generate_code, "
+                        f"read_file, write_file, run_shell, download_project, or any other "
+                        f"tool. The project Q&A path is read-only.\n\n"
+                        f"If the user follows up with another question, call ask_project again. "
+                        f"If they explicitly request a change, route that new turn through "
+                        f"fix_uploaded_project or a write workflow."
+                    )
+            except Exception as _qte:
+                print(f"[v2-gate] qa-terminal check failed (non-fatal): {_qte}")
+
+        if (conv_id
+                and not _uploaded_project_tool_allowed_during_bootstrap(name)
+                and await _check_v2()):
+            try:
+                _wf_up = await db.get_latest_coder_workflow(conv_id)
+                _runs_up = await db.get_runs_by_conversation(conv_id, limit=20)
+                _gate_state_up = _uploaded_project_manual_gate_state(_wf_up, _runs_up)
+                if _gate_state_up:
+                    _pid_up = (_wf_up or {}).get("project_id") or ""
+                    _project_dir_up = f"/root/projects/{_pid_up}" if _pid_up else ""
+                    _task_up = await _latest_user_task_text(conv_id)
+                    _body_up = _uploaded_project_bootstrap_block_message(
+                        name,
+                        _wf_up or {},
+                        _project_dir_up,
+                        _task_up,
+                        _gate_state_up,
+                    )
+                    await events.emit(conv_id, "tool_end", {
+                        "tool": name, "icon": "code",
+                        "status": (
+                            "⛔ Blocked — uploaded-project fixes use Aider first"
+                            if _gate_state_up == "bootstrap"
+                            else "⛔ Blocked — uploaded-project run already in progress"
+                        ),
+                    })
+                    print(f"[v2-gate] state=uploaded-project-{_gate_state_up} "
+                          f"blocked tool={name} workflow={(_wf_up or {}).get('id','?')}",
+                          flush=True)
+                    return _body_up
+            except Exception as _upe:
+                print(f"[v2-gate] uploaded-project bootstrap check failed (non-fatal): {_upe}")
+
         _runs_for_cap = None
         if conv_id and name == "run_fixer":
+            _parent_role_for_cap = "reviewer"
             try:
                 _runs_for_cap = await db.get_runs_by_conversation(conv_id, limit=20)
+                _run_role_by_id_cap = {r.get("id"): r.get("role") for r in _runs_for_cap}
+                _requested_parent_id = (args.get("reviewer_run_id") or "").strip()
+                _parent_role_for_cap = ""
+                if _requested_parent_id:
+                    _parent_role_for_cap = _run_role_by_id_cap.get(_requested_parent_id, "")
+                if not _parent_role_for_cap:
+                    for _r in _runs_for_cap:
+                        if _r.get("role") not in {"reviewer", "acceptance"}:
+                            continue
+                        _env = _r.get("result_envelope") or {}
+                        if (_env.get("status") or "").lower() in {"issues", "error"}:
+                            _parent_role_for_cap = _r.get("role", "reviewer")
+                            break
+                if not _parent_role_for_cap:
+                    _parent_role_for_cap = "reviewer"
+
+                # Uploaded-project fixes are owned by Aider. This redirect is
+                # deliberately before cycle/research gates so stale personas
+                # that still call run_fixer do not get stuck in the old scoped
+                # Fixer loop.
+                if _parent_role_for_cap == "reviewer" and getattr(config, "AIDER_ENABLED", True):
+                    _requested_parent_id = (args.get("reviewer_run_id") or "").strip()
+                    _issue_run_for_aider = await _latest_actionable_issue_run(conv_id, _requested_parent_id)
+                    _aider_ctx = await _uploaded_project_aider_context(
+                        conv_id, issue_run=_issue_run_for_aider,
+                    )
+                    if _issue_run_for_aider and _aider_ctx:
+                        _issue_run_id = _issue_run_for_aider.get("id", "")
+                        _project_dir = _aider_ctx.get("project_dir") or ""
+                        _task = _task_from_issue_run(
+                            await _latest_user_task_text(conv_id),
+                            _issue_run_for_aider,
+                        )
+                        await events.emit(conv_id, "tool_end", {
+                            "tool": "run_fixer", "icon": "wrench",
+                            "status": "↪ Routing uploaded-project fix to Aider",
+                        })
+                        print(f"[v2-gate] redirecting run_fixer to run_aider_fix "
+                              f"for uploaded project issue_run={_issue_run_id}", flush=True)
+                        return await exec_tool(
+                            http, events, "run_aider_fix",
+                            {
+                                "task": _task,
+                                "project_dir": _project_dir,
+                                "issue_run_id": _issue_run_id,
+                            },
+                            conv_id, custom_tool_map, conv_model, kb_ids,
+                        )
+
+                def _fixer_source_role_cap(_fr):
+                    _fenv = _fr.get("result_envelope") or {}
+                    return (_fenv.get("source_role")
+                            or _run_role_by_id_cap.get(_fr.get("parent_run_id"))
+                            or "reviewer")
+
                 _fixer_succ = sum(
                     1 for r in _runs_for_cap
-                    if r.get("role") == "fixer" and r.get("status") == "succeeded"
+                    if (r.get("role") == "fixer" and r.get("status") == "succeeded"
+                        and _fixer_source_role_cap(r) == _parent_role_for_cap)
                 )
-                if _fixer_succ >= 3:
+                _cap_limit = 2 if _parent_role_for_cap == "acceptance" else 3
+                if _fixer_succ >= _cap_limit:
                     # v1 doesn't run this loop, so cap only applies to v2.
                     if await _check_v2():
-                        # Pull the latest reviewer's summary so the model has
+                        # Pull the latest actionable summary so the model has
                         # specifics to relay to the user.
                         _last_rev = next(
-                            (r for r in _runs_for_cap if r.get("role") == "reviewer"),
+                            (r for r in _runs_for_cap if r.get("role") == _parent_role_for_cap),
                             None,
                         )
                         _rev_sum = ""
@@ -1283,13 +1736,15 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             )
                         await events.emit(conv_id, "tool_end", {
                             "tool": "run_fixer", "icon": "wrench",
-                            "status": f"⛔ Cycle cap reached ({_fixer_succ}/3) — summarize and stop",
+                            "status": f"⛔ Cycle cap reached ({_fixer_succ}/{_cap_limit}) — summarize and stop",
                         })
                         print(f"[v2-gate] CYCLE CAP: blocking run_fixer (already "
-                              f"{_fixer_succ} succeeded fixer runs on this conv)", flush=True)
+                              f"{_fixer_succ} succeeded {_parent_role_for_cap}-driven fixer runs "
+                              f"on this conv)", flush=True)
                         return (
-                            f"BLOCKED — Hard cap of 3 review/fix cycles already attempted "
-                            f"on this conversation ({_fixer_succ} successful fixer runs).\n\n"
+                            f"BLOCKED — Hard cap of {_cap_limit} {_parent_role_for_cap}/fix "
+                            f"cycles already attempted on this conversation "
+                            f"({_fixer_succ} successful fixer runs).\n\n"
                             f"The same class of issue is persisting and another fixer call "
                             f"will not help. Your VERY NEXT output MUST be plain text to the "
                             f"user that:\n"
@@ -1322,9 +1777,13 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 _runs_sf = _runs_for_cap
                 if _runs_sf is None:
                     _runs_sf = await db.get_runs_by_conversation(conv_id, limit=20)
+                if _parent_role_for_cap == "acceptance":
+                    raise StopAsyncIteration("acceptance fixes do not use research nudge")
                 _fsucc_sf = sum(
                     1 for r in _runs_sf
-                    if r.get("role") == "fixer" and r.get("status") == "succeeded"
+                    if (r.get("role") == "fixer" and r.get("status") == "succeeded"
+                        and ((r.get("result_envelope") or {}).get("source_role")
+                             or "reviewer") != "acceptance")
                 )
                 # 1 ≤ fixer_succ ≤ 2: between first failure and final cycle.
                 # 0 = first attempt, no gate. ≥3 = cap (handled above).
@@ -1412,11 +1871,13 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                 + "obscure. Do NOT call run_fixer, generate_code, write_file, run_shell, "
                                 + "or run_review until deep_research has run."
                             )
+            except StopAsyncIteration:
+                pass
             except Exception as _sfe:
                 print(f"[v2-gate] stuck/final-cycle check failed (non-fatal): {_sfe}")
 
             # Phantom run_fixer guard: block run_fixer when the latest run
-            # isn't a reviewer with status='issues'/'error'. Without this,
+            # isn't a reviewer/acceptance run with status='issues'/'error'. Without this,
             # a hallucinated reviewer_run_id (the model sometimes invents
             # one right after generate_code) falls through to fixer.py,
             # which returns "no envelope to fix" — burning a cap slot for
@@ -1433,13 +1894,14 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     for _r in _runs_pf:
                         _role_pf = _r.get("role", "")
                         _st_pf = (_r.get("status") or "").lower()
-                        if (_role_pf == "reviewer" or _role_pf.startswith("builder")
+                        if (_role_pf in {"reviewer", "acceptance"} or _role_pf.startswith("builder")
                                 or _role_pf == "fixer") and _st_pf in _MEANINGFUL_STATUSES:
                             _latest_meaningful = _r
                             break
 
                     _allow_fixer = False
-                    if _latest_meaningful and _latest_meaningful.get("role") == "reviewer":
+                    if (_latest_meaningful
+                            and _latest_meaningful.get("role") in {"reviewer", "acceptance"}):
                         _env_pf = _latest_meaningful.get("result_envelope") or {}
                         _rstatus_pf = (_env_pf.get("status") or "").lower()
                         if _rstatus_pf in ("issues", "error"):
@@ -1459,19 +1921,19 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                 break
                         await events.emit(conv_id, "tool_end", {
                             "tool": "run_fixer", "icon": "wrench",
-                            "status": "⛔ run_fixer needs a reviewer envelope first",
+                            "status": "⛔ run_fixer needs an actionable review envelope first",
                         })
                         print(f"[v2-gate] PHANTOM FIXER: blocking run_fixer "
                               f"(latest meaningful run is {_trig_role}/{_trig_status} "
-                              f"{(_trig_id or '')[:14]}, not a reviewer with issues)", flush=True)
+                              f"{(_trig_id or '')[:14]}, not review/acceptance with issues)", flush=True)
                         return (
-                            f"BLOCKED — run_fixer requires a recent reviewer envelope with "
+                            f"BLOCKED — run_fixer requires a recent reviewer or acceptance envelope with "
                             f"issues, but the most recent meaningful run is "
                             f"'{_trig_role}' (status={_trig_status}). There is no "
                             f"actionable envelope to fix.\n\n"
                             f"Your VERY NEXT tool call MUST be:\n"
                             f"  run_review(project_dir='{_pd_hint or '/root/projects/...'}')\n\n"
-                            f"Do not pass a hallucinated reviewer_run_id. Run the reviewer "
+                            f"Do not pass a hallucinated reviewer_run_id. Run review/acceptance "
                             f"first; if it returns issues, call run_fixer with that real id."
                         )
             except Exception as _pe:
@@ -1547,12 +2009,15 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             except Exception as _rbe:
                 print(f"[v2-gate] anti-rebuild check failed (non-fatal): {_rbe}")
 
-        if conv_id and name not in ("run_review", "run_fixer", "ask_project"):
+        if conv_id and name not in ("run_review", "run_acceptance_review", "run_fixer",
+                                    "run_aider_fix", "ask_project", "get_coder_workflow",
+                                    "cancel_coder_workflow"):
             try:
                 _runs_for_v2_gate = await db.get_runs_by_conversation(conv_id, limit=20)
                 _pending_run = None    # state 1 trigger
                 _pending_kind = ""
                 _pending_review = None  # state 2 trigger
+                _pending_acceptance_needed = None  # clean review must be accepted before delivery
                 _terminal_qa = None    # state 3 trigger
 
                 # Walk newest-first.
@@ -1574,19 +2039,34 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             _terminal_qa = _r
                         break
                     if _role == "reviewer":
-                        # Most recent reviewer: state 2 is whether it has issues.
+                        # Most recent reviewer: issues need fixer; clean needs acceptance.
                         _env_r = _r.get("result_envelope") or {}
                         _rstatus = (_env_r.get("status") or "").lower()
                         if _rstatus in ("issues", "error"):
+                            _pending_review = _r
+                        elif _rstatus == "clean":
+                            _pending_acceptance_needed = _r
+                        break
+                    if _role == "acceptance":
+                        # Acceptance issues route through the same Fixer, but
+                        # accepted releases the delivery gate.
+                        _env_a = _r.get("result_envelope") or {}
+                        _astatus = (_env_a.get("status") or "").lower()
+                        if _astatus in ("issues", "error"):
                             _pending_review = _r
                         break
                     if _role.startswith("builder") and _r.get("status") in _BUILDER_GATING:
                         _pending_run = _r
                         _pending_kind = "builder"
                         break
-                    if _role == "fixer" and _r.get("status") in _FIXER_GATING:
-                        _pending_run = _r
-                        _pending_kind = "fixer"
+                    if _role in {"fixer", "aider.fix"} and _r.get("status") in _FIXER_GATING:
+                        _env_f = _r.get("result_envelope") or {}
+                        if (_env_f.get("source_role") == "acceptance"
+                                and _env_f.get("docs_only")):
+                            _pending_acceptance_needed = _r
+                        else:
+                            _pending_run = _r
+                            _pending_kind = "fixer"
                         break
 
                 # If neither state triggers, fall through and run normally.
@@ -1596,22 +2076,52 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     _pd = (_env.get("project_dir") or "").strip()
                     _pid = _pending_run.get("id", "?")
                     _why = ("generate_code" if _pending_kind == "builder" else "run_fixer")
-                    _gate_msg = (
-                        "state", "review-needed",
-                        f"BLOCKED — {_why} ({_pid}) just completed but "
-                        f"run_review has not been called yet.\n\n"
-                        f"Your VERY NEXT tool call MUST be:\n"
-                        f"  run_review(project_dir='{_pd}')\n\n"
-                        f"Do not call {name}, read_file, write_file, run_shell, javac, "
-                        f"or any other tool first. The Reviewer runs the project's real "
-                        f"build / tests / lint and tells you exactly what (if anything) "
-                        f"still needs fixing — with file:line references and a fix scope.",
-                        f"⛔ Blocked — call run_review first (after {_why} {_pid[:14]}…)",
-                        _pid,
-                    )
+                    if (name in {"download_project", "download_file"}
+                            and await _latest_user_requested_ship_anyway(conv_id)):
+                        print(f"[v2-gate] ship-anyway: allowing {name} before "
+                              f"review because latest user requested delivery", flush=True)
+                    else:
+                        _gate_msg = (
+                            "state", "review-needed",
+                            f"BLOCKED — {_why} ({_pid}) just completed but "
+                            f"run_review has not been called yet.\n\n"
+                            f"Your VERY NEXT tool call MUST be:\n"
+                            f"  run_review(project_dir='{_pd}')\n\n"
+                            f"Do not call {name}, read_file, write_file, run_shell, javac, "
+                            f"or any other tool first. The Reviewer runs the project's real "
+                            f"build / tests / lint and tells you exactly what (if anything) "
+                            f"still needs fixing — with file:line references and a fix scope.",
+                            f"⛔ Blocked — call run_review first (after {_why} {_pid[:14]}…)",
+                            _pid,
+                        )
+                elif _pending_acceptance_needed is not None:
+                    _env = _pending_acceptance_needed.get("result_envelope") or {}
+                    _pd = (_env.get("project_dir") or "").strip()
+                    _rid = _pending_acceptance_needed.get("id", "?")
+                    _source_role = _pending_acceptance_needed.get("role", "")
+                    _reviewer_id = (_env.get("reviewer_run_id") or _rid)
+                    if (name in {"download_project", "download_file"}
+                            and await _latest_user_requested_ship_anyway(conv_id)):
+                        print(f"[v2-gate] ship-anyway: allowing {name} before "
+                              f"acceptance because latest user requested delivery", flush=True)
+                    else:
+                        _gate_msg = (
+                            "state", "acceptance-needed",
+                            f"BLOCKED — run_review is clean, but final acceptance has not "
+                            f"passed yet.\n\n"
+                            f"Your VERY NEXT tool call MUST be:\n"
+                            f"  run_acceptance_review(project_dir='{_pd}', reviewer_run_id='{_reviewer_id}')\n\n"
+                            f"Acceptance verifies the generated project satisfies the user's "
+                            f"request, has accurate docs, sane tests, and clean packaging. "
+                            f"Do not call {name} or download_project until acceptance returns accepted.",
+                            f"⛔ Blocked — call run_acceptance_review first ({_source_role} {_rid[:14]}…)",
+                            _rid,
+                        )
                 elif _pending_review is not None:
                     _rid = _pending_review.get("id", "?")
-                    _rstatus_disp = (_pending_review.get("result_envelope") or {}).get("status", "?")
+                    _pending_role = _pending_review.get("role", "reviewer")
+                    _pending_env = _pending_review.get("result_envelope") or {}
+                    _rstatus_disp = _pending_env.get("status", "?")
                     # Cap-aware release: once the fixer cycle budget is
                     # exhausted, the same review issues will keep blocking
                     # the conversation forever. Allow the model to deliver
@@ -1623,18 +2133,36 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     # an exhausted attempt. The cycle-cap check (which gates
                     # run_fixer itself) still counts only successes.
                     _FIXER_TERMINAL = {"succeeded", "failed", "partial", "no_op"}
+                    _run_role_by_id = {r.get("id"): r.get("role") for r in _runs_for_v2_gate}
+                    def _fixer_source_role(_fr):
+                        _fenv = _fr.get("result_envelope") or {}
+                        return (_fenv.get("source_role")
+                                or _run_role_by_id.get(_fr.get("parent_run_id"))
+                                or "reviewer")
                     _fixer_attempts_gate = sum(
                         1 for _r in _runs_for_v2_gate
-                        if _r.get("role") == "fixer" and _r.get("status") in _FIXER_TERMINAL
+                        if (_r.get("role") in {"fixer", "aider.fix"} and _r.get("status") in _FIXER_TERMINAL
+                            and _fixer_source_role(_r) == _pending_role)
                     )
                     _fixer_succ_gate = sum(
                         1 for _r in _runs_for_v2_gate
-                        if _r.get("role") == "fixer" and _r.get("status") == "succeeded"
+                        if (_r.get("role") in {"fixer", "aider.fix"} and _r.get("status") == "succeeded"
+                            and _fixer_source_role(_r) == _pending_role)
                     )
                     _DELIVERY_OK_AFTER_CAP = {
                         "download_project", "download_file",
                         "read_file", "list_files",
                     }
+                    _DELIVERY_SHIP_TOOLS = {"download_project", "download_file"}
+                    _ship_anyway_gate = (
+                        name in _DELIVERY_SHIP_TOOLS
+                        and await _latest_user_requested_ship_anyway(conv_id)
+                    )
+                    _aider_ctx_gate = None
+                    if _pending_role == "reviewer" and getattr(config, "AIDER_ENABLED", True):
+                        _aider_ctx_gate = await _uploaded_project_aider_context(
+                            conv_id, issue_run=_pending_review,
+                        )
                     # Deadlock break: the FINAL_CYCLE gate (2 successful fixers,
                     # no research since the last reviewer) blocks run_fixer with
                     # the message "call deep_research first". The STUCK_FIX gate
@@ -1645,7 +2173,9 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     # the research-first requirement and then retry run_fixer on
                     # the next round. Below 1 fixer attempt the model should
                     # actually try fixing before researching.
+                    _cap_limit_gate = 2 if _pending_role == "acceptance" else 3
                     if (name == "deep_research"
+                            and _pending_role != "acceptance"
                             and _fixer_attempts_gate >= 1
                             and not await _deep_research_called_since(
                                 conv_id, _pending_review.get("ended_at"))):
@@ -1653,15 +2183,37 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                               f"despite fix-needed (fixer_attempts={_fixer_attempts_gate}, "
                               f"required by FINAL_CYCLE/STUCK_FIX)", flush=True)
                         # Skip _gate_msg → deep_research runs.
-                    elif _fixer_attempts_gate >= 3 and name in _DELIVERY_OK_AFTER_CAP:
+                    elif _ship_anyway_gate:
+                        print(f"[v2-gate] ship-anyway: allowing {name} despite "
+                              f"fix-needed because latest user requested delivery", flush=True)
+                        # Skip _gate_msg entirely → delivery tool runs normally.
+                    elif _fixer_attempts_gate >= _cap_limit_gate and name in _DELIVERY_OK_AFTER_CAP:
                         print(f"[v2-gate] cap-release: allowing {name} despite "
                               f"fix-needed (attempts={_fixer_attempts_gate}, "
                               f"succ={_fixer_succ_gate})", flush=True)
                         # Skip _gate_msg entirely → tool runs normally.
-                    else:
+                    elif _aider_ctx_gate:
+                        _project_dir = _aider_ctx_gate.get("project_dir") or _pending_env.get("project_dir") or ""
                         _gate_msg = (
                             "state", "fix-needed",
-                            f"BLOCKED — run_review ({_rid}) returned status='{_rstatus_disp}' "
+                            f"BLOCKED — {_pending_role} ({_rid}) returned status='{_rstatus_disp}' "
+                            f"for an uploaded project.\n\n"
+                            f"Your VERY NEXT tool call MUST be:\n"
+                            f"  run_aider_fix(issue_run_id='{_rid}', project_dir='{_project_dir}', "
+                            f"task='<latest user request + reviewer summary>')\n\n"
+                            f"Uploaded-project fixes are handled by Aider from the project root. "
+                            f"Do NOT call run_fixer, read_file, write_file, generate_code, or "
+                            f"run_shell for this reviewer issue. After Aider returns, call "
+                            f"run_review to verify build/tests.",
+                            f"⛔ Blocked — call run_aider_fix first ({_pending_role} {_rid[:14]}… has issues)",
+                            _rid,
+                        )
+                    else:
+                        _tool_name = "run_acceptance_review" if _pending_role == "acceptance" else "run_review"
+                        _issue_label = "run_acceptance_review" if _pending_role == "acceptance" else "run_review"
+                        _gate_msg = (
+                            "state", "fix-needed",
+                            f"BLOCKED — {_issue_label} ({_rid}) returned status='{_rstatus_disp}' "
                             f"with issues that have not been addressed.\n\n"
                             f"Your VERY NEXT tool call MUST be:\n"
                             f"  run_fixer(reviewer_run_id='{_rid}')\n\n"
@@ -1669,8 +2221,9 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             f"edits via the coder model, and writes them back. Do NOT manually "
                             f"call read_file / write_file for these issues — that's the v1 "
                             f"antipattern that burns rounds. After run_fixer completes, call "
-                            f"run_review again to verify.",
-                            f"⛔ Blocked — call run_fixer first (review {_rid[:14]}… has issues)",
+                            f"{_tool_name if _pending_role == 'acceptance' else 'run_review'} "
+                            f"as instructed by the fixer result.",
+                            f"⛔ Blocked — call run_fixer first ({_pending_role} {_rid[:14]}… has issues)",
                             _rid,
                         )
                 elif _terminal_qa is not None:
@@ -2037,6 +2590,10 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
 
         elif name == "download_project":
             directory = args.get("directory", "/root")
+            _download_warning_lines = []
+            _ship_anyway_requested = (
+                await _latest_user_requested_ship_anyway(conv_id) if conv_id else False
+            )
 
             # Reviewer gate (Coder Bot v2): if the most recent reviewer run on
             # this conversation reported issues or could not identify the
@@ -2046,46 +2603,155 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             if conv_id:
                 try:
                     _runs_for_gate = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _FIXER_TERMINAL_FOR_DELIVERY = {"succeeded", "failed", "partial", "no_op"}
+                    _run_role_by_id_for_delivery = {
+                        r.get("id"): r.get("role") for r in _runs_for_gate
+                    }
+
+                    def _fixer_source_role_for_delivery(_fr):
+                        _fenv = _fr.get("result_envelope") or {}
+                        return (_fenv.get("source_role")
+                                or _run_role_by_id_for_delivery.get(_fr.get("parent_run_id"))
+                                or "reviewer")
+
+                    def _fixer_attempts_for_delivery(_role: str) -> int:
+                        return sum(
+                            1 for _r in _runs_for_gate
+                            if (_r.get("role") in {"fixer", "aider.fix"}
+                                and _r.get("status") in _FIXER_TERMINAL_FOR_DELIVERY
+                                and _fixer_source_role_for_delivery(_r) == _role)
+                        )
+
                     _latest_reviewer = None
+                    _latest_acceptance = None
                     for _r in _runs_for_gate:
+                        if _r.get("role") == "acceptance":
+                            _latest_acceptance = _r
+                            break
                         if _r.get("role") == "reviewer":
                             _latest_reviewer = _r
                             break
+                    if _latest_acceptance:
+                        _env = _latest_acceptance.get("result_envelope") or {}
+                        _astatus = (_env.get("status") or "").lower()
+                        if _astatus != "accepted":
+                            issues = _env.get("issues") or []
+                            n = len(issues)
+                            _acceptance_cap_exhausted = (
+                                _fixer_attempts_for_delivery("acceptance") >= 2
+                            )
+                            if _ship_anyway_requested or _acceptance_cap_exhausted:
+                                _download_warning_lines = [
+                                    "WARNING: Shipped despite unresolved acceptance issues.",
+                                    f"Acceptance status: {_astatus or '?'}; issue count: {n}.",
+                                ]
+                                print(f"[CHAT] download_project allowing ship-anyway "
+                                      f"despite acceptance={_latest_acceptance.get('id')} "
+                                      f"status={_astatus} issues={n} "
+                                      f"requested={_ship_anyway_requested} "
+                                      f"cap={_acceptance_cap_exhausted}")
+                            else:
+                                lines = [
+                                    f"BLOCKED — last run_acceptance_review returned status='{_astatus}'.",
+                                    "You CANNOT call download_project until acceptance is accepted.",
+                                    "",
+                                    f"Acceptance flagged {n} issue{'s' if n != 1 else ''}:",
+                                ]
+                                for i, iss in enumerate(issues[:5], 1):
+                                    lines.append(
+                                        f"  {i}. [{iss.get('category','?')}] {iss.get('file','?')}"
+                                        + (f":{','.join(str(x) for x in iss.get('lines') or [])}" if iss.get('lines') else "")
+                                        + f" — {iss.get('summary','')}"
+                                    )
+                                    scope = iss.get("suggested_fix_scope") or []
+                                    if scope:
+                                        lines.append(f"     fix scope: {', '.join(scope[:5])}")
+                                lines.append("")
+                                lines.append(
+                                    f"REQUIRED NEXT STEP: run_fixer(reviewer_run_id='{_latest_acceptance.get('id')}'), "
+                                    "then re-run review/acceptance as instructed by the fixer."
+                                )
+                                await events.emit(conv_id, "tool_end", {
+                                    "tool": "download_project", "icon": "code",
+                                    "status": f"⛔ Blocked — acceptance has {n} issue{'s' if n != 1 else ''}",
+                                })
+                                return "\n".join(lines)
                     if _latest_reviewer:
                         _env = _latest_reviewer.get("result_envelope") or {}
                         _rstatus = (_env.get("status") or "").lower()
                         if _rstatus in ("issues", "error"):
                             issues = _env.get("issues") or []
                             n = len(issues)
-                            lines = [
-                                f"BLOCKED — last run_review on this project returned status='{_rstatus}'.",
-                                f"Build: `{_env.get('build_cmd','')}` exit={_env.get('build_exit','?')}. "
-                                f"Tests: `{_env.get('test_cmd','')}` exit={_env.get('test_exit','?')}.",
-                                "",
-                                f"You CANNOT call download_project until the project passes review. "
-                                f"Reviewer flagged {n} issue{'s' if n != 1 else ''}:",
-                            ]
-                            for i, iss in enumerate(issues[:5], 1):
-                                lines.append(
-                                    f"  {i}. [{iss.get('severity','?')}] {iss.get('file','?')}"
-                                    + (f":{','.join(str(x) for x in iss.get('lines') or [])}" if iss.get('lines') else "")
-                                    + f" — {iss.get('summary','')}"
-                                )
-                                scope = iss.get("suggested_fix_scope") or []
-                                if scope:
-                                    lines.append(f"     fix scope: {', '.join(scope[:5])}")
-                            lines.append("")
-                            lines.append(
-                                "REQUIRED NEXT STEPS: 1) read each file in 'fix scope', 2) edit it with "
-                                "write_file to address the listed summary, 3) call run_review again. "
-                                "Repeat until run_review returns CLEAN. THEN call download_project."
+                            _reviewer_cap_exhausted = (
+                                _fixer_attempts_for_delivery("reviewer") >= 3
                             )
-                            await events.emit(conv_id, "tool_end", {
-                                "tool": "download_project", "icon": "code",
-                                "status": f"⛔ Blocked — last review had {n} issue{'s' if n != 1 else ''}",
-                            })
-                            print(f"[CHAT] download_project blocked: latest reviewer={_latest_reviewer.get('id')} status={_rstatus} issues={n}")
-                            return "\n".join(lines)
+                            if _ship_anyway_requested or _reviewer_cap_exhausted:
+                                _download_warning_lines = [
+                                    "WARNING: Shipped despite unresolved review/test issues.",
+                                    f"Review status: {_rstatus}; issue count: {n}.",
+                                    f"Build exit={_env.get('build_exit','?')}; test exit={_env.get('test_exit','?')}; lint exit={_env.get('lint_exit','?')}.",
+                                ]
+                                if issues:
+                                    _download_warning_lines.append(
+                                        "Latest issue: "
+                                        + (issues[0].get("file") or "?")
+                                        + " - "
+                                        + (issues[0].get("summary") or "")[:220]
+                                    )
+                                print(f"[CHAT] download_project allowing ship-anyway "
+                                      f"despite reviewer={_latest_reviewer.get('id')} "
+                                      f"status={_rstatus} issues={n} "
+                                      f"requested={_ship_anyway_requested} "
+                                      f"cap={_reviewer_cap_exhausted}")
+                            else:
+                                lines = [
+                                    f"BLOCKED — last run_review on this project returned status='{_rstatus}'.",
+                                    f"Build: `{_env.get('build_cmd','')}` exit={_env.get('build_exit','?')}. "
+                                    f"Tests: `{_env.get('test_cmd','')}` exit={_env.get('test_exit','?')}.",
+                                    "",
+                                    f"You CANNOT call download_project until the project passes review. "
+                                    f"Reviewer flagged {n} issue{'s' if n != 1 else ''}:",
+                                ]
+                                for i, iss in enumerate(issues[:5], 1):
+                                    lines.append(
+                                        f"  {i}. [{iss.get('severity','?')}] {iss.get('file','?')}"
+                                        + (f":{','.join(str(x) for x in iss.get('lines') or [])}" if iss.get('lines') else "")
+                                        + f" — {iss.get('summary','')}"
+                                    )
+                                    scope = iss.get("suggested_fix_scope") or []
+                                    if scope:
+                                        lines.append(f"     fix scope: {', '.join(scope[:5])}")
+                                lines.append("")
+                                lines.append(
+                                    "REQUIRED NEXT STEPS: 1) read each file in 'fix scope', 2) edit it with "
+                                    "write_file to address the listed summary, 3) call run_review again. "
+                                    "Repeat until run_review returns CLEAN. THEN call download_project."
+                                )
+                                await events.emit(conv_id, "tool_end", {
+                                    "tool": "download_project", "icon": "code",
+                                    "status": f"⛔ Blocked — last review had {n} issue{'s' if n != 1 else ''}",
+                                })
+                                print(f"[CHAT] download_project blocked: latest reviewer={_latest_reviewer.get('id')} status={_rstatus} issues={n}")
+                                return "\n".join(lines)
+                        if _rstatus == "clean":
+                            if _ship_anyway_requested:
+                                _download_warning_lines = [
+                                    "WARNING: Shipped before final acceptance review.",
+                                    f"Clean reviewer run: {_latest_reviewer.get('id')}.",
+                                ]
+                                print(f"[CHAT] download_project allowing ship-anyway "
+                                      f"before acceptance after clean reviewer={_latest_reviewer.get('id')}")
+                            else:
+                                await events.emit(conv_id, "tool_end", {
+                                    "tool": "download_project", "icon": "code",
+                                    "status": "⛔ Blocked — acceptance review required",
+                                })
+                                return (
+                                    f"BLOCKED — run_review ({_latest_reviewer.get('id')}) is clean, "
+                                    "but run_acceptance_review has not accepted the project yet.\n\n"
+                                    "REQUIRED NEXT STEP:\n"
+                                    f"  run_acceptance_review(reviewer_run_id='{_latest_reviewer.get('id')}')"
+                                )
                 except Exception as _ge:
                     # Gate is best-effort — don't crash legitimate downloads if
                     # the runs query fails. Log and proceed.
@@ -2100,8 +2766,66 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             tarname = f"{dirname}.tar.gz"
             qdir = shlex.quote(directory)
             qtarname = shlex.quote(f"/tmp/{tarname}")
+            exclude_args = (
+                "--exclude='.pytest_cache' --exclude='*/.pytest_cache/*' "
+                "--exclude='__pycache__' --exclude='*/__pycache__/*' "
+                "--exclude='*.pyc' --exclude='*.egg-info' --exclude='*.egg-info/*' "
+                "--exclude='.mypy_cache' --exclude='*/.mypy_cache/*' "
+                "--exclude='.ruff_cache' --exclude='*/.ruff_cache/*' "
+                "--exclude='.cache' --exclude='*/.cache/*' "
+                "--exclude='.git' --exclude='*/.git/*' "
+                "--exclude='node_modules' --exclude='*/node_modules/*' "
+                "--exclude='dist' --exclude='*/dist/*' "
+                "--exclude='build' --exclude='*/build/*' "
+                "--exclude='target' --exclude='*/target/*' "
+                "--exclude='.next' --exclude='*/.next/*' "
+                "--exclude='venv' --exclude='*/venv/*' "
+                "--exclude='.venv' --exclude='*/.venv/*' "
+                "--exclude='.npm' --exclude='*/.npm/*'"
+            )
+            summary_cmd = (
+                f"cd {qdir} && "
+                "included=$(find . -type f "
+                "! -path '*/.pytest_cache/*' ! -path '*/__pycache__/*' ! -name '*.pyc' "
+                "! -path '*.egg-info/*' ! -path '*/.mypy_cache/*' ! -path '*/.ruff_cache/*' "
+                "! -path '*/.cache/*' ! -path '*/.git/*' ! -path '*/node_modules/*' "
+                "! -path '*/dist/*' ! -path '*/build/*' ! -path '*/target/*' "
+                "! -path '*/.next/*' ! -path '*/venv/*' ! -path '*/.venv/*' "
+                "! -path '*/.npm/*' | wc -l); "
+                "excluded=$(find . \\( "
+                "-path '*/.pytest_cache/*' -o -path '*/__pycache__/*' -o -name '*.pyc' "
+                "-o -path '*.egg-info/*' -o -path '*/.mypy_cache/*' -o -path '*/.ruff_cache/*' "
+                "-o -path '*/.cache/*' -o -path '*/.git/*' -o -path '*/node_modules/*' "
+                "-o -path '*/dist/*' -o -path '*/build/*' -o -path '*/target/*' "
+                "-o -path '*/.next/*' -o -path '*/venv/*' -o -path '*/.venv/*' "
+                "-o -path '*/.npm/*' \\) -print | wc -l); "
+                "excluded_list=$(find . \\( "
+                "-path '*/.pytest_cache/*' -o -path '*/__pycache__/*' -o -name '*.pyc' "
+                "-o -path '*.egg-info/*' -o -path '*/.mypy_cache/*' -o -path '*/.ruff_cache/*' "
+                "-o -path '*/.cache/*' -o -path '*/.git/*' -o -path '*/node_modules/*' "
+                "-o -path '*/dist/*' -o -path '*/build/*' -o -path '*/target/*' "
+                "-o -path '*/.next/*' -o -path '*/venv/*' -o -path '*/.venv/*' "
+                "-o -path '*/.npm/*' \\) -print | sort | head -20); "
+                "printf 'PACKAGING_SUMMARY:%s:%s\\n' \"$included\" \"$excluded\"; "
+                "printf '%s\n' \"$excluded_list\" | sed '/^$/d' | sed 's/^/EXCLUDED_EXAMPLE:/'"
+            )
+            summary_r = await http.post(f"{config.CODEBOX_URL}/command", json={
+                "command": summary_cmd,
+                "timeout": 30,
+            }, timeout=40)
+            summary_out = summary_r.json().get("stdout", "") if summary_r.status_code == 200 else ""
+            included_count = 0
+            excluded_count = 0
+            excluded_examples = []
+            m_summary = re.search(r"PACKAGING_SUMMARY:(\d+):(\d+)", summary_out)
+            if m_summary:
+                included_count = int(m_summary.group(1))
+                excluded_count = int(m_summary.group(2))
+            for line in summary_out.splitlines():
+                if line.startswith("EXCLUDED_EXAMPLE:"):
+                    excluded_examples.append(line.split(":", 1)[1])
             r = await http.post(f"{config.CODEBOX_URL}/command", json={
-                "command": f"cd {qdir} && tar czf {qtarname} --exclude='node_modules' --exclude='.git' --exclude='__pycache__' --exclude='venv' --exclude='.cache' --exclude='.npm' --exclude='package-lock.json' . 2>&1 && base64 -w0 {qtarname}",
+                "command": f"cd {qdir} && tar czf {qtarname} {exclude_args} . 2>&1 && base64 -w0 {qtarname}",
                 "timeout": 60
             }, timeout=70)
             result = r.json()
@@ -2121,7 +2845,14 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 download_url = f"/api/downloads/{tarname}"
                 await events.emit(conv_id, "tool_end", {"tool": "download_project", "icon": "code",
                     "status": f"{tarname} ready",
-                    "detail": json.dumps({"file": tarname, "directory": directory, "download_url": download_url}),
+                    "detail": json.dumps({
+                        "file": tarname,
+                        "directory": directory,
+                        "download_url": download_url,
+                        "included_count": included_count,
+                        "excluded_count": excluded_count,
+                        "excluded_examples": excluded_examples[:10],
+                    }),
                 })
                 await events.emit(conv_id, "file_ready", {
                     "filename": tarname, "url": download_url,
@@ -2131,7 +2862,30 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     await db.add_conversation_file(cf_id, conv_id, tarname, download_url)
                 except Exception as e:
                     print(f"[FileTrack] {e}")
-                return f"**[Download {tarname}]({download_url})**"
+                try:
+                    _proj_for_wf = ""
+                    if directory.startswith("/root/projects/"):
+                        _proj_for_wf = directory.rstrip("/").rsplit("/", 1)[-1]
+                    _wf = await db.get_latest_coder_workflow(conv_id, project_id=_proj_for_wf)
+                    if _wf:
+                        _partial = bool(_download_warning_lines)
+                        await db.update_coder_workflow(
+                            _wf["id"],
+                            state="partial_delivered" if _partial else "accepted",
+                            artifact_status="partial_delivered" if _partial else "delivered",
+                        )
+                except Exception as _wfe:
+                    print(f"[WORKFLOW] delivery state update failed: {_wfe}")
+                summary_lines = [
+                    f"**[Download {tarname}]({download_url})**",
+                    "",
+                    f"Packaging summary: included {included_count} file(s), excluded {excluded_count} generated/cache/build artifact(s).",
+                ]
+                if _download_warning_lines:
+                    summary_lines.extend([""] + _download_warning_lines)
+                if excluded_examples:
+                    summary_lines.append("Excluded examples: " + ", ".join(excluded_examples[:5]))
+                return "\n".join(summary_lines)
             else:
                 await events.emit(conv_id, "tool_end", {"tool": "download_project", "icon": "code", "status": f"Could not package: {directory}"})
                 return f"ERROR: Could not package directory: {directory}"
@@ -2411,6 +3165,229 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             parts.append("\nYou can now continue working on this project. Read any file to see its current state.")
             return "\n".join(parts)
 
+        elif name == "get_coder_workflow":
+            workflow_id = (args.get("workflow_id") or "").strip()
+            if not workflow_id:
+                return "ERROR: workflow_id is required"
+            wf = await db.get_coder_workflow(workflow_id)
+            if not wf:
+                return f"ERROR: workflow not found: {workflow_id}"
+            return "CODER WORKFLOW:\n" + json.dumps(wf, indent=2)
+
+        elif name == "cancel_coder_workflow":
+            workflow_id = (args.get("workflow_id") or "").strip()
+            if not workflow_id:
+                return "ERROR: workflow_id is required"
+            wf = await db.get_coder_workflow(workflow_id)
+            if not wf:
+                return f"ERROR: workflow not found: {workflow_id}"
+            active_run_id = wf.get("active_run_id") or ""
+            await db.update_coder_workflow(
+                workflow_id,
+                state="cancelled",
+                cancel_requested=True,
+                artifact_status="cancelled",
+            )
+            signaled = False
+            if active_run_id:
+                signaled = cancel_registry.signal(active_run_id)
+                try:
+                    run = await db.get_run(active_run_id)
+                    if run and run.get("status") in {"queued", "running", "pending"}:
+                        env = run.get("result_envelope") or {}
+                        env = {**env, "status": "cancelled", "summary": env.get("summary") or "Workflow cancelled"}
+                        await db.update_run(active_run_id, status="cancelled", result_envelope=env, ended=True)
+                except Exception as e:
+                    print(f"[WORKFLOW] active run cancel DB update failed: {e}")
+            await events.emit(conv_id, "tool_end", {
+                "tool": "cancel_coder_workflow", "icon": "activity",
+                "status": f"Workflow cancelled ({workflow_id})",
+            })
+            return f"WORKFLOW CANCELLED: {workflow_id}" + (f" (active run signaled: {signaled})" if active_run_id else "")
+
+        elif name == "start_coder_workflow":
+            mode = (args.get("mode") or "").strip().lower()
+            task = (args.get("task") or "").strip()
+            project_id = (args.get("project_id") or "").strip()
+            language = (args.get("language") or "python").strip() or "python"
+            if not task:
+                return "ERROR: start_coder_workflow requires task"
+            if mode not in {"build_from_prompt", "fix_uploaded_project", "ask_uploaded_project"}:
+                return "ERROR: mode must be build_from_prompt, fix_uploaded_project, or ask_uploaded_project"
+
+            if not project_id and mode != "build_from_prompt" and conv_id:
+                active = await db.get_coding_project_by_conv(conv_id)
+                if active:
+                    project_id = active.get("openhands_project_id") or active.get("id") or ""
+
+            workflow_id = f"cw-{uuid.uuid4().hex[:12]}"
+            contract = {}
+            if project_id:
+                try:
+                    active_project = await db.get_coding_project(project_id)
+                    if active_project:
+                        from agents import language_adapters
+                        contract = language_adapters.detect_contract(
+                            active_project.get("file_manifest") or [],
+                            active_project.get("language") or language,
+                        )
+                except Exception as e:
+                    print(f"[WORKFLOW] contract detection failed: {e}")
+            await db.create_coder_workflow(
+                workflow_id, conv_id, project_id=project_id, mode=mode,
+                state="planning" if mode == "build_from_prompt" else ("fixing" if mode == "fix_uploaded_project" else "answering"),
+                user_task=task, contract=contract,
+                artifact_status="not_ready",
+            )
+            await events.emit(conv_id, "tool_start", {
+                "tool": "start_coder_workflow", "icon": "activity",
+                "status": f"Started workflow {workflow_id} ({mode})",
+                "workflow_id": workflow_id,
+            })
+
+            if mode == "ask_uploaded_project":
+                answer = await exec_tool(
+                    http, events, "ask_project",
+                    {"question": task, "project_dir": f"/root/projects/{project_id}" if project_id else ""},
+                    conv_id, custom_tool_map, conv_model, kb_ids,
+                )
+                await db.update_coder_workflow(workflow_id, state="answering", artifact_status="not_applicable")
+                return f"workflow_id: {workflow_id}\n\n{answer}"
+
+            if mode == "fix_uploaded_project":
+                result = await exec_tool(
+                    http, events, "run_aider_fix",
+                    {"task": task, "project_dir": f"/root/projects/{project_id}" if project_id else ""},
+                    conv_id, custom_tool_map, conv_model, kb_ids,
+                )
+                return f"workflow_id: {workflow_id}\n\n{result}"
+
+            plan = await exec_tool(
+                http, events, "plan_project",
+                {"task": task, "language": language, "constraints": "Return a machine-checkable project contract for OpenHands before build."},
+                conv_id, custom_tool_map, conv_model, kb_ids,
+            )
+            await db.update_coder_workflow(workflow_id, state="planning", artifact_status="not_ready")
+            return (
+                f"workflow_id: {workflow_id}\n\n"
+                f"{plan}\n\n"
+                "NEXT STEP: call generate_code with the planned task. OpenHands remains the greenfield Builder; "
+                "run_review and run_acceptance_review must pass before download_project."
+            )
+
+        elif name == "run_aider_fix":
+            from agents import aider_fixer, language_adapters
+
+            if not getattr(config, "AIDER_ENABLED", True):
+                issue_run_id = (args.get("issue_run_id") or args.get("reviewer_run_id") or "").strip()
+                return await exec_tool(
+                    http, events, "run_fixer",
+                    {"reviewer_run_id": issue_run_id} if issue_run_id else {},
+                    conv_id, custom_tool_map, conv_model, kb_ids,
+                )
+
+            task = (args.get("task") or args.get("description") or "").strip()
+            project_dir = (args.get("project_dir") or "").strip()
+            issue_run_id = (args.get("issue_run_id") or args.get("reviewer_run_id") or "").strip()
+            allowed_files = args.get("allowed_files") or []
+            if isinstance(allowed_files, str):
+                allowed_files = [p.strip() for p in re.split(r"[,\n]", allowed_files) if p.strip()]
+            if not task:
+                return "ERROR: run_aider_fix requires task"
+
+            issue_run = None
+            if issue_run_id:
+                try:
+                    issue_run = await db.get_run(issue_run_id)
+                except Exception:
+                    issue_run = None
+            if not issue_run and conv_id:
+                runs = await db.get_runs_by_conversation(conv_id, limit=30)
+                issue_run = next(
+                    (r for r in runs
+                     if r.get("role") in {"reviewer", "acceptance"}
+                     and ((r.get("result_envelope") or {}).get("status") or "").lower() in {"issues", "error"}),
+                    None,
+                )
+                if issue_run:
+                    issue_run_id = issue_run.get("id", "")
+
+            issue_env = (issue_run or {}).get("result_envelope") or {}
+            if issue_run:
+                issue_env = {**issue_env, "_source_role": issue_run.get("role", "")}
+            if not project_dir:
+                project_dir = (issue_env.get("project_dir") or "").strip()
+
+            project_id = (args.get("project_id") or "").strip()
+            project_id = project_id or (issue_run or {}).get("project_id") or ""
+            active_project = None
+            if conv_id and (not project_dir or not project_id):
+                active_project = await db.get_coding_project_by_conv(conv_id)
+                if active_project:
+                    project_id = project_id or active_project.get("openhands_project_id") or active_project.get("id") or ""
+                    project_dir = project_dir or (f"/root/projects/{project_id}" if project_id else "")
+
+            if not project_dir:
+                return "ERROR: run_aider_fix needs project_dir or an active uploaded project on this conversation."
+
+            contract = {}
+            workflow_id = ""
+            if conv_id:
+                latest_wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
+                if latest_wf:
+                    workflow_id = latest_wf.get("id", "")
+                    contract = latest_wf.get("contract_json") or {}
+                elif active_project or project_id:
+                    if not active_project and project_id:
+                        active_project = await db.get_coding_project(project_id)
+                    if active_project:
+                        contract = language_adapters.detect_contract(
+                            active_project.get("file_manifest") or [],
+                            active_project.get("language") or "",
+                        )
+                    workflow_id = f"cw-{uuid.uuid4().hex[:12]}"
+                    await db.create_coder_workflow(
+                        workflow_id, conv_id, project_id=project_id,
+                        mode="fix_uploaded_project", state="fixing",
+                        user_task=task, contract=contract, artifact_status="not_ready",
+                    )
+                if workflow_id:
+                    await db.update_coder_workflow(workflow_id, state="fixing", artifact_status="not_ready")
+
+            envelope = await aider_fixer.run_aider_fix(
+                http, events, conv_id,
+                project_dir=project_dir, task=task,
+                issue_envelope=issue_env, contract=contract,
+                model=config.AIDER_MODEL or config.FIXER_MODEL or config.CODER_MODEL or conv_model or config.DEFAULT_MODEL,
+                test_cmd=contract.get("aider_test_cmd") or contract.get("test_cmd") or "",
+                lint_cmd=contract.get("aider_lint_cmd") if contract.get("safe_lint") else "",
+                allowed_files=allowed_files,
+                project_id=project_id,
+                parent_run_id=issue_run_id,
+                workflow_id=workflow_id,
+            )
+            files = envelope.get("files_touched") or []
+            status = envelope.get("status", "?")
+            if status == "applied":
+                return (
+                    f"AIDER APPLIED EDITS to {len(files)} file(s).\n"
+                    + "\n".join(f"  - {f}" for f in files[:12])
+                    + f"\nworkflow_id: {workflow_id or '(none)'}\n"
+                    "REQUIRED NEXT TOOL CALL: run_review. Aider only edits; Reviewer must verify build/tests before acceptance or delivery."
+                )
+            if status == "no_changes":
+                return (
+                    f"AIDER MADE NO CHANGES. {envelope.get('summary','')}\n"
+                    "Run review if you need to verify current state, or explain to the user why no patch was produced."
+                )
+            return (
+                f"AIDER FAILED ({status}): {envelope.get('summary','')}\n"
+                f"stderr: {(envelope.get('stderr_tail') or '')[-800:]}\n"
+                "REQUIRED NEXT TOOL CALL: run_review. Do not call read_file/write_file/run_shell "
+                "or run_fixer for uploaded-project fixes; Reviewer must classify the remaining "
+                "failure and then Aider gets the next scoped repair."
+            )
+
         elif name == "run_review":
             # Coder Bot v2 — run the Reviewer agent on a project. Returns a structured
             # issue list the chat agent can react to (instead of doing 28 rounds of
@@ -2486,6 +3463,17 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                                   project_dir=project_dir,
                                                   project_id=project_id,
                                                   conv_model=conv_model)
+            try:
+                wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
+                if wf:
+                    await db.update_coder_workflow(
+                        wf["id"],
+                        state="accepting" if (envelope.get("status") == "clean") else "fixing",
+                        active_run_id=envelope.get("run_id", ""),
+                        artifact_status="not_ready",
+                    )
+            except Exception as _wfe:
+                print(f"[WORKFLOW] review state update failed: {_wfe}")
             # Format the envelope as a tool-result string the chat agent can read
             # without needing to know the JSON schema. Keep it compact.
             status = envelope.get("status", "?")
@@ -2496,7 +3484,9 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 return (f"REVIEW CLEAN. {summary}\n"
                         f"Build: `{envelope.get('build_cmd','')}` exit={envelope.get('build_exit','?')}. "
                         f"Tests: `{envelope.get('test_cmd','')}` exit={envelope.get('test_exit','?')}. "
-                        f"Project is ready — package and deliver with download_project.")
+                        f"reviewer_run_id: {reviewer_run_id}\n"
+                        f"REQUIRED NEXT TOOL CALL: run_acceptance_review(reviewer_run_id='{reviewer_run_id}'). "
+                        f"Do not call download_project until acceptance is accepted.")
             lines = [f"REVIEW FOUND {len(issues)} ISSUE(S). {summary}",
                      f"Build: `{envelope.get('build_cmd','')}` exit={envelope.get('build_exit','?')}. "
                      f"Tests: `{envelope.get('test_cmd','')}` exit={envelope.get('test_exit','?')}.",
@@ -2510,14 +3500,164 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 if scope:
                     lines.append(f"   fix scope: {', '.join(scope[:5])}")
             lines.append("")
+            _use_aider_next = False
+            if getattr(config, "AIDER_ENABLED", True) and conv_id:
+                try:
+                    _wf_next = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
+                    if not _wf_next:
+                        _wf_next = await db.get_latest_coder_workflow(conv_id)
+                    _use_aider_next = bool(_wf_next and _wf_next.get("mode") == "fix_uploaded_project")
+                except Exception as _wf_next_e:
+                    print(f"[run_review] next-fix workflow lookup failed: {_wf_next_e}")
+            if _use_aider_next:
+                lines.append(
+                    f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
+                    f"  run_aider_fix(issue_run_id='{reviewer_run_id}', project_dir='{project_dir}', "
+                    f"task='Fix the reviewer issues from {reviewer_run_id}')\n"
+                    f"This runs Aider from the uploaded project root. AFTER run_aider_fix returns, "
+                    f"call run_review again to verify the project is now CLEAN. Do NOT manually "
+                    f"read_file / write_file or call run_fixer for uploaded-project reviewer issues."
+                )
+            else:
+                lines.append(
+                    f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
+                    f"  run_fixer(reviewer_run_id='{reviewer_run_id}')\n"
+                    f"This runs the Fixer agent which reads the fix-scope files, generates "
+                    f"targeted edits, and writes them back. AFTER run_fixer returns, call "
+                    f"run_review again to verify the project is now CLEAN. Do NOT manually "
+                    f"read_file / write_file for these issues — that's the v1 antipattern that "
+                    f"burns rounds. Hard cap: 3 review/fix cycles."
+                )
+            return "\n".join(lines)
+
+        elif name == "run_acceptance_review":
+            # Coder Bot v2 final gate — static acceptance inspection after a
+            # clean build/test/lint reviewer pass.
+            from agents import acceptance
+            project_dir = (args.get("project_dir") or "").strip()
+            reviewer_run_id = (args.get("reviewer_run_id") or "").strip()
+            project_id = (args.get("project_id") or "").strip()
+
+            if conv_id:
+                try:
+                    _runs_pre = await db.get_runs_by_conversation(conv_id, limit=10)
+                    _latest_pre = next(
+                        (r for r in _runs_pre
+                         if r.get("role") in {"fixer", "reviewer", "acceptance"}
+                         and (r.get("status") or "").lower() in {"succeeded", "failed", "partial"}),
+                        None,
+                    )
+                    if _latest_pre and _latest_pre.get("role") == "fixer":
+                        _env_pre = _latest_pre.get("result_envelope") or {}
+                        if not (_env_pre.get("source_role") == "acceptance"
+                                and _env_pre.get("docs_only")):
+                            return (
+                                "ERROR: run_acceptance_review cannot run immediately after "
+                                "source/test/manifest fixes. Call run_review first so build, "
+                                "tests, and lint are clean for the current files."
+                            )
+                except Exception as _pre_e:
+                    print(f"[run_acceptance_review] preflight failed (non-fatal): {_pre_e}")
+
+            async def _latest_clean_reviewer() -> dict | None:
+                if not conv_id:
+                    return None
+                try:
+                    _runs = await db.get_runs_by_conversation(conv_id, limit=30)
+                    for _r in _runs:
+                        if _r.get("role") != "reviewer":
+                            continue
+                        _env = _r.get("result_envelope") or {}
+                        if (_env.get("status") or "").lower() == "clean":
+                            return _r
+                        return _r
+                except Exception as _re:
+                    print(f"[run_acceptance_review] reviewer lookup failed: {_re}")
+                return None
+
+            reviewer_run = None
+            if reviewer_run_id:
+                try:
+                    reviewer_run = await db.get_run(reviewer_run_id)
+                except Exception:
+                    reviewer_run = None
+                if not reviewer_run or reviewer_run.get("role") != "reviewer":
+                    print(f"[run_acceptance_review] passed reviewer_run_id={reviewer_run_id} "
+                          "not found/not reviewer — falling back to latest reviewer")
+                    reviewer_run_id = ""
+                    reviewer_run = None
+
+            if not reviewer_run:
+                reviewer_run = await _latest_clean_reviewer()
+                if reviewer_run:
+                    reviewer_run_id = reviewer_run.get("id", "")
+
+            review_env = (reviewer_run or {}).get("result_envelope") or {}
+            if not project_dir:
+                project_dir = (review_env.get("project_dir") or "").strip()
+            if not project_id:
+                project_id = (review_env.get("project_id") or "").strip()
+
+            if not reviewer_run_id or (review_env.get("status") or "").lower() != "clean":
+                return (
+                    "ERROR: run_acceptance_review requires a clean run_review first. "
+                    "Call run_review(project_dir='/root/projects/<name>') and only run "
+                    "acceptance after it returns REVIEW CLEAN."
+                )
+            if not project_dir:
+                return "ERROR: run_acceptance_review needs project_dir or a clean reviewer envelope with project_dir."
+
+            envelope = await acceptance.run_acceptance_review(
+                http, events, conv_id,
+                project_dir=project_dir,
+                reviewer_run_id=reviewer_run_id,
+                project_id=project_id,
+                conv_model=conv_model,
+            )
+            try:
+                wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
+                if wf:
+                    _ast = (envelope.get("status") or "").lower()
+                    await db.update_coder_workflow(
+                        wf["id"],
+                        state="accepted" if _ast == "accepted" else "fixing",
+                        active_run_id=envelope.get("run_id", ""),
+                        artifact_status="accepted" if _ast == "accepted" else "not_ready",
+                    )
+            except Exception as _wfe:
+                print(f"[WORKFLOW] acceptance state update failed: {_wfe}")
+
+            a_status = envelope.get("status", "?")
+            summary = envelope.get("summary", "")
+            issues = envelope.get("issues") or []
+            acceptance_run_id = envelope.get("run_id", "")
+            if a_status == "accepted":
+                return (
+                    f"ACCEPTANCE ACCEPTED. {summary}\n"
+                    f"acceptance_run_id: {acceptance_run_id}\n"
+                    "Project is ready — package and deliver with download_project."
+                )
+
+            lines = [
+                f"ACCEPTANCE FOUND {len(issues)} ISSUE(S). {summary}",
+                f"acceptance_run_id: {acceptance_run_id}",
+                "",
+            ]
+            for i, iss in enumerate(issues, 1):
+                lines.append(f"{i}. [{iss.get('category','?')}] {iss.get('file','?')}"
+                             + (f":{','.join(str(x) for x in iss.get('lines') or [])}" if iss.get('lines') else "")
+                             + f" — {iss.get('summary','')}")
+                scope = iss.get("suggested_fix_scope") or []
+                if scope:
+                    lines.append(f"   fix scope: {', '.join(scope[:5])}")
+            lines.append("")
             lines.append(
                 f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
-                f"  run_fixer(reviewer_run_id='{reviewer_run_id}')\n"
-                f"This runs the Fixer agent which reads the fix-scope files, generates "
-                f"targeted edits, and writes them back. AFTER run_fixer returns, call "
-                f"run_review again to verify the project is now CLEAN. Do NOT manually "
-                f"read_file / write_file for these issues — that's the v1 antipattern that "
-                f"burns rounds. Hard cap: 3 review/fix cycles."
+                f"  run_fixer(reviewer_run_id='{acceptance_run_id}')\n"
+                f"If the Fixer touches only docs, call run_acceptance_review again. "
+                f"If it touches source, tests, or manifests, call run_review first, "
+                f"then run_acceptance_review again. Do not call download_project until "
+                f"acceptance is accepted."
             )
             return "\n".join(lines)
 
@@ -2529,22 +3669,25 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             from agents import fixer
             reviewer_run_id = (args.get("reviewer_run_id") or "").strip()
 
-            # Helper: pull the most recent reviewer run id for this conv.
-            async def _latest_reviewer_id() -> str:
+            # Helper: pull the most recent actionable reviewer/acceptance run id for this conv.
+            async def _latest_actionable_run_id() -> str:
                 if not conv_id:
                     return ""
                 try:
                     _runs = await db.get_runs_by_conversation(conv_id, limit=20)
                     for _r in _runs:
-                        if _r.get("role") == "reviewer":
+                        if _r.get("role") not in {"reviewer", "acceptance"}:
+                            continue
+                        _env = _r.get("result_envelope") or {}
+                        if (_env.get("status") or "").lower() in {"issues", "error"}:
                             return _r["id"]
                 except Exception as _re:
-                    print(f"[run_fixer] reviewer lookup failed: {_re}")
+                    print(f"[run_fixer] actionable run lookup failed: {_re}")
                 return ""
 
             # If not given, resolve from runs.
             if not reviewer_run_id:
-                reviewer_run_id = await _latest_reviewer_id()
+                reviewer_run_id = await _latest_actionable_run_id()
                 if reviewer_run_id:
                     print(f"[run_fixer] resolved reviewer_run_id={reviewer_run_id} (omitted by model)")
             else:
@@ -2559,16 +3702,16 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     _exists = None
                 if not _exists:
                     print(f"[run_fixer] passed reviewer_run_id={reviewer_run_id} not found — "
-                          f"falling back to most recent reviewer")
-                    _fallback = await _latest_reviewer_id()
+                          f"falling back to most recent actionable review/acceptance run")
+                    _fallback = await _latest_actionable_run_id()
                     if _fallback:
                         reviewer_run_id = _fallback
                         print(f"[run_fixer] using {reviewer_run_id} instead")
 
             if not reviewer_run_id:
                 return ("ERROR: run_fixer needs reviewer_run_id (the run_id from a prior "
-                        "run_review call), and no reviewer run was found on this conversation. "
-                        "Call run_review first.")
+                        "run_review or run_acceptance_review call with issues), and no "
+                        "actionable run was found on this conversation. Call run_review first.")
 
             await events.emit(conv_id, "tool_start", {
                 "tool": "run_fixer", "icon": "wrench",
@@ -2611,9 +3754,12 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     lines.append("Non-fatal errors:")
                     lines += [f"  - {e}" for e in errors[:5]]
                 lines.append("")
-                lines.append("REQUIRED NEXT TOOL CALL: run_review (no args needed — uses the "
-                             "active project). It will re-run the build/tests and tell you "
-                             "whether the fixes worked.")
+                if envelope.get("source_role") == "acceptance" and envelope.get("docs_only"):
+                    lines.append("REQUIRED NEXT TOOL CALL: run_acceptance_review (docs-only fix; build review may be skipped).")
+                else:
+                    lines.append("REQUIRED NEXT TOOL CALL: run_review (no args needed — uses the "
+                                 "active project). It will re-run the build/tests and tell you "
+                                 "whether the fixes worked before acceptance runs again.")
                 return "\n".join(lines)
             elif f_status == "partial":
                 lines = [
@@ -2624,7 +3770,10 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 lines.append("Errors:")
                 lines += [f"  - {e}" for e in errors[:5]]
                 lines.append("")
-                lines.append("REQUIRED NEXT TOOL CALL: run_review to see the current state of the project.")
+                if envelope.get("source_role") == "acceptance" and envelope.get("docs_only"):
+                    lines.append("REQUIRED NEXT TOOL CALL: run_acceptance_review to re-check docs-only acceptance fixes.")
+                else:
+                    lines.append("REQUIRED NEXT TOOL CALL: run_review to see the current state of the project.")
                 return "\n".join(lines)
             elif f_status == "skipped":
                 return f"FIXER SKIPPED: {envelope.get('summary', 'no issues to fix')}."
@@ -3709,7 +4858,10 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                 # ── Independent critic pass: catch runtime bugs that pass syntax/compile checks ──
                 # Uses a separate model from the coder so it can't rationalize its own mistakes.
                 critique = ""
-                if code_review and config.CRITIC_ENABLED:
+                _skip_inline_critic = bool(conv_id) and await _check_v2()
+                if _skip_inline_critic:
+                    print("[CODEGEN:CRITIC] Skipping inline critic for Coder Bot v2; run_review is the verification gate")
+                if code_review and config.CRITIC_ENABLED and not _skip_inline_critic:
                     critic_model = config.CRITIC_MODEL or config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL
                     await events.emit(conv_id, "tool_progress", {
                         "tool": "generate_code", "icon": "wand",
@@ -3873,6 +5025,18 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                         "model": coder_model,
                         "language": language,
                     })
+                    try:
+                        wf = await db.get_latest_coder_workflow(conv_id, project_id=_project_id)
+                        if wf:
+                            await db.update_coder_workflow(
+                                wf["id"],
+                                state="reviewing",
+                                active_run_id=_run_id,
+                                artifact_status="not_ready",
+                                project_id=_project_id,
+                            )
+                    except Exception as _wfe:
+                        print(f"[WORKFLOW] builder state update failed: {_wfe}")
                     return resp
                 else:
                     # Agent ran but produced no files — treat as failure

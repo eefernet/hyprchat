@@ -102,8 +102,10 @@ def detect_template_family(model_name: str) -> str:
 CODEAGENT_TOOLS_SET = {"execute_code", "run_shell", "write_file", "read_file",
                        "list_files", "download_file", "download_project", "delete_file",
                        "search_files", "diff_files", "git_init", "git_diff", "git_commit",
-                       "run_tests", "lint_code", "resume_project", "run_review", "run_fixer",
-                       "ask_project"}
+                       "run_tests", "lint_code", "resume_project", "run_review",
+                       "run_acceptance_review", "run_fixer", "run_aider_fix",
+                       "start_coder_workflow", "get_coder_workflow",
+                       "cancel_coder_workflow", "ask_project"}
 
 # Tools safe to run in parallel (read-only or independent-target writes)
 _PARALLEL_SAFE_TOOLS = {"read_file", "list_files", "search_files", "diff_files",
@@ -126,7 +128,12 @@ _TOOL_ICONS = {
     "conspiracy_research": ("eye", "🕵️ Investigating"),
     "plan_project": ("compass", "📐 Architect designing plan"),
     "run_review": ("search-check", "🔍 Reviewing project"),
+    "run_acceptance_review": ("clipboard-check", "✅ Acceptance reviewing project"),
     "run_fixer": ("wrench", "🛠 Fixer applying scoped edits"),
+    "run_aider_fix": ("wrench", "🛠 Aider fixing uploaded project"),
+    "start_coder_workflow": ("activity", "🧭 Starting Coder workflow"),
+    "get_coder_workflow": ("activity", "📊 Checking Coder workflow"),
+    "cancel_coder_workflow": ("x-circle", "🛑 Cancelling Coder workflow"),
     "ask_project": ("help-circle", "❓ Investigating project"),
     "project_indexer": ("database", "📚 Indexing project"),
     "run_tests": ("code", "🧪 Running tests"),
@@ -138,6 +145,165 @@ _TOOL_ICONS = {
     "search_files": ("search", "🔍 Searching files"),
     "diff_files": ("terminal", "📊 Diffing files"),
 }
+
+
+_BLOCKED_RUN_RE = re.compile(r"\b(run-[0-9a-fA-F]{8,16})\b")
+_UPLOAD_MANUAL_TOOLS = {
+    "read_file", "write_file", "run_shell", "execute_code", "list_files",
+    "search_files", "diff_files", "download_project", "download_file",
+}
+_TERMINAL_WORKFLOW_STATES = {"accepted", "completed", "cancelled", "blocked"}
+
+
+def _blocked_tool_signature(tool_name: str, tool_result: str) -> str:
+    if not (tool_result or "").lstrip().startswith("BLOCKED"):
+        return ""
+    first_line = next((line.strip() for line in tool_result.splitlines() if line.strip()), "")
+    trigger = _BLOCKED_RUN_RE.search(tool_result or "")
+    trigger_key = trigger.group(1) if trigger else first_line[:140]
+    return f"{tool_name}:{trigger_key}"
+
+
+def _record_blocked_tool_result(state: dict, tool_name: str, tool_result: str) -> bool:
+    sig = _blocked_tool_signature(tool_name, tool_result)
+    if not sig:
+        state["key"] = ""
+        state["count"] = 0
+        return False
+    if state.get("key") == sig:
+        state["count"] = int(state.get("count") or 0) + 1
+    else:
+        state["key"] = sig
+        state["count"] = 1
+    return state["count"] >= 2
+
+
+def _next_action_from_blocked_result(tool_result: str) -> str:
+    text = tool_result or ""
+    m = re.search(r"(?:VERY NEXT tool call MUST be|Your VERY NEXT tool call MUST be):\s*\n\s*([^\n]+)", text, re.I)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r"REQUIRED NEXT TOOL CALL:\s*([^\n]+)", text, re.I)
+    if m:
+        return m.group(1).strip()
+    if "run_aider_fix" in text:
+        return "run_aider_fix(...)"
+    if "run_review" in text:
+        return "run_review(...)"
+    if "run_fixer" in text:
+        return "run_fixer(...)"
+    return "respond to the user with the blocked state and ask for guidance"
+
+
+async def _mark_latest_uploaded_workflow_blocked(conv_id: str) -> None:
+    if not conv_id:
+        return
+    try:
+        wf = await db.get_latest_coder_workflow(conv_id)
+        if wf and wf.get("mode") == "fix_uploaded_project" and wf.get("state") != "blocked":
+            await db.update_coder_workflow(
+                wf.get("id", ""),
+                state="blocked",
+                active_run_id=wf.get("active_run_id") or "",
+                artifact_status="not_ready",
+            )
+    except Exception as e:
+        print(f"[CHAT] blocked-loop workflow update failed (non-fatal): {e}")
+
+
+async def _is_active_uploaded_manual_loop(conv_id: str, tool_names: list[str]) -> bool:
+    if not conv_id or not tool_names:
+        return False
+    if not all((name or "") in _UPLOAD_MANUAL_TOOLS for name in tool_names):
+        return False
+    try:
+        wf = await db.get_latest_coder_workflow(conv_id)
+    except Exception as e:
+        print(f"[CHAT] duplicate-loop workflow lookup failed (non-fatal): {e}")
+        return False
+    if not wf or wf.get("mode") != "fix_uploaded_project":
+        return False
+    return (wf.get("state") or "").lower() not in _TERMINAL_WORKFLOW_STATES
+
+
+async def _next_uploaded_workflow_action(conv_id: str) -> str:
+    project_id = ""
+    try:
+        wf = await db.get_latest_coder_workflow(conv_id) if conv_id else None
+        project_id = (wf or {}).get("project_id") or ""
+        runs = await db.get_runs_by_conversation(conv_id, limit=10) if conv_id else []
+    except Exception as e:
+        print(f"[CHAT] duplicate-loop next-action lookup failed (non-fatal): {e}")
+        runs = []
+    project_arg = f'project_id="{project_id}"' if project_id else "project_id=<active_project_id>"
+    latest = runs[0] if runs else {}
+    role = latest.get("role") or ""
+    run_id = latest.get("id") or ""
+    env = latest.get("result_envelope") or {}
+    env_status = (env.get("status") or "").lower()
+
+    if role == "aider.fix":
+        return f"run_review({project_arg})"
+    if role == "reviewer" and env_status == "clean":
+        return f"run_acceptance_review({project_arg})"
+    if role in {"reviewer", "acceptance"} and run_id:
+        return f'run_aider_fix(project_id="{project_id}", issue_run_id="{run_id}")' if project_id else f'run_aider_fix(issue_run_id="{run_id}")'
+    return f"run_review({project_arg})"
+
+
+async def _duplicate_manual_tool_summary(conv_id: str, tool_names: list[str]) -> str:
+    tool_label = ", ".join(n for n in tool_names if n) or "manual tool"
+    next_action = await _next_uploaded_workflow_action(conv_id)
+    synthetic = f"BLOCKED — duplicate manual tool loop.\nREQUIRED NEXT TOOL CALL: {next_action}"
+    summary = await _blocked_tool_summary(conv_id, tool_label, synthetic)
+    return summary.replace(
+        "after the workflow gate rejected that same action",
+        "after the duplicate detector rejected that same manual action",
+    )
+
+
+async def _blocked_tool_summary(conv_id: str, tool_name: str, tool_result: str) -> str:
+    project_dir = ""
+    issue_lines: list[str] = []
+    reviewer_summary = ""
+    try:
+        wf = await db.get_latest_coder_workflow(conv_id) if conv_id else None
+        if wf and wf.get("project_id"):
+            project_dir = f"/root/projects/{wf.get('project_id')}"
+        runs = await db.get_runs_by_conversation(conv_id, limit=20) if conv_id else []
+        latest_issue = next(
+            (r for r in runs
+             if r.get("role") in {"reviewer", "acceptance"}
+             and ((r.get("result_envelope") or {}).get("status") or "").lower() in {"issues", "error"}),
+            None,
+        )
+        if latest_issue:
+            env = latest_issue.get("result_envelope") or {}
+            project_dir = project_dir or (env.get("project_dir") or "")
+            reviewer_summary = env.get("summary") or ""
+            for i, iss in enumerate((env.get("issues") or [])[:3], 1):
+                issue_lines.append(
+                    f"{i}. [{iss.get('severity', '?')}] {iss.get('file', '?')}"
+                    + (f":{','.join(str(x) for x in iss.get('lines') or [])}" if iss.get("lines") else "")
+                    + f" - {(iss.get('summary') or '')[:220]}"
+                )
+    except Exception as e:
+        print(f"[CHAT] blocked-loop summary lookup failed (non-fatal): {e}")
+
+    next_action = _next_action_from_blocked_result(tool_result)
+    lines = [
+        f"**Blocked**: I stopped because the agent repeatedly tried `{tool_name}` after the workflow gate rejected that same action.",
+    ]
+    if project_dir:
+        lines.append(f"\nActive project path: `{project_dir}`")
+    if reviewer_summary:
+        lines.append(f"\nLatest reviewer summary: {reviewer_summary}")
+    if issue_lines:
+        lines.append("\nLatest reviewer issue(s):")
+        lines.extend(issue_lines)
+    lines.append(f"\nNext valid action: `{next_action}`")
+    lines.append("\nI marked the uploaded-project workflow blocked so it does not keep burning rounds on the same rejected action.")
+    return "\n".join(lines)
 
 
 async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_id_map):
@@ -152,7 +318,6 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     """
     conv_id = req.conversation_id
 
-    # ── Check for /run workflow command ──
     last_user_msg = ""
     for m in reversed(req.messages):
         if m.get("role") == "user":
@@ -183,53 +348,6 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     await db.add_message(conv_id, "user", _content_to_save, metadata=_user_meta)
         except Exception:
             pass
-    if last_user_msg.startswith("/run "):
-        run_arg = last_user_msg[5:].strip()
-        all_wfs = await db.get_workflows()
-        # Match workflow by name — try longest name match first, then fall back
-        wf = None
-        wf_input = ""
-        # Sort by name length descending so "System Health Check" matches before "System"
-        for candidate in sorted(all_wfs, key=lambda w: len(w["name"]), reverse=True):
-            if run_arg.lower().startswith(candidate["name"].lower()):
-                wf = candidate
-                wf_input = run_arg[len(candidate["name"]):].strip()
-                break
-        if wf:
-            import uuid as _uuid
-            from workflows import WorkflowExecutor
-            executor = WorkflowExecutor(http, events)
-            run_id = f"wfr-{_uuid.uuid4().hex[:12]}"
-            await db.create_workflow_run(run_id, wf["id"], conv_id, wf_input)
-            await events.emit(conv_id, "tool_start", {"tool": "workflow", "status": f"Running workflow: {wf['name']}...", "icon": "activity"})
-            results = await executor.run(run_id, wf, wf_input, conv_id)
-            summary = f"## Workflow: {wf['name']}\n\n"
-            for r in results:
-                status = r.get("status", "")
-                icon = "✅" if status == "completed" else "⏭" if status == "skipped" else "❌"
-                step_type = r.get("type", "tool")
-                label = f"{r.get('name', 'Step')} ({r.get('tool', step_type)})"
-                duration = ""
-                if r.get("started_at") and r.get("completed_at"):
-                    duration = f" — {r['completed_at'] - r['started_at']:.1f}s"
-                summary += f"**{icon} {label}**{duration}\n"
-                if r.get("result"):
-                    preview = r["result"][:2000]
-                    summary += f"```\n{preview}\n```\n\n"
-                elif r.get("error"):
-                    summary += f"Error: {r['error']}\n\n"
-                elif status == "skipped":
-                    summary += f"_Skipped: {r.get('reason', 'condition false')}_\n\n"
-            await events.emit(conv_id, "complete", {"status": "Workflow complete"})
-            yield f"data: {json.dumps({'type': 'token', 'content': summary})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
-            return
-        else:
-            wf_names = [w["name"] for w in all_wfs]
-            msg = f"Workflow \"{run_arg}\" not found. Available: {wf_names}" if all_wfs else f"No workflows defined yet. Create one in the Workflows panel."
-            yield f"data: {json.dumps({'type': 'token', 'content': msg})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'model': req.model})}\n\n"
-            return
 
     await events.emit(conv_id, "tool_start", {"tool": "processing", "status": "🔮 Connecting to neural oracle...", "icon": "activity"})
 
@@ -266,7 +384,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             params = mc.get("parameters", {})
             for key in ("temperature", "num_ctx", "top_p", "top_k"):
                 if params.get(key) is not None:
-                    model_options[key] = params[key]
+                    if key == "num_ctx":
+                        _ctx = config.coerce_num_ctx(params[key], fallback=None)
+                        if _ctx:
+                            model_options[key] = _ctx
+                    else:
+                        model_options[key] = params[key]
 
             # Extract latest user message for RAG queries
             user_query = ""
@@ -353,8 +476,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     print(f"[RAG] Research memory query error: {e}")
 
     # Apply global overrides from request (when no persona overrides them)
-    if req.num_ctx and "num_ctx" not in model_options:
-        model_options["num_ctx"] = req.num_ctx
+    if req.num_ctx is not None and "num_ctx" not in model_options:
+        _ctx = config.coerce_num_ctx(req.num_ctx, fallback=None)
+        if _ctx:
+            model_options["num_ctx"] = _ctx
     if req.temperature is not None and "temperature" not in model_options:
         model_options["temperature"] = req.temperature
     if req.top_p is not None and "top_p" not in model_options:
@@ -364,9 +489,16 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     if req.repeat_penalty is not None and "repeat_penalty" not in model_options:
         model_options["repeat_penalty"] = req.repeat_penalty
 
-    # Ensure num_ctx always has a sane default to prevent unconstrained context
+    # Ensure num_ctx always has a sane positive default. Passing 0 through to
+    # Ollama collapses some models to their tiny native default context.
+    if "num_ctx" in model_options:
+        _ctx = config.coerce_num_ctx(model_options.get("num_ctx"), fallback=None)
+        if _ctx:
+            model_options["num_ctx"] = _ctx
+        else:
+            model_options.pop("num_ctx", None)
     if "num_ctx" not in model_options:
-        model_options["num_ctx"] = config.DEFAULT_NUM_CTX
+        model_options["num_ctx"] = config.coerce_num_ctx(config.DEFAULT_NUM_CTX)
 
     messages = []
     effective_system = persona_system_prompt if persona_system_prompt is not None else req.system_prompt
@@ -618,6 +750,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
     # Inject visualization hint for non-coder chats that have execute_code + download_file
     _has_full_codeagent = bool(available_tool_names & (CODEAGENT_TOOLS_SET - {"execute_code", "download_file"}))
+    if _is_v2_persona and _has_full_codeagent:
+        _current_ctx = config.coerce_num_ctx(model_options.get("num_ctx"), fallback=config.DEFAULT_NUM_CTX)
+        _v2_ctx = max(_current_ctx, config.CODER_V2_MIN_NUM_CTX)
+        if _v2_ctx != model_options.get("num_ctx"):
+            print(f"[CHAT] Coder Bot v2 num_ctx raised to {_v2_ctx} (was {model_options.get('num_ctx')})")
+        model_options["num_ctx"] = _v2_ctx
     if not _has_full_codeagent and "execute_code" in available_tool_names:
         _viz_hint = (
             "\n\n## Visualization Capability\n"
@@ -734,6 +872,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     _prev_tool_key = None  # Track previous tool call to detect loops
     _tool_history = []     # Last N tool keys for near-duplicate detection
     _dup_break_count = 0   # How many times we broke out of duplicate loops
+    _blocked_tool_state = {"key": "", "count": 0}
     _last_error_sig = None  # Signature of last tool error for loop detection
     _error_repeat_count = 0  # Consecutive times we've seen the same error
     _generate_code_fail_rounds = 0  # Counter: successful rounds since generate_code failure (0 = no failure or just failed)
@@ -1197,14 +1336,14 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 _tc_names_dup = [tc.get("function", {}).get("name", "") for tc in tool_calls]
 
                 # The v2 fix loop is review → fixer → review → fixer …, so
-                # run_review and run_fixer are designed to be called multiple
+                # run_review, run_acceptance_review, run_fixer, and run_aider_fix are designed to be called multiple
                 # times with identical arguments. The v2 workflow gate (in
                 # tools.py) enforces correctness here; the duplicate detector
                 # should NOT second-guess it. Exempt these from both exact
                 # and near-duplicate checks. ask_project is also exempted
                 # because Q&A is naturally multi-turn (follow-up questions
                 # often share keywords/topics).
-                _LOOP_TOOLS = {"run_review", "run_fixer", "ask_project"}
+                _LOOP_TOOLS = {"run_review", "run_acceptance_review", "run_fixer", "run_aider_fix", "ask_project"}
                 _all_loop_tools = bool(_tc_names_dup) and all(
                     n in _LOOP_TOOLS for n in _tc_names_dup
                 )
@@ -1239,6 +1378,29 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     _dup_break_count += 1
                     print(f"[CHAT]   Duplicate tool call detected (#{_dup_break_count}) — breaking loop")
                     if _dup_break_count >= 2:
+                        if await _is_active_uploaded_manual_loop(conv_id, _tc_names_dup):
+                            print("[CHAT]   Repeated uploaded-project manual tool duplicate — stopping turn")
+                            await _mark_latest_uploaded_workflow_blocked(conv_id)
+                            _dup_summary = await _duplicate_manual_tool_summary(conv_id, _tc_names_dup)
+                            yield f"data: {json.dumps({'type': 'token', 'content': _dup_summary})}\n\n"
+                            if _assistant_msg_id is not None:
+                                try:
+                                    await db.update_message(
+                                        _assistant_msg_id,
+                                        content=_dup_summary,
+                                        metadata={
+                                            "stream_started_at": _stream_started_at,
+                                            "in_progress": False,
+                                            "blocked_loop": True,
+                                            "blocked_tool": ",".join(_tc_names_dup),
+                                            "round": round_num,
+                                        },
+                                    )
+                                except Exception as _de:
+                                    print(f"[CHAT] duplicate-loop persist failed (non-fatal): {_de}")
+                            await events.emit(conv_id, "complete", {"status": "Complete (blocked)"})
+                            yield f"data: {json.dumps({'type': 'done', 'model': req.model, 'message_id': _assistant_msg_id, 'blocked': True})}\n\n"
+                            return
                         messages.append({"role": "tool", "content": "STOP. You are stuck in a loop. Summarize what you accomplished and respond to the user NOW. Do not call any more tools."})
                     else:
                         messages.append({"role": "tool", "content": "You already called this tool with the same arguments. Do NOT repeat the same call. Provide your final response to the user now."})
@@ -1374,6 +1536,30 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
                     messages.append({"role": "tool", "content": tool_result})
                     print(f"[CHAT]   Tool result ({tool_name}): {len(tool_result)} chars")
+
+                    if _record_blocked_tool_result(_blocked_tool_state, tool_name, tool_result):
+                        print(f"[CHAT]   Repeated BLOCKED tool result for {tool_name} — stopping turn")
+                        await _mark_latest_uploaded_workflow_blocked(conv_id)
+                        _blocked_summary = await _blocked_tool_summary(conv_id, tool_name, tool_result)
+                        yield f"data: {json.dumps({'type': 'token', 'content': _blocked_summary})}\n\n"
+                        if _assistant_msg_id is not None:
+                            try:
+                                await db.update_message(
+                                    _assistant_msg_id,
+                                    content=_blocked_summary,
+                                    metadata={
+                                        "stream_started_at": _stream_started_at,
+                                        "in_progress": False,
+                                        "blocked_loop": True,
+                                        "blocked_tool": tool_name,
+                                        "round": round_num,
+                                    },
+                                )
+                            except Exception as _be:
+                                print(f"[CHAT] blocked-loop persist failed (non-fatal): {_be}")
+                        await events.emit(conv_id, "complete", {"status": "Complete (blocked)"})
+                        yield f"data: {json.dumps({'type': 'done', 'model': req.model, 'message_id': _assistant_msg_id, 'blocked': True})}\n\n"
+                        return
 
                     # After plan_project: nudge model to use generate_code for large projects
                     if tool_name == "plan_project" and len(tool_result) > 1000:

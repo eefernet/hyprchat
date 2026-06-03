@@ -1,3 +1,55 @@
+## Alpha v17.0.2 — June 2, 2026
+
+### Coder Bot v2 — uploaded-project repair hardening
+
+- Reviewer now deterministically detects stale `/root/projects/...` references in test/source files before LLM analysis, points the issue at the concrete stale-path file, and includes both the stale path and active project root in the repair envelope.
+- Reviewer now classifies persistent state/schema failures such as `no such column`, `No item with that key`, shared database/cache/state files, and duplicate/unique constraint errors without relying on LLM guesses.
+- Reviewer issue file refs now prefer real files from the project tree and failure output, including mapping guessed storage modules to the actual implementation file when needed.
+- Aider uploaded-project prompts now include a `Known Test Root` section with active `project_dir`, test command, stale absolute paths, and the latest failure tail.
+- Aider prompts now include `Test State Isolation` guidance so fixes make tests project-root-relative and keep DB/cache/state paths configurable or temp-dir scoped.
+- Uploaded-project repair workflows now block initial manual file/shell tools and route first edits through `run_aider_fix` or verification through `run_review`.
+- The chat loop now stops after repeated duplicate `BLOCKED` manual-tool responses, marks the uploaded-project workflow blocked, and reports the latest reviewer issue, active project path, and next valid action instead of burning rounds on the same forbidden tool.
+- Verified against the TaskForge upload loop: stale test roots were repaired, Aider/Reviewer cycles converged, Reviewer passed, Acceptance accepted, and the artifact was delivered. Also verified a clean greenfield NoteShelf path through Architect → OpenHands → Reviewer (`11 passed`) → Acceptance → download.
+
+### Coder Bot v2 — acceptance gate
+
+- Added `run_acceptance_review` as a required final gate after clean `run_review`.
+- Added `backend/agents/acceptance.py` for static spec/docs/tests/packaging checks.
+- `run_fixer` now handles acceptance issues, with docs-only fixes allowed to skip build review.
+- `download_project` now waits for accepted status and excludes common generated/cache/build artifacts.
+- Added Acceptance model override in Settings; empty inherits from Planning Model.
+- Acceptance now uses the user-configured default context window instead of Ollama defaults.
+- Deploy monitor now pushes the new Acceptance agent file.
+- Architect, Reviewer, and Fixer structured model calls now set `think=false`, avoiding thinking-only review rounds and keeping JSON/envelope output in the message content.
+- Acceptance structured JSON calls now also set `think=false` and parse JSON from `message.content`, `message.thinking`, or top-level `thinking`.
+- Acceptance file scans now prune generated/dependency/cache folders instead of walking them before filtering.
+
+### Coder Bot v2 — hybrid workflow router
+
+- Added workflow-level state via `coder_workflows` and `WorkflowCard`.
+- Routed greenfield builds to OpenHands, uploaded-project fixes to Aider, and uploaded-project questions to read-only ProjectQA.
+- Added `run_aider_fix` plus `/aider/*` worker endpoints on Codebox.
+- Uploads now create a local git baseline and return detected build/test contract metadata.
+- ProjectQA now mixes filename targets, grep, code-memory hits, and marker files for better citations.
+- Deploy monitor now bootstraps fresh hosts and installs missing Aider worker support.
+
+### Bug fixes
+
+- Settings no longer PATCH stale `localStorage` values over server-persisted v2 model/context settings during initial page load.
+- Workspace Model helper calls no longer load small analysis models at their native huge context; workspace topic analysis and council suggestions are capped at 4K, and title generation remains capped at 2K.
+- Uploaded-project git baselines now mark Codebox project paths as safe directories before status/init checks.
+- Uploaded-project reviewer issues now route to Aider even when a stale bot tries the old Fixer path.
+- Aider fixes now use Codebox Python, track active workflow runs, and stop repeated-output loops.
+
+### Removed
+- HyprChat already has n8n integration, no need to reinvent the wheel with Workflows feature built in. Also at this point, I rarely use it.
+- Removed the legacy internal automation runner, its UI panel, REST/webhook APIs, scheduler, chat slash command, deploy watch entry, and tests. External automation should run through the existing n8n VM and `/api/n8n/execute`.
+- Startup DB cleanup now drops the legacy internal automation tables (`workflow_schedules`, `workflow_runs`, `workflows`) on existing installs.
+
+### Tests
+
+- Added focused Acceptance structured-output tests, frontend settings hydration guard tests, Workspace Model context-cap tests, and a Quick Search recency test for `time_range="month"`.
+
 ## Alpha v17.0.1 — May 26, 2026
 
 ### Coder Bot v2 — workflow gate hardening
@@ -373,14 +425,7 @@ Each gate state's tool result tells the model exactly what to call next, with th
 ## Alpha v16 — March 2026
 
 ### New Features
-- **Workflow Automation** — Deterministic tool-chain engine with visual step editor and chat trigger (`/run Name input`)
-  - 5 step types: tool, ai_completion, parallel, loop, run_workflow
-  - Conditionals, named variables (`{{input}}`, `{{vars.name}}`, `{{steps.N.result}}`, etc.)
-  - Per-step retry (0-3) with exponential backoff, per-step error handling (fail/skip/continue)
-  - Cron scheduling with enable/disable and run tracking
-  - Webhook triggers — each workflow gets a unique URL for external integrations
-  - Run history with per-step status, duration, and collapsible results
-  - 4 seed presets: Deep Research, System Health Check, Scrape & Analyze, Multi-URL Scraper
+- **Legacy internal automation runner** — Added in this release and removed in Alpha v17.0.2 in favor of external n8n automation.
 - **Full-Text Conversation Search** — SQLite FTS5 search across all messages with highlighted snippets and click-to-navigate
 - **Conversation Forking** — Branch from any message to explore alternatives; forked chats link back to the original
 - **Token Analytics Dashboard** — Track cumulative usage per model/persona/day with summary cards and bar charts
@@ -412,8 +457,8 @@ Each gate state's tool result tells the model exactly what to call next, with th
 
 
 ### Technical
-- New `backend/workflows.py` with WorkflowExecutor and hand-rolled cron parser
-- New DB tables: `token_usage`, `workflows`, `workflow_runs`, `workflow_schedules`
+- Added a legacy internal automation module and scheduler, later removed in Alpha v17.0.2.
+- New DB tables: `token_usage`; legacy internal automation tables were later removed in Alpha v17.0.2.
 - FTS5 virtual table `messages_fts` with INSERT/DELETE/UPDATE triggers
 - New columns: `forked_from`, `fork_point_msg_id`, `pinned` on conversations
 - 17 new API endpoints; 3 new nav rail icons

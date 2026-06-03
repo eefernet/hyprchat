@@ -14,7 +14,6 @@ import base64
 import shlex
 import urllib.parse
 import venv as _venv
-from datetime import datetime
 from typing import Optional
 from contextlib import asynccontextmanager
 
@@ -131,44 +130,11 @@ events = EventBus()
 # APP SETUP
 # ============================================================
 _cleanup_task_ref = None
-_scheduler_task_ref = None
-
-
-async def _workflow_scheduler_loop():
-    """Check for due workflow schedules every 60 seconds and run them."""
-    from workflows import WorkflowExecutor, next_cron_time
-    while True:
-        try:
-            due = await db.get_due_schedules()
-            for sched in due:
-                wf = {
-                    "name": sched["workflow_name"],
-                    "description": sched.get("workflow_description", ""),
-                    "steps": sched["workflow_steps"],
-                }
-                run_id = f"wfr-sched-{uuid.uuid4().hex[:8]}"
-                input_text = sched.get("input_template", "")
-                await db.create_workflow_run(run_id, sched["workflow_id"], "", input_text)
-                executor = WorkflowExecutor(http, events)
-                asyncio.create_task(executor.run(run_id, wf, input_text))
-                # Update schedule timing
-                now = time.time()
-                next_run = next_cron_time(sched["cron_expr"], now)
-                from datetime import datetime
-                await db.update_workflow_schedule(
-                    sched["id"],
-                    last_run_at=datetime.utcfromtimestamp(now).isoformat(),
-                    next_run_at=datetime.utcfromtimestamp(next_run).isoformat(),
-                )
-                print(f"[Scheduler] Triggered workflow '{sched['workflow_name']}' (run: {run_id})")
-        except Exception as e:
-            print(f"[Scheduler] Error: {e}")
-        await asyncio.sleep(60)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _cleanup_task_ref, _health_task_ref, _scheduler_task_ref
+    global _cleanup_task_ref, _health_task_ref
     await db.init_db()
     os.makedirs(config.UPLOAD_DIR, exist_ok=True)
     os.makedirs(config.TOOLS_DIR, exist_ok=True)
@@ -200,6 +166,7 @@ async def lifespan(app: FastAPI):
     for _key, _attr in (
         ("architect_model", "ARCHITECT_MODEL"),
         ("reviewer_model",  "REVIEWER_MODEL"),
+        ("acceptance_model", "ACCEPTANCE_MODEL"),
         ("builder_model",   "BUILDER_MODEL"),
         ("fixer_model",     "FIXER_MODEL"),
         ("qa_model",        "QA_MODEL"),
@@ -214,17 +181,44 @@ async def lifespan(app: FastAPI):
     if "openhands_max_rounds" in _settings:
         config.OPENHANDS_MAX_ROUNDS = int(_settings["openhands_max_rounds"])
         print(f"[Config] Loaded OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
+    if "openhands_num_ctx" in _settings:
+        config.OPENHANDS_NUM_CTX = config.coerce_num_ctx(
+            _settings["openhands_num_ctx"],
+            fallback=config.OPENHANDS_NUM_CTX,
+        )
+        print(f"[Config] Loaded OpenHands num_ctx: {config.OPENHANDS_NUM_CTX}")
     if "openhands_reasoning_effort" in _settings:
         _re = (_settings["openhands_reasoning_effort"] or "medium").strip().lower()
         if _re not in ("low", "medium", "high"):
             _re = "medium"
         config.OPENHANDS_REASONING_EFFORT = _re
         print(f"[Config] Loaded OpenHands reasoning effort: {config.OPENHANDS_REASONING_EFFORT}")
+    if "aider_enabled" in _settings:
+        config.AIDER_ENABLED = bool(_settings["aider_enabled"])
+        print(f"[Config] Loaded Aider enabled: {config.AIDER_ENABLED}")
+    if "aider_model" in _settings:
+        config.AIDER_MODEL = _settings["aider_model"] or ""
+        print(f"[Config] Loaded Aider Model from settings: {config.AIDER_MODEL or '(inherit fixer/coder)'}")
+    if "aider_num_ctx" in _settings:
+        config.AIDER_NUM_CTX = config.coerce_num_ctx(
+            _settings["aider_num_ctx"],
+            fallback=config.AIDER_NUM_CTX,
+        )
+        print(f"[Config] Loaded Aider num_ctx: {config.AIDER_NUM_CTX}")
+    if "aider_auto_test" in _settings:
+        config.AIDER_AUTO_TEST = bool(_settings["aider_auto_test"])
+        print(f"[Config] Loaded Aider auto-test: {config.AIDER_AUTO_TEST}")
+    if "aider_worker_url" in _settings:
+        config.AIDER_WORKER_URL = _settings["aider_worker_url"] or config.OPENHANDS_URL
+        print(f"[Config] Loaded Aider worker URL: {config.AIDER_WORKER_URL}")
     if "default_num_ctx" in _settings:
         # Single knob the user controls. Drives the chat-side fallback in chat.py and
         # every internal LLM call (plan_project, critic) — so increasing the chat ctx
         # in Settings doesn't get silently capped by a hardcoded 16K downstream.
-        config.DEFAULT_NUM_CTX = int(_settings["default_num_ctx"])
+        config.DEFAULT_NUM_CTX = config.coerce_num_ctx(
+            _settings["default_num_ctx"],
+            fallback=config.DEFAULT_NUM_CTX,
+        )
         print(f"[Config] Loaded default num_ctx: {config.DEFAULT_NUM_CTX}")
     # Run cleanup once on startup to clear any stale files
     _run_cleanup_sync()
@@ -242,10 +236,8 @@ async def lifespan(app: FastAPI):
         rag.CHUNK_OVERLAP = int(_rag_cfg["chunk_overlap"])
     # Ensure RAG embedding model is available (non-blocking pull)
     asyncio.create_task(rag.ensure_embed_model())
-    # Start workflow scheduler
-    _scheduler_task_ref = asyncio.create_task(_workflow_scheduler_loop())
     yield
-    for task in [_cleanup_task_ref, _health_task_ref, _scheduler_task_ref]:
+    for task in [_cleanup_task_ref, _health_task_ref]:
         if task:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -269,6 +261,12 @@ app.add_middleware(
 
 HTTP_VERIFY_SSL = os.getenv("HTTP_VERIFY_SSL", "true").lower() == "true"
 http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0), verify=HTTP_VERIFY_SSL)
+
+# Workspace helpers only do short classification/title/suggestion work. Keep
+# their KV cache small even when the user sets chat context to 128K/256K or the
+# selected helper model advertises a huge native context.
+_WORKSPACE_HELPER_NUM_CTX = 4096
+_WORKSPACE_TITLE_NUM_CTX = 2048
 
 # ============================================================
 # PYDANTIC MODELS
@@ -416,30 +414,6 @@ class ConversationSearchRequest(BaseModel):
 
 class ForkRequest(BaseModel):
     message_id: int
-
-class WorkflowCreate(BaseModel):
-    name: str
-    description: str = ""
-    steps: list[dict]
-
-class WorkflowUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    steps: Optional[list[dict]] = None
-
-class WorkflowRunRequest(BaseModel):
-    input: str = ""
-    conversation_id: Optional[str] = None
-
-class WorkflowScheduleCreate(BaseModel):
-    workflow_id: str
-    cron_expr: str
-    input_template: str = ""
-
-class WorkflowScheduleUpdate(BaseModel):
-    cron_expr: Optional[str] = None
-    input_template: Optional[str] = None
-    enabled: Optional[bool] = None
 
 
 # ============================================================
@@ -887,6 +861,13 @@ async def upload_coder_project(
         if lang:
             lang_totals[lang] = lang_totals.get(lang, 0) + n
     language = max(lang_totals, key=lang_totals.get) if lang_totals else "unknown"
+    try:
+        from agents import language_adapters
+        project_contract = language_adapters.detect_contract(manifest, language)
+        language = project_contract.get("language") or language
+    except Exception as e:
+        print(f"[CoderUpload] contract detection failed (non-fatal): {e}")
+        project_contract = {"language": language, "build_system": "unknown"}
 
     # Re-tar the sanitized tree (gzip) for transport to the sandbox
     tar_buf = _io.BytesIO()
@@ -904,6 +885,7 @@ async def upload_coder_project(
     # the old 100KB-of-base64 approach).
     remote_dir = f"/root/projects/{project_id}"
     remote_tmp = f"/tmp/{project_id}.tar.gz"
+    git_baseline_status = "not_started"
     CHUNK = 1_000_000  # 1MB of raw bytes per multipart POST
     total_chunks = max(1, (len(tar_bytes) + CHUNK - 1) // CHUNK)
 
@@ -945,6 +927,31 @@ async def upload_coder_project(
                     500,
                     f"Sandbox extraction failed: {(data.get('stderr') or '')[:300]}",
                 )
+            git_cmd = (
+                f"cd {shlex.quote(remote_dir)} && "
+                f"git config --global --add safe.directory {shlex.quote(remote_dir)} >/dev/null 2>&1 || true; "
+                "if [ -d .git ]; then "
+                "  git status --short >/dev/null 2>&1 && echo GIT_BASELINE:existing; "
+                "else "
+                "  git init >/dev/null 2>&1 && "
+                "  git config user.email hyprchat.local && "
+                "  git config user.name HyprChat && "
+                "  git add -A && "
+                "  git commit --allow-empty -m 'Baseline upload' >/dev/null 2>&1 && "
+                "  echo GIT_BASELINE:created; "
+                "fi"
+            )
+            gr = await http_client.post(
+                f"{config.CODEBOX_URL}/command",
+                json={"command": git_cmd, "timeout": 120},
+                timeout=180,
+            )
+            gd = gr.json()
+            gout = gd.get("stdout") or ""
+            if gd.get("exit_code", 1) == 0 and "GIT_BASELINE:" in gout:
+                git_baseline_status = gout.split("GIT_BASELINE:", 1)[1].strip().splitlines()[0]
+            else:
+                git_baseline_status = "failed"
     except HTTPException:
         raise
     except Exception as e:
@@ -968,12 +975,29 @@ async def upload_coder_project(
     except Exception as e:
         print(f"[CoderUpload] DB save failed (non-fatal): {e}")
 
+    workflow_id = f"cw-{uuid.uuid4().hex[:12]}"
+    try:
+        await db.create_coder_workflow(
+            workflow_id,
+            conv_id,
+            project_id=project_id,
+            mode="fix_uploaded_project",
+            state="planning",
+            user_task=f"Uploaded project: {safe_name}",
+            contract=project_contract,
+            artifact_status="not_ready",
+        )
+    except Exception as e:
+        print(f"[CoderUpload] workflow create failed (non-fatal): {e}")
+        workflow_id = ""
+
     # Phase 4.2 — fire the Project Indexer in the background. It walks the
     # uploaded tree, detects build system, and seeds ChromaDB code_memory so
     # that subsequent ask_project / generate_code calls have semantic
     # retrieval over the uploaded code. Non-blocking: even if it fails, the
     # upload itself succeeds.
     indexer_run_id = ""
+    indexer_status = "not_started"
     try:
         from agents import project_indexer
         indexer_envelope = await project_indexer.run_project_indexer(
@@ -983,6 +1007,7 @@ async def upload_coder_project(
             project_name=project_name,
         )
         indexer_run_id = indexer_envelope.get("run_id", "") or ""
+        indexer_status = indexer_envelope.get("status", "ok") or "ok"
         # The indexer may also have detected a more accurate language than the
         # upload-time mime/extension heuristic. If so, update the
         # coding_projects row so downstream tools see the corrected value.
@@ -1004,10 +1029,12 @@ async def upload_coder_project(
                 print(f"[CoderUpload] language correction failed (non-fatal): {e}")
     except Exception as e:
         print(f"[CoderUpload] Indexer failed (non-fatal): {e}")
+        indexer_status = "failed"
 
     # Keep the local staging copy as a backup we can re-push if needed.
     return {
         "project_id": project_id,
+        "workflow_id": workflow_id,
         "name": project_name,
         "language": language,
         "file_count": len(manifest),
@@ -1015,82 +1042,13 @@ async def upload_coder_project(
         "sandbox_path": remote_dir,
         "size_bytes": len(content),
         "indexer_run_id": indexer_run_id,
+        "indexer_status": indexer_status,
+        "git_baseline_status": git_baseline_status,
+        "detected_build_system": project_contract.get("build_system", "unknown"),
+        "detected_build_cmd": project_contract.get("build_cmd", ""),
+        "detected_test_cmd": project_contract.get("test_cmd", ""),
+        "contract": project_contract,
     }
-
-
-@app.post("/api/seed/workflows")
-async def seed_workflows():
-    """Seed built-in workflow presets showcasing all workflow capabilities."""
-    presets = [
-        {
-            "name": "Deep Research",
-            "description": "Search a topic, fetch Wikipedia, AI-summarize, and save a report",
-            "steps": [
-                {"name": "Web Search", "type": "tool", "tool": "research", "args": {"query": "{{input}}"}, "output_var": "search_data", "on_error": "continue"},
-                {"name": "Fetch Wikipedia", "type": "tool", "tool": "fetch_url", "args": {"url": "https://en.wikipedia.org/wiki/{{input}}"}, "output_var": "wiki_data", "retry": 1, "on_error": "continue"},
-                {"name": "AI Summary", "type": "ai_completion", "prompt": "Summarize the following research on '{{input}}' into a clear, well-structured report with key findings, important details, and sources.\n\n## Search Results:\n{{vars.search_data}}\n\n## Wikipedia:\n{{vars.wiki_data}}", "system": "You are a research analyst. Write clear, factual summaries with bullet points and section headers.", "output_var": "summary"},
-                {"name": "Save Report", "type": "tool", "tool": "write_file", "args": {
-                    "path": "/root/research_report.md",
-                    "content": "# Research Report: {{input}}\n\n{{vars.summary}}"
-                }, "condition": "{{vars.summary}} not_empty"},
-            ],
-        },
-        {
-            "name": "System Health Check",
-            "description": "Run all system diagnostics in parallel — disk, memory, network, processes",
-            "steps": [
-                {"name": "Parallel Diagnostics", "type": "parallel", "on_error": "continue", "steps": [
-                    {"name": "Disk Usage", "type": "tool", "tool": "run_shell", "args": {"command": "df -h && echo '---' && du -sh /root/* 2>/dev/null || true"}},
-                    {"name": "Memory & CPU", "type": "tool", "tool": "run_shell", "args": {"command": "free -h && echo '---' && uptime && echo '---' && nproc"}},
-                    {"name": "Network Check", "type": "tool", "tool": "run_shell", "args": {"command": "ping -c 2 8.8.8.8 2>&1 && echo '---' && curl -s -o /dev/null -w '%{http_code}' https://google.com"}},
-                    {"name": "Processes", "type": "tool", "tool": "run_shell", "args": {"command": "ps aux --sort=-%mem | head -15"}},
-                ], "output_var": "diagnostics"},
-                {"name": "AI Health Report", "type": "ai_completion", "prompt": "Analyze these system diagnostics and provide a brief health summary. Flag any concerns (high disk usage, low memory, network issues, zombie processes):\n\n{{vars.diagnostics}}", "system": "You are a sysadmin. Be concise. Use bullet points. Flag warnings clearly.", "output_var": "health_report"},
-                {"name": "Save Report", "type": "tool", "tool": "write_file", "args": {"path": "/root/health_report.md", "content": "# System Health Report\n\n{{vars.health_report}}"}},
-            ],
-        },
-        {
-            "name": "Scrape & Analyze",
-            "description": "Fetch any URL, analyze word frequency, and AI-summarize the content",
-            "steps": [
-                {"name": "Fetch Page", "type": "tool", "tool": "fetch_url", "args": {"url": "{{input}}"}, "output_var": "page_content", "retry": 2, "retry_delay": 2.0, "on_error": "continue"},
-                {"name": "Save Content", "type": "tool", "tool": "write_file", "args": {
-                    "path": "/root/scraped.txt",
-                    "content": "{{vars.page_content}}"
-                }},
-                {"name": "Word Analysis", "type": "tool", "tool": "execute_code", "args": {
-                    "code": "import collections, re\ntext = open('/root/scraped.txt').read()\nwords = re.findall(r'[a-zA-Z]{4,}', text.lower())\nfreq = collections.Counter(words).most_common(20)\nprint(f'Total words: {len(words)}')\nprint(f'Unique words: {len(set(words))}')\nprint('\\nTop 20 words:')\nfor w, c in freq:\n    print(f'  {w:20s} {c}')\nlines = text.splitlines()\nprint(f'\\nLines: {len(lines)}')\nprint(f'Characters: {len(text)}')",
-                    "language": "python"
-                }, "output_var": "analysis"},
-                {"name": "AI Summary", "type": "ai_completion", "prompt": "Briefly summarize the content from this URL ({{input}}) based on the scraped text:\n\n{{vars.page_content}}", "system": "Summarize in 3-5 bullet points. Be concise.", "output_var": "content_summary"},
-            ],
-        },
-        {
-            "name": "Multi-URL Scraper",
-            "description": "Loop over multiple URLs (one per line) and fetch each one",
-            "steps": [
-                {"name": "Fetch Each URL", "type": "loop", "over": "{{input}}", "max_iterations": 10, "steps": [
-                    {"name": "Fetch", "type": "tool", "tool": "fetch_url", "args": {"url": "{{loop.item}}"}, "retry": 1, "on_error": "continue"},
-                ], "output_var": "all_pages"},
-                {"name": "Save Results", "type": "tool", "tool": "write_file", "args": {
-                    "path": "/root/multi_scrape.md",
-                    "content": "# Multi-URL Scrape Results\n\n{{vars.all_pages}}"
-                }},
-            ],
-        },
-    ]
-    created = []
-    existing = await db.get_workflows()
-    existing_names = {w["name"] for w in existing}
-    for p in presets:
-        if p["name"] in existing_names:
-            continue
-        wf_id = f"wf-{uuid.uuid4().hex[:12]}"
-        webhook_id = uuid.uuid4().hex[:16]
-        await db.create_workflow(wf_id, p["name"], p["description"], json.dumps(p["steps"]))
-        await db.update_workflow(wf_id, webhook_id=webhook_id)
-        created.append({"id": wf_id, "name": p["name"]})
-    return {"seeded": created, "message": f"{len(created)} workflow(s) created"}
 
 
 # ============================================================
@@ -1429,6 +1387,43 @@ async def cancel_run(run_id: str):
         print(f"[CANCEL] DB update failed for {run_id}: {e}")
 
     return {"run_id": run_id, "signaled": signaled, "db_marked": db_marked}
+
+
+# ============================================================
+# CODER WORKFLOWS — workflow-level Coder Bot v2 state
+# ============================================================
+
+@app.get("/api/coder/workflows/{workflow_id}")
+async def get_coder_workflow(workflow_id: str):
+    wf = await db.get_coder_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "Workflow not found")
+    return wf
+
+
+@app.get("/api/coder/workflows")
+async def list_coder_workflows(conversation_id: str = Query(...),
+                               limit: int = Query(50)):
+    return await db.get_coder_workflows_by_conversation(conversation_id, limit=limit)
+
+
+@app.post("/api/coder/workflows/{workflow_id}/cancel")
+async def cancel_coder_workflow(workflow_id: str):
+    wf = await db.get_coder_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "Workflow not found")
+    active_run_id = wf.get("active_run_id") or ""
+    signaled = False
+    if active_run_id:
+        import cancel_registry
+        signaled = cancel_registry.signal(active_run_id)
+    await db.update_coder_workflow(
+        workflow_id,
+        state="cancelled",
+        cancel_requested=True,
+        artifact_status="cancelled",
+    )
+    return {"workflow_id": workflow_id, "active_run_id": active_run_id, "signaled": signaled}
 
 
 # ============================================================
@@ -2221,7 +2216,17 @@ async def analyze_workspace_topics(ws_id: str, body: dict = Body(default={})):
     try:
         r = await http.post(
             f"{config.OLLAMA_URL}/api/generate",
-            json={"model": ws_model, "prompt": prompt, "stream": False, "options": {"temperature": 0.2}},
+            json={
+                "model": ws_model,
+                "prompt": prompt,
+                "stream": False,
+                "think": False,
+                "options": {
+                    "temperature": 0.2,
+                    "num_ctx": _WORKSPACE_HELPER_NUM_CTX,
+                    "num_predict": 400,
+                },
+            },
             timeout=60
         )
         if r.status_code != 200:
@@ -2646,7 +2651,11 @@ async def get_council_suggestions(council_id: str):
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
             "think": False,
-            "options": {"temperature": 0.9, "num_predict": 200}
+            "options": {
+                "temperature": 0.9,
+                "num_ctx": _WORKSPACE_HELPER_NUM_CTX,
+                "num_predict": 200,
+            },
         }, timeout=30)
         data = r.json()
         if "error" in data:
@@ -2869,6 +2878,7 @@ async def get_app_settings():
         # Coder Bot v2 per-agent overrides — empty string = inherit from umbrella
         "current_architect_model": config.ARCHITECT_MODEL,
         "current_reviewer_model":  config.REVIEWER_MODEL,
+        "current_acceptance_model": config.ACCEPTANCE_MODEL,
         "current_builder_model":   config.BUILDER_MODEL,
         "current_fixer_model":     config.FIXER_MODEL,
         "current_qa_model":        config.QA_MODEL,
@@ -2876,6 +2886,11 @@ async def get_app_settings():
         "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
         "openhands_num_ctx": config.OPENHANDS_NUM_CTX,
         "openhands_reasoning_effort": config.OPENHANDS_REASONING_EFFORT,
+        "aider_enabled": config.AIDER_ENABLED,
+        "aider_model": config.AIDER_MODEL,
+        "aider_num_ctx": config.AIDER_NUM_CTX,
+        "aider_auto_test": config.AIDER_AUTO_TEST,
+        "aider_worker_url": config.AIDER_WORKER_URL,
         "default_num_ctx": config.DEFAULT_NUM_CTX,
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
@@ -2890,9 +2905,11 @@ async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
     allowed = {"file_cleanup_days", "ollama_url", "rag", "planning_model", "coder_model",
                "workspace_model",
-               "architect_model", "reviewer_model", "builder_model", "fixer_model", "qa_model",
+               "architect_model", "reviewer_model", "acceptance_model", "builder_model", "fixer_model", "qa_model",
                "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
-               "openhands_reasoning_effort", "default_num_ctx"}
+               "openhands_reasoning_effort",
+               "aider_enabled", "aider_model", "aider_num_ctx", "aider_auto_test", "aider_worker_url",
+               "default_num_ctx"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
@@ -2924,6 +2941,7 @@ async def update_app_settings(body: dict = Body(...)):
     for _key, _attr, _label in (
         ("architect_model", "ARCHITECT_MODEL", "Architect"),
         ("reviewer_model",  "REVIEWER_MODEL",  "Reviewer"),
+        ("acceptance_model", "ACCEPTANCE_MODEL", "Acceptance"),
         ("builder_model",   "BUILDER_MODEL",   "Builder"),
         ("fixer_model",     "FIXER_MODEL",     "Fixer"),
         ("qa_model",        "QA_MODEL",        "ProjectQA"),
@@ -2938,7 +2956,11 @@ async def update_app_settings(body: dict = Body(...)):
         config.OPENHANDS_MAX_ROUNDS = int(body["openhands_max_rounds"])
         print(f"[Config] OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
     if "openhands_num_ctx" in body:
-        config.OPENHANDS_NUM_CTX = int(body["openhands_num_ctx"])
+        config.OPENHANDS_NUM_CTX = config.coerce_num_ctx(
+            body["openhands_num_ctx"],
+            fallback=config.OPENHANDS_NUM_CTX,
+        )
+        settings["openhands_num_ctx"] = config.OPENHANDS_NUM_CTX
         print(f"[Config] OpenHands num_ctx: {config.OPENHANDS_NUM_CTX}")
     if "openhands_reasoning_effort" in body:
         _re_in = (body["openhands_reasoning_effort"] or "medium").strip().lower()
@@ -2948,8 +2970,32 @@ async def update_app_settings(body: dict = Body(...)):
         # Persist the validated value, not the raw input.
         settings["openhands_reasoning_effort"] = _re_in
         print(f"[Config] OpenHands reasoning effort: {config.OPENHANDS_REASONING_EFFORT}")
+    if "aider_enabled" in body:
+        config.AIDER_ENABLED = bool(body["aider_enabled"])
+        print(f"[Config] Aider enabled: {config.AIDER_ENABLED}")
+    if "aider_model" in body:
+        config.AIDER_MODEL = body["aider_model"] or ""
+        print(f"[Config] Aider Model: {config.AIDER_MODEL or '(inherit fixer/coder)'}")
+    if "aider_num_ctx" in body:
+        config.AIDER_NUM_CTX = config.coerce_num_ctx(
+            body["aider_num_ctx"],
+            fallback=config.AIDER_NUM_CTX,
+        )
+        settings["aider_num_ctx"] = config.AIDER_NUM_CTX
+        print(f"[Config] Aider num_ctx: {config.AIDER_NUM_CTX}")
+    if "aider_auto_test" in body:
+        config.AIDER_AUTO_TEST = bool(body["aider_auto_test"])
+        print(f"[Config] Aider auto-test: {config.AIDER_AUTO_TEST}")
+    if "aider_worker_url" in body:
+        config.AIDER_WORKER_URL = body["aider_worker_url"] or config.OPENHANDS_URL
+        settings["aider_worker_url"] = config.AIDER_WORKER_URL
+        print(f"[Config] Aider worker URL: {config.AIDER_WORKER_URL}")
     if "default_num_ctx" in body:
-        config.DEFAULT_NUM_CTX = int(body["default_num_ctx"])
+        config.DEFAULT_NUM_CTX = config.coerce_num_ctx(
+            body["default_num_ctx"],
+            fallback=config.DEFAULT_NUM_CTX,
+        )
+        settings["default_num_ctx"] = config.DEFAULT_NUM_CTX
         print(f"[Config] Default num_ctx: {config.DEFAULT_NUM_CTX}")
     save_settings(settings)
     return {
@@ -2960,9 +3006,20 @@ async def update_app_settings(body: dict = Body(...)):
         "current_workspace_model": config.WORKSPACE_MODEL,
         "current_architect_model": config.ARCHITECT_MODEL,
         "current_reviewer_model":  config.REVIEWER_MODEL,
+        "current_acceptance_model": config.ACCEPTANCE_MODEL,
         "current_builder_model":   config.BUILDER_MODEL,
         "current_fixer_model":     config.FIXER_MODEL,
         "current_qa_model":        config.QA_MODEL,
+        "openhands_enabled": config.OPENHANDS_ENABLED,
+        "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
+        "openhands_num_ctx": config.OPENHANDS_NUM_CTX,
+        "openhands_reasoning_effort": config.OPENHANDS_REASONING_EFFORT,
+        "aider_enabled": config.AIDER_ENABLED,
+        "aider_model": config.AIDER_MODEL,
+        "aider_num_ctx": config.AIDER_NUM_CTX,
+        "aider_auto_test": config.AIDER_AUTO_TEST,
+        "aider_worker_url": config.AIDER_WORKER_URL,
+        "default_num_ctx": config.DEFAULT_NUM_CTX,
     }
 
 
@@ -3122,7 +3179,8 @@ async def generate_title(conv_id: str, body: dict = Body(default={})):
                 {"role": "user", "content": summary_input}
             ],
             "stream": False,
-            "options": {"num_ctx": 2048, "temperature": 0.3}
+            "think": False,
+            "options": {"num_ctx": _WORKSPACE_TITLE_NUM_CTX, "temperature": 0.3}
         }, timeout=30)
         title = resp.json().get("message", {}).get("content", "").strip().strip('"\'')[:60]
         if title:
@@ -3150,137 +3208,6 @@ async def get_token_summary():
     week = await db.get_token_usage(7, "model")
     month = await db.get_token_usage(30, "day")
     return {"today": today, "by_model_7d": week, "daily_30d": month}
-
-
-# ============================================================
-# WORKFLOWS
-# ============================================================
-@app.get("/api/workflows")
-async def list_workflows():
-    return await db.get_workflows()
-
-
-@app.post("/api/workflows")
-async def create_workflow(req: WorkflowCreate):
-    id = f"wf-{uuid.uuid4().hex[:12]}"
-    webhook_id = uuid.uuid4().hex[:16]
-    await db.create_workflow(id, req.name, req.description, json.dumps(req.steps))
-    await db.update_workflow(id, webhook_id=webhook_id)
-    return {"id": id, "name": req.name, "description": req.description, "steps": req.steps, "webhook_id": webhook_id}
-
-
-@app.get("/api/workflows/{wf_id}")
-async def get_workflow(wf_id: str):
-    wf = await db.get_workflow(wf_id)
-    if not wf:
-        raise HTTPException(404, "Workflow not found")
-    return wf
-
-
-@app.put("/api/workflows/{wf_id}")
-async def update_workflow(wf_id: str, req: WorkflowUpdate):
-    kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
-    await db.update_workflow(wf_id, **kwargs)
-    return {"status": "updated"}
-
-
-@app.delete("/api/workflows/{wf_id}")
-async def delete_workflow(wf_id: str):
-    await db.delete_workflow(wf_id)
-    return {"status": "deleted"}
-
-
-@app.post("/api/workflows/{wf_id}/run")
-async def run_workflow(wf_id: str, req: WorkflowRunRequest):
-    wf = await db.get_workflow(wf_id)
-    if not wf:
-        raise HTTPException(404, "Workflow not found")
-    from workflows import WorkflowExecutor
-    run_id = f"wfr-{uuid.uuid4().hex[:12]}"
-    await db.create_workflow_run(run_id, wf_id, req.conversation_id or "", req.input)
-    executor = WorkflowExecutor(http, events)
-    asyncio.create_task(executor.run(run_id, wf, req.input, req.conversation_id))
-    return {"run_id": run_id, "status": "started"}
-
-
-@app.get("/api/workflows/{wf_id}/runs")
-async def get_workflow_runs(wf_id: str):
-    return await db.get_workflow_runs(wf_id)
-
-
-@app.get("/api/workflow-runs/{run_id}")
-async def get_workflow_run(run_id: str):
-    runs = await db.get_workflow_runs()
-    run = next((r for r in runs if r["id"] == run_id), None)
-    if not run:
-        raise HTTPException(404, "Run not found")
-    return run
-
-
-# ============================================================
-# WORKFLOW SCHEDULES
-# ============================================================
-@app.get("/api/workflow-schedules")
-async def list_workflow_schedules(workflow_id: str = None):
-    return await db.get_workflow_schedules(workflow_id)
-
-
-@app.post("/api/workflow-schedules")
-async def create_workflow_schedule(req: WorkflowScheduleCreate):
-    from workflows import next_cron_time
-    from datetime import datetime
-    wf = await db.get_workflow(req.workflow_id)
-    if not wf:
-        raise HTTPException(404, "Workflow not found")
-    sched_id = f"ws-{uuid.uuid4().hex[:12]}"
-    next_run = next_cron_time(req.cron_expr)
-    next_run_iso = datetime.utcfromtimestamp(next_run).isoformat()
-    await db.create_workflow_schedule(sched_id, req.workflow_id, req.cron_expr, req.input_template, next_run_iso)
-    return {"id": sched_id, "workflow_id": req.workflow_id, "cron_expr": req.cron_expr, "next_run_at": next_run_iso}
-
-
-@app.put("/api/workflow-schedules/{sched_id}")
-async def update_workflow_schedule(sched_id: str, req: WorkflowScheduleUpdate):
-    kwargs = {}
-    if req.cron_expr is not None:
-        kwargs["cron_expr"] = req.cron_expr
-        from workflows import next_cron_time
-        from datetime import datetime
-        kwargs["next_run_at"] = datetime.utcfromtimestamp(next_cron_time(req.cron_expr)).isoformat()
-    if req.input_template is not None:
-        kwargs["input_template"] = req.input_template
-    if req.enabled is not None:
-        kwargs["enabled"] = 1 if req.enabled else 0
-    if kwargs:
-        await db.update_workflow_schedule(sched_id, **kwargs)
-    return {"status": "updated"}
-
-
-@app.delete("/api/workflow-schedules/{sched_id}")
-async def delete_workflow_schedule(sched_id: str):
-    await db.delete_workflow_schedule(sched_id)
-    return {"status": "deleted"}
-
-
-# ============================================================
-# WORKFLOW WEBHOOKS
-# ============================================================
-@app.post("/api/webhooks/workflow/{webhook_id}")
-async def trigger_workflow_webhook(webhook_id: str, request: Request):
-    wf = await db.get_workflow_by_webhook(webhook_id)
-    if not wf:
-        raise HTTPException(404, "Webhook not found")
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    from workflows import WorkflowExecutor
-    run_id = f"wfr-hook-{uuid.uuid4().hex[:8]}"
-    input_text = json.dumps(body) if body else ""
-    await db.create_workflow_run(run_id, wf["id"], "", input_text)
-    executor = WorkflowExecutor(http, events)
-    asyncio.create_task(executor.run(run_id, wf, input_text, webhook_data=body))
-    return {"run_id": run_id, "status": "started", "workflow": wf["name"]}
 
 
 # ============================================================

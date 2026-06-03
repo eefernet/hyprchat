@@ -323,7 +323,6 @@ const IC={
   Crown:()=>sv(<><path d="M2 20h20"/><path d="m2 16 5-10 5 4 5-4 5 10"/></>,14),
   GitBranch:(p)=>sv(<><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></>,p?.s||14),
   BarChart:()=>sv(<><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></>),
-  Workflow:()=>sv(<><path d="M3 3v18h18"/><path d="m7 16 4-8 4 4 4-8"/></>),
 };
 
 const TIC = {code:IC.Code,search:IC.Search,terminal:IC.Terminal,globe:IC.Globe,workflow:IC.Activity};
@@ -701,6 +700,46 @@ const RunCard = ({runId, liveEvts, t, font, md})=>{
         {(env.files_examined||[]).length>0 && <div style={{marginTop:8,fontSize:10,color:t.mut}}>📂 examined: {(env.files_examined||[]).slice(0,5).join(", ")}{(env.files_examined||[]).length>5?` +${(env.files_examined||[]).length-5} more`:""}</div>}
       </div>}
     </div>}
+  </div>;
+};
+
+const WorkflowCard = ({workflow, t, font})=>{
+  const [wf,setWf]=useState(workflow);
+  useEffect(()=>{setWf(workflow);},[workflow?.id,workflow?.updated_at]);
+  useEffect(()=>{
+    if(!wf?.id)return;
+    const active=["planning","building","reviewing","fixing","answering","accepting","packaging"].includes(wf.state);
+    if(!active)return;
+    let stop=false;
+    const tick=async()=>{
+      try{
+        const r=await fetch(`${API}/api/coder/workflows/${wf.id}`);
+        if(r.ok&&!stop)setWf(await r.json());
+      }catch{}
+    };
+    const id=setInterval(tick,5000);tick();
+    return()=>{stop=true;clearInterval(id);};
+  },[wf?.id,wf?.state]);
+  if(!wf)return null;
+  const state=wf.state||"planning";
+  const artifact=wf.artifact_status||"not_ready";
+  const colour=state==="accepted"||artifact==="delivered"?t.ok:state==="blocked"||state==="cancelled"?t.err:artifact==="partial_delivered"?"#e9a45a":t.acc;
+  const modeLabel=(wf.mode||"workflow").replaceAll("_"," ");
+  const contract=wf.contract_json||{};
+  return <div style={{marginTop:6,marginBottom:6,borderRadius:10,border:`1px solid ${colour}38`,background:`${colour}0c`,padding:"7px 12px",fontFamily:font,maxWidth:"100%"}}>
+    <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
+      <span style={{fontSize:13}}>🧭</span>
+      <span style={{fontWeight:700,fontSize:11,color:colour,letterSpacing:.3}}>Workflow</span>
+      <span style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>· {modeLabel}</span>
+      <span style={{fontSize:10,color:colour}}>· {state}</span>
+      <span style={{fontSize:10,color:t.mut}}>· artifact: {artifact}</span>
+    </div>
+    <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:5,fontSize:10,color:t.mut}}>
+      {wf.project_id&&<span>project: {wf.project_id}</span>}
+      {contract.build_system&&<span>build: {contract.build_system}</span>}
+      {contract.test_cmd&&<span>test: {contract.test_cmd.slice(0,60)}</span>}
+      {wf.active_run_id&&<span>run: {wf.active_run_id}</span>}
+    </div>
   </div>;
 };
 
@@ -1598,6 +1637,7 @@ function HyprChat(){
   // Coder Bot v2 — per-agent model overrides. Empty = inherit from umbrella (Planning/Coder) or chat model.
   const [architectModel,setArchitectModel]=useState(()=>{try{return localStorage.getItem("hc-architect-model")||"";}catch{return "";}});
   const [reviewerModel, setReviewerModel] =useState(()=>{try{return localStorage.getItem("hc-reviewer-model") ||"";}catch{return "";}});
+  const [acceptanceModel,setAcceptanceModel]=useState(()=>{try{return localStorage.getItem("hc-acceptance-model")||"";}catch{return "";}});
   const [builderModel,  setBuilderModel]  =useState(()=>{try{return localStorage.getItem("hc-builder-model")  ||"";}catch{return "";}});
   const [fixerModel,    setFixerModel]    =useState(()=>{try{return localStorage.getItem("hc-fixer-model")    ||"";}catch{return "";}});
   const [qaModel,       setQaModel]       =useState(()=>{try{return localStorage.getItem("hc-qa-model")       ||"";}catch{return "";}});
@@ -1606,6 +1646,9 @@ function HyprChat(){
   const [openhandsEnabled,setOpenhandsEnabled]=useState(()=>{try{return localStorage.getItem("hc-openhands-enabled")!=="false";}catch{return true;}});
   const [openhandsMaxRounds,setOpenhandsMaxRounds]=useState(()=>{try{return parseInt(localStorage.getItem("hc-openhands-max-rounds")||"20");}catch{return 20;}});
   const [openhandsReasoningEffort,setOpenhandsReasoningEffort]=useState(()=>{try{return localStorage.getItem("hc-openhands-reasoning-effort")||"medium";}catch{return "medium";}});
+  const [aiderEnabled,setAiderEnabled]=useState(()=>{try{return localStorage.getItem("hc-aider-enabled")!=="false";}catch{return true;}});
+  const [aiderModel,setAiderModel]=useState(()=>{try{return localStorage.getItem("hc-aider-model")||"";}catch{return "";}});
+  const [aiderAutoTest,setAiderAutoTest]=useState(()=>{try{return localStorage.getItem("hc-aider-auto-test")!=="false";}catch{return true;}});
   const [ctxTokens,setCtxTokens]=useState(0);
   const [genTokens,setGenTokens]=useState(0);
   const [previewFile,setPreviewFile]=useState(null);
@@ -1662,6 +1705,21 @@ function HyprChat(){
   const t=THEMES[tm], font=FONTS[fi].v;
   const LIGHT_PAIRS={nord:"oneLight",catppuccin:"oneLight",gruvbox:"oneLight",tokyoNight:"oneLight",rosePine:"oneLight",dracula:"oneLight",midnight:"oneLight",terminal:"oneLight",cyberpunk:"oneLight",solarizedDark:"solarizedLight",materialOcean:"oneLight",ayuDark:"oneLight",oneLight:"nord",solarizedLight:"solarizedDark"};
   const isLightTheme=tm==="oneLight"||tm==="solarizedLight";
+  const settingsLoadedRef=useRef(false);
+  const seenSettingEffectRef=useRef({});
+  const skipSettingPatchRef=useRef({});
+  const hydrateServerSetting=(settingKey,setter,value,current)=>{
+    if(value!==current)skipSettingPatchRef.current[settingKey]=true;
+    setter(value);
+  };
+  const persistServerSetting=(storageKey,settingKey,value,storageValue=String(value))=>{
+    const seen=!!seenSettingEffectRef.current[settingKey];
+    seenSettingEffectRef.current[settingKey]=true;
+    try{localStorage.setItem(storageKey,storageValue);}catch{}
+    if(skipSettingPatchRef.current[settingKey]){delete skipSettingPatchRef.current[settingKey];return;}
+    if(!settingsLoadedRef.current&&!seen)return;
+    fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({[settingKey]:value})}).catch(()=>{});
+  };
 
   // Mermaid init — re-runs when theme/font changes; bumps epoch to force diagram re-render
   const [mermaidEpoch,setMermaidEpoch]=useState(0);
@@ -1717,7 +1775,7 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-theme",tm);}catch{}},[tm]);
   useEffect(()=>{try{localStorage.setItem("hc-font",String(fi));}catch{}},[fi]);
   useEffect(()=>{try{localStorage.setItem("hc-token-limit",String(tokenLimit));}catch{}},[tokenLimit]);
-  useEffect(()=>{try{localStorage.setItem("hc-num-ctx",String(numCtx));}catch{}},[numCtx]);
+  useEffect(()=>{persistServerSetting("hc-num-ctx","default_num_ctx",numCtx,String(numCtx));},[numCtx]);
   useEffect(()=>{try{localStorage.setItem("hc-temp",String(defaultTemp));}catch{}},[defaultTemp]);
   useEffect(()=>{try{localStorage.setItem("hc-top-p",String(defaultTopP));}catch{}},[defaultTopP]);
   useEffect(()=>{try{localStorage.setItem("hc-compact",compactMode?"1":"0");}catch{}},[compactMode]);
@@ -1731,20 +1789,24 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-ui-font-size",uiFontSize);}catch{}},[uiFontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
   useEffect(()=>{try{localStorage.setItem("hc-custom-quotes",JSON.stringify(customQuotes));}catch{}},[customQuotes]);
-  useEffect(()=>{try{localStorage.setItem("hc-ws-model",wsModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({workspace_model:wsModel})}).catch(()=>{});}catch{}},[wsModel]);
-  useEffect(()=>{try{localStorage.setItem("hc-planning-model",planningModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({planning_model:planningModel})}).catch(()=>{});}catch{}},[planningModel]);
-  useEffect(()=>{try{localStorage.setItem("hc-coder-model",coderModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({coder_model:coderModel})}).catch(()=>{});}catch{}},[coderModel]);
-  // Coder Bot v2 per-agent overrides — sync each to localStorage + PATCH /api/settings.
-  useEffect(()=>{try{localStorage.setItem("hc-architect-model",architectModel);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({architect_model:architectModel})}).catch(()=>{});}catch{}},[architectModel]);
-  useEffect(()=>{try{localStorage.setItem("hc-reviewer-model", reviewerModel); fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({reviewer_model: reviewerModel})}).catch(()=>{});}catch{}},[reviewerModel]);
-  useEffect(()=>{try{localStorage.setItem("hc-builder-model",  builderModel);  fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({builder_model:  builderModel})}).catch(()=>{});}catch{}},[builderModel]);
-  useEffect(()=>{try{localStorage.setItem("hc-fixer-model",    fixerModel);    fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fixer_model:    fixerModel})}).catch(()=>{});}catch{}},[fixerModel]);
-  useEffect(()=>{try{localStorage.setItem("hc-qa-model",       qaModel);       fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({qa_model:       qaModel})}).catch(()=>{});}catch{}},[qaModel]);
+  useEffect(()=>{persistServerSetting("hc-ws-model","workspace_model",wsModel);},[wsModel]);
+  useEffect(()=>{persistServerSetting("hc-planning-model","planning_model",planningModel);},[planningModel]);
+  useEffect(()=>{persistServerSetting("hc-coder-model","coder_model",coderModel);},[coderModel]);
+  // Coder Bot v2 per-agent overrides — sync each to localStorage + guarded PATCH /api/settings.
+  useEffect(()=>{persistServerSetting("hc-architect-model","architect_model",architectModel);},[architectModel]);
+  useEffect(()=>{persistServerSetting("hc-reviewer-model","reviewer_model",reviewerModel);},[reviewerModel]);
+  useEffect(()=>{persistServerSetting("hc-acceptance-model","acceptance_model",acceptanceModel);},[acceptanceModel]);
+  useEffect(()=>{persistServerSetting("hc-builder-model","builder_model",builderModel);},[builderModel]);
+  useEffect(()=>{persistServerSetting("hc-fixer-model","fixer_model",fixerModel);},[fixerModel]);
+  useEffect(()=>{persistServerSetting("hc-qa-model","qa_model",qaModel);},[qaModel]);
   useEffect(()=>{try{localStorage.setItem("hc-coderbot-models-open",coderBotModelsOpen?"1":"0");}catch{}},[coderBotModelsOpen]);
-  useEffect(()=>{try{localStorage.setItem("hc-coder-num-ctx",coderNumCtx);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_num_ctx:coderNumCtx})}).catch(()=>{});}catch{}},[coderNumCtx]);
-  useEffect(()=>{try{localStorage.setItem("hc-openhands-enabled",openhandsEnabled);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_enabled:openhandsEnabled})}).catch(()=>{});}catch{}},[openhandsEnabled]);
-  useEffect(()=>{try{localStorage.setItem("hc-openhands-max-rounds",openhandsMaxRounds);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_max_rounds:openhandsMaxRounds})}).catch(()=>{});}catch{}},[openhandsMaxRounds]);
-  useEffect(()=>{try{localStorage.setItem("hc-openhands-reasoning-effort",openhandsReasoningEffort);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({openhands_reasoning_effort:openhandsReasoningEffort})}).catch(()=>{});}catch{}},[openhandsReasoningEffort]);
+  useEffect(()=>{persistServerSetting("hc-coder-num-ctx","openhands_num_ctx",coderNumCtx,String(coderNumCtx));},[coderNumCtx]);
+  useEffect(()=>{persistServerSetting("hc-openhands-enabled","openhands_enabled",openhandsEnabled,String(openhandsEnabled));},[openhandsEnabled]);
+  useEffect(()=>{persistServerSetting("hc-openhands-max-rounds","openhands_max_rounds",openhandsMaxRounds,String(openhandsMaxRounds));},[openhandsMaxRounds]);
+  useEffect(()=>{persistServerSetting("hc-openhands-reasoning-effort","openhands_reasoning_effort",openhandsReasoningEffort);},[openhandsReasoningEffort]);
+  useEffect(()=>{persistServerSetting("hc-aider-enabled","aider_enabled",aiderEnabled,String(aiderEnabled));},[aiderEnabled]);
+  useEffect(()=>{persistServerSetting("hc-aider-model","aider_model",aiderModel);},[aiderModel]);
+  useEffect(()=>{persistServerSetting("hc-aider-auto-test","aider_auto_test",aiderAutoTest,String(aiderAutoTest));},[aiderAutoTest]);
   useEffect(()=>{try{localStorage.setItem("hc-model-params",JSON.stringify(modelParams));}catch{}},[modelParams]);
   useEffect(()=>{try{localStorage.setItem("hc-prompts",JSON.stringify(prompts));}catch{}},[prompts]);
   useEffect(()=>{try{localStorage.setItem("hc-conv-tags",JSON.stringify(convTags));}catch{}},[convTags]);
@@ -1770,14 +1832,6 @@ function HyprChat(){
   const [analyticsData,setAnalyticsData]=useState(null);
   const [analyticsDays,setAnalyticsDays]=useState(30);
   const [analyticsGroup,setAnalyticsGroup]=useState("day");
-  const [workflows,setWorkflows]=useState([]);
-  const [editWf,setEditWf]=useState(null);
-  const [wfRunning,setWfRunning]=useState(null);
-  const [selectedWf,setSelectedWf]=useState(null);
-  const [wfRuns,setWfRuns]=useState([]);
-  const [expandedRun,setExpandedRun]=useState(null);
-  const [wfSchedules,setWfSchedules]=useState([]);
-  const [editSched,setEditSched]=useState(null);
   const [copied,setCopied]=useState(null);
   const [showScrollTop,setShowScrollTop]=useState(false);
   const [showScrollBottom,setShowScrollBottom]=useState(false);
@@ -1819,6 +1873,14 @@ function HyprChat(){
   const [attachments,setAttachments]=useState([]); // [{name, content}]
   const [coderProjUploading,setCoderProjUploading]=useState(false);
   const [coderProjInfo,setCoderProjInfo]=useState(null); // {name, file_count, language}
+  const [coderWorkflows,setCoderWorkflows]=useState([]);
+  const refreshCoderWorkflows=useCallback(async(cid=actId)=>{
+    if(!cid)return;
+    try{
+      const r=await fetch(`${API}/api/coder/workflows?conversation_id=${cid}`);
+      if(r.ok)setCoderWorkflows(await r.json());
+    }catch{}
+  },[actId]);
   const uploadCoderProject=async(f)=>{
     if(!actId||!f)return;
     setCoderProjUploading(true);setCoderProjInfo(null);
@@ -1830,11 +1892,12 @@ function HyprChat(){
       const r=await fetch(`${API}/api/coder/upload-project`,{method:"POST",body:fd});
       if(!r.ok){const err=await r.json().catch(()=>({detail:r.statusText}));throw new Error(err.detail||`HTTP ${r.status}`);}
       const data=await r.json();
-      setCoderProjInfo({name:data.name,file_count:data.file_count,language:data.language});
+      setCoderProjInfo({name:data.name,file_count:data.file_count,language:data.language,workflow_id:data.workflow_id,build_system:data.detected_build_system,test_cmd:data.detected_test_cmd,indexer_status:data.indexer_status});
       setAttachments(p=>[
         ...p.filter(a=>a.name!==placeholderName&&!a.name.startsWith("📦 project:")),
-        {name:`📦 project: ${data.name} (${data.file_count} ${data.language} files)`,content:`[Uploaded project attached to sandbox at ${data.sandbox_path}]`}
+        {name:`📦 project: ${data.name} (${data.file_count} ${data.language} files)`,content:`[Uploaded project attached to sandbox at ${data.sandbox_path}; workflow_id=${data.workflow_id||"n/a"}]`}
       ]);
+      refreshCoderWorkflows(actId);
     }catch(e){
       setAttachments(p=>p.filter(a=>a.name!==placeholderName));
       alert(`Project upload failed: ${e.message}`);
@@ -1927,7 +1990,28 @@ function HyprChat(){
     fetch(`${API}/api/tools`).then(r=>r.json()).then(setTools).catch(()=>{});
     fetch(`${API}/api/model-configs`).then(r=>r.json()).then(setMcs).catch(()=>{});
     fetch(`${API}/api/health`).then(r=>r.json()).then(d=>setHealth(d.services||{})).catch(()=>{});
-    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);if(d.rag)setRagSettings(p=>({...p,...d.rag}));if(d.current_planning_model!=null)setPlanningModel(d.current_planning_model);if(d.current_coder_model!=null)setCoderModel(d.current_coder_model);if(d.current_architect_model!=null)setArchitectModel(d.current_architect_model);if(d.current_reviewer_model!=null)setReviewerModel(d.current_reviewer_model);if(d.current_builder_model!=null)setBuilderModel(d.current_builder_model);if(d.current_fixer_model!=null)setFixerModel(d.current_fixer_model);if(d.current_qa_model!=null)setQaModel(d.current_qa_model);if(d.current_workspace_model!=null)setWsModel(d.current_workspace_model);if(d.openhands_num_ctx!=null)setCoderNumCtx(d.openhands_num_ctx);if(d.openhands_enabled!=null)setOpenhandsEnabled(d.openhands_enabled);if(d.openhands_max_rounds!=null)setOpenhandsMaxRounds(d.openhands_max_rounds);if(d.openhands_reasoning_effort)setOpenhandsReasoningEffort(d.openhands_reasoning_effort);}).catch(()=>{});
+    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{
+      if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);
+      if(d.rag)setRagSettings(p=>({...p,...d.rag}));
+      if(d.default_num_ctx!=null)hydrateServerSetting("default_num_ctx",setNumCtx,d.default_num_ctx,numCtx);
+      if(d.current_planning_model!=null)hydrateServerSetting("planning_model",setPlanningModel,d.current_planning_model,planningModel);
+      if(d.current_coder_model!=null)hydrateServerSetting("coder_model",setCoderModel,d.current_coder_model,coderModel);
+      if(d.current_architect_model!=null)hydrateServerSetting("architect_model",setArchitectModel,d.current_architect_model,architectModel);
+      if(d.current_reviewer_model!=null)hydrateServerSetting("reviewer_model",setReviewerModel,d.current_reviewer_model,reviewerModel);
+      if(d.current_acceptance_model!=null)hydrateServerSetting("acceptance_model",setAcceptanceModel,d.current_acceptance_model,acceptanceModel);
+      if(d.current_builder_model!=null)hydrateServerSetting("builder_model",setBuilderModel,d.current_builder_model,builderModel);
+      if(d.current_fixer_model!=null)hydrateServerSetting("fixer_model",setFixerModel,d.current_fixer_model,fixerModel);
+      if(d.current_qa_model!=null)hydrateServerSetting("qa_model",setQaModel,d.current_qa_model,qaModel);
+      if(d.current_workspace_model!=null)hydrateServerSetting("workspace_model",setWsModel,d.current_workspace_model,wsModel);
+      if(d.openhands_num_ctx!=null)hydrateServerSetting("openhands_num_ctx",setCoderNumCtx,d.openhands_num_ctx,coderNumCtx);
+      if(d.openhands_enabled!=null)hydrateServerSetting("openhands_enabled",setOpenhandsEnabled,d.openhands_enabled,openhandsEnabled);
+      if(d.openhands_max_rounds!=null)hydrateServerSetting("openhands_max_rounds",setOpenhandsMaxRounds,d.openhands_max_rounds,openhandsMaxRounds);
+      if(d.openhands_reasoning_effort)hydrateServerSetting("openhands_reasoning_effort",setOpenhandsReasoningEffort,d.openhands_reasoning_effort,openhandsReasoningEffort);
+      if(d.aider_enabled!=null)hydrateServerSetting("aider_enabled",setAiderEnabled,d.aider_enabled,aiderEnabled);
+      if(d.aider_model!=null)hydrateServerSetting("aider_model",setAiderModel,d.aider_model,aiderModel);
+      if(d.aider_auto_test!=null)hydrateServerSetting("aider_auto_test",setAiderAutoTest,d.aider_auto_test,aiderAutoTest);
+      settingsLoadedRef.current=true;
+    }).catch(()=>{settingsLoadedRef.current=true;});
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
     fetch(`${API}/api/workspaces`).then(r=>r.json()).then(setWorkspaces).catch(()=>{});
     fetch(`${API}/api/councils`).then(r=>r.json()).then(setCouncils).catch(()=>{});
@@ -1961,6 +2045,12 @@ function HyprChat(){
     connect();
     return()=>{closed=true;if(retryTimer)clearTimeout(retryTimer);sseR.current?.close();};
   },[actId]);
+  useEffect(()=>{if(actId)refreshCoderWorkflows(actId);},[actId,refreshCoderWorkflows]);
+  useEffect(()=>{
+    if(!actId||!evts.some(e=>e.data?.workflow_id||e.type==="tool_end"||e.type==="tool_progress"))return;
+    const id=setTimeout(()=>refreshCoderWorkflows(actId),500);
+    return()=>clearTimeout(id);
+  },[evts,actId,refreshCoderWorkflows]);
 
   // Auto-expand thinking pill when enabled
   useEffect(()=>{
@@ -2197,19 +2287,6 @@ function HyprChat(){
     }catch(e){console.error("Analytics error",e);}
   },[analyticsDays,analyticsGroup]);
   useEffect(()=>{if(panel==="analytics")loadAnalytics();},[panel,loadAnalytics]);
-
-  // Load workflows
-  const loadWorkflows=useCallback(async()=>{
-    try{const r=await fetch(`${API}/api/workflows`);setWorkflows(await r.json());}catch(e){console.error("Workflow load error",e);}
-  },[]);
-  useEffect(()=>{if(panel==="workflows")loadWorkflows();},[panel,loadWorkflows]);
-  const loadWfRuns=useCallback(async(wfId)=>{
-    try{const r=await fetch(`${API}/api/workflows/${wfId}/runs`);setWfRuns(await r.json());}catch(e){console.error(e);}
-  },[]);
-  const loadWfSchedules=useCallback(async(wfId)=>{
-    try{const r=await fetch(`${API}/api/workflow-schedules?workflow_id=${wfId}`);setWfSchedules(await r.json());}catch(e){console.error(e);}
-  },[]);
-  useEffect(()=>{if(selectedWf){loadWfRuns(selectedWf.id);loadWfSchedules(selectedWf.id);}else{setWfRuns([]);setWfSchedules([]);}},[selectedWf]);
 
   // Start a new council chat session
   const startCouncilChat=async(councilId)=>{
@@ -2788,6 +2865,7 @@ function HyprChat(){
       // Coder Bot v2 per-agent overrides — clear if pinned to the deleted model
       if(architectModel===m){setArchitectModel("");}
       if(reviewerModel===m){setReviewerModel("");}
+      if(acceptanceModel===m){setAcceptanceModel("");}
       if(builderModel===m){setBuilderModel("");}
       if(fixerModel===m){setFixerModel("");}
       if(qaModel===m){setQaModel("");}
@@ -3259,7 +3337,7 @@ function HyprChat(){
   };
 
   const glass={background:`${t.surface}CC`,backdropFilter:"blur(24px)",border:`1px solid ${t.brd}44`};
-  const _navShort={Chat:"Chat","Knowledge Bases":"KB",Tools:"Tools",Personas:"Personas","Prompt Library":"Prompts","Council of AI":"Council","Model Manager":"Models",Workflows:"Flows",Analytics:"Stats",Settings:"Settings"};
+  const _navShort={Chat:"Chat","Knowledge Bases":"KB",Tools:"Tools",Personas:"Personas","Prompt Library":"Prompts","Council of AI":"Council","Model Manager":"Models",Analytics:"Stats",Settings:"Settings"};
   const nb=(p,ico,lab)=><button onClick={()=>setPanel(p)} title={lab} style={{width:52,height:showNavLabels?50:48,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:12,cursor:"pointer",border:"none",background:panel===p?`${t.acc}22`:"transparent",color:panel===p?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:panel===p?`0 0 10px ${t.acc}22`:"none",padding:showNavLabels?"3px 0 1px":0}}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.7,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{panel===p&&<div style={{position:"absolute",left:0,top:"18%",width:3,height:"64%",borderRadius:"0 3px 3px 0",background:t.acc,boxShadow:`0 0 6px ${t.acc}`}}/>}</button>;
   const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?"#f0a030":t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${n}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
@@ -3302,7 +3380,6 @@ function HyprChat(){
       {nb("prompts",<IC.Zap/>,"Prompt Library")}
       {nb("council",<IC.Council/>,"Council of AI")}
       {nb("models",<IC.Layers/>,"Model Manager")}
-      {nb("workflows",<IC.Workflow/>,"Workflows")}
       {nb("analytics",<IC.BarChart/>,"Analytics")}
       <div style={{flex:1}}/>
       {nb("settings",<IC.Settings/>,"Settings")}
@@ -4717,251 +4794,6 @@ function HyprChat(){
         </div>
       </div>
 
-      :panel==="workflows"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-        <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
-          <div style={{maxWidth:960}}>
-            {/* ── Header ── */}
-            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
-              <div style={{fontSize:20,fontWeight:700,display:"flex",alignItems:"center",gap:8}}>
-                {selectedWf&&<button onClick={()=>{setSelectedWf(null);setEditWf(null);}} style={{...btnS(t.mut),padding:"4px 10px",fontSize:10}}>Back</button>}
-                <IC.Workflow/> {selectedWf?selectedWf.name:"Workflows"}
-              </div>
-              {!selectedWf&&<div style={{display:"flex",gap:8}}>
-                <button onClick={async()=>{try{await fetch(`${API}/api/seed/workflows`,{method:"POST"});loadWorkflows();}catch(e){console.error(e);}}} style={{...btnS(t.ok),padding:"6px 14px",fontSize:11}}>Seed Presets</button>
-                <button onClick={()=>setEditWf({name:"",description:"",steps:[{name:"Step 1",type:"tool",tool:"research",args:{query:"{{input}}"}}]})} style={{...btnS(t.acc),padding:"6px 14px"}}><IC.Plus/> New Workflow</button>
-              </div>}
-            </div>
-
-            {/* ── Workflow Editor ── */}
-            {editWf&&<div style={{...cardS,marginBottom:16}}>
-              <div style={{fontSize:14,fontWeight:600,marginBottom:12}}>{editWf.id?"Edit Workflow":"New Workflow"}</div>
-              <div style={{display:"flex",gap:8,marginBottom:10}}>
-                <input value={editWf.name} onChange={e=>setEditWf(p=>({...p,name:e.target.value}))} placeholder="Workflow name..." style={{...inputS,flex:1}}/>
-                <input value={editWf.description} onChange={e=>setEditWf(p=>({...p,description:e.target.value}))} placeholder="Description..." style={{...inputS,flex:2}}/>
-              </div>
-              <div style={{fontSize:11,fontWeight:600,color:t.mut,marginBottom:6}}>Steps</div>
-              {(editWf.steps||[]).map((step,si)=>{
-                const sType=step.type||"tool";
-                return <div key={si} style={{...cardS,marginBottom:8,padding:10,border:`1px solid ${t.brd}33`}}>
-                  <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:6}}>
-                    <span style={{fontSize:10,color:t.mut,minWidth:20,fontWeight:700}}>{si+1}.</span>
-                    <input value={step.name} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],name:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Step name" style={{...inputS,flex:2,padding:"5px 8px",fontSize:11}}/>
-                    <select value={sType} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],type:e.target.value};setEditWf(p=>({...p,steps:s}));}} style={{...inputS,flex:1,padding:"5px 8px",fontSize:10}}>
-                      <option value="tool">Tool</option>
-                      <option value="ai_completion">AI Completion</option>
-                      <option value="parallel">Parallel</option>
-                      <option value="loop">Loop</option>
-                      <option value="run_workflow">Sub-Workflow</option>
-                    </select>
-                    <button onClick={()=>{const s=editWf.steps.filter((_,i)=>i!==si);setEditWf(p=>({...p,steps:s}));}} style={{...btnS(t.err),padding:"4px 8px",fontSize:9}}>x</button>
-                  </div>
-                  {/* Type-specific fields */}
-                  {sType==="tool"&&<div style={{display:"flex",gap:6,marginBottom:4}}>
-                    <input value={step.tool||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],tool:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Tool (research, fetch_url, run_shell...)" style={{...inputS,flex:1,padding:"5px 8px",fontSize:10}}/>
-                    <textarea value={typeof step.args==="object"?JSON.stringify(step.args,null,1):step.args||""} onChange={e=>{const s=[...editWf.steps];try{s[si]={...s[si],args:JSON.parse(e.target.value)};}catch{s[si]={...s[si],args:e.target.value};}setEditWf(p=>({...p,steps:s}));}} placeholder='{"query":"{{input}}"}' style={{...inputS,flex:2,padding:"5px 8px",fontSize:10,minHeight:32,fontFamily:"monospace",resize:"vertical"}}/>
-                  </div>}
-                  {sType==="ai_completion"&&<div style={{display:"flex",flexDirection:"column",gap:4}}>
-                    <textarea value={step.prompt||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],prompt:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Prompt (use {{input}}, {{steps.N.result}}, {{vars.name}})" style={{...inputS,padding:"5px 8px",fontSize:10,minHeight:48,fontFamily:"monospace",resize:"vertical"}}/>
-                    <div style={{display:"flex",gap:6}}>
-                      <input value={step.model||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],model:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Model (optional, default)" style={{...inputS,flex:1,padding:"5px 8px",fontSize:10}}/>
-                      <input value={step.system||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],system:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="System prompt (optional)" style={{...inputS,flex:2,padding:"5px 8px",fontSize:10}}/>
-                    </div>
-                  </div>}
-                  {sType==="parallel"&&<div>
-                    <div style={{fontSize:9,color:t.mut,marginBottom:4}}>Sub-steps (run concurrently) — JSON array:</div>
-                    <textarea value={typeof step.steps==="object"?JSON.stringify(step.steps,null,2):step.steps||"[]"} onChange={e=>{const s=[...editWf.steps];try{s[si]={...s[si],steps:JSON.parse(e.target.value)};}catch{s[si]={...s[si],steps:e.target.value};}setEditWf(p=>({...p,steps:s}));}} style={{...inputS,width:"100%",padding:"5px 8px",fontSize:10,minHeight:60,fontFamily:"monospace",resize:"vertical"}}/>
-                  </div>}
-                  {sType==="loop"&&<div style={{display:"flex",flexDirection:"column",gap:4}}>
-                    <div style={{display:"flex",gap:6}}>
-                      <input value={step.over||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],over:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Iterate over ({{steps.0.result}} or JSON array)" style={{...inputS,flex:2,padding:"5px 8px",fontSize:10}}/>
-                      <input value={step.max_iterations||10} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],max_iterations:parseInt(e.target.value)||10};setEditWf(p=>({...p,steps:s}));}} type="number" min="1" max="50" style={{...inputS,flex:0,width:60,padding:"5px 8px",fontSize:10}}/>
-                    </div>
-                    <div style={{fontSize:9,color:t.mut}}>Loop sub-steps (JSON array, use {"{{loop.item}}"} and {"{{loop.index}}"}):</div>
-                    <textarea value={typeof step.steps==="object"?JSON.stringify(step.steps,null,2):step.steps||"[]"} onChange={e=>{const s=[...editWf.steps];try{s[si]={...s[si],steps:JSON.parse(e.target.value)};}catch{s[si]={...s[si],steps:e.target.value};}setEditWf(p=>({...p,steps:s}));}} style={{...inputS,width:"100%",padding:"5px 8px",fontSize:10,minHeight:60,fontFamily:"monospace",resize:"vertical"}}/>
-                  </div>}
-                  {sType==="run_workflow"&&<div style={{display:"flex",gap:6}}>
-                    <input value={step.workflow_id||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],workflow_id:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Workflow ID (wf-...)" style={{...inputS,flex:1,padding:"5px 8px",fontSize:10}}/>
-                    <input value={step.input||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],input:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Input to sub-workflow" style={{...inputS,flex:2,padding:"5px 8px",fontSize:10}}/>
-                  </div>}
-                  {/* Common fields: condition, output_var, error handling */}
-                  <div style={{display:"flex",gap:6,marginTop:4}}>
-                    <input value={step.condition||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],condition:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Condition (optional)" style={{...inputS,flex:2,padding:"4px 8px",fontSize:9}}/>
-                    <input value={step.output_var||""} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],output_var:e.target.value};setEditWf(p=>({...p,steps:s}));}} placeholder="Output var" style={{...inputS,flex:1,padding:"4px 8px",fontSize:9}}/>
-                    <select value={step.on_error||"fail"} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],on_error:e.target.value};setEditWf(p=>({...p,steps:s}));}} style={{...inputS,flex:0,width:80,padding:"4px 6px",fontSize:9}}>
-                      <option value="fail">On error: fail</option>
-                      <option value="skip">On error: skip</option>
-                      <option value="continue">On error: continue</option>
-                    </select>
-                    <input value={step.retry||0} onChange={e=>{const s=[...editWf.steps];s[si]={...s[si],retry:parseInt(e.target.value)||0};setEditWf(p=>({...p,steps:s}));}} type="number" min="0" max="3" title="Retry count" style={{...inputS,flex:0,width:40,padding:"4px 6px",fontSize:9}}/>
-                  </div>
-                </div>;
-              })}
-              <div style={{display:"flex",gap:6,marginTop:6}}>
-                <button onClick={()=>setEditWf(p=>({...p,steps:[...p.steps,{name:`Step ${p.steps.length+1}`,type:"tool",tool:"",args:{}}]}))} style={{...btnS(t.mut),padding:"4px 10px",fontSize:10}}><IC.Plus/> Add Step</button>
-                <div style={{flex:1}}/>
-                <button onClick={()=>setEditWf(null)} style={{...btnS(t.mut),padding:"4px 10px",fontSize:10}}>Cancel</button>
-                <button onClick={async()=>{
-                  const body={name:editWf.name,description:editWf.description,steps:editWf.steps.map(s=>{
-                    const clean={...s};
-                    if(typeof clean.args==="string")try{clean.args=JSON.parse(clean.args);}catch{clean.args={};}
-                    if(typeof clean.steps==="string")try{clean.steps=JSON.parse(clean.steps);}catch{clean.steps=[];}
-                    return clean;
-                  })};
-                  if(editWf.id){
-                    await fetch(`${API}/api/workflows/${editWf.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-                  }else{
-                    await fetch(`${API}/api/workflows`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-                  }
-                  setEditWf(null);loadWorkflows();if(selectedWf)setSelectedWf(null);
-                }} style={{...btnS(t.ok),padding:"4px 14px",fontSize:10}}>Save</button>
-              </div>
-              <div style={{fontSize:9,color:t.mut,marginTop:8,lineHeight:1.6}}>
-                Variables: <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>{"{{input}}"}</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>{"{{steps.N.result}}"}</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>{"{{vars.name}}"}</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>{"{{loop.item}}"}</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>{"{{webhook.field}}"}</code>
-                <br/>Conditions: <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>contains</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>not_contains</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>==</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>!=</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>is_empty</code> <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>not_empty</code>
-              </div>
-            </div>}
-
-            {/* ── Workflow Detail View (selected) ── */}
-            {selectedWf&&!editWf&&<>
-              <div style={{...cardS,marginBottom:12,padding:14}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <div>
-                    <div style={{fontSize:10,color:t.mut}}>{selectedWf.id}</div>
-                    {selectedWf.description&&<div style={{fontSize:12,color:t.mut,marginTop:4}}>{selectedWf.description}</div>}
-                    <div style={{fontSize:10,color:t.dim,marginTop:4}}>{(selectedWf.steps||[]).length} steps: {(selectedWf.steps||[]).map(s=>s.type==="ai_completion"?"AI":(s.tool||s.type)).join(" -> ")}</div>
-                  </div>
-                  <div style={{display:"flex",gap:6}}>
-                    <button onClick={()=>setEditWf({...selectedWf,steps:selectedWf.steps||[]})} style={{...btnS(t.mut),padding:"4px 10px",fontSize:10}}><IC.Pencil/></button>
-                    <button onClick={async()=>{
-                      const input=prompt("Workflow input:");if(input===null)return;
-                      setWfRunning(selectedWf.id);
-                      try{await fetch(`${API}/api/workflows/${selectedWf.id}/run`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({input})});
-                        setTimeout(()=>{loadWfRuns(selectedWf.id);setWfRunning(null);},2000);
-                      }catch(e){console.error(e);setWfRunning(null);}
-                    }} style={{...btnS(t.ok),padding:"4px 10px",fontSize:10}}>{wfRunning===selectedWf.id?"Running...":"Run"}</button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Webhook section */}
-              {selectedWf.webhook_id&&<div style={{...cardS,marginBottom:12,padding:12}}>
-                <div style={{fontSize:12,fontWeight:600,marginBottom:6}}>Webhook Trigger</div>
-                <div style={{display:"flex",gap:6,alignItems:"center"}}>
-                  <code style={{fontSize:9,background:`${t.brd}22`,padding:"4px 8px",borderRadius:4,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{`${API}/api/webhooks/workflow/${selectedWf.webhook_id}`}</code>
-                  <button onClick={()=>{navigator.clipboard.writeText(`${API}/api/webhooks/workflow/${selectedWf.webhook_id}`);setCopied("wh");setTimeout(()=>setCopied(null),1500);}} style={{...btnS(t.acc),padding:"4px 10px",fontSize:9}}>{copied==="wh"?"Copied!":"Copy"}</button>
-                </div>
-                <div style={{fontSize:9,color:t.mut,marginTop:4}}>POST JSON to this URL to trigger the workflow. Access fields with {"{{webhook.field_name}}"}</div>
-              </div>}
-
-              {/* Schedules section */}
-              <div style={{...cardS,marginBottom:12,padding:12}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                  <div style={{fontSize:12,fontWeight:600}}>Schedules</div>
-                  <button onClick={()=>setEditSched({cron_expr:"0 */6 * * *",input_template:""})} style={{...btnS(t.acc),padding:"3px 10px",fontSize:9}}><IC.Plus/> Add</button>
-                </div>
-                {editSched&&<div style={{display:"flex",gap:6,marginBottom:8,alignItems:"center"}}>
-                  <select onChange={e=>{if(e.target.value)setEditSched(p=>({...p,cron_expr:e.target.value}));}} value="" style={{...inputS,flex:0,width:110,padding:"4px 6px",fontSize:9}}>
-                    <option value="">Preset...</option>
-                    <option value="*/5 * * * *">Every 5 min</option>
-                    <option value="*/30 * * * *">Every 30 min</option>
-                    <option value="0 * * * *">Every hour</option>
-                    <option value="0 */6 * * *">Every 6 hours</option>
-                    <option value="0 0 * * *">Daily midnight</option>
-                    <option value="0 0 * * 1">Weekly Monday</option>
-                  </select>
-                  <input value={editSched.cron_expr} onChange={e=>setEditSched(p=>({...p,cron_expr:e.target.value}))} placeholder="Cron (min hr day mon dow)" style={{...inputS,flex:1,padding:"4px 8px",fontSize:10,fontFamily:"monospace"}}/>
-                  <input value={editSched.input_template} onChange={e=>setEditSched(p=>({...p,input_template:e.target.value}))} placeholder="Input template (optional)" style={{...inputS,flex:1,padding:"4px 8px",fontSize:10}}/>
-                  <button onClick={async()=>{
-                    const body={workflow_id:selectedWf.id,cron_expr:editSched.cron_expr,input_template:editSched.input_template};
-                    if(editSched.id){await fetch(`${API}/api/workflow-schedules/${editSched.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});}
-                    else{await fetch(`${API}/api/workflow-schedules`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});}
-                    setEditSched(null);loadWfSchedules(selectedWf.id);
-                  }} style={{...btnS(t.ok),padding:"3px 10px",fontSize:9}}>Save</button>
-                  <button onClick={()=>setEditSched(null)} style={{...btnS(t.mut),padding:"3px 8px",fontSize:9}}>x</button>
-                </div>}
-                {wfSchedules.length===0&&!editSched&&<div style={{fontSize:10,color:t.mut}}>No schedules. Add one to run this workflow automatically.</div>}
-                {wfSchedules.map(sc=><div key={sc.id} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0",borderBottom:`1px solid ${t.brd}22`}}>
-                  <code style={{fontSize:10,fontFamily:"monospace",color:t.acc,minWidth:110}}>{sc.cron_expr}</code>
-                  <div style={{flex:1,fontSize:9,color:t.mut}}>
-                    {sc.last_run_at?`Last: ${new Date(sc.last_run_at).toLocaleString()}`:"Never run"}
-                    {sc.next_run_at&&` | Next: ${new Date(sc.next_run_at).toLocaleString()}`}
-                  </div>
-                  <button onClick={async()=>{
-                    await fetch(`${API}/api/workflow-schedules/${sc.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:!sc.enabled})});
-                    loadWfSchedules(selectedWf.id);
-                  }} style={{...btnS(sc.enabled?t.ok:t.mut),padding:"2px 8px",fontSize:9}}>{sc.enabled?"Enabled":"Disabled"}</button>
-                  <button onClick={async()=>{if(!confirm("Delete schedule?"))return;await fetch(`${API}/api/workflow-schedules/${sc.id}`,{method:"DELETE"});loadWfSchedules(selectedWf.id);}} style={{...btnS(t.err),padding:"2px 6px",fontSize:9}}>x</button>
-                </div>)}
-              </div>
-
-              {/* Run History */}
-              <div style={{...cardS,padding:12}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                  <div style={{fontSize:12,fontWeight:600}}>Run History</div>
-                  <button onClick={()=>loadWfRuns(selectedWf.id)} style={{...btnS(t.mut),padding:"2px 8px",fontSize:9}}>Refresh</button>
-                </div>
-                {wfRuns.length===0&&<div style={{fontSize:10,color:t.mut}}>No runs yet.</div>}
-                {wfRuns.map(run=>{
-                  const statusColor=run.status==="completed"?t.ok:run.status==="failed"?t.err:run.status==="running"?t.acc:t.mut;
-                  const duration=run.started_at&&run.completed_at?((new Date(run.completed_at).getTime()-new Date(run.started_at).getTime())/1000).toFixed(1)+"s":run.status==="running"?"...":"—";
-                  const isExpanded=expandedRun===run.id;
-                  return <div key={run.id} style={{marginBottom:8}}>
-                    <div onClick={()=>setExpandedRun(isExpanded?null:run.id)} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",padding:"6px 0",borderBottom:`1px solid ${t.brd}22`}}>
-                      <span style={{fontSize:8,color:statusColor,fontWeight:700}}>{isExpanded?"v":">"}</span>
-                      <span style={{fontSize:10,color:statusColor,fontWeight:600,minWidth:70}}>{run.status}</span>
-                      <span style={{fontSize:9,color:t.mut,flex:1}}>{run.id}</span>
-                      <span style={{fontSize:9,color:t.mut}}>{duration}</span>
-                      <span style={{fontSize:9,color:t.dim}}>{run.created_at?new Date(run.created_at).toLocaleString():""}</span>
-                    </div>
-                    {isExpanded&&<div style={{paddingLeft:16,paddingTop:6}}>
-                      {run.input&&<div style={{fontSize:9,color:t.mut,marginBottom:6}}>Input: <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>{run.input.substring(0,200)}</code></div>}
-                      {run.error&&<div style={{fontSize:10,color:t.err,marginBottom:6}}>Error: {run.error}</div>}
-                      {(run.step_results||[]).map((sr,si)=>{
-                        const sColor=sr.status==="completed"?t.ok:sr.status==="skipped"?"#888":t.err;
-                        const sDur=sr.started_at&&sr.completed_at?(sr.completed_at-sr.started_at).toFixed(2)+"s":"";
-                        return <div key={si} style={{marginBottom:6,paddingLeft:8,borderLeft:`2px solid ${sColor}`}}>
-                          <div style={{display:"flex",alignItems:"center",gap:6}}>
-                            <span style={{fontSize:10,fontWeight:600}}>{sr.name||`Step ${si}`}</span>
-                            <span style={{fontSize:9,color:t.mut}}>{sr.tool||sr.type||""}</span>
-                            <span style={{fontSize:9,color:sColor,fontWeight:600}}>{sr.status}</span>
-                            <span style={{fontSize:9,color:t.dim}}>{sDur}</span>
-                          </div>
-                          {sr.error&&<div style={{fontSize:9,color:t.err,marginTop:2}}>{sr.error}</div>}
-                          {sr.result&&<details style={{marginTop:2}}><summary style={{fontSize:9,color:t.mut,cursor:"pointer"}}>Result ({sr.result.length} chars)</summary><pre style={{fontSize:9,color:t.dim,maxHeight:150,overflow:"auto",background:`${t.brd}11`,padding:6,borderRadius:4,whiteSpace:"pre-wrap",margin:"4px 0"}}>{sr.result.substring(0,3000)}</pre></details>}
-                          {sr.reason&&<div style={{fontSize:9,color:t.mut,fontStyle:"italic",marginTop:2}}>{sr.reason}</div>}
-                        </div>;
-                      })}
-                    </div>}
-                  </div>;
-                })}
-              </div>
-            </>}
-
-            {/* ── Workflow List (when no workflow selected) ── */}
-            {!selectedWf&&!editWf&&<>
-              {workflows.length===0&&<div style={{textAlign:"center",padding:40,color:t.mut}}>No workflows yet. Create one or seed presets to get started!</div>}
-              {workflows.map(wf=><div key={wf.id} style={{...cardS,display:"flex",alignItems:"center",gap:12,cursor:"pointer"}} onClick={()=>{setSelectedWf(wf);setExpandedRun(null);}}>
-                <div style={{flex:1}}>
-                  <div style={{fontSize:14,fontWeight:600}}>{wf.name}</div>
-                  {wf.description&&<div style={{fontSize:10,color:t.mut,marginTop:2}}>{wf.description}</div>}
-                  <div style={{fontSize:9,color:t.dim,marginTop:4}}>{(wf.steps||[]).length} steps: {(wf.steps||[]).map(s=>s.type==="ai_completion"?"AI":(s.tool||s.type)).join(" -> ")}</div>
-                </div>
-                <button onClick={e=>{e.stopPropagation();setEditWf({...wf,steps:wf.steps||[]});}} style={{...btnS(t.mut),padding:"4px 10px",fontSize:10}}><IC.Pencil/></button>
-                <button onClick={async e=>{
-                  e.stopPropagation();
-                  const input=prompt("Workflow input:");if(input===null)return;
-                  setWfRunning(wf.id);
-                  try{await fetch(`${API}/api/workflows/${wf.id}/run`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({input})});}catch(e2){console.error(e2);}
-                  setTimeout(()=>setWfRunning(null),2000);
-                }} style={{...btnS(t.ok),padding:"4px 10px",fontSize:10}}>{wfRunning===wf.id?"Running...":"Run"}</button>
-                <button onClick={async e=>{e.stopPropagation();if(!confirm("Delete this workflow?"))return;await fetch(`${API}/api/workflows/${wf.id}`,{method:"DELETE"});loadWorkflows();}} style={{...btnS(t.err),padding:"4px 10px",fontSize:10}}><IC.Trash/></button>
-              </div>)}
-              <div style={{fontSize:10,color:t.dim,marginTop:12,textAlign:"center"}}>Tip: type <code style={{background:`${t.brd}22`,padding:"1px 4px",borderRadius:3}}>/run Workflow Name input text</code> in chat to trigger a workflow</div>
-            </>}
-          </div>
-        </div>
-      </div>
-
       :panel==="settings"?<div style={{flex:1,display:"flex",overflow:"hidden"}}>
     <div style={{flex:showHealthMonitor?"0 0 50%":"1 1 auto",overflowY:"auto",padding:"20px 28px",transition:"flex .3s ease"}}>
     <div style={{maxWidth:760}}>
@@ -5066,7 +4898,7 @@ function HyprChat(){
             <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Same as chat model</div><div style={{fontSize:9,color:t.dim}}>Click to select a dedicated planning model</div></div>
             <span style={{fontSize:9,color:t.mut}}>▾</span>
           </div>}
-          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Used by Architect + Reviewer agents. Empty = uses the active chat model.</div>
+          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Used by Architect + Reviewer + Acceptance agents. Empty = uses the active chat model.</div>
         </div>
 
         <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
@@ -5121,6 +4953,19 @@ function HyprChat(){
               </div>}
             </div>
 
+            {/* Acceptance — inherits from Planning Model */}
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>✅ Acceptance Model</div>
+              {acceptanceModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <div style={{flex:1}}><ModelPicker value={acceptanceModel} onChange={setAcceptanceModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
+                <button onClick={()=>setAcceptanceModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
+              </div>:<div onClick={()=>setAcceptanceModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+                <span style={{fontSize:14}}>✅</span>
+                <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from Planning Model</div><div style={{fontSize:9,color:t.dim}}>Click to override for the Acceptance agent only</div></div>
+                <span style={{fontSize:9,color:t.mut}}>▾</span>
+              </div>}
+            </div>
+
             {/* Builder — inherits from Coder Model */}
             <div style={{marginBottom:14}}>
               <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>🏗 Builder Model</div>
@@ -5168,6 +5013,29 @@ function HyprChat(){
             <div style={{width:16,height:16,borderRadius:8,background:t.fg,position:"absolute",top:2,left:openhandsEnabled?18:2,transition:"all .2s"}}/>
           </div>
           <span style={{fontSize:10,color:t.mut}}>{openhandsEnabled?"On":"Off"}</span>
+        </div>
+
+        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+            <label style={{fontSize:12,color:t.dim,fontWeight:600,whiteSpace:"nowrap"}}>Aider Enabled</label>
+            <div onClick={()=>setAiderEnabled(!aiderEnabled)} style={{width:36,height:20,borderRadius:10,background:aiderEnabled?t.acc:`${t.mut}44`,cursor:"pointer",position:"relative",transition:"all .2s"}}>
+              <div style={{width:16,height:16,borderRadius:8,background:t.fg,position:"absolute",top:2,left:aiderEnabled?18:2,transition:"all .2s"}}/>
+            </div>
+            <span style={{fontSize:10,color:t.mut}}>{aiderEnabled?"Uploaded-project fixes use Aider":"Fallback Fixer"}</span>
+          </div>
+          <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Aider/Fix Model</div>
+          {aiderModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <div style={{flex:1}}><ModelPicker value={aiderModel} onChange={setAiderModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
+            <button onClick={()=>setAiderModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
+          </div>:<div onClick={()=>setAiderModel(fixerModel||coderModel||models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+            <span style={{fontSize:14}}>🛠</span>
+            <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from Fixer/Coder Model</div><div style={{fontSize:9,color:t.dim}}>Click to pin the Aider edit model</div></div>
+            <span style={{fontSize:9,color:t.mut}}>▾</span>
+          </div>}
+          <label style={{display:"flex",alignItems:"center",gap:8,marginTop:10,fontSize:11,color:t.mut,cursor:"pointer"}}>
+            <input type="checkbox" checked={aiderAutoTest} onChange={e=>setAiderAutoTest(e.target.checked)} style={{accentColor:t.acc}}/>
+            Auto-run safe test command after Aider edits
+          </label>
         </div>
 
         <div style={{marginBottom:14}}>
@@ -5821,6 +5689,7 @@ function HyprChat(){
                   {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:null;})()}
                   {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>:null;})()}
                   {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} md={md}/>;})()}
+                  {(()=>{if(isU)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;if(i!==lastAI||!coderWorkflows.length)return null;return coderWorkflows.slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font}/>);})()}
                   {/* Coder Bot v2 — durable run cards. Render one card per unique run_id.
                       Sources, in priority: explicit metadata.run_ids (written server-side at
                       each round boundary — survives mid-stream reload), then live events
