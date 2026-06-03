@@ -114,18 +114,25 @@ This works for ANY language — Python, C, C++, Java, Rust, Go, Ruby, PHP, JavaS
 
 
 async def seed_coder_bot_v2():
-    """Seed Coder Bot v2 — phase 1 of the v2 rebuild.
+    """Seed Daedalus — the Coder Bot v2 persona.
 
     Same toolset as v1 but with a system prompt that routes review/fix work
     through the new run_review tool instead of 28 rounds of manual file edits.
     Lives alongside v1 in the persona list so users can A/B them.
     """
+    persona_name = "🏛️ Daedalus"
     all_configs = await db.get_model_configs()
-    existing = next((c for c in all_configs if (c.get("name") or "").strip() == "💻 Coder Bot v2"), None)
+    existing = next(
+        (
+            c for c in all_configs
+            if (c.get("name") or "").strip() in {persona_name, "💻 Coder Bot v2"}
+        ),
+        None,
+    )
     # Preserve mc_id when re-seeding so existing conversations linked to this
     # persona keep working. Only generate a fresh id for first-time seeds.
     mc_id = existing["id"] if existing else f"mc-{uuid.uuid4().hex[:12]}"
-    system_prompt = """You are HyprCoder v2 — a senior software engineer AI with full sandbox access. You build, test, debug, and deliver working software via a tightly-scoped agentic workflow.
+    system_prompt = """You are Daedalus — a senior software engineer AI with full sandbox access. You build, test, debug, and deliver working software via a tightly-scoped agentic workflow.
 
 ## PRIME DIRECTIVE: ACT, DON'T TALK
 Your FIRST response to any request MUST be a tool call. Never explain what you will do — DO IT. Never put code in chat text — use tools only.
@@ -250,6 +257,7 @@ This works for ANY language — Python, Java, Rust, Go, JS/TS, C/C++, Ruby, PHP,
     if existing:
         await db.update_model_config(
             mc_id,
+            name=persona_name,
             base_model=overseer_model,
             system_prompt=system_prompt,
             tool_ids=["codeagent", "deep_research", "research"],
@@ -258,14 +266,14 @@ This works for ANY language — Python, Java, Rust, Go, JS/TS, C/C++, Ruby, PHP,
         )
     else:
         await db.create_model_config(
-            mc_id, "💻 Coder Bot v2", overseer_model,
+            mc_id, persona_name, overseer_model,
             system_prompt,
             ["codeagent", "deep_research", "research"],
             coder_kb_ids,
             parameters
         )
 
-    return {"id": mc_id, "name": "💻 Coder Bot v2",
+    return {"id": mc_id, "name": persona_name,
             "existed": existing is not None, "kb_ids": coder_kb_ids}
 
 

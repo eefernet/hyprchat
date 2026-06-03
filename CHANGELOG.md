@@ -1,3 +1,24 @@
+## Alpha v17.1 — June 3, 2026
+
+### UI refresh
+- This UI refresh was heavily inspired by Pewdiepies Odysseus local AI webview. So I stole his ideas.
+- Added a flatter, modern Hyprland-inspired visual direction while preserving the existing HyprChat terminal/cyberpunk feel.
+- Added the HyprFlat-style theme polish, tighter glass panels, cleaner borders, flatter controls, and refreshed chat/settings surfaces.
+- Renamed Coder Bot v2 to **Daedalus** throughout the UI and updated related model/context labels.
+- Added selectable animated background effects in Settings next to the theme selector, including Pixel Rain, Soft Flow, Aurora Lines, Star Drift, Circuit Drift, and Odysseus-style flow variants.
+- Tuned the background effects so they fill the whole viewport, are more visible where needed, and avoid dense rain, oversized bars, or overly aggressive glitching.
+- Updated the first-chat empty state with the HyprChat logo, centered product greeting, generated daily message copy, and a taller first-message composer that settles back to the normal bottom composer after sending.
+- Moved the streaming/loading sweep from the top of the page to an animated trace around the composer.
+- Updated the startup/loading screen so it uses the selected theme and selected animated background instead of the old standalone loading look.
+- Added persona descriptions to the Personas screen and persona editor.
+- Reworked export/import controls into a single export menu with Markdown/JSON choices and corrected import/export icon usage.
+- Updated the site favicon to the HyprChat logo mark.
+- Cleaned up sidebar search: title filtering and full-message search now live behind a single rail search action above Chat.
+- Page loads and refreshes now open to the new empty chat surface instead of restoring the most recent conversation; the real chat row is created when the first message is sent.
+- New Chat now opens the empty chat surface immediately; the composer keeps the smooth float up/down behavior, lands closer to the greeting, and delays textarea focus with `preventScroll` so the browser does not nudge it upward at the end.
+- Empty-chat daily greeting messages now use a more playful prompt and stronger fallback lines, with a cache version bump so browsers refresh stale generic copy.
+- Raised the composer control layer so Prompt Library and thinking-mode menus render above chat/chart content, made the Daedalus `</>` shortcut toggle off as well as on, and nudged the empty-chat composer closer to the greeting.
+
 ## Alpha v17.0.2 — June 2, 2026
 
 ### Coder Bot v2 — uploaded-project repair hardening

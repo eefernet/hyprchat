@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>HyprChat</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0%25' stop-color='%2388C0D0'/><stop offset='100%25' stop-color='%235E81AC'/></linearGradient></defs><rect width='100' height='100' rx='20' fill='%232E3440'/><text x='50' y='52' text-anchor='middle' dominant-baseline='central' font-family='monospace' font-weight='bold' font-size='60' fill='url(%23g)'>HC</text><circle cx='82' cy='18' r='8' fill='%23A3BE8C' opacity='.9'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%230B1D24'/><rect x='28' y='24' width='18' height='52' rx='3' fill='%2358BFEF'/><rect x='54' y='24' width='18' height='52' rx='3' fill='%23D7A72F'/></svg>">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; width: 100%; overflow: hidden; }
@@ -14,9 +14,22 @@
   /* ── Loading Screen ── */
   #hc-loading {
     position: fixed; inset: 0; z-index: 99999;
-    background: linear-gradient(135deg, #1a1e28 0%, #242933 40%, #2E3440 100%);
+    --hc-bg: #282C34;
+    --hc-bg-deep: #111418;
+    --hc-surface: #171B21;
+    --hc-surface-alpha: rgba(23,27,33,.86);
+    --hc-brd: #355A66;
+    --hc-brd-alpha: rgba(53,90,102,.55);
+    --hc-text: #CDEFF7;
+    --hc-dim: #9CDEF2;
+    --hc-mut: #6B8A94;
+    --hc-acc: #9CDEF2;
+    --hc-acc-soft: rgba(156,239,247,.10);
+    --hc-warm: #E06C75;
+    background: var(--hc-bg);
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    color: var(--hc-text);
     overflow: hidden;
     transition: opacity 0.9s ease;
     pointer-events: all;
@@ -27,36 +40,70 @@
     pointer-events: none;
   }
 
-  /* grid bg */
   #hc-loading::before {
-    content: ''; position: absolute; inset: 0; opacity: .025;
-    background-image: linear-gradient(#88C0D0 1px, transparent 1px), linear-gradient(90deg, #88C0D0 1px, transparent 1px);
-    background-size: 64px 64px;
+    content: ''; position: absolute; inset: 0; opacity: 0;
+    pointer-events: none; z-index: 0;
+  }
+  #hc-loading[data-bg-effect="dots"]::before {
+    opacity: .42;
+    background-image: radial-gradient(circle, var(--hc-acc-soft) 1px, transparent 1.4px);
+    background-size: 24px 24px;
+  }
+  #hc-loading[data-bg-effect="scanlines"]::before {
+    opacity: .42;
+    background: linear-gradient(180deg, transparent 0%, var(--hc-acc-soft) 50%, transparent 100%);
+    background-size: 100% 4px;
+    animation: hcScanline 8s linear infinite;
+  }
+  #hc-loading-bg {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    z-index: 0; pointer-events: none; opacity: .78;
+  }
+  #hc-loading[data-bg-effect="rain"] #hc-loading-bg { opacity: .58; }
+  #hc-loading[data-bg-effect="flow"] #hc-loading-bg { opacity: .86; }
+  #hc-loading[data-bg-effect="aurora"] #hc-loading-bg { opacity: .66; }
+  #hc-loading[data-bg-effect="stars"] #hc-loading-bg { opacity: .82; }
+  #hc-loading[data-bg-effect="circuit"] #hc-loading-bg { opacity: .78; }
+  #hc-loading > :not(#hc-loading-bg) {
+    position: relative; z-index: 1;
+  }
+  @keyframes hcScanline {
+    0% { background-position: 0 0; }
+    100% { background-position: 0 100%; }
   }
 
   .hc-load-logo {
-    width: 14px; height: 14px; border-radius: 50%;
-    background: #88C0D0;
-    box-shadow: 0 0 20px #88C0D0cc, 0 0 48px #88C0D055;
-    margin-bottom: 28px;
+    position: relative; width: 28px; height: 28px; border-radius: 8px;
+    background: var(--hc-bg-deep);
+    border: 1px solid var(--hc-brd-alpha);
+    box-shadow: 0 0 20px var(--hc-acc-soft);
+    margin-bottom: 18px;
     animation: hcGlow 2.5s ease-in-out infinite;
   }
+  .hc-load-logo::before {
+    content: ''; position: absolute; left: 7px; top: 6px;
+    width: 6px; height: 16px; border-radius: 2px;
+    background: var(--hc-acc);
+    box-shadow: 8px 0 0 var(--hc-warm);
+  }
   @keyframes hcGlow {
-    0%,100% { box-shadow: 0 0 20px #88C0D0cc, 0 0 48px #88C0D055; }
-    50%      { box-shadow: 0 0 32px #88C0D0ff, 0 0 72px #88C0D09a; }
+    0%,100% { box-shadow: 0 0 14px var(--hc-acc-soft); }
+    50%      { box-shadow: 0 0 26px var(--hc-acc-soft); }
   }
 
   .hc-load-title {
     font-size: 11px; letter-spacing: 4px; text-transform: uppercase;
-    color: #4C566A; margin-bottom: 36px; font-weight: 700;
+    color: var(--hc-acc); margin-bottom: 28px; font-weight: 700;
+    opacity: .78;
   }
 
   .hc-load-card {
     position: relative; max-width: 520px; width: 88%;
-    background: rgba(59,66,82,0.55); backdrop-filter: blur(16px);
-    border: 1px solid rgba(136,192,208,0.18);
-    border-radius: 18px; padding: 36px 40px;
+    background: var(--hc-surface-alpha); backdrop-filter: none;
+    border: 1px solid var(--hc-brd-alpha);
+    border-radius: 8px; padding: 30px 36px;
     text-align: center;
+    box-shadow: none;
     animation: hcSlideUp .9s cubic-bezier(.16,1,.3,1) both;
   }
   @keyframes hcSlideUp {
@@ -65,15 +112,16 @@
   }
 
   .hc-load-quote {
-    font-size: 15px; line-height: 1.75; color: #D8DEE9;
+    font-size: 15px; line-height: 1.75; color: var(--hc-text);
     font-style: italic; margin-bottom: 14px;
   }
   .hc-load-attr {
-    font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: #81A1C1;
+    font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: var(--hc-acc);
+    opacity: .72;
   }
 
-  /* floating emojis */
   .hc-em {
+    display: none;
     position: fixed; font-size: 22px; pointer-events: none; user-select: none;
     animation: hcFloat var(--hc-float-dur,4s) ease-in-out infinite var(--hc-float-del,0s);
   }
@@ -86,8 +134,8 @@
 
   /* pulsing dots */
   .hc-dot {
-    width: 7px; height: 7px; border-radius: 50%; background: #88C0D0;
-    box-shadow: 0 0 8px #88C0D0aa;
+    width: 7px; height: 7px; border-radius: 50%; background: var(--hc-acc);
+    box-shadow: 0 0 8px var(--hc-acc-soft);
     display: inline-block; margin: 0 4px;
     animation: hcPulse 1.4s ease-in-out infinite;
   }
@@ -97,7 +145,7 @@
   }
 
   .hc-load-status {
-    margin-top: 26px; font-size: 10px; color: #4C566A;
+    margin-top: 26px; font-size: 10px; color: var(--hc-mut);
     letter-spacing: 2px; text-transform: uppercase;
     animation: hcSlideUp .9s .3s cubic-bezier(.16,1,.3,1) both;
   }
@@ -118,6 +166,7 @@
      Dismissed by React once models load
      ═══════════════════════════════════════════ -->
 <div id="hc-loading">
+  <canvas id="hc-loading-bg" aria-hidden="true"></canvas>
   <!-- Floating emojis scattered around the viewport -->
   <span class="hc-em" style="top:7%;  left:8%;  --hc-float-dur:4.1s;--hc-float-del:0s;   --hc-spin:-12deg">✨</span>
   <span class="hc-em" style="top:12%; right:10%;--hc-float-dur:3.7s;--hc-float-del:.4s;  --hc-spin: 18deg">🔭</span>
@@ -150,6 +199,166 @@
 
 <script>
 (function(){
+  var loadThemes={
+    hyprflat:{bg:"#282C34",bgDeep:"#111418",surface:"#171B21",brd:"#355A66",text:"#CDEFF7",dim:"#9CDEF2",mut:"#6B8A94",acc:"#9CDEF2",acc2:"#74CFE7",warm:"#E06C75",pink:"#B48EAD",f1:"#88C0D0"},
+    nord:{bg:"#2E3440",bgDeep:"#242933",surface:"#3B4252",brd:"#4C566A",text:"#ECEFF4",dim:"#D8DEE9",mut:"#81A1C1",acc:"#88C0D0",acc2:"#81A1C1",warm:"#EBCB8B",pink:"#B48EAD",f1:"#8FBCBB"},
+    catppuccin:{bg:"#1E1E2E",bgDeep:"#181825",surface:"#313244",brd:"#45475A",text:"#CDD6F4",dim:"#BAC2DE",mut:"#89B4FA",acc:"#89B4FA",acc2:"#74C7EC",warm:"#F9E2AF",pink:"#CBA6F7",f1:"#94E2D5"},
+    gruvbox:{bg:"#282828",bgDeep:"#1D2021",surface:"#3C3836",brd:"#504945",text:"#EBDBB2",dim:"#D5C4A1",mut:"#a89984",acc:"#83A598",acc2:"#8EC07C",warm:"#FABD2F",pink:"#D3869B",f1:"#8EC07C"},
+    tokyoNight:{bg:"#1A1B26",bgDeep:"#16161E",surface:"#24283B",brd:"#3B4261",text:"#C0CAF5",dim:"#A9B1D6",mut:"#7AA2F7",acc:"#7AA2F7",acc2:"#7DCFFF",warm:"#E0AF68",pink:"#BB9AF7",f1:"#73DACA"},
+    rosePine:{bg:"#191724",bgDeep:"#1F1D2E",surface:"#26233A",brd:"#403D52",text:"#E0DEF4",dim:"#c9bdde",mut:"#908caa",acc:"#9CCFD8",acc2:"#C4A7E7",warm:"#F6C177",pink:"#C4A7E7",f1:"#9CCFD8"},
+    dracula:{bg:"#282A36",bgDeep:"#1E1F29",surface:"#343746",brd:"#44475A",text:"#F8F8F2",dim:"#CFCFCF",mut:"#8a9cd0",acc:"#BD93F9",acc2:"#FF79C6",warm:"#F1FA8C",pink:"#FF79C6",f1:"#8BE9FD"},
+    oneLight:{bg:"#FAFAFA",bgDeep:"#EFEFEF",surface:"#E2E3E5",brd:"#B0B1B8",text:"#282A30",dim:"#3E4047",mut:"#6B6E78",acc:"#3569D6",acc2:"#4260CC",warm:"#A06D00",pink:"#9021A0",f1:"#0174A8"},
+    midnight:{bg:"#0A0A0F",bgDeep:"#050508",surface:"#111118",brd:"#1E1E2E",text:"#C8C8E8",dim:"#9090B8",mut:"#7a7aa8",acc:"#9b8ce0",acc2:"#6e63b8",warm:"#E0A060",pink:"#c080c0",f1:"#5ab8d0"},
+    terminal:{bg:"#0a0f0a",bgDeep:"#050805",surface:"#0d1a0d",brd:"#1a3a1a",text:"#baffc6",dim:"#7fe89a",mut:"#5ca776",acc:"#00ff41",acc2:"#33ff77",warm:"#ffcc00",pink:"#ff66ff",f1:"#7ad6ff"},
+    cyberpunk:{bg:"#0d0015",bgDeep:"#080010",surface:"#150025",brd:"#2a0045",text:"#f0e6ff",dim:"#d2b8ff",mut:"#b083d8",acc:"#f26bff",acc2:"#d859e5",warm:"#ffe066",pink:"#ff66d4",f1:"#5cc9ff"},
+    solarizedDark:{bg:"#002b36",bgDeep:"#001e27",surface:"#073642",brd:"#094858",text:"#d6dcd6",dim:"#a7b4b3",mut:"#839496",acc:"#4ba6e8",acc2:"#4dbab0",warm:"#cfa036",pink:"#e25999",f1:"#4dbab0"},
+    solarizedLight:{bg:"#fdf6e3",bgDeep:"#eee8d5",surface:"#e8e1cc",brd:"#b5ad96",text:"#3b4d53",dim:"#475963",mut:"#6e7f86",acc:"#1a7abf",acc2:"#1f8c85",warm:"#a37400",pink:"#c42484",f1:"#1f8c85"},
+    materialOcean:{bg:"#0f111a",bgDeep:"#090b10",surface:"#1a1c25",brd:"#2a2d3a",text:"#a6accd",dim:"#8b91b8",mut:"#4b526d",acc:"#82aaff",acc2:"#89ddff",warm:"#ffcb6b",pink:"#c792ea",f1:"#89ddff"},
+    ayuDark:{bg:"#0b0e14",bgDeep:"#070910",surface:"#0d1017",brd:"#1a1f2e",text:"#cccac2",dim:"#b3b1ad",mut:"#626a73",acc:"#39bae6",acc2:"#59c2ff",warm:"#ffb454",pink:"#d2a6ff",f1:"#95e6cb"}
+  };
+  var validEffects={dots:1,rain:1,flow:1,aurora:1,stars:1,circuit:1,scanlines:1,off:1};
+  var savedTheme="hyprflat", savedEffect="dots";
+  try{savedTheme=localStorage.getItem("hc-theme")||savedTheme;}catch{}
+  try{savedEffect=localStorage.getItem("hc-bg-effect")||(localStorage.getItem("hc-scanline")==="1"?"scanlines":"dots");}catch{}
+  if(!loadThemes[savedTheme])savedTheme="hyprflat";
+  if(!validEffects[savedEffect])savedEffect="dots";
+  var loader=document.getElementById("hc-loading");
+  var th=loadThemes[savedTheme];
+  function hexToRgb(hex){
+    var s=String(hex||"").replace("#","");
+    var m=s.match(/^([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+    return m?{r:parseInt(m[1],16),g:parseInt(m[2],16),b:parseInt(m[3],16)}:{r:17,g:20,b:24};
+  }
+  function rgba(hex,a){var c=hexToRgb(hex);return "rgba("+c.r+","+c.g+","+c.b+","+a+")";}
+  function snap(v,s){s=s||4;return Math.round(v/s)*s;}
+  function clamp(n,min,max){return Math.min(max,Math.max(min,Math.floor(n)));}
+  if(loader){
+    loader.setAttribute("data-theme",savedTheme);
+    loader.setAttribute("data-bg-effect",savedEffect);
+    loader.style.setProperty("--hc-bg",th.bg);
+    loader.style.setProperty("--hc-bg-deep",th.bgDeep);
+    loader.style.setProperty("--hc-surface",th.surface);
+    loader.style.setProperty("--hc-surface-alpha",rgba(th.surface,.88));
+    loader.style.setProperty("--hc-brd",th.brd);
+    loader.style.setProperty("--hc-brd-alpha",rgba(th.brd,.55));
+    loader.style.setProperty("--hc-text",th.text);
+    loader.style.setProperty("--hc-dim",th.dim);
+    loader.style.setProperty("--hc-mut",th.mut);
+    loader.style.setProperty("--hc-acc",th.acc);
+    loader.style.setProperty("--hc-acc-soft",rgba(th.acc,.14));
+    loader.style.setProperty("--hc-warm",th.warm);
+  }
+  function startLoadingBg(effect,theme){
+    if(["rain","flow","aurora","stars","circuit"].indexOf(effect)<0)return;
+    var canvas=document.getElementById("hc-loading-bg");
+    if(!canvas)return;
+    var ctx=canvas.getContext("2d");
+    if(!ctx)return;
+    var reduced=false;
+    try{reduced=window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches;}catch{}
+    var colors=[theme.acc,theme.warm,theme.f1||theme.acc,theme.acc2||theme.acc];
+    var particles=[], w=1, h=1, dpr=1, raf=0, stopped=false;
+    function n2(x,y){var v=Math.sin(x*127.1+y*311.7)*43758.5453123;return v-Math.floor(v);}
+    function noise(x,y){
+      var xi=Math.floor(x), yi=Math.floor(y), xf=x-xi, yf=y-yi;
+      var u=xf*xf*(3-2*xf), v=yf*yf*(3-2*yf);
+      var a=n2(xi,yi), b=n2(xi+1,yi), c=n2(xi,yi+1), d=n2(xi+1,yi+1);
+      return (a+(b-a)*u)+((c+(d-c)*u)-(a+(b-a)*u))*v;
+    }
+    function makeRain(i){return {x:Math.random()*w,y:Math.random()*h-h*.4,c:colors[i%colors.length],a:.08+Math.random()*.16,v:1+Math.random()*2.6,drift:(Math.random()-.5)*.42,size:2+(Math.random()>.82?2:0),blocks:1+Math.floor(Math.random()*4),gap:6+Math.floor(Math.random()*8)};}
+    function makeFlow(i){return {x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.16+Math.random()*.24,s:.36+Math.random()*.8};}
+    function makeStar(i){return {x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.28+Math.random()*.48,v:.18+Math.random()*.65,size:1+(Math.random()>.62?1:0)+(Math.random()>.9?1:0)};}
+    function makeCircuit(i){
+      var segs=[];
+      for(var j=0;j<5+Math.floor(Math.random()*5);j++){
+        var len=(30+Math.random()*130)*(Math.random()>.5?1:-1);
+        segs.push(Math.random()>.5?[len,0]:[0,len*.55]);
+      }
+      return {x:Math.random()*w,y:Math.random()*h,segs:segs,c:colors[i%colors.length],a:.11+Math.random()*.16,phase:Math.random()*Math.PI*2,v:.045+Math.random()*.1};
+    }
+    function seed(){
+      var area=w*h;
+      if(effect==="rain")particles=Array.from({length:clamp(area/36000,24,78)},function(_,i){return makeRain(i);});
+      else if(effect==="flow")particles=Array.from({length:clamp(area/11000,70,240)},function(_,i){return makeFlow(i);});
+      else if(effect==="stars")particles=Array.from({length:clamp(area/8000,90,300)},function(_,i){return makeStar(i);});
+      else if(effect==="circuit")particles=Array.from({length:clamp(area/30000,25,82)},function(_,i){return makeCircuit(i);});
+      else particles=[];
+    }
+    function resize(){
+      var rect=canvas.getBoundingClientRect();
+      dpr=Math.min(window.devicePixelRatio||1,2);
+      w=Math.max(1,rect.width);h=Math.max(1,rect.height);
+      canvas.width=Math.max(1,Math.floor(w*dpr));canvas.height=Math.max(1,Math.floor(h*dpr));
+      ctx.setTransform(dpr,0,0,dpr,0,0);ctx.imageSmoothingEnabled=false;seed();ctx.clearRect(0,0,w,h);
+    }
+    function drawRain(time){
+      ctx.clearRect(0,0,w,h);
+      particles.forEach(function(p,i){
+        p.y+=p.v;p.x+=p.drift+Math.sin(time*.001+i)*.05;
+        if(p.y>h+40||p.x<-20||p.x>w+20){particles[i]=p=makeRain(i);p.y=-Math.random()*h*.35;}
+        var x=snap(p.x,4), y=snap(p.y,4);
+        ctx.fillStyle=p.c;ctx.globalAlpha=p.a;
+        for(var b=0;b<p.blocks;b++)ctx.fillRect(x,y-b*p.gap,p.size,p.size*2);
+      });
+      ctx.globalAlpha=1;
+    }
+    function drawFlow(time){
+      ctx.globalCompositeOperation="destination-out";ctx.fillStyle="rgba(0,0,0,.12)";ctx.fillRect(0,0,w,h);ctx.globalCompositeOperation="source-over";
+      particles.forEach(function(p,i){
+        var px=p.x, py=p.y, ang=noise(p.x*.0036+time*.000035,p.y*.0036-time*.000022)*Math.PI*4;
+        p.x+=Math.cos(ang)*(0.28+p.s);p.y+=Math.sin(ang)*(0.28+p.s);
+        if(p.x<-8||p.x>w+8||p.y<-8||p.y>h+8){particles[i]=makeFlow(i);return;}
+        ctx.globalAlpha=p.a;ctx.strokeStyle=p.c;ctx.lineWidth=1.35;ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(p.x,p.y);ctx.stroke();
+      });
+      ctx.globalAlpha=1;
+    }
+    function drawAurora(time){
+      ctx.clearRect(0,0,w,h);
+      for(var i=0;i<7;i++){
+        var yBase=h*(.16+i*.12);
+        ctx.beginPath();
+        for(var x=-80;x<=w+80;x+=48){
+          var y=yBase+Math.sin(x*.006+time*.00024+i)*32+Math.sin(x*.017-time*.00018+i*2)*12;
+          if(x===-80)ctx.moveTo(x,y);else ctx.lineTo(x,y);
+        }
+        ctx.strokeStyle=colors[i%colors.length];ctx.globalAlpha=.06+i*.011;ctx.lineWidth=1.3+(i%3)*.55;ctx.stroke();
+      }
+      ctx.globalAlpha=1;
+    }
+    function drawStars(time){
+      ctx.clearRect(0,0,w,h);
+      particles.forEach(function(p,i){
+        p.y+=p.v;p.x+=Math.sin(time*.00045+i)*.08;
+        if(p.y>h+8){particles[i]=p=makeStar(i);p.y=-8;}
+        ctx.fillStyle=p.c;ctx.globalAlpha=p.a*(.72+.28*Math.sin(time*.002+i));
+        var x=snap(p.x,2), y=snap(p.y,2);ctx.fillRect(x,y,p.size,p.size);
+        if(p.size>1){ctx.globalAlpha*=.36;ctx.fillRect(x-2,y,p.size+4,1);ctx.fillRect(x,y-2,1,p.size+4);}
+      });
+      ctx.globalAlpha=1;
+    }
+    function drawCircuit(time){
+      ctx.clearRect(0,0,w,h);
+      particles.forEach(function(p,i){
+        p.y+=p.v;if(p.y>h+160){particles[i]=p=makeCircuit(i);p.y=-120;}
+        var x=p.x,y=p.y;ctx.beginPath();ctx.moveTo(snap(x,8),snap(y,8));
+        p.segs.forEach(function(seg){x+=seg[0];y+=seg[1];ctx.lineTo(snap(x,8),snap(y,8));});
+        ctx.strokeStyle=p.c;ctx.globalAlpha=p.a*(.6+.4*Math.sin(time*.001+p.phase));ctx.lineWidth=1.45;ctx.stroke();
+        ctx.fillStyle=p.c;ctx.globalAlpha*=.8;ctx.fillRect(snap(x,8)-2,snap(y,8)-2,5,5);
+      });
+      ctx.globalAlpha=1;
+    }
+    function stop(){stopped=true;cancelAnimationFrame(raf);window.removeEventListener("resize",resize);}
+    function step(time){
+      if(stopped||!document.body.contains(canvas)){stop();return;}
+      if(effect==="rain")drawRain(time);else if(effect==="flow")drawFlow(time);else if(effect==="aurora")drawAurora(time);else if(effect==="stars")drawStars(time);else if(effect==="circuit")drawCircuit(time);
+      if(!reduced)raf=requestAnimationFrame(step);
+    }
+    resize();window.addEventListener("resize",resize);
+    if(loader)loader.addEventListener("transitionend",stop,{once:true});
+    step(performance.now());
+  }
+  startLoadingBg(savedEffect,th);
+
   var defaults=[
     {t:'"The fear of the LORD is the beginning of wisdom, and knowledge of the Holy One is understanding."',a:'Proverbs 9:10'},
     {t:'"The heavens declare the glory of God; the skies proclaim the work of his hands."',a:'Psalm 19:1'},
@@ -256,6 +465,7 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 const API = window.HYPRCHAT_API || "";
 const THEMES = {
+  hyprflat:{name:"HyprFlat",bg:"#282C34",bgDeep:"#111418",surface:"#171B21",sfHov:"#20262E",sfBri:"#2B343D",brd:"#355A66",text:"#CDEFF7",dim:"#9CDEF2",mut:"#6B8A94",acc:"#9CDEF2",acc2:"#74CFE7",warm:"#E06C75",ok:"#50FA7B",err:"#E06C75",pink:"#B48EAD",f1:"#88C0D0",f4:"#81A1C1"},
   nord:{name:"Nord",bg:"#2E3440",bgDeep:"#242933",surface:"#3B4252",sfHov:"#434C5E",sfBri:"#4C566A",brd:"#4C566A",text:"#ECEFF4",dim:"#D8DEE9",mut:"#81A1C1",acc:"#88C0D0",acc2:"#81A1C1",warm:"#EBCB8B",ok:"#A3BE8C",err:"#BF616A",pink:"#B48EAD",f1:"#8FBCBB",f4:"#5E81AC"},
   catppuccin:{name:"Catppuccin",bg:"#1E1E2E",bgDeep:"#181825",surface:"#313244",sfHov:"#45475A",sfBri:"#585B70",brd:"#45475A",text:"#CDD6F4",dim:"#BAC2DE",mut:"#89B4FA",acc:"#89B4FA",acc2:"#74C7EC",warm:"#F9E2AF",ok:"#A6E3A1",err:"#F38BA8",pink:"#CBA6F7",f1:"#94E2D5",f4:"#7287FD"},
   gruvbox:{name:"Gruvbox",bg:"#282828",bgDeep:"#1D2021",surface:"#3C3836",sfHov:"#504945",sfBri:"#665C54",brd:"#504945",text:"#EBDBB2",dim:"#D5C4A1",mut:"#a89984",acc:"#83A598",acc2:"#8EC07C",warm:"#FABD2F",ok:"#B8BB26",err:"#FB4934",pink:"#D3869B",f1:"#8EC07C",f4:"#83a598"},
@@ -282,6 +492,210 @@ const FONTS = [
   {name:"Space Mono",v:"'Space Mono',monospace",i:"Space+Mono:wght@400;700"},
   {name:"Geist Mono",v:"'Geist Mono',monospace",i:"Geist+Mono:wght@300;400;500;600;700"},
 ];
+
+const BACKGROUND_EFFECTS = [
+  {id:"dots",name:"Dot Grid"},
+  {id:"rain",name:"Pixel Rain"},
+  {id:"flow",name:"Soft Flow"},
+  {id:"aurora",name:"Aurora Lines"},
+  {id:"stars",name:"Star Drift"},
+  {id:"circuit",name:"Circuit Drift"},
+  {id:"scanlines",name:"Scanlines"},
+  {id:"off",name:"Off"},
+];
+
+const WELCOME_FALLBACKS = [
+  "Summon a better rabbit hole",
+  "Ask the question with teeth",
+  "Turn chaos into a checklist",
+  "Make the weird idea executable",
+  "Disturb the obvious answer",
+  "Open a trapdoor in the problem",
+  "Give the machine a worthy puzzle",
+  "Bring snacks for the algorithm",
+  "Make today's mystery regret it",
+  "Translate fog into working code",
+];
+const WELCOME_VERSION="fun-2";
+const localDayKey=()=>{
+  const d=new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+};
+const fallbackWelcome=()=>{
+  const key=localDayKey().replace(/\D/g,"");
+  const idx=Number(key.slice(-4))%WELCOME_FALLBACKS.length;
+  return WELCOME_FALLBACKS[idx];
+};
+
+const hexToRgb=(hex)=>{
+  const s=String(hex||"").replace("#","");
+  const m=s.match(/^([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+  return m?{r:parseInt(m[1],16),g:parseInt(m[2],16),b:parseInt(m[3],16)}:{r:17,g:20,b:24};
+};
+
+function BackgroundCanvas({effect,t}){
+  const ref=useRef(null);
+  useEffect(()=>{
+    if(!["rain","flow","aurora","stars","circuit"].includes(effect))return;
+    const canvas=ref.current;
+    if(!canvas)return;
+    const reduced=window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const ctx=canvas.getContext("2d");
+    if(!ctx)return;
+    let raf=0, stopped=false, particles=[];
+    let view={w:1,h:1,dpr:1};
+    const colors=[t.acc,t.warm,t.f1||t.acc,t.acc2||t.acc].filter(Boolean);
+    const snap=(v,s=4)=>Math.round(v/s)*s;
+    const clampCount=(n,min,max)=>Math.min(max,Math.max(min,Math.floor(n)));
+    const n2=(x,y)=>{
+      const v=Math.sin(x*127.1+y*311.7)*43758.5453123;
+      return v-Math.floor(v);
+    };
+    const noise=(x,y)=>{
+      const xi=Math.floor(x), yi=Math.floor(y), xf=x-xi, yf=y-yi;
+      const u=xf*xf*(3-2*xf), v=yf*yf*(3-2*yf);
+      const a=n2(xi,yi), b=n2(xi+1,yi), c=n2(xi,yi+1), d=n2(xi+1,yi+1);
+      return (a+(b-a)*u)+((c+(d-c)*u)-(a+(b-a)*u))*v;
+    };
+    const makeRain=(w,h,i)=>({x:Math.random()*w,y:Math.random()*h-h*.4,c:colors[i%colors.length],a:.08+Math.random()*.16,v:1+Math.random()*2.6,drift:(Math.random()-.5)*.42,size:2+(Math.random()>.82?2:0),blocks:1+Math.floor(Math.random()*4),gap:6+Math.floor(Math.random()*8)});
+    const makeFlow=(w,h,i)=>({x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.16+Math.random()*.24,s:.36+Math.random()*.8});
+    const makeStar=(w,h,i)=>({x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.28+Math.random()*.48,v:.18+Math.random()*.65,size:1+(Math.random()>.62?1:0)+(Math.random()>.9?1:0)});
+    const makeCircuit=(w,h,i)=>{
+      let x=Math.random()*w, y=Math.random()*h, segs=[];
+      for(let j=0;j<5+Math.floor(Math.random()*5);j++){
+        const len=(30+Math.random()*130)*(Math.random()>.5?1:-1);
+        segs.push(Math.random()>.5?[len,0]:[0,len*.55]);
+      }
+      return {x,y,segs,c:colors[i%colors.length],a:.11+Math.random()*.16,phase:Math.random()*Math.PI*2,v:.045+Math.random()*.1};
+    };
+    const seed=(w,h)=>{
+      const area=w*h;
+      if(effect==="rain")particles=Array.from({length:clampCount(area/36000,24,78)},(_,i)=>makeRain(w,h,i));
+      else if(effect==="flow")particles=Array.from({length:clampCount(area/11000,70,240)},(_,i)=>makeFlow(w,h,i));
+      else if(effect==="stars")particles=Array.from({length:clampCount(area/8000,90,300)},(_,i)=>makeStar(w,h,i));
+      else if(effect==="circuit")particles=Array.from({length:clampCount(area/30000,25,82)},(_,i)=>makeCircuit(w,h,i));
+      else particles=[];
+    };
+    const resize=()=>{
+      const rect=canvas.getBoundingClientRect();
+      const dpr=Math.min(window.devicePixelRatio||1,2);
+      view={w:Math.max(1,rect.width),h:Math.max(1,rect.height),dpr};
+      canvas.width=Math.max(1,Math.floor(view.w*dpr));
+      canvas.height=Math.max(1,Math.floor(view.h*dpr));
+      ctx.setTransform(dpr,0,0,dpr,0,0);
+      ctx.imageSmoothingEnabled=false;
+      seed(view.w,view.h);
+      ctx.clearRect(0,0,view.w,view.h);
+    };
+    const drawRain=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);
+      particles.forEach((p,i)=>{
+        p.y+=p.v;
+        p.x+=p.drift+Math.sin(time*.001+i)*.05;
+        if(p.y>h+40||p.x<-20||p.x>w+20)Object.assign(p,makeRain(w,h,i),{y:-Math.random()*h*.35});
+        const x=snap(p.x,4), y=snap(p.y,4);
+        ctx.fillStyle=p.c;
+        ctx.globalAlpha=p.a;
+        for(let b=0;b<p.blocks;b++)ctx.fillRect(x,y-b*p.gap,p.size,p.size*2);
+      });
+      ctx.globalAlpha=1;
+    };
+    const drawFlow=(time,w,h)=>{
+      ctx.globalCompositeOperation="destination-out";
+      ctx.fillStyle="rgba(0,0,0,.12)";
+      ctx.fillRect(0,0,w,h);
+      ctx.globalCompositeOperation="source-over";
+      particles.forEach((p,i)=>{
+        const px=p.x, py=p.y;
+        const ang=noise(p.x*.0036+time*.000035,p.y*.0036-time*.000022)*Math.PI*4;
+        const nx=p.x+Math.cos(ang)*(0.28+p.s);
+        const ny=p.y+Math.sin(ang)*(0.28+p.s);
+        if(nx<-8||nx>w+8||ny<-8||ny>h+8){Object.assign(p,makeFlow(w,h,i));return;}
+        p.x=nx;p.y=ny;
+        ctx.globalAlpha=p.a;
+        ctx.strokeStyle=p.c;
+        ctx.lineWidth=1.35;
+        ctx.beginPath();
+        ctx.moveTo(px,py);
+        ctx.lineTo(p.x,p.y);
+        ctx.stroke();
+      });
+      ctx.globalAlpha=1;
+    };
+    const drawAurora=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);
+      for(let i=0;i<7;i++){
+        const yBase=h*(.16+i*.12);
+        ctx.beginPath();
+        for(let x=-80;x<=w+80;x+=48){
+          const y=yBase+Math.sin(x*.006+time*.00024+i)*32+Math.sin(x*.017-time*.00018+i*2)*12;
+          if(x===-80)ctx.moveTo(x,y);else ctx.lineTo(x,y);
+        }
+        ctx.strokeStyle=colors[i%colors.length];
+        ctx.globalAlpha=.06+i*.011;
+        ctx.lineWidth=1.3+(i%3)*.55;
+        ctx.stroke();
+      }
+      ctx.globalAlpha=1;
+    };
+    const drawStars=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);
+      particles.forEach((p,i)=>{
+        p.y+=p.v;
+        p.x+=Math.sin(time*.00045+i)*.08;
+        if(p.y>h+8)Object.assign(p,makeStar(w,h,i),{y:-8});
+        ctx.fillStyle=p.c;
+        ctx.globalAlpha=p.a*(.72+.28*Math.sin(time*.002+i));
+        const x=snap(p.x,2), y=snap(p.y,2);
+        ctx.fillRect(x,y,p.size,p.size);
+        if(p.size>1){
+          ctx.globalAlpha*=.36;
+          ctx.fillRect(x-2,y, p.size+4, 1);
+          ctx.fillRect(x,y-2, 1, p.size+4);
+        }
+      });
+      ctx.globalAlpha=1;
+    };
+    const drawCircuit=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);
+      particles.forEach((p,i)=>{
+        p.y+=p.v;
+        if(p.y>h+160)Object.assign(p,makeCircuit(w,h,i),{y:-120});
+        let x=p.x, y=p.y;
+        ctx.beginPath();
+        ctx.moveTo(snap(x,8),snap(y,8));
+        p.segs.forEach(([dx,dy])=>{x+=dx;y+=dy;ctx.lineTo(snap(x,8),snap(y,8));});
+        ctx.strokeStyle=p.c;
+        ctx.globalAlpha=p.a*(.6+.4*Math.sin(time*.001+p.phase));
+        ctx.lineWidth=1.45;
+        ctx.stroke();
+        ctx.fillStyle=p.c;
+        ctx.globalAlpha*=.8;
+        ctx.fillRect(snap(x,8)-2,snap(y,8)-2,5,5);
+      });
+      ctx.globalAlpha=1;
+    };
+    const step=(time)=>{
+      if(stopped)return;
+      const w=view.w, h=view.h;
+      if(effect==="rain")drawRain(time,w,h);
+      else if(effect==="flow")drawFlow(time,w,h);
+      else if(effect==="aurora")drawAurora(time,w,h);
+      else if(effect==="stars")drawStars(time,w,h);
+      else if(effect==="circuit")drawCircuit(time,w,h);
+      if(!reduced)raf=requestAnimationFrame(step);
+    };
+    resize();
+    window.addEventListener("resize",resize);
+    let ro=null;
+    if(window.ResizeObserver){ro=new ResizeObserver(resize);ro.observe(canvas);}
+    step(performance.now());
+    return ()=>{stopped=true;cancelAnimationFrame(raf);window.removeEventListener("resize",resize);if(ro)ro.disconnect();};
+  },[effect,t.acc,t.acc2,t.warm,t.f1]);
+  if(!["rain","flow","aurora","stars","circuit"].includes(effect))return null;
+  const opacity=effect==="rain"?0.58:effect==="flow"?0.86:effect==="aurora"?0.66:effect==="stars"?0.82:effect==="circuit"?0.78:0.5;
+  return <canvas ref={ref} aria-hidden="true" style={{position:"absolute",inset:0,width:"100%",height:"100%",zIndex:0,pointerEvents:"none",opacity}}/>;
+}
 
 const sv=(d,w=16)=><svg width={w} height={w} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{d}</svg>;
 const IC={
@@ -1603,7 +2017,7 @@ function MDWrap({children}){
 
 // ============================================================
 function HyprChat(){
-  const [tm,setTm]=useState(()=>{try{return localStorage.getItem("hc-theme")||"nord";}catch{return "nord";}});
+  const [tm,setTm]=useState(()=>{try{return localStorage.getItem("hc-theme")||"hyprflat";}catch{return "hyprflat";}});
   const [fi,setFi]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font")||"0");}catch{return 0;}});
   const [tokenLimit,setTokenLimit]=useState(()=>{try{return parseInt(localStorage.getItem("hc-token-limit")||"0");}catch{return 0;}});
   const [numCtx,setNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-num-ctx")||"0");}catch{return 0;}});
@@ -1611,7 +2025,7 @@ function HyprChat(){
   const [defaultTopP,setDefaultTopP]=useState(()=>{try{return parseFloat(localStorage.getItem("hc-top-p")||"0.9");}catch{return 0.9;}});
   const [compactMode,setCompactMode]=useState(()=>{try{return localStorage.getItem("hc-compact")==="1";}catch{return false;}});
   const [autoExpandThink,setAutoExpandThink]=useState(()=>{try{return localStorage.getItem("hc-auto-expand-think")==="1";}catch{return false;}});
-  const [scanlineEffect,setScanlineEffect]=useState(()=>{try{return localStorage.getItem("hc-scanline")==="1";}catch{return false;}});
+  const [bgEffect,setBgEffect]=useState(()=>{try{const saved=localStorage.getItem("hc-bg-effect");if(saved&&BACKGROUND_EFFECTS.some(e=>e.id===saved))return saved;return localStorage.getItem("hc-scanline")==="1"?"scanlines":"dots";}catch{return "dots";}});
   const [showNavLabels,setShowNavLabels]=useState(()=>{try{return localStorage.getItem("hc-nav-labels")!=="0";}catch{return true;}});
   const [thinkMode,setThinkMode]=useState(()=>{try{return localStorage.getItem("hc-think-mode")||"auto";}catch{return "auto";}});
   // Effort Level — global default (0=Blurt, 1=Ponder, 2=Forge, 3=Galaxy Brain)
@@ -1632,6 +2046,7 @@ function HyprChat(){
   const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"14");}catch{return 14;}});
   const [chatWidth,setChatWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-w")||"880");}catch{return 880;}});
   const [wsModel,setWsModel]=useState(()=>{try{return localStorage.getItem("hc-ws-model")||"qwen2.5:7b";}catch{return "qwen2.5:7b";}});
+  const [dailyWelcome,setDailyWelcome]=useState(()=>{try{const c=JSON.parse(localStorage.getItem("hc-daily-welcome")||"{}");if(c.version===WELCOME_VERSION&&c.date===localDayKey()&&c.message)return c.message;}catch{}return fallbackWelcome();});
   const [planningModel,setPlanningModel]=useState(()=>{try{return localStorage.getItem("hc-planning-model")||"";}catch{return "";}});
   const [coderModel,setCoderModel]=useState(()=>{try{return localStorage.getItem("hc-coder-model")||"";}catch{return "";}});
   // Coder Bot v2 — per-agent model overrides. Empty = inherit from umbrella (Planning/Coder) or chat model.
@@ -1674,7 +2089,9 @@ function HyprChat(){
   const [prompts,setPrompts]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-prompts")||"[]");}catch{return [];}});
   const [showPromptPicker,setShowPromptPicker]=useState(false);
   const [showEffortPicker,setShowEffortPicker]=useState(false);
+  const [showExportMenu,setShowExportMenu]=useState(false);
   const effortPickerRef=useRef(null);
+  const exportMenuRef=useRef(null);
   const [promptSearch,setPromptSearch]=useState("");
   const [editPrompt,setEditPrompt]=useState(null); // {id, title, content, category}
 
@@ -1703,7 +2120,7 @@ function HyprChat(){
   const [hfSelectedFiles,setHfSelectedFiles]=useState([]); // filenames to download
   const [hfGgufOnly,setHfGgufOnly]=useState(true);
   const t=THEMES[tm], font=FONTS[fi].v;
-  const LIGHT_PAIRS={nord:"oneLight",catppuccin:"oneLight",gruvbox:"oneLight",tokyoNight:"oneLight",rosePine:"oneLight",dracula:"oneLight",midnight:"oneLight",terminal:"oneLight",cyberpunk:"oneLight",solarizedDark:"solarizedLight",materialOcean:"oneLight",ayuDark:"oneLight",oneLight:"nord",solarizedLight:"solarizedDark"};
+  const LIGHT_PAIRS={hyprflat:"oneLight",nord:"oneLight",catppuccin:"oneLight",gruvbox:"oneLight",tokyoNight:"oneLight",rosePine:"oneLight",dracula:"oneLight",midnight:"oneLight",terminal:"oneLight",cyberpunk:"oneLight",solarizedDark:"solarizedLight",materialOcean:"oneLight",ayuDark:"oneLight",oneLight:"hyprflat",solarizedLight:"solarizedDark"};
   const isLightTheme=tm==="oneLight"||tm==="solarizedLight";
   const settingsLoadedRef=useRef(false);
   const seenSettingEffectRef=useRef({});
@@ -1780,7 +2197,7 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-top-p",String(defaultTopP));}catch{}},[defaultTopP]);
   useEffect(()=>{try{localStorage.setItem("hc-compact",compactMode?"1":"0");}catch{}},[compactMode]);
   useEffect(()=>{try{localStorage.setItem("hc-auto-expand-think",autoExpandThink?"1":"0");}catch{}},[autoExpandThink]);
-  useEffect(()=>{try{localStorage.setItem("hc-scanline",scanlineEffect?"1":"0");}catch{}},[scanlineEffect]);
+  useEffect(()=>{try{localStorage.setItem("hc-bg-effect",bgEffect);localStorage.setItem("hc-scanline",bgEffect==="scanlines"?"1":"0");}catch{}},[bgEffect]);
   useEffect(()=>{try{localStorage.setItem("hc-nav-labels",showNavLabels?"1":"0");}catch{}},[showNavLabels]);
   useEffect(()=>{try{localStorage.setItem("hc-think-mode",thinkMode);}catch{}},[thinkMode]);
   useEffect(()=>{try{localStorage.setItem("hc-effort-level",String(globalEffort));}catch{}},[globalEffort]);
@@ -1790,6 +2207,25 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
   useEffect(()=>{try{localStorage.setItem("hc-custom-quotes",JSON.stringify(customQuotes));}catch{}},[customQuotes]);
   useEffect(()=>{persistServerSetting("hc-ws-model","workspace_model",wsModel);},[wsModel]);
+  useEffect(()=>{
+    const date=localDayKey();
+    const model=wsModel||"";
+    try{
+      const cached=JSON.parse(localStorage.getItem("hc-daily-welcome")||"{}");
+      if(cached.version===WELCOME_VERSION&&cached.date===date&&cached.model===model&&cached.message){setDailyWelcome(cached.message);return;}
+    }catch{}
+    let cancelled=false;
+    fetch(`${API}/api/daily-message`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model})})
+      .then(r=>r.ok?r.json():null)
+      .then(d=>{
+        const msg=(d?.message||"").trim();
+        if(cancelled||!msg)return;
+        setDailyWelcome(msg);
+        try{localStorage.setItem("hc-daily-welcome",JSON.stringify({version:WELCOME_VERSION,date,model,message:msg}));}catch{}
+      })
+      .catch(()=>{});
+    return ()=>{cancelled=true;};
+  },[wsModel]);
   useEffect(()=>{persistServerSetting("hc-planning-model","planning_model",planningModel);},[planningModel]);
   useEffect(()=>{persistServerSetting("hc-coder-model","coder_model",coderModel);},[coderModel]);
   // Coder Bot v2 per-agent overrides — sync each to localStorage + guarded PATCH /api/settings.
@@ -1829,6 +2265,7 @@ function HyprChat(){
   const [ftsQuery,setFtsQuery]=useState("");
   const [ftsResults,setFtsResults]=useState([]);
   const [ftsLoading,setFtsLoading]=useState(false);
+  const [showMessageSearch,setShowMessageSearch]=useState(false);
   const [analyticsData,setAnalyticsData]=useState(null);
   const [analyticsDays,setAnalyticsDays]=useState(30);
   const [analyticsGroup,setAnalyticsGroup]=useState("day");
@@ -1836,7 +2273,7 @@ function HyprChat(){
   const [showScrollTop,setShowScrollTop]=useState(false);
   const [showScrollBottom,setShowScrollBottom]=useState(false);
   const [dragOver,setDragOver]=useState(false);
-  const [prevDarkTheme,setPrevDarkTheme]=useState(()=>{try{return localStorage.getItem("hc-prev-dark")||"nord";}catch{return "nord";}});
+  const [prevDarkTheme,setPrevDarkTheme]=useState(()=>{try{return localStorage.getItem("hc-prev-dark")||"hyprflat";}catch{return "hyprflat";}});
   const [autoTitle,setAutoTitle]=useState(()=>{try{return localStorage.getItem("hc-auto-title")!=="false";}catch{return true;}});
   useEffect(()=>{try{localStorage.setItem("hc-auto-title",autoTitle?"true":"false");}catch{}},[autoTitle]);
   const [showSysPromptPicker,setShowSysPromptPicker]=useState(false);
@@ -1934,9 +2371,28 @@ function HyprChat(){
   const [quickResults,setQuickResults]=useState([]); // per send
   const [searchLoading,setSearchLoading]=useState(false);
 
-  const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0),chatScrollRef=useRef(null),dlPanelRef=useRef(null),promptPickerRef=useRef(null),actIdRef=useRef(actId),ftsRef=useRef(null),importRef=useRef(null);
+  const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0),chatScrollRef=useRef(null),dlPanelRef=useRef(null),promptPickerRef=useRef(null),actIdRef=useRef(actId),titleSearchRef=useRef(null),ftsRef=useRef(null),importRef=useRef(null);
   actIdRef.current=actId;
   const act = convs.find(c=>c.id===actId);
+  const isCoderPersonaName = (name)=>{const n=(name||"").toLowerCase();return n.includes("coder")||n.includes("daedalus");};
+  const personaDescription=(mc)=>{
+    const explicit=(mc.parameters?.description||"").trim();
+    if(explicit)return explicit;
+    const n=(mc.name||"").toLowerCase();
+    if(n.includes("deep researcher"))return "Research-first persona for multi-source investigations, citations, and synthesized reports.";
+    if(n.includes("daedalus"))return "Agentic coding workflow for uploaded projects: plans, patches, reviews, and iterates toward a verified fix.";
+    if(n.includes("coder"))return "General coding assistant for shell work, file edits, debugging, and implementation help.";
+    if(n.includes("conspiracy"))return "Investigative research persona for hidden narratives, disputed claims, source comparison, and deep-dive synthesis.";
+    if(n.includes("based"))return "Irreverent conversational persona with a blunt tone for casual brainstorming and opinionated takes.";
+    const tools=(mc.tool_ids||[]);
+    const parts=[];
+    if(tools.includes("codeagent"))parts.push("code execution");
+    if(tools.includes("deep_research"))parts.push("deep research");
+    if(tools.includes("conspiracy_research"))parts.push("conspiracy research");
+    if(tools.includes("quick_search"))parts.push("quick search");
+    if((mc.kb_ids||[]).length)parts.push(`${(mc.kb_ids||[]).length} knowledge base${(mc.kb_ids||[]).length===1?"":"s"}`);
+    return parts.length?`Custom persona with ${parts.join(", ")} enabled.`:"Custom persona with its own model, prompt, tools, and knowledge context.";
+  };
   // Quick search — derived from active conversation's tool_ids
   const quickSearch = (act?.tool_ids||[]).includes("quick_search");
 
@@ -1977,14 +2433,9 @@ function HyprChat(){
       try{if(!localStorage.getItem("hc-last-model")&&cs[0]?.model)localStorage.setItem("hc-last-model",cs[0].model);}catch{}
       const isCouncil=v=>v==="1"||v===1||v===true;
       setConvs(cs.map(c=>({...c, messages: [], is_council: isCouncil(c.is_council), council_config_id: c.council_config_id||null})));
-      setActId(cs[0].id);
-      setLoadingConv(true);
-      // Fetch full first conversation
-      fetch(`${API}/api/conversations/${cs[0].id}`).then(r=>r.json()).then(full=>{
-        const parseMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
-        setConvs(prev=>prev.map(c=>c.id===cs[0].id?{...c, messages:(full.messages||[]).map(m=>({role:m.role,content:m.content,metadata:parseMeta(m)})), model:full.model||c.model, system_prompt:full.system_prompt||c.system_prompt, tool_ids:full.tool_ids||c.tool_ids||[], model_config_id:full.model_config_id||null, is_council:isCouncil(full.is_council), council_config_id:full.council_config_id||null}:c));
-        setLoadingConv(false);
-      }).catch(()=>{setLoadingConv(false);});
+      setActId(null);
+      setPanel("chat");
+      setLoadingConv(false);
     }}).catch(()=>{});
     fetch(`${API}/api/knowledge-bases`).then(r=>r.json()).then(setKbs).catch(()=>{});
     fetch(`${API}/api/tools`).then(r=>r.json()).then(setTools).catch(()=>{});
@@ -2144,7 +2595,7 @@ function HyprChat(){
     const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<300;
     if(nearBottom)el.scrollTop=el.scrollHeight;
   },[councilResponses,councilHostContent,councilVotes,councilVoting]);
-  useEffect(()=>{if(panel==="chat")inpRef.current?.focus();if(panel==="models")refreshModels();},[actId,panel]);
+  useEffect(()=>{if(panel==="chat"&&actId){try{inpRef.current?.focus({preventScroll:true});}catch{inpRef.current?.focus();}}if(panel==="models")refreshModels();},[actId,panel]);
   useEffect(()=>{
     if(!downloadsExpanded)return;
     const handler=(e)=>{if(dlPanelRef.current&&!dlPanelRef.current.contains(e.target))setDownloadsExpanded(false);};
@@ -2157,6 +2608,12 @@ function HyprChat(){
     document.addEventListener("mousedown",handler);
     return()=>document.removeEventListener("mousedown",handler);
   },[showPromptPicker]);
+  useEffect(()=>{
+    if(!showExportMenu)return;
+    const handler=(e)=>{if(exportMenuRef.current&&!exportMenuRef.current.contains(e.target))setShowExportMenu(false);};
+    document.addEventListener("mousedown",handler);
+    return()=>document.removeEventListener("mousedown",handler);
+  },[showExportMenu]);
   useEffect(()=>{
     if(!showEffortPicker)return;
     const handler=(e)=>{if(effortPickerRef.current&&!effortPickerRef.current.contains(e.target))setShowEffortPicker(false);};
@@ -2220,21 +2677,54 @@ function HyprChat(){
         fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(persona)}).catch(()=>{});
       }
       setConvs(p=>[c,...p]);setActId(c.id);
+      setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
+      return c.id;
     }catch{
       const newId=`l-${Date.now()}`;
       const c={id:newId,title:"New Chat",messages:[],model:defaultModel,system_prompt:persona?.system_prompt||"",...(persona||{})};
       setConvs(p=>[c,...p]);setActId(newId);
+      setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
+      return newId;
     }
-    setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
+  };
+
+  const startBlankChat=()=>{
+    setActId(null);
+    setPanel("chat");
+    setInp("");
+    setAttachments([]);
+    setEvts([]);
+    setQuickResults([]);
+    setSessionTokens(0);
+    setCtxTokens(0);
+    setGenTokens(0);
+    setExpandedPill(null);
+    setCouncilRunning(false);
+    setCouncilResponses({});
+    setCouncilHostContent("");
+    setLoadingConv(false);
+  };
+
+  const closeSidebarSearch=()=>{
+    setShowMessageSearch(false);
+    setSq("");
+    setFtsQuery("");
+    setFtsResults([]);
+  };
+  const openSidebarSearch=(focus="titles")=>{
+    setSidebar(true);
+    setWsPanel(false);
+    setShowMessageSearch(true);
+    setTimeout(()=>{(focus==="messages"?ftsRef:titleSearchRef).current?.focus();},80);
   };
 
   // ── Keyboard Shortcuts ──
   useEffect(()=>{
     const handler=(e)=>{
-      if((e.ctrlKey||e.metaKey)&&e.key==="k"){e.preventDefault();setSidebar(true);setTimeout(()=>ftsRef.current?.focus(),100);}
-      if((e.ctrlKey||e.metaKey)&&e.key==="n"){e.preventDefault();newChat(true);}
+      if((e.ctrlKey||e.metaKey)&&e.key==="k"){e.preventDefault();openSidebarSearch("messages");}
+      if((e.ctrlKey||e.metaKey)&&e.key==="n"){e.preventDefault();startBlankChat();}
       if((e.ctrlKey||e.metaKey)&&e.key==="/"){e.preventDefault();setSidebar(p=>!p);}
-      if(e.key==="Escape"){if(showPromptPicker)setShowPromptPicker(false);else if(previewFile){setPreviewFile(null);setPreviewContent(null);setPreviewError(null);setPreviewArchive(null);}else if(showSysPromptPicker)setShowSysPromptPicker(false);else if(ftsQuery){setFtsQuery("");setFtsResults([]);}}
+      if(e.key==="Escape"){if(showPromptPicker)setShowPromptPicker(false);else if(previewFile){setPreviewFile(null);setPreviewContent(null);setPreviewError(null);setPreviewArchive(null);}else if(showSysPromptPicker)setShowSysPromptPicker(false);else if(ftsQuery||sq){setSq("");setFtsQuery("");setFtsResults([]);}else if(showMessageSearch)closeSidebarSearch();}
     };
     document.addEventListener("keydown",handler);
     return ()=>document.removeEventListener("keydown",handler);
@@ -2542,7 +3032,7 @@ function HyprChat(){
   const send=async()=>{
     if(streaming||loadingConv||(!inp.trim()&&!attachments.length))return;
     let cid=actId;
-    if(!cid){await newChat();return;}
+    if(!cid){cid=await newChat(true);if(!cid)return;}
     const cv=convs.find(c=>c.id===cid);
     // Route council chats to council sender
     if(cv?.is_council){await sendCouncil();return;}
@@ -2651,13 +3141,13 @@ function HyprChat(){
     const isArchive=(f)=>{const n=(f.name||"").toLowerCase();return n.endsWith(".zip")||n.endsWith(".tar")||n.endsWith(".tar.gz")||n.endsWith(".tgz")||n.endsWith(".tar.bz2")||n.endsWith(".tbz2");};
     const isPdf=(f)=>(f.name||"").toLowerCase().endsWith(".pdf");
     const isImage=(f)=>(f.type||"").startsWith("image/")||/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(f.name||"");
-    const coderActive=act?.persona_name&&act.persona_name.includes("Coder");
+    const coderActive=isCoderPersonaName(act?.persona_name);
     let remaining=files;
     if(coderActive){
       const archives=files.filter(isArchive);
       remaining=files.filter(f=>!isArchive(f));
       if(archives.length){
-        if(archives.length>1)console.warn("Multiple archives dropped — only the first will be attached as a Coder Bot project.");
+        if(archives.length>1)console.warn("Multiple archives dropped — only the first will be attached as a Daedalus project.");
         uploadCoderProject(archives[0]);
       }
     }
@@ -3336,9 +3826,9 @@ function HyprChat(){
     return _rendered;
   };
 
-  const glass={background:`${t.surface}CC`,backdropFilter:"blur(24px)",border:`1px solid ${t.brd}44`};
+  const glass={background:`${t.surface}F2`,backdropFilter:"none",border:`1px solid ${t.brd}55`,boxShadow:"none"};
   const _navShort={Chat:"Chat","Knowledge Bases":"KB",Tools:"Tools",Personas:"Personas","Prompt Library":"Prompts","Council of AI":"Council","Model Manager":"Models",Analytics:"Stats",Settings:"Settings"};
-  const nb=(p,ico,lab)=><button onClick={()=>setPanel(p)} title={lab} style={{width:52,height:showNavLabels?50:48,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:12,cursor:"pointer",border:"none",background:panel===p?`${t.acc}22`:"transparent",color:panel===p?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:panel===p?`0 0 10px ${t.acc}22`:"none",padding:showNavLabels?"3px 0 1px":0}}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.7,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{panel===p&&<div style={{position:"absolute",left:0,top:"18%",width:3,height:"64%",borderRadius:"0 3px 3px 0",background:t.acc,boxShadow:`0 0 6px ${t.acc}`}}/>}</button>;
+  const nb=(p,ico,lab)=><button onClick={()=>setPanel(p)} title={lab} style={{width:52,height:showNavLabels?48:46,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:8,cursor:"pointer",border:`1px solid ${panel===p?`${t.acc}55`:"transparent"}`,background:panel===p?`${t.acc}14`:"transparent",color:panel===p?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:"none",padding:showNavLabels?"3px 0 1px":0}}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{panel===p&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}</button>;
   const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?"#f0a030":t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${n}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
     const matchSearch=(c.title||"").toLowerCase().includes(sq.toLowerCase());
@@ -3346,10 +3836,22 @@ function HyprChat(){
     const matchTag=!activeTagFilter||tags.includes(activeTagFilter);
     return matchSearch&&matchTag;
   });
-  const inputS={width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"9px 12px",borderRadius:8,fontFamily:font,fontSize:13,outline:"none",boxSizing:"border-box"};
+  const inputS={width:"100%",background:`${t.bgDeep}E6`,border:`1px solid ${t.brd}55`,color:t.text,padding:"9px 12px",borderRadius:7,fontFamily:font,fontSize:13,outline:"none",boxSizing:"border-box"};
   const labelS={fontSize:11,color:t.mut,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:.6};
-  const cardS={background:`${t.surface}88`,border:`1px solid ${t.brd}44`,borderRadius:14,padding:18,marginBottom:14,animation:"fadeIn .3s"};
-  const btnS=(c,bg)=>({background:bg||`${c}22`,border:`1px solid ${c}44`,color:c,padding:"6px 12px",borderRadius:8,cursor:"pointer",fontFamily:font,fontSize:11,display:"flex",alignItems:"center",gap:5});
+  const cardS={background:`${t.surface}F0`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:18,marginBottom:14,animation:"fadeIn .3s",boxShadow:"none"};
+  const btnS=(c,bg)=>({background:bg||`${c}18`,border:`1px solid ${c}4D`,color:c,padding:"6px 12px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:11,display:"flex",alignItems:"center",gap:5,boxShadow:"none"});
+  const isEmptyChatSurface=panel==="chat"&&!loadingConv&&!councilRunning&&!streaming&&(!act||(!(act.messages||[]).length&&!act.is_council));
+  const emptyComposerLift=isEmptyChatSurface?"translate3d(0,clamp(-410px,calc(-50vh + 165px),-205px),0)":"translate3d(0,0,0)";
+  useEffect(()=>{
+    if(!isEmptyChatSurface)return;
+    const id=setTimeout(()=>{
+      try{inpRef.current?.focus({preventScroll:true});}catch{inpRef.current?.focus();}
+    },760);
+    return()=>clearTimeout(id);
+  },[isEmptyChatSurface]);
+  const composerActive=streaming||councilRunning;
+  const composerColor=councilRunning?t.pink:streaming?t.warm:quickSearch?t.f1:t.acc;
+  const sidebarSearchActive=showMessageSearch||sq||ftsQuery;
 
   // ============================================================
   // PANELS
@@ -3363,16 +3865,25 @@ function HyprChat(){
   // RENDER
   // ============================================================
   const _uiScale=uiFontSize/14;
-  return <div style={{height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:`linear-gradient(135deg,${t.bgDeep} 0%,${t.bg} 50%,${t.bgDeep} 100%)`,color:t.text,overflow:"hidden",position:"relative"}}>
-    <div style={{position:"absolute",inset:0,opacity:.025,zIndex:0,backgroundImage:`linear-gradient(${t.acc} 1px,transparent 1px),linear-gradient(90deg,${t.acc} 1px,transparent 1px)`,backgroundSize:"64px 64px"}}/>
-    {scanlineEffect&&<div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${t.acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:.4}}/>}
+  return <div style={{height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:t.bg,color:t.text,overflow:"hidden",position:"relative"}}>
+    {bgEffect==="dots"&&<div style={{position:"absolute",inset:0,opacity:.42,zIndex:0,pointerEvents:"none",backgroundImage:`radial-gradient(circle,${t.acc}18 1px,transparent 1.4px)`,backgroundSize:"24px 24px"}}/>}
+    <BackgroundCanvas effect={bgEffect} t={t}/>
+    {bgEffect==="scanlines"&&<div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${t.acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:.4}}/>}
 
     {/* NAV RAIL */}
-    <div style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...glass,borderRight:`1px solid ${t.brd}33`,zIndex:11,padding:"12px 0",gap:3}}>
+    <div style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...glass,borderRight:`1px solid ${t.brd}55`,zIndex:11,padding:"12px 0",gap:4}}>
       {/* Logo dot */}
       <div style={{width:52,height:48,display:"flex",alignItems:"center",justifyContent:"center",marginBottom:6}}>
-        <div style={{width:14,height:14,borderRadius:"50%",background:t.acc,boxShadow:`0 0 16px ${t.acc}DD,0 0 32px ${t.acc}55`,animation:"glow 3s ease-in-out infinite"}}/>
+        <div style={{width:24,height:24,borderRadius:8,background:t.bgDeep,border:`1px solid ${t.brd}66`,position:"relative",overflow:"hidden"}}>
+          <div style={{position:"absolute",left:5,top:5,width:7,height:14,background:t.acc,opacity:.95}}/>
+          <div style={{position:"absolute",right:5,bottom:5,width:7,height:14,background:t.warm,opacity:.9}}/>
+        </div>
       </div>
+      <button onClick={()=>{if(showMessageSearch&&sidebar)closeSidebarSearch();else openSidebarSearch("titles");}} title="Search conversations" style={{width:52,height:showNavLabels?48:46,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:8,cursor:"pointer",border:`1px solid ${sidebarSearchActive?`${t.acc}55`:"transparent"}`,background:sidebarSearchActive?`${t.acc}14`:"transparent",color:sidebarSearchActive?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:"none",padding:showNavLabels?"3px 0 1px":0}}>
+        <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Search/></span>
+        {showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>Search</div>}
+        {sidebarSearchActive&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}
+      </button>
       {nb("chat",<IC.Chat/>,"Chat")}
       {nb("kb",<IC.Database/>,"Knowledge Bases")}
       {nb("tools",<IC.Tool/>,"Tools")}
@@ -3389,22 +3900,26 @@ function HyprChat(){
     </div>
 
     {/* CONVERSATION LIST */}
-    <div style={{width:sidebar?290:0,minWidth:sidebar?290:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",display:"flex",flexDirection:"column",borderRight:`1px solid ${t.brd}28`,overflow:"hidden",background:`${t.bgDeep}DD`,backdropFilter:"blur(24px)"}}>
+    <div style={{width:sidebar?304:0,minWidth:sidebar?304:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",display:"flex",flexDirection:"column",borderRight:`1px solid ${t.brd}55`,overflow:"hidden",background:`${t.bgDeep}F2`,backdropFilter:"none",position:"relative",zIndex:10}}>
       <div style={{padding:"12px 10px 6px",flexShrink:0}}>
-        <div style={{fontSize:11,fontWeight:700,letterSpacing:3,textTransform:"uppercase",color:t.mut,marginBottom:8,paddingLeft:2}}>HyprChat <span style={{fontSize:8,fontWeight:700,letterSpacing:1,color:t.pink,opacity:.8,padding:"1px 5px",background:`${t.pink}15`,border:`1px solid ${t.pink}30`,borderRadius:4}}>ALPHA</span></div>
+        <div style={{fontSize:13,fontWeight:800,letterSpacing:1.8,textTransform:"uppercase",color:t.acc,marginBottom:8,paddingLeft:2}}>HyprChat <span style={{fontSize:8,fontWeight:700,letterSpacing:1,color:t.warm,opacity:.95,padding:"1px 5px",background:`${t.warm}14`,border:`1px solid ${t.warm}40`,borderRadius:4}}>ALPHA</span></div>
       </div>
       <div style={{padding:"0 8px 6px",display:"flex",flexDirection:"column",gap:4,flexShrink:0}}>
         <div style={{display:"flex",gap:4}}>
-          <button onClick={()=>newChat()} style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,background:`${t.acc}18`,border:`1px solid ${t.acc}38`,color:t.acc,padding:"10px 12px",borderRadius:10,cursor:"pointer",fontFamily:font,fontSize:13,fontWeight:600,boxShadow:`0 0 8px ${t.acc}18`}}><IC.Plus/> New Chat</button>
+          <button onClick={startBlankChat} style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,background:t.warm,border:`1px solid ${t.warm}`,color:"#fff",padding:"10px 12px",borderRadius:8,cursor:"pointer",fontFamily:font,fontSize:13,fontWeight:700,boxShadow:"none"}}><IC.Plus/> New Chat</button>
           <button onClick={()=>{setWsPanel(p=>!p);setActiveWs(null);setWsDetail(null);}} style={{...btnS(wsPanel?t.acc:t.mut),padding:"5px 8px",fontSize:11}} title="Workspaces">🗂</button>
         </div>
         {!wsPanel&&<>
-        <input value={sq} onChange={e=>setSq(e.target.value)} placeholder="Filter titles..." style={{...inputS,padding:"5px 8px",fontSize:11}}/>
-        <div style={{position:"relative"}}>
-          <input ref={ftsRef} value={ftsQuery} onChange={e=>setFtsQuery(e.target.value)} onKeyDown={e=>{if(e.key==="Escape"){setFtsQuery("");setFtsResults([]);}}} placeholder="Search all messages... (Ctrl+K)" style={{...inputS,padding:"5px 8px",fontSize:11,paddingLeft:24}}/>
-          <span style={{position:"absolute",left:7,top:"50%",transform:"translateY(-50%)",color:t.mut,opacity:.5,display:"flex"}}><IC.Search/></span>
-          {ftsLoading&&<span style={{position:"absolute",right:7,top:"50%",transform:"translateY(-50%)",fontSize:9,color:t.mut}}>...</span>}
-        </div>
+        {showMessageSearch&&<div style={{display:"flex",flexDirection:"column",gap:4,animation:"fadeIn .16s both"}}>
+          <div style={{position:"relative"}}>
+            <input ref={titleSearchRef} value={sq} onChange={e=>setSq(e.target.value)} onKeyDown={e=>{if(e.key==="Escape"){closeSidebarSearch();}}} placeholder="Filter chat titles..." style={{...inputS,padding:"7px 30px 7px 9px",fontSize:11}}/>
+            <span style={{position:"absolute",right:9,top:"50%",transform:"translateY(-50%)",color:t.mut,display:"flex",pointerEvents:"none",opacity:.75}}><IC.Search/></span>
+          </div>
+          <div style={{position:"relative"}}>
+            <input ref={ftsRef} value={ftsQuery} onChange={e=>setFtsQuery(e.target.value)} onKeyDown={e=>{if(e.key==="Escape"){closeSidebarSearch();}}} placeholder="Search all messages..." style={{...inputS,padding:"7px 30px 7px 9px",fontSize:11}}/>
+            {ftsLoading?<span style={{position:"absolute",right:9,top:"50%",transform:"translateY(-50%)",fontSize:9,color:t.mut}}>...</span>:<button onClick={closeSidebarSearch} title="Close search" style={{position:"absolute",right:5,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:14,lineHeight:1,padding:"2px 4px"}}>×</button>}
+          </div>
+        </div>}
         {(()=>{
           const convIds=new Set(convs.map(c=>c.id));const allTags=[...new Set(Object.entries(convTags).filter(([k])=>convIds.has(k)).flatMap(([,v])=>v))];
           if(!allTags.length)return null;
@@ -3418,13 +3933,13 @@ function HyprChat(){
       {!wsPanel?<div style={{flex:1,overflowY:"auto",padding:"2px 5px"}}>
         {ftsResults.length>0?<div>
           <div style={{padding:"4px 6px",fontSize:9,color:t.mut,display:"flex",justifyContent:"space-between",alignItems:"center"}}><span>{ftsResults.length} results</span><button onClick={()=>{setFtsQuery("");setFtsResults([]);}} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:9,padding:0}}>Clear</button></div>
-          {ftsResults.map((r,i)=><div key={i} onClick={()=>{loadConversation(r.conversation_id);setFtsQuery("");setFtsResults([]);}} style={{padding:"6px 8px",borderRadius:8,cursor:"pointer",marginBottom:2,background:`${t.surface}44`,border:`1px solid ${t.brd}22`}}>
+          {ftsResults.map((r,i)=><div key={i} onClick={()=>{loadConversation(r.conversation_id);closeSidebarSearch();}} style={{padding:"6px 8px",borderRadius:8,cursor:"pointer",marginBottom:2,background:`${t.surface}44`,border:`1px solid ${t.brd}22`}}>
             <div style={{fontSize:11,fontWeight:600,color:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.conv_title||"Chat"}</div>
             <div style={{fontSize:10,color:t.mut,marginTop:2,display:"flex",gap:4,alignItems:"center"}}><span style={{fontSize:8,padding:"1px 4px",borderRadius:3,background:`${t.brd}22`,color:t.dim}}>{r.role}</span></div>
             <div style={{fontSize:10,color:t.dim,marginTop:2,lineHeight:1.4,maxHeight:40,overflow:"hidden"}} dangerouslySetInnerHTML={{__html:(r.snippet||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/&lt;(\/?mark)&gt;/g,"<$1>")}}/>
           </div>)}
         </div>:(()=>{const pinnedC=filtC.filter(c=>c.pinned==="1"||c.pinned===1);const unpinnedC=filtC.filter(c=>c.pinned!=="1"&&c.pinned!==1);const renderConv=(c)=>{const isCouncil=c.is_council==="1"||c.is_council===1||c.is_council===true;const hasPersona=!!c.persona_name&&!isCouncil;const tags=convTags[c.id]||[];const isAct=c.id===actId&&panel==="chat";const accentColor=isCouncil?t.pink:hasPersona?t.warm:t.acc;const isPinned=c.pinned==="1"||c.pinned===1;return <div key={c.id} style={{marginBottom:1}}>
-        <div onClick={()=>loadConversation(c.id)} style={{padding:"10px 12px",borderRadius:9,cursor:"pointer",background:isAct?`${accentColor}18`:(isCouncil||hasPersona)?`${accentColor}10`:"transparent",border:isAct?`1px solid ${accentColor}44`:(isCouncil||hasPersona)?`1px solid ${accentColor}25`:"1px solid transparent",display:"flex",justifyContent:"space-between",alignItems:"center",borderLeft:(isCouncil||hasPersona)?`3px solid ${isAct?accentColor:`${accentColor}66`}`:"3px solid transparent"}}>
+        <div onClick={()=>loadConversation(c.id)} style={{padding:"10px 12px",borderRadius:8,cursor:"pointer",background:isAct?`${accentColor}14`:(isCouncil||hasPersona)?`${accentColor}0C`:"transparent",border:isAct?`1px solid ${accentColor}50`:(isCouncil||hasPersona)?`1px solid ${accentColor}25`:"1px solid transparent",display:"flex",justifyContent:"space-between",alignItems:"center",borderLeft:(isCouncil||hasPersona)?`3px solid ${isAct?accentColor:`${accentColor}66`}`:"3px solid transparent"}}>
           <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:13,color:isAct?t.text:t.dim,flex:1,fontWeight:isAct?500:400,display:"flex",alignItems:"center",gap:5}}>
             {isCouncil&&<span style={{flexShrink:0,color:t.pink,display:"flex",opacity:isAct?1:.7}}><IC.Council/></span>}
             {hasPersona&&(c.persona_avatar?<img src={`${API}${c.persona_avatar}`} style={{width:14,height:14,borderRadius:4,objectFit:"cover",flexShrink:0,opacity:isAct?1:.8}} alt=""/>:<span style={{flexShrink:0,color:t.warm,display:"flex",opacity:isAct?1:.7}}><IC.Bot/></span>)}
@@ -3485,8 +4000,8 @@ function HyprChat(){
     </div>
 
     {/* MAIN */}
-    <div style={{flex:1,display:"flex",flexDirection:"column",zIndex:5,minWidth:0}}>
-      <div style={{padding:"9px 16px",...glass,borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0,position:"relative",zIndex:100}}>
+    <div style={{flex:1,display:"flex",flexDirection:"column",zIndex:5,minWidth:0,position:"relative"}}>
+      <div style={{padding:"10px 18px",...glass,borderBottom:`1px solid ${t.brd}55`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0,position:"relative",zIndex:100}}>
         <div style={{display:"flex",alignItems:"center",gap:6}}>
           {panel==="chat"&&act&&<>
             {act.forked_from&&<div style={{display:"flex",alignItems:"center",gap:4,padding:"2px 8px",background:`${t.acc}12`,border:`1px solid ${t.acc}28`,borderRadius:16,fontSize:9,color:t.acc,cursor:"pointer"}} onClick={()=>loadConversation(act.forked_from)}>
@@ -3579,11 +4094,16 @@ function HyprChat(){
           <button onClick={()=>{if(isLightTheme){setTm(prevDarkTheme);}else{setPrevDarkTheme(tm);localStorage.setItem("hc-prev-dark",tm);setTm(LIGHT_PAIRS[tm]||"oneLight");}}} title={isLightTheme?"Switch to dark mode":"Switch to light mode"} style={{background:"none",border:`1px solid ${t.brd}33`,color:t.mut,cursor:"pointer",padding:"4px 8px",borderRadius:8,fontSize:13,display:"flex",alignItems:"center"}}>{isLightTheme?"\u2600\uFE0F":"\uD83C\uDF19"}</button>
           {/* Export / Import */}
           {panel==="chat"&&act&&(act.messages||[]).length>0&&<>
-            <button onClick={exportChat} title="Export as Markdown" style={{background:"none",border:`1px solid ${t.brd}33`,color:t.mut,cursor:"pointer",padding:"4px 8px",borderRadius:8,fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:2}}>MD</button>
-            <button onClick={exportChatJSON} title="Export as JSON" style={{background:"none",border:`1px solid ${t.brd}33`,color:t.mut,cursor:"pointer",padding:"4px 8px",borderRadius:8,fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:2}}>JSON</button>
+            <div ref={exportMenuRef} style={{position:"relative"}}>
+              <button onClick={()=>setShowExportMenu(p=>!p)} title="Export chat" style={{background:showExportMenu?`${t.acc}12`:"none",border:`1px solid ${showExportMenu?t.acc:t.brd}33`,color:showExportMenu?t.acc:t.mut,cursor:"pointer",padding:"4px 8px",borderRadius:8,fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:4}}><IC.Upload/> export</button>
+              {showExportMenu&&<div style={{position:"absolute",top:"calc(100% + 6px)",right:0,zIndex:250,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:8,boxShadow:`0 4px 20px #0008`,minWidth:150,padding:5,animation:"fadeIn .15s"}}>
+                <button onClick={()=>{setShowExportMenu(false);exportChat();}} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:"transparent",border:"none",color:t.dim,cursor:"pointer",padding:"7px 9px",borderRadius:6,fontFamily:font,fontSize:11,textAlign:"left"}}><span>Markdown</span><span style={{color:t.mut,fontSize:9}}>MD</span></button>
+                <button onClick={()=>{setShowExportMenu(false);exportChatJSON();}} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:"transparent",border:"none",color:t.dim,cursor:"pointer",padding:"7px 9px",borderRadius:6,fontFamily:font,fontSize:11,textAlign:"left"}}><span>JSON</span><span style={{color:t.mut,fontSize:9}}>JSON</span></button>
+              </div>}
+            </div>
           </>}
           <input ref={importRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>{if(e.target.files?.[0])importChatJSON(e.target.files[0]);e.target.value="";}}/>
-          <button onClick={()=>importRef.current?.click()} title="Import chat from JSON" style={{background:"none",border:`1px solid ${t.brd}33`,color:t.mut,cursor:"pointer",padding:"4px 8px",borderRadius:8,fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:2}}><IC.Upload/> import</button>
+          <button onClick={()=>importRef.current?.click()} title="Import chat from JSON" style={{background:"none",border:`1px solid ${t.brd}33`,color:t.mut,cursor:"pointer",padding:"4px 8px",borderRadius:8,fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:2}}><IC.Download/> import</button>
           {panel==="chat"&&act&&(()=>{
             // During streaming: show prompt + live gen tokens. After: show total context used.
             const promptToks=ctxTokens||0;
@@ -3609,11 +4129,6 @@ function HyprChat(){
             </div>;
           })()}
         </div>
-      </div>
-
-      {/* Stream bar */}
-      <div style={{height:3,background:`${t.surface}88`,overflow:"hidden",opacity:streaming?1:0,transition:"opacity .3s"}}>
-        <div style={{height:"100%",background:`linear-gradient(90deg,transparent,${t.acc},transparent)`,animation:streaming?"slide 1.5s ease-in-out infinite":"none",width:"40%"}}/>
       </div>
 
       {/* Status pills - removed from here, now in chat area */}
@@ -4066,7 +4581,7 @@ function HyprChat(){
           }catch(e){alert("Failed: "+e.message);}
         }} style={{...btnS(t.acc),fontSize:10}}>Restore Defaults</button>
         <button onClick={async()=>{
-          const mc={name:"New Persona",base_model:models[0]||"",system_prompt:"You are a helpful assistant.",tool_ids:[],kb_ids:[],parameters:{}};
+          const mc={name:"New Persona",base_model:models[0]||"",system_prompt:"You are a helpful assistant.",tool_ids:[],kb_ids:[],parameters:{description:"Custom assistant tuned with its own model, prompt, tools, and knowledge context."}};
           try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});const d=await r.json();setMcs(p=>[...p,d]);setEditMc(d.id);}
           catch{const id=`mc-${Date.now()}`;setMcs(p=>[...p,{id,...mc}]);setEditMc(id);}
         }} style={btnS(t.pink)}><IC.Plus/> New Persona</button>
@@ -4094,6 +4609,7 @@ function HyprChat(){
                 {isE?<input value={mc.name} onChange={e=>setMcs(p=>p.map(x=>x.id===mc.id?{...x,name:e.target.value}:x))} style={{...inputS,fontSize:14,fontWeight:600,background:"transparent",border:"none",padding:0,color:t.text,width:200}}/>
                 :<div style={{fontSize:14,fontWeight:600,color:t.text}}>{mc.name}</div>}
                 <div style={{fontSize:10,color:t.mut,marginTop:2}}>Base: {mc.base_model||"none"}</div>
+                {!isE&&<div style={{fontSize:11,color:t.dim,marginTop:6,lineHeight:1.45,maxWidth:720}}>{personaDescription(mc)}</div>}
               </div>
             </div>
             <div style={{display:"flex",gap:4}}>
@@ -4106,6 +4622,10 @@ function HyprChat(){
             <div style={{marginBottom:12}}>
               <label style={labelS}>Base Model</label>
               <ModelPicker value={mc.base_model} onChange={v=>setMcs(p=>p.map(x=>x.id===mc.id?{...x,base_model:v}:x))} models={models} modelDetails={modelDetails} t={t} font={font}/>
+            </div>
+            <div style={{marginBottom:12}}>
+              <label style={labelS}>Description</label>
+              <textarea value={mc.parameters?.description||""} onChange={e=>setMcs(p=>p.map(x=>x.id===mc.id?{...x,parameters:{...(x.parameters||{}),description:e.target.value}}:x))} rows={2} placeholder={personaDescription({...mc,parameters:{...(mc.parameters||{}),description:""}})} style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:58}}/>
             </div>
             <div style={{marginBottom:12}}>
               <label style={labelS}>System Prompt</label>
@@ -4882,11 +5402,11 @@ function HyprChat(){
         </div>
       </div>
 
-      {/* TILE: Coder Bot — all coder-bot-related settings live here.
+      {/* TILE: Daedalus — all coder-agent-related settings live here.
           Includes the umbrella Planning/Coder model pickers, the new collapsible
           per-agent model overrides card, and OpenHands runtime knobs. */}
       <div style={{background:`${t.surface}33`,border:`1px solid ${t.brd}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
-        <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:14,display:"flex",alignItems:"center",gap:8}}>🤖 Coder Bot</div>
+        <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:14,display:"flex",alignItems:"center",gap:8}}>🏛️ Daedalus</div>
 
         <div style={{marginBottom:14}}>
           <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Code Planning Model</div>
@@ -4920,7 +5440,7 @@ function HyprChat(){
         <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
           <div onClick={()=>setCoderBotModelsOpen(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",userSelect:"none"}}>
             <span style={{fontSize:14}}>🎛</span>
-            <span style={{fontSize:12,fontWeight:700,color:t.fg,letterSpacing:.3}}>Per-Agent Model Overrides</span>
+            <span style={{fontSize:12,fontWeight:700,color:t.text,letterSpacing:.3}}>Per-Agent Model Overrides</span>
             <span style={{flex:1}}/>
             <span style={{fontSize:10,color:t.mut}}>{coderBotModelsOpen ? "▴ collapse" : "▾ expand"}</span>
           </div>
@@ -5010,7 +5530,7 @@ function HyprChat(){
         <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14,display:"flex",alignItems:"center",gap:10}}>
           <label style={{fontSize:12,color:t.dim,fontWeight:600,whiteSpace:"nowrap"}}>OpenHands Enabled</label>
           <div onClick={()=>setOpenhandsEnabled(!openhandsEnabled)} style={{width:36,height:20,borderRadius:10,background:openhandsEnabled?t.acc:`${t.mut}44`,cursor:"pointer",position:"relative",transition:"all .2s"}}>
-            <div style={{width:16,height:16,borderRadius:8,background:t.fg,position:"absolute",top:2,left:openhandsEnabled?18:2,transition:"all .2s"}}/>
+            <div style={{width:16,height:16,borderRadius:8,background:t.text,position:"absolute",top:2,left:openhandsEnabled?18:2,transition:"all .2s"}}/>
           </div>
           <span style={{fontSize:10,color:t.mut}}>{openhandsEnabled?"On":"Off"}</span>
         </div>
@@ -5019,7 +5539,7 @@ function HyprChat(){
           <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
             <label style={{fontSize:12,color:t.dim,fontWeight:600,whiteSpace:"nowrap"}}>Aider Enabled</label>
             <div onClick={()=>setAiderEnabled(!aiderEnabled)} style={{width:36,height:20,borderRadius:10,background:aiderEnabled?t.acc:`${t.mut}44`,cursor:"pointer",position:"relative",transition:"all .2s"}}>
-              <div style={{width:16,height:16,borderRadius:8,background:t.fg,position:"absolute",top:2,left:aiderEnabled?18:2,transition:"all .2s"}}/>
+              <div style={{width:16,height:16,borderRadius:8,background:t.text,position:"absolute",top:2,left:aiderEnabled?18:2,transition:"all .2s"}}/>
             </div>
             <span style={{fontSize:10,color:t.mut}}>{aiderEnabled?"Uploaded-project fixes use Aider":"Fallback Fixer"}</span>
           </div>
@@ -5039,12 +5559,12 @@ function HyprChat(){
         </div>
 
         <div style={{marginBottom:14}}>
-          <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Coder Context Window: <span style={{color:t.acc}}>{coderNumCtx.toLocaleString()}</span></label>
+          <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Daedalus Context Window: <span style={{color:t.acc}}>{coderNumCtx.toLocaleString()}</span></label>
           <input type="range" min="2048" max="262144" step="2048" value={coderNumCtx} onChange={e=>setCoderNumCtx(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
           <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>2048</span><span>262144</span></div>
           <div style={{fontSize:9,color:t.mut,marginTop:4,lineHeight:1.5}}>
             {coderNumCtx<=16384?<><b style={{color:t.acc}}>Compact (≤16K)</b> — small tasks, single-function edits. Fits comfortably with 3 models warm.</>
-            :coderNumCtx<=65536?<><b style={{color:t.acc}}>Recommended (32–64K)</b> — sweet spot for most Coder Bot work. Multi-file refactors fit, VRAM stays comfortable.</>
+            :coderNumCtx<=65536?<><b style={{color:t.acc}}>Recommended (32–64K)</b> — sweet spot for most Daedalus work. Multi-file refactors fit, VRAM stays comfortable.</>
             :coderNumCtx<=131072?<><b style={{color:t.acc}}>Large (64–128K)</b> — whole-file analysis, big refactors. Keep only 1–2 models warm or you may hit VRAM limits.</>
             :<><b style={{color:t.err}}>Maximum (128–256K)</b> — whole-codebase context. Drop <code>OLLAMA_MAX_LOADED_MODELS</code> to 1 or expect OOM. First run after slider change reloads the model.</>}
           </div>
@@ -5071,14 +5591,24 @@ function HyprChat(){
       <div style={{background:`${t.surface}33`,border:`1px solid ${t.brd}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
         <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:14,display:"flex",alignItems:"center",gap:8}}>🎨 Appearance</div>
         <div style={{marginBottom:12}}>
-          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Theme</div>
           {(()=>{
             const previewKey=pendingTheme||tm;
             const pTh=THEMES[previewKey]||t;
             return <div>
-              <select value={previewKey} onChange={e=>setPendingTheme(e.target.value)} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"8px 12px",borderRadius:8,fontFamily:font,fontSize:12,outline:"none",cursor:"pointer",marginBottom:8}}>
-                {Object.entries(THEMES).map(([k,th])=><option key={k} value={k}>{th.name}</option>)}
-              </select>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))",gap:8,alignItems:"end",marginBottom:8}}>
+                <div>
+                  <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Theme</div>
+                  <select value={previewKey} onChange={e=>setPendingTheme(e.target.value)} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"8px 12px",borderRadius:8,fontFamily:font,fontSize:12,outline:"none",cursor:"pointer"}}>
+                    {Object.entries(THEMES).map(([k,th])=><option key={k} value={k}>{th.name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Background</div>
+                  <select value={bgEffect} onChange={e=>setBgEffect(e.target.value)} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"8px 12px",borderRadius:8,fontFamily:font,fontSize:12,outline:"none",cursor:"pointer"}}>
+                    {BACKGROUND_EFFECTS.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+                  </select>
+                </div>
+              </div>
               <div style={{padding:"10px 14px",background:pTh.bgDeep,border:`1px solid ${pTh.brd}44`,borderRadius:10,marginBottom:8}}>
                 <div style={{display:"flex",gap:4,marginBottom:8,flexWrap:"wrap"}}>
                   {[["bg",pTh.bg],["surface",pTh.surface],["text",pTh.text],["accent",pTh.acc],["warm",pTh.warm],["ok",pTh.ok],["err",pTh.err],["pink",pTh.pink]].map(([label,c])=><div key={label} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
@@ -5146,7 +5676,6 @@ function HyprChat(){
           {[
             [compactMode,setCompactMode,"Compact"],
             [autoExpandThink,setAutoExpandThink,"Auto-think"],
-            [scanlineEffect,setScanlineEffect,"Scanlines"],
             [showNavLabels,setShowNavLabels,"Nav Labels"],
             [autoTitle,setAutoTitle,"Auto Title"],
           ].map(([val,setter,label],idx)=><div key={idx} onClick={()=>setter(!val)} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${t.bgDeep}`,borderRadius:7,border:`1px solid ${val?t.acc:t.brd}33`,cursor:"pointer",fontSize:12}}>
@@ -5400,17 +5929,28 @@ function HyprChat(){
           onDrop={e=>{e.preventDefault();e.stopPropagation();setDragOver(false);const files=Array.from(e.dataTransfer.files);if(files.length)handleFileUpload(files);}}>
           {/* Drag overlay */}
           {dragOver&&<div style={{position:"absolute",inset:0,zIndex:50,background:`${t.acc}12`,border:`3px dashed ${t.acc}`,borderRadius:16,display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(4px)",pointerEvents:"none"}}>
-            <div style={{fontSize:15,color:t.acc,fontWeight:700,letterSpacing:1}}>{act?.persona_name&&act.persona_name.includes("Coder")?"Drop files or a project archive (.zip, .tar.gz)":"Drop files to attach (PDFs supported)"}</div>
+            <div style={{fontSize:15,color:t.acc,fontWeight:700,letterSpacing:1}}>{isCoderPersonaName(act?.persona_name)?"Drop files or a project archive (.zip, .tar.gz)":"Drop files to attach (PDFs supported)"}</div>
           </div>}
           {/* Scroll-to-top / Scroll-to-bottom */}
           {showScrollTop&&<button onClick={()=>chatScrollRef.current?.scrollTo({top:0,behavior:"smooth"})} style={{position:"absolute",top:12,right:20,zIndex:20,...glass,border:`1px solid ${t.brd}33`,borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:14,boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to top">{"\u2191"}</button>}
           {showScrollBottom&&<button onClick={()=>chatScrollRef.current?.scrollTo({top:chatScrollRef.current.scrollHeight,behavior:"smooth"})} style={{position:"absolute",bottom:12,right:20,zIndex:20,...glass,border:`1px solid ${t.brd}33`,borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:14,boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to bottom">{"\u2193"}</button>}
           {/* Messages */}
-          <div ref={chatScrollRef} onScroll={e=>{const el=e.target;setShowScrollTop(el.scrollTop>400);setShowScrollBottom(el.scrollHeight-el.scrollTop-el.clientHeight>400);}} style={{flex:1,overflowY:"auto",padding:"16px 0"}}>
-          {!act||!(act.messages||[]).length&&!councilRunning?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",gap:10,opacity:.5}}>
+          <div ref={chatScrollRef} onScroll={e=>{const el=e.target;setShowScrollTop(el.scrollTop>400);setShowScrollBottom(el.scrollHeight-el.scrollTop-el.clientHeight>400);}} style={{flex:1,overflowY:"auto",padding:"20px 0 18px"}}>
+          {!act||!(act.messages||[]).length&&!councilRunning?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",gap:10,opacity:(loadingConv||act?.is_council)?0.68:1,paddingBottom:isEmptyChatSurface?250:0,pointerEvents:"none",transition:"padding-bottom .35s ease"}}>
             {loadingConv?<><div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div><div style={{fontSize:12,color:t.mut,letterSpacing:1}}>Loading conversation...</div></>
             :act?.is_council?<><div style={{fontSize:36,animation:"float 4s ease-in-out infinite"}}>⚖️</div><div style={{fontSize:12,color:t.mut,letterSpacing:1}}>{loadingConv?"Loading council history...":"Ask the council"}</div></>
-            :<><div style={{fontSize:36,animation:"float 4s ease-in-out infinite"}}>⟩_</div><div style={{fontSize:12,color:t.mut,letterSpacing:1}}>Start a conversation</div></>}
+            :<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:16,animation:"fadeIn .35s both",transform:isEmptyChatSurface?"translateY(-34px)":"none"}}>
+              <div style={{width:68,height:68,borderRadius:18,background:t.bgDeep,border:`1px solid ${t.brd}77`,position:"relative",overflow:"hidden",boxShadow:`0 0 26px ${t.acc}14`,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                <div style={{position:"absolute",inset:6,borderRadius:13,border:`1px solid ${t.brd}33`,background:`${t.surface}55`}}/>
+                <div style={{position:"absolute",left:23,top:18,width:10,height:32,borderRadius:2,background:t.acc,opacity:.95}}/>
+                <div style={{position:"absolute",right:23,bottom:18,width:10,height:32,borderRadius:2,background:t.warm,opacity:.9}}/>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+                <div style={{fontSize:32,fontWeight:800,color:t.acc,letterSpacing:.7,lineHeight:1}}>HyprChat</div>
+                <div style={{width:120,height:1,background:`linear-gradient(90deg,transparent,${t.acc}88,transparent)`}}/>
+                <div style={{fontSize:13,color:t.dim,letterSpacing:1.8,textAlign:"center",maxWidth:520,lineHeight:1.7,textTransform:"none"}}>{dailyWelcome}</div>
+              </div>
+            </div>}
           </div>:act?.is_council?(()=>{
             // ── COUNCIL CHAT VIEW ──
             const councilCfg=councils.find(c=>c.id===act.council_config_id);
@@ -5434,14 +5974,14 @@ function HyprChat(){
             // Compat: flatten all rounds into .responses for voting display
             for(const turn of turns){turn.responses=Object.values(turn.rounds).flat();}
             const isLastTurn=(ti)=>ti===turns.length-1;
-            return <div key={actId||"empty"} style={{maxWidth:"100%",padding:"0 20px",overflowY:"auto"}}>
+              return <div key={actId||"empty"} style={{maxWidth:"100%",padding:"2px 20px 0",overflowY:"auto"}}>
               {turns.map((turn,ti)=><div key={ti} style={{marginBottom:28,animation:`fadeIn .3s both`}}>
                 {/* User message */}
                 <div style={{display:"flex",gap:9,alignItems:"flex-start",marginBottom:12}}>
-                  <div style={{width:27,height:27,borderRadius:7,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.f4}20`,border:`1px solid ${t.f4}28`,color:t.f4,flexShrink:0,marginTop:2}}><IC.User/></div>
+                  <div style={{width:28,height:28,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:t.bgDeep,border:`1px solid ${t.f4}40`,color:t.f4,flexShrink:0,marginTop:2}}><IC.User/></div>
                   <div style={{flex:1}}>
                     <div style={{fontSize:10,color:t.mut,marginBottom:2,fontWeight:600,letterSpacing:.5}}>you</div>
-                    <div style={{background:`${t.surface}50`,padding:"8px 12px",borderRadius:9,border:`1px solid ${t.brd}18`,lineHeight:1.6,fontSize:fontSize,color:t.dim}}><MDWrap>{md(turn.user.content)}</MDWrap></div>
+                    <div style={{background:`${t.surface}F0`,padding:"9px 13px",borderRadius:8,border:`1px solid ${t.brd}44`,lineHeight:1.65,fontSize:fontSize,color:t.text}}><MDWrap>{md(turn.user.content)}</MDWrap></div>
                   </div>
                 </div>
                 {/* Quick search results — show before last turn's responses */}
@@ -5452,9 +5992,9 @@ function HyprChat(){
                   </div>
                   <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:10}}>
                     {quickResults.map((r,ri)=>{const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();const isYT=r.type==="youtube";const isImg=r.type==="image";const hasTh=!!r.thumbnail;const domLetter=(hn||"?")[0].toUpperCase();
-                      return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:12,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}
+                      return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}F2`,border:`1px solid ${t.brd}55`,borderRadius:8,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}
                         onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
-                        <div style={{width:"100%",height:110,background:hasTh?(isYT?"#0a0a0a":"transparent"):`linear-gradient(135deg,${t.bgDeep}DD,${t.surface}AA,${t.acc}18)`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                        <div style={{width:"100%",height:110,background:hasTh?(isYT?"#0a0a0a":t.bgDeep):t.bgDeep,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
                           {hasTh?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";e.target.nextSibling&&(e.target.nextSibling.style.display="flex");}}/>:null}
                           {!hasTh&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
                             <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:32,height:32,borderRadius:4,display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
@@ -5604,7 +6144,7 @@ function HyprChat(){
               </div>}
               <div ref={chatEnd}/>
             </div>;
-          })():<div key={actId||"empty"} style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 16px"}}>
+          })():<div key={actId||"empty"} style={{maxWidth:chatWidth,margin:"0 auto",padding:"2px 18px 0"}}>
             {(()=>{const filteredMsgs=(act.messages||[]).filter(msg=>msg.role==="user"||msg.role==="assistant");
               // Find the index of the last assistant message to place quick search results before it
               let lastAssistantFilteredIdx=-1;
@@ -5622,9 +6162,9 @@ function HyprChat(){
                 </div>
                 <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:10}}>
                   {quickResults.map((r,ri)=>{const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();const isYT=r.type==="youtube";const isImg=r.type==="image";const hasTh=!!r.thumbnail;const domLetter=(hn||"?")[0].toUpperCase();
-                    return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:12,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}
+                    return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}F2`,border:`1px solid ${t.brd}55`,borderRadius:8,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}
                       onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
-                      <div style={{width:"100%",height:110,background:hasTh?(isYT?"#0a0a0a":"transparent"):`linear-gradient(135deg,${t.bgDeep}DD,${t.surface}AA,${t.acc}18)`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                      <div style={{width:"100%",height:110,background:hasTh?(isYT?"#0a0a0a":t.bgDeep):t.bgDeep,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
                         {hasTh?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";e.target.nextSibling&&(e.target.nextSibling.style.display="flex");}}/>:null}
                         {!hasTh&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
                           <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:32,height:32,borderRadius:4,display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
@@ -5645,8 +6185,8 @@ function HyprChat(){
                     </a>;})}
                 </div>
               </div>}
-              <div style={{marginBottom:compactMode?8:20,display:"flex",gap:12,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(i*.04,.2)}s both`}}>
-                <div style={{width:32,height:32,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",background:isU?`${t.f4}20`:`${personaColor}18`,border:`1px solid ${isU?t.f4:personaColor}33`,color:isU?t.f4:personaColor,flexShrink:0,marginTop:2,overflow:"hidden",boxShadow:`0 0 8px ${isU?t.f4:personaColor}22`}}>
+              <div style={{marginBottom:compactMode?8:22,display:"flex",gap:10,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(i*.04,.2)}s both`}}>
+                <div style={{width:32,height:32,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:isU?t.bgDeep:`${personaColor}12`,border:`1px solid ${isU?t.f4:personaColor}45`,color:isU?t.f4:personaColor,flexShrink:0,marginTop:2,overflow:"hidden",boxShadow:"none"}}>
                   {isU?<IC.User/>:personaAvatar?<img src={`${API}${personaAvatar}`} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
                 </div>
                 <div style={{flex:1,minWidth:0}}>
@@ -5660,7 +6200,7 @@ function HyprChat(){
                     {msg.created_at&&<span style={{fontSize:9,color:t.mut,opacity:.4,marginLeft:2}}>{new Date(msg.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
                     {!isU&&!msg.isS&&(()=>{const meta=typeof msg.metadata==="string"?(()=>{try{return JSON.parse(msg.metadata);}catch{return{};}})():(msg.metadata||{});const n=meta.refinements||0;if(n<=0)return null;const lvl=EFFORT_LEVELS[n]||EFFORT_LEVELS[EFFORT_LEVELS.length-1];return <span title={`Refined ${n}× via ${lvl.name}`} style={{fontSize:9,padding:"1px 6px",borderRadius:8,background:`${t.pink}15`,border:`1px solid ${t.pink}30`,color:t.pink,display:"inline-flex",alignItems:"center",gap:3,fontWeight:600}}>✨ Refined {n}×</span>;})()}
                   </div>
-                  <div style={{background:isU?`${t.surface}60`:"transparent",padding:isU?"10px 14px":"0",borderRadius:isU?10:0,border:isU?`1px solid ${t.brd}28`:"none",lineHeight:1.7,fontSize:fontSize,color:t.dim}}>
+                  <div style={{background:isU?`${t.surface}F0`:"transparent",padding:isU?"10px 14px":"0",borderRadius:isU?8:0,border:isU?`1px solid ${t.brd}44`:"none",lineHeight:1.7,fontSize:fontSize,color:isU?t.text:t.dim}}>
                     {isEditing?<div style={{display:"flex",flexDirection:"column",gap:6}}>
                       <textarea defaultValue={msg.content} ref={el=>{if(el&&!el._set){el._set=true;el.style.height=Math.min(el.scrollHeight,200)+"px";}}} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.acc}44`,color:t.text,padding:"8px 10px",borderRadius:6,fontFamily:font,fontSize:12,outline:"none",resize:"vertical",lineHeight:1.5,boxSizing:"border-box"}}
                         onChange={e=>setEditingMsg(p=>({...p,content:e.target.value}))}/>
@@ -5672,7 +6212,7 @@ function HyprChat(){
                     :msg.isS?mdStream(msg.content):<MDWrap>{md(msg.content)}</MDWrap>}
                     {isU&&msg.metadata?.images?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:msg.content?10:0}}>
                       {msg.metadata.images.map((img,ii)=><div key={ii} title={img.name} style={{display:"inline-flex",flexDirection:"column",gap:4,alignItems:"flex-start",maxWidth:260}}>
-                        <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:8,border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:`0 2px 10px ${t.acc}18`}}/>
+                        <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:8,border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:"none"}}/>
                         <span style={{fontSize:9,color:t.mut,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:260}}>📷 {img.name}</span>
                       </div>)}
                     </div>}
@@ -5784,9 +6324,10 @@ function HyprChat(){
           </div>}
         </div>
         </div>
+        <div style={{flexShrink:0,position:"relative",transform:emptyComposerLift,transition:"transform .7s cubic-bezier(.2,.8,.2,1)",willChange:"transform",zIndex:120,pointerEvents:"auto"}}>
         {/* TOOL TOGGLES BAR + QUICK SEARCH */}
         <div style={{padding:"0 16px",flexShrink:0}}>
-          <div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",gap:4,overflowX:"auto",padding:"4px 0",alignItems:"center"}}>
+          <div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",gap:6,overflowX:"auto",padding:"6px 0",alignItems:"center",minHeight:32}}>
             {!act?.is_council&&allTools.map(tl=>{
               const on=(act?.tool_ids||[]).includes(tl.id);
               const isQs=tl.id==="quick_search";
@@ -5794,14 +6335,14 @@ function HyprChat(){
               return <button key={tl.id} onClick={()=>{
                 if(!actId)return;
                 uConv(actId,c=>{const ids=c.tool_ids||[];return{...c,tool_ids:on?ids.filter(x=>x!==tl.id):[...ids,tl.id]};});
-              }} style={{display:"flex",alignItems:"center",gap:4,padding:"4px 10px",borderRadius:12,fontSize:10,fontWeight:on?600:400,cursor:"pointer",whiteSpace:"nowrap",background:on?`${col}18`:`${t.surface}44`,border:`1px solid ${on?col:t.brd}33`,color:on?col:t.mut,transition:"all .15s",boxShadow:on?`0 0 6px ${col}22`:"none"}}>
+              }} style={{display:"flex",alignItems:"center",gap:4,padding:"4px 10px",borderRadius:8,fontSize:10,fontWeight:on?700:500,cursor:"pointer",whiteSpace:"nowrap",background:on?`${col}18`:`${t.surface}D9`,border:`1px solid ${on?col:t.brd}44`,color:on?col:t.mut,transition:"all .15s",boxShadow:"none"}}>
                 {isQs&&searchLoading?<span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span>:(on?<IC.ToggleOn/>:<IC.ToggleOff/>)}{tl.name}
               </button>;
             })}
           </div>
         </div>
         {/* INPUT */}
-        <div style={{padding:"6px 18px 14px",flexShrink:0}}>
+        <div style={{padding:"6px 18px 16px",flexShrink:0}}>
           {/* Attachment chips */}
           {/* Council suggested prompts */}
           {act?.is_council&&!councilRunning&&(councilSuggestions.length>0||councilSugLoading)&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 0 6px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
@@ -5834,15 +6375,18 @@ function HyprChat(){
               </span>
             :<Chip key={i} l={`📎 ${a.name}`} c={t.f1} bg={`${t.f1}15`} onX={()=>setAttachments(p=>p.filter((_,j)=>j!==i))}/>)}
           </div>}
-          <div style={{maxWidth:chatWidth,margin:"0 auto",...glass,borderRadius:16,padding:"6px 6px 6px 14px",display:"flex",alignItems:"center",gap:6,border:`1px solid ${councilRunning?t.pink:streaming?t.warm:quickSearch?t.f1:t.acc}38`,boxShadow:`0 0 ${councilRunning||streaming?32:16}px ${councilRunning?t.pink:streaming?t.warm:t.acc}${councilRunning||streaming?"22":"0C"}`,transition:"box-shadow .4s,border-color .4s",minHeight:48}}>
+          <div className={isEmptyChatSurface?"empty-composer-box":""} style={{maxWidth:chatWidth,margin:"0 auto",...glass,borderRadius:8,padding:isEmptyChatSurface?"9px 7px 9px 14px":"6px 6px 6px 12px",display:"flex",alignItems:"center",gap:6,border:`1px solid ${composerColor}55`,boxShadow:composerActive?`0 0 18px ${composerColor}22`:"none",transition:"border-color .22s, box-shadow .5s",minHeight:isEmptyChatSurface?60:48,position:"relative",overflow:"visible",isolation:"isolate","--empty-composer-glow":`${composerColor}30`}}>
+            {composerActive&&<div aria-hidden="true" style={{position:"absolute",inset:0,borderRadius:8,pointerEvents:"none",overflow:"hidden",zIndex:0}}>
+              {["top","right","bottom","left"].map(side=><span key={side} className={`composer-trace composer-trace-${side}`} style={{"--trace-color":composerColor}}/>)}
+            </div>}
             {!act?.is_council&&<><button onClick={()=>fileRef.current?.click()} title="Attach file" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"4px 3px",display:"flex",alignItems:"center",flexShrink:0,opacity:.6}}>
               <IC.Paperclip/>
             </button>
             <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>{if(e.target.files?.length)handleFileUpload(Array.from(e.target.files));e.target.value="";}}/>
-            {(()=>{const coderMc=mcs.find(m=>m.name&&m.name.includes("Coder"));const isCoderActive=act?.persona_name&&act.persona_name.includes("Coder");return coderMc?<button onClick={()=>{if(isCoderActive)return;uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:coderMc.parameters?.avatar});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} title={isCoderActive?"Coder Bot active — drop a .zip/.tar.gz to attach a project":"Activate Coder Bot"} style={{background:isCoderActive?`${t.ok}20`:"none",border:isCoderActive?`1px solid ${t.ok}44`:"none",color:isCoderActive?t.ok:t.mut,cursor:isCoderActive?"default":"pointer",padding:"4px 5px",display:"flex",alignItems:"center",flexShrink:0,fontSize:13,opacity:isCoderActive?1:.7,borderRadius:6}}>&lt;/&gt;</button>:null;})()}
+            {(()=>{const coderMc=mcs.find(m=>isCoderPersonaName(m.name));const isCoderActive=isCoderPersonaName(act?.persona_name);return coderMc?<button onClick={()=>{if(!actId)return;if(isCoderActive){uConv(actId,{model_config_id:null,persona_name:null,persona_avatar:null,system_prompt:"",tool_ids:[]});setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:coderMc.parameters?.avatar});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} title={isCoderActive?"Disable Daedalus":"Activate Daedalus"} style={{background:isCoderActive?`${t.ok}20`:"none",border:isCoderActive?`1px solid ${t.ok}44`:"none",color:isCoderActive?t.ok:t.mut,cursor:"pointer",padding:"4px 5px",display:"flex",alignItems:"center",flexShrink:0,fontSize:13,opacity:isCoderActive?1:.7,borderRadius:6}}>&lt;/&gt;</button>:null;})()}
             {prompts.length>0&&<div ref={promptPickerRef} style={{position:"relative"}}>
               <button onClick={()=>{setShowPromptPicker(p=>!p);setPromptSearch("");}} title="Prompt Library (⚡)" style={{background:showPromptPicker?`${t.f1}15`:"none",border:"none",color:showPromptPicker?t.f1:t.mut,cursor:"pointer",padding:"4px 5px",display:"flex",alignItems:"center",flexShrink:0,fontSize:13,opacity:showPromptPicker?1:.7}}>⚡</button>
-              {showPromptPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:50,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8}}>
+              {showPromptPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8}}>
                 <input value={promptSearch} onChange={e=>setPromptSearch(e.target.value)} placeholder="Search prompts..." style={{...inputS,marginBottom:6,padding:"5px 8px",fontSize:11}} autoFocus/>
                 <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
                   {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={(e)=>{e.stopPropagation();setInp(p.content);setShowPromptPicker(false);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
@@ -5860,7 +6404,7 @@ function HyprChat(){
               <button onClick={()=>setShowEffortPicker(p=>!p)} title={`Effort: ${L.name} — ${L.desc}${overridden?" (overrides global)":""}`} style={{background:showEffortPicker?`${t.pink}15`:"none",border:overridden?`1px solid ${t.pink}55`:"none",color:lvl>0?t.pink:t.mut,cursor:"pointer",padding:"3px 8px",borderRadius:8,display:"flex",alignItems:"center",gap:4,fontSize:11,flexShrink:0,opacity:lvl>0?1:.65,fontWeight:600}}>
                 <span style={{fontSize:13}}>{L.emoji}</span><span style={{fontSize:10}}>{L.name}</span>
               </button>
-              {showEffortPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:50,background:t.bgDeep,border:`1px solid ${t.pink}33`,borderRadius:10,boxShadow:`0 4px 24px #0008`,minWidth:200,padding:6}}>
+              {showEffortPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.pink}33`,borderRadius:10,boxShadow:`0 4px 24px #0008`,minWidth:200,padding:6}}>
                 <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,padding:"3px 6px 5px",fontWeight:700}}>Effort — this chat</div>
                 {EFFORT_LEVELS.map((lv,v)=><button key={v} onClick={()=>{if(actId){setEffortPerChat(p=>({...p,[actId]:v}));}setShowEffortPicker(false);}} style={{display:"flex",alignItems:"center",gap:6,width:"100%",textAlign:"left",padding:"6px 8px",borderRadius:6,background:lvl===v?`${t.pink}18`:"transparent",border:"none",color:lvl===v?t.pink:t.dim,cursor:"pointer",fontSize:11,fontFamily:font,marginBottom:2}}>
                   <span style={{fontSize:14}}>{lv.emoji}</span>
@@ -5878,13 +6422,14 @@ function HyprChat(){
             <textarea ref={inpRef} value={inp} onChange={e=>setInp(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
               placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":"What's on your mind?"}`} rows={1}
               disabled={streaming||councilRunning||loadingConv}
-              style={{flex:1,background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:14,outline:"none",resize:"none",padding:"8px 0",maxHeight:140,lineHeight:1.6}}
+              style={{flex:1,background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:14,outline:"none",resize:"none",padding:isEmptyChatSurface?"11px 0":"8px 0",minHeight:isEmptyChatSurface?38:"auto",maxHeight:140,lineHeight:1.6}}
               onInput={e=>{e.target.style.height="auto";e.target.style.height=Math.min(e.target.scrollHeight,120)+"px";}}
               onPaste={e=>{const files=Array.from(e.clipboardData?.files||[]);if(files.length){e.preventDefault();handleFileUpload(files);}}}/>
-            {councilRunning?<button onClick={()=>setCouncilRunning(false)} style={{background:t.pink,border:"none",color:"#fff",padding:"10px 14px",borderRadius:12,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :streaming?<button onClick={stop} style={{background:t.err,border:"none",color:"#fff",padding:"10px 14px",borderRadius:12,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :<button onClick={send} disabled={!inp.trim()&&!attachments.length} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.acc):t.sfBri,border:"none",color:(inp.trim()||attachments.length)?t.bgDeep:t.mut,padding:"10px 14px",borderRadius:12,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all .2s",boxShadow:(inp.trim()||attachments.length)?`0 0 12px ${t.acc}44`:"none"}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
+            {councilRunning?<button onClick={()=>setCouncilRunning(false)} style={{background:t.pink,border:"none",color:"#fff",padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            :streaming?<button onClick={stop} style={{background:t.err,border:"none",color:"#fff",padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            :<button onClick={send} disabled={!inp.trim()&&!attachments.length} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.sfBri,border:"none",color:(inp.trim()||attachments.length)?"#fff":t.mut,padding:"10px 14px",borderRadius:8,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all .2s",boxShadow:"none"}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
           </div>
+        </div>
         </div>
       </>}
       </div>{/* end inner panel column */}
@@ -6021,6 +6566,17 @@ function HyprChat(){
       @keyframes blink{0%,50%{opacity:1}51%,100%{opacity:0}}
       @keyframes pulse{0%,80%,100%{opacity:.3;transform:scale(.8)}40%{opacity:1;transform:scale(1.2)}}
       @keyframes slide{0%{transform:translateX(-100%)}100%{transform:translateX(350%)}}
+      .composer-trace{position:absolute;display:block;background:linear-gradient(90deg,transparent,var(--trace-color),transparent);filter:drop-shadow(0 0 6px var(--trace-color));opacity:.9;pointer-events:none}
+      .composer-trace-top{top:0;left:0;width:42%;height:2px;animation:traceX 1.25s linear infinite}
+      .composer-trace-bottom{right:0;bottom:0;width:42%;height:2px;animation:traceXReverse 1.25s linear infinite}
+      .composer-trace-right{top:0;right:0;width:2px;height:50%;background:linear-gradient(180deg,transparent,var(--trace-color),transparent);animation:traceY 1.25s linear infinite}
+      .composer-trace-left{left:0;bottom:0;width:2px;height:50%;background:linear-gradient(180deg,transparent,var(--trace-color),transparent);animation:traceYReverse 1.25s linear infinite}
+      .empty-composer-box{animation:emptyComposerAura .75s ease-out .08s both}
+      @keyframes emptyComposerAura{0%{box-shadow:0 0 0 rgba(0,0,0,0)}42%{box-shadow:0 0 0 1px var(--empty-composer-glow),0 0 34px var(--empty-composer-glow)}100%{box-shadow:0 0 0 rgba(0,0,0,0)}}
+      @keyframes traceX{0%{transform:translateX(-115%)}100%{transform:translateX(260%)}}
+      @keyframes traceXReverse{0%{transform:translateX(115%)}100%{transform:translateX(-260%)}}
+      @keyframes traceY{0%{transform:translateY(-115%)}100%{transform:translateY(260%)}}
+      @keyframes traceYReverse{0%{transform:translateY(115%)}100%{transform:translateY(-260%)}}
       @keyframes marquee-think{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(-50%,0,0)}}
       .pill-marquee-wrap{overflow:hidden;max-width:280px;display:inline-block;vertical-align:middle;-webkit-mask-image:linear-gradient(to right,transparent 0%,black 8%,black 92%,transparent 100%);mask-image:linear-gradient(to right,transparent 0%,black 8%,black 92%,transparent 100%)}
       .pill-marquee-inner{display:inline-block;white-space:nowrap;animation:marquee-think 12s linear infinite;will-change:transform;backface-visibility:hidden}
@@ -6050,7 +6606,7 @@ function HyprChat(){
       ::selection{background:${t.acc}44}
       textarea::placeholder,input::placeholder{color:${t.mut}55}
       select option{background:${t.bgDeep};color:${t.text}}
-      button{transition:all .15s ease;position:relative;overflow:hidden}button:hover{filter:brightness(1.15);transform:translateY(-1px)}button:active{transform:translateY(0)}
+      button{transition:filter .15s ease,border-color .15s ease,background-color .15s ease,color .15s ease;position:relative;overflow:hidden}button:hover{filter:brightness(1.08)}button:active{filter:brightness(.98)}
     `}</style>
   </div>;
 }

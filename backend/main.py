@@ -3160,6 +3160,38 @@ async def get_conversation_forks(conv_id: str):
 # ============================================================
 # AUTO-TITLE GENERATION
 # ============================================================
+@app.post("/api/daily-message")
+async def generate_daily_message(body: dict = Body(default={})):
+    model = body.get("model") or config.WORKSPACE_MODEL or config.DEFAULT_MODEL
+    fallback = "Give the machine a worthy puzzle."
+    try:
+        resp = await http.post(f"{config.OLLAMA_URL}/api/chat", json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": (
+                    "Write one short welcome tagline for HyprChat's empty new-chat screen. "
+                    "Tone: clever, playful, curious, a little mischievous, but still useful. "
+                    "Prefer concrete verbs and odd-but-smart imagery over generic productivity slogans. "
+                    "3-9 words. No quotes, no emoji, no markdown, no brand name, no period unless needed."
+                )},
+                {"role": "user", "content": f"Today is {time.strftime('%A, %B %d, %Y')}. Generate one fresh, memorable line."}
+            ],
+            "stream": False,
+            "think": False,
+            "options": {"num_ctx": 1024, "temperature": 1.05}
+        }, timeout=20)
+        msg = resp.json().get("message", {}).get("content", "").strip()
+        msg = re.sub(r"^[\"'`“”]+|[\"'`“”]+$", "", msg)
+        msg = re.sub(r"\s+", " ", msg.splitlines()[0] if msg else "").strip()
+        msg = re.sub(r"^(tagline|line)\s*:\s*", "", msg, flags=re.I).strip()
+        if not msg or len(msg) > 90:
+            msg = fallback
+        return {"message": msg, "model": model}
+    except Exception as e:
+        print(f"[DAILY-MESSAGE] Error: {e}")
+        return {"message": fallback, "model": model, "fallback": True}
+
+
 @app.post("/api/conversations/{conv_id}/generate-title")
 async def generate_title(conv_id: str, body: dict = Body(default={})):
     conv = await db.get_conversation(conv_id)

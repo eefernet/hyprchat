@@ -619,7 +619,7 @@ def _guess_fix_scope(test_file_abs: str, project_dir: str) -> list[str]:
 
 
 async def _is_v2_persona(conv_id: str, conv_row: dict | None = None) -> bool:
-    """Return True iff this conversation's persona name contains 'v2'.
+    """Return True iff this conversation is using the v2 coding persona.
 
     Centralised so the workflow gate doesn't repeat the same db lookup +
     string match in five different places. Pass conv_row if the caller has
@@ -633,7 +633,8 @@ async def _is_v2_persona(conv_id: str, conv_row: dict | None = None) -> bool:
         if not _mc_id:
             return False
         _mc = await db.get_model_config(_mc_id)
-        return bool(_mc and "v2" in (_mc.get("name") or "").lower())
+        _name = (_mc.get("name") or "").lower() if _mc else ""
+        return bool(_mc and ("v2" in _name or "daedalus" in _name))
     except Exception as _e:
         print(f"[v2-gate] persona lookup failed (non-fatal): {_e}")
         return False

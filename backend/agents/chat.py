@@ -379,7 +379,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         mc = next((c for c in all_configs if c["id"] == req.persona_id), None)
         if mc:
             persona_system_prompt = mc.get("system_prompt") or None
-            if "v2" in (mc.get("name") or "").lower():
+            _persona_name_l = (mc.get("name") or "").lower()
+            if "v2" in _persona_name_l or "daedalus" in _persona_name_l:
                 _is_v2_persona = True
             params = mc.get("parameters", {})
             for key in ("temperature", "num_ctx", "top_p", "top_k"):
