@@ -21,15 +21,108 @@ import config
 import database as db
 
 
+_STATE_FIX_HINT_RE = re.compile(
+    r"(no such column|no such table|database schema|schema mismatch|"
+    r"no item with that key|keyerror|duplicate key|unique constraint|"
+    r"stale (?:database|db|cache|state)|shared (?:database|db|cache|state)|"
+    r"test_isolation_suspected)",
+    re.I,
+)
+_STORAGE_BASENAME_HINTS = [
+    "db.py", "database.py", "storage.py", "store.py", "repository.py",
+    "db.js", "database.js", "storage.js", "store.js", "repository.js",
+    "db.ts", "database.ts", "storage.ts", "store.ts", "repository.ts",
+    "db.go", "database.go", "storage.go", "store.go", "repository.go",
+    "db.rs", "database.rs", "storage.rs", "store.rs", "repository.rs",
+    "Database.java", "Storage.java", "Repository.java",
+]
+_TEST_BASENAME_HINTS = [
+    "test_cli.py", "test_db.py", "test_storage.py", "test_database.py",
+    "cli.test.js", "db.test.js", "storage.test.js", "database.test.js",
+    "cli.spec.ts", "db.spec.ts", "storage.spec.ts", "database.spec.ts",
+]
+_TASK_FILE_RE = re.compile(
+    r"(?<![\w./-])(?:[\w.-]+/)*[\w.-]+"
+    r"\.(?:py|js|jsx|ts|tsx|go|rs|java|kt|cs|php|rb|c|cc|cpp|h|hpp|json|toml|yaml|yml)\b"
+)
+_ENTRYPOINT_FIX_RE = re.compile(
+    r"\b(import|entry\s*point|main|cli|command|commands|function\s+is\s+named|"
+    r"cannot import|undefined|not defined|name mismatch)\b",
+    re.I,
+)
+_DOTTED_MODULE_RE = re.compile(r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\b")
+_ENTRYPOINT_BASENAME_HINTS = [
+    "__main__.py", "main.py", "cli.py", "commands.py",
+    "index.js", "main.js", "cli.js", "commands.js",
+    "index.ts", "main.ts", "cli.ts", "commands.ts",
+    "main.go", "main.rs", "Main.java",
+]
+
+
+def _append_unique(paths: list[str], path: str) -> None:
+    path = (path or "").strip()
+    if path and path not in paths:
+        paths.append(path)
+
+
 def _allowed_files_from_issues(issue_envelope: dict) -> list[str]:
     out = []
+    text_bits = [
+        issue_envelope.get("summary") or "",
+        issue_envelope.get("test_stdout_tail") or "",
+        issue_envelope.get("test_stderr_tail") or "",
+        issue_envelope.get("stdout_tail") or "",
+        issue_envelope.get("stderr_tail") or "",
+    ]
     for issue in (issue_envelope or {}).get("issues") or []:
+        text_bits.extend([
+            issue.get("summary") or "",
+            issue.get("details") or "",
+            issue.get("message") or "",
+            " ".join(str(s) for s in issue.get("state_error_signals") or []),
+            "test_isolation_suspected" if issue.get("test_isolation_suspected") else "",
+        ])
         for path in issue.get("suggested_fix_scope") or []:
             if path and path not in out:
                 out.append(path)
         path = issue.get("file")
         if path and path not in out:
             out.append(path)
+    text = "\n".join(text_bits)
+    for mention in re.findall(r"(?<![\w./-])[\w.-]+\.py\b", text):
+        if mention and mention not in out:
+            out.append(mention)
+    # Python CLI import failures are often reported at __main__.py even though
+    # the real dispatch/import mismatch lives in sibling cli.py or commands.py.
+    if "__main__.py" in text or any(str(p).endswith("__main__.py") for p in out):
+        for sibling in ("cli.py", "commands.py"):
+            if sibling not in out:
+                out.append(sibling)
+    if _STATE_FIX_HINT_RE.search(text):
+        for hint in _STORAGE_BASENAME_HINTS + _TEST_BASENAME_HINTS:
+            if hint not in out:
+                out.append(hint)
+    return out
+
+
+def _allowed_files_from_task(task: str) -> list[str]:
+    """Infer a small initial Aider scope from the user's uploaded-project task."""
+    out: list[str] = []
+    text = task or ""
+    for mention in _TASK_FILE_RE.findall(text):
+        _append_unique(out, mention)
+
+    if _ENTRYPOINT_FIX_RE.search(text):
+        for dotted in _DOTTED_MODULE_RE.findall(text):
+            parts = dotted.split(".")
+            if len(parts) >= 2 and all(part and part[0].isalpha() or part.startswith("_") for part in parts):
+                _append_unique(out, "/".join(parts) + ".py")
+        for hint in _ENTRYPOINT_BASENAME_HINTS:
+            _append_unique(out, hint)
+
+    if _STATE_FIX_HINT_RE.search(text):
+        for hint in _STORAGE_BASENAME_HINTS + _TEST_BASENAME_HINTS:
+            _append_unique(out, hint)
     return out
 
 
@@ -45,7 +138,23 @@ async def run_aider_fix(http, events, conv_id: str, *,
     started = time.time()
     issue_envelope = issue_envelope or {}
     contract = contract or {}
-    allowed_files = allowed_files or _allowed_files_from_issues(issue_envelope)
+    seeded_allowed_files = list(allowed_files or [])
+    for path in _allowed_files_from_issues(issue_envelope) + _allowed_files_from_task(task):
+        _append_unique(seeded_allowed_files, path)
+    allowed_files = seeded_allowed_files
+    try:
+        recent_runs = await db.get_runs_by_conversation(conv_id, limit=12) if conv_id else []
+        for prior in recent_runs:
+            if prior.get("role") != "aider.fix":
+                continue
+            if project_id and prior.get("project_id") and prior.get("project_id") != project_id:
+                continue
+            prior_env = prior.get("result_envelope") or {}
+            for path in prior_env.get("files_touched") or []:
+                if path.endswith(".py") and path not in allowed_files:
+                    allowed_files.append(path)
+    except Exception as e:
+        print(f"[AIDER] recent touched-file scope lookup failed (non-fatal): {e}")
     aider_model = model or config.AIDER_MODEL or config.FIXER_MODEL or config.CODER_MODEL or config.DEFAULT_MODEL
     worker_url = (config.AIDER_WORKER_URL or config.OPENHANDS_URL).rstrip("/")
     source_role = issue_envelope.get("_source_role") or (
@@ -64,6 +173,17 @@ async def run_aider_fix(http, events, conv_id: str, *,
         cancel_event = cancel_registry.register(run_id)
     else:
         cancel_event = None
+
+    if workflow_id and run_id:
+        try:
+            await db.update_coder_workflow(
+                workflow_id,
+                state="fixing",
+                active_run_id=run_id,
+                artifact_status="not_ready",
+            )
+        except Exception as e:
+            print(f"[AIDER] workflow start update failed (non-fatal): {e}")
 
     async def _step(action: str, detail: str = "", step: int | None = None):
         await events.emit(conv_id, "tool_progress", {

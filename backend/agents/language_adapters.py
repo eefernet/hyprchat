@@ -40,6 +40,8 @@ COMMON_IGNORES = [
     "venv", ".venv", ".tox",
 ]
 
+CODEBOX_PYTHON = "/root/venv/bin/python3"
+
 
 EXT_TO_LANGUAGE = {
     ".py": "python",
@@ -108,23 +110,28 @@ def python_adapter(manifest: list[str]) -> LanguageAdapter:
         for p in manifest
     )
     packages = _python_packages(manifest)
-    build_cmd = "python -m py_compile $(find . -name '*.py' -not -path '*/.venv/*' -not -path '*/venv/*' -not -path '*/__pycache__/*')"
+    py_compile = (
+        f"{CODEBOX_PYTHON} -m py_compile "
+        "$(find . -name '*.py' -not -path '*/.venv/*' -not -path '*/venv/*' "
+        "-not -path '*/.git/*' -not -path '*/__pycache__/*')"
+    )
+    build_cmd = py_compile
     if has_pyproject:
         build_system = "pyproject.toml"
-        build_cmd = "python -m pip install -e . && " + build_cmd
+        build_cmd = f"{CODEBOX_PYTHON} -m pip install -e . && " + build_cmd
     elif has_requirements:
         build_system = "requirements.txt"
-        build_cmd = "python -m pip install -r requirements.txt && " + build_cmd
+        build_cmd = f"{CODEBOX_PYTHON} -m pip install -r requirements.txt && " + build_cmd
     else:
         build_system = "plain-python"
 
-    test_cmd = "python -m pytest -q" if has_tests else ""
+    test_cmd = f"{CODEBOX_PYTHON} -m pytest -q" if has_tests else ""
     smoke_cmds = []
     for pkg in packages[:3]:
         if any(p == f"{pkg}/__main__.py" or p == f"src/{pkg}/__main__.py" for p in manifest):
-            smoke_cmds.append(f"python -m {pkg} --help")
+            smoke_cmds.append(f"{CODEBOX_PYTHON} -m {pkg} --help")
     if has_pyproject and packages and not smoke_cmds:
-        smoke_cmds.append(f"python -c \"import {packages[0]}; print({packages[0]}.__name__)\"")
+        smoke_cmds.append(f"{CODEBOX_PYTHON} -c \"import {packages[0]}; print({packages[0]}.__name__)\"")
 
     return LanguageAdapter(
         language="python",
@@ -140,7 +147,7 @@ def python_adapter(manifest: list[str]) -> LanguageAdapter:
         source_extensions=[".py"],
         ignored_dirs=COMMON_IGNORES,
         aider_test_cmd=test_cmd,
-        aider_lint_cmd=build_cmd if not has_pyproject and not has_requirements else "python -m py_compile $(find . -name '*.py' -not -path '*/.venv/*' -not -path '*/venv/*' -not -path '*/__pycache__/*')",
+        aider_lint_cmd=build_cmd if not has_pyproject and not has_requirements else py_compile,
         safe_lint=True,
     )
 

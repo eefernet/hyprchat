@@ -27,6 +27,8 @@
 - Settings no longer PATCH stale `localStorage` values over server-persisted v2 model/context settings during initial page load.
 - Workspace Model helper calls no longer load small analysis models at their native huge context; workspace topic analysis and council suggestions are capped at 4K, and title generation remains capped at 2K.
 - Uploaded-project git baselines now mark Codebox project paths as safe directories before status/init checks.
+- Uploaded-project reviewer issues now route to Aider even when a stale bot tries the old Fixer path.
+- Aider fixes now use Codebox Python, track active workflow runs, and stop repeated-output loops.
 
 ### Removed
 - HyprChat already has n8n integration, no need to reinvent the wheel. Also at this point, I rarely use it.

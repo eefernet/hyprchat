@@ -272,6 +272,54 @@ _FILE_REFS_RE = re.compile(
     r"(?::(\d+))?",
     re.MULTILINE,
 )
+_SOURCE_EXTS = (
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs", ".rb", ".php",
+    ".cs", ".swift", ".scala", ".kt", ".cpp", ".cc", ".c", ".h", ".hpp",
+)
+_CONFIG_EXTS = (
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".properties",
+    ".xml", ".sql", ".sh", ".env",
+)
+_IGNORED_PARTS = {
+    ".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".cache", ".venv", "venv", "node_modules", "dist", "build", "target",
+}
+_STORAGE_NAME_RE = re.compile(
+    r"(?:^|[/_.-])(db|database|storage|store|repository|repo|persist|"
+    r"persistence|schema|migration|migrations|dao|model|models)(?:$|[/_.-])",
+    re.I,
+)
+_STATE_ERROR_PATTERNS = [
+    re.compile(p, re.I) for p in (
+        r"\bno such column\b",
+        r"\bno such table\b",
+        r"\bmissing column\b",
+        r"\bcolumn ['\"]?[\w.-]+['\"]? (?:does not exist|not found)\b",
+        r"\brelation ['\"]?[\w.-]+['\"]? does not exist\b",
+        r"\btable ['\"]?[\w.-]+['\"]? (?:does not exist|not found)\b",
+        r"\bdatabase schema\b",
+        r"\bschema mismatch",
+        r"\bmigration\b.*\b(failed|missing|needed|required)\b",
+        r"\bno item with that key\b",
+        r"\bkeyerror\b",
+        r"\balready exists\b",
+        r"\bduplicate key\b",
+        r"\bunique constraint\b",
+        r"\bforeign key constraint\b",
+        r"\bdatabase is locked\b",
+        r"\bstale (?:database|db|cache|state)\b",
+        r"\bshared (?:database|db|cache|state)\b",
+    )
+]
+_STATE_PATH_RE = re.compile(
+    r"(?:~|/root|/home/[A-Za-z0-9_.-]+)/(?:\.[A-Za-z0-9_.-]+|[A-Za-z0-9_.-]+)"
+    r"(?:/[^\s'\"),;]+)?"
+)
+_STATE_PATH_EXCLUDE_RE = re.compile(
+    r"(^/root/venv/|/(?:\.venv|venv)/|^/usr/|^/opt/|"
+    r"/(?:bin|sbin)/(?:python\d*|pip\d*|pytest|node|npm|npx|bash|sh)$)",
+    re.I,
+)
 
 
 def _extract_file_refs(text: str, max_refs: int = 8) -> list[dict]:
@@ -289,6 +337,430 @@ def _extract_file_refs(text: str, max_refs: int = 8) -> list[dict]:
     # Sort: most frequent first, then by path length (shorter = more likely root).
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], len(kv[0][0])))
     return [{"file": p, "line": l, "hits": c} for (p, l), c in ranked[:max_refs]]
+
+
+def _is_probably_test_file(path: str) -> bool:
+    path = (path or "").replace("\\", "/")
+    base = path.rsplit("/", 1)[-1].lower()
+    return (
+        path.startswith(("test/", "tests/", "spec/", "specs/"))
+        or "/test/" in path or "/tests/" in path or "/spec/" in path or "/specs/" in path
+        or base.startswith(("test_", "spec_"))
+        or base.endswith(("_test.py", ".test.js", ".test.ts", ".spec.js", ".spec.ts", "test.java", "tests.java"))
+    )
+
+
+def _source_file_score(path: str) -> int:
+    p = (path or "").lower()
+    if p.endswith(_SOURCE_EXTS):
+        return 0
+    if p.endswith(_CONFIG_EXTS):
+        return 1
+    return 2
+
+
+def _valid_project_file(path: str) -> bool:
+    p = (path or "").replace("\\", "/").strip()
+    if not p or p.startswith(("/", "../")) or "/../" in p:
+        return False
+    parts = set(p.split("/"))
+    if parts & _IGNORED_PARTS:
+        return False
+    return p.endswith(_SOURCE_EXTS + _CONFIG_EXTS)
+
+
+async def _list_project_files(http, project_dir: str, limit: int = 5000) -> list[str]:
+    """Return real project-relative files that Reviewer/Aider may cite."""
+    cmd = (
+        f"cd {shlex.quote(project_dir)} && "
+        "find . -type f "
+        "-not -path '*/.git/*' -not -path '*/__pycache__/*' "
+        "-not -path '*/.pytest_cache/*' -not -path '*/.mypy_cache/*' "
+        "-not -path '*/.ruff_cache/*' -not -path '*/.cache/*' "
+        "-not -path '*/.venv/*' -not -path '*/venv/*' "
+        "-not -path '*/node_modules/*' -not -path '*/dist/*' "
+        "-not -path '*/build/*' -not -path '*/target/*' "
+        f"| sed 's#^./##' | head -{int(limit)}"
+    )
+    try:
+        r = await http.post(
+            f"{config.CODEBOX_URL}/command",
+            json={"command": cmd, "timeout": 20},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            files = []
+            for line in (r.json().get("stdout") or "").splitlines():
+                p = line.strip()
+                if _valid_project_file(p) and p not in files:
+                    files.append(p)
+            return files
+    except Exception:
+        pass
+    return []
+
+
+def _resolve_project_file(path: str, project_files: list[str]) -> str:
+    """Map a possibly guessed path to a real project-relative file."""
+    raw = (path or "").replace("\\", "/").strip().strip("'\"")
+    if not raw or not project_files:
+        return ""
+    raw = re.sub(r"^/root/projects/[A-Za-z0-9._-]+/", "", raw)
+    raw = raw[2:] if raw.startswith("./") else raw
+    if raw in project_files:
+        return raw
+
+    by_lower = {p.lower(): p for p in project_files}
+    if raw.lower() in by_lower:
+        return by_lower[raw.lower()]
+
+    # A guessed path may have the right suffix but the wrong package root.
+    suffix_matches = [p for p in project_files if p.lower().endswith("/" + raw.lower())]
+    if len(suffix_matches) == 1:
+        return suffix_matches[0]
+
+    base = raw.rsplit("/", 1)[-1].lower()
+    if not base:
+        return ""
+    base_matches = [p for p in project_files if p.rsplit("/", 1)[-1].lower() == base]
+    if len(base_matches) == 1:
+        return base_matches[0]
+    if base_matches:
+        ranked = sorted(
+            base_matches,
+            key=lambda p: (_source_file_score(p), 1 if _is_probably_test_file(p) else 0, len(p), p),
+        )
+        return ranked[0]
+    return ""
+
+
+def _state_error_signals(text: str) -> list[str]:
+    signals = []
+    lower = text or ""
+    for pat in _STATE_ERROR_PATTERNS:
+        m = pat.search(lower)
+        if m:
+            sig = m.group(0).strip()
+            if sig and sig.lower() not in [s.lower() for s in signals]:
+                signals.append(sig)
+    return signals[:6]
+
+
+def _extract_state_paths(text: str) -> list[str]:
+    paths = []
+    for m in _STATE_PATH_RE.finditer(text or ""):
+        p = m.group(0).rstrip(".,:;")
+        if p.startswith("/root/projects/"):
+            continue
+        if _STATE_PATH_EXCLUDE_RE.search(p):
+            continue
+        if p not in paths:
+            paths.append(p)
+    return paths[:5]
+
+
+def _rank_storage_candidates(project_files: list[str]) -> list[str]:
+    candidates = [p for p in project_files or [] if _STORAGE_NAME_RE.search(p)]
+    ranked = sorted(
+        candidates,
+        key=lambda p: (
+            _source_file_score(p),
+            1 if _is_probably_test_file(p) else 0,
+            0 if re.search(r"(^|/)db\.", p, re.I) else 1,
+            0 if re.search(r"(^|/)database\.", p, re.I) else 1,
+            len(p),
+            p,
+        ),
+    )
+    return ranked[:8]
+
+
+def _test_files_from_refs(refs: list[dict], project_files: list[str]) -> list[str]:
+    out = []
+    for ref in refs or []:
+        resolved = _resolve_project_file(ref.get("file") or "", project_files)
+        if resolved and _is_probably_test_file(resolved) and resolved not in out:
+            out.append(resolved)
+    if out:
+        return out[:5]
+    for p in project_files or []:
+        if _is_probably_test_file(p) and p not in out:
+            out.append(p)
+            if len(out) >= 5:
+                break
+    return out
+
+
+def _state_isolation_issue_from_failure(failure_text: str, project_dir: str,
+                                        project_files: list[str],
+                                        refs: list[dict]) -> dict | None:
+    """Classify persistent test-state/storage-schema failures without LLM guesses.
+
+    This is language-neutral: it uses failure text ("no such column", duplicate
+    key, stale DB/cache state) and the actual files present in the project.
+    """
+    signals = _state_error_signals(failure_text)
+    if not signals:
+        return None
+
+    storage_files = _rank_storage_candidates(project_files)
+    test_files = _test_files_from_refs(refs, project_files)
+    scope = []
+    for p in storage_files[:3] + test_files[:3]:
+        if p and p not in scope:
+            scope.append(p)
+
+    primary = storage_files[0] if storage_files else (test_files[0] if test_files else "")
+    state_paths = _extract_state_paths(failure_text)
+    signal_display = ", ".join(signals[:3])
+    scope_hint = (
+        "Make the application's data store configurable for tests and give each "
+        "test a fresh temp DB/cache/state path; also make schema creation or "
+        "migration idempotent for existing state."
+    )
+    if state_paths:
+        scope_hint += " Detected persistent state path(s): " + ", ".join(state_paths) + "."
+
+    return {
+        "status": "issues",
+        "summary": (
+            "Tests fail with persistent storage/schema state errors"
+            + (f" ({signal_display})." if signal_display else ".")
+        ),
+        "issues": [{
+            "severity": "test",
+            "file": primary,
+            "lines": [],
+            "summary": scope_hint,
+            "suggested_fix_scope": scope,
+            "state_error_signals": signals,
+            "state_paths": state_paths,
+            "test_isolation_suspected": True,
+        }],
+        "deterministic_issue": "persistent_test_state",
+        "state_error_signals": signals,
+        "state_paths": state_paths,
+    }
+
+
+def _sanitize_review_envelope(parsed: dict, failure_text: str,
+                              project_files: list[str],
+                              refs: list[dict]) -> dict:
+    """Normalize Reviewer output so Aider only receives real project files."""
+    if not isinstance(parsed, dict):
+        return parsed
+    if parsed.get("status") == "clean":
+        parsed["issues"] = []
+        return parsed
+
+    storage_files = _rank_storage_candidates(project_files)
+    test_files = _test_files_from_refs(refs, project_files)
+    existing_ref_files = []
+    for ref in refs or []:
+        resolved = _resolve_project_file(ref.get("file") or "", project_files)
+        if resolved and resolved not in existing_ref_files:
+            existing_ref_files.append(resolved)
+
+    sanitized = {**parsed}
+    issues = []
+    for issue in parsed.get("issues") or []:
+        if not isinstance(issue, dict):
+            continue
+        new_issue = {**issue}
+        issue_text = "\n".join([
+            str(issue.get("file") or ""),
+            str(issue.get("summary") or ""),
+            " ".join(str(p) for p in issue.get("suggested_fix_scope") or []),
+            failure_text[-2500:],
+        ])
+        state_signals = _state_error_signals(issue_text)
+
+        original_file = issue.get("file") or ""
+        resolved_file = _resolve_project_file(original_file, project_files)
+        if state_signals and storage_files:
+            resolved_file = storage_files[0]
+        if not resolved_file:
+            resolved_file = (
+                existing_ref_files[0] if existing_ref_files else
+                (storage_files[0] if storage_files else
+                 (project_files[0] if project_files else original_file))
+            )
+        new_issue["file"] = resolved_file
+        if original_file and resolved_file and original_file != resolved_file:
+            new_issue["normalized_from_file"] = original_file
+
+        scope = []
+        for raw in issue.get("suggested_fix_scope") or []:
+            resolved = _resolve_project_file(str(raw), project_files)
+            if resolved and resolved not in scope:
+                scope.append(resolved)
+        if state_signals:
+            for p in storage_files[:3] + test_files[:3]:
+                if p and p not in scope:
+                    scope.append(p)
+            new_issue["state_error_signals"] = state_signals
+            new_issue["test_isolation_suspected"] = True
+        if resolved_file and resolved_file not in scope:
+            scope.insert(0, resolved_file)
+        new_issue["suggested_fix_scope"] = scope[:8]
+        issues.append(new_issue)
+
+    sanitized["issues"] = issues
+    if issues and sanitized.get("status") not in {"issues", "error", "cancelled"}:
+        sanitized["status"] = "issues"
+    return sanitized
+
+
+_PROJECT_ROOT_RE = re.compile(r"/root/projects/[A-Za-z0-9._-]+")
+
+
+def _extract_stale_project_paths(text: str, project_dir: str) -> list[str]:
+    """Return /root/projects/<id> literals that do not match project_dir."""
+    active = (project_dir or "").rstrip("/")
+    out: list[str] = []
+    for path in _PROJECT_ROOT_RE.findall(text or ""):
+        root = path.rstrip("/")
+        if root == active:
+            continue
+        if root not in out:
+            out.append(root)
+    return out
+
+
+def _parse_project_path_grep(stdout: str, project_dir: str) -> list[dict]:
+    """Parse grep -RIn output for stale /root/projects literals."""
+    hits: list[dict] = []
+    for line in (stdout or "").splitlines():
+        if not line.strip():
+            continue
+        parts = line.split(":", 2)
+        if len(parts) < 3:
+            continue
+        raw_file, raw_line, text = parts
+        rel_file = raw_file[2:] if raw_file.startswith("./") else raw_file
+        try:
+            line_no = int(raw_line)
+        except ValueError:
+            line_no = 0
+        stale = _extract_stale_project_paths(text, project_dir)
+        if stale:
+            hits.append({
+                "file": rel_file,
+                "line": line_no,
+                "text": text[:500],
+                "stale_paths": stale,
+            })
+    return hits
+
+
+async def _grep_project_root_literals(http, project_dir: str) -> list[dict]:
+    """Find project files that contain hardcoded /root/projects paths."""
+    cmd = (
+        f"cd {shlex.quote(project_dir)} && "
+        "grep -RIn --exclude-dir=.git --exclude-dir=.pytest_cache "
+        "--exclude-dir=__pycache__ --exclude-dir=.venv --exclude-dir=venv "
+        "--exclude-dir=node_modules --exclude-dir=dist --exclude-dir=build "
+        "--exclude-dir=target -- '/root/projects/' . 2>/dev/null | head -80 || true"
+    )
+    try:
+        r = await http.post(
+            f"{config.CODEBOX_URL}/command",
+            json={"command": cmd, "timeout": 15},
+            timeout=20,
+        )
+        if r.status_code == 200:
+            return _parse_project_path_grep(r.json().get("stdout") or "", project_dir)
+    except Exception:
+        pass
+    return []
+
+
+def _stale_path_issue_from_failure(failure_text: str, project_dir: str,
+                                   grep_hits: list[dict]) -> dict | None:
+    """Classify test failures caused by hardcoded stale upload roots.
+
+    This intentionally runs before LLM review. A pytest subprocess failure that
+    executes with cwd="/root/projects/old-upload" should route Aider to the test
+    file containing that stale cwd, not to whatever source module failed inside
+    the old copied project.
+    """
+    stale_from_failure = _extract_stale_project_paths(failure_text, project_dir)
+    relevant_hits = []
+    for hit in grep_hits or []:
+        f = (hit.get("file") or "").lower()
+        if f.endswith((".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs",
+                       ".toml", ".ini", ".cfg", ".yaml", ".yml", ".json", ".sh")):
+            relevant_hits.append(hit)
+
+    stale_paths: list[str] = []
+    for path in stale_from_failure:
+        if path not in stale_paths:
+            stale_paths.append(path)
+    for hit in relevant_hits:
+        for path in hit.get("stale_paths") or []:
+            if path not in stale_paths:
+                stale_paths.append(path)
+    if not stale_paths:
+        return None
+
+    stale_hit_files = []
+    for hit in relevant_hits:
+        if any(p in stale_paths for p in hit.get("stale_paths") or []):
+            stale_hit_files.append(hit)
+
+    def _hit_rank(hit: dict) -> tuple[int, int, str]:
+        path = hit.get("file") or ""
+        base = path.rsplit("/", 1)[-1]
+        is_test = path.startswith("tests/") or "/tests/" in path or base.startswith("test_") or "_test." in base
+        return (0 if is_test else 1, len(path), path)
+
+    selected_hit = sorted(stale_hit_files, key=_hit_rank)[0] if stale_hit_files else None
+    refs = _extract_file_refs(failure_text)
+    pytest_ref = next(
+        (r for r in refs if (r.get("file") or "").startswith("tests/")
+         or "/tests/" in (r.get("file") or "")
+         or (r.get("file") or "").rsplit("/", 1)[-1].startswith("test_")),
+        None,
+    )
+    issue_file = (
+        (selected_hit or {}).get("file")
+        or (pytest_ref or {}).get("file")
+        or (refs[0].get("file") if refs else project_dir)
+    )
+    issue_line = (selected_hit or {}).get("line") or (pytest_ref or {}).get("line") or 0
+    active = (project_dir or "").rstrip("/")
+    stale_display = ", ".join(stale_paths[:3])
+    scope = []
+    if issue_file and not issue_file.startswith("/root/projects/"):
+        scope.append(issue_file)
+    elif issue_file:
+        scope.append(issue_file)
+    for hit in sorted(stale_hit_files, key=_hit_rank):
+        f = hit.get("file")
+        if f and f not in scope:
+            scope.append(f)
+    return {
+        "status": "issues",
+        "summary": (
+            f"Tests reference stale project root {stale_display} instead of "
+            f"the active upload root {active}."
+        ),
+        "issues": [{
+            "severity": "test",
+            "file": issue_file,
+            "lines": [issue_line] if issue_line else [],
+            "summary": (
+                f"Hardcoded stale project path {stale_display} makes the tests "
+                f"run against the wrong upload; use {active} or a project-root-relative path."
+            ),
+            "suggested_fix_scope": scope[:5],
+            "stale_project_paths": stale_paths,
+            "expected_project_dir": active,
+        }],
+        "stale_project_paths": stale_paths,
+        "expected_project_dir": active,
+        "deterministic_issue": "stale_project_root",
+    }
 
 
 async def _read_file_snippet(http, project_dir: str, path: str, line: int = 0,
@@ -497,6 +969,9 @@ async def run_review(http, events, conv_id: str, project_dir: str,
     lint_result = {"exit_code": 0, "stdout": ""}
     review_model = ""
     review_text = ""
+    failure_text = ""
+    refs: list[dict] = []
+    project_files: list[str] = []
     _cancel_phase = "build"
     _ticker = None
 
@@ -528,6 +1003,97 @@ async def run_review(http, events, conv_id: str, project_dir: str,
         if lint_result["exit_code"] != 0:
             failure_text += "\n" + lint_result.get("stdout", "")
         refs = _extract_file_refs(failure_text)
+        any_failure = (
+            build_result["exit_code"] != 0
+            or test_result["exit_code"] != 0
+            or lint_result["exit_code"] != 0
+        )
+        project_files = []
+        if any_failure:
+            await _step("scan_files", "indexing real project files")
+            project_files = await _list_project_files(http, project_dir)
+
+        # Deterministic stale-upload-root classification. This catches pytest
+        # failures where tests still run subprocesses with cwd="/root/projects/<old>"
+        # after the upload was remounted as /root/projects/proj-*. That failure
+        # mode misleads the LLM toward source imports from the old project; the
+        # correct fix is usually in the test file containing the hardcoded cwd.
+        grep_hits: list[dict] = []
+        if test_result["exit_code"] != 0:
+            await _step("scan_paths", "checking for stale /root/projects literals")
+            grep_hits = await _grep_project_root_literals(http, project_dir)
+            stale_parsed = _stale_path_issue_from_failure(failure_text, project_dir, grep_hits)
+            if stale_parsed:
+                envelope = {
+                    **stale_parsed,
+                    "build_cmd": build_cmd, "test_cmd": test_cmd, "lint_cmd": lint_cmd,
+                    "build_exit": build_result["exit_code"], "test_exit": test_result["exit_code"],
+                    "lint_exit": lint_result["exit_code"],
+                    "build_stdout_tail": (build_result.get("stdout", "") or "")[-3000:],
+                    "test_stdout_tail": (test_result.get("stdout", "") or "")[-5000:],
+                    "lint_stdout_tail": (lint_result.get("stdout", "") or "")[-2000:],
+                    "language": language, "marker": marker,
+                    "review_model": "(deterministic stale project-root classifier)",
+                    "raw_review_chars": 0,
+                    "project_dir": project_dir,
+                    "run_id": run_id,
+                }
+                n_issues = len(envelope.get("issues") or [])
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "run_review", "icon": "search-check",
+                    "status": f"⚠ Review found {n_issues} stale project path issue",
+                    "run_id": run_id,
+                })
+                if run_id:
+                    try:
+                        await db.update_run(run_id, status="succeeded",
+                                            result_envelope=envelope, ended=True)
+                    except Exception:
+                        pass
+                    cancel_registry.cleanup(run_id)
+                return envelope
+
+        # Deterministic persistent-state/schema classification. This catches a
+        # common uploaded-project failure after source imports are fixed: CLI or
+        # integration tests keep using an old/global DB/cache/state file, so the
+        # failures look like missing columns, missing tables, duplicate keys, or
+        # row key errors. The actionable fix is in the real storage/config/test
+        # files, not in hallucinated modules such as storage.py when no such file
+        # exists.
+        if test_result["exit_code"] != 0:
+            state_parsed = _state_isolation_issue_from_failure(
+                failure_text, project_dir, project_files, refs
+            )
+            if state_parsed:
+                envelope = {
+                    **state_parsed,
+                    "build_cmd": build_cmd, "test_cmd": test_cmd, "lint_cmd": lint_cmd,
+                    "build_exit": build_result["exit_code"], "test_exit": test_result["exit_code"],
+                    "lint_exit": lint_result["exit_code"],
+                    "build_stdout_tail": (build_result.get("stdout", "") or "")[-3000:],
+                    "test_stdout_tail": (test_result.get("stdout", "") or "")[-5000:],
+                    "lint_stdout_tail": (lint_result.get("stdout", "") or "")[-2000:],
+                    "language": language, "marker": marker,
+                    "review_model": "(deterministic persistent-state classifier)",
+                    "raw_review_chars": 0,
+                    "project_dir": project_dir,
+                    "run_id": run_id,
+                }
+                n_issues = len(envelope.get("issues") or [])
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "run_review", "icon": "search-check",
+                    "status": f"⚠ Review found {n_issues} persistent state issue",
+                    "run_id": run_id,
+                })
+                if run_id:
+                    try:
+                        await db.update_run(run_id, status="succeeded",
+                                            result_envelope=envelope, ended=True)
+                    except Exception:
+                        pass
+                    cancel_registry.cleanup(run_id)
+                return envelope
+
         snippet_blocks = []
         if refs:
             _read_tasks = [
@@ -551,6 +1117,9 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                 "issues": [],
                 "build_exit": 0, "test_exit": 0, "lint_exit": 0,
                 "build_cmd": build_cmd, "test_cmd": test_cmd, "lint_cmd": lint_cmd,
+                "build_stdout_tail": (build_result.get("stdout", "") or "")[-3000:],
+                "test_stdout_tail": (test_result.get("stdout", "") or "")[-5000:],
+                "lint_stdout_tail": (lint_result.get("stdout", "") or "")[-2000:],
                 "language": language, "marker": marker,
                 "project_dir": project_dir,
                 "run_id": run_id,
@@ -718,11 +1287,16 @@ async def run_review(http, events, conv_id: str, project_dir: str,
             "issues": _fb_issues,
         }
 
+    parsed = _sanitize_review_envelope(parsed, failure_text, project_files, refs)
+
     envelope = {
         **parsed,
         "build_cmd": build_cmd, "test_cmd": test_cmd, "lint_cmd": lint_cmd,
         "build_exit": build_result["exit_code"], "test_exit": test_result["exit_code"],
         "lint_exit": lint_result["exit_code"],
+        "build_stdout_tail": (build_result.get("stdout", "") or "")[-3000:],
+        "test_stdout_tail": (test_result.get("stdout", "") or "")[-5000:],
+        "lint_stdout_tail": (lint_result.get("stdout", "") or "")[-2000:],
         "language": language, "marker": marker,
         "review_model": review_model,
         "raw_review_chars": len(review_text),

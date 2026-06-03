@@ -226,6 +226,201 @@ async def _latest_user_requested_ship_anyway(conv_id: str) -> bool:
         return False
 
 
+def _project_id_from_dir(project_dir: str) -> str:
+    """Best-effort project id from a Codebox project path."""
+    if not project_dir:
+        return ""
+    name = os.path.basename(project_dir.rstrip("/"))
+    return name if name.startswith("proj-") else ""
+
+
+async def _latest_user_task_text(conv_id: str) -> str:
+    if not conv_id:
+        return ""
+    try:
+        conv = await db.get_conversation(conv_id)
+        msgs = (conv or {}).get("messages") or []
+        latest = next((m for m in reversed(msgs) if m.get("role") == "user"), None)
+        content = (latest or {}).get("content") or ""
+        if not isinstance(content, str):
+            content = json.dumps(content)
+        return content.strip()[:2000]
+    except Exception as _e:
+        print(f"[v2-gate] latest user task lookup failed (non-fatal): {_e}")
+        return ""
+
+
+async def _latest_actionable_issue_run(conv_id: str, requested_id: str = "") -> dict | None:
+    """Return the requested/latest reviewer or acceptance run with issues."""
+    if not conv_id and not requested_id:
+        return None
+    if requested_id:
+        try:
+            run = await db.get_run(requested_id)
+            if run:
+                return run
+        except Exception as _e:
+            print(f"[v2-gate] requested issue run lookup failed (non-fatal): {_e}")
+    if not conv_id:
+        return None
+    try:
+        runs = await db.get_runs_by_conversation(conv_id, limit=30)
+        return next(
+            (r for r in runs
+             if r.get("role") in {"reviewer", "acceptance"}
+             and ((r.get("result_envelope") or {}).get("status") or "").lower() in {"issues", "error"}),
+            None,
+        )
+    except Exception as _e:
+        print(f"[v2-gate] latest actionable issue lookup failed (non-fatal): {_e}")
+        return None
+
+
+def _task_from_issue_run(user_task: str, issue_run: dict | None) -> str:
+    env = (issue_run or {}).get("result_envelope") or {}
+    summary = (env.get("summary") or "").strip()
+    issues = env.get("issues") or []
+    issue_lines = []
+    for i, issue in enumerate(issues[:5], 1):
+        issue_lines.append(
+            f"{i}. {issue.get('file') or '?'}: {(issue.get('summary') or '')[:240]}"
+        )
+    parts = []
+    if user_task:
+        parts.append(user_task)
+    if summary:
+        parts.append(f"Reviewer summary: {summary}")
+    if issue_lines:
+        parts.append("Reviewer issues:\n" + "\n".join(issue_lines))
+    return "\n\n".join(parts).strip() or "Fix the uploaded project reviewer issues."
+
+
+async def _uploaded_project_aider_context(conv_id: str, *,
+                                          issue_run: dict | None = None,
+                                          project_dir: str = "",
+                                          project_id: str = "") -> dict | None:
+    """Return routing context when this conversation is an uploaded-project fix.
+
+    This intentionally does not classify all active coding projects as uploads:
+    greenfield OpenHands builds also create coding_projects rows. Uploaded
+    projects are identified by their workflow mode or upload-time description.
+    """
+    if not conv_id or not getattr(config, "AIDER_ENABLED", True):
+        return None
+    env = (issue_run or {}).get("result_envelope") or {}
+    project_dir = (project_dir or env.get("project_dir") or "").strip()
+    project_id = (project_id or (issue_run or {}).get("project_id") or "").strip()
+    project_id = project_id or _project_id_from_dir(project_dir)
+
+    try:
+        wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id) if project_id else None
+        if not wf:
+            wf = await db.get_latest_coder_workflow(conv_id)
+        if wf and wf.get("mode") == "fix_uploaded_project" and not wf.get("cancel_requested"):
+            project_id = project_id or wf.get("project_id") or ""
+            project_dir = project_dir or (f"/root/projects/{project_id}" if project_id else "")
+            return {"workflow": wf, "project_id": project_id, "project_dir": project_dir}
+    except Exception as _e:
+        print(f"[v2-gate] uploaded workflow lookup failed (non-fatal): {_e}")
+
+    try:
+        active = await db.get_coding_project_by_conv(conv_id)
+        if active:
+            active_pid = active.get("openhands_project_id") or active.get("id") or ""
+            desc = active.get("description") or ""
+            if desc.startswith("Uploaded project:") and (not project_id or project_id == active_pid):
+                project_id = project_id or active_pid
+                project_dir = project_dir or (f"/root/projects/{project_id}" if project_id else "")
+                return {"workflow": None, "project_id": project_id, "project_dir": project_dir}
+    except Exception as _e:
+        print(f"[v2-gate] uploaded project lookup failed (non-fatal): {_e}")
+    return None
+
+
+_UPLOADED_PROJECT_BOOTSTRAP_ALLOWED_TOOLS = {
+    "run_aider_fix",
+    "run_review",
+    "run_acceptance_review",
+    "get_coder_workflow",
+    "cancel_coder_workflow",
+}
+_UPLOADED_PROJECT_TERMINAL_STATES = {
+    "accepted", "delivered", "complete", "completed", "cancelled", "blocked",
+}
+_UPLOADED_PROJECT_TERMINAL_ARTIFACTS = {
+    "accepted", "delivered", "partial_delivered", "cancelled",
+}
+_UPLOADED_PROJECT_ACTIVE_RUN_STATUSES = {"queued", "running", "pending"}
+_UPLOADED_PROJECT_AGENT_ROLES = {"aider.fix", "reviewer", "acceptance", "fixer"}
+
+
+def _uploaded_project_tool_allowed_during_bootstrap(name: str) -> bool:
+    return name in _UPLOADED_PROJECT_BOOTSTRAP_ALLOWED_TOOLS
+
+
+def _uploaded_project_manual_gate_state(workflow: dict | None,
+                                        runs: list[dict] | None = None) -> str:
+    """Return bootstrap/inflight when an uploaded fix must not use manual tools."""
+    if not workflow or workflow.get("mode") != "fix_uploaded_project":
+        return ""
+    if workflow.get("cancel_requested"):
+        return ""
+    state = (workflow.get("state") or "").lower()
+    artifact = (workflow.get("artifact_status") or "").lower()
+    if state in _UPLOADED_PROJECT_TERMINAL_STATES:
+        return ""
+    if artifact in _UPLOADED_PROJECT_TERMINAL_ARTIFACTS:
+        return ""
+
+    runs = runs or []
+    active_run_id = workflow.get("active_run_id") or ""
+    for run in runs:
+        if active_run_id and run.get("id") == active_run_id:
+            if (run.get("status") or "").lower() in _UPLOADED_PROJECT_ACTIVE_RUN_STATUSES:
+                return "inflight"
+            break
+
+    for run in runs:
+        role = run.get("role") or ""
+        if role in _UPLOADED_PROJECT_AGENT_ROLES or role.startswith("builder"):
+            return ""
+    return "bootstrap"
+
+
+def _uploaded_project_bootstrap_block_message(name: str, workflow: dict,
+                                              project_dir: str,
+                                              task: str,
+                                              gate_state: str = "bootstrap") -> str:
+    project_id = (workflow or {}).get("project_id") or _project_id_from_dir(project_dir)
+    project_dir = project_dir or (f"/root/projects/{project_id}" if project_id else "/root/projects/<active-project>")
+    task_hint = (task or (workflow or {}).get("user_task") or "latest user request").strip()
+    task_hint = re.sub(r"\s+", " ", task_hint)[:700].replace("\\", "\\\\").replace("'", "\\'")
+    if gate_state == "inflight":
+        reason = (
+            "an uploaded-project Aider/Reviewer run is already in progress. "
+            "Wait for that run or inspect workflow status."
+        )
+        next_call = "get_coder_workflow(workflow_id='<workflow_id>')"
+    else:
+        reason = (
+            "uploaded-project fixes must start with Aider or Reviewer from the active "
+            "project root, not manual file tools."
+        )
+        next_call = (
+            f"run_aider_fix(project_dir='{project_dir}', task='{task_hint}')"
+        )
+    return (
+        f"BLOCKED — {reason}\n\n"
+        f"Active project path: `{project_dir}`"
+        + (f"\nProject id: `{project_id}`" if project_id else "")
+        + "\n\n"
+        f"Your VERY NEXT tool call MUST be:\n  {next_call}\n\n"
+        f"Do NOT call {name}, read_file, write_file, run_shell, execute_code, "
+        f"generate_code, run_fixer, list_files, or search_files for this uploaded-project "
+        f"fix. Aider owns the edit; Reviewer verifies it."
+    )
+
+
 # Pytest "FAILED tests/foo.py::test_x - reason" line, plus a fallback for
 # generic "FAILED <path>:<line>" / "ERROR tests/foo.py" forms. Captures the
 # file path so the synthesized reviewer envelope can route Fixer to the
@@ -626,7 +821,7 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "run_fixer",
-            "description": "Apply targeted edits for issues identified by run_review or run_acceptance_review. The Fixer reads each issue's fix-scope files, asks a coder LLM for minimal complete-file replacements, and writes the edits back. Use this AFTER a review/acceptance envelope returns issues. After reviewer-driven fixes, call run_review again. After docs-only acceptance fixes, call run_acceptance_review again; otherwise call run_review. Hard caps: 3 reviewer-driven fix cycles, 2 acceptance-driven fix cycles.",
+            "description": "Fallback targeted editor for issues identified by run_review or run_acceptance_review. For uploaded-project fixes, prefer run_aider_fix; run_fixer is mainly for greenfield/OpenHands projects or when Aider is disabled/unavailable. After reviewer-driven fixes, call run_review again. After docs-only acceptance fixes, call run_acceptance_review again; otherwise call run_review. Hard caps: 3 reviewer-driven fix cycles, 2 acceptance-driven fix cycles.",
             "parameters": {"type": "object", "properties": {
                 "reviewer_run_id": {"type": "string", "description": "The run_id of the run_review or run_acceptance_review call whose issues you want to fix (e.g. 'run-bd6f9dc7b4e3'). If omitted, the most recent actionable review/acceptance run is used."},
             }, "required": []},
@@ -654,6 +849,7 @@ CODEAGENT_TOOLS = {
                 "project_dir": {"type": "string", "description": "Absolute project root in Codebox, e.g. /root/projects/proj-... . If omitted, uses the active uploaded project."},
                 "task": {"type": "string", "description": "The user's requested fix/change, verbatim when possible."},
                 "issue_run_id": {"type": "string", "description": "Optional reviewer/acceptance run_id whose issues should guide Aider."},
+                "project_id": {"type": "string", "description": "Optional uploaded project id for workflow linkage."},
                 "allowed_files": {"type": "array", "items": {"type": "string"}, "description": "Optional file scope Aider should focus on."},
             }, "required": ["task"]},
         },
@@ -1416,6 +1612,39 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             except Exception as _qte:
                 print(f"[v2-gate] qa-terminal check failed (non-fatal): {_qte}")
 
+        if (conv_id
+                and not _uploaded_project_tool_allowed_during_bootstrap(name)
+                and await _check_v2()):
+            try:
+                _wf_up = await db.get_latest_coder_workflow(conv_id)
+                _runs_up = await db.get_runs_by_conversation(conv_id, limit=20)
+                _gate_state_up = _uploaded_project_manual_gate_state(_wf_up, _runs_up)
+                if _gate_state_up:
+                    _pid_up = (_wf_up or {}).get("project_id") or ""
+                    _project_dir_up = f"/root/projects/{_pid_up}" if _pid_up else ""
+                    _task_up = await _latest_user_task_text(conv_id)
+                    _body_up = _uploaded_project_bootstrap_block_message(
+                        name,
+                        _wf_up or {},
+                        _project_dir_up,
+                        _task_up,
+                        _gate_state_up,
+                    )
+                    await events.emit(conv_id, "tool_end", {
+                        "tool": name, "icon": "code",
+                        "status": (
+                            "⛔ Blocked — uploaded-project fixes use Aider first"
+                            if _gate_state_up == "bootstrap"
+                            else "⛔ Blocked — uploaded-project run already in progress"
+                        ),
+                    })
+                    print(f"[v2-gate] state=uploaded-project-{_gate_state_up} "
+                          f"blocked tool={name} workflow={(_wf_up or {}).get('id','?')}",
+                          flush=True)
+                    return _body_up
+            except Exception as _upe:
+                print(f"[v2-gate] uploaded-project bootstrap check failed (non-fatal): {_upe}")
+
         _runs_for_cap = None
         if conv_id and name == "run_fixer":
             _parent_role_for_cap = "reviewer"
@@ -1436,6 +1665,39 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             break
                 if not _parent_role_for_cap:
                     _parent_role_for_cap = "reviewer"
+
+                # Uploaded-project fixes are owned by Aider. This redirect is
+                # deliberately before cycle/research gates so stale personas
+                # that still call run_fixer do not get stuck in the old scoped
+                # Fixer loop.
+                if _parent_role_for_cap == "reviewer" and getattr(config, "AIDER_ENABLED", True):
+                    _requested_parent_id = (args.get("reviewer_run_id") or "").strip()
+                    _issue_run_for_aider = await _latest_actionable_issue_run(conv_id, _requested_parent_id)
+                    _aider_ctx = await _uploaded_project_aider_context(
+                        conv_id, issue_run=_issue_run_for_aider,
+                    )
+                    if _issue_run_for_aider and _aider_ctx:
+                        _issue_run_id = _issue_run_for_aider.get("id", "")
+                        _project_dir = _aider_ctx.get("project_dir") or ""
+                        _task = _task_from_issue_run(
+                            await _latest_user_task_text(conv_id),
+                            _issue_run_for_aider,
+                        )
+                        await events.emit(conv_id, "tool_end", {
+                            "tool": "run_fixer", "icon": "wrench",
+                            "status": "↪ Routing uploaded-project fix to Aider",
+                        })
+                        print(f"[v2-gate] redirecting run_fixer to run_aider_fix "
+                              f"for uploaded project issue_run={_issue_run_id}", flush=True)
+                        return await exec_tool(
+                            http, events, "run_aider_fix",
+                            {
+                                "task": _task,
+                                "project_dir": _project_dir,
+                                "issue_run_id": _issue_run_id,
+                            },
+                            conv_id, custom_tool_map, conv_model, kb_ids,
+                        )
 
                 def _fixer_source_role_cap(_fr):
                     _fenv = _fr.get("result_envelope") or {}
@@ -1896,6 +2158,11 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         name in _DELIVERY_SHIP_TOOLS
                         and await _latest_user_requested_ship_anyway(conv_id)
                     )
+                    _aider_ctx_gate = None
+                    if _pending_role == "reviewer" and getattr(config, "AIDER_ENABLED", True):
+                        _aider_ctx_gate = await _uploaded_project_aider_context(
+                            conv_id, issue_run=_pending_review,
+                        )
                     # Deadlock break: the FINAL_CYCLE gate (2 successful fixers,
                     # no research since the last reviewer) blocks run_fixer with
                     # the message "call deep_research first". The STUCK_FIX gate
@@ -1925,6 +2192,22 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                               f"fix-needed (attempts={_fixer_attempts_gate}, "
                               f"succ={_fixer_succ_gate})", flush=True)
                         # Skip _gate_msg entirely → tool runs normally.
+                    elif _aider_ctx_gate:
+                        _project_dir = _aider_ctx_gate.get("project_dir") or _pending_env.get("project_dir") or ""
+                        _gate_msg = (
+                            "state", "fix-needed",
+                            f"BLOCKED — {_pending_role} ({_rid}) returned status='{_rstatus_disp}' "
+                            f"for an uploaded project.\n\n"
+                            f"Your VERY NEXT tool call MUST be:\n"
+                            f"  run_aider_fix(issue_run_id='{_rid}', project_dir='{_project_dir}', "
+                            f"task='<latest user request + reviewer summary>')\n\n"
+                            f"Uploaded-project fixes are handled by Aider from the project root. "
+                            f"Do NOT call run_fixer, read_file, write_file, generate_code, or "
+                            f"run_shell for this reviewer issue. After Aider returns, call "
+                            f"run_review to verify build/tests.",
+                            f"⛔ Blocked — call run_aider_fix first ({_pending_role} {_rid[:14]}… has issues)",
+                            _rid,
+                        )
                     else:
                         _tool_name = "run_acceptance_review" if _pending_role == "acceptance" else "run_review"
                         _issue_label = "run_acceptance_review" if _pending_role == "acceptance" else "run_review"
@@ -3035,7 +3318,8 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             if not project_dir:
                 project_dir = (issue_env.get("project_dir") or "").strip()
 
-            project_id = (issue_run or {}).get("project_id") or ""
+            project_id = (args.get("project_id") or "").strip()
+            project_id = project_id or (issue_run or {}).get("project_id") or ""
             active_project = None
             if conv_id and (not project_dir or not project_id):
                 active_project = await db.get_coding_project_by_conv(conv_id)
@@ -3099,7 +3383,9 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             return (
                 f"AIDER FAILED ({status}): {envelope.get('summary','')}\n"
                 f"stderr: {(envelope.get('stderr_tail') or '')[-800:]}\n"
-                "Fallback path: call run_fixer with a reviewer_run_id, or make a manual targeted edit."
+                "REQUIRED NEXT TOOL CALL: run_review. Do not call read_file/write_file/run_shell "
+                "or run_fixer for uploaded-project fixes; Reviewer must classify the remaining "
+                "failure and then Aider gets the next scoped repair."
             )
 
         elif name == "run_review":
@@ -3214,15 +3500,34 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 if scope:
                     lines.append(f"   fix scope: {', '.join(scope[:5])}")
             lines.append("")
-            lines.append(
-                f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
-                f"  run_fixer(reviewer_run_id='{reviewer_run_id}')\n"
-                f"This runs the Fixer agent which reads the fix-scope files, generates "
-                f"targeted edits, and writes them back. AFTER run_fixer returns, call "
-                f"run_review again to verify the project is now CLEAN. Do NOT manually "
-                f"read_file / write_file for these issues — that's the v1 antipattern that "
-                f"burns rounds. Hard cap: 3 review/fix cycles."
-            )
+            _use_aider_next = False
+            if getattr(config, "AIDER_ENABLED", True) and conv_id:
+                try:
+                    _wf_next = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
+                    if not _wf_next:
+                        _wf_next = await db.get_latest_coder_workflow(conv_id)
+                    _use_aider_next = bool(_wf_next and _wf_next.get("mode") == "fix_uploaded_project")
+                except Exception as _wf_next_e:
+                    print(f"[run_review] next-fix workflow lookup failed: {_wf_next_e}")
+            if _use_aider_next:
+                lines.append(
+                    f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
+                    f"  run_aider_fix(issue_run_id='{reviewer_run_id}', project_dir='{project_dir}', "
+                    f"task='Fix the reviewer issues from {reviewer_run_id}')\n"
+                    f"This runs Aider from the uploaded project root. AFTER run_aider_fix returns, "
+                    f"call run_review again to verify the project is now CLEAN. Do NOT manually "
+                    f"read_file / write_file or call run_fixer for uploaded-project reviewer issues."
+                )
+            else:
+                lines.append(
+                    f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
+                    f"  run_fixer(reviewer_run_id='{reviewer_run_id}')\n"
+                    f"This runs the Fixer agent which reads the fix-scope files, generates "
+                    f"targeted edits, and writes them back. AFTER run_fixer returns, call "
+                    f"run_review again to verify the project is now CLEAN. Do NOT manually "
+                    f"read_file / write_file for these issues — that's the v1 antipattern that "
+                    f"burns rounds. Hard cap: 3 review/fix cycles."
+                )
             return "\n".join(lines)
 
         elif name == "run_acceptance_review":

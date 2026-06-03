@@ -8,6 +8,7 @@ Deploy to CodeBox LXC at /opt/openhands-worker/openhands_worker.py
 import asyncio
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -29,6 +30,8 @@ _ACTIVE_RUNS: dict[str, dict] = {}
 _ACTIVE_RUNS_LOCK = threading.Lock()
 _ACTIVE_AIDER_RUNS: dict[str, dict] = {}
 _ACTIVE_AIDER_RUNS_LOCK = threading.Lock()
+AIDER_MAX_SECONDS = int(os.environ.get("AIDER_MAX_SECONDS", "420"))
+AIDER_REPEAT_LINE_LIMIT = int(os.environ.get("AIDER_REPEAT_LINE_LIMIT", "120"))
 
 
 def _register_run(run_id: str, conversation, cancel_event: threading.Event) -> None:
@@ -337,21 +340,163 @@ def _run_shell_capture(project_dir: Path, command: str, env: dict,
 def _safe_allowed_files(project_dir: Path, files: list[str]) -> list[str]:
     out = []
     root = project_dir.resolve()
+
+    def _add_resolved(path: Path) -> None:
+        try:
+            resolved = path.resolve()
+        except Exception:
+            return
+        if resolved == root or root in resolved.parents:
+            rel = str(resolved.relative_to(root))
+            if rel and rel not in out and resolved.is_file():
+                out.append(rel)
+
     for raw in files or []:
         if not raw:
             continue
         candidate = Path(raw)
         if not candidate.is_absolute():
             candidate = project_dir / candidate
-        try:
-            resolved = candidate.resolve()
-        except Exception:
+        _add_resolved(candidate)
+        if str(raw) in out:
             continue
-        if resolved == root or root in resolved.parents:
-            rel = str(resolved.relative_to(root))
-            if rel and rel not in out and resolved.is_file():
-                out.append(rel)
+        # Reviewer summaries often mention just "cli.py" or "commands.py".
+        # Expand those basenames to real project paths so Aider can actually
+        # load the relevant files instead of looping on "file is not uploaded".
+        raw_name = Path(str(raw)).name
+        if raw_name and raw_name == str(raw):
+            for match in root.rglob(raw_name):
+                if any(part in {".git", "__pycache__", ".venv", "venv"} for part in match.parts):
+                    continue
+                _add_resolved(match)
+                if len(out) >= 80:
+                    break
     return out
+
+
+def _worker_python() -> str:
+    preferred = Path("/root/venv/bin/python3")
+    if preferred.exists():
+        return str(preferred)
+    return shutil.which("python3") or "python3"
+
+
+def _normalize_worker_command(cmd: str) -> str:
+    if not cmd:
+        return ""
+    py = _worker_python()
+    # Stale upload contracts used bare `python`, but the worker only guarantees
+    # python3/the Codebox venv. Replace shell command tokens without touching
+    # python3, paths like /usr/bin/python, or prose in file names.
+    return re.sub(r"(?<![\w./-])python(?=\s)", py, cmd)
+
+
+def _missing_runner_failure(exit_code: int | None, stdout: str, stderr: str) -> bool:
+    if exit_code not in {126, 127}:
+        return False
+    combined = f"{stdout}\n{stderr}".lower()
+    return "python: not found" in combined or "command not found" in combined or "no such file" in combined
+
+
+def _known_test_root_section(req: AiderRunRequest) -> str:
+    issue_env = req.issue_envelope or {}
+    stale_paths: list[str] = []
+    for path in issue_env.get("stale_project_paths") or []:
+        if path and path not in stale_paths:
+            stale_paths.append(path)
+    for issue in issue_env.get("issues") or []:
+        for path in issue.get("stale_project_paths") or []:
+            if path and path not in stale_paths:
+                stale_paths.append(path)
+        path = issue.get("stale_project_path")
+        if path and path not in stale_paths:
+            stale_paths.append(path)
+
+    tail = (
+        issue_env.get("test_stdout_tail")
+        or issue_env.get("test_stderr_tail")
+        or issue_env.get("stdout_tail")
+        or issue_env.get("stderr_tail")
+        or ""
+    )
+    stale_block = "\n".join(f"- {p}" for p in stale_paths) or "- (none detected)"
+    tail_block = _tail(tail, 2500) if tail else "(none captured)"
+    test_cmd = req.test_cmd or (req.contract or {}).get("aider_test_cmd") or (req.contract or {}).get("test_cmd") or "(none)"
+    return f"""## Known Test Root
+- Active project root: `{req.project_dir}`
+- Test command: `{test_cmd}`
+- Detected stale absolute project paths:
+{stale_block}
+- Latest test failure tail:
+```
+{tail_block}
+```
+
+If tests reference a different `/root/projects/...` directory than the active
+project root, fix the test path or make the tests derive paths from the current
+project root. Do not patch source code to satisfy behavior from a stale copied
+project directory.
+"""
+
+
+def _test_state_isolation_section(req: AiderRunRequest) -> str:
+    issue_env = req.issue_envelope or {}
+    text_bits = [
+        issue_env.get("summary") or "",
+        issue_env.get("test_stdout_tail") or "",
+        issue_env.get("test_stderr_tail") or "",
+        issue_env.get("stdout_tail") or "",
+        issue_env.get("stderr_tail") or "",
+        " ".join(str(s) for s in issue_env.get("state_error_signals") or []),
+    ]
+    state_paths: list[str] = []
+    for path in issue_env.get("state_paths") or []:
+        if path and path not in state_paths:
+            state_paths.append(path)
+    for issue in issue_env.get("issues") or []:
+        text_bits.extend([
+            issue.get("summary") or "",
+            " ".join(str(s) for s in issue.get("state_error_signals") or []),
+            "test_isolation_suspected" if issue.get("test_isolation_suspected") else "",
+        ])
+        for path in issue.get("state_paths") or []:
+            if path and path not in state_paths:
+                state_paths.append(path)
+
+    combined = "\n".join(text_bits)
+    signals = []
+    for pat in (
+        r"no such column", r"no such table", r"database schema", r"schema mismatch",
+        r"no item with that key", r"keyerror", r"duplicate key", r"unique constraint",
+        r"stale (?:database|db|cache|state)", r"shared (?:database|db|cache|state)",
+        r"test_isolation_suspected",
+    ):
+        if re.search(pat, combined, re.I):
+            signals.append(pat.replace("(?:", "").replace("|", "/").replace(")", ""))
+    if not signals and not state_paths:
+        signals_block = "- (none detected)"
+        paths_block = "- (none detected)"
+    else:
+        signals_block = "\n".join(f"- {s}" for s in signals[:8]) or "- (none detected)"
+        paths_block = "\n".join(f"- {p}" for p in state_paths[:8]) or "- (none detected)"
+
+    return f"""## Test State Isolation
+Detected persistent-state/schema signals:
+{signals_block}
+Detected persistent state paths:
+{paths_block}
+
+When tests fail because a CLI, server, or integration path is reading old or
+shared state, fix isolation at the storage/config/test boundary:
+- Make the data/cache/state path configurable for tests (environment variable,
+  config option, temp directory, in-memory store, or per-test database URL).
+- Update tests or subprocess helpers to pass a fresh per-test state path.
+- Make schema creation/migration idempotent for an existing store when that is
+  part of the real app behavior.
+- Do not rename existing command/business functions just to work around a stale
+  database, cache, or fixture.
+- Do not delete or depend on global user state such as home-directory app data.
+"""
 
 
 def _write_aider_prompt(req: AiderRunRequest, prompt_dir: Path) -> Path:
@@ -360,6 +505,8 @@ def _write_aider_prompt(req: AiderRunRequest, prompt_dir: Path) -> Path:
     issue_json = json.dumps(req.issue_envelope or {}, indent=2)[:12000]
     contract_json = json.dumps(req.contract or {}, indent=2)[:12000]
     allowed = "\n".join(f"- {p}" for p in (req.allowed_files or [])[:80]) or "(none specified)"
+    known_root = _known_test_root_section(req)
+    state_isolation = _test_state_isolation_section(req)
     content = f"""You are editing an existing uploaded project. Make the smallest coherent patch that satisfies the task.
 
 ## User Task
@@ -375,6 +522,10 @@ def _write_aider_prompt(req: AiderRunRequest, prompt_dir: Path) -> Path:
 {issue_json}
 ```
 
+{known_root}
+
+{state_isolation}
+
 ## Allowed / Relevant Files
 {allowed}
 
@@ -383,6 +534,10 @@ Rules:
 - Prefer focused edits over broad rewrites.
 - Preserve existing behavior unless the task or review envelope requires a change.
 - If tests fail, fix the root cause and rerun the relevant command when possible.
+- When the review reports stale `/root/projects/...` paths, prioritize the
+  reviewer-provided test/path files in the allowed list before changing source.
+- When the review reports storage/schema/state-isolation errors, prefer making
+  state paths configurable and tests isolated over broad source/API renames.
 - Do not create commits. Leave changes in the working tree for HyprChat to inspect.
 """
     path.write_text(content)
@@ -414,10 +569,12 @@ def _build_aider_command(req: AiderRunRequest, prompt_file: Path,
         "--no-auto-commits",
         "--model-settings-file", str(model_settings_file),
     ]
-    if req.auto_test and req.test_cmd:
-        cmd += ["--test-cmd", req.test_cmd, "--auto-test"]
-    if req.lint_cmd:
-        cmd += ["--lint-cmd", req.lint_cmd]
+    test_cmd = _normalize_worker_command(req.test_cmd)
+    lint_cmd = _normalize_worker_command(req.lint_cmd)
+    if req.auto_test and test_cmd:
+        cmd += ["--test-cmd", test_cmd, "--auto-test"]
+    if lint_cmd:
+        cmd += ["--lint-cmd", lint_cmd]
     cmd += allowed_files
     return cmd
 
@@ -442,6 +599,17 @@ def _run_aider_blocking(req: AiderRunRequest, stream_cb=None) -> dict:
         }
 
     prompt_dir = Path("/tmp/hyprchat-aider")
+    req.test_cmd = _normalize_worker_command(req.test_cmd)
+    req.lint_cmd = _normalize_worker_command(req.lint_cmd)
+    if isinstance(req.contract, dict):
+        for key in ("build_cmd", "test_cmd", "smoke_cmd", "aider_test_cmd", "aider_lint_cmd"):
+            if isinstance(req.contract.get(key), str):
+                req.contract[key] = _normalize_worker_command(req.contract[key])
+        if isinstance(req.contract.get("smoke_cmds"), list):
+            req.contract["smoke_cmds"] = [
+                _normalize_worker_command(c) if isinstance(c, str) else c
+                for c in req.contract["smoke_cmds"]
+            ]
     req.allowed_files = _safe_allowed_files(project_dir, req.allowed_files)
     prompt_file = _write_aider_prompt(req, prompt_dir)
     model_settings_file = _write_aider_model_settings(req, prompt_dir)
@@ -454,6 +622,8 @@ def _run_aider_blocking(req: AiderRunRequest, stream_cb=None) -> dict:
     cancel_event = threading.Event()
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
+    repeat_counts: dict[str, int] = {}
+    internal_stop = {"reason": ""}
     proc = None
 
     try:
@@ -476,6 +646,20 @@ def _run_aider_blocking(req: AiderRunRequest, stream_cb=None) -> dict:
                     dest.append(line)
                     if stream_cb:
                         stream_cb({"type": "step", "action": label, "detail": line.rstrip()[:240]})
+                    clean = line.strip()
+                    if clean:
+                        key = clean[:200]
+                        repeat_counts[key] = repeat_counts.get(key, 0) + 1
+                        if repeat_counts[key] > AIDER_REPEAT_LINE_LIMIT and not internal_stop["reason"]:
+                            internal_stop["reason"] = f"repeated output: {key[:120]}"
+                            cancel_event.set()
+                            if stream_cb:
+                                stream_cb({
+                                    "type": "step",
+                                    "action": "stopping",
+                                    "detail": internal_stop["reason"],
+                                })
+                            break
                     if cancel_event.is_set():
                         break
             finally:
@@ -492,6 +676,9 @@ def _run_aider_blocking(req: AiderRunRequest, stream_cb=None) -> dict:
             t.start()
 
         while proc.poll() is None:
+            if time.time() - start > AIDER_MAX_SECONDS and not internal_stop["reason"]:
+                internal_stop["reason"] = f"timeout after {AIDER_MAX_SECONDS}s"
+                cancel_event.set()
             if cancel_event.is_set():
                 proc.terminate()
                 try:
@@ -529,9 +716,16 @@ def _run_aider_blocking(req: AiderRunRequest, stream_cb=None) -> dict:
                 test_stdout_tail = _tail(e.stdout or "")
                 test_stderr_tail = _tail((e.stderr or "") + "\nTest command timed out after 300s.")
 
+        infra_test_failure = (
+            bool(files)
+            and exit_code == 0
+            and _missing_runner_failure(test_exit, test_stdout_tail, test_stderr_tail)
+        )
         status = (
-            "cancelled" if cancel_event.is_set()
-            else "error" if exit_code != 0 or (test_exit is not None and test_exit != 0)
+            "error" if internal_stop["reason"]
+            else "cancelled" if cancel_event.is_set()
+            else "error" if exit_code != 0
+            else "error" if test_exit is not None and test_exit != 0 and not infra_test_failure
             else "ok" if files
             else "no_changes"
         )
@@ -539,9 +733,15 @@ def _run_aider_blocking(req: AiderRunRequest, stream_cb=None) -> dict:
             f"Aider changed {len(files)} file(s)." if status == "ok"
             else "Aider completed without changes." if status == "no_changes"
             else "Aider cancelled by user." if status == "cancelled"
+            else f"Aider stopped: {internal_stop['reason']}." if internal_stop["reason"]
             else f"Aider failed with exit {exit_code}." if exit_code != 0
             else f"Aider edits left test command failing with exit {test_exit}."
         )
+        if infra_test_failure:
+            summary = (
+                f"Aider changed {len(files)} file(s); auto-test runner was unavailable "
+                f"(exit {test_exit}), so Reviewer verification is still required."
+            )
         return {
             "status": status,
             "summary": summary,
