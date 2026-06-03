@@ -249,7 +249,8 @@
     loader.style.setProperty("--hc-warm",th.warm);
   }
   function startLoadingBg(effect,theme){
-    if(["rain","flow","aurora","stars","circuit"].indexOf(effect)<0)return;
+    var canvasEffects=["rain","flow","aurora","stars","circuit","neural","sacred","signal","quantum","veins","solar","terminalGhost","orbital","lattice","synapse","sonar","magnetic","candle","microwave","blueprint"];
+    if(canvasEffects.indexOf(effect)<0)return;
     var canvas=document.getElementById("hc-loading-bg");
     if(!canvas)return;
     var ctx=canvas.getContext("2d");
@@ -268,6 +269,7 @@
     function makeRain(i){return {x:Math.random()*w,y:Math.random()*h-h*.4,c:colors[i%colors.length],a:.08+Math.random()*.16,v:1+Math.random()*2.6,drift:(Math.random()-.5)*.42,size:2+(Math.random()>.82?2:0),blocks:1+Math.floor(Math.random()*4),gap:6+Math.floor(Math.random()*8)};}
     function makeFlow(i){return {x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.16+Math.random()*.24,s:.36+Math.random()*.8};}
     function makeStar(i){return {x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.28+Math.random()*.48,v:.18+Math.random()*.65,size:1+(Math.random()>.62?1:0)+(Math.random()>.9?1:0)};}
+    function makePoint(i){return {x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.08+Math.random()*.3,v:.15+Math.random()*.9,r:1+Math.random()*3,phase:Math.random()*Math.PI*2};}
     function makeCircuit(i){
       var segs=[];
       for(var j=0;j<5+Math.floor(Math.random()*5);j++){
@@ -282,7 +284,7 @@
       else if(effect==="flow")particles=Array.from({length:clamp(area/11000,70,240)},function(_,i){return makeFlow(i);});
       else if(effect==="stars")particles=Array.from({length:clamp(area/8000,90,300)},function(_,i){return makeStar(i);});
       else if(effect==="circuit")particles=Array.from({length:clamp(area/30000,25,82)},function(_,i){return makeCircuit(i);});
-      else particles=[];
+      else particles=Array.from({length:clamp(area/15000,55,260)},function(_,i){return makePoint(i);});
     }
     function resize(){
       var rect=canvas.getBoundingClientRect();
@@ -347,10 +349,37 @@
       });
       ctx.globalAlpha=1;
     }
+    function drawNewEffect(time){
+      ctx.clearRect(0,0,w,h);
+      if(effect==="sacred"){
+        ctx.save();ctx.translate(w/2,h/2);ctx.rotate(time*.00008);ctx.strokeStyle=theme.acc;ctx.lineWidth=1.2;
+        for(var ring=0;ring<5;ring++){var r=Math.min(w,h)*(.11+ring*.075);ctx.globalAlpha=.08+ring*.018;ctx.beginPath();ctx.arc(0,0,r,0,Math.PI*2);ctx.stroke();for(var i=0;i<6;i++){var a=i*Math.PI/3+ring*.34;ctx.beginPath();ctx.arc(Math.cos(a)*r*.82,Math.sin(a)*r*.82,r*.38,0,Math.PI*2);ctx.stroke();}}
+        ctx.restore();ctx.globalAlpha=1;return;
+      }
+      if(effect==="signal"||effect==="sonar"){
+        var cx=effect==="sonar"?w*.78:w*.22,cy=effect==="sonar"?h*.68:h*.72,max=Math.max(w,h);
+        for(var s=0;s<9;s++){var rr=(time*.055+s*110)%max;ctx.globalAlpha=Math.max(0,.18-rr/max*.18);ctx.strokeStyle=colors[s%colors.length];ctx.beginPath();ctx.arc(cx,cy,rr,effect==="signal"?-.95:0,effect==="signal"?-.05:Math.PI*2);ctx.stroke();}
+        ctx.globalAlpha=1;return;
+      }
+      if(effect==="candle"){
+        var grd=ctx.createRadialGradient(w*.5,h*.42,20,w*.5,h*.42,Math.max(w,h)*.7);grd.addColorStop(0,rgba(theme.warm,.16));grd.addColorStop(1,"rgba(0,0,0,0)");ctx.fillStyle=grd;ctx.globalAlpha=.5+.1*Math.sin(time*.006);ctx.fillRect(0,0,w,h);ctx.globalAlpha=1;return;
+      }
+      if(effect==="terminalGhost")ctx.font="11px monospace";
+      particles.forEach(function(p,i){
+        if(effect==="neural"){p.x+=Math.sin(time*.00035+p.phase)*.16;p.y+=Math.cos(time*.00028+p.phase)*.16;for(var j=i+1;j<particles.length;j+=8){var b=particles[j],dx=p.x-b.x,dy=p.y-b.y,d=Math.sqrt(dx*dx+dy*dy);if(d<145){ctx.globalAlpha=(1-d/145)*.1;ctx.strokeStyle=p.c;ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(b.x,b.y);ctx.stroke();}}}
+        else if(effect==="terminalGhost"){var glyphs="01AF39#{}[]<>/sys:root",yy=(p.y+time*.018*(1+i%4))%(h+40);ctx.globalAlpha=.04+p.a*.22;ctx.fillStyle=p.c;ctx.fillText(glyphs[(i+Math.floor(time*.002))%glyphs.length],snap(p.x,12),snap(yy,14));return;}
+        else if(effect==="lattice"){return;}
+        else {p.x+=Math.sin(time*.001+p.phase)*.2;p.y+=Math.cos(time*.0008+p.phase)*.2;}
+        ctx.globalAlpha=p.a;ctx.fillStyle=p.c;ctx.fillRect(snap(p.x,2),snap(p.y,2),p.r,p.r);
+      });
+      if(effect==="lattice"||effect==="magnetic"||effect==="solar"){for(var l=0;l<24;l++){ctx.globalAlpha=.04+(l%5)*.01;ctx.strokeStyle=colors[l%colors.length];ctx.beginPath();for(var x=-80;x<w+80;x+=34){var y=h*(.16+l*.035)+Math.sin(x*.01+time*.0005+l)*26;if(x===-80)ctx.moveTo(x,y);else ctx.lineTo(x,y);}ctx.stroke();}}
+      if(effect==="blueprint"){ctx.strokeStyle=theme.acc;for(var q=0;q<16;q++){var p2=particles[q]||{x:0,y:0};ctx.globalAlpha=.055;ctx.strokeRect(snap(p2.x,16),snap(p2.y,16),60+(q%5)*26,30+(q%4)*18);}}
+      ctx.globalAlpha=1;
+    }
     function stop(){stopped=true;cancelAnimationFrame(raf);window.removeEventListener("resize",resize);}
     function step(time){
       if(stopped||!document.body.contains(canvas)){stop();return;}
-      if(effect==="rain")drawRain(time);else if(effect==="flow")drawFlow(time);else if(effect==="aurora")drawAurora(time);else if(effect==="stars")drawStars(time);else if(effect==="circuit")drawCircuit(time);
+      if(effect==="rain")drawRain(time);else if(effect==="flow")drawFlow(time);else if(effect==="aurora")drawAurora(time);else if(effect==="stars")drawStars(time);else if(effect==="circuit")drawCircuit(time);else drawNewEffect(time);
       if(!reduced)raf=requestAnimationFrame(step);
     }
     resize();window.addEventListener("resize",resize);
@@ -500,6 +529,21 @@ const BACKGROUND_EFFECTS = [
   {id:"aurora",name:"Aurora Lines"},
   {id:"stars",name:"Star Drift"},
   {id:"circuit",name:"Circuit Drift"},
+  {id:"neural",name:"Neural Constellation"},
+  {id:"sacred",name:"Sacred Geometry"},
+  {id:"signal",name:"Signal Drift"},
+  {id:"quantum",name:"Quantum Foam"},
+  {id:"veins",name:"Data Veins"},
+  {id:"solar",name:"Solar Wind"},
+  {id:"terminalGhost",name:"Blackbox Terminal"},
+  {id:"orbital",name:"Orbital Mechanics"},
+  {id:"lattice",name:"Lattice Field"},
+  {id:"synapse",name:"Synapse Rain"},
+  {id:"sonar",name:"Deep Ocean Sonar"},
+  {id:"magnetic",name:"Magnetic Field Lines"},
+  {id:"candle",name:"Monastery Candlelight"},
+  {id:"microwave",name:"Cosmic Microwave"},
+  {id:"blueprint",name:"Blueprint Ghosts"},
   {id:"scanlines",name:"Scanlines"},
   {id:"off",name:"Off"},
 ];
@@ -536,7 +580,8 @@ const hexToRgb=(hex)=>{
 function BackgroundCanvas({effect,t}){
   const ref=useRef(null);
   useEffect(()=>{
-    if(!["rain","flow","aurora","stars","circuit"].includes(effect))return;
+    const canvasEffects=["rain","flow","aurora","stars","circuit","neural","sacred","signal","quantum","veins","solar","terminalGhost","orbital","lattice","synapse","sonar","magnetic","candle","microwave","blueprint"];
+    if(!canvasEffects.includes(effect))return;
     const canvas=ref.current;
     if(!canvas)return;
     const reduced=window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -560,6 +605,7 @@ function BackgroundCanvas({effect,t}){
     const makeRain=(w,h,i)=>({x:Math.random()*w,y:Math.random()*h-h*.4,c:colors[i%colors.length],a:.08+Math.random()*.16,v:1+Math.random()*2.6,drift:(Math.random()-.5)*.42,size:2+(Math.random()>.82?2:0),blocks:1+Math.floor(Math.random()*4),gap:6+Math.floor(Math.random()*8)});
     const makeFlow=(w,h,i)=>({x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.16+Math.random()*.24,s:.36+Math.random()*.8});
     const makeStar=(w,h,i)=>({x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.28+Math.random()*.48,v:.18+Math.random()*.65,size:1+(Math.random()>.62?1:0)+(Math.random()>.9?1:0)});
+    const makePoint=(w,h,i)=>({x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.08+Math.random()*.3,v:.15+Math.random()*.9,r:1+Math.random()*3,phase:Math.random()*Math.PI*2});
     const makeCircuit=(w,h,i)=>{
       let x=Math.random()*w, y=Math.random()*h, segs=[];
       for(let j=0;j<5+Math.floor(Math.random()*5);j++){
@@ -574,6 +620,7 @@ function BackgroundCanvas({effect,t}){
       else if(effect==="flow")particles=Array.from({length:clampCount(area/11000,70,240)},(_,i)=>makeFlow(w,h,i));
       else if(effect==="stars")particles=Array.from({length:clampCount(area/8000,90,300)},(_,i)=>makeStar(w,h,i));
       else if(effect==="circuit")particles=Array.from({length:clampCount(area/30000,25,82)},(_,i)=>makeCircuit(w,h,i));
+      else if(["neural","quantum","veins","solar","terminalGhost","orbital","lattice","synapse","sonar","magnetic","candle","microwave","blueprint","signal","sacred"].includes(effect))particles=Array.from({length:clampCount(area/15000,55,260)},(_,i)=>makePoint(w,h,i));
       else particles=[];
     };
     const resize=()=>{
@@ -675,6 +722,59 @@ function BackgroundCanvas({effect,t}){
       });
       ctx.globalAlpha=1;
     };
+    const drawNeural=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);
+      particles.forEach((p,i)=>{p.x+=Math.sin(time*.00035+p.phase)*.16;p.y+=Math.cos(time*.00028+p.phase)*.16;});
+      for(let i=0;i<particles.length;i++)for(let j=i+1;j<particles.length;j+=3){
+        const a=particles[i],b=particles[j],dx=a.x-b.x,dy=a.y-b.y,d=Math.hypot(dx,dy);
+        if(d<145){ctx.globalAlpha=(1-d/145)*.12;ctx.strokeStyle=a.c;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();}
+      }
+      particles.forEach(p=>{ctx.globalAlpha=p.a;ctx.fillStyle=p.c;ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fill();});ctx.globalAlpha=1;
+    };
+    const drawSacred=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);ctx.save();ctx.translate(w/2,h/2);ctx.rotate(time*.00008);ctx.strokeStyle=t.acc;ctx.lineWidth=1.2;
+      for(let ring=0;ring<5;ring++){const r=Math.min(w,h)*(.11+ring*.075);ctx.globalAlpha=.08+ring*.018;ctx.beginPath();ctx.arc(0,0,r,0,Math.PI*2);ctx.stroke();for(let i=0;i<6;i++){const a=i*Math.PI/3+ring*.34;ctx.beginPath();ctx.arc(Math.cos(a)*r*.82,Math.sin(a)*r*.82,r*.38,0,Math.PI*2);ctx.stroke();}}
+      ctx.restore();ctx.globalAlpha=1;
+    };
+    const drawSignal=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);const cx=w*.22,cy=h*.72;for(let i=0;i<10;i++){const r=((time*.045+i*90)%(Math.max(w,h)*1.2));ctx.globalAlpha=Math.max(0,.16-r/(Math.max(w,h)*7));ctx.strokeStyle=colors[i%colors.length];ctx.lineWidth=1.4;ctx.beginPath();ctx.arc(cx,cy,r,-.95,-.05);ctx.stroke();}ctx.globalAlpha=1;
+    };
+    const drawQuantum=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);particles.forEach((p,i)=>{if(Math.random()<.012){p.x=Math.random()*w;p.y=Math.random()*h;}p.x+=Math.sin(time*.001+p.phase)*.25;p.y+=Math.cos(time*.0008+p.phase)*.25;ctx.globalAlpha=p.a*(.35+.65*Math.sin(time*.006+i)**2);ctx.fillStyle=p.c;ctx.fillRect(snap(p.x,2),snap(p.y,2),p.r,p.r);});ctx.globalAlpha=1;
+    };
+    const drawVeins=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);particles.slice(0,70).forEach((p,i)=>{const x=(p.x+time*.015*(i%3+1))%(w+160)-80;const y=p.y;ctx.globalAlpha=.08+p.a*.25;ctx.strokeStyle=p.c;ctx.beginPath();ctx.moveTo(x,y);for(let k=0;k<5;k++)ctx.lineTo(x+k*48,y+Math.sin(time*.0008+i+k)*34);ctx.stroke();});ctx.globalAlpha=1;
+    };
+    const drawSolar=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);for(let i=0;i<18;i++){ctx.globalAlpha=.05+(i%4)*.015;ctx.strokeStyle=colors[i%colors.length];ctx.lineWidth=1.2;ctx.beginPath();for(let x=-80;x<w+80;x+=32){const y=h*(.2+i*.035)+Math.sin(x*.01+time*.0005+i)*28;if(x===-80)ctx.moveTo(x,y);else ctx.lineTo(x,y);}ctx.stroke();}ctx.globalAlpha=1;
+    };
+    const drawTerminal=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);ctx.font="11px monospace";const glyphs="01AF39#{}[]<>/sys:root";particles.slice(0,90).forEach((p,i)=>{const y=(p.y+time*.018*(1+i%4))%(h+40);ctx.globalAlpha=.04+p.a*.22;ctx.fillStyle=p.c;ctx.fillText(glyphs[(i+Math.floor(time*.002))%glyphs.length],snap(p.x,12),snap(y,14));});ctx.globalAlpha=1;
+    };
+    const drawOrbital=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);particles.slice(0,12).forEach((p,i)=>{const cx=w*((i%4)+1)/5,cy=h*(.24+Math.floor(i/4)*.22),r=34+(i%5)*18;ctx.globalAlpha=.09;ctx.strokeStyle=p.c;ctx.beginPath();ctx.ellipse(cx,cy,r,r*.42,(i%3)*.6,0,Math.PI*2);ctx.stroke();const a=time*.00035*(i%3+1)+p.phase;ctx.globalAlpha=.42;ctx.fillStyle=p.c;ctx.beginPath();ctx.arc(cx+Math.cos(a)*r,cy+Math.sin(a)*r*.42,2.2,0,Math.PI*2);ctx.fill();});ctx.globalAlpha=1;
+    };
+    const drawLattice=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);ctx.strokeStyle=t.acc;ctx.lineWidth=1;for(let y=h*.18;y<h;y+=36){ctx.globalAlpha=.045+(y/h)*.08;ctx.beginPath();for(let x=0;x<=w;x+=36){const yy=y+Math.sin(x*.012+time*.0008+y*.01)*10;if(x===0)ctx.moveTo(x,yy);else ctx.lineTo(x,yy);}ctx.stroke();}for(let x=0;x<w;x+=52){ctx.globalAlpha=.04;ctx.beginPath();ctx.moveTo(x,h*.18);ctx.lineTo(w/2+(x-w/2)*1.8,h);ctx.stroke();}ctx.globalAlpha=1;
+    };
+    const drawSynapse=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);particles.slice(0,45).forEach((p,i)=>{const y=(p.y+time*.035*(1+i%3))%(h+80)-40;ctx.strokeStyle=p.c;ctx.globalAlpha=.08+p.a*.15;ctx.beginPath();ctx.moveTo(p.x,y);ctx.bezierCurveTo(p.x+30,y+30,p.x-20,y+70,p.x+50,y+110);ctx.stroke();ctx.globalAlpha=.45;ctx.fillStyle=p.c;ctx.beginPath();ctx.arc(p.x+Math.sin(time*.004+i)*34,y+((time*.08+i*17)%110),2,0,Math.PI*2);ctx.fill();});ctx.globalAlpha=1;
+    };
+    const drawSonar=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);const cx=w*.78,cy=h*.68,max=Math.max(w,h);for(let i=0;i<7;i++){const r=(time*.055+i*130)%max;ctx.globalAlpha=Math.max(0,.18-r/max*.18);ctx.strokeStyle=colors[i%colors.length];ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.stroke();}ctx.globalAlpha=1;
+    };
+    const drawMagnetic=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);for(let i=0;i<24;i++){ctx.globalAlpha=.055;ctx.strokeStyle=colors[i%colors.length];ctx.beginPath();for(let y=-40;y<h+40;y+=28){const x=w*.5+Math.sin(y*.01+time*.0004+i)*Math.min(w,h)*(.18+i*.006);if(y===-40)ctx.moveTo(x,y);else ctx.lineTo(x,y);}ctx.stroke();}ctx.globalAlpha=1;
+    };
+    const drawCandle=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);const grd=ctx.createRadialGradient(w*.5,h*.42,20,w*.5,h*.42,Math.max(w,h)*.7);grd.addColorStop(0,`${t.warm}20`);grd.addColorStop(1,"rgba(0,0,0,0)");ctx.fillStyle=grd;ctx.globalAlpha=.5+.1*Math.sin(time*.006);ctx.fillRect(0,0,w,h);for(let i=0;i<40;i++){ctx.globalAlpha=.015;ctx.fillStyle=i%2?t.warm:t.acc;ctx.fillRect(Math.random()*w,Math.random()*h,1,Math.random()*80);}ctx.globalAlpha=1;
+    };
+    const drawMicrowave=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);particles.forEach((p,i)=>{ctx.globalAlpha=.035+p.a*.12;ctx.fillStyle=colors[(i+Math.floor(time*.0004))%colors.length];ctx.fillRect(snap(p.x,3),snap(p.y,3),2,2);});ctx.globalAlpha=1;
+    };
+    const drawBlueprint=(time,w,h)=>{
+      ctx.clearRect(0,0,w,h);ctx.strokeStyle=t.acc;ctx.lineWidth=1;for(let i=0;i<16;i++){const x=(particles[i]?.x||0),y=(particles[i]?.y||0),ww=60+(i%5)*26,hh=30+(i%4)*18;ctx.globalAlpha=.045+(i%3)*.02;ctx.strokeRect(snap(x,16),snap(y,16),ww,hh);ctx.beginPath();ctx.moveTo(snap(x,16)-16,snap(y,16)+hh/2);ctx.lineTo(snap(x,16)+ww+16,snap(y,16)+hh/2);ctx.moveTo(snap(x,16)+ww/2,snap(y,16)-16);ctx.lineTo(snap(x,16)+ww/2,snap(y,16)+hh+16);ctx.stroke();}ctx.globalAlpha=1;
+    };
     const step=(time)=>{
       if(stopped)return;
       const w=view.w, h=view.h;
@@ -683,6 +783,21 @@ function BackgroundCanvas({effect,t}){
       else if(effect==="aurora")drawAurora(time,w,h);
       else if(effect==="stars")drawStars(time,w,h);
       else if(effect==="circuit")drawCircuit(time,w,h);
+      else if(effect==="neural")drawNeural(time,w,h);
+      else if(effect==="sacred")drawSacred(time,w,h);
+      else if(effect==="signal")drawSignal(time,w,h);
+      else if(effect==="quantum")drawQuantum(time,w,h);
+      else if(effect==="veins")drawVeins(time,w,h);
+      else if(effect==="solar")drawSolar(time,w,h);
+      else if(effect==="terminalGhost")drawTerminal(time,w,h);
+      else if(effect==="orbital")drawOrbital(time,w,h);
+      else if(effect==="lattice")drawLattice(time,w,h);
+      else if(effect==="synapse")drawSynapse(time,w,h);
+      else if(effect==="sonar")drawSonar(time,w,h);
+      else if(effect==="magnetic")drawMagnetic(time,w,h);
+      else if(effect==="candle")drawCandle(time,w,h);
+      else if(effect==="microwave")drawMicrowave(time,w,h);
+      else if(effect==="blueprint")drawBlueprint(time,w,h);
       if(!reduced)raf=requestAnimationFrame(step);
     };
     resize();
@@ -692,8 +807,8 @@ function BackgroundCanvas({effect,t}){
     step(performance.now());
     return ()=>{stopped=true;cancelAnimationFrame(raf);window.removeEventListener("resize",resize);if(ro)ro.disconnect();};
   },[effect,t.acc,t.acc2,t.warm,t.f1]);
-  if(!["rain","flow","aurora","stars","circuit"].includes(effect))return null;
-  const opacity=effect==="rain"?0.58:effect==="flow"?0.86:effect==="aurora"?0.66:effect==="stars"?0.82:effect==="circuit"?0.78:0.5;
+  if(!["rain","flow","aurora","stars","circuit","neural","sacred","signal","quantum","veins","solar","terminalGhost","orbital","lattice","synapse","sonar","magnetic","candle","microwave","blueprint"].includes(effect))return null;
+  const opacity=effect==="rain"?0.58:effect==="flow"?0.86:effect==="aurora"?0.66:effect==="stars"?0.82:effect==="circuit"?0.78:effect==="candle"?0.48:effect==="microwave"?0.5:0.7;
   return <canvas ref={ref} aria-hidden="true" style={{position:"absolute",inset:0,width:"100%",height:"100%",zIndex:0,pointerEvents:"none",opacity}}/>;
 }
 
@@ -2040,7 +2155,7 @@ function HyprChat(){
     {emoji:"🌌",name:"Galaxy Brain",desc:"Max effort — three passes"},
   ];
   // Resolve effort for a given conv id (per-chat override, else global)
-  const resolveEffort=(cid)=>(cid&&effortPerChat[cid]!==undefined?effortPerChat[cid]:globalEffort);
+  const resolveEffort=(cid,overrides={})=>overrides.effort!==undefined?overrides.effort:(cid&&effortPerChat[cid]!==undefined?effortPerChat[cid]:(!cid&&pendingEffort!==null?pendingEffort:globalEffort));
   const [lastPersonaId,setLastPersonaId]=useState(()=>{try{return localStorage.getItem("hc-last-persona")||null;}catch{return null;}});
   const [fontSize,setFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font-size")||"14");}catch{return 14;}});
   const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"14");}catch{return 14;}});
@@ -2070,7 +2185,6 @@ function HyprChat(){
   const [previewContent,setPreviewContent]=useState(null);
   const [previewError,setPreviewError]=useState(null);
   const [previewArchive,setPreviewArchive]=useState(null); // {filename, file_count, entries}
-  const [showChangelog,setShowChangelog]=useState(false);
   const [pendingTheme,setPendingTheme]=useState(null);
   const [pendingFont,setPendingFont]=useState(null);
   const DEFAULT_LOADING_QUOTES=[
@@ -2126,7 +2240,10 @@ function HyprChat(){
   const [modelSearch,setModelSearch]=useState("");
   const [prompts,setPrompts]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-prompts")||"[]");}catch{return [];}});
   const [showPromptPicker,setShowPromptPicker]=useState(false);
+  const [showQuickMenu,setShowQuickMenu]=useState(false);
   const [showEffortPicker,setShowEffortPicker]=useState(false);
+  const [pendingEffort,setPendingEffort]=useState(null);
+  const [pendingPersona,setPendingPersona]=useState(null);
   const [showExportMenu,setShowExportMenu]=useState(false);
   const effortPickerRef=useRef(null);
   const exportMenuRef=useRef(null);
@@ -2412,7 +2529,7 @@ function HyprChat(){
   const [quickResults,setQuickResults]=useState([]); // per send
   const [searchLoading,setSearchLoading]=useState(false);
 
-  const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0),chatScrollRef=useRef(null),dlPanelRef=useRef(null),promptPickerRef=useRef(null),actIdRef=useRef(actId),titleSearchRef=useRef(null),ftsRef=useRef(null),importRef=useRef(null);
+  const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0),chatScrollRef=useRef(null),dlPanelRef=useRef(null),quickMenuRef=useRef(null),promptPickerRef=useRef(null),actIdRef=useRef(actId),titleSearchRef=useRef(null),ftsRef=useRef(null),importRef=useRef(null);
   actIdRef.current=actId;
   const act = convs.find(c=>c.id===actId);
   const isCoderPersonaName = (name)=>{const n=(name||"").toLowerCase();return n.includes("coder")||n.includes("daedalus");};
@@ -2654,6 +2771,12 @@ function HyprChat(){
     return()=>document.removeEventListener("mousedown",handler);
   },[showPromptPicker]);
   useEffect(()=>{
+    if(!showQuickMenu)return;
+    const handler=(e)=>{if(quickMenuRef.current&&!quickMenuRef.current.contains(e.target))setShowQuickMenu(false);};
+    document.addEventListener("mousedown",handler);
+    return()=>document.removeEventListener("mousedown",handler);
+  },[showQuickMenu]);
+  useEffect(()=>{
     if(!showExportMenu)return;
     const handler=(e)=>{if(exportMenuRef.current&&!exportMenuRef.current.contains(e.target))setShowExportMenu(false);};
     document.addEventListener("mousedown",handler);
@@ -2705,7 +2828,9 @@ function HyprChat(){
 
     // Figure out persona to carry over
     let persona=null;
-    if(!forceBlank){
+    if(forceBlank&&pendingPersona){
+      persona={...pendingPersona,tool_ids:pendingToolIds};
+    }else if(!forceBlank){
       if(curConv?.persona_name){
         persona={model:curConv.model,system_prompt:curConv.system_prompt||"",tool_ids:curConv.tool_ids||[],model_config_id:curConv.model_config_id,persona_name:curConv.persona_name,persona_avatar:curConv.persona_avatar};
       }
@@ -2713,7 +2838,8 @@ function HyprChat(){
 
     const lastModel=(()=>{try{return localStorage.getItem("hc-last-model")||"";}catch{return "";}})();
     const defaultModel=persona?.model||curConv?.model||lastModel||models[0]||"qwen3.5:27b";
-    const pendingTools=forceBlank?pendingToolIds:[];
+    const pendingTools=forceBlank?(persona?.tool_ids||pendingToolIds):[];
+    const pendingEffortValue=forceBlank&&pendingEffort!==null?pendingEffort:null;
     try{
       const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:"New Chat",model:defaultModel})});
       const c=await r.json();c.messages=[];
@@ -2726,12 +2852,14 @@ function HyprChat(){
         c.tool_ids=pendingTools;
         fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({tool_ids:pendingTools})}).catch(()=>{});
       }
+      if(pendingEffortValue!==null)setEffortPerChat(p=>({...p,[c.id]:pendingEffortValue}));
       setConvs(p=>[c,...p]);setActId(c.id);
       setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
       return c.id;
     }catch{
       const newId=`l-${Date.now()}`;
       const c={id:newId,title:"New Chat",messages:[],model:defaultModel,system_prompt:persona?.system_prompt||"",...(persona||{}),tool_ids:pendingTools};
+      if(pendingEffortValue!==null)setEffortPerChat(p=>({...p,[newId]:pendingEffortValue}));
       setConvs(p=>[c,...p]);setActId(newId);
       setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
       return newId;
@@ -2953,7 +3081,7 @@ function HyprChat(){
     // User message persistence is handled server-side by chat_stream_generate's defensive save —
     // doing it from the client too would race and create duplicates.
     try{
-      const cv=convs.find(c=>c.id===cid)||{tool_ids:pendingToolIds};
+      const cv=convs.find(c=>c.id===cid)||{tool_ids:pendingToolIds,system_prompt:pendingPersona?.system_prompt||"",model_config_id:pendingPersona?.model_config_id||null,persona_name:pendingPersona?.persona_name||null,persona_avatar:pendingPersona?.persona_avatar||null,model:pendingPersona?.model};
       let am = messagesToSend.map(m=>{
         let baseContent=m._fullContent||m.content||"";
         // After reload _fullContent is gone; reconstruct the `[Attached N image: ...]` hint
@@ -3024,7 +3152,7 @@ function HyprChat(){
       if(sendTopK!==undefined)body.top_k=sendTopK;
       if(sendRepeatPenalty!==undefined)body.repeat_penalty=sendRepeatPenalty;
       if(thinkMode!=="auto")body.think_budget=thinkMode==="off"?0:1;
-      const _effort=resolveEffort(cid);
+      const _effort=resolveEffort(cid,overrides);
       if(_effort>0)body.effort_rounds=_effort;
       const res=await fetch(`${API}/api/chat/stream`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:ctrl.signal});
       if(!res.ok){const errText=await res.text().catch(()=>res.statusText);throw new Error(`HTTP ${res.status}: ${errText}`);}
@@ -3082,6 +3210,7 @@ function HyprChat(){
   const send=async()=>{
     if(streaming||loadingConv||(!inp.trim()&&!attachments.length))return;
     let cid=actId;
+    const pendingEffortForSend=!cid&&pendingEffort!==null?pendingEffort:undefined;
     if(!cid){cid=await newChat(true);if(!cid)return;}
     const cv=convs.find(c=>c.id===cid);
     // Route council chats to council sender
@@ -3136,7 +3265,7 @@ function HyprChat(){
     setInp("");setAttachments([]);if(inpRef.current){inpRef.current.style.height="auto";}
     setTimeout(()=>{if(chatScrollRef.current)chatScrollRef.current.scrollTop=chatScrollRef.current.scrollHeight;},0);
     const am=[...(cv?.messages||[]),um];
-    await sendMessages(cid, am, um._fullContent||um.content);
+    await sendMessages(cid, am, um._fullContent||um.content, pendingEffortForSend!==undefined?{effort:pendingEffortForSend}:undefined);
   };
 
   const regenerate=async(msgIndex, overrides)=>{
@@ -3915,6 +4044,7 @@ function HyprChat(){
     ["quotes","💬","Loading Quotes","Custom waiting text"],
     ["cleanup","🗃️","Sandbox & Cleanup","Storage maintenance"],
     ["danger","⚠️","Danger Zone","Destructive actions"],
+    ["changelog","📋","Changelog","Release notes and updates"],
   ];
   const activeSettingsTitle=(settingsTabs.find(([id])=>id===settingsTab)||settingsTabs[0])[2];
 
@@ -5385,28 +5515,37 @@ function HyprChat(){
 
       :panel==="settings"?ReactDOM.createPortal(<div style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)",fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)closeSettings();}}>
     <div style={{width:"min(1100px,95vw)",maxHeight:"85vh",height:"85vh",display:"grid",gridTemplateColumns:"260px minmax(0,1fr)",background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,boxShadow:"0 8px 48px #0008",overflow:"hidden",animation:"fadeIn .25s"}}>
-      <div style={{borderRight:`1px solid ${t.brd}44`,background:`${t.surface}50`,padding:18,display:"flex",flexDirection:"column",gap:8,overflowY:"auto"}}>
+      <div style={{borderRight:`1px solid ${t.brd}44`,background:`${t.surface}50`,padding:18,display:"flex",flexDirection:"column",gap:8,overflow:"hidden"}}>
         <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:10}}>
           <span style={{color:t.acc,display:"flex"}}><IC.Settings/></span>
           <div>
             <div style={{fontSize:15,fontWeight:800,color:t.text,letterSpacing:.4}}>Settings</div>
           </div>
         </div>
-        {settingsTabs.map(([id,icon,label,hint])=>{const active=settingsTab===id;return <button key={id} onClick={()=>{setSettingsTab(id);if(id!=="connections")setShowHealthMonitor(false);}} style={{width:"100%",display:"flex",alignItems:"center",gap:10,textAlign:"left",padding:"10px 11px",borderRadius:10,border:`1px solid ${active?t.acc:t.brd}33`,background:active?`${t.acc}18`:`${t.bgDeep}88`,color:active?t.acc:t.dim,cursor:"pointer",fontFamily:font,boxShadow:"none"}}>
-          <span style={{fontSize:16,width:20,textAlign:"center",flexShrink:0}}>{icon}</span>
+        <div style={{flex:1,minHeight:0,overflowY:"auto",display:"flex",flexDirection:"column",gap:8,paddingRight:2}}>
+          {settingsTabs.filter(([id])=>id!=="changelog").map(([id,icon,label,hint])=>{const active=settingsTab===id;return <button key={id} onClick={()=>{setSettingsTab(id);if(id!=="connections")setShowHealthMonitor(false);}} style={{width:"100%",display:"flex",alignItems:"center",gap:10,textAlign:"left",padding:"10px 11px",borderRadius:10,border:`1px solid ${active?t.acc:t.brd}33`,background:active?`${t.acc}18`:`${t.bgDeep}88`,color:active?t.acc:t.dim,cursor:"pointer",fontFamily:font,boxShadow:"none"}}>
+            <span style={{fontSize:16,width:20,textAlign:"center",flexShrink:0}}>{icon}</span>
+            <span style={{minWidth:0,flex:1}}>
+              <span style={{display:"block",fontSize:12,fontWeight:800,color:active?t.acc:t.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{label}</span>
+              <span style={{display:"block",fontSize:9,color:t.mut,marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{hint}</span>
+            </span>
+          </button>;})}
+        </div>
+        {(()=>{const active=settingsTab==="changelog";return <button onClick={async()=>{setSettingsTab("changelog");setShowHealthMonitor(false);if(!changelogContent){try{const r=await fetch(`${API}/api/changelog`);const d=await r.json();setChangelogContent(d.content||"");}catch{setChangelogContent("# Changelog\n\nFailed to load.");}}}} style={{width:"100%",display:"flex",alignItems:"center",gap:10,textAlign:"left",padding:"10px 11px",borderRadius:10,border:`1px solid ${active?t.acc:t.brd}33`,background:active?`${t.acc}18`:`${t.bgDeep}88`,color:active?t.acc:t.dim,cursor:"pointer",fontFamily:font,boxShadow:"none",marginTop:8}}>
+          <span style={{fontSize:16,width:20,textAlign:"center",flexShrink:0}}>📋</span>
           <span style={{minWidth:0,flex:1}}>
-            <span style={{display:"block",fontSize:12,fontWeight:800,color:active?t.acc:t.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{label}</span>
-            <span style={{display:"block",fontSize:9,color:t.mut,marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{hint}</span>
+            <span style={{display:"block",fontSize:12,fontWeight:800,color:active?t.acc:t.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>Changelog</span>
+            <span style={{display:"block",fontSize:9,color:t.mut,marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>Release notes and updates</span>
           </span>
-        </button>;})}
+        </button>;})()}
       </div>
       <div style={{display:"flex",overflow:"hidden",minWidth:0}}>
     <div style={{flex:showHealthMonitor?"0 0 52%":"1 1 auto",overflowY:"auto",padding:"22px 30px",transition:"flex .3s ease",minWidth:0}}>
     <div style={{maxWidth:980}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
         <h3 style={{fontSize:16,fontWeight:700,color:t.acc,letterSpacing:1,textTransform:"uppercase",margin:0}}>{activeSettingsTitle}</h3>
-        <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          <button onClick={async()=>{setShowChangelog(true);if(!changelogContent){try{const r=await fetch(`${API}/api/changelog`);const d=await r.json();setChangelogContent(d.content||"");}catch{setChangelogContent("# Changelog\n\nFailed to load.");};}}} style={{...btnS(t.f1),fontSize:12,padding:"6px 14px"}}>📋 Changelog</button>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          {settingsTab==="changelog"&&<button onClick={async()=>{setChangelogContent(null);try{const r=await fetch(`${API}/api/changelog`);const d=await r.json();setChangelogContent(d.content||"");}catch{setChangelogContent("# Changelog\n\nFailed to load.");}}} style={{...btnS(t.f1),fontSize:11,padding:"5px 10px"}}>Refresh</button>}
           <button onClick={closeSettings} style={{...btnS(t.mut),fontSize:12,padding:"6px 10px"}}>✕</button>
         </div>
       </div>
@@ -5993,6 +6132,16 @@ function HyprChat(){
         </div>
       </div>
 
+      {/* TILE: Changelog */}
+      <div style={{...settingsCardS,display:settingsTab==="changelog"?"block":"none",padding:0,overflow:"hidden"}}>
+        <div style={{maxHeight:"calc(85vh - 120px)",overflowY:"auto",padding:"20px 24px",lineHeight:1.7,fontSize:13,color:t.text}}>
+          {!changelogContent?<div style={{textAlign:"center",padding:40,color:t.mut,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+            <div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
+            Loading changelog...
+          </div>:<MDWrap>{md(changelogContent)}</MDWrap>}
+        </div>
+      </div>
+
     </div>
   </div>
 
@@ -6522,45 +6671,30 @@ function HyprChat(){
             {composerActive&&<div aria-hidden="true" style={{position:"absolute",inset:0,borderRadius:8,pointerEvents:"none",overflow:"hidden",zIndex:0}}>
               {["top","right","bottom","left"].map(side=><span key={side} className={`composer-trace composer-trace-${side}`} style={{"--trace-color":composerColor}}/>)}
             </div>}
-            {!act?.is_council&&<><button onClick={()=>fileRef.current?.click()} title="Attach file" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"4px 3px",display:"flex",alignItems:"center",flexShrink:0,opacity:.6}}>
-              <IC.Paperclip/>
-            </button>
+            {!act?.is_council&&<><div ref={quickMenuRef} style={{position:"relative",flexShrink:0}}>
+              <button onClick={()=>{setShowQuickMenu(p=>!p);setShowPromptPicker(false);}} title="Quick actions" style={{background:showQuickMenu?`${t.acc}18`:"none",border:showQuickMenu?`1px solid ${t.acc}44`:"none",color:showQuickMenu?t.acc:t.mut,cursor:"pointer",padding:"4px 6px",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,opacity:showQuickMenu?1:.75,borderRadius:7,fontSize:17,lineHeight:1}}><IC.Plus/></button>
+              {showQuickMenu&&<div style={{position:"absolute",bottom:"115%",left:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:220,padding:7,display:"flex",flexDirection:"column",gap:4}}>
+                <button onClick={()=>{fileRef.current?.click();setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:`${t.surface}66`,color:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}><IC.Paperclip/> Attach files</button>
+                {prompts.length>0&&<button onClick={()=>{setShowPromptPicker(true);setPromptSearch("");setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:showPromptPicker?`${t.f1}18`:`${t.surface}66`,color:showPromptPicker?t.f1:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}>⚡ Prompt Library</button>}
+                {(()=>{const coderMc=mcs.find(m=>isCoderPersonaName(m.name));const isCoderActive=isCoderPersonaName(act?.persona_name)||(!actId&&isCoderPersonaName(pendingPersona?.persona_name));return coderMc?<button onClick={()=>{setShowQuickMenu(false);if(!actId){if(isCoderActive){setPendingPersona(null);setPendingToolIds([]);setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}const persona={model:coderMc.base_model||models[0]||"qwen3.5:27b",system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:coderMc.parameters?.avatar};setPendingPersona(persona);setPendingToolIds(persona.tool_ids||[]);setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);return;}if(isCoderActive){uConv(actId,{model_config_id:null,persona_name:null,persona_avatar:null,system_prompt:"",tool_ids:[]});setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:coderMc.parameters?.avatar});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:isCoderActive?`${t.ok}18`:`${t.surface}66`,color:isCoderActive?t.ok:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}>&lt;/&gt; {isCoderActive?"Disable Daedalus":"Activate Daedalus"}</button>:null;})()}
+              </div>}
+            </div>
             <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>{if(e.target.files?.length)handleFileUpload(Array.from(e.target.files));e.target.value="";}}/>
-            {(()=>{const coderMc=mcs.find(m=>isCoderPersonaName(m.name));const isCoderActive=isCoderPersonaName(act?.persona_name);return coderMc?<button onClick={()=>{if(!actId)return;if(isCoderActive){uConv(actId,{model_config_id:null,persona_name:null,persona_avatar:null,system_prompt:"",tool_ids:[]});setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:coderMc.parameters?.avatar});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} title={isCoderActive?"Disable Daedalus":"Activate Daedalus"} style={{background:isCoderActive?`${t.ok}20`:"none",border:isCoderActive?`1px solid ${t.ok}44`:"none",color:isCoderActive?t.ok:t.mut,cursor:"pointer",padding:"4px 5px",display:"flex",alignItems:"center",flexShrink:0,fontSize:13,opacity:isCoderActive?1:.7,borderRadius:6}}>&lt;/&gt;</button>:null;})()}
-            {prompts.length>0&&<div ref={promptPickerRef} style={{position:"relative"}}>
-              <button onClick={()=>{setShowPromptPicker(p=>!p);setPromptSearch("");}} title="Prompt Library (⚡)" style={{background:showPromptPicker?`${t.f1}15`:"none",border:"none",color:showPromptPicker?t.f1:t.mut,cursor:"pointer",padding:"4px 5px",display:"flex",alignItems:"center",flexShrink:0,fontSize:13,opacity:showPromptPicker?1:.7}}>⚡</button>
-              {showPromptPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8}}>
+            {prompts.length>0&&<div ref={promptPickerRef} style={{position:"relative",flexShrink:0}}>
+              {showPromptPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:310,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8}}>
                 <input value={promptSearch} onChange={e=>setPromptSearch(e.target.value)} placeholder="Search prompts..." style={{...inputS,marginBottom:6,padding:"5px 8px",fontSize:11}} autoFocus/>
                 <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
-                  {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={(e)=>{e.stopPropagation();setInp(p.content);setShowPromptPicker(false);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
+                  {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={(e)=>{e.stopPropagation();setInp(p.content);setShowPromptPicker(false);setShowQuickMenu(false);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
                     <div style={{fontSize:11,fontWeight:600,color:t.text}}>{p.title}</div>
                     <div style={{fontSize:9,color:t.f1,marginTop:1}}>{p.category||"General"}</div>
                   </div>)}
                   {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())).length===0&&<div style={{textAlign:"center",padding:16,color:t.mut,fontSize:11}}>No matches</div>}
                 </div>
                 <div style={{borderTop:`1px solid ${t.brd}22`,marginTop:4,paddingTop:4}}>
-                  <button onClick={()=>{setShowPromptPicker(false);setPanel("prompts");}} style={{...btnS(t.f1),width:"100%",justifyContent:"center",fontSize:9}}>Manage Prompts →</button>
+                  <button onClick={()=>{setShowPromptPicker(false);setShowQuickMenu(false);setPanel("prompts");}} style={{...btnS(t.f1),width:"100%",justifyContent:"center",fontSize:9}}>Manage Prompts →</button>
                 </div>
               </div>}
             </div>}
-            {!act?.is_council&&(()=>{const lvl=resolveEffort(actId);const L=EFFORT_LEVELS[lvl]||EFFORT_LEVELS[0];const overridden=actId&&effortPerChat[actId]!==undefined&&effortPerChat[actId]!==globalEffort;return <div ref={effortPickerRef} style={{position:"relative",flexShrink:0}}>
-              <button onClick={()=>setShowEffortPicker(p=>!p)} title={`Effort: ${L.name} — ${L.desc}${overridden?" (overrides global)":""}`} style={{background:showEffortPicker?`${t.pink}15`:"none",border:overridden?`1px solid ${t.pink}55`:"none",color:lvl>0?t.pink:t.mut,cursor:"pointer",padding:"3px 8px",borderRadius:8,display:"flex",alignItems:"center",gap:4,fontSize:11,flexShrink:0,opacity:lvl>0?1:.65,fontWeight:600}}>
-                <span style={{fontSize:13}}>{L.emoji}</span><span style={{fontSize:10}}>{L.name}</span>
-              </button>
-              {showEffortPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.pink}33`,borderRadius:10,boxShadow:`0 4px 24px #0008`,minWidth:200,padding:6}}>
-                <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,padding:"3px 6px 5px",fontWeight:700}}>Effort — this chat</div>
-                {EFFORT_LEVELS.map((lv,v)=><button key={v} onClick={()=>{if(actId){setEffortPerChat(p=>({...p,[actId]:v}));}setShowEffortPicker(false);}} style={{display:"flex",alignItems:"center",gap:6,width:"100%",textAlign:"left",padding:"6px 8px",borderRadius:6,background:lvl===v?`${t.pink}18`:"transparent",border:"none",color:lvl===v?t.pink:t.dim,cursor:"pointer",fontSize:11,fontFamily:font,marginBottom:2}}>
-                  <span style={{fontSize:14}}>{lv.emoji}</span>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontWeight:600}}>{lv.name}{globalEffort===v&&<span style={{fontSize:8,color:t.mut,marginLeft:4,opacity:.7}}>default</span>}</div>
-                    <div style={{fontSize:9,color:t.mut}}>{lv.desc}</div>
-                  </div>
-                </button>)}
-                {actId&&effortPerChat[actId]!==undefined&&<div style={{borderTop:`1px solid ${t.brd}22`,marginTop:4,paddingTop:4}}>
-                  <button onClick={()=>{setEffortPerChat(p=>{const n={...p};delete n[actId];return n;});setShowEffortPicker(false);}} style={{width:"100%",background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:10,padding:"4px 0",fontFamily:font}}>Use global default →</button>
-                </div>}
-              </div>}
-            </div>;})()}
             </>}
             <textarea ref={inpRef} value={inp} onChange={e=>setInp(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
               placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":"What's on your mind?"}`} rows={1}
@@ -6568,6 +6702,24 @@ function HyprChat(){
               style={{flex:1,background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:14,outline:"none",resize:"none",padding:isEmptyChatSurface?"11px 0":"8px 0",minHeight:isEmptyChatSurface?38:"auto",maxHeight:140,lineHeight:1.6}}
               onInput={e=>{e.target.style.height="auto";e.target.style.height=Math.min(e.target.scrollHeight,120)+"px";}}
               onPaste={e=>{const files=Array.from(e.clipboardData?.files||[]);if(files.length){e.preventDefault();handleFileUpload(files);}}}/>
+            {!act?.is_council&&(()=>{const lvl=resolveEffort(actId);const L=EFFORT_LEVELS[lvl]||EFFORT_LEVELS[0];const overridden=actId?effortPerChat[actId]!==undefined&&effortPerChat[actId]!==globalEffort:pendingEffort!==null&&pendingEffort!==globalEffort;return <div ref={effortPickerRef} style={{position:"relative",flexShrink:0}}>
+              <button onClick={()=>setShowEffortPicker(p=>!p)} title={`Effort: ${L.name} — ${L.desc}${overridden?" (overrides global)":""}`} style={{background:showEffortPicker?`${t.pink}15`:"none",border:overridden?`1px solid ${t.pink}55`:"none",color:lvl>0?t.pink:t.mut,cursor:"pointer",padding:"3px 8px",borderRadius:8,display:"flex",alignItems:"center",gap:4,fontSize:11,flexShrink:0,opacity:lvl>0?1:.65,fontWeight:600}}>
+                <span style={{fontSize:13}}>{L.emoji}</span><span style={{fontSize:10}}>{L.name}</span>
+              </button>
+              {showEffortPicker&&<div style={{position:"absolute",bottom:"110%",right:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.pink}33`,borderRadius:10,boxShadow:`0 4px 24px #0008`,minWidth:200,padding:6}}>
+                <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,padding:"3px 6px 5px",fontWeight:700}}>Effort — this chat</div>
+                {EFFORT_LEVELS.map((lv,v)=><button key={v} onClick={()=>{if(actId){setEffortPerChat(p=>({...p,[actId]:v}));}else{setPendingEffort(v);}setShowEffortPicker(false);}} style={{display:"flex",alignItems:"center",gap:6,width:"100%",textAlign:"left",padding:"6px 8px",borderRadius:6,background:lvl===v?`${t.pink}18`:"transparent",border:"none",color:lvl===v?t.pink:t.dim,cursor:"pointer",fontSize:11,fontFamily:font,marginBottom:2}}>
+                  <span style={{fontSize:14}}>{lv.emoji}</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:600}}>{lv.name}{globalEffort===v&&<span style={{fontSize:8,color:t.mut,marginLeft:4,opacity:.7}}>default</span>}</div>
+                    <div style={{fontSize:9,color:t.mut}}>{lv.desc}</div>
+                  </div>
+                </button>)}
+                {((actId&&effortPerChat[actId]!==undefined)||(!actId&&pendingEffort!==null))&&<div style={{borderTop:`1px solid ${t.brd}22`,marginTop:4,paddingTop:4}}>
+                  <button onClick={()=>{if(actId){setEffortPerChat(p=>{const n={...p};delete n[actId];return n;});}else{setPendingEffort(null);}setShowEffortPicker(false);}} style={{width:"100%",background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:10,padding:"4px 0",fontFamily:font}}>Use global default →</button>
+                </div>}
+              </div>}
+            </div>;})()}
             {councilRunning?<button onClick={()=>setCouncilRunning(false)} style={{background:t.pink,border:"none",color:"#fff",padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
             :streaming?<button onClick={stop} style={{background:t.err,border:"none",color:"#fff",padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
             :<button onClick={send} disabled={!inp.trim()&&!attachments.length} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.sfBri,border:"none",color:(inp.trim()||attachments.length)?"#fff":t.mut,padding:"10px 14px",borderRadius:8,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all .2s",boxShadow:"none"}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
@@ -6685,23 +6837,6 @@ function HyprChat(){
         <span>{tt.text}</span>
         {tt.onUndo&&<button onClick={tt.onUndo} style={{background:"none",border:`1px solid ${t.acc}55`,color:t.acc,cursor:"pointer",padding:"2px 10px",borderRadius:6,fontFamily:font,fontSize:11,fontWeight:700}}>Undo</button>}
       </div>)}
-    </div>}
-
-    {/* Changelog Modal */}
-    {showChangelog&&<div style={{position:"fixed",inset:0,zIndex:120,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setShowChangelog(false);}}>
-      <div style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,width:"min(1100px,95vw)",maxHeight:"85vh",display:"flex",flexDirection:"column",boxShadow:`0 8px 48px #0008`,overflow:"hidden",animation:"fadeIn .25s"}}>
-        <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:8,flexShrink:0,background:`${t.surface}88`}}>
-          <span style={{fontSize:18}}>📋</span>
-          <span style={{fontSize:14,fontWeight:700,color:t.acc,flex:1}}>HyprChat Changelog</span>
-          <button onClick={()=>setShowChangelog(false)} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:18,padding:"0 4px",lineHeight:1}}>✕</button>
-        </div>
-        <div style={{flex:1,overflowY:"auto",padding:"20px 28px",lineHeight:1.7,fontSize:13,color:t.text}}>
-          {!changelogContent?<div style={{textAlign:"center",padding:40,color:t.mut,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
-            <div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
-            Loading changelog...
-          </div>:<MDWrap>{md(changelogContent)}</MDWrap>}
-        </div>
-      </div>
     </div>}
 
     <style>{`

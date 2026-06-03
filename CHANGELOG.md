@@ -17,9 +17,11 @@
 - Page loads and refreshes now open to the new empty chat surface instead of restoring the most recent conversation; the real chat row is created when the first message is sent.
 - New Chat now opens the empty chat surface immediately; the composer keeps the smooth float up/down behavior, lands closer to the greeting, and delays textarea focus with `preventScroll` so the browser does not nudge it upward at the end.
 - Empty-chat daily greeting messages now use a more playful prompt and stronger fallback lines, with a cache version bump so browsers refresh stale generic copy.
-- Raised the composer control layer so Prompt Library and thinking-mode menus render above chat/chart content, made the Daedalus `</>` shortcut toggle off as well as on, and nudged the empty-chat composer closer to the greeting.
-- Reworked Settings into a centered modal overlay with left-side section navigation and a scrollable right-side editor, matching the Changelog modal behavior instead of replacing the chat surface.
-- Updated Settings modal layering so it renders above the app shell, preserves the active user-selected font/theme, and lets the Changelog modal stack above Settings when opened from inside it.
+- Raised the composer control layer so Prompt Library and effort menus render above chat/chart content, and nudged the empty-chat composer closer to the greeting.
+- Reworked the composer controls so Attachments, Prompt Library, and Daedalus activation live under a single `+` quick-actions menu, with the effort selector moved next to Send.
+- Empty-chat effort selection and Daedalus activation now work before the first message; pending choices are applied when the real conversation is created.
+- Reworked Settings into a centered modal overlay with left-side section navigation and a scrollable right-side editor instead of replacing the chat surface.
+- Moved Changelog into Settings as a bottom-pinned sidebar section that renders in the right editor pane with inline refresh.
 - Reworked **Connections** into a vertically stacked endpoint editor with service status chips, always-visible Ollama/Codebox/N8N/SearXNG URL fields, and `/api/settings` persistence.
 - Rebuilt **Loading Quotes** as a scrollable editor with readable full quote rows, attribution display, inline edit/save/cancel/remove controls, restore defaults, and add-new-quote controls.
 - Added 30 default loading quotes from real philosophers, religious texts, mystics, and scientists, with cleanup for previously saved placeholder HyprChat-authored defaults.
@@ -353,7 +355,7 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - **Mermaid.js diagrams** — ` ```mermaid ` code fences render inline as live SVG: flowcharts, sequence, class, state, ER, gantt, mindmap, pie. Theme-synced (34 mapped variables) and re-render when the user switches themes mid-conversation.
 - **KaTeX math** — Inline `$...$`, display `$$...$$`, and LaTeX `\(...\)` / `\[...\]` delimiters all render as typeset math. Code blocks are ignored so `$` in source stays literal.
 - **`<MermaidBlock>` component** — Header with `◈ mermaid` label, source toggle, and copy button matching existing code-block styling. Broken diagrams show a red error banner plus the raw source instead of breaking the message.
-- **`<MDWrap>` wrapper** — Wraps 8 render surfaces (chat, council cards, HF README, changelog modal) and invokes KaTeX auto-render after mount. Streaming messages skip wrapping so partial tokens don't flicker.
+- **`<MDWrap>` wrapper** — Wraps render surfaces including chat, council cards, HF README, and the changelog view, then invokes KaTeX auto-render after mount. Streaming messages skip wrapping so partial tokens don't flicker.
 - **Multi-line display math** — `md()` pre-splits non-code segments by `$$...$$` before line-splitting so equations spanning multiple lines render as one KaTeX node instead of fragmenting across `<div>`s.
 - **Backend rendering hint** — `chat.py` injects a system message telling the model diagrams/math render inline (not via `write_file` or `generate_code`) and explicitly warns against embedding `$...$` LaTeX inside Mermaid node labels.
 - **Display-math escape inside inline code** — `md()` now masks `$$` and `$` inside single-line backtick inline code before the display-math split, so documentation examples that quote a math delimiter render as inline code instead of being yanked out as a math block.
