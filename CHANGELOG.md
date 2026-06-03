@@ -1,4 +1,15 @@
-## Alpha v17.0.2 — May 26, 2026
+## Alpha v17.0.2 — June 2, 2026
+
+### Coder Bot v2 — uploaded-project repair hardening
+
+- Reviewer now deterministically detects stale `/root/projects/...` references in test/source files before LLM analysis, points the issue at the concrete stale-path file, and includes both the stale path and active project root in the repair envelope.
+- Reviewer now classifies persistent state/schema failures such as `no such column`, `No item with that key`, shared database/cache/state files, and duplicate/unique constraint errors without relying on LLM guesses.
+- Reviewer issue file refs now prefer real files from the project tree and failure output, including mapping guessed storage modules to the actual implementation file when needed.
+- Aider uploaded-project prompts now include a `Known Test Root` section with active `project_dir`, test command, stale absolute paths, and the latest failure tail.
+- Aider prompts now include `Test State Isolation` guidance so fixes make tests project-root-relative and keep DB/cache/state paths configurable or temp-dir scoped.
+- Uploaded-project repair workflows now block initial manual file/shell tools and route first edits through `run_aider_fix` or verification through `run_review`.
+- The chat loop now stops after repeated duplicate `BLOCKED` manual-tool responses, marks the uploaded-project workflow blocked, and reports the latest reviewer issue, active project path, and next valid action instead of burning rounds on the same forbidden tool.
+- Verified against the TaskForge upload loop: stale test roots were repaired, Aider/Reviewer cycles converged, Reviewer passed, Acceptance accepted, and the artifact was delivered. Also verified a clean greenfield NoteShelf path through Architect → OpenHands → Reviewer (`11 passed`) → Acceptance → download.
 
 ### Coder Bot v2 — acceptance gate
 
@@ -31,7 +42,7 @@
 - Aider fixes now use Codebox Python, track active workflow runs, and stop repeated-output loops.
 
 ### Removed
-- HyprChat already has n8n integration, no need to reinvent the wheel. Also at this point, I rarely use it.
+- HyprChat already has n8n integration, no need to reinvent the wheel with Workflows feature built in. Also at this point, I rarely use it.
 - Removed the legacy internal automation runner, its UI panel, REST/webhook APIs, scheduler, chat slash command, deploy watch entry, and tests. External automation should run through the existing n8n VM and `/api/n8n/execute`.
 - Startup DB cleanup now drops the legacy internal automation tables (`workflow_schedules`, `workflow_runs`, `workflows`) on existing installs.
 

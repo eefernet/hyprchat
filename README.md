@@ -42,14 +42,15 @@ A deterministic coding workflow with three specialized paths: OpenHands for gree
 | 🏗 **Builder** | OpenHands SDK on Codebox — greenfield/full-project builds from a contract |
 | 🔍 **Reviewer** | Read-only — runs the project's real build/test/lint commands, returns structured issues with `file:line` references |
 | ✅ **Acceptance** | Final quality gate after clean review — checks the delivered project against the user request, docs, tests, packaging, and generated artifacts |
-| 🛠 **Aider Fixer** | Primary uploaded-project edit path — runs Aider from the project root, captures diff/touched files/test output |
+| 🛠 **Aider Fixer** | Primary uploaded-project edit path — runs Aider from the active project root, captures diff/touched files/test output |
 | 🩹 **Fixer** | Fallback scoped editor — marker-format edits when Aider is disabled or unavailable |
 | ❓ **ProjectQA** | Read-only Q&A — "walk me through X", "show me Y" — grounded answers with file:line citations, change-request detection |
 | 📚 **Indexer** | Runs once at upload time — walks tree, detects build system, indexes into ChromaDB for semantic retrieval |
 
-- **Workflow gate** — server-side state machine enforces *review-after-build*, *acceptance-after-clean-review*, *fix-after-issues*, *answer-after-QA*, and hard caps on review/fix loops. The model can't skip steps or get stuck.
+- **Workflow gate** — server-side state machine enforces *review-after-build*, *acceptance-after-clean-review*, *fix-after-issues*, *answer-after-QA*, uploaded-project Aider-first routing, duplicate `BLOCKED` loop stops, and hard caps on review/fix loops. The model can't skip steps or get stuck.
 - **Durable workflows + runs** — `coder_workflows` tracks the user-facing workflow, while every agent invocation is a row in `runs`. Browser disconnects can't lose work; the UI rebuilds the timeline on reload.
 - **Project uploads** — drop a `.zip`/`.tar.gz`; HyprChat sanitizes it, creates a local git baseline in Codebox, detects build/test commands, and runs the Indexer. Subsequent questions and changes operate on the uploaded code with full project awareness.
+- **Uploaded-project repair safeguards** — Reviewer detects stale hardcoded `/root/projects/...` paths, shared DB/cache/state failures, and schema mismatches before LLM review; Aider receives the active project root, stale paths, failure tail, and test-state isolation guidance so fixes stay portable.
 - **Architecture Plan panel** — rich markdown rendering of the Architect's plan: file tree, build commands, dependencies as build-system snippets, success criteria as a checklist.
 - **Accepted downloads only** — `download_project` is blocked until Acceptance returns `accepted`, then packages the project while excluding common cache/build artifacts.
 - **Cross-language support** — verified end-to-end on Java (Maven), Python (Flask + pytest), Rust (Cargo), Go (gorilla/mux). Builder profiles + Reviewer markers cover most ecosystems.
@@ -64,9 +65,9 @@ A deterministic coding workflow with three specialized paths: OpenHands for gree
 | `start_coder_workflow` | Backend router for `build_from_prompt`, `fix_uploaded_project`, or `ask_uploaded_project` |
 | `plan_project` | Routes through the **Architect** for v2 personas — produces structured JSON manifest (file tree, build/test cmds, deps, success criteria); rich markdown plan panel in chat |
 | `generate_code` | **Builder** via OpenHands — greenfield/full-project builds from the Architect contract |
-| `run_review` | **Reviewer** — runs build/test/lint, returns structured issue list with `suggested_fix_scope` |
+| `run_review` | **Reviewer** — runs build/test/lint, returns structured issue list with `suggested_fix_scope`, including deterministic stale-root and state/schema diagnostics |
 | `run_acceptance_review` | **Acceptance** — final static quality gate after clean review; checks request fit, docs, tests, packaging, entrypoints, and generated artifacts |
-| `run_aider_fix` | **Aider Fixer** — surgical edits for uploaded projects, then requires Reviewer verification |
+| `run_aider_fix` | **Aider Fixer** — surgical uploaded-project edits with active-root, stale-path, and test-state-isolation context, then requires Reviewer verification |
 | `run_fixer` | **Fixer** — applies scoped edits driven by a Reviewer or Acceptance envelope; marker-format LLM output |
 | `ask_project` | **ProjectQA** — grounded Q&A with file:line citations; auto-resolves `project_dir`; flags change requests |
 
