@@ -55,6 +55,16 @@ def save_settings(settings: dict):
         json.dump(settings, f, indent=2)
 
 
+def _coerce_service_url(value: str, env_key: str, default: str) -> str:
+    """Return a runtime service URL, accepting bare host:port input from Settings."""
+    raw = (value or "").strip()
+    if not raw:
+        return os.getenv(env_key, default)
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    return raw.rstrip("/")
+
+
 # ============================================================
 # SANDBOX — directory init + venv
 # ============================================================
@@ -141,11 +151,21 @@ async def lifespan(app: FastAPI):
     os.makedirs(config.KB_DIR, exist_ok=True)
     # Init sandbox dirs + venv
     _init_sandbox()
-    # Override OLLAMA_URL from persistent settings if set
+    # Override service URLs from persistent settings if set. Empty values inherit
+    # from environment/config defaults.
     _settings = load_settings()
     if _settings.get("ollama_url"):
-        config.OLLAMA_URL = _settings["ollama_url"]
+        config.OLLAMA_URL = _coerce_service_url(_settings["ollama_url"], "OLLAMA_URL", "http://127.0.0.1:11434")
         print(f"[Config] Loaded Ollama URL from settings: {config.OLLAMA_URL}")
+    if _settings.get("codebox_url"):
+        config.CODEBOX_URL = _coerce_service_url(_settings["codebox_url"], "CODEBOX_URL", "http://127.0.0.1:8585")
+        print(f"[Config] Loaded Codebox URL from settings: {config.CODEBOX_URL}")
+    if _settings.get("searxng_url"):
+        config.SEARXNG_URL = _coerce_service_url(_settings["searxng_url"], "SEARXNG_URL", "http://127.0.0.1:8888")
+        print(f"[Config] Loaded SearXNG URL from settings: {config.SEARXNG_URL}")
+    if _settings.get("n8n_url"):
+        config.N8N_URL = _coerce_service_url(_settings["n8n_url"], "N8N_URL", "http://127.0.0.1:5678")
+        print(f"[Config] Loaded N8N URL from settings: {config.N8N_URL}")
     # Use `in _settings` (not `.get(...)` truthy check) so an explicitly-saved
     # empty string — meaning "inherit from chat model" in the UI — is honored
     # on startup. Otherwise the env default (e.g. PLANNING_MODEL=qwen3.5:27b
@@ -2872,6 +2892,9 @@ async def get_app_settings():
     return {
         **settings,
         "current_ollama_url": config.OLLAMA_URL,
+        "current_codebox_url": config.CODEBOX_URL,
+        "current_searxng_url": config.SEARXNG_URL,
+        "current_n8n_url": config.N8N_URL,
         "current_planning_model": config.PLANNING_MODEL,
         "current_coder_model": config.CODER_MODEL,
         "current_workspace_model": config.WORKSPACE_MODEL,
@@ -2903,7 +2926,8 @@ async def get_app_settings():
 @app.patch("/api/settings")
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
-    allowed = {"file_cleanup_days", "ollama_url", "rag", "planning_model", "coder_model",
+    allowed = {"file_cleanup_days", "ollama_url", "codebox_url", "searxng_url", "n8n_url",
+               "rag", "planning_model", "coder_model",
                "workspace_model",
                "architect_model", "reviewer_model", "acceptance_model", "builder_model", "fixer_model", "qa_model",
                "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
@@ -2924,10 +2948,33 @@ async def update_app_settings(body: dict = Body(...)):
             rag.CHUNK_OVERLAP = int(rag_cfg["chunk_overlap"])
         print(f"[Config] Updated RAG settings: model={rag.EMBED_MODEL} chunk={rag.CHUNK_SIZE}/{rag.CHUNK_OVERLAP}")
     if "ollama_url" in body and body["ollama_url"]:
-        config.OLLAMA_URL = body["ollama_url"]
+        config.OLLAMA_URL = _coerce_service_url(body["ollama_url"], "OLLAMA_URL", "http://127.0.0.1:11434")
+        settings["ollama_url"] = config.OLLAMA_URL
         print(f"[Config] Updated Ollama URL to: {config.OLLAMA_URL}")
     elif "ollama_url" in body and not body["ollama_url"]:
+        settings["ollama_url"] = ""
         config.OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
+    if "codebox_url" in body and body["codebox_url"]:
+        config.CODEBOX_URL = _coerce_service_url(body["codebox_url"], "CODEBOX_URL", "http://127.0.0.1:8585")
+        settings["codebox_url"] = config.CODEBOX_URL
+        print(f"[Config] Updated Codebox URL to: {config.CODEBOX_URL}")
+    elif "codebox_url" in body and not body["codebox_url"]:
+        settings["codebox_url"] = ""
+        config.CODEBOX_URL = os.getenv("CODEBOX_URL", "http://127.0.0.1:8585")
+    if "searxng_url" in body and body["searxng_url"]:
+        config.SEARXNG_URL = _coerce_service_url(body["searxng_url"], "SEARXNG_URL", "http://127.0.0.1:8888")
+        settings["searxng_url"] = config.SEARXNG_URL
+        print(f"[Config] Updated SearXNG URL to: {config.SEARXNG_URL}")
+    elif "searxng_url" in body and not body["searxng_url"]:
+        settings["searxng_url"] = ""
+        config.SEARXNG_URL = os.getenv("SEARXNG_URL", "http://127.0.0.1:8888")
+    if "n8n_url" in body and body["n8n_url"]:
+        config.N8N_URL = _coerce_service_url(body["n8n_url"], "N8N_URL", "http://127.0.0.1:5678")
+        settings["n8n_url"] = config.N8N_URL
+        print(f"[Config] Updated N8N URL to: {config.N8N_URL}")
+    elif "n8n_url" in body and not body["n8n_url"]:
+        settings["n8n_url"] = ""
+        config.N8N_URL = os.getenv("N8N_URL", "http://127.0.0.1:5678")
     if "planning_model" in body:
         config.PLANNING_MODEL = body["planning_model"] or ""
         print(f"[Config] Updated Planning Model to: {config.PLANNING_MODEL or '(use chat model)'}")
@@ -3001,6 +3048,9 @@ async def update_app_settings(body: dict = Body(...)):
     return {
         **settings,
         "current_ollama_url": config.OLLAMA_URL,
+        "current_codebox_url": config.CODEBOX_URL,
+        "current_searxng_url": config.SEARXNG_URL,
+        "current_n8n_url": config.N8N_URL,
         "current_planning_model": config.PLANNING_MODEL,
         "current_coder_model": config.CODER_MODEL,
         "current_workspace_model": config.WORKSPACE_MODEL,

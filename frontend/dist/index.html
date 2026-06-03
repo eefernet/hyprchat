@@ -2078,7 +2078,11 @@ function HyprChat(){
   const [newQuoteAttr,setNewQuoteAttr]=useState("");
   const [changelogContent,setChangelogContent]=useState(null);
   const [ollamaUrl,setOllamaUrl]=useState("");
-  const [ollamaUrlSaving,setOllamaUrlSaving]=useState(false);
+  const [codeboxUrl,setCodeboxUrl]=useState("");
+  const [searxngUrl,setSearxngUrl]=useState("");
+  const [n8nUrl,setN8nUrl]=useState("");
+  const [connectionsOpen,setConnectionsOpen]=useState(false);
+  const [connectionsSaving,setConnectionsSaving]=useState(false);
   const [ragSettings,setRagSettings]=useState({embed_model:"nomic-embed-text",chunk_size:500,chunk_overlap:50,top_k:6,max_context_chars:6000,research_top_k:4,research_max_chars:3000});
   const [kbPreview,setKbPreview]=useState(null);
   const [ragSaving,setRagSaving]=useState(false);
@@ -2443,6 +2447,9 @@ function HyprChat(){
     fetch(`${API}/api/health`).then(r=>r.json()).then(d=>setHealth(d.services||{})).catch(()=>{});
     fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{
       if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);
+      if(d.current_codebox_url)setCodeboxUrl(d.current_codebox_url);
+      if(d.current_searxng_url)setSearxngUrl(d.current_searxng_url);
+      if(d.current_n8n_url)setN8nUrl(d.current_n8n_url);
       if(d.rag)setRagSettings(p=>({...p,...d.rag}));
       if(d.default_num_ctx!=null)hydrateServerSetting("default_num_ctx",setNumCtx,d.default_num_ctx,numCtx);
       if(d.current_planning_model!=null)hydrateServerSetting("planning_model",setPlanningModel,d.current_planning_model,planningModel);
@@ -3839,6 +3846,8 @@ function HyprChat(){
   const inputS={width:"100%",background:`${t.bgDeep}E6`,border:`1px solid ${t.brd}55`,color:t.text,padding:"9px 12px",borderRadius:7,fontFamily:font,fontSize:13,outline:"none",boxSizing:"border-box"};
   const labelS={fontSize:11,color:t.mut,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:.6};
   const cardS={background:`${t.surface}F0`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:18,marginBottom:14,animation:"fadeIn .3s",boxShadow:"none"};
+  const settingsCardS={background:`${t.surface}40`,border:`1px solid ${t.brd}24`,borderRadius:12,padding:"16px 18px",marginBottom:14};
+  const settingsKickerS={fontSize:10,color:t.mut,lineHeight:1.45};
   const btnS=(c,bg)=>({background:bg||`${c}18`,border:`1px solid ${c}4D`,color:c,padding:"6px 12px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:11,display:"flex",alignItems:"center",gap:5,boxShadow:"none"});
   const isEmptyChatSurface=panel==="chat"&&!loadingConv&&!councilRunning&&!streaming&&(!act||(!(act.messages||[]).length&&!act.is_council));
   const emptyComposerLift=isEmptyChatSurface?"translate3d(0,clamp(-410px,calc(-50vh + 165px),-205px),0)":"translate3d(0,0,0)";
@@ -5316,55 +5325,83 @@ function HyprChat(){
 
       :panel==="settings"?<div style={{flex:1,display:"flex",overflow:"hidden"}}>
     <div style={{flex:showHealthMonitor?"0 0 50%":"1 1 auto",overflowY:"auto",padding:"20px 28px",transition:"flex .3s ease"}}>
-    <div style={{maxWidth:760}}>
+    <div style={{maxWidth:860}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
         <h3 style={{fontSize:16,fontWeight:700,color:t.acc,letterSpacing:1,textTransform:"uppercase",margin:0}}>Settings</h3>
         <button onClick={async()=>{setShowChangelog(true);if(!changelogContent){try{const r=await fetch(`${API}/api/changelog`);const d=await r.json();setChangelogContent(d.content||"");}catch{setChangelogContent("# Changelog\n\nFailed to load.");};}}} style={{...btnS(t.f1),fontSize:12,padding:"6px 14px"}}>📋 Changelog</button>
       </div>
 
-      {/* TILE: Connection */}
-      <div style={{background:`${t.surface}33`,border:`1px solid ${t.brd}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
-        <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:14,display:"flex",alignItems:"center",gap:8}}>🔌 Connection</div>
-        <div style={{marginBottom:14}}>
-          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Ollama Server URL</div>
-          <div style={{display:"flex",gap:8}}>
-            <input value={ollamaUrl} onChange={e=>setOllamaUrl(e.target.value)} placeholder="http://192.168.1.110:11434" style={{...inputS,flex:1,fontFamily:"monospace",fontSize:13,padding:"8px 12px"}}/>
-            <button disabled={ollamaUrlSaving} onClick={async()=>{
-              setOllamaUrlSaving(true);
-              try{await fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({ollama_url:ollamaUrl})});
-                await refreshModels();
-              }catch{}
-              setOllamaUrlSaving(false);
-            }} style={{...btnS(t.ok),opacity:ollamaUrlSaving?.6:1,fontSize:12,padding:"8px 16px"}}>
-              {ollamaUrlSaving?"...":"Save"}
-            </button>
+      {/* TILE: Connections */}
+      <div style={settingsCardS}>
+        <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"flex-start",marginBottom:12}}>
+          <div>
+            <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:.5,display:"flex",alignItems:"center",gap:8}}>🔌 Connections</div>
+            <div style={{...settingsKickerS,marginTop:4}}>Runtime endpoints and live service status.</div>
           </div>
-        </div>
-        <div>
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-            <div style={{fontSize:12,color:t.dim,fontWeight:600}}>Service Health</div>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
             <button onClick={async()=>{
               const next=!showHealthMonitor;
               setShowHealthMonitor(next);
               if(next&&!healthHistory){try{const r=await fetch(`${API}/api/health/history?days=90`);const d=await r.json();setHealthHistory(d);}catch(e){console.error("Health history:",e);}}
-            }} style={{padding:"3px 10px",borderRadius:6,border:`1px solid ${showHealthMonitor?t.acc:t.brd}44`,background:showHealthMonitor?`${t.acc}22`:t.bgDeep,color:showHealthMonitor?t.acc:t.dim,fontSize:11,cursor:"pointer",fontFamily:font,fontWeight:600,display:"flex",alignItems:"center",gap:4}}>
+            }} style={{padding:"5px 11px",borderRadius:7,border:`1px solid ${showHealthMonitor?t.acc:t.brd}44`,background:showHealthMonitor?`${t.acc}22`:t.bgDeep,color:showHealthMonitor?t.acc:t.dim,fontSize:11,cursor:"pointer",fontFamily:font,fontWeight:700,display:"flex",alignItems:"center",gap:5}}>
               <span style={{fontSize:13}}>{showHealthMonitor?"◂":"▸"}</span> Monitor
             </button>
+            <button onClick={()=>setConnectionsOpen(v=>!v)} style={{padding:"5px 11px",borderRadius:7,border:`1px solid ${connectionsOpen?t.f1:t.brd}44`,background:connectionsOpen?`${t.f1}18`:t.bgDeep,color:connectionsOpen?t.f1:t.dim,fontSize:11,cursor:"pointer",fontFamily:font,fontWeight:700,display:"flex",alignItems:"center",gap:5}}>
+              <span style={{fontSize:12}}>{connectionsOpen?"▾":"▸"}</span> Endpoints
+            </button>
           </div>
+        </div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:connectionsOpen?14:0}}>
           <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-            {Object.entries(health).map(([n,s])=>{const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?"#f0a030":t.err;return <div key={n} style={{display:"flex",alignItems:"center",gap:5,padding:"5px 12px",background:`${t.bgDeep}`,borderRadius:7,border:`1px solid ${rl?`#f0a030`:t.brd}22`,fontSize:12}}>
+            {["ollama","codebox","n8n","searxng"].map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?"#f0a030":s?.status?t.err:t.mut;const label={ollama:"Ollama",codebox:"Codebox",n8n:"N8N",searxng:"SearXNG"}[n];return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:7,border:`1px solid ${rl?`#f0a030`:t.brd}24`,fontSize:12}}>
               <div style={{width:8,height:8,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}66`}}/>
-              <span style={{fontWeight:600,color:t.dim,textTransform:"capitalize"}}>{n}</span>
-              {rl&&<span style={{padding:"1px 6px",borderRadius:4,background:"#f0a03020",border:"1px solid #f0a03044",fontSize:9,fontWeight:700,color:"#f0a030"}}>Rate Limited</span>}
+              <span style={{fontWeight:700,color:t.dim}}>{label}</span>
               {s?.response_ms!=null&&<span style={{fontSize:10,color:t.mut}}>{s.response_ms}ms</span>}
+              {rl&&<span style={{padding:"1px 6px",borderRadius:4,background:"#f0a03020",border:"1px solid #f0a03044",fontSize:9,fontWeight:800,color:"#f0a030"}}>Limited</span>}
             </div>;})}
           </div>
         </div>
+        {connectionsOpen&&<div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
+            {[
+              ["Ollama",ollamaUrl,setOllamaUrl,"http://192.168.1.110:11434","Model inference and model manager"],
+              ["Codebox",codeboxUrl,setCodeboxUrl,"http://192.168.1.201:8585","Tool execution and project upload bridge"],
+              ["N8N",n8nUrl,setN8nUrl,"http://192.168.1.114:5678","External workflow automation"],
+              ["SearXNG",searxngUrl,setSearxngUrl,"http://192.168.1.141:8888","Search and research backend"],
+            ].map(([label,value,setter,placeholder,hint])=><label key={label} style={{display:"block"}}>
+              <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:8,marginBottom:5}}>
+                <span style={{fontSize:12,color:t.dim,fontWeight:700}}>{label}</span>
+                <span style={{fontSize:9,color:t.mut}}>{hint}</span>
+              </div>
+              <input value={value} onChange={e=>setter(e.target.value)} placeholder={placeholder} style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
+            </label>)}
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",gap:10,alignItems:"center",marginTop:12}}>
+            <div style={settingsKickerS}>Bare <code>IP:port</code> is accepted; HyprChat stores it as an HTTP URL.</div>
+            <button disabled={connectionsSaving} onClick={async()=>{
+              setConnectionsSaving(true);
+              try{
+                const r=await fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({ollama_url:ollamaUrl,codebox_url:codeboxUrl,searxng_url:searxngUrl,n8n_url:n8nUrl})});
+                const d=await r.json().catch(()=>({}));
+                if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);
+                if(d.current_codebox_url)setCodeboxUrl(d.current_codebox_url);
+                if(d.current_searxng_url)setSearxngUrl(d.current_searxng_url);
+                if(d.current_n8n_url)setN8nUrl(d.current_n8n_url);
+                await refreshModels();
+                try{const h=await fetch(`${API}/api/health`);const hd=await h.json();setHealth(hd.services||{});}catch{}
+              }catch(e){console.error("Connection settings:",e);}
+              setConnectionsSaving(false);
+            }} style={{...btnS(t.ok),opacity:connectionsSaving ? .6 : 1,fontSize:12,padding:"8px 16px",whiteSpace:"nowrap"}}>
+              {connectionsSaving?"Saving...":"Save Connections"}
+            </button>
+          </div>
+        </div>}
       </div>
 
       {/* TILE: Model & Generation */}
-      <div style={{background:`${t.surface}33`,border:`1px solid ${t.brd}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
-        <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:14,display:"flex",alignItems:"center",gap:8}}>Model & Generation</div>
+      <div style={settingsCardS}>
+        <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:.5,marginBottom:4,display:"flex",alignItems:"center",gap:8}}>Model & Generation</div>
+        <div style={{...settingsKickerS,marginBottom:14}}>Global model behavior. Individual chats can still override effort and tools.</div>
 
         <div style={{marginBottom:14}}>
           <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Default Context Window</div>
@@ -5405,8 +5442,9 @@ function HyprChat(){
       {/* TILE: Daedalus — all coder-agent-related settings live here.
           Includes the umbrella Planning/Coder model pickers, the new collapsible
           per-agent model overrides card, and OpenHands runtime knobs. */}
-      <div style={{background:`${t.surface}33`,border:`1px solid ${t.brd}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
-        <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:14,display:"flex",alignItems:"center",gap:8}}>🏛️ Daedalus</div>
+      <div style={settingsCardS}>
+        <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:.5,marginBottom:4,display:"flex",alignItems:"center",gap:8}}>🏛️ Daedalus</div>
+        <div style={{...settingsKickerS,marginBottom:14}}>Coder-agent routing, model inheritance, and uploaded-project repair behavior.</div>
 
         <div style={{marginBottom:14}}>
           <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Code Planning Model</div>
@@ -5588,8 +5626,9 @@ function HyprChat(){
       </div>
 
       {/* TILE: Appearance */}
-      <div style={{background:`${t.surface}33`,border:`1px solid ${t.brd}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
-        <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:14,display:"flex",alignItems:"center",gap:8}}>🎨 Appearance</div>
+      <div style={settingsCardS}>
+        <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:.5,marginBottom:4,display:"flex",alignItems:"center",gap:8}}>🎨 Appearance</div>
+        <div style={{...settingsKickerS,marginBottom:14}}>Theme, background animation, font, and density preferences.</div>
         <div style={{marginBottom:12}}>
           {(()=>{
             const previewKey=pendingTheme||tm;
@@ -5686,9 +5725,9 @@ function HyprChat(){
       </div>
 
       {/* TILE: RAG Pipeline */}
-      <div style={{background:`${t.surface}33`,border:`1px solid ${t.brd}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
+      <div style={settingsCardS}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-          <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,display:"flex",alignItems:"center",gap:8}}>🧠 RAG Pipeline</div>
+          <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:.5,display:"flex",alignItems:"center",gap:8}}>🧠 RAG Pipeline</div>
           <div style={{display:"flex",gap:8}}>
             <button onClick={()=>setRagSettings({embed_model:"nomic-embed-text",chunk_size:500,chunk_overlap:50,top_k:6,max_context_chars:6000,research_top_k:4,research_max_chars:3000})} style={{...btnS(t.mut),fontSize:12,padding:"5px 12px"}}>Default</button>
             <button disabled={ragSaving} onClick={async()=>{
@@ -5816,7 +5855,7 @@ function HyprChat(){
       </div>
 
       {/* TILE: Loading Quotes */}
-      <div style={{background:`${t.surface}33`,border:`1px solid ${t.brd}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
+      <div style={settingsCardS}>
         <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:10,display:"flex",alignItems:"center",gap:8}}>💬 Loading Quotes <span style={{fontSize:11,color:t.mut,fontWeight:400}}>({customQuotes.length})</span></div>
         {customQuotes.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:10,maxHeight:90,overflowY:"auto"}}>
           {customQuotes.map((q,i)=><div key={i} style={{background:`${t.bgDeep}`,border:`1px solid ${t.brd}22`,borderRadius:6,padding:"4px 10px",display:"inline-flex",gap:6,alignItems:"center",fontSize:11}}>
@@ -5834,7 +5873,7 @@ function HyprChat(){
       </div>
 
       {/* TILE: Sandbox & Cleanup */}
-      <div style={{background:`${t.surface}33`,border:`1px solid ${t.brd}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
+      <div style={settingsCardS}>
         <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:10,display:"flex",alignItems:"center",gap:8}}>🗃️ Sandbox & Cleanup</div>
         <SandboxSection t={t} btnS={btnS} labelS={labelS}/>
       </div>

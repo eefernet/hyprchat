@@ -18,6 +18,7 @@
 - New Chat now opens the empty chat surface immediately; the composer keeps the smooth float up/down behavior, lands closer to the greeting, and delays textarea focus with `preventScroll` so the browser does not nudge it upward at the end.
 - Empty-chat daily greeting messages now use a more playful prompt and stronger fallback lines, with a cache version bump so browsers refresh stale generic copy.
 - Raised the composer control layer so Prompt Library and thinking-mode menus render above chat/chart content, made the Daedalus `</>` shortcut toggle off as well as on, and nudged the empty-chat composer closer to the greeting.
+- Cleaned up Settings with shared card styling and a collapsed **Connections** card that shows service health by default, expands to edit Ollama/Codebox/N8N/SearXNG endpoints, and persists those runtime URLs through `/api/settings`.
 
 ## Alpha v17.0.2 — June 2, 2026
 
