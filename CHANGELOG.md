@@ -1,7 +1,10 @@
 ## Alpha v17.1 — June 3, 2026
 
+## UI Overhaul Update
+### Developer Note 
+> Complete refresh and update to the overall feel of hyprchat with a new take on personas. Next update will feature hotfixes and changes to deep research. UI changes are subject to undergo more changes till I feel they look right. This is not final for UI but a step into the right direction. For bugs, please raise an issue through the GitHub issue tracker [here](https://github.com/eefernet/hyprchat/issues).
 ### Visual Direction & App Shell
-- This UI refresh was heavily inspired by Pewdiepies Odysseus local AI webview. So I stole his ideas.
+- This UI refresh was heavily inspired by Pewdiepies [Odysseus](https://pewdiepie-archdaemon.github.io/odysseus/) local AI webview. So I stole his ideas.
 - Added a flatter, modern Hyprland-inspired visual direction while preserving the existing HyprChat terminal/cyberpunk feel.
 - Added HyprFlat-style theme polish, tighter glass panels, cleaner borders, flatter controls, and refreshed chat/settings surfaces.
 - Updated the site favicon to the HyprChat logo mark.
@@ -53,11 +56,11 @@
 - Added compact top-of-page guidance explaining the difference between Agents and Personas, plus separate create/edit flows for each profile type.
 - Added **Kayla — Gen Z Bestie** as a fully populated example Persona so users can see how description, personality, scenario, first message, example dialogue, lore, tags, rating, and sampling fields are meant to be filled.
 - Replaced the old Based Bot seed with **Tyler — Based Gamer Bro**, a fully populated 18-year-old gamer-bro Persona with description, personality, scenario, first message, example dialogue, lore, tags, rating, and advanced prompt filled in.
-- Changed Persona rating to a fixed emoji-labeled dropdown (`G`, `PG`, `PG-13`, `R`, `NC-17`, `Unrated`) with visible descriptors and model-facing content-boundary guidance during chat.
+- Added a Persona age rating to a fixed emoji-labeled dropdown (`G`, `PG`, `PG-13`, `R`, `NC-17`, `Unrated`) with visible descriptors and model-facing content-boundary guidance during chat.
 - Added a per-Persona Thinking Mode control (`Auto`, `On`, `Off`) that can override the global thinking setting for Persona chats.
 - Enabled Knowledge Base attachment controls for Personas, including Persona card KB badges and chat-time KB retrieval when a Persona is active.
 - Fixed empty-chat Persona state handling so leaving a Persona/Agent detaches the active profile instead of spawning a new chat with the same profile.
-- Persona `first_message` now appears as the first assistant message in fresh Persona chats and is included in the chat context.
+- Persona `first_message` appears as the first assistant message in fresh Persona chats and is included in the chat context.
 - Added Persona import for Chub, SillyTavern, and TavernAI character cards, including PNG `chara` metadata cards, JSON card files, Chub-style packed definition splitting, tags, alternate greetings, character-book lore, and first-message mapping.
 - Added a built-in Daedalus avatar so the coding agent has a fitting image in the Agents page, chat header, sidebar, and assistant message bubbles.
 
