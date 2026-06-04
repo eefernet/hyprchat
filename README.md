@@ -31,9 +31,9 @@ HyprChat can execute code, upload files, call local services, and drive coding a
 |---|---|---|
 | <img src="docs/images/council.png" alt="HyprChat council of AI" width="280"> | <img src="docs/images/councilSettings.png" alt="HyprChat council settings" width="280"> | <img src="docs/images/settingsPage.png" alt="HyprChat settings page" width="280"> |
 
-| Mermaid Support | Chart Support | Callouts |
-|---|---|---|
-| <img src="docs/images/mermaidSupport.png" alt="HyprChat Mermaid diagram support" width="280"> | <img src="docs/images/chartSupport.png" alt="HyprChat chart rendering support" width="280"> | <img src="docs/images/calloutsExample.png" alt="HyprChat callout rendering support" width="280"> |
+| Mermaid Support | KaTeX / LaTeX | Chart Support | Callouts |
+|---|---|---|---|
+| <img src="docs/images/mermaidSupport.png" alt="HyprChat Mermaid diagram support" width="210"> | <img src="docs/images/KaTeX%3ALaTeX%20notationSupport.png" alt="HyprChat KaTeX and LaTeX notation support" width="210"> | <img src="docs/images/chartSupport.png" alt="HyprChat chart rendering support" width="210"> | <img src="docs/images/calloutsExample.png" alt="HyprChat callout rendering support" width="210"> |
 
 </details>
 
@@ -46,7 +46,7 @@ HyprChat can execute code, upload files, call local services, and drive coding a
 - Empty-chat greeting surface with selectable tools, Daedalus activation, and effort mode before the first message
 - Per-conversation model selection, system prompts, and parameter overrides
 - Per-chat effort modes — Blurt, Ponder, Forge, and Galaxy Brain
-- Rich message rendering for Markdown, code, Mermaid diagrams, charts, and callouts
+- Rich message rendering for Markdown, code, KaTeX/LaTeX notation, Mermaid diagrams, charts, and callouts
 - Conversation forking — branch from any message to explore alternatives
 - Full-text search (FTS5) across all messages with highlighted snippets
 - Conversation tags, pinning, and sidebar filtering
@@ -56,12 +56,13 @@ HyprChat can execute code, upload files, call local services, and drive coding a
 
 <img src="docs/images/mainScreen.png" alt="HyprChat main chat screen" width="900">
 
-HyprChat renders structured model output directly in the chat stream, so diagrams, data visualizations, and formatted callouts stay attached to the answer that produced them.
+HyprChat renders structured model output directly in the chat stream, so math notation, diagrams, data visualizations, and formatted callouts stay attached to the answer that produced them.
 
 <p>
-  <img src="docs/images/mermaidSupport.png" alt="HyprChat Mermaid diagram support" width="290">
-  <img src="docs/images/chartSupport.png" alt="HyprChat chart rendering support" width="290">
-  <img src="docs/images/calloutsExample.png" alt="HyprChat callout rendering support" width="290">
+  <img src="docs/images/KaTeX%3ALaTeX%20notationSupport.png" alt="HyprChat KaTeX and LaTeX notation support" width="215">
+  <img src="docs/images/mermaidSupport.png" alt="HyprChat Mermaid diagram support" width="215">
+  <img src="docs/images/chartSupport.png" alt="HyprChat chart rendering support" width="215">
+  <img src="docs/images/calloutsExample.png" alt="HyprChat callout rendering support" width="215">
 </p>
 
 ### 📄 File Attachments
