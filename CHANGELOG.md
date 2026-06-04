@@ -8,6 +8,12 @@
 - Added selectable animated background effects in Settings next to the theme selector, including Pixel Rain, Soft Flow, Aurora Lines, Star Drift, Circuit Drift, and Odysseus-style flow variants.
 - Tuned the background effects so they fill the whole viewport, are more visible where needed, and avoid dense rain, oversized bars, or overly aggressive glitching.
 
+### Documentation & Screenshots
+- Reworked the README screenshots from a bare image dump into a top collapsible gallery plus contextual feature screenshots placed next to the sections they explain.
+- Added README coverage for the new Agents and Personas profile manager, Knowledge Bases, Model Manager, Activity Monitor, Council, Council Settings, Settings, and main chat screenshots.
+- Added rich-rendering README examples for KaTeX/LaTeX notation, Mermaid diagrams, charts, and callouts.
+- Updated README feature copy to match the Agents/Personas split, including Persona card import, per-profile KBs, rating controls, thinking-mode overrides, and first-message behavior.
+
 ### Startup & Empty Chat
 - Updated the startup/loading screen so it uses the selected theme and selected animated background instead of the old standalone loading look.
 - Updated the first-chat empty state with the HyprChat logo, centered product greeting, generated daily message copy, and a taller first-message composer that settles back to the normal bottom composer after sending.

@@ -14,7 +14,7 @@ if str(BACKEND) not in sys.path:
 
 _HAS_AIOSQLITE = importlib.util.find_spec("aiosqlite") is not None
 if not _HAS_AIOSQLITE:
-    sys.modules.setdefault("aiosqlite", types.SimpleNamespace())
+    sys.modules.setdefault("aiosqlite", types.SimpleNamespace(Connection=object, Row=object))
 
 from agents import aider_fixer, language_adapters, reviewer
 from tools import CODEAGENT_TOOLS
