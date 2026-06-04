@@ -2154,7 +2154,9 @@ async def upload_persona_avatar(mc_id: str, file: UploadFile = File(...)):
     with open(avatar_path, "wb") as f:
         f.write(content)
 
-    await db.update_model_config(mc_id, parameters={"avatar": f"/api/avatars/{mc_id}.{ext}"})
+    existing = await db.get_model_config(mc_id)
+    params = existing.get("parameters", {}) if existing else {}
+    await db.update_model_config(mc_id, parameters={**params, "avatar": f"/api/avatars/{mc_id}.{ext}"})
     return {"avatar_url": f"/api/avatars/{mc_id}.{ext}"}
 
 

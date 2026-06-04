@@ -84,7 +84,8 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                     kb_context = rag.format_context(chunks, max_chars=_max_chars)
                     filenames = list(set(c["filename"] for c in chunks))
                     avg_score = sum(c["score"] for c in chunks) / len(chunks)
-                    yield f"data: {json.dumps({'type': 'council_kb', 'status': f'Retrieved {len(chunks)} KB chunks from {', '.join(filenames[:3])} ({avg_score:.0%} relevance)'})}\n\n"
+                    filename_summary = ", ".join(filenames[:3])
+                    yield f"data: {json.dumps({'type': 'council_kb', 'status': f'Retrieved {len(chunks)} KB chunks from {filename_summary} ({avg_score:.0%} relevance)'})}\n\n"
                     print(f"[COUNCIL RAG] Retrieved {len(chunks)} chunks (avg {avg_score:.2f}) for: {last_user[:80]!r}")
             except Exception as e:
                 print(f"[COUNCIL RAG] KB query failed: {e}")
