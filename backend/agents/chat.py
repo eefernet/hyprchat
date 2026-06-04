@@ -18,6 +18,65 @@ from events import inject_text_tool_prompt, parse_tool_params
 from quick_search import run_quick_search_for_chat
 
 
+_PERSONA_RATING_GUIDANCE = {
+    "G": "G: All-ages only. Avoid profanity, sexual content, graphic violence, drugs, and mature themes.",
+    "PG": "PG: Mild jokes, tiny scares, and gentle conflict are allowed. Avoid explicit adult content.",
+    "PG-13": "PG-13: Teen-level edge is allowed: mild profanity, flirting, suggestive jokes, and non-graphic mature themes.",
+    "R": "R: Adult language and mature themes are allowed, but keep sexual content non-explicit.",
+    "NC-17": "NC-17: Adult-only explicit themes may be used for consenting adults. Avoid minors, coercion, illegal content, and non-consensual sexual content.",
+    "Unrated": "Unrated (max XXX): Broadest adult setting. Explicit consenting-adult NSFW is allowed within safety boundaries. Avoid minors, coercion, illegal content, and non-consensual sexual content.",
+}
+
+
+def _normalize_persona_rating(value) -> str:
+    s = re.sub(r"[\s_]+", "", str(value or "PG-13").strip().lower())
+    if s in {"g", "general", "allages"}:
+        return "G"
+    if s == "pg":
+        return "PG"
+    if s in {"pg13", "pg-13", "teen"}:
+        return "PG-13"
+    if s in {"r", "mature"}:
+        return "R"
+    if s in {"nc17", "nc-17"}:
+        return "NC-17"
+    if s in {"unrated", "xxx", "maxxxx"}:
+        return "Unrated"
+    return "PG-13"
+
+
+def _normalize_persona_thinking_mode(value) -> str:
+    s = str(value or "auto").strip().lower()
+    if s in {"on", "true", "enable", "enabled", "1"}:
+        return "on"
+    if s in {"off", "false", "disable", "disabled", "0"}:
+        return "off"
+    return "auto"
+
+
+def _model_config_profile_type(mc: dict, params: dict) -> str:
+    raw = params.get("profile_type")
+    if raw in {"agent", "persona"}:
+        return raw
+    name = (mc.get("name") or "").lower()
+    persona = params.get("persona") if isinstance(params.get("persona"), dict) else {}
+    persona_keys = ("personality", "scenario", "first_message", "example_dialogue", "lore", "rating")
+    if (
+        "based bot" in name
+        or "gamer bro" in name
+        or "tyler" in name
+        or any(str(persona.get(k) or params.get(k) or "").strip() for k in persona_keys)
+    ):
+        return "persona"
+    return "agent"
+
+
+def _persona_rating_guidance(params: dict) -> str:
+    persona = params.get("persona") if isinstance(params.get("persona"), dict) else {}
+    rating = _normalize_persona_rating(persona.get("rating", params.get("rating")))
+    return _PERSONA_RATING_GUIDANCE.get(rating, _PERSONA_RATING_GUIDANCE["PG-13"])
+
+
 # ── Tool-calling templates keyed by model family ──
 TOOL_TEMPLATES = {
     "chatml": {
@@ -373,15 +432,29 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     kb_context = ""
     persona_system_prompt = None
     persona_kb_ids = []
+    persona_think_budget = None
     _is_v2_persona = False
     if req.persona_id:
         all_configs = await db.get_model_configs()
         mc = next((c for c in all_configs if c["id"] == req.persona_id), None)
         if mc:
             persona_system_prompt = mc.get("system_prompt") or None
-            if "v2" in (mc.get("name") or "").lower():
+            _persona_name_l = (mc.get("name") or "").lower()
+            if "v2" in _persona_name_l or "daedalus" in _persona_name_l:
                 _is_v2_persona = True
             params = mc.get("parameters", {})
+            if _model_config_profile_type(mc, params) == "persona":
+                persona_fields = params.get("persona") if isinstance(params.get("persona"), dict) else {}
+                thinking_mode = _normalize_persona_thinking_mode(persona_fields.get("thinking_mode", params.get("thinking_mode")))
+                if thinking_mode != "auto":
+                    persona_think_budget = 0 if thinking_mode == "off" else 1
+                rating_guidance = _persona_rating_guidance(params)
+                rating_block = f"\n\n=== PERSONA CONTENT RATING ===\n{rating_guidance}"
+                if persona_system_prompt:
+                    if "=== PERSONA CONTENT RATING ===" not in persona_system_prompt:
+                        persona_system_prompt += rating_block
+                else:
+                    persona_system_prompt = rating_block.strip()
             for key in ("temperature", "num_ctx", "top_p", "top_k"):
                 if params.get(key) is not None:
                     if key == "num_ctx":
@@ -916,9 +989,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             "keep_alive": "10m",
         }
         print(f"[CHAT] Sending to Ollama: model={req.model} options={model_options}")
-        # Thinking control: None=model default, 0=disable, 1=enable
-        if hasattr(req, 'think_budget') and req.think_budget is not None:
-            if req.think_budget == 0:
+        # Thinking control: Persona override wins, then request setting, then model default.
+        effective_think_budget = persona_think_budget if persona_think_budget is not None else getattr(req, "think_budget", None)
+        if effective_think_budget is not None:
+            if effective_think_budget == 0:
                 payload["think"] = False
             else:
                 payload["think"] = True

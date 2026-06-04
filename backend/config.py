@@ -50,6 +50,9 @@ SETTINGS_PATH = os.getenv("SETTINGS_PATH", "/opt/hyprchat/data/settings.json")
 DEFAULT_SETTINGS = {
     "file_cleanup_days": 30,  # 0 = never clean
     "ollama_url": "",  # empty = use OLLAMA_URL from env/default
+    "codebox_url": "",  # empty = use CODEBOX_URL from env/default
+    "searxng_url": "",  # empty = use SEARXNG_URL from env/default
+    "n8n_url": "",  # empty = use N8N_URL from env/default
     "rag": {
         "embed_model": "nomic-embed-text",
         "chunk_size": 500,

@@ -1,6 +1,6 @@
 # 🧠 HyprChat
 
-**Self-hosted AI chat platform** — tool calling, agentic code generation, deep research, multi-model councils, n8n automation integration, and full model management. All running on your own hardware.
+**Self-hosted AI chat platform** — tool calling, Daedalus agentic coding, deep research, multi-model councils, n8n automation integration, and full model management. All running on your own hardware.
 
 Built with FastAPI + a single-file React SPA. No build step, no cloud dependencies.
 
@@ -14,11 +14,39 @@ HyprChat can execute code, upload files, call local services, and drive coding a
 
 ---
 
+## 📸 Screenshots
+
+<details>
+<summary>Open the full screenshot gallery</summary>
+
+| Main Chat | Agents | Personas |
+|---|---|---|
+| <img src="docs/images/mainScreen.png" alt="HyprChat main chat screen" width="280"> | <img src="docs/images/agents.png" alt="HyprChat agents manager" width="280"> | <img src="docs/images/personas.png" alt="HyprChat personas manager" width="280"> |
+
+| Knowledge Bases | Model Manager | Activity Monitor |
+|---|---|---|
+| <img src="docs/images/knowledge%20base.png" alt="HyprChat knowledge bases manager" width="280"> | <img src="docs/images/modelManager.png" alt="HyprChat model manager" width="280"> | <img src="docs/images/activityMonitor.png" alt="HyprChat activity monitor" width="280"> |
+
+| Council | Council Settings | Settings |
+|---|---|---|
+| <img src="docs/images/council.png" alt="HyprChat council of AI" width="280"> | <img src="docs/images/councilSettings.png" alt="HyprChat council settings" width="280"> | <img src="docs/images/settingsPage.png" alt="HyprChat settings page" width="280"> |
+
+| Mermaid Support | KaTeX / LaTeX | Chart Support | Callouts |
+|---|---|---|---|
+| <img src="docs/images/mermaidSupport.png" alt="HyprChat Mermaid diagram support" width="210"> | <img src="docs/images/KaTeX%3ALaTeX%20notationSupport.png" alt="HyprChat KaTeX and LaTeX notation support" width="210"> | <img src="docs/images/chartSupport.png" alt="HyprChat chart rendering support" width="210"> | <img src="docs/images/calloutsExample.png" alt="HyprChat callout rendering support" width="210"> |
+
+</details>
+
+---
+
 ## ✨ Core Features
 
 ### 💬 Chat
 - SSE streaming with live token counter, speed display, and thinking token visualization
+- Empty-chat greeting surface with selectable tools, Daedalus activation, and effort mode before the first message
 - Per-conversation model selection, system prompts, and parameter overrides
+- Per-chat effort modes — Blurt, Ponder, Forge, and Galaxy Brain
+- Rich message rendering for Markdown, code, KaTeX/LaTeX notation, Mermaid diagrams, charts, and callouts
 - Conversation forking — branch from any message to explore alternatives
 - Full-text search (FTS5) across all messages with highlighted snippets
 - Conversation tags, pinning, and sidebar filtering
@@ -26,13 +54,24 @@ HyprChat can execute code, upload files, call local services, and drive coding a
 - Export as Markdown or JSON (with reimport)
 - Keyboard shortcuts — `Ctrl+K` search, `Ctrl+N` new chat, `Ctrl+/` toggle sidebar
 
+<img src="docs/images/mainScreen.png" alt="HyprChat main chat screen" width="900">
+
+HyprChat renders structured model output directly in the chat stream, so math notation, diagrams, data visualizations, and formatted callouts stay attached to the answer that produced them.
+
+<p>
+  <img src="docs/images/KaTeX%3ALaTeX%20notationSupport.png" alt="HyprChat KaTeX and LaTeX notation support" width="215">
+  <img src="docs/images/mermaidSupport.png" alt="HyprChat Mermaid diagram support" width="215">
+  <img src="docs/images/chartSupport.png" alt="HyprChat chart rendering support" width="215">
+  <img src="docs/images/calloutsExample.png" alt="HyprChat callout rendering support" width="215">
+</p>
+
 ### 📄 File Attachments
-- Drag-and-drop or paste files directly into chat
+- Drag-and-drop, paste, or attach files from the composer `+` quick-actions menu
 - **PDF support** — text extracted server-side via `pypdf`, displayed as a compact badge in chat while full content is sent to the model
-- Project archives (`.zip`, `.tar.gz`) route to Coder Bot automatically
+- Project archives (`.zip`, `.tar.gz`) route to Daedalus automatically
 - Text files attached inline with syntax highlighting
 
-### 🤖 Coder Bot v2 — Hybrid Agent Workflow
+### 🏛️ Daedalus — Hybrid Agent Workflow
 
 A deterministic coding workflow with three specialized paths: OpenHands for greenfield builds, Aider for uploaded-project fixes, and ProjectQA for read-only codebase questions. Workflow correctness is enforced by a server-side gate, not by hoping the model follows a prompt:
 
@@ -54,16 +93,16 @@ A deterministic coding workflow with three specialized paths: OpenHands for gree
 - **Architecture Plan panel** — rich markdown rendering of the Architect's plan: file tree, build commands, dependencies as build-system snippets, success criteria as a checklist.
 - **Accepted downloads only** — `download_project` is blocked until Acceptance returns `accepted`, then packages the project while excluding common cache/build artifacts.
 - **Cross-language support** — verified end-to-end on Java (Maven), Python (Flask + pytest), Rust (Cargo), Go (gorilla/mux). Builder profiles + Reviewer markers cover most ecosystems.
-- Sandboxed execution via Codebox (LXC) with 30+ language support, live progress pills, workflow cards, role-specific run cards, and the original v1 Coder Bot still selectable as a persona.
+- Sandboxed execution via Codebox (LXC) with 30+ language support, live progress pills, workflow cards, and role-specific run cards.
 
 ### 🛠️ Tool Suites
 
-**Coder Bot v2 multi-agent tools:**
+**Daedalus multi-agent tools:**
 
 | Tool | Description |
 |------|-------------|
 | `start_coder_workflow` | Backend router for `build_from_prompt`, `fix_uploaded_project`, or `ask_uploaded_project` |
-| `plan_project` | Routes through the **Architect** for v2 personas — produces structured JSON manifest (file tree, build/test cmds, deps, success criteria); rich markdown plan panel in chat |
+| `plan_project` | Routes through the **Architect** for Daedalus — produces structured JSON manifest (file tree, build/test cmds, deps, success criteria); rich markdown plan panel in chat |
 | `generate_code` | **Builder** via OpenHands — greenfield/full-project builds from the Architect contract |
 | `run_review` | **Reviewer** — runs build/test/lint, returns structured issue list with `suggested_fix_scope`, including deterministic stale-root and state/schema diagnostics |
 | `run_acceptance_review` | **Acceptance** — final static quality gate after clean review; checks request fit, docs, tests, packaging, entrypoints, and generated artifacts |
@@ -92,6 +131,15 @@ A deterministic coding workflow with three specialized paths: OpenHands for gree
 - **Downloads bar** — live progress, speed, and ETA for all active downloads
 - Clear error handling for missing/corrupt models
 
+<img src="docs/images/modelManager.png" alt="HyprChat model manager" width="900">
+
+### 📡 Activity Monitor
+- Shared activity tray for downloads, long-running jobs, model actions, and background work
+- Live progress, status, speed, and completion feedback without leaving the current chat
+- Useful for model pulls, HuggingFace downloads, and agentic coding runs that continue in the background
+
+<img src="docs/images/activityMonitor.png" alt="HyprChat activity monitor" width="900">
+
 ### 🏛️ Council of AI
 - Run multiple models in parallel on the same prompt
 - **Preset councils** — Philosophers, Visionaries, Scientists, Debaters (one-click setup)
@@ -101,46 +149,64 @@ A deterministic coding workflow with three specialized paths: OpenHands for gree
 - Host model synthesizes all responses with full debate and vote context
 - Expandable round-by-round history in chat
 
+<p>
+  <img src="docs/images/council.png" alt="HyprChat council of AI" width="440">
+  <img src="docs/images/councilSettings.png" alt="HyprChat council settings" width="440">
+</p>
+
 ### 📚 Knowledge Bases & RAG
-- Upload documents (PDF, Markdown, text, code) and attach to personas
+- Upload documents (PDF, Markdown, text, code) and attach to Agents or Personas
 - Sentence-aware chunking with code-aware splitting for Python/JS/TS
 - ChromaDB vector storage with cosine similarity search
-- Research tool results auto-indexed into per-persona memory
+- Research tool results auto-indexed into profile memory
 - Configurable chunk size, overlap, top_k, and embed model
 
-### 🎭 Personas
-- Named AI personalities with avatars, model config, system prompts, and temperature/context settings
-- Linked knowledge bases and tool sets
-- Persona avatar and name displayed in chat messages
-- Seed bots: Coder Bot, Conspiracy Bot, Based Bot
+<img src="docs/images/knowledge%20base.png" alt="HyprChat knowledge bases manager" width="900">
+
+### 🧩 Agents & Personas
+- **Agents** are task/workflow profiles for coding, research, automation, tools, knowledge bases, and specialized work.
+- **Personas** are voice and roleplay profiles focused on identity, tone, scenario, backstory, and conversational style.
+- Per-profile avatar, base model, system prompt, knowledge bases, tools, temperature, top-p, and thinking-mode controls
+- Persona-specific fields for short description, personality, scenario, first message, example dialogue, lore, tags, and rating
+- Character card import for Chub, SillyTavern, and TavernAI-style PNG cards
+- Active Agent or Persona name/avatar is displayed in chat, with matching leave controls
+
+<p>
+  <img src="docs/images/agents.png" alt="HyprChat agents manager" width="440">
+  <img src="docs/images/personas.png" alt="HyprChat personas manager" width="440">
+</p>
 
 ### 🗂️ Workspaces
 - Group related conversations and track files across chats
 - AI-powered topic analysis using configurable workspace model
-- Generate personas from workspace knowledge
+- Generate profile prompts from workspace knowledge
 
 ### ⚡ External Automation
 - Automation lives in the external n8n VM. HyprChat keeps the n8n health/proxy integration, including `/api/n8n/execute`, without maintaining an internal automation engine.
 
 ### 📊 Token Analytics
-- Cumulative usage tracking per model, persona, and day
+- Cumulative usage tracking per model, profile, and day
 - Summary cards with CSS bar charts
 - Configurable date range (7d / 30d / 90d)
 
 ### 🔍 Prompt Library
 - Save and organize reusable prompts by category
-- Quick-insert via ⚡ button in input bar
-- Apply as system prompt templates without creating a persona
+- Quick-insert from the composer `+` quick-actions menu
+- Apply as system prompt templates without creating a full profile
 
 ### ⚙️ Settings
-- 🎨 14 themes (Terminal, Cyberpunk, Solarized, Dracula, Material Ocean, and more) and 9 monospace fonts
-- Font size, chat width, and UI size sliders
-- Per-model parameters (temperature, top_p, top_k, num_ctx, repeat_penalty)
-- Configurable workspace analysis model, planning model, and coder model
-- Runtime Ollama URL override
-- Thinking mode control (Auto / On / Off)
-- Auto-title toggle, scanline effect toggle, nav rail labels
-- Danger zone: bulk delete all chats, purge all RAG collections
+- Centered overlay with left-side section navigation and a scrollable right-side editor
+- 🎨 15 themes, 9 monospace fonts, chat width, UI font size, and chat font size controls
+- 23 background modes including Dot Grid, Pixel Rain, Aurora Lines, Neural Constellation, Sacred Geometry, Blackbox Terminal, Monastery Candlelight, and Off
+- Connections editor for Ollama, Codebox, n8n, and SearXNG URLs with live service status chips
+- Model & Generation settings for context window, thinking mode, default effort, and workspace analysis model
+- Daedalus settings for planning/coder umbrella models, per-agent overrides, OpenHands, Aider, context window, rounds, and reasoning effort
+- RAG pipeline settings for embedding model, chunking, retrieval top-K, context limits, stats, reindex, and purge
+- Loading Quotes editor with real attributed defaults, inline edit/remove, restore defaults, and add-new-quote controls
+- Changelog renders inside Settings as a bottom-pinned sidebar section with inline refresh
+- Danger Zone: bulk delete all chats
+
+<img src="docs/images/settingsPage.png" alt="HyprChat settings page" width="900">
 
 ---
 
@@ -151,7 +217,7 @@ User → HyprChat Server (:8000)
          ├── Frontend:  Single-file React SPA (inline Babel, no build step)
          ├── Backend:   FastAPI + SSE streaming + SQLite
          │
-         │   Coder Bot v2 — hybrid workflow router:
+         │   Daedalus — hybrid workflow router:
          │   workflows persist in `coder_workflows`; agent calls persist in `runs`
          │     📐 Architect    → JSON plan
          │     🏗 Builder      → OpenHands greenfield builds
@@ -174,23 +240,23 @@ User → HyprChat Server (:8000)
 |------|---------|
 | `backend/main.py` | FastAPI routes, SSE endpoints, model management, project upload |
 | `backend/agents/chat.py` | Multi-round streaming chat agent with tool calling, QA short-circuit, ACTIVE PROJECT injection |
-| `backend/agents/personas.py` | Seed bot definitions (Coder Bot v1 + v2, Conspiracy Bot, Based Bot) |
-| `backend/agents/architect.py` | **v2** Architect — structured plan as JSON, rich markdown rendering |
-| `backend/agents/reviewer.py` | **v2** Reviewer — read-only build/test/lint with marker auto-detection |
-| `backend/agents/acceptance.py` | **v2** Acceptance — final static quality gate for request fit, docs, tests, packaging, and artifacts |
-| `backend/agents/fixer.py` | **v2** Fixer — scoped edits via marker-delimited LLM output |
-| `backend/agents/aider_fixer.py` | **v2** Aider Fixer — uploaded-project patch worker with diff/test capture |
-| `backend/agents/language_adapters.py` | **v2** uploaded-project build/test/smoke/lint contract detection |
-| `backend/agents/project_qa.py` | **v2** ProjectQA — grounded Q&A with file:line citations |
-| `backend/agents/project_indexer.py` | **v2** Indexer — uploaded-project tree walk → ChromaDB |
-| `backend/tools.py` | Tool execution engine + v2 workflow router/gate + OpenHands/Aider dispatch |
+| `backend/agents/personas.py` | Seed Agent and Persona definitions, including Daedalus, Coder Bot, Conspiracy Bot, Tyler, and Kayla |
+| `backend/agents/architect.py` | Daedalus Architect — structured plan as JSON, rich markdown rendering |
+| `backend/agents/reviewer.py` | Daedalus Reviewer — read-only build/test/lint with marker auto-detection |
+| `backend/agents/acceptance.py` | Daedalus Acceptance — final static quality gate for request fit, docs, tests, packaging, and artifacts |
+| `backend/agents/fixer.py` | Daedalus Fixer — scoped edits via marker-delimited LLM output |
+| `backend/agents/aider_fixer.py` | Daedalus Aider Fixer — uploaded-project patch worker with diff/test capture |
+| `backend/agents/language_adapters.py` | Daedalus uploaded-project build/test/smoke/lint contract detection |
+| `backend/agents/project_qa.py` | Daedalus ProjectQA — grounded Q&A with file:line citations |
+| `backend/agents/project_indexer.py` | Daedalus Indexer — uploaded-project tree walk → ChromaDB |
+| `backend/tools.py` | Tool execution engine + Daedalus workflow router/gate + OpenHands/Aider dispatch |
 | `backend/openhands_worker.py` | OpenHands SDK + Aider bridge on Codebox; `/run*`, `/cancel/*`, and `/aider/*` endpoints |
 | `backend/research.py` | Deep research engine |
 | `backend/council.py` | Council debate, voting, and synthesis |
 | `backend/events.py` | Async SSE EventBus (pub/sub with `asyncio.Lock`) |
 | `backend/rag.py` | RAG pipeline (chunking, embedding, retrieval) |
 | `backend/hf.py` | HuggingFace model browser and download |
-| `backend/database.py` | SQLite schema, migrations, and queries — incl. `runs` and `coder_workflows` for v2 |
+| `backend/database.py` | SQLite schema, migrations, and queries — incl. `runs` and `coder_workflows` for Daedalus |
 | `backend/config.py` | Configuration and environment variables |
 | `frontend/dist/index.html` | Entire frontend — React SPA with inline Babel |
 
@@ -206,8 +272,8 @@ CODEBOX_URL         = "http://<CODEBOX_IP>:8585"
 OPENHANDS_URL       = "http://<CODEBOX_IP>:8586"
 SEARXNG_URL         = "http://<SEARXNG_IP>:8888"
 
-# Models — each v2 agent inherits from these umbrella defaults:
-DEFAULT_MODEL       = "qwen3.5:27b"   # chat / persona fallback
+# Models — each Daedalus agent inherits from these umbrella defaults:
+DEFAULT_MODEL       = "qwen3.5:27b"   # chat / profile fallback
 PLANNING_MODEL      = "qwen3.5:27b"   # Architect + Reviewer + Acceptance
 CODER_MODEL         = "qwen2.5-coder:14b" # Builder + Fixer
 WORKSPACE_MODEL     = "qwen3.5:4b"    # auto-title, topic analysis, query rewriting
@@ -218,7 +284,7 @@ REVIEWER_MODEL      = ""               # empty = PLANNING_MODEL
 ACCEPTANCE_MODEL    = ""               # empty = PLANNING_MODEL
 BUILDER_MODEL       = ""               # empty = CODER_MODEL
 FIXER_MODEL         = ""               # empty = CODER_MODEL
-QA_MODEL            = ""               # empty = chat / persona model
+QA_MODEL            = ""               # empty = chat / profile model
 AIDER_MODEL         = ""               # empty = FIXER_MODEL, then CODER_MODEL
 
 # Resources
@@ -230,11 +296,11 @@ AIDER_NUM_CTX       = 16384
 AIDER_AUTO_TEST     = True
 AIDER_WORKER_URL    = OPENHANDS_URL
 DEFAULT_NUM_CTX     = 16384            # used by Architect / Reviewer / Acceptance / Fixer / QA
-MAX_AGENT_ROUNDS    = 12               # chat-side cap (non-coder personas)
-MAX_AGENT_ROUNDS_CODER = 30            # chat-side cap for Coder Bot personas
+MAX_AGENT_ROUNDS    = 12               # chat-side cap (non-coder profiles)
+MAX_AGENT_ROUNDS_CODER = 30            # chat-side cap for Daedalus / coder agents
 ```
 
-All model, OpenHands, and Aider settings can be changed at runtime from the Settings panel.
+All model, OpenHands, Aider, connection, RAG, appearance, quote, and changelog settings can be changed at runtime from the Settings overlay.
 
 **Recommended model setup (dual-3090 / 48 GB VRAM):**
 - `PLANNING_MODEL` = `qwen3-coder:30b` (Architect / Reviewer / Acceptance)
@@ -322,7 +388,7 @@ python -m pytest tests/ -v -k "integration"   # end-to-end flows
 | Chat / SSE | 3 | Streaming, token events, error handling |
 | Knowledge Bases | 7 | KB CRUD, file upload, reindexing |
 | Tools & Execution | 9 | Python/shell exec, fetch_url, web search |
-| Personas | 9 | CRUD, seed bots |
+| Agents / Personas | 9 | CRUD, seed profiles |
 | Workspaces | 7 | CRUD, conversation management |
 | Councils | 13 | CRUD, members, presets, analytics |
 | HuggingFace | 5 | GGUF search, model info |

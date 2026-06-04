@@ -354,19 +354,33 @@ Be rigorous, structured, and honest about uncertainty. When sources conflict, sa
             )
             now = datetime.utcnow().isoformat()
             DEEP_RESEARCHER_TOOLS = '["deep_research", "execute_code"]'
+            DEEP_RESEARCHER_PARAMS = {
+                "profile_type": "agent",
+                "description": "Research-first agent for multi-source investigations, citations, and synthesized reports.",
+            }
             if not exists:
                 await db.execute(
                     "INSERT INTO model_configs(id,name,base_model,system_prompt,tool_ids,kb_ids,parameters,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                     ("mc-preset-deepresearch", "🔬 Deep Researcher", "qwen3.5:27b",
-                     DEEP_RESEARCHER_PROMPT, DEEP_RESEARCHER_TOOLS, '[]', '{}', now, now)
+                     DEEP_RESEARCHER_PROMPT, DEEP_RESEARCHER_TOOLS, '[]', json.dumps(DEEP_RESEARCHER_PARAMS), now, now)
                 )
             else:
                 # Refresh prompt + tool_ids on version bumps so existing installs pick up guidance
                 # updates and newly-required tools (e.g. execute_code for numerical reliability).
-                # Preserves base_model, kb_ids, parameters — those may be user-customized.
+                # Preserves base_model, kb_ids, and custom parameters while adding profile_type.
+                existing_params = {}
+                try:
+                    row = await db.execute_fetchall(
+                        "SELECT parameters FROM model_configs WHERE id='mc-preset-deepresearch'"
+                    )
+                    if row:
+                        existing_params = json.loads(row[0][0] or "{}")
+                except Exception:
+                    existing_params = {}
+                merged_params = {**DEEP_RESEARCHER_PARAMS, **existing_params, "profile_type": existing_params.get("profile_type") or "agent"}
                 await db.execute(
-                    "UPDATE model_configs SET system_prompt=?, tool_ids=?, updated_at=? WHERE id='mc-preset-deepresearch'",
-                    (DEEP_RESEARCHER_PROMPT, DEEP_RESEARCHER_TOOLS, now)
+                    "UPDATE model_configs SET system_prompt=?, tool_ids=?, parameters=?, updated_at=? WHERE id='mc-preset-deepresearch'",
+                    (DEEP_RESEARCHER_PROMPT, DEEP_RESEARCHER_TOOLS, json.dumps(merged_params), now)
                 )
         except Exception as e:
             print(f"[DB SEED] {e}")

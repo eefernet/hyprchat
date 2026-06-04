@@ -1,3 +1,83 @@
+## Alpha v17.1 — June 3, 2026
+
+## UI Overhaul Update
+### Developer Note 
+> Complete refresh and update to the overall feel of hyprchat with a new take on personas. Next update will feature hotfixes and changes to deep research. UI changes are subject to undergo more changes till I feel they look right. This is not final for UI but a step into the right direction. For bugs, please raise an issue through the GitHub issue tracker [here](https://github.com/eefernet/hyprchat/issues).
+### Visual Direction & App Shell
+- This UI refresh was heavily inspired by Pewdiepies [Odysseus](https://pewdiepie-archdaemon.github.io/odysseus/) local AI webview. So I stole his ideas.
+- Added a flatter, modern Hyprland-inspired visual direction while preserving the existing HyprChat terminal/cyberpunk feel.
+- Added HyprFlat-style theme polish, tighter glass panels, cleaner borders, flatter controls, and refreshed chat/settings surfaces.
+- Updated the site favicon to the HyprChat logo mark.
+- Added selectable animated background effects in Settings next to the theme selector, including Pixel Rain, Soft Flow, Aurora Lines, Star Drift, Circuit Drift, and Odysseus-style flow variants.
+- Tuned the background effects so they fill the whole viewport, are more visible where needed, and avoid dense rain, oversized bars, or overly aggressive glitching.
+
+### Documentation & Screenshots
+- Reworked the README screenshots from a bare image dump into a top collapsible gallery plus contextual feature screenshots placed next to the sections they explain.
+- Added README coverage for the new Agents and Personas profile manager, Knowledge Bases, Model Manager, Activity Monitor, Council, Council Settings, Settings, and main chat screenshots.
+- Added rich-rendering README examples for KaTeX/LaTeX notation, Mermaid diagrams, charts, and callouts.
+- Updated README feature copy to match the Agents/Personas split, including Persona card import, per-profile KBs, rating controls, thinking-mode overrides, and first-message behavior.
+
+### Startup & Empty Chat
+- Updated the startup/loading screen so it uses the selected theme and selected animated background instead of the old standalone loading look.
+- Updated the first-chat empty state with the HyprChat logo, centered product greeting, generated daily message copy, and a taller first-message composer that settles back to the normal bottom composer after sending.
+- Page loads and refreshes now open to the new empty chat surface instead of restoring the most recent conversation; the real chat row is created when the first message is sent.
+- New Chat now opens the empty chat surface immediately; the composer keeps the smooth float up/down behavior, lands closer to the greeting, and delays textarea focus with `preventScroll` so the browser does not nudge it upward at the end.
+- Empty-chat daily greeting messages now use a more playful prompt and stronger fallback lines, with a cache version bump so browsers refresh stale generic copy.
+
+### Chat & Composer
+- Moved the streaming/loading sweep from the top of the page to an animated trace around the composer.
+- Raised the composer control layer so Prompt Library and effort menus render above chat/chart content, and nudged the empty-chat composer closer to the greeting.
+- Reworked the composer controls so Attachments, Prompt Library, and Daedalus activation live under a single `+` quick-actions menu, with the effort selector moved next to Send.
+- Empty-chat effort selection and Daedalus activation now work before the first message; pending choices are applied when the real conversation is created.
+- Added inline PDF extraction failure feedback with retry/remove actions.
+- Quick Search failures now surface as a compact warning chip instead of silently clearing results or spinning indefinitely.
+
+### Sidebar, Search & Chat Utilities
+- Cleaned up sidebar search: title filtering and full-message search now live behind a single rail search action above Chat.
+- Reworked export/import controls into a single export menu with Markdown/JSON choices and corrected import/export icon usage.
+- Import/export failures now show visible in-app feedback instead of failing silently or only logging to the console.
+
+### Settings
+- Reworked Settings into a centered modal overlay with left-side section navigation and a scrollable right-side editor instead of replacing the chat surface.
+- Moved Changelog into Settings as a bottom-pinned sidebar section that renders in the right editor pane with inline refresh.
+- Reworked **Connections** into a vertically stacked endpoint editor with service status chips, always-visible Ollama/Codebox/N8N/SearXNG URL fields, and `/api/settings` persistence.
+- Added consistent save feedback for Connections, RAG settings, Loading Quotes, appearance preferences, and model parameter settings.
+- Rebuilt **Loading Quotes** as a scrollable editor with readable full quote rows, attribution display, inline edit/save/cancel/remove controls, restore defaults, and add-new-quote controls.
+- Added 30 default loading quotes from real philosophers, religious texts, mystics, and scientists, with cleanup for previously saved placeholder HyprChat-authored defaults.
+
+### Personas & Daedalus
+- Renamed Coder Bot v2 to **Daedalus** throughout the UI and updated related model/context labels.
+- Added persona descriptions to the Personas screen and persona editor.
+- Restore-defaults actions now use themed in-app confirmation and visible success/error feedback.
+
+### Agents & Personas Split
+- Split model configs into **Agents** for task/workflow-driven assistants and **Personas** for roleplay, voice, and character-style profiles.
+- Added profile-type metadata via `parameters.profile_type` while keeping the existing `model_configs` table and compatibility API field names.
+- Added compact top-of-page guidance explaining the difference between Agents and Personas, plus separate create/edit flows for each profile type.
+- Added **Kayla — Gen Z Bestie** as a fully populated example Persona so users can see how description, personality, scenario, first message, example dialogue, lore, tags, rating, and sampling fields are meant to be filled.
+- Replaced the old Based Bot seed with **Tyler — Based Gamer Bro**, a fully populated 18-year-old gamer-bro Persona with description, personality, scenario, first message, example dialogue, lore, tags, rating, and advanced prompt filled in.
+- Added a Persona age rating to a fixed emoji-labeled dropdown (`G`, `PG`, `PG-13`, `R`, `NC-17`, `Unrated`) with visible descriptors and model-facing content-boundary guidance during chat.
+- Added a per-Persona Thinking Mode control (`Auto`, `On`, `Off`) that can override the global thinking setting for Persona chats.
+- Enabled Knowledge Base attachment controls for Personas, including Persona card KB badges and chat-time KB retrieval when a Persona is active.
+- Fixed empty-chat Persona state handling so leaving a Persona/Agent detaches the active profile instead of spawning a new chat with the same profile.
+- Persona `first_message` appears as the first assistant message in fresh Persona chats and is included in the chat context.
+- Added Persona import for Chub, SillyTavern, and TavernAI character cards, including PNG `chara` metadata cards, JSON card files, Chub-style packed definition splitting, tags, alternate greetings, character-book lore, and first-message mapping.
+- Added a built-in Daedalus avatar so the coding agent has a fitting image in the Agents page, chat header, sidebar, and assistant message bubbles.
+
+### Models, Knowledge Bases & Activity
+- Reworked the top-right Downloads tray into a shared **Activity** tray for model pulls/downloads, KB uploads/indexing, project archive uploads, RAG reindex/purge jobs, cleanup jobs, and tool-template patching.
+- Model deletion, tool-calling enablement, and tool-template patching now use themed in-app confirmations/toasts instead of browser alerts.
+- Knowledge Base uploads now show both inline upload/indexing progress and Activity tray status.
+- RAG reindex and purge flows now use themed confirmation dialogs, Activity progress rows, and visible success/error feedback.
+
+### Feedback & Confirmations
+- Added shared toast feedback variants for success, error, warning, and info messages, with optional action buttons.
+- Replaced normal browser `alert()` / `confirm()` flows with themed in-app dialogs and toasts across destructive actions, restore-defaults actions, model management, RAG maintenance, tool-template patching, import/export, and cleanup workflows.
+- User-triggered failures that previously only wrote to the developer console now surface visible toasts or inline card errors while keeping console logging for debugging.
+
+### Bug Fixes
+- Fixed Acceptance falsely reporting long source files as truncated or syntactically incomplete when its static source excerpt ended mid-statement. Acceptance now reads much larger source excerpts, marks any remaining excerpt truncation explicitly, and treats the clean Reviewer build/lint result as authoritative for syntax status.
+
 ## Alpha v17.0.2 — June 2, 2026
 
 ### Coder Bot v2 — uploaded-project repair hardening
@@ -327,7 +407,7 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - **Mermaid.js diagrams** — ` ```mermaid ` code fences render inline as live SVG: flowcharts, sequence, class, state, ER, gantt, mindmap, pie. Theme-synced (34 mapped variables) and re-render when the user switches themes mid-conversation.
 - **KaTeX math** — Inline `$...$`, display `$$...$$`, and LaTeX `\(...\)` / `\[...\]` delimiters all render as typeset math. Code blocks are ignored so `$` in source stays literal.
 - **`<MermaidBlock>` component** — Header with `◈ mermaid` label, source toggle, and copy button matching existing code-block styling. Broken diagrams show a red error banner plus the raw source instead of breaking the message.
-- **`<MDWrap>` wrapper** — Wraps 8 render surfaces (chat, council cards, HF README, changelog modal) and invokes KaTeX auto-render after mount. Streaming messages skip wrapping so partial tokens don't flicker.
+- **`<MDWrap>` wrapper** — Wraps render surfaces including chat, council cards, HF README, and the changelog view, then invokes KaTeX auto-render after mount. Streaming messages skip wrapping so partial tokens don't flicker.
 - **Multi-line display math** — `md()` pre-splits non-code segments by `$$...$$` before line-splitting so equations spanning multiple lines render as one KaTeX node instead of fragmenting across `<div>`s.
 - **Backend rendering hint** — `chat.py` injects a system message telling the model diagrams/math render inline (not via `write_file` or `generate_code`) and explicitly warns against embedding `$...$` LaTeX inside Mermaid node labels.
 - **Display-math escape inside inline code** — `md()` now masks `$$` and `$` inside single-line backtick inline code before the display-math split, so documentation examples that quote a math delimiter render as inline code instead of being yanked out as a math block.
