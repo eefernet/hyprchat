@@ -13,6 +13,59 @@ _SEARCH_BATCH_SIZE = 3
 _SEARCH_BATCH_DELAY_DEEP = 2.0          # seconds between batches in deep research
 _SEARCH_BATCH_DELAY_CONSPIRACY = 2.5    # seconds between batches in conspiracy research
 
+REPORT_TEMPLATES = [
+    {
+        "id": "analyst",
+        "label": "Analyst Report",
+        "description": "Executive-grade synthesis with evidence, uncertainty, implications, and recommendations.",
+        "default_depth": 4,
+        "sections": ["Executive Summary", "Key Findings", "Evidence Review", "Conflicts and Uncertainty", "Implications", "Recommendations", "Sources"],
+    },
+    {
+        "id": "academic",
+        "label": "Academic Review",
+        "description": "Literature-review style report with methodology, themes, limitations, and bibliography.",
+        "default_depth": 5,
+        "sections": ["Abstract", "Methodology", "Background", "Literature Themes", "Evidence Synthesis", "Limitations", "Bibliography"],
+    },
+    {
+        "id": "decision",
+        "label": "Decision Brief",
+        "description": "Options, tradeoffs, risks, and a recommended course of action.",
+        "default_depth": 3,
+        "sections": ["Decision Context", "Options", "Evaluation Criteria", "Tradeoffs", "Risks", "Recommendation", "Next Steps"],
+    },
+    {
+        "id": "market",
+        "label": "Market Intelligence",
+        "description": "Competitive landscape, market signals, risks, and strategic opportunities.",
+        "default_depth": 4,
+        "sections": ["Executive Brief", "Market Landscape", "Competitors", "Demand Signals", "Risks", "Opportunities", "Strategic Readout"],
+    },
+    {
+        "id": "technical",
+        "label": "Technical Deep Dive",
+        "description": "Architecture, implementation details, benchmarks, failure modes, and practical guidance.",
+        "default_depth": 4,
+        "sections": ["Overview", "Architecture", "Implementation Details", "Benchmarks and Data", "Failure Modes", "Best Practices", "References"],
+    },
+    {
+        "id": "timeline",
+        "label": "Investigative Timeline",
+        "description": "Chronological dossier with actors, evidence, contradictions, and open questions.",
+        "default_depth": 5,
+        "sections": ["Briefing", "Timeline", "Key Actors", "Evidence Trail", "Contradictions", "Open Questions", "Appendix"],
+    },
+    {
+        "id": "digest",
+        "label": "Source Digest",
+        "description": "Source-by-source summary for fast review, triage, and follow-up research.",
+        "default_depth": 2,
+        "sections": ["Overview", "Highest-Value Sources", "Source Summaries", "Patterns", "Gaps", "Follow-up Queries"],
+    },
+]
+REPORT_TEMPLATE_MAP = {t["id"]: t for t in REPORT_TEMPLATES}
+
 
 async def _search_google_fallback(http, query: str, count: int = 10) -> list:
     """Fallback: scrape Google search results when SearXNG is down."""
@@ -336,6 +389,19 @@ def _source_tier(url: str) -> int:
     return 2
 
 
+def _source_tier_label(tier) -> str:
+    try:
+        tier_i = int(tier)
+    except Exception:
+        tier_i = 2
+    return {
+        0: "primary evidence",
+        1: "investigative / archival",
+        2: "general web / community",
+        3: "fact-checker / secondary review",
+    }.get(tier_i, "general web / community")
+
+
 async def _fetch_wikileaks_page(http, url: str) -> dict | None:
     """Fetch a WikiLeaks page, extracting article text and document/PDF links."""
     lower = url.lower()
@@ -493,6 +559,596 @@ async def _ask_ollama_streamed(
         return accumulated.strip()
     except Exception as e:
         return f"[AI synthesis failed: {e}]"
+
+
+def _safe_json_obj(text: str, fallback):
+    """Best-effort JSON parser for model output that may include markdown fences."""
+    if not text:
+        return fallback
+    raw = text.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\s*```$", "", raw)
+    candidates = [raw]
+    m = re.search(r"(\{.*\}|\[.*\])", raw, flags=re.DOTALL)
+    if m:
+        candidates.append(m.group(1))
+    for cand in candidates:
+        try:
+            return json.loads(cand)
+        except Exception:
+            continue
+    return fallback
+
+
+def _one_line(text: str, limit: int = 180) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()[:limit]
+
+
+def _normalize_source_ids(raw_ids, max_source_index: int) -> list[str]:
+    ids = []
+    for raw in raw_ids or []:
+        text = str(raw).strip()
+        matches = re.findall(r"\bS\s*(\d+)\b", text, re.I)
+        if not matches and text.isdigit():
+            matches = [text]
+        for match in matches:
+            try:
+                idx = int(match)
+            except Exception:
+                continue
+            if idx < 1 or idx > max_source_index:
+                continue
+            sid = f"S{idx}"
+            if sid not in ids:
+                ids.append(sid)
+    return ids
+
+
+def _normalize_research_findings(findings, max_source_index: int) -> list[dict]:
+    clean = []
+    if not isinstance(findings, list):
+        return clean
+    for item in findings[:16]:
+        if isinstance(item, str):
+            item = {"claim": item}
+        if not isinstance(item, dict):
+            continue
+        confidence = str(item.get("confidence") or "medium").strip().lower()
+        if confidence not in {"high", "medium", "low"}:
+            confidence = "medium"
+        evidence_strength = str(item.get("evidence_strength") or "").strip().lower()
+        if evidence_strength not in {"strong", "moderate", "thin", "anecdotal"}:
+            evidence_strength = {"high": "strong", "medium": "moderate", "low": "thin"}.get(confidence, "moderate")
+        clean.append({
+            "finding_id": len(clean) + 1,
+            "claim": _one_line(str(item.get("claim") or item.get("title") or "Finding"), 520),
+            "evidence": _one_line(str(item.get("evidence") or item.get("summary") or ""), 700),
+            "source_ids": _normalize_source_ids(item.get("source_ids") or item.get("sources"), max_source_index),
+            "confidence": confidence,
+            "evidence_strength": evidence_strength,
+            "source_quality": _one_line(str(item.get("source_quality") or ""), 260),
+            "caveat": _one_line(str(item.get("caveat") or item.get("limitation") or ""), 320),
+            "implication": _one_line(str(item.get("implication") or ""), 420),
+        })
+    return clean
+
+
+def _normalize_url(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        p = urllib.parse.urlsplit(url)
+        query = urllib.parse.parse_qsl(p.query, keep_blank_values=True)
+        query = [(k, v) for k, v in query if not k.lower().startswith("utm_")]
+        return urllib.parse.urlunsplit((
+            p.scheme.lower(), p.netloc.lower(), p.path.rstrip("/") or p.path,
+            urllib.parse.urlencode(query), "",
+        ))
+    except Exception:
+        return url.strip()
+
+
+async def _emit_report_event(events, report_id: str, event_type: str, data: dict):
+    """Emit a live research event and persist it on the report row."""
+    import database as db
+
+    event = {"type": event_type, "data": data or {}, "timestamp": time.time()}
+    try:
+        await db.append_research_event(report_id, event)
+    except Exception as e:
+        print(f"[RESEARCH REPORT] Event persist failed: {e}")
+    try:
+        await events.emit(report_id, event_type, data or {})
+    except Exception as e:
+        print(f"[RESEARCH REPORT] Event emit failed: {e}")
+
+
+async def _ask_report_streamed(
+    http, ollama_url: str, events, report_id: str, prompt: str,
+    model: str = None, default_model: str = "qwen3.5:27b",
+    max_tokens: int = 6144,
+) -> str:
+    """Stream final report tokens to the dedicated research workspace."""
+    import config as _cfg
+    import cancel_registry
+
+    _num_ctx = _cfg.DEFAULT_NUM_CTX or 16384
+    accumulated = ""
+    token_buf = ""
+    try:
+        async with http.stream("POST", f"{ollama_url}/api/generate", json={
+            "model": model or default_model,
+            "prompt": prompt,
+            "stream": True,
+            "options": {"temperature": 0.25, "num_predict": max_tokens, "num_ctx": _num_ctx},
+        }, timeout=420) as stream:
+            async for line in stream.aiter_lines():
+                if cancel_registry.is_cancelled(report_id):
+                    raise cancel_registry.RunCancelled(report_id)
+                if not line.strip():
+                    continue
+                try:
+                    chunk = json.loads(line)
+                except Exception:
+                    continue
+                piece = chunk.get("response", "") or ""
+                if piece:
+                    accumulated += piece
+                    token_buf += piece
+                if len(token_buf) >= 240:
+                    await _emit_report_event(events, report_id, "research_token", {"content": token_buf})
+                    token_buf = ""
+                if chunk.get("done"):
+                    break
+        if token_buf:
+            await _emit_report_event(events, report_id, "research_token", {"content": token_buf})
+        return accumulated.strip()
+    except cancel_registry.RunCancelled:
+        raise
+    except Exception as e:
+        return f"[Report synthesis failed: {e}]"
+
+
+async def run_research_report(
+    http, ollama_url: str, default_model: str, events, report_id: str,
+    query: str, depth: int = 3, focus: str = "", report_type: str = "analyst",
+    model: str = "", planner_model: str = "", auditor_model: str = "",
+    kb_ids: list | None = None, inputs: list | None = None,
+) -> dict:
+    """Run the first-class Deep Research report pipeline.
+
+    This is intentionally additive. `run_deep_research` below keeps the existing
+    tool contract used by chat agents and Daedalus.
+    """
+    import config
+    import database as db
+    import rag
+    import cancel_registry
+
+    t_start = time.time()
+    depth = max(1, min(5, int(depth or 3)))
+    report_type = report_type if report_type in REPORT_TEMPLATE_MAP else "analyst"
+    template = REPORT_TEMPLATE_MAP[report_type]
+    run_model = model or default_model
+    plan_model = planner_model or run_model
+    audit_model = auditor_model or run_model
+    kb_ids = kb_ids or []
+    inputs = inputs or []
+    searxng_url = config.SEARXNG_URL
+    cancel_registry.register(report_id)
+
+    async def check_cancel():
+        if cancel_registry.is_cancelled(report_id):
+            raise cancel_registry.RunCancelled(report_id)
+
+    async def phase(key: str, label: str, detail: str = "", pct: int | None = None):
+        await check_cancel()
+        await db.update_research_report(report_id, status="running")
+        await _emit_report_event(events, report_id, "research_phase", {
+            "phase": key, "label": label, "detail": detail, "pct": pct,
+        })
+
+    try:
+        await db.update_research_report(report_id, status="running", error="")
+        await _emit_report_event(events, report_id, "research_started", {
+            "query": query, "report_type": report_type, "depth": depth,
+        })
+
+        # Phase 1: planning
+        await phase("planning", "Planning research strategy", "Building queries, criteria, and outline", 5)
+        plan_prompt = f"""You are the planning stage for an advanced research system.
+
+Topic: {query}
+Focus: {focus or "none"}
+Report type: {template["label"]}
+Expected sections: {", ".join(template["sections"])}
+Depth: {depth}/5
+
+Return strict JSON with:
+{{
+  "title": "short report title",
+  "research_questions": ["..."],
+  "search_queries": ["..."],
+  "inclusion_criteria": ["..."],
+  "outline": [{{"heading":"...", "goal":"..."}}],
+  "known_risks": ["..."]
+}}
+
+Prefer precise search queries, primary sources, recent sources when freshness matters, and diverse viewpoints."""
+        plan_text = await cancel_registry.await_cancellable(
+            _ask_ollama(http, ollama_url, plan_prompt, model=plan_model, default_model=default_model, max_tokens=1800),
+            report_id,
+        )
+        plan = _safe_json_obj(plan_text, {})
+        if not isinstance(plan, dict):
+            plan = {}
+        fallback_title = query[:80].strip() or "Research Report"
+        title = _one_line(plan.get("title") or fallback_title, 96)
+        outline = plan.get("outline") if isinstance(plan.get("outline"), list) else [
+            {"heading": s, "goal": f"Cover {s.lower()} for {template['label']}."}
+            for s in template["sections"]
+        ]
+        await db.update_research_report(report_id, title=title, outline={
+            "template": report_type,
+            "sections": outline,
+            "research_questions": plan.get("research_questions", []),
+            "inclusion_criteria": plan.get("inclusion_criteria", []),
+            "known_risks": plan.get("known_risks", []),
+        })
+
+        # Phase 2: gather context from uploaded inputs and KBs.
+        await phase("context", "Loading user context", "Reading uploaded notes and knowledge bases", 12)
+        input_context_parts = []
+        input_sources = []
+        for item in inputs[:12]:
+            name = _one_line(item.get("name") or item.get("filename") or "Uploaded input", 120)
+            content = (item.get("content") or item.get("text") or "").strip()
+            if not content:
+                continue
+            content = content[:16000]
+            input_sources.append({
+                "index": 0, "title": f"Uploaded: {name}", "url": "",
+                "snippet": _one_line(content, 240), "type": item.get("type", "file"),
+                "tier": 0, "tier_label": _source_tier_label(0), "metadata": {"name": name},
+            })
+            input_context_parts.append(f"### Uploaded input: {name}\n{content}")
+        kb_context = ""
+        if kb_ids and query:
+            try:
+                chunks = await rag.query(kb_ids, query, top_k=8)
+                if chunks:
+                    kb_context = rag.format_context(chunks, max_chars=8000)
+                    input_context_parts.append(f"### Knowledge base context\n{kb_context}")
+            except Exception as e:
+                await _emit_report_event(events, report_id, "research_audit", {
+                    "level": "warning", "message": f"KB context unavailable: {e}",
+                })
+        user_context = "\n\n".join(input_context_parts)[:32000]
+
+        # Phase 3: search.
+        await phase("search", "Searching the web", "Expanding and deduplicating queries", 20)
+        planned_queries = plan.get("search_queries", [])
+        if not isinstance(planned_queries, list):
+            planned_queries = []
+        qset = []
+        def add_query(q):
+            q = _one_line(q, 220)
+            if q and q.lower() not in {x.lower() for x in qset}:
+                qset.append(q)
+        add_query(query)
+        if focus:
+            add_query(f"{query} {focus}")
+        for q in planned_queries:
+            add_query(str(q))
+        template_queries = {
+            "academic": ["research paper", "literature review", "systematic review", "methodology limitations"],
+            "decision": ["pros cons risks", "cost benefit", "alternatives comparison", "implementation risk"],
+            "market": ["market size competitors", "industry analysis", "pricing business model", "customer adoption"],
+            "technical": ["architecture", "implementation details", "benchmarks", "failure modes best practices"],
+            "timeline": ["timeline chronology", "documents evidence", "key actors", "controversy investigation"],
+            "digest": ["best sources", "overview", "primary source", "expert analysis"],
+            "analyst": ["expert analysis", "latest developments", "data statistics", "criticism risks"],
+        }.get(report_type, [])
+        for suffix in template_queries:
+            add_query(f"{query} {suffix}")
+        max_queries = min(len(qset), 5 + depth * 3)
+        qset = qset[:max_queries]
+
+        all_results = []
+        searched = set()
+        for batch_start in range(0, len(qset), _SEARCH_BATCH_SIZE):
+            await check_cancel()
+            batch = qset[batch_start:batch_start + _SEARCH_BATCH_SIZE]
+            tasks = []
+            for q in batch:
+                searched.add(q)
+                time_range = "year" if re.search(r"\b(latest|recent|current|today|202[5-9]|news)\b", q, re.I) else None
+                tasks.append(_search_searxng(http, searxng_url, q, count=10, time_range=time_range))
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for q, res in zip(batch, results):
+                if not isinstance(res, list):
+                    continue
+                for item in res:
+                    item["query"] = q
+                    all_results.append(item)
+            await _emit_report_event(events, report_id, "research_phase", {
+                "phase": "search", "label": "Searching the web",
+                "detail": f"{min(batch_start + len(batch), len(qset))}/{len(qset)} queries complete",
+                "pct": 20 + int(18 * (batch_start + len(batch)) / max(len(qset), 1)),
+            })
+            if batch_start + _SEARCH_BATCH_SIZE < len(qset):
+                await asyncio.sleep(_SEARCH_BATCH_DELAY_DEEP)
+
+        # Source normalization.
+        seen_urls = set()
+        sources = []
+        for item in all_results:
+            url = _normalize_url(item.get("url", ""))
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            src = {
+                "index": len(input_sources) + len(sources) + 1,
+                "title": item.get("title", "") or url,
+                "url": url,
+                "snippet": item.get("content", "")[:320],
+                "thumbnail": item.get("thumbnail", ""),
+                "type": item.get("type", "web"),
+                "tier": _source_tier(url),
+                "query": item.get("query", ""),
+            }
+            src["tier_label"] = _source_tier_label(src["tier"])
+            sources.append(src)
+            if len(sources) <= 30:
+                await _emit_report_event(events, report_id, "research_source_found", src)
+        sources = input_sources + sources
+        for i, src in enumerate(sources, start=1):
+            src["index"] = i
+        await db.update_research_report(report_id, sources=sources, metrics={
+            "searches": len(searched), "results": len(all_results),
+            "source_count": len(sources), "pages_read": 0, "elapsed": time.time() - t_start,
+        })
+        await db.replace_research_sources(report_id, sources)
+
+        if not sources and not user_context:
+            raise RuntimeError("No usable sources found. Check SearXNG or provide files/KB context.")
+
+        # Phase 4: read pages.
+        await phase("reading", "Reading high-value sources", "Fetching full text for ranked pages", 42)
+        web_results = [r for r in all_results if r.get("url")]
+        top_urls = _rank_urls(web_results, set())[:min(6 + depth * 3, 22)]
+        pages = []
+        for i in range(0, len(top_urls), 4):
+            await check_cancel()
+            batch = top_urls[i:i + 4]
+            fetched = await asyncio.gather(*[_fetch_page(http, u) for u in batch], return_exceptions=True)
+            for page in fetched:
+                if isinstance(page, dict) and page.get("content"):
+                    src_meta = next((s for s in sources if s.get("url") == _normalize_url(page.get("url", ""))), {})
+                    page["source_index"] = src_meta.get("index", 0)
+                    pages.append(page)
+                    await _emit_report_event(events, report_id, "research_source_read", {
+                        "url": page.get("url", ""), "title": src_meta.get("title", ""),
+                        "source_index": page.get("source_index"),
+                        "chars": len(page.get("content", "")),
+                    })
+            await db.update_research_report(report_id, metrics={
+                "searches": len(searched), "results": len(all_results),
+                "source_count": len(sources), "pages_read": len(pages), "elapsed": time.time() - t_start,
+            })
+
+        # Build bounded evidence context.
+        source_briefs = []
+        for src in sources[:40]:
+            sid = f"S{src['index']}"
+            tier = src.get("tier", 2)
+            source_briefs.append(
+                f"Source ID: [{sid}]\n"
+                f"Title: {src.get('title','')}\n"
+                f"URL: {src.get('url','uploaded/local')}\n"
+                f"Source tier: {_source_tier_label(tier)} (T{tier})\n"
+                f"Snippet: {src.get('snippet','')}"
+            )
+        page_context = []
+        for p in pages[:16]:
+            sid = f"S{p.get('source_index')}" if p.get("source_index") else "S?"
+            page_context.append(f"--- {sid} {p.get('url','')} ---\n{p.get('content','')[:3000]}")
+        evidence_context = (
+            ("USER/KB CONTEXT\n" + user_context + "\n\n" if user_context else "") +
+            "SOURCE BRIEFS\n" + "\n\n".join(source_briefs) +
+            "\n\nFULL TEXT EXTRACTS\n" + "\n\n".join(page_context)
+        )[:70000]
+
+        # Phase 5: extract findings.
+        await phase("extracting", "Extracting evidence", "Converting sources into claim-level findings", 62)
+        allowed_source_ids = ", ".join(f"S{s.get('index')}" for s in sources[:40])
+        findings_prompt = f"""Extract the strongest findings for this report as strict JSON.
+
+Topic: {query}
+Focus: {focus or "none"}
+Report type: {template["label"]}
+Allowed source IDs: {allowed_source_ids}
+
+Evidence:
+{evidence_context}
+
+Return a JSON array of 8-16 objects:
+[
+  {{
+    "finding_id": 1,
+    "claim": "specific finding",
+    "evidence": "short evidence summary",
+    "source_ids": ["S1"],
+    "confidence": "high|medium|low",
+    "evidence_strength": "strong|moderate|thin|anecdotal",
+    "source_quality": "primary/benchmark/official/community/blog/etc.",
+    "caveat": "main limitation or empty string",
+    "implication": "why it matters"
+  }}
+]
+
+Rules:
+- Use source IDs only as S1, S2, etc. Do not invent source IDs.
+- Use "finding_id" only for findings. Do not call sources "claims".
+- Do not write "studies show" unless the cited source_ids contain peer-reviewed papers, official benchmarks, or primary empirical studies.
+- Mark community discussions, blogs, GitHub issues, and vendor docs as moderate, thin, or anecdotal unless they contain direct data."""
+        findings_text = await cancel_registry.await_cancellable(
+            _ask_ollama(http, ollama_url, findings_prompt, model=run_model, default_model=default_model, max_tokens=2600),
+            report_id,
+        )
+        findings = _normalize_research_findings(_safe_json_obj(findings_text, []), len(sources))
+        if not findings:
+            findings = [{
+                "finding_id": 1,
+                "claim": "The available source set was too weak for structured extraction.",
+                "evidence": "The runner will still synthesize a report from the source briefs and available full text.",
+                "source_ids": [],
+                "confidence": "low",
+                "evidence_strength": "thin",
+                "source_quality": "insufficient",
+                "caveat": "No source-backed findings were extracted.",
+                "implication": "Treat conclusions as preliminary.",
+            }]
+        for finding in findings[:16]:
+            await _emit_report_event(events, report_id, "research_finding", finding)
+        await db.update_research_report(report_id, findings=findings)
+
+        # Phase 6: audit.
+        await phase("audit", "Auditing evidence quality", "Checking citation coverage and uncertainty", 74)
+        audit_prompt = f"""You are a citation auditor and skeptical reviewer.
+
+Topic: {query}
+Report type: {template["label"]}
+Findings JSON:
+{json.dumps(findings[:20], indent=2)}
+
+Sources:
+{chr(10).join(source_briefs[:45])}
+
+Audit rules:
+- Refer to extracted findings as "Finding #N".
+- Refer to sources only as "[S#]"; never write "claim 22" or use a bare number for a source.
+- Flag any finding that uses strong causal, benchmark, quality, latency, cost, or hallucination-reduction language without primary empirical data.
+- Treat community discussions, blogs, GitHub repositories, and vendor docs as practical signals, not peer-reviewed evidence.
+- Contradictions should name the affected Finding #N and source IDs where possible.
+
+Return strict JSON:
+{{
+  "coverage_score": 0-100,
+  "strengths": ["..."],
+  "finding_issues": [{{"finding_id": 1, "issue": "...", "source_ids": ["S1"]}}],
+  "weaknesses": ["..."],
+  "contradictions": ["..."],
+  "missing_evidence": ["..."],
+  "source_quality_notes": ["..."]
+}}"""
+        audit_text = await cancel_registry.await_cancellable(
+            _ask_ollama(http, ollama_url, audit_prompt, model=audit_model, default_model=default_model, max_tokens=2200),
+            report_id,
+        )
+        audit = _safe_json_obj(audit_text, {})
+        if not isinstance(audit, dict):
+            audit = {"coverage_score": 0, "weaknesses": ["Audit output was not valid JSON."]}
+        await _emit_report_event(events, report_id, "research_audit", audit)
+
+        metrics = {
+            "searches": len(searched),
+            "results": len(all_results),
+            "source_count": len(sources),
+            "pages_read": len(pages),
+            "elapsed": time.time() - t_start,
+            "coverage_score": audit.get("coverage_score", 0),
+            "tiers": {
+                "primary": len([s for s in sources if s.get("tier") == 0]),
+                "investigative": len([s for s in sources if s.get("tier") == 1]),
+                "general": len([s for s in sources if s.get("tier") == 2]),
+                "fact_checker": len([s for s in sources if s.get("tier") == 3]),
+            },
+        }
+
+        # Phase 7: synthesize final report.
+        await phase("synthesis", "Writing final report", "Streaming the report into the viewer", 86)
+        final_prompt = f"""Write a polished, advanced research report.
+
+Topic: {query}
+Focus: {focus or "none"}
+Report type: {template["label"]}
+Required sections: {", ".join(template["sections"])}
+Title: {title}
+Current date: {datetime.utcnow().date().isoformat()}
+
+Research plan:
+{json.dumps({"questions": plan.get("research_questions", []), "criteria": plan.get("inclusion_criteria", [])}, indent=2)}
+
+Findings:
+{json.dumps(findings[:20], indent=2)}
+
+Audit:
+{json.dumps(audit, indent=2)}
+
+Evidence context:
+{evidence_context}
+
+Write in Markdown. Requirements:
+- Start with "# {title}".
+- Include a compact "Method" section explaining web/files/KB coverage.
+- Use inline citations like [S1], [S2] after claims.
+- Do not cite a source id unless it appears in the evidence.
+- Include uncertainty, contradictions, and missing-evidence caveats.
+- Use "Finding #N" only when referring to extracted findings; use "[S#]" only when citing sources.
+- Do not use "studies show", "proves", "significantly improves", "reduces hallucinations", "sub-second", or other strong empirical language unless the cited finding has strong empirical, benchmark, peer-reviewed, or primary-source support.
+- When evidence comes mostly from community posts, blogs, GitHub repos, or vendor/project docs, write it as reported practice, implementation guidance, or anecdotal evidence.
+- If the audit coverage score is under 70 or the source set is mostly general/community sources, add an "Evidence Strength" section before recommendations.
+- Use tables where comparisons are clearer than prose.
+- End with "Source Notes" summarizing source quality and follow-up searches.
+- Keep it rigorous and decision-useful, not a search-result dump."""
+        report = await cancel_registry.await_cancellable(
+            _ask_report_streamed(http, ollama_url, events, report_id, final_prompt, model=run_model, default_model=default_model),
+            report_id,
+        )
+        summary = _one_line(re.sub(r"^# .+?\n", "", report.strip(), flags=re.DOTALL), 320)
+        if not summary:
+            summary = f"{template['label']} on {query}"
+
+        metrics["elapsed"] = time.time() - t_start
+        await db.update_research_report(
+            report_id, status="complete", report_markdown=report, summary=summary,
+            sources=sources, findings=findings, metrics={**metrics, "audit": audit},
+            completed_at=datetime.utcnow().isoformat(),
+        )
+        await db.replace_research_sources(report_id, sources)
+        await _emit_report_event(events, report_id, "research_done", {
+            "status": "complete", "summary": summary, "metrics": metrics,
+        })
+        return {
+            "id": report_id, "status": "complete", "report": report, "sources": sources,
+            "findings": findings, "metrics": metrics,
+        }
+    except cancel_registry.RunCancelled:
+        await db.update_research_report(
+            report_id, status="cancelled", error="Cancelled by user",
+            metrics={"elapsed": time.time() - t_start},
+            completed_at=datetime.utcnow().isoformat(),
+        )
+        await _emit_report_event(events, report_id, "research_error", {
+            "status": "cancelled", "error": "Cancelled by user",
+        })
+        return {"id": report_id, "status": "cancelled"}
+    except Exception as e:
+        await db.update_research_report(
+            report_id, status="failed", error=str(e),
+            metrics={"elapsed": time.time() - t_start},
+            completed_at=datetime.utcnow().isoformat(),
+        )
+        await _emit_report_event(events, report_id, "research_error", {
+            "status": "failed", "error": str(e),
+        })
+        return {"id": report_id, "status": "failed", "error": str(e)}
+    finally:
+        try:
+            cancel_registry.cleanup(report_id)
+        except Exception:
+            pass
 
 
 async def run_deep_research(http, ollama_url: str, default_model: str, events,

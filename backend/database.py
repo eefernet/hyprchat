@@ -187,6 +187,51 @@ CREATE INDEX IF NOT EXISTS idx_runs_conv    ON runs(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_parent  ON runs(parent_run_id);
 
+-- First-class Deep Research reports. The existing deep_research tool remains
+-- compatibility-focused; these rows back the dedicated report workspace.
+CREATE TABLE IF NOT EXISTS research_reports (
+    id              TEXT PRIMARY KEY,
+    title           TEXT NOT NULL DEFAULT '',
+    query           TEXT NOT NULL,
+    focus           TEXT DEFAULT '',
+    report_type     TEXT NOT NULL DEFAULT 'analyst',
+    status          TEXT NOT NULL DEFAULT 'queued',
+    depth           INTEGER DEFAULT 3,
+    model           TEXT DEFAULT '',
+    planner_model   TEXT DEFAULT '',
+    auditor_model   TEXT DEFAULT '',
+    kb_ids          TEXT DEFAULT '[]',
+    inputs_json     TEXT DEFAULT '[]',
+    outline_json    TEXT DEFAULT '{}',
+    findings_json   TEXT DEFAULT '[]',
+    sources_json    TEXT DEFAULT '[]',
+    metrics_json    TEXT DEFAULT '{}',
+    report_markdown TEXT DEFAULT '',
+    summary         TEXT DEFAULT '',
+    error           TEXT DEFAULT '',
+    events_log      TEXT DEFAULT '[]',
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at    TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_research_reports_status  ON research_reports(status);
+CREATE INDEX IF NOT EXISTS idx_research_reports_updated ON research_reports(updated_at);
+
+CREATE TABLE IF NOT EXISTS research_sources (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id     TEXT NOT NULL,
+    source_index  INTEGER DEFAULT 0,
+    title         TEXT DEFAULT '',
+    url           TEXT DEFAULT '',
+    snippet       TEXT DEFAULT '',
+    tier          INTEGER DEFAULT 2,
+    source_type   TEXT DEFAULT 'web',
+    metadata_json TEXT DEFAULT '{}',
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (report_id) REFERENCES research_reports(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_research_sources_report ON research_sources(report_id);
+
 -- Coder Bot v2 hybrid workflow state. A workflow is the user-facing unit of
 -- work; runs remain the per-agent invocations attached to that workflow.
 CREATE TABLE IF NOT EXISTS coder_workflows (
@@ -1154,6 +1199,215 @@ async def get_token_usage(days: int = 30, group_by: str = "day"):
                    GROUP BY date(created_at) ORDER BY date ASC"""
         cursor = await db.execute(q, (f"-{days} days",))
         return [dict(r) for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+
+# ============================================================
+# DEEP RESEARCH REPORTS
+# ============================================================
+def _parse_research_report(row) -> dict:
+    r = dict(row)
+    for key, default in (
+        ("kb_ids", []),
+        ("inputs_json", []),
+        ("outline_json", {}),
+        ("findings_json", []),
+        ("sources_json", []),
+        ("metrics_json", {}),
+        ("events_log", []),
+    ):
+        try:
+            r[key] = json.loads(r.get(key) or json.dumps(default))
+        except (json.JSONDecodeError, TypeError):
+            r[key] = default
+    r["inputs"] = r.pop("inputs_json", [])
+    r["outline"] = r.pop("outline_json", {})
+    r["findings"] = r.pop("findings_json", [])
+    r["sources"] = r.pop("sources_json", [])
+    r["metrics"] = r.pop("metrics_json", {})
+    return r
+
+
+async def create_research_report(report_id: str, *, query: str, title: str = "",
+                                 focus: str = "", report_type: str = "analyst",
+                                 depth: int = 3, model: str = "",
+                                 planner_model: str = "", auditor_model: str = "",
+                                 kb_ids: list = None, inputs: list = None,
+                                 status: str = "queued") -> None:
+    db = await get_db()
+    try:
+        now = datetime.utcnow().isoformat()
+        await db.execute(
+            "INSERT INTO research_reports(id,title,query,focus,report_type,status,depth,"
+            "model,planner_model,auditor_model,kb_ids,inputs_json,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                report_id, title or query[:80], query, focus or "", report_type or "analyst",
+                status, int(depth or 3), model or "", planner_model or "",
+                auditor_model or "", json.dumps(kb_ids or []), json.dumps(inputs or []),
+                now, now,
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def update_research_report(report_id: str, **kwargs) -> None:
+    if not kwargs:
+        return
+    json_fields = {
+        "kb_ids": "kb_ids",
+        "inputs": "inputs_json",
+        "outline": "outline_json",
+        "findings": "findings_json",
+        "sources": "sources_json",
+        "metrics": "metrics_json",
+        "events_log": "events_log",
+    }
+    allowed = {
+        "title", "query", "focus", "report_type", "status", "depth", "model",
+        "planner_model", "auditor_model", "summary", "error", "report_markdown",
+        "completed_at",
+        *json_fields.keys(),
+    }
+    sets = []
+    vals = []
+    for key, value in kwargs.items():
+        if key not in allowed:
+            continue
+        col = json_fields.get(key, key)
+        sets.append(f"{col}=?")
+        vals.append(json.dumps(value) if key in json_fields else value)
+    if not sets:
+        return
+    sets.append("updated_at=?")
+    vals.append(datetime.utcnow().isoformat())
+    vals.append(report_id)
+    db = await get_db()
+    try:
+        await db.execute(f"UPDATE research_reports SET {', '.join(sets)} WHERE id=?", tuple(vals))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def append_research_event(report_id: str, event: dict) -> None:
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT events_log FROM research_reports WHERE id=?", (report_id,))
+        if not rows:
+            return
+        try:
+            log = json.loads(rows[0]["events_log"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            log = []
+        if "ts" not in event:
+            event = {**event, "ts": datetime.utcnow().isoformat()}
+        log.append(event)
+        await db.execute(
+            "UPDATE research_reports SET events_log=?, updated_at=? WHERE id=?",
+            (json.dumps(log), datetime.utcnow().isoformat(), report_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def replace_research_sources(report_id: str, sources: list[dict]) -> None:
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM research_sources WHERE report_id=?", (report_id,))
+        for i, src in enumerate(sources or [], start=1):
+            await db.execute(
+                "INSERT INTO research_sources(report_id,source_index,title,url,snippet,tier,source_type,metadata_json) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    report_id, int(src.get("index") or i), src.get("title", ""),
+                    src.get("url", ""), src.get("snippet", "") or src.get("content", ""),
+                    int(src.get("tier", 2)), src.get("type", "web"),
+                    json.dumps(src.get("metadata") or {}),
+                ),
+            )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_research_report(report_id: str) -> dict | None:
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT * FROM research_reports WHERE id=?", (report_id,))
+        if not rows:
+            return None
+        report = _parse_research_report(rows[0])
+        src_rows = await db.execute_fetchall(
+            "SELECT * FROM research_sources WHERE report_id=? ORDER BY source_index ASC, id ASC",
+            (report_id,),
+        )
+        if src_rows:
+            parsed = []
+            for row in src_rows:
+                src = dict(row)
+                try:
+                    src["metadata"] = json.loads(src.get("metadata_json") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    src["metadata"] = {}
+                src.pop("metadata_json", None)
+                parsed.append(src)
+            report["sources"] = parsed
+        return report
+    finally:
+        await db.close()
+
+
+async def list_research_reports(limit: int = 50, offset: int = 0, query: str = "") -> list[dict]:
+    db = await get_db()
+    try:
+        if query:
+            like = f"%{query}%"
+            rows = await db.execute_fetchall(
+                "SELECT id,title,query,focus,report_type,status,depth,model,summary,error,"
+                "sources_json,metrics_json,created_at,updated_at,completed_at "
+                "FROM research_reports WHERE title LIKE ? OR query LIKE ? OR summary LIKE ? "
+                "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (like, like, like, limit, offset),
+            )
+        else:
+            rows = await db.execute_fetchall(
+                "SELECT id,title,query,focus,report_type,status,depth,model,summary,error,"
+                "sources_json,metrics_json,created_at,updated_at,completed_at "
+                "FROM research_reports ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            )
+        reports = []
+        for row in rows:
+            r = dict(row)
+            try:
+                sources = json.loads(r.pop("sources_json") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                sources = []
+            try:
+                metrics = json.loads(r.pop("metrics_json") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                metrics = {}
+            r["source_count"] = metrics.get("source_count") or len(sources)
+            r["pages_read"] = metrics.get("pages_read", 0)
+            r["elapsed"] = metrics.get("elapsed", 0)
+            r["metrics"] = metrics
+            reports.append(r)
+        return reports
+    finally:
+        await db.close()
+
+
+async def delete_research_report(report_id: str) -> None:
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM research_sources WHERE report_id=?", (report_id,))
+        await db.execute("DELETE FROM research_reports WHERE id=?", (report_id,))
+        await db.commit()
     finally:
         await db.close()
 

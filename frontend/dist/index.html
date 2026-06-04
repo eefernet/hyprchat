@@ -2615,6 +2615,21 @@ function HyprChat(){
   const [wsDetail,setWsDetail]=useState(null);
   const [wsLoading,setWsLoading]=useState(false);
 
+  // Deep Research workspace state
+  const [researchTemplates,setResearchTemplates]=useState([]);
+  const [researchReports,setResearchReports]=useState([]);
+  const [activeResearchId,setActiveResearchId]=useState(null);
+  const [activeResearch,setActiveResearch]=useState(null);
+  const [researchLoading,setResearchLoading]=useState(false);
+  const [researchRunning,setResearchRunning]=useState(false);
+  const [researchEvents,setResearchEvents]=useState([]);
+  const [researchDraft,setResearchDraft]=useState({query:"",focus:"",report_type:"analyst",depth:4,model:"",planner_model:"",auditor_model:"",kb_ids:[],inputs:[]});
+  const [researchInputText,setResearchInputText]=useState("");
+  const [researchReportFilter,setResearchReportFilter]=useState("");
+  const [researchLiveMarkdown,setResearchLiveMarkdown]=useState("");
+  const researchEventRef=useRef(null);
+  const researchFileRef=useRef(null);
+
   // Council state
   const [councils,setCouncils]=useState([]);
   const [councilPresets,setCouncilPresets]=useState([]);
@@ -2893,6 +2908,8 @@ function HyprChat(){
     }).catch(()=>{settingsLoadedRef.current=true;});
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
     fetch(`${API}/api/workspaces`).then(r=>r.json()).then(setWorkspaces).catch(()=>{});
+    fetch(`${API}/api/research/templates`).then(r=>r.json()).then(d=>{const tm=d.templates||[];setResearchTemplates(tm);if(tm[0])setResearchDraft(p=>({...p,report_type:p.report_type||tm[0].id,depth:p.depth||tm[0].default_depth||3}));}).catch(()=>{});
+    fetch(`${API}/api/research/reports`).then(r=>r.json()).then(d=>{setResearchReports(d||[]);if((d||[])[0])setActiveResearchId((d||[])[0].id);}).catch(()=>{});
     fetch(`${API}/api/councils`).then(r=>r.json()).then(setCouncils).catch(()=>{});
     fetch(`${API}/api/council-presets`).then(r=>r.json()).then(setCouncilPresets).catch(()=>{});
     const quickSearchEntry={id:"quick_search",name:"⚡ Quick Search",description:"SearXNG instant search with inline YouTube, image & web previews",icon:"flash"};
@@ -2946,6 +2963,177 @@ function HyprChat(){
     if(autoExpandThink&&evts.some(e=>e.type==="thinking")){setExpandedPill("thinking");}
   },[evts,autoExpandThink]);
   useEffect(()=>{evtsRef.current=evts;},[evts]);
+
+  const refreshResearchReports=useCallback(async(q=researchReportFilter)=>{
+    try{
+      const r=await fetch(`${API}/api/research/reports${q?`?q=${encodeURIComponent(q)}`:""}`);
+      if(r.ok)setResearchReports(await r.json());
+    }catch(e){console.error("Research report refresh failed",e);}
+  },[researchReportFilter]);
+
+  const loadResearchReport=useCallback(async(id,{openPanel=true}={})=>{
+    if(!id)return;
+    setResearchLoading(true);
+    try{
+      const r=await fetch(`${API}/api/research/reports/${id}`);
+      if(!r.ok)throw new Error(`HTTP ${r.status}`);
+      const d=await r.json();
+      setActiveResearchId(id);setActiveResearch(d);
+      setResearchEvents(d.events_log||[]);
+      setResearchLiveMarkdown(d.report_markdown||"");
+      setResearchRunning(["queued","running"].includes(d.status));
+      if(openPanel)setPanel("research");
+    }catch(e){console.error("Research report load failed",e);notify({type:"error",text:"Research report failed to load",detail:e.message||String(e)});}
+    setResearchLoading(false);
+  },[notify]);
+
+  useEffect(()=>{if(activeResearchId)loadResearchReport(activeResearchId,{openPanel:false});},[activeResearchId]);
+
+  useEffect(()=>{
+    if(researchEventRef.current){researchEventRef.current.close();researchEventRef.current=null;}
+    if(!activeResearchId||!researchRunning)return;
+    let closed=false;
+    const es=new EventSource(`${API}/api/events/${activeResearchId}`);
+    es.onmessage=e=>{try{
+      const ev=JSON.parse(e.data);
+      if(ev.type==="heartbeat"||ev.type==="keepalive")return;
+      setResearchEvents(p=>[...p.slice(-300),ev]);
+      if(ev.type==="research_token"&&ev.data?.content)setResearchLiveMarkdown(p=>p+ev.data.content);
+      if(ev.type==="research_done"||ev.type==="research_error"){
+        setResearchRunning(false);
+        setTimeout(()=>{refreshResearchReports();loadResearchReport(activeResearchId,{openPanel:false});},600);
+      }
+    }catch{}};
+    es.onerror=()=>{if(!closed)console.warn("Research event stream disconnected");};
+    researchEventRef.current=es;
+    return()=>{closed=true;es.close();if(researchEventRef.current===es)researchEventRef.current=null;};
+  },[activeResearchId,researchRunning,refreshResearchReports,loadResearchReport]);
+
+  const startResearchReport=async()=>{
+    const query=(researchDraft.query||"").trim();
+    if(!query){notify({type:"warning",text:"Research topic required",detail:"Enter a topic or question first."});return;}
+    const notes=(researchInputText||"").trim();
+    const inputs=[...(researchDraft.inputs||[])];
+    if(notes)inputs.push({name:"Pasted notes",type:"notes",content:notes});
+    const body={...researchDraft,query,depth:parseInt(researchDraft.depth)||3,model:researchDraft.model||models[0]||"",inputs};
+    setResearchRunning(true);setResearchEvents([]);setResearchLiveMarkdown("");setResearchLoading(true);
+    try{
+      const r=await fetch(`${API}/api/research/reports`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      if(!r.ok){const txt=await r.text().catch(()=>r.statusText);throw new Error(`HTTP ${r.status}: ${txt}`);}
+      const d=await r.json();
+      setActiveResearchId(d.id);setActiveResearch(d);setResearchEvents(d.events_log||[]);
+      setResearchReports(p=>[d,...p.filter(x=>x.id!==d.id)]);
+      setResearchDraft(p=>({...p,query:"",focus:"",inputs:[]}));
+      setResearchInputText("");
+      setPanel("research");
+    }catch(e){setResearchRunning(false);notify({type:"error",text:"Research failed to start",detail:e.message||String(e)});}
+    setResearchLoading(false);
+  };
+
+  const cancelResearchReport=async(id=activeResearchId)=>{
+    if(!id)return;
+    try{await fetch(`${API}/api/research/reports/${id}/cancel`,{method:"POST"});}catch{}
+    setResearchRunning(false);
+    setResearchReports(p=>p.map(r=>r.id===id?{...r,status:"cancelled",error:"Cancelled by user"}:r));
+  };
+
+  const rerunResearchReport=async(id=activeResearchId)=>{
+    if(!id)return;
+    setResearchRunning(true);setResearchEvents([]);setResearchLiveMarkdown("");
+    try{
+      const r=await fetch(`${API}/api/research/reports/${id}/rerun`,{method:"POST"});
+      if(!r.ok)throw new Error(`HTTP ${r.status}`);
+      const d=await r.json();
+      setActiveResearchId(d.id);setActiveResearch(d);setResearchReports(p=>[d,...p]);setPanel("research");
+    }catch(e){setResearchRunning(false);notify({type:"error",text:"Research rerun failed",detail:e.message||String(e)});}
+  };
+
+  const deleteResearchReport=async(id)=>{
+    if(!id)return;
+    const ok=await confirmAction({title:"Delete research report?",body:"This removes the saved report and source metadata.",confirmLabel:"Delete",tone:"danger"});
+    if(!ok)return;
+    try{await fetch(`${API}/api/research/reports/${id}`,{method:"DELETE"});}catch{}
+    setResearchReports(p=>p.filter(r=>r.id!==id));
+    if(activeResearchId===id){setActiveResearchId(null);setActiveResearch(null);setResearchEvents([]);setResearchLiveMarkdown("");}
+  };
+
+  const handleResearchFiles=async(files)=>{
+    const added=[];
+    for(const f of Array.from(files||[])){
+      const isPdf=(f.name||"").toLowerCase().endsWith(".pdf");
+      if(f.size>25*1024*1024){notify({type:"warning",text:"Research file skipped",detail:`${f.name} is larger than 25MB.`});continue;}
+      try{
+        if(isPdf){
+          const fd=new FormData();fd.append("file",f);
+          const r=await fetch(`${API}/api/extract-pdf`,{method:"POST",body:fd});
+          if(!r.ok)throw new Error(`PDF extraction HTTP ${r.status}`);
+          const d=await r.json();
+          added.push({name:f.name,type:"pdf",content:(d.text||"").slice(0,60000),pages:d.total_pages||0});
+        }else{
+          const text=await f.text();
+          added.push({name:f.name,type:"file",content:text.slice(0,60000)});
+        }
+      }catch(e){notify({type:"error",text:"Research file failed",detail:`${f.name}: ${e.message||String(e)}`});}
+    }
+    if(added.length)setResearchDraft(p=>({...p,inputs:[...(p.inputs||[]),...added]}));
+  };
+
+  const exportResearchMarkdown=()=>{
+    const report=activeResearch;
+    const body=(researchLiveMarkdown||report?.report_markdown||"").trim();
+    if(!body)return;
+    const blob=new Blob([body],{type:"text/markdown"});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    a.href=url;a.download=`${(report?.title||"research-report").replace(/[^a-z0-9._-]+/gi,"-").slice(0,80)}.md`;
+    document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  };
+
+  const printResearchReport=()=>{
+    const report=activeResearch;
+    const node=document.querySelector(".research-report-print");
+    const clone=node?.cloneNode(true);
+    if(clone){
+      const srcCanvases=node.querySelectorAll("canvas");
+      clone.querySelectorAll("canvas").forEach((cv,i)=>{
+        try{
+          const img=document.createElement("img");
+          img.src=srcCanvases[i].toDataURL("image/png");
+          img.style.maxWidth="100%";
+          img.style.display="block";
+          img.style.margin="10pt 0";
+          cv.replaceWith(img);
+        }catch{}
+      });
+    }
+    const html=clone?.innerHTML||"";
+    if(!html){notify({type:"warning",text:"No report body to print"});return;}
+    const title=(report?.title||"HyprChat Research Report").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+    const w=window.open("","_blank");
+    if(!w){notify({type:"error",text:"Print window blocked",detail:"Allow popups for HyprChat, then try Print / PDF again."});return;}
+    w.document.open();
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>
+      @page{margin:0.62in}
+      *{box-sizing:border-box}
+      body{margin:0;color:#151823;background:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;font-size:11.5pt;line-height:1.55}
+      main{max-width:7.35in;margin:0 auto}
+      h1{font-size:23pt;line-height:1.15;margin:0 0 18pt;color:#111827}
+      h2{font-size:15pt;line-height:1.25;margin:22pt 0 8pt;color:#1f4f9f;border-top:1px solid #d8dee9;padding-top:12pt}
+      h3{font-size:12.5pt;margin:16pt 0 6pt;color:#24324a}
+      p{margin:0 0 9pt}
+      table{width:100%;border-collapse:collapse;margin:10pt 0 14pt;table-layout:auto;page-break-inside:auto}
+      tr{page-break-inside:avoid;page-break-after:auto}
+      th,td{border:1px solid #cfd6e3;padding:5pt 6pt;text-align:left;vertical-align:top;font-size:9pt;line-height:1.35;word-break:normal;overflow-wrap:anywhere}
+      th{background:#edf3ff;color:#2452a0;font-weight:800}
+      code,pre{font-family:"SFMono-Regular",Menlo,Consolas,monospace}
+      pre{white-space:pre-wrap;border:1px solid #d8dee9;background:#f8fafc;padding:8pt;border-radius:5pt;page-break-inside:avoid}
+      blockquote{border-left:3pt solid #84a9ff;margin:10pt 0;padding:4pt 0 4pt 10pt;color:#39445a;background:#f6f8ff}
+      a{color:#0645ad;text-decoration:none}
+      hr{border:0;border-top:1px solid #d8dee9;margin:14pt 0}
+      @media print{body{print-color-adjust:exact;-webkit-print-color-adjust:exact}}
+    </style></head><body><main>${html}</main><script>setTimeout(()=>{window.focus();window.print();},250);<\/script></body></html>`);
+    w.document.close();
+  };
 
   // Load conversation messages from backend when switching chats
   const loadConversation = useCallback(async (id, {force=false}={}) => {
@@ -4610,7 +4798,7 @@ function HyprChat(){
   };
 
   const glass={background:`${t.surface}F2`,backdropFilter:"none",border:`1px solid ${t.brd}55`,boxShadow:"none"};
-  const _navShort={Chat:"Chat","Knowledge Bases":"KB",Tools:"Tools",Agents:"Agents","Prompt Library":"Prompts","Council of AI":"Council","Model Manager":"Models",Analytics:"Stats",Settings:"Settings"};
+  const _navShort={Chat:"Chat","Knowledge Bases":"KB",Tools:"Tools",Agents:"Agents","Prompt Library":"Prompts","Deep Research":"Research","Council of AI":"Council","Model Manager":"Models",Analytics:"Stats",Settings:"Settings"};
   const openSettings=()=>{if(panel!=="settings")previousPanelRef.current=panel;setPanel("settings");};
   const closeSettings=()=>{setShowHealthMonitor(false);setPanel(previousPanelRef.current||"chat");};
   const nb=(p,ico,lab)=><button onClick={()=>setPanel(p)} title={lab} style={{width:52,height:showNavLabels?48:46,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:8,cursor:"pointer",border:`1px solid ${panel===p?`${t.acc}55`:"transparent"}`,background:panel===p?`${t.acc}14`:"transparent",color:panel===p?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:"none",padding:showNavLabels?"3px 0 1px":0}}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{panel===p&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}</button>;
@@ -4710,6 +4898,7 @@ function HyprChat(){
       {nb("tools",<IC.Tool/>,"Tools")}
       {nb("personas",<IC.Cube/>,"Agents")}
       {nb("prompts",<IC.Zap/>,"Prompt Library")}
+      {nb("research",<IC.Search/>,"Deep Research")}
       {nb("council",<IC.Council/>,"Council of AI")}
       {nb("models",<IC.Layers/>,"Model Manager")}
       {nb("analytics",<IC.BarChart/>,"Analytics")}
@@ -5257,6 +5446,165 @@ function HyprChat(){
       })}
     </div>
   </div>
+
+      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return `Audit complete${d.coverage_score!==undefined?` - coverage ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return d.summary?`Report complete - ${d.summary}`:"Report complete";if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const activeStatus=statusMeta(report?.status);const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=[...(report?.outline?.sections||[])].map(s=>s.heading||s).filter(Boolean);return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}><IC.Search/><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Deep Research</span>{researchRunning&&<span style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.acc}14`,border:`1px solid ${t.acc}33`,color:t.acc}}>live</span>}</div>
+      <div style={{display:"flex",gap:6,alignItems:"center"}}>
+        {activeResearchId&&researchRunning&&<button onClick={()=>cancelResearchReport(activeResearchId)} style={btnS(t.err)}><IC.Stop/> Stop</button>}
+        {activeResearchId&&<button onClick={()=>rerunResearchReport(activeResearchId)} style={btnS(t.acc)}><IC.Refresh/> Rerun</button>}
+        {body&&<button onClick={exportResearchMarkdown} style={btnS(t.warm)}><IC.Download/> Markdown</button>}
+        {body&&<button onClick={printResearchReport} style={btnS(t.mut)}><IC.External/> Print / PDF</button>}
+      </div>
+    </div>
+    <div style={{flex:1,display:"grid",gridTemplateColumns:"290px minmax(0,1fr) 320px",overflow:"hidden",minHeight:0}}>
+      <div style={{borderRight:`1px solid ${t.brd}24`,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:12}}>
+        <div style={{background:`${t.surface}80`,border:`1px solid ${t.brd}33`,borderRadius:8,padding:12,display:"flex",flexDirection:"column",gap:9}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+            <span style={{fontSize:11,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.6}}>New Report</span>
+            <span style={{fontSize:9,color:t.mut}}>{tmpl.label}</span>
+          </div>
+          <textarea value={researchDraft.query} onChange={e=>setResearchDraft(p=>({...p,query:e.target.value}))} placeholder="Research topic or question" rows={3} style={{...inputS,resize:"vertical",fontSize:12,lineHeight:1.45}}/>
+          <input value={researchDraft.focus||""} onChange={e=>setResearchDraft(p=>({...p,focus:e.target.value}))} placeholder="Optional focus" style={{...inputS,fontSize:12}}/>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            <select value={researchDraft.report_type} onChange={e=>{const nt=researchTemplates.find(x=>x.id===e.target.value);setResearchDraft(p=>({...p,report_type:e.target.value,depth:nt?.default_depth||p.depth||3}));}} style={{...inputS,fontSize:12}}>
+              {(researchTemplates.length?researchTemplates:[tmpl]).map(rt=>{const ico={analyst:"📊",academic:"🎓",decision:"⚖️",market:"📈",technical:"🛠️",timeline:"🗓️",digest:"🗂️"}[rt.id]||"🔬";return <option key={rt.id} value={rt.id}>{ico} {rt.label}</option>;})}
+            </select>
+            <select value={researchDraft.depth||3} onChange={e=>setResearchDraft(p=>({...p,depth:parseInt(e.target.value)||3}))} title="Research depth" style={{...inputS,fontSize:11,padding:"8px 7px"}}>
+              <option value={1}>⚡ Quick</option>
+              <option value={2}>🧭 Overview</option>
+              <option value={3}>🔎 Standard</option>
+              <option value={4}>📚 Comprehensive</option>
+              <option value={5}>🧠 Exhaustive</option>
+            </select>
+          </div>
+          <ModelPicker value={researchDraft.model||models[0]||""} onChange={v=>setResearchDraft(p=>({...p,model:v}))} models={models} modelDetails={modelDetails} t={t} font={font}/>
+          <details style={{border:`1px solid ${t.brd}22`,borderRadius:8,padding:"7px 9px",background:`${t.bgDeep}88`}}>
+            <summary style={{cursor:"pointer",fontSize:10,fontWeight:800,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Role Models</summary>
+            <div style={{display:"flex",flexDirection:"column",gap:7,marginTop:8}}>
+              <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Planner</div>
+              <ModelPicker value={researchDraft.planner_model||""} onChange={v=>setResearchDraft(p=>({...p,planner_model:v}))} models={["",...models]} modelDetails={modelDetails} t={t} font={font}/>
+              <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Auditor</div>
+              <ModelPicker value={researchDraft.auditor_model||""} onChange={v=>setResearchDraft(p=>({...p,auditor_model:v}))} models={["",...models]} modelDetails={modelDetails} t={t} font={font}/>
+            </div>
+          </details>
+          <textarea value={researchInputText} onChange={e=>setResearchInputText(e.target.value)} placeholder="Optional pasted notes, constraints, or source excerpts" rows={4} style={{...inputS,resize:"vertical",fontSize:11,lineHeight:1.45}}/>
+          <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+            <label style={{...btnS(t.f1),justifyContent:"center",flex:1}}><IC.Upload/> Add Files<input ref={researchFileRef} type="file" multiple accept=".pdf,.txt,.md,.csv,.json,.html,.py,.js,.ts" style={{display:"none"}} onChange={e=>{handleResearchFiles(e.target.files);e.target.value="";}}/></label>
+            <button onClick={startResearchReport} disabled={researchLoading||researchRunning} style={{...btnS(t.acc),justifyContent:"center",flex:1,opacity:(researchLoading||researchRunning)?0.55:1}}><IC.Zap/> Start</button>
+          </div>
+          {(researchDraft.inputs||[]).length>0&&<div style={{display:"flex",flexDirection:"column",gap:4}}>
+            {(researchDraft.inputs||[]).map((inp,i)=><div key={`${inp.name}-${i}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 7px",border:`1px solid ${t.brd}22`,borderRadius:7,background:`${t.surface}55`}}>
+              <span style={{fontSize:10,color:t.f1,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{inp.name}</span>
+              <span style={{fontSize:9,color:t.mut}}>{Math.round((inp.content||"").length/1000)}k</span>
+              <button onClick={()=>setResearchDraft(p=>({...p,inputs:(p.inputs||[]).filter((_,ix)=>ix!==i)}))} style={{background:"none",border:"none",color:t.err,cursor:"pointer",display:"flex",padding:2}}><IC.X/></button>
+            </div>)}
+          </div>}
+          {kbs.length>0&&<div style={{display:"flex",flexDirection:"column",gap:4}}>
+            <div style={{fontSize:9,fontWeight:800,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Knowledge Bases</div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+              {kbs.slice(0,8).map(kb=>{const on=(researchDraft.kb_ids||[]).includes(kb.id);return <button key={kb.id} onClick={()=>setResearchDraft(p=>({...p,kb_ids:on?(p.kb_ids||[]).filter(x=>x!==kb.id):[...(p.kb_ids||[]),kb.id]}))} style={{fontSize:9,padding:"4px 7px",borderRadius:7,border:`1px solid ${on?t.acc:t.brd}33`,background:on?`${t.acc}18`:`${t.surface}55`,color:on?t.acc:t.mut,cursor:"pointer",fontFamily:font}}>{kb.name}</button>;})}
+            </div>
+          </div>}
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <input value={researchReportFilter} onChange={e=>setResearchReportFilter(e.target.value)} placeholder="Filter reports" style={{...inputS,fontSize:11,padding:"7px 9px"}}/>
+          <button onClick={()=>refreshResearchReports()} style={btnS(t.mut)}><IC.Refresh/></button>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:7}}>
+          {filteredReports.map(r=>{const sm=statusMeta(r.status);const active=r.id===activeResearchId;return <div key={r.id} onClick={()=>loadResearchReport(r.id)} style={{padding:10,borderRadius:8,border:`1px solid ${active?sm[0]:t.brd}33`,background:active?`${sm[0]}10`:`${t.surface}66`,cursor:"pointer",display:"flex",flexDirection:"column",gap:5}}>
+            <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+              <span style={{width:7,height:7,borderRadius:"50%",background:sm[0],boxShadow:r.status==="running"?`0 0 8px ${sm[0]}99`:"none",flexShrink:0}}/>
+              <span style={{fontSize:12,fontWeight:800,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{r.title||r.query}</span>
+              <button onClick={e=>{e.stopPropagation();deleteResearchReport(r.id);}} style={{background:"none",border:"none",color:t.err,cursor:"pointer",display:"flex",padding:2,opacity:.75}}><IC.Trash/></button>
+            </div>
+            <div style={{fontSize:10,color:t.mut,lineHeight:1.35,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{r.summary||r.query}</div>
+            <div style={{display:"flex",gap:5,alignItems:"center",fontSize:9,color:t.dim}}>
+              <span>{sm[1]}</span><span>·</span><span>{r.report_type}</span><span>·</span><span>{r.source_count||0} sources</span>
+            </div>
+          </div>;})}
+          {!filteredReports.length&&<div style={{textAlign:"center",padding:18,color:t.mut,fontSize:11,border:`1px dashed ${t.brd}33`,borderRadius:8}}>No research reports yet.</div>}
+        </div>
+      </div>
+      <div style={{overflowY:"auto",padding:"18px 26px",minWidth:0}}>
+        {report?<div style={{maxWidth:960,margin:"0 auto"}}>
+          <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:14,marginBottom:14,paddingBottom:12,borderBottom:`1px solid ${t.brd}22`}}>
+            <div style={{minWidth:0}}>
+              <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:5}}>
+                <span style={{fontSize:10,fontWeight:900,textTransform:"uppercase",letterSpacing:.7,color:activeStatus[0]}}>{activeStatus[1]}</span>
+                <span style={{fontSize:10,color:t.mut}}>{report.report_type}</span>
+                {metrics.coverage_score!==undefined&&<span style={{fontSize:10,color:t.acc}}>coverage {metrics.coverage_score}/100</span>}
+              </div>
+              <h1 style={{fontSize:24,lineHeight:1.15,margin:"0 0 6px",color:t.text,letterSpacing:0}}>{report.title||report.query}</h1>
+              <div style={{fontSize:12,color:t.mut,lineHeight:1.45}}>{report.query}</div>
+            </div>
+          </div>
+          {sectionHeadings.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:14}}>
+            {sectionHeadings.slice(0,10).map((h,i)=><span key={i} style={{fontSize:9,padding:"3px 7px",borderRadius:7,background:`${t.acc}10`,border:`1px solid ${t.acc}22`,color:t.acc}}>{h}</span>)}
+          </div>}
+          {body?<div className="research-report-print" style={{fontSize:fontSize,lineHeight:1.72,color:t.text}}>
+            <MDWrap>{md(body)}</MDWrap>
+          </div>:<div style={{border:`1px dashed ${t.brd}33`,borderRadius:8,padding:24,color:t.mut,fontSize:12,lineHeight:1.5}}>
+            {researchRunning?"The report is being written. Live tokens will appear here as synthesis starts.":"This report has no rendered body yet."}
+          </div>}
+        </div>:<div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:t.mut,fontSize:12}}>Select a report or start a new research run.</div>}
+      </div>
+      <div style={{borderLeft:`1px solid ${t.brd}24`,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:12}}>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8}}>
+          {[["Sources",sources.length||metrics.source_count||0,t.acc],["Pages",metrics.pages_read||0,t.f1],["Searches",metrics.searches||0,t.warm],["Elapsed",metrics.elapsed?`${Math.round(metrics.elapsed)}s`:"--",t.mut]].map(([l,v,c])=><div key={l} style={{padding:10,borderRadius:8,border:`1px solid ${c}2e`,background:`${c}0d`}}>
+            <div style={{fontSize:18,fontWeight:900,color:c,lineHeight:1}}>{v}</div><div style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.7,marginTop:5}}>{l}</div>
+          </div>)}
+        </div>
+        {audit&&Object.keys(audit).length>0&&<div style={{border:`1px solid ${t.warm}24`,borderRadius:8,padding:11,background:`${t.warm}08`}}>
+          <div style={{fontSize:10,fontWeight:900,color:t.warm,textTransform:"uppercase",letterSpacing:.6,marginBottom:7}}>Audit</div>
+          {["finding_issues","weaknesses","contradictions","missing_evidence","source_quality_notes"].map(k=>(audit[k]||[]).length?<div key={k} style={{marginBottom:8}}>
+            <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:3}}>{k.replaceAll("_"," ")}</div>
+            {(audit[k]||[]).slice(0,3).map((x,i)=><div key={i} style={{fontSize:10,color:t.dim,lineHeight:1.4,marginBottom:3}}>• {fmtAudit(x)}</div>)}
+          </div>:null)}
+        </div>}
+        <div>
+          <div style={{fontSize:10,fontWeight:900,color:t.acc,textTransform:"uppercase",letterSpacing:.6,marginBottom:7}}>Findings</div>
+          <div style={{display:"flex",flexDirection:"column",gap:7}}>
+            {findings.slice(0,10).map((f,i)=>{const fid=f.finding_id||i+1;const strength=f.evidence_strength||"";return <div key={i} style={{padding:9,border:`1px solid ${t.brd}24`,borderRadius:8,background:`${t.surface}66`}}>
+              <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:5}}>
+                <span style={{fontSize:8,fontWeight:900,color:t.acc,textTransform:"uppercase",letterSpacing:.5}}>Finding #{fid}</span>
+                {f.confidence&&<span style={{fontSize:8,padding:"1px 5px",borderRadius:5,background:`${t.f1}10`,border:`1px solid ${t.f1}22`,color:t.f1}}>{f.confidence}</span>}
+                {strength&&<span style={{fontSize:8,padding:"1px 5px",borderRadius:5,background:`${t.warm}10`,border:`1px solid ${t.warm}22`,color:t.warm}}>{strength}</span>}
+              </div>
+              <div style={{fontSize:11,fontWeight:800,color:t.text,lineHeight:1.35,marginBottom:5}}>{f.claim||f.title||"Finding"}</div>
+              <div style={{fontSize:10,color:t.mut,lineHeight:1.4}}>{f.evidence||f.implication||""}</div>
+              {f.caveat&&<div style={{fontSize:9,color:t.warm,lineHeight:1.35,marginTop:5}}>Caveat: {f.caveat}</div>}
+              {(f.source_ids||[]).length>0&&<div style={{display:"flex",gap:3,flexWrap:"wrap",marginTop:6}}>{f.source_ids.map(s=><span key={s} style={{fontSize:8,padding:"2px 5px",borderRadius:5,background:`${t.acc}12`,color:t.acc,border:`1px solid ${t.acc}22`}}>{s}</span>)}</div>}
+            </div>;})}
+            {!findings.length&&<div style={{fontSize:11,color:t.mut}}>Findings appear after extraction.</div>}
+          </div>
+        </div>
+        <div>
+          <div style={{fontSize:10,fontWeight:900,color:t.f1,textTransform:"uppercase",letterSpacing:.6,marginBottom:7}}>Sources</div>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {sources.slice(0,35).map(src=>{const tm=tierMeta(src.tier);return <a key={`${src.index}-${src.url||src.title}`} href={src.url||undefined} target={src.url?"_blank":undefined} rel="noreferrer" style={{textDecoration:"none",padding:9,border:`1px solid ${t.brd}22`,borderRadius:8,background:`${t.surface}66`,display:"block"}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+                <span style={{fontSize:9,fontWeight:900,color:t.f1,flexShrink:0}}>[S{src.index||src.source_index}]</span>
+                <span style={{fontSize:10,fontWeight:800,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{src.title||src.url||"Uploaded source"}</span>
+                <span style={{fontSize:8,padding:"1px 5px",borderRadius:5,background:`${tm[1]}10`,border:`1px solid ${tm[1]}22`,color:tm[1],flexShrink:0}}>{tm[0]}</span>
+              </div>
+              <div style={{fontSize:9,color:t.mut,lineHeight:1.35,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{src.snippet||src.url||""}</div>
+            </a>;})}
+            {!sources.length&&<div style={{fontSize:11,color:t.mut}}>Sources appear during search.</div>}
+          </div>
+        </div>
+        <div>
+          <div style={{fontSize:10,fontWeight:900,color:t.mut,textTransform:"uppercase",letterSpacing:.6,marginBottom:7}}>Run Timeline</div>
+          <div style={{display:"flex",flexDirection:"column",gap:5}}>
+            {(researchEvents||[]).filter(e=>e.type!=="research_token").slice(-40).map((ev,i)=>{const c=ev.type==="research_error"?t.err:ev.type==="research_done"?t.ok:ev.type==="research_source_found"?t.f1:ev.type==="research_audit"?t.warm:t.acc;return <div key={i} style={{display:"flex",gap:7,alignItems:"flex-start",fontSize:10,color:t.dim,lineHeight:1.35}}>
+              <span style={{width:6,height:6,borderRadius:"50%",background:c,marginTop:5,flexShrink:0}}/>
+              <span>{eventLabel(ev,i)}</span>
+            </div>;})}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>;})()
 
       :panel==="council"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>

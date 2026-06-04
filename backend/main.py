@@ -14,6 +14,7 @@ import base64
 import shlex
 import urllib.parse
 import venv as _venv
+from datetime import datetime
 from typing import Optional
 from contextlib import asynccontextmanager
 
@@ -35,6 +36,7 @@ from agents.personas import seed_coder_bot as _seed_coder_bot, seed_coder_bot_v2
 import hf as hf_module
 from hf import parse_ollama_progress
 import rag
+from research import REPORT_TEMPLATES, REPORT_TEMPLATE_MAP, run_research_report
 
 # ============================================================
 # SETTINGS — persistent JSON file
@@ -396,6 +398,18 @@ class CouncilChatRequest(BaseModel):
 class QuickSearchRequest(BaseModel):
     query: str
     count: int = 6
+
+class ResearchReportCreate(BaseModel):
+    title: Optional[str] = None
+    query: str
+    focus: str = ""
+    report_type: str = "analyst"
+    depth: Optional[int] = None
+    model: str = ""
+    planner_model: str = ""
+    auditor_model: str = ""
+    kb_ids: list[str] = []
+    inputs: list[dict] = []
 
 class KBCreate(BaseModel):
     name: str
@@ -1327,6 +1341,147 @@ async def event_stream(conversation_id: str):
             await events.unsubscribe(conversation_id, queue)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# ============================================================
+# DEEP RESEARCH — durable report workspace
+# ============================================================
+def _research_default_depth(report_type: str, depth: Optional[int]) -> int:
+    if depth is not None:
+        return max(1, min(5, int(depth or 3)))
+    tmpl = REPORT_TEMPLATE_MAP.get(report_type or "analyst") or REPORT_TEMPLATE_MAP["analyst"]
+    return int(tmpl.get("default_depth") or 3)
+
+
+async def _create_and_start_research_report(req: ResearchReportCreate) -> dict:
+    query = (req.query or "").strip()
+    if not query:
+        raise HTTPException(400, "Research query is required")
+    report_type = req.report_type if req.report_type in REPORT_TEMPLATE_MAP else "analyst"
+    depth = _research_default_depth(report_type, req.depth)
+    report_id = f"research-{uuid.uuid4().hex[:10]}"
+    await db.create_research_report(
+        report_id,
+        title=(req.title or query[:80]).strip(),
+        query=query,
+        focus=req.focus or "",
+        report_type=report_type,
+        depth=depth,
+        model=req.model or config.DEFAULT_MODEL,
+        planner_model=req.planner_model or "",
+        auditor_model=req.auditor_model or "",
+        kb_ids=req.kb_ids or [],
+        inputs=req.inputs or [],
+        status="queued",
+    )
+
+    async def _runner():
+        try:
+            await run_research_report(
+                http, config.OLLAMA_URL, config.DEFAULT_MODEL, events, report_id,
+                query=query,
+                depth=depth,
+                focus=req.focus or "",
+                report_type=report_type,
+                model=req.model or config.DEFAULT_MODEL,
+                planner_model=req.planner_model or "",
+                auditor_model=req.auditor_model or "",
+                kb_ids=req.kb_ids or [],
+                inputs=req.inputs or [],
+            )
+        except Exception as e:
+            print(f"[RESEARCH REPORT] Background task failed: {e}")
+            await db.update_research_report(
+                report_id,
+                status="failed",
+                error=str(e),
+                completed_at=datetime.utcnow().isoformat(),
+            )
+            await db.append_research_event(report_id, {
+                "type": "research_error",
+                "data": {"status": "failed", "error": str(e)},
+                "timestamp": time.time(),
+            })
+            await events.emit(report_id, "research_error", {"status": "failed", "error": str(e)})
+
+    asyncio.create_task(_runner())
+    return await db.get_research_report(report_id)
+
+
+@app.get("/api/research/templates")
+async def get_research_templates():
+    return {"templates": REPORT_TEMPLATES}
+
+
+@app.get("/api/research/reports")
+async def list_research_reports(limit: int = Query(50), offset: int = Query(0),
+                                q: str = Query("")):
+    return await db.list_research_reports(limit=limit, offset=offset, query=q)
+
+
+@app.post("/api/research/reports")
+async def create_research_report(req: ResearchReportCreate):
+    return await _create_and_start_research_report(req)
+
+
+@app.get("/api/research/reports/{report_id}")
+async def get_research_report(report_id: str):
+    report = await db.get_research_report(report_id)
+    if not report:
+        raise HTTPException(404, "Research report not found")
+    return report
+
+
+@app.delete("/api/research/reports/{report_id}")
+async def delete_research_report(report_id: str):
+    await db.delete_research_report(report_id)
+    return {"ok": True}
+
+
+@app.post("/api/research/reports/{report_id}/cancel")
+async def cancel_research_report(report_id: str):
+    import cancel_registry
+
+    signaled = cancel_registry.signal(report_id)
+    report = await db.get_research_report(report_id)
+    if not report:
+        raise HTTPException(404, "Research report not found")
+    marked = False
+    if report.get("status") in ("queued", "running"):
+        marked = True
+        await db.update_research_report(
+            report_id,
+            status="cancelled",
+            error="Cancelled by user",
+            completed_at=datetime.utcnow().isoformat(),
+        )
+        ev = {
+            "type": "research_error",
+            "data": {"status": "cancelled", "error": "Cancelled by user"},
+            "timestamp": time.time(),
+        }
+        await db.append_research_event(report_id, ev)
+        await events.emit(report_id, "research_error", ev["data"])
+    return {"report_id": report_id, "signaled": signaled, "marked": marked}
+
+
+@app.post("/api/research/reports/{report_id}/rerun")
+async def rerun_research_report(report_id: str):
+    report = await db.get_research_report(report_id)
+    if not report:
+        raise HTTPException(404, "Research report not found")
+    return await _create_and_start_research_report(ResearchReportCreate(
+        title=report.get("title") or report.get("query", "")[:80],
+        query=report.get("query", ""),
+        focus=report.get("focus", ""),
+        report_type=report.get("report_type", "analyst"),
+        depth=report.get("depth") or None,
+        model=report.get("model", "") or config.DEFAULT_MODEL,
+        planner_model=report.get("planner_model", ""),
+        auditor_model=report.get("auditor_model", ""),
+        kb_ids=report.get("kb_ids", []),
+        inputs=report.get("inputs", []),
+    ))
 
 
 # ============================================================
