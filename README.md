@@ -14,6 +14,38 @@ HyprChat can execute code, upload files, call local services, and drive coding a
 
 ---
 
+## 📸 Screenshot Tour
+
+### Main Chat
+
+<img src="docs/images/mainScreen.png" alt="HyprChat main chat screen" width="900">
+
+### Agents & Personas
+
+<img src="docs/images/agents.png" alt="HyprChat agents and personas manager" width="900">
+
+### Knowledge Bases
+
+<img src="docs/images/knowledge%20base.png" alt="HyprChat knowledge bases manager" width="900">
+
+### Model Manager
+
+<img src="docs/images/modelManager.png" alt="HyprChat model manager" width="900">
+
+### Activity Monitor
+
+<img src="docs/images/activityMonitor.png" alt="HyprChat activity monitor" width="900">
+
+### Council
+
+<img src="docs/images/council.png" alt="HyprChat council of AI" width="900">
+
+### Settings
+
+<img src="docs/images/settingsPage.png" alt="HyprChat settings page" width="900">
+
+---
+
 ## ✨ Core Features
 
 ### 💬 Chat
