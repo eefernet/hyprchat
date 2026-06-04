@@ -2,7 +2,9 @@
 Research engines — deep research, conspiracy research, and search helpers.
 """
 import asyncio
+import ipaddress
 import json
+import os
 import re
 import time
 import urllib.parse
@@ -288,6 +290,157 @@ def _wikileaks_collections_for_topic(topic_lower: str) -> list[str]:
         if any(k in topic_lower for k in keywords):
             cols.append(col)
     return cols
+
+
+def _extract_seed_urls(*texts: str, limit: int = 12) -> list[str]:
+    """Extract user-provided URLs that should be treated as first-class sources."""
+    urls = []
+    seen = set()
+    for text in texts:
+        for raw in re.findall(r"https?://[^\s<>\]\[\"'`]+", text or "", flags=re.I):
+            url = raw.rstrip(").,;:!?")
+            norm = _normalize_url(url)
+            if norm and norm not in seen:
+                seen.add(norm)
+                urls.append(norm)
+            if len(urls) >= limit:
+                return urls
+    return urls
+
+
+def _url_safe_for_direct_fetch(url: str) -> bool:
+    """Basic guard for URLs pasted by users before direct fetching."""
+    try:
+        p = urllib.parse.urlsplit(url)
+        if p.scheme not in {"http", "https"} or not p.hostname:
+            return False
+        host = p.hostname.lower()
+        if host in {"localhost"} or host.endswith(".local"):
+            return False
+        try:
+            ip = ipaddress.ip_address(host)
+            return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved)
+        except ValueError:
+            return True
+    except Exception:
+        return False
+
+
+def _github_repo_from_url(url: str) -> tuple[str, str] | None:
+    try:
+        p = urllib.parse.urlsplit(url)
+        if p.netloc.lower() not in {"github.com", "www.github.com"}:
+            return None
+        parts = [part for part in p.path.strip("/").split("/") if part]
+        if len(parts) < 2:
+            return None
+        owner = parts[0]
+        repo = parts[1].removesuffix(".git")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or not re.fullmatch(r"[A-Za-z0-9_.-]+", repo):
+            return None
+        return owner, repo
+    except Exception:
+        return None
+
+
+def _github_file_score(path: str, size: int) -> int:
+    p = path.lower()
+    name = p.rsplit("/", 1)[-1]
+    score = 0
+    if name in {"readme.md", "readme", "agents.md", "claude.md"}:
+        score += 120
+    if name in {"package.json", "pyproject.toml", "requirements.txt", "dockerfile", "compose.yaml", "docker-compose.yml"}:
+        score += 105
+    if name in {"vite.config.js", "vite.config.ts", "tsconfig.json", "webpack.config.js"}:
+        score += 95
+    if p in {"frontend/dist/index.html", "backend/main.py", "backend/research.py", "backend/database.py", "deploy_monitor.py"}:
+        score += 90
+    if p.startswith(("frontend/", "backend/", "src/", "app/", "components/")):
+        score += 35
+    if p.endswith((".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".css", ".md", ".json", ".toml", ".yml", ".yaml")):
+        score += 25
+    if "/node_modules/" in p or "/.git/" in p or "/dist/assets/" in p or "/__pycache__/" in p:
+        score -= 200
+    if size > 220000:
+        score -= 35
+    return score
+
+
+async def _fetch_github_repo_snapshot(http, url: str) -> dict | None:
+    repo = _github_repo_from_url(url)
+    if not repo:
+        return None
+    owner, name = repo
+    headers = {
+        "User-Agent": "HyprChat-DeepResearch/1.0",
+        "Accept": "application/vnd.github+json",
+    }
+    token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        meta_r = await http.get(f"https://api.github.com/repos/{owner}/{name}", headers=headers, timeout=15)
+        if meta_r.status_code >= 400:
+            return None
+        meta = meta_r.json()
+        branch = meta.get("default_branch") or "main"
+        tree_r = await http.get(
+            f"https://api.github.com/repos/{owner}/{name}/git/trees/{urllib.parse.quote(branch, safe='')}?recursive=1",
+            headers=headers,
+            timeout=20,
+        )
+        if tree_r.status_code >= 400:
+            return None
+        tree = tree_r.json().get("tree") or []
+        blobs = [x for x in tree if x.get("type") == "blob" and x.get("path")]
+        ranked = sorted(
+            blobs,
+            key=lambda x: (_github_file_score(x.get("path", ""), int(x.get("size") or 0)), -len(x.get("path", ""))),
+            reverse=True,
+        )
+        selected = [x for x in ranked if _github_file_score(x.get("path", ""), int(x.get("size") or 0)) > 0][:14]
+        file_sections = []
+        total_chars = 0
+        for item in selected:
+            path = item.get("path", "")
+            file_url = f"https://api.github.com/repos/{owner}/{name}/contents/{urllib.parse.quote(path, safe='/')}"
+            try:
+                file_headers = {**headers, "Accept": "application/vnd.github.raw"}
+                fr = await http.get(file_url, params={"ref": branch}, headers=file_headers, timeout=15)
+                if fr.status_code >= 400:
+                    continue
+                text = fr.text
+            except Exception:
+                continue
+            if "\x00" in text:
+                continue
+            remaining = 70000 - total_chars
+            if remaining <= 2000:
+                break
+            excerpt = text[:min(18000, remaining)]
+            total_chars += len(excerpt)
+            file_sections.append(f"## File: {path}\n```text\n{excerpt}\n```")
+        top_tree = "\n".join(f"- {x.get('path')} ({x.get('size', 0)} bytes)" for x in ranked[:80])
+        content = (
+            f"# GitHub Repository Snapshot: {owner}/{name}\n"
+            f"URL: https://github.com/{owner}/{name}\n"
+            f"Default branch: {branch}\n"
+            f"Description: {meta.get('description') or ''}\n"
+            f"Stars: {meta.get('stargazers_count', 0)}\n"
+            f"Primary language: {meta.get('language') or 'unknown'}\n\n"
+            f"## Repository tree excerpt\n{top_tree}\n\n"
+            + "\n\n".join(file_sections)
+        )
+        return {
+            "url": f"https://github.com/{owner}/{name}",
+            "title": f"GitHub repository snapshot: {owner}/{name}",
+            "content": content[:76000],
+            "default_branch": branch,
+            "files": [x.get("path") for x in selected],
+        }
+    except Exception as e:
+        print(f"[RESEARCH REPORT] GitHub snapshot failed for {url}: {e}")
+        return None
 
 
 async def _fetch_page(http, url: str) -> dict | None:
@@ -824,6 +977,53 @@ Prefer precise search queries, primary sources, recent sources when freshness ma
                     "level": "warning", "message": f"KB context unavailable: {e}",
                 })
         user_context = "\n\n".join(input_context_parts)[:32000]
+        seed_urls = _extract_seed_urls(query, focus, user_context)
+        direct_sources = []
+        direct_pages = []
+        for url in seed_urls:
+            if not _url_safe_for_direct_fetch(url):
+                await _emit_report_event(events, report_id, "research_audit", {
+                    "level": "warning", "message": f"Skipped unsafe direct URL: {url}",
+                })
+                continue
+            page = None
+            source_type = "direct_url"
+            if _github_repo_from_url(url):
+                page = await _fetch_github_repo_snapshot(http, url)
+                source_type = "github_repo"
+            if not page:
+                page = await _fetch_page(http, url)
+            if not page or not page.get("content"):
+                await _emit_report_event(events, report_id, "research_audit", {
+                    "level": "warning", "message": f"Direct URL could not be read: {url}",
+                })
+                continue
+            direct_url = _normalize_url(page.get("url") or url)
+            tier = 0 if source_type == "github_repo" else _source_tier(direct_url)
+            src = {
+                "index": len(input_sources) + len(direct_sources) + 1,
+                "title": page.get("title") or direct_url,
+                "url": direct_url,
+                "snippet": _one_line(page.get("content", ""), 320),
+                "type": source_type,
+                "tier": tier,
+                "tier_label": _source_tier_label(tier),
+                "query": "user-provided URL",
+                "metadata": {"seed_url": url, "files": page.get("files", []), "default_branch": page.get("default_branch")},
+            }
+            direct_sources.append(src)
+            direct_pages.append({
+                "url": direct_url,
+                "title": src["title"],
+                "content": page.get("content", ""),
+                "source_index": src["index"],
+                "source_type": source_type,
+            })
+            await _emit_report_event(events, report_id, "research_source_found", src)
+            await _emit_report_event(events, report_id, "research_source_read", {
+                "url": direct_url, "title": src["title"], "source_index": src["index"],
+                "chars": len(page.get("content", "")), "direct": True,
+            })
 
         # Phase 3: search.
         await phase("search", "Searching the web", "Expanding and deduplicating queries", 20)
@@ -880,7 +1080,7 @@ Prefer precise search queries, primary sources, recent sources when freshness ma
                 await asyncio.sleep(_SEARCH_BATCH_DELAY_DEEP)
 
         # Source normalization.
-        seen_urls = set()
+        seen_urls = {s.get("url") for s in direct_sources if s.get("url")}
         sources = []
         for item in all_results:
             url = _normalize_url(item.get("url", ""))
@@ -888,7 +1088,7 @@ Prefer precise search queries, primary sources, recent sources when freshness ma
                 continue
             seen_urls.add(url)
             src = {
-                "index": len(input_sources) + len(sources) + 1,
+                "index": len(input_sources) + len(direct_sources) + len(sources) + 1,
                 "title": item.get("title", "") or url,
                 "url": url,
                 "snippet": item.get("content", "")[:320],
@@ -901,12 +1101,14 @@ Prefer precise search queries, primary sources, recent sources when freshness ma
             sources.append(src)
             if len(sources) <= 30:
                 await _emit_report_event(events, report_id, "research_source_found", src)
-        sources = input_sources + sources
+        sources = input_sources + direct_sources + sources
         for i, src in enumerate(sources, start=1):
             src["index"] = i
+        for page in direct_pages:
+            page["source_index"] = next((s["index"] for s in sources if s.get("url") == page.get("url")), page.get("source_index", 0))
         await db.update_research_report(report_id, sources=sources, metrics={
             "searches": len(searched), "results": len(all_results),
-            "source_count": len(sources), "pages_read": 0, "elapsed": time.time() - t_start,
+            "source_count": len(sources), "pages_read": len(direct_pages), "elapsed": time.time() - t_start,
         })
         await db.replace_research_sources(report_id, sources)
 
@@ -917,7 +1119,7 @@ Prefer precise search queries, primary sources, recent sources when freshness ma
         await phase("reading", "Reading high-value sources", "Fetching full text for ranked pages", 42)
         web_results = [r for r in all_results if r.get("url")]
         top_urls = _rank_urls(web_results, set())[:min(6 + depth * 3, 22)]
-        pages = []
+        pages = list(direct_pages)
         for i in range(0, len(top_urls), 4):
             await check_cancel()
             batch = top_urls[i:i + 4]
@@ -942,11 +1144,16 @@ Prefer precise search queries, primary sources, recent sources when freshness ma
         for src in sources[:40]:
             sid = f"S{src['index']}"
             tier = src.get("tier", 2)
+            metadata = src.get("metadata") if isinstance(src.get("metadata"), dict) else {}
+            files = metadata.get("files") or []
+            file_line = f"Repository files sampled: {', '.join(files[:12])}\n" if files else ""
             source_briefs.append(
                 f"Source ID: [{sid}]\n"
                 f"Title: {src.get('title','')}\n"
                 f"URL: {src.get('url','uploaded/local')}\n"
+                f"Source type: {src.get('type','web')}\n"
                 f"Source tier: {_source_tier_label(tier)} (T{tier})\n"
+                f"{file_line}"
                 f"Snippet: {src.get('snippet','')}"
             )
         page_context = []
@@ -990,6 +1197,7 @@ Return a JSON array of 8-16 objects:
 Rules:
 - Use source IDs only as S1, S2, etc. Do not invent source IDs.
 - Use "finding_id" only for findings. Do not call sources "claims".
+- Treat sources with Source type "github_repo" as direct repository evidence for repo-specific architecture, dependency, and file-organization claims.
 - Do not write "studies show" unless the cited source_ids contain peer-reviewed papers, official benchmarks, or primary empirical studies.
 - Mark community discussions, blogs, GitHub issues, and vendor docs as moderate, thin, or anecdotal unless they contain direct data."""
         findings_text = await cancel_registry.await_cancellable(
@@ -1098,6 +1306,7 @@ Write in Markdown. Requirements:
 - Use "Finding #N" only when referring to extracted findings; use "[S#]" only when citing sources.
 - Do not use "studies show", "proves", "significantly improves", "reduces hallucinations", "sub-second", or other strong empirical language unless the cited finding has strong empirical, benchmark, peer-reviewed, or primary-source support.
 - When evidence comes mostly from community posts, blogs, GitHub repos, or vendor/project docs, write it as reported practice, implementation guidance, or anecdotal evidence.
+- When a Source type "github_repo" snapshot is present, use it for repository-specific claims and do not say no direct repository review was performed.
 - If the audit coverage score is under 70 or the source set is mostly general/community sources, add an "Evidence Strength" section before recommendations.
 - Use tables where comparisons are clearer than prose.
 - End with "Source Notes" summarizing source quality and follow-up searches.
