@@ -7,6 +7,9 @@ import config
 import database as db
 
 
+DAEDALUS_AVATAR = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAxMDAgMTAwJz48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9J2cnIHgxPScxMicgeTE9JzgnIHgyPSc4OCcgeTI9JzkyJyBncmFkaWVudFVuaXRzPSd1c2VyU3BhY2VPblVzZSc+PHN0b3Agc3RvcC1jb2xvcj0nIzBiMTIyMCcvPjxzdG9wIG9mZnNldD0nLjU1JyBzdG9wLWNvbG9yPScjMWQyYTQ0Jy8+PHN0b3Agb2Zmc2V0PScxJyBzdG9wLWNvbG9yPScjNGIyZDczJy8+PC9saW5lYXJHcmFkaWVudD48bGluZWFyR3JhZGllbnQgaWQ9J2EnIHgxPScyNCcgeTE9JzE4JyB4Mj0nNzgnIHkyPSc4NCcgZ3JhZGllbnRVbml0cz0ndXNlclNwYWNlT25Vc2UnPjxzdG9wIHN0b3AtY29sb3I9JyM4ZmQ4ZmYnLz48c3RvcCBvZmZzZXQ9Jy41NScgc3RvcC1jb2xvcj0nI2E4OGNmZicvPjxzdG9wIG9mZnNldD0nMScgc3RvcC1jb2xvcj0nIzZmZmZkMicvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPjxyZWN0IHdpZHRoPScxMDAnIGhlaWdodD0nMTAwJyByeD0nMTgnIGZpbGw9J3VybCgjZyknLz48cGF0aCBkPSdNMTggNDloMTVNNjcgNDloMTVNNTAgMTh2MTNNNTAgNjl2MTNNMjkgMjlsLTktOU03MSA3MWw5IDknIHN0cm9rZT0nIzZmZmZkMicgc3Ryb2tlLXdpZHRoPSczJyBzdHJva2UtbGluZWNhcD0ncm91bmQnIG9wYWNpdHk9Jy43MicvPjxwYXRoIGQ9J00yOCA3MlYyOGgyMmMxNiAwIDI2IDkgMjYgMjJTNjYgNzIgNTAgNzJIMjh6JyBmaWxsPSdub25lJyBzdHJva2U9J3VybCgjYSknIHN0cm9rZS13aWR0aD0nNycgc3Ryb2tlLWxpbmVqb2luPSdyb3VuZCcvPjxwYXRoIGQ9J000MiAzNnYyOGg4YzkgMCAxNS01IDE1LTE0UzU5IDM2IDUwIDM2aC04eicgZmlsbD0nIzExMTgyNycgc3Ryb2tlPScjZDhlNmZmJyBzdHJva2Utd2lkdGg9JzMnIHN0cm9rZS1saW5lam9pbj0ncm91bmQnLz48Y2lyY2xlIGN4PSc1MCcgY3k9JzUwJyByPSc1JyBmaWxsPScjNmZmZmQyJy8+PGNpcmNsZSBjeD0nMjAnIGN5PScyMCcgcj0nNCcgZmlsbD0nI2E4OGNmZicvPjxjaXJjbGUgY3g9JzgwJyBjeT0nODAnIHI9JzQnIGZpbGw9JyM4ZmQ4ZmYnLz48L3N2Zz4="
+
+
 async def seed_coder_bot():
     """Seed the v1 Coder Bot persona. Exact-match by name so re-seeding v1
     doesn't delete v2 (and vice versa)."""
@@ -227,7 +230,7 @@ This works for ANY language — Python, Java, Rust, Go, JS/TS, C/C++, Ruby, PHP,
     parameters = {
         "profile_type": "agent",
         "temperature": 0.3,
-        "avatar": None,
+        "avatar": DAEDALUS_AVATAR,
         "description": "Agentic coding workflow for uploaded projects: plans, patches, reviews, and iterates toward a verified fix.",
     }
 

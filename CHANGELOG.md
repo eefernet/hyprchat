@@ -53,6 +53,7 @@
 - Fixed empty-chat Persona state handling so leaving a Persona/Agent detaches the active profile instead of spawning a new chat with the same profile.
 - Persona `first_message` now appears as the first assistant message in fresh Persona chats and is included in the chat context.
 - Added Persona import for Chub, SillyTavern, and TavernAI character cards, including PNG `chara` metadata cards, JSON card files, Chub-style packed definition splitting, tags, alternate greetings, character-book lore, and first-message mapping.
+- Added a built-in Daedalus avatar so the coding agent has a fitting image in the Agents page, chat header, sidebar, and assistant message bubbles.
 
 ### Models, Knowledge Bases & Activity
 - Reworked the top-right Downloads tray into a shared **Activity** tray for model pulls/downloads, KB uploads/indexing, project archive uploads, RAG reindex/purge jobs, cleanup jobs, and tool-template patching.

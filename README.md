@@ -14,35 +14,28 @@ HyprChat can execute code, upload files, call local services, and drive coding a
 
 ---
 
-## 📸 Screenshot Tour
+## 📸 Screenshots
 
-### Main Chat
+<details>
+<summary>Open the full screenshot gallery</summary>
 
-<img src="docs/images/mainScreen.png" alt="HyprChat main chat screen" width="900">
+| Main Chat | Agents | Personas |
+|---|---|---|
+| <img src="docs/images/mainScreen.png" alt="HyprChat main chat screen" width="280"> | <img src="docs/images/agents.png" alt="HyprChat agents manager" width="280"> | <img src="docs/images/personas.png" alt="HyprChat personas manager" width="280"> |
 
-### Agents & Personas
+| Knowledge Bases | Model Manager | Activity Monitor |
+|---|---|---|
+| <img src="docs/images/knowledge%20base.png" alt="HyprChat knowledge bases manager" width="280"> | <img src="docs/images/modelManager.png" alt="HyprChat model manager" width="280"> | <img src="docs/images/activityMonitor.png" alt="HyprChat activity monitor" width="280"> |
 
-<img src="docs/images/agents.png" alt="HyprChat agents and personas manager" width="900">
+| Council | Council Settings | Settings |
+|---|---|---|
+| <img src="docs/images/council.png" alt="HyprChat council of AI" width="280"> | <img src="docs/images/councilSettings.png" alt="HyprChat council settings" width="280"> | <img src="docs/images/settingsPage.png" alt="HyprChat settings page" width="280"> |
 
-### Knowledge Bases
+| Mermaid Support | Chart Support | Callouts |
+|---|---|---|
+| <img src="docs/images/mermaidSupport.png" alt="HyprChat Mermaid diagram support" width="280"> | <img src="docs/images/chartSupport.png" alt="HyprChat chart rendering support" width="280"> | <img src="docs/images/calloutsExample.png" alt="HyprChat callout rendering support" width="280"> |
 
-<img src="docs/images/knowledge%20base.png" alt="HyprChat knowledge bases manager" width="900">
-
-### Model Manager
-
-<img src="docs/images/modelManager.png" alt="HyprChat model manager" width="900">
-
-### Activity Monitor
-
-<img src="docs/images/activityMonitor.png" alt="HyprChat activity monitor" width="900">
-
-### Council
-
-<img src="docs/images/council.png" alt="HyprChat council of AI" width="900">
-
-### Settings
-
-<img src="docs/images/settingsPage.png" alt="HyprChat settings page" width="900">
+</details>
 
 ---
 
@@ -53,12 +46,23 @@ HyprChat can execute code, upload files, call local services, and drive coding a
 - Empty-chat greeting surface with selectable tools, Daedalus activation, and effort mode before the first message
 - Per-conversation model selection, system prompts, and parameter overrides
 - Per-chat effort modes — Blurt, Ponder, Forge, and Galaxy Brain
+- Rich message rendering for Markdown, code, Mermaid diagrams, charts, and callouts
 - Conversation forking — branch from any message to explore alternatives
 - Full-text search (FTS5) across all messages with highlighted snippets
 - Conversation tags, pinning, and sidebar filtering
 - Auto-generated titles via LLM after first exchange
 - Export as Markdown or JSON (with reimport)
 - Keyboard shortcuts — `Ctrl+K` search, `Ctrl+N` new chat, `Ctrl+/` toggle sidebar
+
+<img src="docs/images/mainScreen.png" alt="HyprChat main chat screen" width="900">
+
+HyprChat renders structured model output directly in the chat stream, so diagrams, data visualizations, and formatted callouts stay attached to the answer that produced them.
+
+<p>
+  <img src="docs/images/mermaidSupport.png" alt="HyprChat Mermaid diagram support" width="290">
+  <img src="docs/images/chartSupport.png" alt="HyprChat chart rendering support" width="290">
+  <img src="docs/images/calloutsExample.png" alt="HyprChat callout rendering support" width="290">
+</p>
 
 ### 📄 File Attachments
 - Drag-and-drop, paste, or attach files from the composer `+` quick-actions menu
@@ -126,6 +130,15 @@ A deterministic coding workflow with three specialized paths: OpenHands for gree
 - **Downloads bar** — live progress, speed, and ETA for all active downloads
 - Clear error handling for missing/corrupt models
 
+<img src="docs/images/modelManager.png" alt="HyprChat model manager" width="900">
+
+### 📡 Activity Monitor
+- Shared activity tray for downloads, long-running jobs, model actions, and background work
+- Live progress, status, speed, and completion feedback without leaving the current chat
+- Useful for model pulls, HuggingFace downloads, and agentic coding runs that continue in the background
+
+<img src="docs/images/activityMonitor.png" alt="HyprChat activity monitor" width="900">
+
 ### 🏛️ Council of AI
 - Run multiple models in parallel on the same prompt
 - **Preset councils** — Philosophers, Visionaries, Scientists, Debaters (one-click setup)
@@ -135,36 +148,50 @@ A deterministic coding workflow with three specialized paths: OpenHands for gree
 - Host model synthesizes all responses with full debate and vote context
 - Expandable round-by-round history in chat
 
+<p>
+  <img src="docs/images/council.png" alt="HyprChat council of AI" width="440">
+  <img src="docs/images/councilSettings.png" alt="HyprChat council settings" width="440">
+</p>
+
 ### 📚 Knowledge Bases & RAG
-- Upload documents (PDF, Markdown, text, code) and attach to personas
+- Upload documents (PDF, Markdown, text, code) and attach to Agents or Personas
 - Sentence-aware chunking with code-aware splitting for Python/JS/TS
 - ChromaDB vector storage with cosine similarity search
-- Research tool results auto-indexed into per-persona memory
+- Research tool results auto-indexed into profile memory
 - Configurable chunk size, overlap, top_k, and embed model
 
-### 🎭 Personas
-- Named AI personalities with avatars, model config, system prompts, and temperature/context settings
-- Linked knowledge bases and tool sets
-- Persona avatar and name displayed in chat messages
-- Seed personas: Daedalus, legacy Coder Bot, Conspiracy Bot, Based Bot
+<img src="docs/images/knowledge%20base.png" alt="HyprChat knowledge bases manager" width="900">
+
+### 🧩 Agents & Personas
+- **Agents** are task/workflow profiles for coding, research, automation, tools, knowledge bases, and specialized work.
+- **Personas** are voice and roleplay profiles focused on identity, tone, scenario, backstory, and conversational style.
+- Per-profile avatar, base model, system prompt, knowledge bases, tools, temperature, top-p, and thinking-mode controls
+- Persona-specific fields for short description, personality, scenario, first message, example dialogue, lore, tags, and rating
+- Character card import for Chub, SillyTavern, and TavernAI-style PNG cards
+- Active Agent or Persona name/avatar is displayed in chat, with matching leave controls
+
+<p>
+  <img src="docs/images/agents.png" alt="HyprChat agents manager" width="440">
+  <img src="docs/images/personas.png" alt="HyprChat personas manager" width="440">
+</p>
 
 ### 🗂️ Workspaces
 - Group related conversations and track files across chats
 - AI-powered topic analysis using configurable workspace model
-- Generate personas from workspace knowledge
+- Generate profile prompts from workspace knowledge
 
 ### ⚡ External Automation
 - Automation lives in the external n8n VM. HyprChat keeps the n8n health/proxy integration, including `/api/n8n/execute`, without maintaining an internal automation engine.
 
 ### 📊 Token Analytics
-- Cumulative usage tracking per model, persona, and day
+- Cumulative usage tracking per model, profile, and day
 - Summary cards with CSS bar charts
 - Configurable date range (7d / 30d / 90d)
 
 ### 🔍 Prompt Library
 - Save and organize reusable prompts by category
 - Quick-insert from the composer `+` quick-actions menu
-- Apply as system prompt templates without creating a persona
+- Apply as system prompt templates without creating a full profile
 
 ### ⚙️ Settings
 - Centered overlay with left-side section navigation and a scrollable right-side editor
@@ -177,6 +204,8 @@ A deterministic coding workflow with three specialized paths: OpenHands for gree
 - Loading Quotes editor with real attributed defaults, inline edit/remove, restore defaults, and add-new-quote controls
 - Changelog renders inside Settings as a bottom-pinned sidebar section with inline refresh
 - Danger Zone: bulk delete all chats
+
+<img src="docs/images/settingsPage.png" alt="HyprChat settings page" width="900">
 
 ---
 
@@ -210,7 +239,7 @@ User → HyprChat Server (:8000)
 |------|---------|
 | `backend/main.py` | FastAPI routes, SSE endpoints, model management, project upload |
 | `backend/agents/chat.py` | Multi-round streaming chat agent with tool calling, QA short-circuit, ACTIVE PROJECT injection |
-| `backend/agents/personas.py` | Seed persona definitions (legacy Coder Bot, Daedalus, Conspiracy Bot, Based Bot) |
+| `backend/agents/personas.py` | Seed Agent and Persona definitions, including Daedalus, Coder Bot, Conspiracy Bot, Tyler, and Kayla |
 | `backend/agents/architect.py` | Daedalus Architect — structured plan as JSON, rich markdown rendering |
 | `backend/agents/reviewer.py` | Daedalus Reviewer — read-only build/test/lint with marker auto-detection |
 | `backend/agents/acceptance.py` | Daedalus Acceptance — final static quality gate for request fit, docs, tests, packaging, and artifacts |
@@ -243,7 +272,7 @@ OPENHANDS_URL       = "http://<CODEBOX_IP>:8586"
 SEARXNG_URL         = "http://<SEARXNG_IP>:8888"
 
 # Models — each Daedalus agent inherits from these umbrella defaults:
-DEFAULT_MODEL       = "qwen3.5:27b"   # chat / persona fallback
+DEFAULT_MODEL       = "qwen3.5:27b"   # chat / profile fallback
 PLANNING_MODEL      = "qwen3.5:27b"   # Architect + Reviewer + Acceptance
 CODER_MODEL         = "qwen2.5-coder:14b" # Builder + Fixer
 WORKSPACE_MODEL     = "qwen3.5:4b"    # auto-title, topic analysis, query rewriting
@@ -254,7 +283,7 @@ REVIEWER_MODEL      = ""               # empty = PLANNING_MODEL
 ACCEPTANCE_MODEL    = ""               # empty = PLANNING_MODEL
 BUILDER_MODEL       = ""               # empty = CODER_MODEL
 FIXER_MODEL         = ""               # empty = CODER_MODEL
-QA_MODEL            = ""               # empty = chat / persona model
+QA_MODEL            = ""               # empty = chat / profile model
 AIDER_MODEL         = ""               # empty = FIXER_MODEL, then CODER_MODEL
 
 # Resources
@@ -266,8 +295,8 @@ AIDER_NUM_CTX       = 16384
 AIDER_AUTO_TEST     = True
 AIDER_WORKER_URL    = OPENHANDS_URL
 DEFAULT_NUM_CTX     = 16384            # used by Architect / Reviewer / Acceptance / Fixer / QA
-MAX_AGENT_ROUNDS    = 12               # chat-side cap (non-coder personas)
-MAX_AGENT_ROUNDS_CODER = 30            # chat-side cap for Daedalus / coder personas
+MAX_AGENT_ROUNDS    = 12               # chat-side cap (non-coder profiles)
+MAX_AGENT_ROUNDS_CODER = 30            # chat-side cap for Daedalus / coder agents
 ```
 
 All model, OpenHands, Aider, connection, RAG, appearance, quote, and changelog settings can be changed at runtime from the Settings overlay.
@@ -358,7 +387,7 @@ python -m pytest tests/ -v -k "integration"   # end-to-end flows
 | Chat / SSE | 3 | Streaming, token events, error handling |
 | Knowledge Bases | 7 | KB CRUD, file upload, reindexing |
 | Tools & Execution | 9 | Python/shell exec, fetch_url, web search |
-| Personas | 9 | CRUD, seed bots |
+| Agents / Personas | 9 | CRUD, seed profiles |
 | Workspaces | 7 | CRUD, conversation management |
 | Councils | 13 | CRUD, members, presets, analytics |
 | HuggingFace | 5 | GGUF search, model info |
