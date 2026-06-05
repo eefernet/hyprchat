@@ -1162,6 +1162,104 @@ def _normalize_url(url: str) -> str:
         return url.strip()
 
 
+def _clean_search_query_text(text: str) -> str:
+    text = re.sub(r"https?://[^\s<>\]\[\"'`]+", " ", str(text or ""))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _clip_query_head(text: str, limit: int) -> str:
+    text = _clean_search_query_text(text)
+    if len(text) <= limit:
+        return text
+    clipped = text[:limit].rstrip()
+    if " " in clipped:
+        clipped = clipped.rsplit(" ", 1)[0]
+    return clipped or text[:limit].strip()
+
+
+def _clip_query_tail(text: str, limit: int) -> str:
+    text = _clean_search_query_text(text)
+    if len(text) <= limit:
+        return text
+    clipped = text[-limit:].lstrip()
+    if " " in clipped:
+        clipped = clipped.split(" ", 1)[1]
+    return clipped or text[-limit:].strip()
+
+
+def _compact_search_query(text: str, limit: int = 220) -> str:
+    """Bound long search queries without collapsing distinct tail terms."""
+    text = _clean_search_query_text(text)
+    if len(text) <= limit:
+        return text
+    tail_limit = min(70, max(30, limit // 3))
+    head_limit = max(80, limit - tail_limit - 1)
+    return _clean_search_query_text(f"{_clip_query_head(text, head_limit)} {_clip_query_tail(text, tail_limit)}")[:limit]
+
+
+def _compose_report_query(topic: str, suffix: str = "", limit: int = 220) -> str:
+    topic = _clean_search_query_text(topic)
+    suffix = _compact_search_query(suffix, 80)
+    if not suffix:
+        return _compact_search_query(topic, limit)
+    base_limit = max(80, limit - len(suffix) - 1)
+    return _compact_search_query(f"{_clip_query_head(topic, base_limit)} {suffix}", limit)
+
+
+def _make_report_search_queries(
+    query: str, focus: str, planned_queries: list, report_type: str, budget: dict,
+) -> list[str]:
+    """Build diverse report searches.
+
+    Long user topics used to be truncated before suffixes were appended, which
+    made all template/common variants dedupe to one query. Compose variants by
+    reserving room for the differentiating suffix.
+    """
+    qset: list[str] = []
+    seen: set[str] = set()
+
+    def add_query(q: str) -> None:
+        q = _compact_search_query(q)
+        key = re.sub(r"\W+", " ", q.lower()).strip()
+        if q and key and key not in seen:
+            seen.add(key)
+            qset.append(q)
+
+    search_topic = _clean_search_query_text(query) or str(query or "")
+    search_focus = _clean_search_query_text(focus)
+    add_query(search_topic)
+    if search_focus:
+        add_query(_compose_report_query(search_topic, search_focus))
+    for q in planned_queries or []:
+        add_query(str(q))
+
+    common_queries = [
+        "official documentation", "primary source", "implementation details", "architecture",
+        "benchmarks data", "failure modes", "limitations criticism", "best practices",
+        "production deployment", "security risk", "maintenance cost", "case study",
+        "community discussion", "recent 2026", "alternatives comparison", "migration guide",
+        "decision criteria", "developer experience", "testing strategy", "rollback plan",
+        "technical debt", "adoption trends", "performance tradeoffs", "source code organization",
+    ]
+    template_queries = {
+        "academic": ["research paper", "literature review", "systematic review", "methodology limitations", "empirical study", "survey paper", "replication", "open dataset"],
+        "decision": ["pros cons risks", "cost benefit", "alternatives comparison", "implementation risk", "decision matrix", "migration cost", "opportunity cost", "governance", "rollback strategy"],
+        "market": ["market size competitors", "industry analysis", "pricing business model", "customer adoption", "funding", "analyst report", "customer reviews", "growth trend", "competitive landscape"],
+        "technical": ["architecture", "implementation details", "benchmarks", "failure modes best practices", "dependency graph", "source code architecture", "build tooling", "runtime performance", "debugging", "production examples"],
+        "timeline": ["timeline chronology", "documents evidence", "key actors", "controversy investigation", "original source", "archive", "public record", "interview", "event sequence"],
+        "digest": ["best sources", "overview", "primary source", "expert analysis", "official docs", "high signal references", "source comparison", "must read", "FAQ"],
+        "analyst": ["expert analysis", "latest developments", "data statistics", "criticism risks", "strategic implications", "operational constraints", "adoption", "roadmap", "lessons learned"],
+    }.get(report_type, [])
+
+    for suffix in template_queries:
+        add_query(_compose_report_query(search_topic, suffix))
+    for suffix in common_queries:
+        if len(qset) >= int(budget.get("queries") or 0):
+            break
+        add_query(_compose_report_query(search_topic, suffix))
+    return qset[:min(len(qset), int(budget.get("queries") or len(qset)))]
+
+
 async def _emit_report_event(events, report_id: str, event_type: str, data: dict):
     """Emit a live research event and persist it on the report row."""
     import database as db
@@ -1247,6 +1345,7 @@ async def run_research_report(
     run_model = model or default_model
     plan_model = planner_model or run_model
     audit_model = auditor_model or run_model
+    current_date = datetime.utcnow().date().isoformat()
     kb_ids = kb_ids or []
     inputs = inputs or []
     searxng_url = config.SEARXNG_URL
@@ -1277,6 +1376,7 @@ Topic: {query}
 Focus: {focus or "none"}
 Report type: {template["label"]}
 Expected sections: {", ".join(template["sections"])}
+Current date: {current_date}
 Depth: {depth}/5
 Collection budget: up to {budget["queries"]} search queries, {budget["target_sources"]} sources, and {budget["page_reads"]} full-page reads.
 
@@ -1290,7 +1390,8 @@ Return strict JSON with:
   "known_risks": ["..."]
 }}
 
-Prefer precise search queries, primary sources, recent sources when freshness matters, diverse viewpoints, and enough query diversity to use the collection budget."""
+Prefer precise search queries, primary sources, recent sources when freshness matters, diverse viewpoints, and enough query diversity to use the collection budget.
+Use the current date above as authoritative; do not infer "current real-world knowledge" from model training cutoffs."""
         plan_text = await cancel_registry.await_cancellable(
             _ask_ollama(http, ollama_url, plan_prompt, model=plan_model, default_model=default_model, max_tokens=1800),
             report_id,
@@ -1393,43 +1494,7 @@ Prefer precise search queries, primary sources, recent sources when freshness ma
         planned_queries = plan.get("search_queries", [])
         if not isinstance(planned_queries, list):
             planned_queries = []
-        qset = []
-        def add_query(q):
-            q = _one_line(re.sub(r"https?://[^\s<>\]\[\"'`]+", " ", str(q or "")), 220)
-            if q and q.lower() not in {x.lower() for x in qset}:
-                qset.append(q)
-        search_topic = _one_line(re.sub(r"https?://[^\s<>\]\[\"'`]+", " ", query or ""), 220) or query
-        search_focus = _one_line(re.sub(r"https?://[^\s<>\]\[\"'`]+", " ", focus or ""), 160)
-        add_query(search_topic)
-        if focus:
-            add_query(f"{search_topic} {search_focus}")
-        for q in planned_queries:
-            add_query(str(q))
-        common_queries = [
-            "official documentation", "primary source", "implementation details", "architecture",
-            "benchmarks data", "failure modes", "limitations criticism", "best practices",
-            "production deployment", "security risk", "maintenance cost", "case study",
-            "community discussion", "recent 2026", "alternatives comparison", "migration guide",
-            "decision criteria", "developer experience", "testing strategy", "rollback plan",
-            "technical debt", "adoption trends", "performance tradeoffs", "source code organization",
-        ]
-        template_queries = {
-            "academic": ["research paper", "literature review", "systematic review", "methodology limitations", "empirical study", "survey paper", "replication", "open dataset"],
-            "decision": ["pros cons risks", "cost benefit", "alternatives comparison", "implementation risk", "decision matrix", "migration cost", "opportunity cost", "governance", "rollback strategy"],
-            "market": ["market size competitors", "industry analysis", "pricing business model", "customer adoption", "funding", "analyst report", "customer reviews", "growth trend", "competitive landscape"],
-            "technical": ["architecture", "implementation details", "benchmarks", "failure modes best practices", "dependency graph", "source code architecture", "build tooling", "runtime performance", "debugging", "production examples"],
-            "timeline": ["timeline chronology", "documents evidence", "key actors", "controversy investigation", "original source", "archive", "public record", "interview", "event sequence"],
-            "digest": ["best sources", "overview", "primary source", "expert analysis", "official docs", "high signal references", "source comparison", "must read", "FAQ"],
-            "analyst": ["expert analysis", "latest developments", "data statistics", "criticism risks", "strategic implications", "operational constraints", "adoption", "roadmap", "lessons learned"],
-        }.get(report_type, [])
-        for suffix in template_queries:
-            add_query(f"{search_topic} {suffix}")
-        for suffix in common_queries:
-            if len(qset) >= budget["queries"]:
-                break
-            add_query(f"{search_topic} {suffix}")
-        max_queries = min(len(qset), budget["queries"])
-        qset = qset[:max_queries]
+        qset = _make_report_search_queries(query, focus, planned_queries, report_type, budget)
 
         all_results = []
         searched = set()
@@ -1562,6 +1627,7 @@ Prefer precise search queries, primary sources, recent sources when freshness ma
 Topic: {query}
 Focus: {focus or "none"}
 Report type: {template["label"]}
+Current date: {current_date}
 Allowed source IDs: {allowed_source_ids}
 
 Evidence:
@@ -1586,6 +1652,7 @@ Rules:
 - Use source IDs only as S1, S2, etc. Do not invent source IDs.
 - Use "finding_id" only for findings. Do not call sources "claims".
 - Treat sources with Source type "github_repo" as direct repository evidence for repo-specific architecture, dependency, and file-organization claims.
+- Use the current date above as authoritative. Dates on or before that date are not future-dated.
 - Do not write "studies show" unless the cited source_ids contain peer-reviewed papers, official benchmarks, or primary empirical studies.
 - Mark community discussions, blogs, GitHub issues, and vendor docs as moderate, thin, or anecdotal unless they contain direct data."""
         findings_obj = await cancel_registry.await_cancellable(
@@ -1612,6 +1679,7 @@ Rules:
 
 Topic: {query}
 Report type: {template["label"]}
+Current date: {current_date}
 Findings JSON:
 {json.dumps(findings[:budget["findings"]], indent=2)}
 
@@ -1623,6 +1691,8 @@ Audit rules:
 - Refer to sources only as "[S#]"; never write "claim 22" or use a bare number for a source.
 - Flag any finding that uses strong causal, benchmark, quality, latency, cost, or hallucination-reduction language without primary empirical data.
 - Treat community discussions, blogs, GitHub repositories, and vendor docs as practical signals, not peer-reviewed evidence.
+- Use the current date above as authoritative. Do not call sources future-dated when their dates are on or before the current date.
+- Never mention a model training cutoff or phrases like "current real-world knowledge early 2024"; audit only against the source set and current date shown here.
 - Contradictions should name the affected Finding #N and source IDs where possible.
 
 Return strict JSON:
@@ -1680,7 +1750,7 @@ Focus: {focus or "none"}
 Report type: {template["label"]}
 Required sections: {", ".join(template["sections"])}
 Title: {title}
-Current date: {datetime.utcnow().date().isoformat()}
+Current date: {current_date}
 
 Research plan:
 {json.dumps({"questions": plan.get("research_questions", []), "criteria": plan.get("inclusion_criteria", [])}, indent=2)}
@@ -1699,6 +1769,7 @@ Write in Markdown. Requirements:
 - Include a compact "Method" section explaining web/files/KB coverage.
 - Use inline citations like [S1], [S2] after claims.
 - Do not cite a source id unless it appears in the evidence.
+- Use the current date above as authoritative. Do not describe source dates on or before that date as future-dated, and do not mention training cutoffs.
 - Include uncertainty, contradictions, and missing-evidence caveats.
 - Use "Finding #N" only when referring to extracted findings; use "[S#]" only when citing sources.
 - Do not use "studies show", "proves", "significantly improves", "reduces hallucinations", "sub-second", or other strong empirical language unless the cited finding has strong empirical, benchmark, peer-reviewed, or primary-source support.

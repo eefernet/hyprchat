@@ -562,7 +562,7 @@ const WELCOME_FALLBACKS = [
   "Translate fog into working code",
 ];
 const WELCOME_VERSION="fun-2";
-const HC_UI_BUILD="activity-polish-2026-06-04e";
+const HC_UI_BUILD="research-live-2026-06-04b";
 const localDayKey=()=>{
   const d=new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
@@ -1320,6 +1320,13 @@ const _fmtElapsed = (start, now=Date.now())=>{
   if(s>=60)return`${Math.floor(s/60)}m ${s%60}s`;
   return`${s}s`;
 };
+const _parseUtcishMs = (value)=>{
+  if(!value)return 0;
+  if(typeof value==="number")return value>1000000000000?value:value*1000;
+  const s=String(value).trim();
+  const ms=Date.parse(/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)?s:`${s}Z`);
+  return Number.isFinite(ms)?ms:0;
+};
 const _stripStatusEmoji = (txt="")=>String(txt||"").replace(/^[\p{Extended_Pictographic}\u200d\ufe0f\s]+/u,"").trim();
 const _phaseFromEvent = (ev)=>{
   if(!ev)return null;
@@ -1334,6 +1341,59 @@ const _phaseFromEvent = (ev)=>{
   if(ev.type==="streaming")return{phase:"streaming",label:"Streaming",detail:status,pct:d.pct};
   return null;
 };
+
+function ResearchLiveStatus({t,font,events=[],metrics={},sources=[],researchRunning=false,elapsedLabel="--",eventLabel}){
+  const visible=(events||[]).filter(e=>e.type!=="research_token");
+  const latestPhase=[...visible].reverse().find(e=>e.type==="research_phase");
+  const phaseKey=latestPhase?.data?.phase||(
+    researchRunning?"planning":(visible.some(e=>e.type==="research_done")?"complete":"idle")
+  );
+  const phaseMap={
+    planning:["Route Plot","Mapping questions, criteria, and weak spots before the search fanout."],
+    context:["Context Load","Pulling notes, files, and knowledge-base fragments into the evidence bay."],
+    search:["Signal Sweep","Launching query waves and sorting early leads from background noise."],
+    reading:["Page Dive","Opening high-value sources and extracting the clean text worth citing."],
+    extracting:["Evidence Distill","Compressing source notes into claim-level findings with source IDs."],
+    audit:["Claim Pressure Test","Stress-testing citations, caveats, missing evidence, and contradictions."],
+    synthesis:["Report Forge","Writing the final brief; live markdown will stream into this pane."],
+    complete:["Report Ready","Final synthesis landed."],
+    idle:["Research Bay","No report body has been rendered yet."],
+  };
+  const [phaseTitle,phaseDetail]=phaseMap[phaseKey]||phaseMap.idle;
+  const pct=Number.isFinite(Number(latestPhase?.data?.pct))?Math.max(0,Math.min(100,Number(latestPhase.data.pct))):(researchRunning?8:0);
+  const metricLine=[
+    ["Sources",sources.length||metrics.source_count||0,metrics.target_sources],
+    ["Pages",metrics.pages_read||0,metrics.target_pages],
+    ["Searches",metrics.searches||0,metrics.target_queries],
+    ["Elapsed",elapsedLabel,null],
+  ];
+  const recent=visible.filter(e=>["research_phase","research_source_found","research_source_read","research_finding","research_audit","research_done","research_error"].includes(e.type)).slice(-6);
+  return <div style={{border:`1px solid ${t.brd}33`,borderRadius:8,padding:22,background:`${t.surface}66`,color:t.mut,fontSize:12,lineHeight:1.55,animation:"fadeIn .2s"}}>
+    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+      <div style={{width:34,height:34,borderRadius:8,border:`1px solid ${t.acc}33`,background:`${t.acc}12`,display:"flex",alignItems:"center",justifyContent:"center",color:t.acc,flexShrink:0}}><IC.Search/></div>
+      <div style={{minWidth:0}}>
+        <div style={{fontSize:11,fontWeight:900,textTransform:"uppercase",letterSpacing:.8,color:t.acc}}>{phaseTitle}</div>
+        <div style={{fontSize:12,color:t.text,lineHeight:1.35}}>{latestPhase?.data?.detail||phaseDetail}</div>
+      </div>
+      {researchRunning&&<span style={{marginLeft:"auto",fontSize:9,padding:"3px 7px",borderRadius:7,border:`1px solid ${t.f1}33`,color:t.f1,background:`${t.f1}10`,textTransform:"uppercase",letterSpacing:.6}}>live</span>}
+    </div>
+    <div style={{height:6,borderRadius:99,background:`${t.bgDeep}cc`,border:`1px solid ${t.brd}24`,overflow:"hidden",marginBottom:12}}>
+      <div style={{height:"100%",width:`${pct}%`,background:`linear-gradient(90deg, ${t.acc}, ${t.f1})`,boxShadow:`0 0 18px ${t.acc}66`,transition:"width .45s ease"}}/>
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(0,1fr))",gap:7,marginBottom:14}}>
+      {metricLine.map(([label,value,target])=><div key={label} style={{border:`1px solid ${t.brd}24`,borderRadius:7,padding:"7px 8px",background:`${t.bgDeep}66`,minWidth:0}}>
+        <div style={{fontSize:13,fontWeight:900,color:label==="Elapsed"?t.mut:t.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{target?`${value}/${target}`:value}</div>
+        <div style={{fontSize:8,color:t.dim,textTransform:"uppercase",letterSpacing:.6,marginTop:2}}>{label}</div>
+      </div>)}
+    </div>
+    <div style={{display:"flex",flexDirection:"column",gap:6}}>
+      {recent.length?recent.map((ev,i)=>{const c=ev.type==="research_error"?t.err:ev.type==="research_done"?t.ok:ev.type==="research_source_read"?t.f1:ev.type==="research_audit"?t.warm:t.acc;return <div key={`${ev.type}-${i}`} style={{display:"flex",alignItems:"flex-start",gap:8,color:t.dim,fontSize:10,lineHeight:1.35}}>
+        <span style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 8px ${c}66`,marginTop:4,flexShrink:0}}/>
+        <span style={{overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{eventLabel?eventLabel(ev,i):(ev.type||"activity")}</span>
+      </div>}):<div style={{fontSize:10,color:t.dim}}>Awaiting first research event.</div>}
+    </div>
+  </div>;
+}
 
 // Inline tool status: shows latest pill, expands to show all
 const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,historical,md,savedEvts})=>{
@@ -3427,6 +3487,11 @@ function HyprChat(){
     const id=setInterval(()=>setActivityNow(Date.now()),1000);
     return()=>clearInterval(id);
   },[downloads]);
+  useEffect(()=>{
+    if(!researchRunning)return;
+    const id=setInterval(()=>setActivityNow(Date.now()),1000);
+    return()=>clearInterval(id);
+  },[researchRunning]);
   useEffect(()=>{
     if(!currentRunNotice)return;
     const id=setTimeout(()=>setCurrentRunNotice(null),5200);
@@ -5643,7 +5708,7 @@ function HyprChat(){
     </div>
   </div>
 
-      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return `Audit complete${d.coverage_score!==undefined?` - coverage ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return d.summary?`Report complete - ${d.summary}`:"Report complete";if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=[...(report?.outline?.sections||[])].map(s=>s.heading||s).filter(Boolean);return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return `Audit complete${d.coverage_score!==undefined?` - coverage ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return d.summary?`Report complete - ${d.summary}`:"Report complete";if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=[...(report?.outline?.sections||[])].map(s=>s.heading||s).filter(Boolean);return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}>
       <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}><IC.Search/><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Deep Research</span>{researchRunning&&<span style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.acc}14`,border:`1px solid ${t.acc}33`,color:t.acc}}>live</span>}<div style={{display:"flex",gap:3,marginLeft:8,padding:3,border:`1px solid ${t.brd}28`,borderRadius:8,background:`${t.bgDeep}88`}}>{[["new","New"],["reports",researchReports.length?`Reports ${researchReports.length}`:"Reports"]].map(([id,label])=><button key={id} onClick={()=>setResearchView(id)} style={{fontSize:10,padding:"5px 9px",borderRadius:6,border:"none",background:researchView===id?`${t.acc}22`:"transparent",color:researchView===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontWeight:researchView===id?800:600}}>{label}</button>)}</div></div>
       <div style={{display:"flex",gap:6,alignItems:"center"}}>
@@ -5746,14 +5811,12 @@ function HyprChat(){
           </div>}
           {body?<div className="research-report-print" style={{fontSize:fontSize,lineHeight:1.72,color:t.text}}>
             <MDWrap>{md(body)}</MDWrap>
-          </div>:<div style={{border:`1px dashed ${t.brd}33`,borderRadius:8,padding:24,color:t.mut,fontSize:12,lineHeight:1.5}}>
-            {researchRunning?"The report is being written. Live tokens will appear here as synthesis starts.":"This report has no rendered body yet."}
-          </div>}
+          </div>:<ResearchLiveStatus t={t} font={font} events={researchEvents} metrics={metrics} sources={sources} researchRunning={researchRunning} elapsedLabel={elapsedLabel} eventLabel={eventLabel}/>}
         </div>:<div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:t.mut,fontSize:12}}>Select a report or start a new research run.</div>}
       </div>
       <div style={{borderLeft:`1px solid ${t.brd}24`,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:12}}>
         <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8}}>
-          {[["Sources",fmtTarget(sources.length||metrics.source_count||0,metrics.target_sources),t.acc],["Pages",fmtTarget(metrics.pages_read||0,metrics.target_pages),t.f1],["Searches",fmtTarget(metrics.searches||0,metrics.target_queries),t.warm],["Elapsed",metrics.elapsed?`${Math.round(metrics.elapsed)}s`:"--",t.mut]].map(([l,v,c])=><div key={l} style={{padding:10,borderRadius:8,border:`1px solid ${c}2e`,background:`${c}0d`}}>
+          {[["Sources",fmtTarget(sources.length||metrics.source_count||0,metrics.target_sources),t.acc],["Pages",fmtTarget(metrics.pages_read||0,metrics.target_pages),t.f1],["Searches",fmtTarget(metrics.searches||0,metrics.target_queries),t.warm],["Elapsed",elapsedLabel,t.mut]].map(([l,v,c])=><div key={l} style={{padding:10,borderRadius:8,border:`1px solid ${c}2e`,background:`${c}0d`}}>
             <div style={{fontSize:18,fontWeight:900,color:c,lineHeight:1}}>{v}</div><div style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.7,marginTop:5}}>{l}</div>
           </div>)}
         </div>
