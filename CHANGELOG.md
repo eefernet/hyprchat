@@ -1,3 +1,13 @@
+## Alpha v17.1.1 — June 4, 2026
+
+### Deep Research Panel
+- Added the dedicated Deep Research workspace as a first-class panel with report creation, live run timeline, sources, findings, metrics, rerun/cancel/delete actions, Markdown export, and report history.
+- Added report inputs for pasted notes, uploaded files/PDF text extraction, knowledge-base selection, report templates, depth, and role-model overrides.
+- Deep Research reports now persist `events_log`, findings, source metadata, metrics, and rendered report Markdown so completed runs can be reopened from the report list.
+- Added a running-report polling fallback so completed reports load into the main display even if the dedicated SSE stream disconnects or the browser misses the final `research_done` event.
+- Reworked research report PDF export to generate a cleaner document-style PDF from semantic report Markdown instead of cloning the app-themed React view.
+- Added a separate Print action with cleaner print HTML and a direct Markdown export that uses the active report title for filenames.
+
 ## Alpha v17.1 — June 3, 2026
 
 ## UI Overhaul Update

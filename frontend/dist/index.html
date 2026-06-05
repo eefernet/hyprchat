@@ -486,6 +486,7 @@
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css">
 <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js" data-manual></script>
 <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" data-autoloader-path="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/"></script>
@@ -3009,6 +3010,33 @@ function HyprChat(){
     return()=>{closed=true;es.close();if(researchEventRef.current===es)researchEventRef.current=null;};
   },[activeResearchId,researchRunning,refreshResearchReports,loadResearchReport]);
 
+  useEffect(()=>{
+    if(!activeResearchId||!researchRunning)return;
+    let closed=false,timer=null;
+    const sync=async()=>{
+      try{
+        const r=await fetch(`${API}/api/research/reports/${activeResearchId}`);
+        if(!r.ok)return;
+        const d=await r.json();
+        if(closed)return;
+        setActiveResearch(d);
+        setResearchEvents(d.events_log||[]);
+        if(d.report_markdown)setResearchLiveMarkdown(d.report_markdown||"");
+        setResearchReports(p=>{
+          const rest=p.filter(x=>x.id!==d.id);
+          return [d,...rest];
+        });
+        if(["complete","failed","cancelled"].includes(String(d.status||"").toLowerCase())){
+          setResearchRunning(false);
+          refreshResearchReports();
+        }
+      }catch(e){console.warn("Research report poll failed",e);}
+    };
+    timer=setInterval(sync,5000);
+    const first=setTimeout(sync,2500);
+    return()=>{closed=true;clearInterval(timer);clearTimeout(first);};
+  },[activeResearchId,researchRunning,refreshResearchReports]);
+
   const startResearchReport=async()=>{
     const query=(researchDraft.query||"").trim();
     if(!query){notify({type:"warning",text:"Research topic required",detail:"Enter a topic or question first."});return;}
@@ -3078,6 +3106,139 @@ function HyprChat(){
     if(added.length)setResearchDraft(p=>({...p,inputs:[...(p.inputs||[]),...added]}));
   };
 
+  const researchExportName=(ext)=>{
+    const report=activeResearch;
+    const base=(report?.title||report?.query||"research-report")
+      .replace(/[^a-z0-9._-]+/gi,"-")
+      .replace(/^-+|-+$/g,"")
+      .slice(0,80)||"research-report";
+    return `${base}.${ext}`;
+  };
+
+  const escapePrintHtml=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  const inlinePrintMarkdown=text=>{
+    let out=escapePrintHtml(text);
+    out=out.replace(/!\[([^\]]*)\]\(([^)]+)\)/g,(_m,alt,url)=>`<span class="image-note">Image: ${alt||url}</span>`);
+    out=out.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/g,(_m,label,url)=>`<a href="${url}" rel="noreferrer">${label}</a>`);
+    out=out.replace(/`([^`]+)`/g,"<code>$1</code>");
+    out=out.replace(/\*\*([^*\n]+)\*\*/g,"<strong>$1</strong>");
+    out=out.replace(/\*([^*\n]+)\*/g,"<em>$1</em>");
+    out=out.replace(/_([^_\n]+)_/g,"<em>$1</em>");
+    return out;
+  };
+
+  const renderResearchMarkdownForPrint=markdown=>{
+    const lines=String(markdown||"").trim().replace(/\r\n/g,"\n").split("\n");
+    const html=[];let para=[],list=null,inCode=false,code=[];
+    const flushPara=()=>{const txt=para.join(" ").trim();if(txt)html.push(`<p>${inlinePrintMarkdown(txt)}</p>`);para=[];};
+    const flushList=()=>{if(list){html.push(`</${list}>`);list=null;}};
+    const parseTableRow=r=>r.replace(/^\||\|$/g,"").split("|").map(c=>c.trim());
+    for(let i=0;i<lines.length;i++){
+      const ln=lines[i];
+      if(/^```/.test(ln.trim())){
+        if(inCode){html.push(`<pre><code>${escapePrintHtml(code.join("\n"))}</code></pre>`);code=[];inCode=false;}
+        else{flushPara();flushList();inCode=true;code=[];}
+        continue;
+      }
+      if(inCode){code.push(ln);continue;}
+      if(!ln.trim()){flushPara();flushList();continue;}
+      const h=ln.match(/^(#{1,6})\s+(.+)$/);
+      if(h){flushPara();flushList();const lvl=Math.min(6,h[1].length);html.push(`<h${lvl}>${inlinePrintMarkdown(h[2])}</h${lvl}>`);continue;}
+      if(/^---+$|^\*\*\*+$|^___+$/.test(ln.trim())){flushPara();flushList();html.push("<hr>");continue;}
+      if(/^\|.+\|$/.test(ln.trim())){
+        flushPara();flushList();
+        const rows=[ln.trim()];let j=i+1;
+        while(j<lines.length&&/^\|.+\|$/.test(lines[j].trim())){rows.push(lines[j].trim());j++;}
+        i=j-1;
+        const isSep=r=>r.replace(/[\s\-:|]/g,"").length===0&&r.includes("-");
+        const parsed=rows.filter(r=>!isSep(r)).map(parseTableRow);
+        const hasHeader=rows.length>1&&isSep(rows[1]);
+        const head=hasHeader?parsed[0]:null;
+        const body=hasHeader?parsed.slice(1):parsed;
+        html.push("<table>");
+        if(head)html.push(`<thead><tr>${head.map(c=>`<th>${inlinePrintMarkdown(c)}</th>`).join("")}</tr></thead>`);
+        html.push(`<tbody>${body.map(r=>`<tr>${r.map(c=>`<td>${inlinePrintMarkdown(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`);
+        continue;
+      }
+      const ul=ln.match(/^[-*+]\s+(.+)$/);
+      if(ul){flushPara();if(list!=="ul"){flushList();list="ul";html.push("<ul>");}html.push(`<li>${inlinePrintMarkdown(ul[1])}</li>`);continue;}
+      const ol=ln.match(/^\d+\.\s+(.+)$/);
+      if(ol){flushPara();if(list!=="ol"){flushList();list="ol";html.push("<ol>");}html.push(`<li>${inlinePrintMarkdown(ol[1])}</li>`);continue;}
+      const bq=ln.match(/^>\s?(.+)$/);
+      if(bq){flushPara();flushList();html.push(`<blockquote>${inlinePrintMarkdown(bq[1])}</blockquote>`);continue;}
+      para.push(ln.trim());
+    }
+    if(inCode)html.push(`<pre><code>${escapePrintHtml(code.join("\n"))}</code></pre>`);
+    flushPara();flushList();
+    return html.join("\n");
+  };
+
+  const researchPrintCss=()=>`
+      *{box-sizing:border-box}
+      body{margin:0;color:#161b22;background:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;font-size:10.8pt;line-height:1.58}
+      main,.research-print-page{max-width:7.15in;margin:0 auto;background:#fff;color:#161b22}
+      .report-cover{border-bottom:1px solid #d7dde8;margin:0 0 20pt;padding:0 0 14pt}
+      .eyebrow{font-size:8.5pt;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#57606a;margin:0 0 5pt}
+      h1{font-size:21pt;line-height:1.14;margin:0 0 8pt;color:#111827;letter-spacing:0}
+      .query{font-size:9.8pt;color:#4b5563;line-height:1.45;margin-top:6pt}
+      .meta{display:flex;flex-wrap:wrap;gap:5pt;margin-top:10pt}
+      .meta span{border:1px solid #d7dde8;border-radius:4pt;padding:2.5pt 5pt;color:#364152;background:#f8fafc;font-size:8.5pt}
+      h2{font-size:14.5pt;line-height:1.25;margin:20pt 0 7pt;color:#1f2937;border-top:1px solid #d7dde8;padding-top:10pt}
+      h3{font-size:12pt;line-height:1.3;margin:13pt 0 5pt;color:#1f2937}
+      h4,h5,h6{font-size:10.5pt;line-height:1.3;margin:10pt 0 4pt;color:#374151}
+      p{margin:0 0 8pt}
+      ul,ol{margin:0 0 9pt 18pt;padding:0}
+      li{margin:0 0 4pt;padding-left:2pt}
+      code{font-family:"SFMono-Regular",Menlo,Consolas,monospace;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:3pt;padding:0 3pt;color:#334155;font-size:.92em}
+      pre{white-space:pre-wrap;border:1px solid #d7dde8;background:#f8fafc;padding:8pt;border-radius:5pt;margin:9pt 0 11pt;page-break-inside:avoid}
+      pre code{border:0;background:transparent;padding:0;color:#1f2937}
+      blockquote{border-left:3pt solid #94a3b8;margin:9pt 0;padding:4pt 0 4pt 10pt;color:#374151;background:#f8fafc}
+      table{width:100%;border-collapse:collapse;margin:9pt 0 12pt;page-break-inside:auto}
+      tr{page-break-inside:avoid;page-break-after:auto}
+      th,td{border:1px solid #d7dde8;padding:5pt 6pt;text-align:left;vertical-align:top;font-size:8.8pt;line-height:1.35;overflow-wrap:anywhere}
+      th{background:#f1f5f9;color:#1f2937;font-weight:800}
+      a{color:#175cd3;text-decoration:none;overflow-wrap:anywhere}
+      hr{border:0;border-top:1px solid #d7dde8;margin:13pt 0}
+      .image-note{display:inline-block;border:1px solid #d7dde8;border-radius:4pt;padding:1pt 4pt;color:#57606a;background:#f8fafc;font-size:.9em}
+      .sources{margin-top:22pt;border-top:1px solid #d7dde8;padding-top:12pt}
+      .sources li{margin-bottom:6pt}
+      .source-title{font-weight:700;color:#1f2937}
+      .source-url{font-size:8.5pt;color:#57606a;overflow-wrap:anywhere}
+      @page{size:letter;margin:.58in}
+      @media print{body{print-color-adjust:exact;-webkit-print-color-adjust:exact}.research-print-page{max-width:none}}
+    `;
+
+  const buildResearchPrintHtml=(report,markdown)=>{
+    const bodyMd=String(markdown||"").trim().replace(/^#\s+.+(?:\n|$)/,"");
+    const metrics=report?.metrics||{};
+    const sources=report?.sources||[];
+    const meta=[
+      report?.report_type,
+      report?.status,
+      sources.length?`${sources.length} sources`:metrics.source_count?`${metrics.source_count} sources`:"",
+      metrics.pages_read?`${metrics.pages_read} pages read`:"",
+      metrics.elapsed?`${Math.round(metrics.elapsed)}s`:"",
+      report?.model?`model ${report.model}`:"",
+    ].filter(Boolean);
+    const sourceHtml=sources.length?`<section class="sources"><h2>Sources</h2><ol>${sources.map(src=>{
+      const idx=src.index||src.source_index||"";
+      const title=escapePrintHtml(src.title||src.url||"Source");
+      const url=escapePrintHtml(src.url||"");
+      const snippet=escapePrintHtml(src.snippet||"");
+      return `<li><div class="source-title">${idx?`[S${idx}] `:""}${title}</div>${url?`<div class="source-url">${url}</div>`:""}${snippet?`<p>${snippet}</p>`:""}</li>`;
+    }).join("")}</ol></section>`:"";
+    return `<div class="research-print-page">
+      <header class="report-cover">
+        <div class="eyebrow">HyprChat Deep Research</div>
+        <h1>${escapePrintHtml(report?.title||report?.query||"Research Report")}</h1>
+        ${report?.query?`<div class="query">${escapePrintHtml(report.query)}</div>`:""}
+        ${meta.length?`<div class="meta">${meta.map(x=>`<span>${escapePrintHtml(x)}</span>`).join("")}</div>`:""}
+      </header>
+      ${renderResearchMarkdownForPrint(bodyMd)}
+      ${sourceHtml}
+    </div>`;
+  };
+
   const exportResearchMarkdown=()=>{
     const report=activeResearch;
     const body=(researchLiveMarkdown||report?.report_markdown||"").trim();
@@ -3085,53 +3246,47 @@ function HyprChat(){
     const blob=new Blob([body],{type:"text/markdown"});
     const url=URL.createObjectURL(blob);
     const a=document.createElement("a");
-    a.href=url;a.download=`${(report?.title||"research-report").replace(/[^a-z0-9._-]+/gi,"-").slice(0,80)}.md`;
+    a.href=url;a.download=researchExportName("md");
     document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  };
+
+  const exportResearchPdf=async()=>{
+    const report=activeResearch;
+    const body=(researchLiveMarkdown||report?.report_markdown||"").trim();
+    if(!body){notify({type:"warning",text:"No report body to export"});return;}
+    if(!window.html2pdf){printResearchReport();return;}
+    const host=document.createElement("div");
+    host.style.position="fixed";host.style.left="-10000px";host.style.top="0";host.style.width="7.15in";
+    host.style.background="#fff";host.style.color="#161b22";host.style.zIndex="-1";
+    host.innerHTML=`<style>${researchPrintCss()}</style>${buildResearchPrintHtml(report,body)}`;
+    document.body.appendChild(host);
+    try{
+      await window.html2pdf().set({
+        margin:[0.58,0.58,0.58,0.58],
+        filename:researchExportName("pdf"),
+        image:{type:"jpeg",quality:0.98},
+        html2canvas:{scale:2,backgroundColor:"#ffffff",useCORS:true,logging:false},
+        jsPDF:{unit:"in",format:"letter",orientation:"portrait"},
+        pagebreak:{mode:["css","legacy"],avoid:["pre","blockquote","table","tr"]}
+      }).from(host.querySelector(".research-print-page")).save();
+    }catch(e){
+      notify({type:"error",text:"PDF export failed",detail:e.message||String(e)});
+    }finally{
+      host.remove();
+    }
   };
 
   const printResearchReport=()=>{
     const report=activeResearch;
-    const node=document.querySelector(".research-report-print");
-    const clone=node?.cloneNode(true);
-    if(clone){
-      const srcCanvases=node.querySelectorAll("canvas");
-      clone.querySelectorAll("canvas").forEach((cv,i)=>{
-        try{
-          const img=document.createElement("img");
-          img.src=srcCanvases[i].toDataURL("image/png");
-          img.style.maxWidth="100%";
-          img.style.display="block";
-          img.style.margin="10pt 0";
-          cv.replaceWith(img);
-        }catch{}
-      });
-    }
-    const html=clone?.innerHTML||"";
-    if(!html){notify({type:"warning",text:"No report body to print"});return;}
+    const body=(researchLiveMarkdown||report?.report_markdown||"").trim();
+    if(!body){notify({type:"warning",text:"No report body to print"});return;}
     const title=(report?.title||"HyprChat Research Report").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
     const w=window.open("","_blank");
-    if(!w){notify({type:"error",text:"Print window blocked",detail:"Allow popups for HyprChat, then try Print / PDF again."});return;}
+    if(!w){notify({type:"error",text:"Print window blocked",detail:"Allow popups for HyprChat, then try Print again."});return;}
     w.document.open();
     w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>
-      @page{margin:0.62in}
-      *{box-sizing:border-box}
-      body{margin:0;color:#151823;background:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;font-size:11.5pt;line-height:1.55}
-      main{max-width:7.35in;margin:0 auto}
-      h1{font-size:23pt;line-height:1.15;margin:0 0 18pt;color:#111827}
-      h2{font-size:15pt;line-height:1.25;margin:22pt 0 8pt;color:#1f4f9f;border-top:1px solid #d8dee9;padding-top:12pt}
-      h3{font-size:12.5pt;margin:16pt 0 6pt;color:#24324a}
-      p{margin:0 0 9pt}
-      table{width:100%;border-collapse:collapse;margin:10pt 0 14pt;table-layout:auto;page-break-inside:auto}
-      tr{page-break-inside:avoid;page-break-after:auto}
-      th,td{border:1px solid #cfd6e3;padding:5pt 6pt;text-align:left;vertical-align:top;font-size:9pt;line-height:1.35;word-break:normal;overflow-wrap:anywhere}
-      th{background:#edf3ff;color:#2452a0;font-weight:800}
-      code,pre{font-family:"SFMono-Regular",Menlo,Consolas,monospace}
-      pre{white-space:pre-wrap;border:1px solid #d8dee9;background:#f8fafc;padding:8pt;border-radius:5pt;page-break-inside:avoid}
-      blockquote{border-left:3pt solid #84a9ff;margin:10pt 0;padding:4pt 0 4pt 10pt;color:#39445a;background:#f6f8ff}
-      a{color:#0645ad;text-decoration:none}
-      hr{border:0;border-top:1px solid #d8dee9;margin:14pt 0}
-      @media print{body{print-color-adjust:exact;-webkit-print-color-adjust:exact}}
-    </style></head><body><main>${html}</main><script>setTimeout(()=>{window.focus();window.print();},250);<\/script></body></html>`);
+      ${researchPrintCss()}
+    </style></head><body><main>${buildResearchPrintHtml(report,body)}</main><script>setTimeout(()=>{window.focus();window.print();},250);<\/script></body></html>`);
     w.document.close();
   };
 
@@ -5454,7 +5609,8 @@ function HyprChat(){
         {activeResearchId&&researchRunning&&<button onClick={()=>cancelResearchReport(activeResearchId)} style={btnS(t.err)}><IC.Stop/> Stop</button>}
         {activeResearchId&&<button onClick={()=>rerunResearchReport(activeResearchId)} style={btnS(t.acc)}><IC.Refresh/> Rerun</button>}
         {body&&<button onClick={exportResearchMarkdown} style={btnS(t.warm)}><IC.Download/> Markdown</button>}
-        {body&&<button onClick={printResearchReport} style={btnS(t.mut)}><IC.External/> Print / PDF</button>}
+        {body&&<button onClick={exportResearchPdf} style={btnS(t.mut)}><IC.Download/> PDF</button>}
+        {body&&<button onClick={printResearchReport} style={btnS(t.mut)}><IC.External/> Print</button>}
       </div>
     </div>
     <div style={{flex:1,display:"grid",gridTemplateColumns:"290px minmax(0,1fr) 320px",overflow:"hidden",minHeight:0}}>
