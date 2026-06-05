@@ -41,6 +41,10 @@
 - Empty-chat effort selection and Daedalus activation now work before the first message; pending choices are applied when the real conversation is created.
 - Added inline PDF extraction failure feedback with retry/remove actions.
 - Quick Search failures now surface as a compact warning chip instead of silently clearing results or spinning indefinitely.
+- Expanded chat Quick Search from a 6-source helper to a broader fast search that can return up to 35 source cards when enough useful results are available.
+- Increased Quick Search SearXNG retrieval to pull larger candidate pools, with broader/current/news/comparison searches requesting more results before ranking and dedupe.
+- Updated Quick Search ranking to run domain diversity and embedding dedupe over the larger pool, then backfill from remaining candidates so dedupe does not unnecessarily shrink the final source list.
+- Kept Quick Search context compact by injecting title, URL, domain, and snippets for up to 35 sources while fetching full page excerpts only for the top few results.
 
 ### Sidebar, Search & Chat Utilities
 - Cleaned up sidebar search: title filtering and full-message search now live behind a single rail search action above Chat.
