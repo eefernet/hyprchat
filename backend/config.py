@@ -71,11 +71,26 @@ EXECUTION_TIMEOUT = int(os.getenv("EXECUTION_TIMEOUT", "60"))
 SEARCH_RESULTS_COUNT = int(os.getenv("SEARCH_RESULTS_COUNT", "15"))
 MAX_FETCH_CHARS = int(os.getenv("MAX_FETCH_CHARS", "8000"))
 
-# Multi-round search agent (replaces the old single-shot quick_search rewrite
-# pipeline). Triage runs against the chat model by default to avoid VRAM-swap
-# latency on single-GPU homelabs; set QUICK_SEARCH_TRIAGE_MODEL to override
-# with e.g. a small workspace model (only worthwhile if it stays co-resident
-# in VRAM with the chat model).
+# Quick Search answer-grounding pipeline. Default "balanced" targets enough
+# sources for grounded answers without making LLM triage or embeddings part of
+# every turn's critical path.
+QUICK_SEARCH_MODE = os.getenv("QUICK_SEARCH_MODE", "balanced").strip().lower()
+QUICK_SEARCH_PROVIDER = os.getenv("QUICK_SEARCH_PROVIDER", "searxng").strip().lower()
+QUICK_SEARCH_SCRAPER = os.getenv("QUICK_SEARCH_SCRAPER", "local").strip().lower()
+QUICK_SEARCH_RERANKER = os.getenv("QUICK_SEARCH_RERANKER", "none").strip().lower()
+QUICK_SEARCH_MIN_RESULTS = int(os.getenv("QUICK_SEARCH_MIN_RESULTS", "10"))
+QUICK_SEARCH_TARGET_RESULTS = int(os.getenv("QUICK_SEARCH_TARGET_RESULTS", "24"))
+QUICK_SEARCH_MAX_RESULTS = int(os.getenv("QUICK_SEARCH_MAX_RESULTS", "35"))
+QUICK_SEARCH_PAGE_READS_BALANCED = int(os.getenv("QUICK_SEARCH_PAGE_READS_BALANCED", "8"))
+QUICK_SEARCH_SEARXNG_ENGINES = os.getenv("QUICK_SEARCH_SEARXNG_ENGINES", "").strip()
+QUICK_SEARCH_SEARXNG_NEWS_ENGINES = os.getenv("QUICK_SEARCH_SEARXNG_NEWS_ENGINES", "").strip()
+QUICK_SEARCH_SEARXNG_CODE_ENGINES = os.getenv("QUICK_SEARCH_SEARXNG_CODE_ENGINES", "").strip()
+QUICK_SEARCH_SEARXNG_RECIPE_ENGINES = os.getenv("QUICK_SEARCH_SEARXNG_RECIPE_ENGINES", "").strip()
+QUICK_SEARCH_EMBED_RERANK = os.getenv("QUICK_SEARCH_EMBED_RERANK", "false").lower() == "true"
+QUICK_SEARCH_EMBED_TIMEOUT = float(os.getenv("QUICK_SEARCH_EMBED_TIMEOUT", "1.5"))
+
+# Optional LLM model for the quality-mode refinement round. The normal planner
+# is deterministic-first; this override is only used when refinement is allowed.
 QUICK_SEARCH_TRIAGE_MODEL = os.getenv("QUICK_SEARCH_TRIAGE_MODEL", "")
 
 # ============================================================

@@ -1,44 +1,29 @@
 """
-Multi-round search agent. Each chat turn runs:
+Quick Search answer-grounding agent.
 
-  1. triage()        — one LLM call (JSON-mode) returns
-                        {needs_search, standalone_query, queries, category}.
-  2. subquery dedup  — drop queries already searched this conversation.
-  3. parallel search — 1-3 SearXNG calls fanned out at once;
-                        time_range="month" when category=news + recency cue.
-  4. heuristic rank  — quality + domain dedup + category bias.
-  5. embedding rerank — cosine vs nomic-embed-text; drop sim<0.45;
-                         dedup pairs sim>0.85. Falls back to (4) on any
-                         embed failure.
-  6. relevance check — cheap content-token overlap (with prior_tokens
-                        folded in for follow-ups). No LLM.
-  7. refine          — if relevance is low and rounds remain, ask the model
-                        for ONE different query and search once more.
-  8. fetch + context — trafilatura-extracted page text + OG-image enrichment.
-
-Falls back to a raw-message search on any triage failure — never a
-regression vs today's behavior. Returns:
-  {"context": str, "rewritten_query": str, "skipped": bool, "reason": str}
-
-Reuses helpers from `quick_search`: `_content_tokens`, `_cached_search`,
-`_rank_and_filter_for_chat`, `_embed_score_and_dedup`, `_enrich_with_pages`,
-`_enrich_og_images`, `_build_context`, `proxy_image_url`,
-`_filter_novel_queries`.
+Each chat turn runs a deterministic-first SearchPlan, then parallel SearXNG
+fanout, heuristic freshness/source ranking, selective page reads, and prompt
+context injection. The LLM helpers below are retained for explicit tests and
+for the optional quality-mode refinement round; they are not on the default
+balanced critical path.
 """
 import asyncio
 import json
 import re
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import Any
 
+import config
 import quick_search as _qs
 
 
 _VALID_CATEGORIES = ("news", "code", "recipe", "general")
 _REFINE_THRESHOLD_DEFAULT = 0.30
 
-# Time-cues that indicate the user wants *current* news, not background.
-# Combined with category=="news" → pass time_range="month" to SearXNG so
-# 2019 articles don't outrank current ones.
+# Time-cues that indicate the user wants current news, not background.
+# Strict "today"/"yesterday" cues use day-level SearXNG filtering; softer
+# recency cues use week/month filters.
 _NEWS_TIME_CUE_RE = re.compile(
     r"\b(today|now|latest|current|currently|breaking|recent|recently|"
     r"this\s+(?:week|month)|"
@@ -58,10 +43,15 @@ def _news_time_range(category: str, latest: str) -> str | None:
     """Return SearXNG time_range when the query is news + has a recency cue."""
     if category != "news":
         return None
+    if re.search(r"\btoday|tonight|this morning|this afternoon|this evening\b", latest, re.I):
+        return "day"
+    if re.search(r"\byesterday\b", latest, re.I):
+        return "day"
+    if re.search(r"\bthis\s+week\b", latest, re.I):
+        return "week"
     if _NEWS_TIME_CUE_RE.search(latest):
         return "month"
     # Bare-year mentions of the current/recent year imply recency
-    from datetime import datetime
     yr = datetime.now().year
     if str(yr) in latest or str(yr - 1) in latest:
         return "month"
@@ -78,15 +68,325 @@ def _search_count_for_round(category: str, latest: str, queries: list[str]) -> i
     return _qs.CHAT_SEARCH_COUNT_DEFAULT
 
 
-async def _select_top_results(http, ollama_url: str, raw: list, primary: str, category: str) -> list:
-    """Rank a large candidate pool, then embedding-dedup and backfill to 35."""
-    candidates = _qs._rank_and_filter_for_chat(
-        raw, primary, category=category, limit=_qs.CHAT_RANK_POOL_SIZE,
+@dataclass
+class SearchModeConfig:
+    mode: str
+    min_results: int
+    target_results: int
+    max_results: int
+    page_reads: int
+    max_queries: int
+    allow_refine: bool
+    embed_rerank: bool
+
+
+@dataclass
+class SearchPlan:
+    canonical_question: str
+    queries: list[str]
+    category: str
+    freshness_mode: str
+    resolved_date: str | None
+    source_mode: str
+    search_provider: str
+    scraper_provider: str
+    reranker_type: str
+    searxng_engines: str
+    target_results: int
+    min_results: int
+    max_results: int
+    page_reads: int
+    time_range: str | None
+    generated_at: str
+    embed_rerank: bool
+
+
+def _configured_search_provider() -> str:
+    provider = (getattr(config, "QUICK_SEARCH_PROVIDER", "searxng") or "searxng").strip().lower()
+    return provider if provider == "searxng" else "searxng"
+
+
+def _configured_scraper_provider() -> str:
+    scraper = (getattr(config, "QUICK_SEARCH_SCRAPER", "local") or "local").strip().lower()
+    return scraper if scraper == "local" else "local"
+
+
+def _configured_reranker_type() -> str:
+    reranker = (getattr(config, "QUICK_SEARCH_RERANKER", "none") or "none").strip().lower()
+    if reranker in ("ollama", "embedding", "embeddings"):
+        return "ollama"
+    if bool(getattr(config, "QUICK_SEARCH_EMBED_RERANK", False)):
+        return "ollama"
+    return "none"
+
+
+def _mode_config() -> SearchModeConfig:
+    mode = (getattr(config, "QUICK_SEARCH_MODE", "balanced") or "balanced").strip().lower()
+    if mode not in ("speed", "balanced", "quality"):
+        mode = "balanced"
+    min_results = max(1, min(_qs.CHAT_MAX_RESULTS, int(getattr(config, "QUICK_SEARCH_MIN_RESULTS", 10))))
+    configured_target = max(min_results, min(
+        _qs.CHAT_MAX_RESULTS,
+        int(getattr(config, "QUICK_SEARCH_TARGET_RESULTS", _qs.CHAT_TARGET_RESULTS)),
+    ))
+    reranker_type = _configured_reranker_type()
+    embed_rerank = reranker_type == "ollama"
+    if mode == "speed":
+        speed_max = min(15, _qs.CHAT_MAX_RESULTS)
+        speed_min = min(min_results, speed_max)
+        target = max(speed_min, min(speed_max, configured_target))
+        return SearchModeConfig(mode, speed_min, target, speed_max, 3, 2, False, False)
+    if mode == "quality":
+        return SearchModeConfig(
+            mode, min_results, _qs.CHAT_MAX_RESULTS, _qs.CHAT_MAX_RESULTS,
+            12, 5, True, embed_rerank,
+        )
+    return SearchModeConfig(
+        mode, min_results, configured_target, _qs.CHAT_MAX_RESULTS,
+        _qs.CHAT_PAGE_FETCH_COUNT, 4, False, embed_rerank,
     )
-    return await _qs._embed_score_and_dedup(
-        http, ollama_url, primary, candidates,
-        limit=_qs.CHAT_MAX_RESULTS, backfill=True,
+
+
+def _display_date(d: date) -> str:
+    return f"{d.strftime('%B')} {d.day}, {d.year}"
+
+
+def _latest_user_message(messages: list) -> str:
+    for m in reversed(messages):
+        if m.get("role") == "user" and m.get("content"):
+            return m["content"].strip()
+    return ""
+
+
+def _strip_online_prefix(text: str) -> tuple[str, bool]:
+    stripped = (text or "").strip()
+    if stripped.lower().startswith("/online"):
+        return stripped[len("/online"):].strip(), True
+    return stripped, False
+
+
+def _freshness_from_text(text: str, now: datetime) -> tuple[str, str | None, str | None, str]:
+    low = text.lower()
+    if re.search(r"\btoday|tonight|this morning|this afternoon|this evening\b", low):
+        return "day", now.date().isoformat(), "day", _display_date(now.date())
+    if re.search(r"\byesterday\b", low):
+        d = now.date() - timedelta(days=1)
+        return "day", d.isoformat(), "day", _display_date(d)
+    if re.search(r"\bthis\s+week\b", low):
+        return "week", None, "week", ""
+    if re.search(r"\b(latest|current|currently|breaking|recent|recently|updates?|happening|going on)\b", low):
+        return "month", None, "month", ""
+    if str(now.year) in low or str(now.year - 1) in low:
+        return "month", None, "month", ""
+    return "none", None, None, ""
+
+
+_QUESTION_PREFIX_RE = re.compile(
+    r"^\s*(what(?:'s| is| was| were)?|who(?:'s| is)?|where(?:'s| is)?|"
+    r"when(?:'s| is)?|why(?:'s| is)?|how(?:'s| is| was)?|"
+    r"tell me about|give me|show me|find|search for|look up)\s+",
+    re.IGNORECASE,
+)
+
+
+def _clean_query_phrase(text: str) -> str:
+    q = re.sub(r"https?://\S+", " ", text or "")
+    q = _QUESTION_PREFIX_RE.sub("", q)
+    q = re.sub(r"\b(please|for me)\b", " ", q, flags=re.I)
+    q = re.sub(r"[?!.,;:]+", " ", q)
+    q = re.sub(r"\s+", " ", q).strip()
+    words = q.split()
+    if len(words) > 12:
+        q = " ".join(words[:12])
+    return q or (text or "").strip()[:120]
+
+
+def _query_variants(base: str, category: str, freshness_mode: str, resolved_label: str, max_queries: int) -> list[str]:
+    base = _clean_query_phrase(base)
+    variants = [base]
+    if freshness_mode == "day":
+        dated = _clean_query_phrase(f"{base} {resolved_label}") if resolved_label else base
+        variants = [dated, _clean_query_phrase(f"{base} today"), _clean_query_phrase(f"{base} news")]
+    elif category == "news":
+        variants = [base]
+        low = f" {base.lower()} "
+        for suffix in ("latest", "news", "updates"):
+            if f" {suffix} " not in low:
+                variants.append(_clean_query_phrase(f"{base} {suffix}"))
+    elif category == "code":
+        variants = [
+            base,
+            _clean_query_phrase(f"{base} documentation"),
+            _clean_query_phrase(f"{base} examples"),
+        ]
+    elif category == "recipe":
+        variants = [base, _clean_query_phrase(f"{base} recipe"), _clean_query_phrase(f"{base} technique")]
+    else:
+        variants = [base, _clean_query_phrase(f"{base} overview"), _clean_query_phrase(f"{base} sources")]
+    out: list[str] = []
+    seen: set[str] = set()
+    for q in variants:
+        q = q.strip()
+        key = q.lower()
+        if not q or key in seen or not _qs._content_tokens(q):
+            continue
+        seen.add(key)
+        out.append(q)
+        if len(out) >= max_queries:
+            break
+    return out or [base]
+
+
+def _context_topic(turns: list[str]) -> str:
+    for turn in reversed(turns):
+        if not turn.startswith("user:"):
+            continue
+        body = turn.split(":", 1)[-1]
+        cleaned = _clean_query_phrase(body)
+        if _qs._content_tokens(cleaned):
+            return cleaned
+    return ""
+
+
+def _deterministic_plan(messages: list, latest: str, mode_cfg: SearchModeConfig) -> SearchPlan:
+    now = datetime.now().astimezone()
+    latest, forced_online = _strip_online_prefix(latest)
+    search_provider = _configured_search_provider()
+    scraper_provider = _configured_scraper_provider()
+    reranker_type = _configured_reranker_type() if mode_cfg.embed_rerank else "none"
+    turns, prior_tokens = _build_prior_tokens(messages, latest)
+    base = latest
+    if prior_tokens and _qs._needs_context(latest, prior_tokens):
+        topic = _context_topic(turns)
+        if topic and not (_qs._content_tokens(latest) & _qs._content_tokens(topic)):
+            base = f"{topic} {latest}"
+
+    freshness_mode, resolved_date, time_range, resolved_label = _freshness_from_text(base, now)
+    category = _qs._classify_query(base)
+    if freshness_mode != "none" and category == "general":
+        category = "news"
+
+    canonical = latest
+    if resolved_label:
+        canonical = re.sub(
+            r"\btoday|tonight|this morning|this afternoon|this evening|yesterday\b",
+            f"on {resolved_label}",
+            canonical,
+            flags=re.I,
+        )
+    if base != latest and _qs._content_tokens(base):
+        canonical = f"{canonical} (context: {_clean_query_phrase(base)})"
+
+    queries = _query_variants(base, category, freshness_mode, resolved_label, mode_cfg.max_queries)
+    if forced_online and latest and latest not in queries:
+        queries.insert(0, _clean_query_phrase(latest))
+        queries = queries[:mode_cfg.max_queries]
+
+    searxng_engines = _searxng_engines_for_category(category)
+    source_bits = [search_provider]
+    if forced_online:
+        source_bits.append("/online")
+    source_bits.append(f"scraper={scraper_provider}")
+    source_bits.append(f"reranker={reranker_type}")
+    if searxng_engines:
+        source_bits.append(f"engines={searxng_engines}")
+
+    return SearchPlan(
+        canonical_question=canonical[:400],
+        queries=queries,
+        category=category,
+        freshness_mode=freshness_mode,
+        resolved_date=resolved_date,
+        source_mode=";".join(source_bits),
+        search_provider=search_provider,
+        scraper_provider=scraper_provider,
+        reranker_type=reranker_type,
+        searxng_engines=searxng_engines,
+        target_results=mode_cfg.target_results,
+        min_results=mode_cfg.min_results,
+        max_results=mode_cfg.max_results,
+        page_reads=mode_cfg.page_reads,
+        time_range=time_range,
+        generated_at=now.strftime("%Y-%m-%d %H:%M %Z"),
+        embed_rerank=mode_cfg.embed_rerank,
     )
+
+
+def _searxng_categories(category: str, freshness_mode: str) -> str:
+    if category == "news" and freshness_mode != "none":
+        return "news"
+    return "general"
+
+
+def _searxng_engines_for_category(category: str) -> str:
+    specific = {
+        "news": getattr(config, "QUICK_SEARCH_SEARXNG_NEWS_ENGINES", ""),
+        "code": getattr(config, "QUICK_SEARCH_SEARXNG_CODE_ENGINES", ""),
+        "recipe": getattr(config, "QUICK_SEARCH_SEARXNG_RECIPE_ENGINES", ""),
+    }.get(category, "")
+    return (specific or getattr(config, "QUICK_SEARCH_SEARXNG_ENGINES", "") or "").strip()
+
+
+def _search_count_for_plan(plan: SearchPlan, query_count: int) -> int:
+    spread = max(1, query_count)
+    per_query = int((plan.target_results / spread) + plan.min_results)
+    if plan.freshness_mode == "day":
+        per_query += 4
+    return max(10, min(_qs.CHAT_SEARCH_COUNT_BROAD, per_query))
+
+
+async def _search_provider(http, plan: SearchPlan, queries: list[str]) -> tuple[list, int]:
+    count = _search_count_for_plan(plan, len(queries))
+    categories = _searxng_categories(plan.category, plan.freshness_mode)
+    engines = plan.searxng_engines or None
+    raw_lists = await asyncio.gather(
+        *[
+            _qs._cached_search(
+                http, q, count=count, time_range=plan.time_range,
+                categories=categories, engines=engines,
+            )
+            for q in queries
+        ],
+        return_exceptions=True,
+    )
+    errors = sum(1 for r in raw_lists if isinstance(r, Exception))
+    usable: list[list] = []
+    for q, result in zip(queries, raw_lists):
+        if not isinstance(result, list):
+            continue
+        tagged = []
+        for item in result:
+            if not isinstance(item, dict):
+                continue
+            copied = dict(item)
+            copied.setdefault("query_origin", q)
+            tagged.append(copied)
+        usable.append(tagged)
+    return _merge_unique(usable), errors
+
+
+async def _select_top_results(http, ollama_url: str, raw: list, primary: str, plan: SearchPlan) -> list:
+    candidates = _qs._rank_for_search_plan(
+        raw, primary, plan,
+        category=plan.category,
+        limit=plan.max_results,
+    )
+    if not candidates:
+        return []
+    if plan.embed_rerank:
+        try:
+            reranked = await asyncio.wait_for(
+                _qs._embed_score_and_dedup(
+                    http, ollama_url, primary, candidates,
+                    limit=plan.target_results, backfill=True,
+                ),
+                timeout=float(getattr(config, "QUICK_SEARCH_EMBED_TIMEOUT", 1.5)),
+            )
+            if reranked:
+                return reranked[:plan.target_results]
+        except Exception as e:
+            print(f"[SA]   embed rerank skipped: {type(e).__name__}: {e!r}")
+    return candidates[:plan.target_results]
 
 
 # ── JSON-mode Ollama call ──
@@ -425,67 +725,35 @@ async def run_search_agent(
     max_rounds: int = 2,
     relevance_threshold: float = _REFINE_THRESHOLD_DEFAULT,
 ) -> dict:
-    """Orchestrate skip → triage → multi-query search → relevance check →
-    optional refine → page/OG enrichment → context build.
+    """Orchestrate skip → deterministic plan → multi-query search →
+    heuristic rank → optional quality refine → page/OG enrichment → context.
 
     Returns the same shape as `run_quick_search_for_chat`:
       {"context", "rewritten_query", "skipped", "reason"}
-
-    On triage failure, falls back to searching the raw user message.
     """
-    latest = ""
-    for m in reversed(messages):
-        if m.get("role") == "user" and m.get("content"):
-            latest = m["content"].strip()
-            break
+    latest = _latest_user_message(messages)
     if not latest:
         return {"context": "", "rewritten_query": "", "skipped": True, "reason": "no user message"}
 
-    skip, reason = _qs._should_skip(latest)
+    clean_latest, _ = _strip_online_prefix(latest)
+    skip, reason = _qs._should_skip(clean_latest)
     if skip:
         await _emit(events, conv_id, "tool_done", {
             "tool": "quick_search", "icon": "search", "status": f"Skipped ({reason})",
         })
         return {"context": "", "rewritten_query": "", "skipped": True, "reason": reason}
 
+    mode_cfg = _mode_config()
+    plan = _deterministic_plan(messages, latest, mode_cfg)
+
     await _emit(events, conv_id, "tool_start", {
         "tool": "quick_search", "icon": "search",
-        "status": f"Searching: {latest[:60]}",
+        "status": f"Searching ({mode_cfg.mode}): {plan.canonical_question[:60]}",
     })
 
-    # ── Triage ──
-    _, prior_tokens = _build_prior_tokens(messages, latest)
-    plan = await triage(http, ollama_url, triage_model, messages, latest)
-    triage_ok = plan is not None
-    if not triage_ok:
-        # Triage failed (model down, JSON parse, or validation rejection).
-        # Search the raw user message as a last resort — the relevance check
-        # and refine path will still try to recover bad results.
-        print(f"[SA]   triage failed; searching raw user message")
-        plan = {
-            "needs_search": True,
-            "standalone_query": latest[:400],
-            "queries": [latest[:200]],
-            "category": "general",
-            "reason": "triage failed",
-        }
-
-    if not plan["needs_search"] or not plan["queries"]:
-        await _emit(events, conv_id, "tool_done", {
-            "tool": "quick_search", "icon": "search",
-            "status": f"Skipped ({plan.get('reason') or 'not needed'})",
-        })
-        return {
-            "context": "", "rewritten_query": "",
-            "skipped": True, "reason": plan.get("reason") or "triage skip",
-        }
-
-    queries: list[str] = list(plan["queries"])
-    category: str = plan["category"]
-    standalone: str = plan.get("standalone_query") or (queries[0] if queries else latest)
-
     # Filter out queries already searched earlier in this conversation.
-    queries = _qs._filter_novel_queries(conv_id, queries)
+    queries = _qs._filter_novel_queries(conv_id, list(plan.queries))
+    plan.queries = queries
 
     progress_label = " | ".join(q[:40] for q in queries[:2])
     await _emit(events, conv_id, "tool_progress", {
@@ -493,40 +761,36 @@ async def run_search_agent(
         "status": f"→ {progress_label[:120]}",
     })
 
-    # ── Round 1: parallel search ──
+    _, prior_tokens = _build_prior_tokens(messages, clean_latest)
     rounds_used = 1
-    time_range = _news_time_range(category, latest)
-    search_count = _search_count_for_round(category, latest, queries)
-    raw_lists = await asyncio.gather(
-        *[_qs._cached_search(http, q, count=search_count, time_range=time_range) for q in queries],
-        return_exceptions=True,
-    )
-    raw = _merge_unique([r for r in raw_lists if isinstance(r, list)])
+    raw, search_errors = await _search_provider(http, plan, queries)
 
     if not raw:
+        reason_text = "search unavailable or no results"
+        ctx = _qs._build_unavailable_context(plan.canonical_question, plan, reason_text)
         await _emit(events, conv_id, "tool_done", {
-            "tool": "quick_search", "icon": "search", "status": "No results found",
+            "tool": "quick_search", "icon": "search", "status": "No usable search results",
         })
-        return {"context": "", "rewritten_query": queries[0],
+        return {"context": ctx, "rewritten_query": plan.canonical_question,
                 "skipped": False, "reason": "no results"}
 
-    # Use standalone_query as the canonical query for ranking + carousel.
-    # It carries the pronoun-resolved form; queries[] are the (often shorter)
-    # search-optimized variants fanned out to SearXNG.
-    primary = standalone
-    # Embedding rerank + dedup runs over a larger ranked pool, then backfills
-    # from that pool so near-duplicate clusters do not shrink the final list.
-    top = await _select_top_results(http, ollama_url, raw, primary, category)
-    score = relevance_score(latest, queries, top, prior_tokens)
-    print(f"[SA]   triage_ok={triage_ok} round={rounds_used} sq={standalone!r} q={queries!r} relevance={score:.2f}")
+    primary = plan.canonical_question
+    top = await _select_top_results(http, ollama_url, raw, primary, plan)
+    score = relevance_score(clean_latest, queries, top, prior_tokens)
+    print(
+        f"[SA]   plan mode={mode_cfg.mode} round={rounds_used} "
+        f"freshness={plan.freshness_mode} time_range={plan.time_range} "
+        f"q={queries!r} relevance={score:.2f} errors={search_errors}"
+    )
 
-    # ── Round 2: refine if relevance is low ──
+    # ── Optional quality refinement ──
     if (
-        score < relevance_threshold
+        mode_cfg.allow_refine
+        and score < relevance_threshold
         and rounds_used < max_rounds
-        and len(_qs._content_tokens(latest)) >= 3
+        and len(_qs._content_tokens(clean_latest)) >= 3
     ):
-        refined = await refine_query(http, ollama_url, refine_model, latest, queries, top)
+        refined = await refine_query(http, ollama_url, refine_model, clean_latest, queries, top)
         if refined and refined not in queries:
             await _emit(events, conv_id, "tool_progress", {
                 "tool": "quick_search", "icon": "search",
@@ -535,24 +799,25 @@ async def run_search_agent(
             try:
                 more = await _qs._cached_search(
                     http, refined,
-                    count=_search_count_for_round(category, latest, queries + [refined]),
-                    time_range=time_range,
+                    count=_search_count_for_plan(plan, len(queries) + 1),
+                    time_range=plan.time_range,
+                    categories=_searxng_categories(plan.category, plan.freshness_mode),
                 )
             except Exception:
                 more = []
             if more:
+                more = [{**r, "query_origin": refined} for r in more if isinstance(r, dict)]
                 raw = _merge_unique([raw, more])
                 queries = queries + [refined]
-                # Keep ranking against the standalone query — the refined query
-                # is just another search-optimized variant.
-                top = await _select_top_results(http, ollama_url, raw, primary, category)
+                plan.queries = queries
+                top = await _select_top_results(http, ollama_url, raw, primary, plan)
                 rounds_used = 2
-                new_score = relevance_score(latest, queries, top, prior_tokens)
+                new_score = relevance_score(clean_latest, queries, top, prior_tokens)
                 print(f"[SA]   round={rounds_used} refined={refined!r} relevance={new_score:.2f}")
 
     # ── Page-fetch + OG-image enrichment (parallel) ──
     page_text, _ = await asyncio.gather(
-        _qs._enrich_with_pages(http, top, top_n=_qs.CHAT_PAGE_FETCH_COUNT),
+        _qs._enrich_with_pages(http, top, top_n=plan.page_reads),
         _qs._enrich_og_images(http, top, max_fetch=4),
         return_exceptions=False,
     )
@@ -576,6 +841,12 @@ async def run_search_agent(
             "thumbnail": r.get("thumbnail", ""),
             "engine": r.get("engine", ""),
             "type": r.get("type", "web"),
+            "published_date": r.get("published_date", ""),
+            "freshness": r.get("freshness", ""),
+            "source_tier": r.get("source_tier", ""),
+            "score": r.get("score", 0),
+            "score_reason": r.get("score_reason", ""),
+            "query_origin": r.get("query_origin", ""),
         }
         for r in top
     ]
@@ -583,9 +854,12 @@ async def run_search_agent(
         "query": primary,
         "results": carousel,
         "source": "quick_search",
+        "freshness_mode": plan.freshness_mode,
+        "resolved_date": plan.resolved_date,
+        "queries": plan.queries,
     })
 
-    ctx = _qs._build_context(top, primary, page_text, allowed)
+    ctx = _qs._build_context(top, primary, page_text, allowed, plan)
 
     await _emit(events, conv_id, "tool_done", {
         "tool": "quick_search", "icon": "search",
@@ -593,7 +867,7 @@ async def run_search_agent(
                   f"{' (refined)' if rounds_used > 1 else ''}",
     })
 
-    print(f"[SA]   {len(top)} results, category={category}, rounds={rounds_used}")
+    print(f"[SA]   {len(top)} results, category={plan.category}, rounds={rounds_used}")
     return {"context": ctx, "rewritten_query": primary, "skipped": False, "reason": ""}
 
 

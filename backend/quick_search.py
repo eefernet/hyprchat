@@ -3,11 +3,9 @@ Quick search — shared helper for chat injection (`agents/chat.py`) and the
 standalone `/api/quick-search` endpoint (`main.py`).
 
 Pipeline (chat path): dispatches to `search_agent.run_search_agent`, which
-runs skip-gate → triage (LLM, JSON-mode, returns standalone_query +
-queries + category) → per-conversation subquery dedup → parallel SearXNG
-(time_range="month" for news + recency cue) → heuristic rank + category
-bias → embedding rerank/dedup against nomic-embed-text → relevance check
-(prior-tokens-aware for follow-ups) → optional refine → trafilatura page
+runs skip-gate → deterministic SearchPlan → per-conversation subquery dedup
+→ parallel SearXNG fanout with native filters → heuristic rank/freshness/
+domain diversity → optional time-bounded embedding rerank → selective page
 extraction + OG-image enrichment → context build.
 
 This module hosts the shared helpers the agent reuses: skip-gate regexes,
@@ -29,24 +27,39 @@ import socket
 import time
 import urllib.parse
 from collections import OrderedDict
-from datetime import datetime
+from datetime import date, datetime
+from email.utils import parsedate_to_datetime
 
 import config
 from research import _search_searxng, _rank_urls
 
 
-# ── 10-min TTL cache, keyed by (query, time_range), bounded LRU ──
-_CACHE: "OrderedDict[tuple[str, str | None], tuple[float, list]]" = OrderedDict()
+# ── 10-min TTL cache, keyed by (query, time_range, categories, engines), bounded LRU ──
+_CACHE: "OrderedDict[tuple[str, str | None, str, str], tuple[float, list]]" = OrderedDict()
 _CACHE_TTL = 600
 _CACHE_MAX = 512
 
-# Chat Quick Search is a broad source gatherer. Keep the final source list
-# generous, but only fetch full page text for the highest-ranked few.
-CHAT_MAX_RESULTS = 35
-CHAT_SEARCH_COUNT_DEFAULT = 25
-CHAT_SEARCH_COUNT_BROAD = 35
-CHAT_RANK_POOL_SIZE = 105
-CHAT_PAGE_FETCH_COUNT = 8
+def _clamp_int(value, fallback: int, lo: int, hi: int) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = fallback
+    return max(lo, min(hi, n))
+
+
+# Chat Quick Search is a broad source gatherer. Defaults target 20-25 sources,
+# with explicit min/max clamps for mode-specific overrides.
+CHAT_MIN_RESULTS = _clamp_int(getattr(config, "QUICK_SEARCH_MIN_RESULTS", 10), 10, 1, 35)
+CHAT_MAX_RESULTS = _clamp_int(getattr(config, "QUICK_SEARCH_MAX_RESULTS", 35), 35, CHAT_MIN_RESULTS, 50)
+CHAT_TARGET_RESULTS = _clamp_int(
+    getattr(config, "QUICK_SEARCH_TARGET_RESULTS", 24), 24, CHAT_MIN_RESULTS, CHAT_MAX_RESULTS,
+)
+CHAT_SEARCH_COUNT_DEFAULT = CHAT_TARGET_RESULTS
+CHAT_SEARCH_COUNT_BROAD = CHAT_MAX_RESULTS
+CHAT_RANK_POOL_SIZE = max(CHAT_MAX_RESULTS * 3, CHAT_TARGET_RESULTS * 4)
+CHAT_PAGE_FETCH_COUNT = _clamp_int(
+    getattr(config, "QUICK_SEARCH_PAGE_READS_BALANCED", 8), 8, 0, 16,
+)
 CHAT_CONTEXT_SNIPPET_CHARS = 280
 CHAT_CONTEXT_PAGE_CHARS = 1200
 
@@ -230,6 +243,8 @@ def _registrable_domain(url: str) -> str:
         host = urllib.parse.urlparse(url).netloc.lower()
         host = host.split(":", 1)[0].removeprefix("www.")
         parts = host.split(".")
+        if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in {"co", "com", "org", "net", "gov", "ac", "edu"}:
+            return ".".join(parts[-3:])
         return ".".join(parts[-2:]) if len(parts) >= 2 else host
     except Exception:
         return url
@@ -351,6 +366,240 @@ def _rank_and_filter_for_chat(
     cat = category if category in _DOWNRANK_DOMAINS else _classify_query(query)
     biased = _apply_domain_bias(deduped, cat)
     return biased[:limit]
+
+
+# ── Deterministic answer-grounding ranker ──
+_MAJOR_SOURCE_DOMAINS = frozenset({
+    "apnews.com", "reuters.com", "bbc.com", "bbc.co.uk", "npr.org", "pbs.org",
+    "nytimes.com", "washingtonpost.com", "theguardian.com", "bloomberg.com",
+    "wsj.com", "latimes.com", "politico.com", "axios.com", "nbcnews.com",
+    "abcnews.go.com", "cbsnews.com", "cnn.com", "theatlantic.com",
+})
+_LOW_SOURCE_DOMAINS = frozenset({
+    "twitter.com", "x.com", "facebook.com", "instagram.com", "tiktok.com",
+    "pinterest.com", "reddit.com", "quora.com", "medium.com",
+})
+
+
+def _parse_result_date(value) -> date | None:
+    """Parse common SearXNG/news date forms to a date."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    low = s.lower()
+    today = datetime.now().date()
+    if "hour ago" in low or "hours ago" in low or "minute ago" in low or "minutes ago" in low:
+        return today
+    if "yesterday" in low:
+        return date.fromordinal(today.toordinal() - 1)
+    m = re.search(r"\b(\d{1,2})\s+days?\s+ago\b", low)
+    if m:
+        return date.fromordinal(today.toordinal() - min(3650, int(m.group(1))))
+    for candidate in (s, s.replace("Z", "+00:00")):
+        try:
+            return datetime.fromisoformat(candidate).date()
+        except Exception:
+            pass
+    try:
+        return parsedate_to_datetime(s).date()
+    except Exception:
+        pass
+    for pattern, fmt in (
+        (r"\b(\d{4}-\d{1,2}-\d{1,2})\b", "%Y-%m-%d"),
+        (r"\b(\d{4}/\d{1,2}/\d{1,2})\b", "%Y/%m/%d"),
+        (r"\b([A-Z][a-z]+ \d{1,2}, \d{4})\b", "%B %d, %Y"),
+        (r"\b([A-Z][a-z]{2} \d{1,2}, \d{4})\b", "%b %d, %Y"),
+    ):
+        m = re.search(pattern, s)
+        if not m:
+            continue
+        try:
+            return datetime.strptime(m.group(1), fmt).date()
+        except Exception:
+            pass
+    return None
+
+
+def _result_published_date(result: dict) -> date | None:
+    for key in ("published_date", "publishedDate", "date", "pubDate", "updated"):
+        parsed = _parse_result_date(result.get(key))
+        if parsed:
+            return parsed
+    return None
+
+
+def _source_tier_for_domain(domain: str) -> tuple[str, float]:
+    if not domain:
+        return "unknown", 0.45
+    if domain in _LOW_SOURCE_DOMAINS:
+        return "low", 0.2
+    if domain.endswith(".gov") or domain.endswith(".mil") or domain in _MAJOR_SOURCE_DOMAINS:
+        return "primary", 1.0
+    if domain.endswith(".edu") or domain.endswith(".org"):
+        return "strong", 0.78
+    return "standard", 0.58
+
+
+def _freshness_fit(published: date | None, freshness_mode: str, resolved_date: str | None) -> tuple[str, float]:
+    if freshness_mode in ("", "none", None):
+        return "evergreen", 0.5
+    if not published:
+        return "unknown", 0.35
+    today = datetime.now().date()
+    target = _parse_result_date(resolved_date) if resolved_date else today
+    if freshness_mode == "day":
+        if target and published == target:
+            return "same_day", 1.0
+        delta = abs(((target or today) - published).days)
+        if delta <= 2:
+            return "near_day", 0.45
+        return "stale", 0.05
+    age = max(0, (today - published).days)
+    if freshness_mode == "week":
+        if age <= 7:
+            return "fresh", 1.0
+        if age <= 31:
+            return "recent", 0.55
+        return "stale", 0.1
+    if freshness_mode == "month":
+        if age <= 31:
+            return "fresh", 1.0
+        if age <= 90:
+            return "recent", 0.55
+        return "stale", 0.1
+    return "unknown", 0.35
+
+
+def _snippet_usefulness(result: dict) -> float:
+    snippet = (result.get("content") or result.get("snippet") or "").strip()
+    if not snippet:
+        return 0.0
+    if _MENU_RE.search(snippet):
+        return 0.2
+    if len(snippet) >= 180:
+        return 1.0
+    if len(snippet) >= 80:
+        return 0.65
+    return 0.35
+
+
+def _lexical_relevance(query: str, result: dict) -> float:
+    q_tokens = _content_tokens(query)
+    if not q_tokens:
+        return 0.5
+    blob = " ".join([
+        result.get("title") or "",
+        result.get("content") or result.get("snippet") or "",
+        _registrable_domain(result.get("url") or ""),
+    ])
+    r_tokens = _content_tokens(blob)
+    if not r_tokens:
+        return 0.0
+    overlap = q_tokens & r_tokens
+    return min(1.0, len(overlap) / max(1, len(q_tokens)))
+
+
+def _plan_get(plan, key: str, default=None):
+    if isinstance(plan, dict):
+        return plan.get(key, default)
+    return getattr(plan, key, default)
+
+
+def _rank_for_search_plan(
+    results: list,
+    query: str,
+    plan=None,
+    *,
+    category: str | None = None,
+    limit: int = CHAT_TARGET_RESULTS,
+) -> list:
+    """Rank candidates for answer grounding without making embeddings mandatory."""
+    limit = max(1, min(CHAT_MAX_RESULTS, int(limit or CHAT_TARGET_RESULTS)))
+    text_only = [r for r in results if isinstance(r, dict) and r.get("type", "web") not in ("youtube", "image")]
+    if not text_only:
+        return []
+
+    cat = category or _plan_get(plan, "category") or _classify_query(query)
+    ranked_urls = _rank_urls(text_only)
+    rank_pos = {u: i for i, u in enumerate(ranked_urls)}
+    freshness_mode = _plan_get(plan, "freshness_mode", "none")
+    resolved_date = _plan_get(plan, "resolved_date", None)
+    strict_day = freshness_mode == "day"
+
+    scored: list[dict] = []
+    for idx, r in enumerate(text_only):
+        item = dict(r)
+        url = item.get("url") or ""
+        domain = _registrable_domain(url)
+        published = _result_published_date(item)
+        freshness, freshness_score = _freshness_fit(published, freshness_mode, resolved_date)
+        source_tier, source_score = _source_tier_for_domain(domain)
+        lexical = _lexical_relevance(query, item)
+        snippet_score = _snippet_usefulness(item)
+        base_rank = 1.0 - (rank_pos.get(url, idx) / max(1, len(text_only)))
+        raw_score = item.get("score", 0)
+        try:
+            raw_score = min(1.0, max(0.0, float(raw_score) / 100.0))
+        except (TypeError, ValueError):
+            raw_score = 0.0
+
+        if strict_day:
+            score = (
+                lexical * 0.34
+                + freshness_score * 0.34
+                + source_score * 0.14
+                + snippet_score * 0.10
+                + base_rank * 0.06
+                + raw_score * 0.02
+            )
+        else:
+            score = (
+                lexical * 0.42
+                + freshness_score * 0.20
+                + source_score * 0.16
+                + snippet_score * 0.12
+                + base_rank * 0.07
+                + raw_score * 0.03
+            )
+        if domain in (_DOWNRANK_DOMAINS.get(cat) or frozenset()):
+            score *= 0.72
+
+        item["published_date"] = published.isoformat() if published else (item.get("published_date") or "")
+        item["freshness"] = freshness
+        item["source_tier"] = source_tier
+        item["score"] = round(score * 100, 1)
+        item["score_reason"] = (
+            f"lexical={lexical:.2f}; freshness={freshness}; "
+            f"source={source_tier}; snippet={snippet_score:.2f}"
+        )
+        scored.append(item)
+
+    scored.sort(key=lambda x: x.get("score", 0), reverse=True)
+    diverse = _dedupe_by_domain(scored, max_per_domain=2)
+    if len(diverse) < min(limit, len(scored)):
+        used_urls = {r.get("url") for r in diverse}
+        counts: dict[str, int] = {}
+        for r in diverse:
+            d = _registrable_domain(r.get("url", ""))
+            counts[d] = counts.get(d, 0) + 1
+        for r in scored:
+            if r.get("url") in used_urls:
+                continue
+            d = _registrable_domain(r.get("url", ""))
+            if counts.get(d, 0) >= 3:
+                continue
+            diverse.append(r)
+            used_urls.add(r.get("url"))
+            counts[d] = counts.get(d, 0) + 1
+            if len(diverse) >= limit:
+                break
+    return diverse[:limit]
 
 
 # ── Embedding-based rerank + dedup (Perplexica pattern) ──
@@ -596,12 +845,25 @@ async def _fetch_clean_page(http, url: str) -> dict | None:
 
 
 async def _enrich_with_pages(http, results: list, top_n: int = 3) -> dict[str, str]:
-    targets = [
-        r["url"] for r in results[:top_n]
-        if r.get("url")
-        and _looks_thin(r.get("content") or r.get("snippet", ""))
-        and _url_safe(r["url"])
-    ]
+    top_n = max(0, int(top_n or 0))
+    targets: list[str] = []
+    seen: set[str] = set()
+
+    def _add(url: str) -> None:
+        if not url or url in seen or not _url_safe(url):
+            return
+        targets.append(url)
+        seen.add(url)
+
+    # Always read the first few text pages, then spend the rest of the budget
+    # on thin snippets where page text is most likely to change answer quality.
+    for r in results[:min(3, top_n)]:
+        _add(r.get("url") or "")
+    for r in results[:max(top_n * 2, top_n)]:
+        if len(targets) >= top_n:
+            break
+        if _looks_thin(r.get("content") or r.get("snippet", "")):
+            _add(r.get("url") or "")
     if not targets:
         return {}
 
@@ -681,9 +943,65 @@ def proxy_image_url(raw_url: str) -> str:
 
 
 # ── Context builder ──
-def _build_context(results: list, query: str, page_text: dict[str, str], allowed_image_urls: set[str]) -> str:
-    today = datetime.now().strftime("%Y-%m-%d")
-    lines = [f"=== WEB SEARCH (today: {today}) ===", f"Query: {query}", ""]
+def _format_now() -> str:
+    try:
+        return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def _strict_day_evidence(results: list, plan=None) -> bool:
+    if _plan_get(plan, "freshness_mode", "none") != "day":
+        return True
+    resolved = _plan_get(plan, "resolved_date", None)
+    target = _parse_result_date(resolved)
+    if not target:
+        return True
+    for r in results:
+        published = _result_published_date(r)
+        if published and published == target:
+            return True
+    return False
+
+
+def _build_context(
+    results: list,
+    query: str,
+    page_text: dict[str, str],
+    allowed_image_urls: set[str],
+    plan=None,
+) -> str:
+    now = _format_now()
+    resolved = _plan_get(plan, "resolved_date", "") or "none"
+    freshness_mode = _plan_get(plan, "freshness_mode", "none") or "none"
+    queries = _plan_get(plan, "queries", None) or [query]
+    source_mode = _plan_get(plan, "source_mode", "searxng") or "searxng"
+    search_provider = _plan_get(plan, "search_provider", "searxng") or "searxng"
+    scraper_provider = _plan_get(plan, "scraper_provider", "local") or "local"
+    reranker_type = _plan_get(plan, "reranker_type", "none") or "none"
+    searxng_engines = _plan_get(plan, "searxng_engines", "") or ""
+    lines = [
+        "=== WEB SEARCH GROUNDING ===",
+        f"Current date/time: {now}",
+        f"Canonical question: {query}",
+        f"Resolved date: {resolved}",
+        f"Freshness mode: {freshness_mode}",
+        f"Search backend: {source_mode}",
+        f"Search provider: {search_provider}",
+        f"Scraper: {scraper_provider}",
+        f"Reranker: {reranker_type}",
+        "Queries used: " + "; ".join(str(q) for q in queries),
+        "",
+    ]
+    if searxng_engines:
+        lines.insert(-1, f"SearXNG engines: {searxng_engines}")
+    if freshness_mode == "day" and not _strict_day_evidence(results, plan):
+        lines += [
+            "FRESHNESS WARNING:",
+            f"- These sources do not prove activity on {resolved}.",
+            "- If the user asked what happened on that date, say the search only found older or undated evidence.",
+            "",
+        ]
     for i, r in enumerate(results, 1):
         title = (r.get("title") or "")[:200]
         url = r.get("url") or ""
@@ -692,6 +1010,17 @@ def _build_context(results: list, query: str, page_text: dict[str, str], allowed
         body = page_text.get(url, "")
         lines.append(f"{i}. **{title}** — {domain}")
         lines.append(f"   URL: {url}")
+        if r.get("published_date"):
+            lines.append(f"   Published: {r.get('published_date')}")
+        if r.get("freshness") or r.get("source_tier") or r.get("score") is not None:
+            lines.append(
+                "   Fit: "
+                f"freshness={r.get('freshness') or 'unknown'}, "
+                f"source_tier={r.get('source_tier') or 'unknown'}, "
+                f"score={r.get('score', '')}"
+            )
+        if r.get("score_reason"):
+            lines.append(f"   Score reason: {r.get('score_reason')}")
         if snippet:
             lines.append(f"   Snippet: {snippet}")
         if body:
@@ -705,7 +1034,8 @@ def _build_context(results: list, query: str, page_text: dict[str, str], allowed
     has_images = bool(allowed_image_urls)
     lines += ["INSTRUCTIONS:",
               "- Answer using these results. Cite the URLs you actually used.",
-              "- If the results don't contain the answer, say so plainly — don't guess."]
+              "- If the results don't contain the answer, say so plainly; don't guess.",
+              "- For strict date questions, only claim activity on the resolved date when a source proves that date."]
     if has_images:
         lines += [
             "- IMAGES: One of the [image: ...] URLs above MUST be embedded near the top",
@@ -719,16 +1049,39 @@ def _build_context(results: list, query: str, page_text: dict[str, str], allowed
     return "\n".join(lines)
 
 
+def _build_unavailable_context(query: str, plan=None, reason: str = "search unavailable") -> str:
+    resolved = _plan_get(plan, "resolved_date", "") or "none"
+    freshness_mode = _plan_get(plan, "freshness_mode", "none") or "none"
+    queries = _plan_get(plan, "queries", None) or [query]
+    source_mode = _plan_get(plan, "source_mode", "searxng") or "searxng"
+    return "\n".join([
+        "=== WEB SEARCH UNAVAILABLE ===",
+        f"Current date/time: {_format_now()}",
+        f"Canonical question: {query}",
+        f"Resolved date: {resolved}",
+        f"Freshness mode: {freshness_mode}",
+        f"Search backend: {source_mode}",
+        "Queries attempted: " + "; ".join(str(q) for q in queries),
+        f"Reason: {reason}",
+        "",
+        "INSTRUCTIONS:",
+        "- Web search did not provide usable sources for this turn.",
+        "- If the user asked about current events, recent news, or a specific date, say you cannot verify it from fresh sources.",
+        "- Do not answer current facts from memory as if they were verified.",
+    ])
+
+
 # ── Cached SearXNG (safesearch=0 per project config) ──
 async def _cached_search(
     http, query: str, count: int = 10, time_range: str | None = None,
+    categories: str = "general", engines: str | None = None,
 ) -> list:
-    """Cached SearXNG search. Cache key is (query, time_range) so news
-    queries with time_range=month don't collide with evergreen searches
-    of the same string.
+    """Cached SearXNG search. Cache key includes native routing filters so
+    current/news/engine-specific searches don't collide with evergreen results
+    of the same query string.
     """
     now = time.time()
-    key = (query, time_range)
+    key = (query, time_range, categories or "general", engines or "")
     cached = _CACHE.get(key)
     if cached and (now - cached[0]) < _CACHE_TTL:
         if len(cached[1]) >= count:
@@ -736,7 +1089,8 @@ async def _cached_search(
             return cached[1]
     results = await _search_searxng(
         http, config.SEARXNG_URL, query, count=count,
-        safesearch="0", time_range=time_range,
+        categories=categories or "general", safesearch="0", time_range=time_range,
+        engines=engines,
     )
     if results:
         _CACHE[key] = (now, results)
@@ -818,19 +1172,13 @@ async def run_quick_search_for_chat(
 ) -> dict:
     """Used by `agents/chat.py` to inject fresh search context.
 
-    Dispatches to `search_agent.run_search_agent` for the full multi-round
-    pipeline (skip-gate → triage → parallel SearXNG → relevance check →
-    optional refine → fetch → context build).
-
-    Triage model selection: explicit `QUICK_SEARCH_TRIAGE_MODEL` override,
-    otherwise the small workspace model (fast — ~1-2s per call vs 10-30s on a
-    27B chat model — and on multi-GPU / sufficient-VRAM setups it stays
-    co-resident with the chat model so there's no swap penalty), otherwise
-    the chat model, otherwise the default.
+    Dispatches to `search_agent.run_search_agent` for the deterministic-first
+    pipeline. The model parameter is now only used for optional quality-mode
+    refinement, not for the normal planning path.
 
     Returns: {"context": str, "rewritten_query": str, "skipped": bool, "reason": str}
     """
-    triage_model = (
+    refine_model = (
         getattr(config, "QUICK_SEARCH_TRIAGE_MODEL", "")
         or workspace_model
         or chat_model
@@ -840,7 +1188,7 @@ async def run_quick_search_for_chat(
     # from this module.
     from search_agent import run_search_agent
     return await run_search_agent(
-        http, ollama_url, triage_model, triage_model,
+        http, ollama_url, refine_model, refine_model,
         events, conv_id, messages,
         default_model=default_model or workspace_model,
     )
@@ -859,6 +1207,9 @@ async def run_quick_search_for_api(http, query: str, count: int = 6) -> dict:
     deduped = _dedupe_by_domain(raw, max_per_domain=2)[:count]
     out = []
     for r in deduped:
+        published = _result_published_date(r)
+        domain = _registrable_domain(r.get("url", ""))
+        tier, _ = _source_tier_for_domain(domain)
         out.append({
             "title": r.get("title", ""),
             "url": r.get("url", ""),
@@ -866,6 +1217,12 @@ async def run_quick_search_for_api(http, query: str, count: int = 6) -> dict:
             "thumbnail": r.get("thumbnail", ""),
             "engine": r.get("engine", ""),
             "type": r.get("type", "web"),
+            "published_date": published.isoformat() if published else (r.get("published_date") or ""),
+            "freshness": "unknown",
+            "source_tier": tier,
+            "score": r.get("score", 0),
+            "score_reason": "standalone quick search result",
+            "query_origin": query,
         })
 
     await _enrich_og_images(http, out)

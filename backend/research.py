@@ -124,7 +124,11 @@ async def _search_google_fallback(http, query: str, count: int = 10) -> list:
         return []
 
 
-async def _search_searxng(http, searxng_url: str, query: str, count: int = 10, categories: str = "general", safesearch: str | None = None, time_range: str | None = None) -> list:
+async def _search_searxng(
+    http, searxng_url: str, query: str, count: int = 10,
+    categories: str = "general", safesearch: str | None = None,
+    time_range: str | None = None, engines: str | None = None,
+) -> list:
     """Search SearXNG and return structured results. Falls back to Google scrape if SearXNG returns nothing.
 
     `time_range`: SearXNG accepts day|week|month|year. Set to "month" for news
@@ -137,6 +141,8 @@ async def _search_searxng(http, searxng_url: str, query: str, count: int = 10, c
             _params["safesearch"] = safesearch
         if time_range:
             _params["time_range"] = time_range
+        if engines:
+            _params["engines"] = engines
         params = urllib.parse.urlencode(_params)
         r = await http.get(f"{searxng_url}/search?{params}", timeout=12)
         if r.status_code == 429:
@@ -172,6 +178,10 @@ async def _search_searxng(http, searxng_url: str, query: str, count: int = 10, c
                 "content": (item.get("content", "") or "")[:500],
                 "engine": item.get("engine", ""), "score": item.get("score", 0),
                 "thumbnail": thumbnail, "type": r_type,
+                "published_date": (
+                    item.get("publishedDate") or item.get("published_date")
+                    or item.get("date") or item.get("pubDate") or ""
+                ),
             })
         for box in data.get("infoboxes", []):
             results.append({
