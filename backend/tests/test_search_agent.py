@@ -7,6 +7,7 @@ network. Run with:
 """
 import asyncio
 import json
+import math
 import sys
 from pathlib import Path
 from unittest.mock import patch, AsyncMock
@@ -47,6 +48,14 @@ class _FakeHTTP:
         if isinstance(nxt, Exception):
             raise nxt
         return _FakeResponse(nxt)
+
+
+class _FakeEvents:
+    def __init__(self):
+        self.items = []
+
+    async def emit(self, conv_id, evt, data):
+        self.items.append((conv_id, evt, data))
 
 
 def _ollama_response(text: str) -> dict:
@@ -241,6 +250,20 @@ def _searxng_results(*titles_urls):
     return [{"title": t, "url": u, "content": f"snippet about {t}"} for t, u in titles_urls]
 
 
+def _many_web_results(n: int, *, prefix: str = "Result") -> list[dict]:
+    return [
+        {
+            "title": f"{prefix} {i}",
+            "url": f"https://source{i}.test/article",
+            "content": f"snippet about latest broad search result {i}",
+            "engine": "test",
+            "score": 10,
+            "type": "web",
+        }
+        for i in range(n)
+    ]
+
+
 def test_run_search_agent_skip_gate():
     """Greetings short-circuit before any LLM call."""
     http = _FakeHTTP([])  # no responses queued — would error if triage ran
@@ -328,6 +351,138 @@ def test_run_search_agent_news_recency_passes_month_time_range():
         assert out["skipped"] is False
         assert mock_search.await_count == 1
         assert mock_search.await_args.kwargs["time_range"] == "month"
+
+
+def test_run_search_agent_returns_up_to_35_chat_results():
+    plan = json.dumps({
+        "needs_search": True,
+        "standalone_query": "latest broad search topic",
+        "queries": ["latest broad search topic"],
+        "category": "news",
+        "reason": "current news",
+    })
+    http = _FakeHTTP([_ollama_response(plan)])
+    events = _FakeEvents()
+    messages = [{"role": "user", "content": "latest broad search topic"}]
+
+    async def fake_cached_search(http, query, count=10, time_range=None):
+        assert count == quick_search.CHAT_SEARCH_COUNT_BROAD
+        return _many_web_results(40)
+
+    with patch.object(quick_search, "_cached_search", new=fake_cached_search), \
+         patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
+         patch.object(search_agent, "refine_query", new=AsyncMock(return_value="should-not-be-called")):
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "test-model", "test-model",
+            events=events, conv_id="conv-1", messages=messages,
+        ))
+
+    search_events = [d for _, evt, d in events.items if evt == "search_results"]
+    done_events = [d for _, evt, d in events.items if evt == "tool_done"]
+    assert out["skipped"] is False
+    assert len(search_events[-1]["results"]) == quick_search.CHAT_MAX_RESULTS
+    assert done_events[-1]["status"] == "Found 35 results"
+    assert "35. **Result 34**" in out["context"]
+    assert "36. **" not in out["context"]
+
+
+def test_embed_dedup_backfills_to_35_when_candidates_exist():
+    results = _many_web_results(40, prefix="Candidate")
+    dim = 50
+    q = [1.0] + [0.0] * (dim - 1)
+    high_dup = [1.0] + [0.0] * (dim - 1)
+    low_unique_mag = math.sqrt(1.0 - 0.2 ** 2)
+    embeddings = [q]
+    for i in range(40):
+        if i < 6:
+            embeddings.append(high_dup)
+        else:
+            v = [0.2] + [0.0] * (dim - 1)
+            v[i - 5] = low_unique_mag
+            embeddings.append(v)
+
+    async def fake_embed_batch(http, ollama_url, texts):
+        assert len(texts) == 41
+        return embeddings
+
+    with patch.object(quick_search, "_ollama_embed_batch", new=fake_embed_batch):
+        out = _run(quick_search._embed_score_and_dedup(
+            None, "http://ollama", "query", results,
+            limit=quick_search.CHAT_MAX_RESULTS, backfill=True,
+        ))
+
+    urls = [r["url"] for r in out]
+    assert len(out) == quick_search.CHAT_MAX_RESULTS
+    assert urls[:1] == [results[0]["url"]]
+    assert all(results[i]["url"] not in urls for i in range(1, 6))
+
+
+def test_rank_domain_limit_still_reaches_35_with_diverse_sources():
+    repeated = [
+        {
+            "title": f"Repeated {i}",
+            "url": f"https://example.com/article-{i}",
+            "content": "search topic repeated domain",
+            "score": 100 - i,
+            "type": "web",
+        }
+        for i in range(20)
+    ]
+    diverse = [
+        {
+            "title": f"Diverse {i}",
+            "url": f"https://diverse{i}.org/article",
+            "content": "search topic diverse domain",
+            "score": 50,
+            "type": "web",
+        }
+        for i in range(60)
+    ]
+
+    out = quick_search._rank_and_filter_for_chat(
+        repeated + diverse, "search topic", category="general",
+        limit=quick_search.CHAT_MAX_RESULTS,
+    )
+    domains = [quick_search._registrable_domain(r["url"]) for r in out]
+    assert len(out) == quick_search.CHAT_MAX_RESULTS
+    assert domains.count("example.com") <= 2
+
+
+def test_run_search_agent_page_enrichment_only_uses_top_configured_results():
+    plan = json.dumps({
+        "needs_search": True,
+        "standalone_query": "latest broad search topic",
+        "queries": ["latest broad search topic"],
+        "category": "news",
+        "reason": "current news",
+    })
+    http = _FakeHTTP([_ollama_response(plan)])
+    messages = [{"role": "user", "content": "latest broad search topic"}]
+    captured = {}
+
+    async def fake_cached_search(http, query, count=10, time_range=None):
+        return _many_web_results(40)
+
+    async def fake_enrich_with_pages(http, results, top_n=3):
+        captured["result_count"] = len(results)
+        captured["top_n"] = top_n
+        return {}
+
+    with patch.object(quick_search, "_cached_search", new=fake_cached_search), \
+         patch.object(quick_search, "_enrich_with_pages", new=fake_enrich_with_pages), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
+         patch.object(search_agent, "refine_query", new=AsyncMock(return_value="should-not-be-called")):
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "test-model", "test-model",
+            events=None, conv_id=None, messages=messages,
+        ))
+
+    assert out["skipped"] is False
+    assert captured == {
+        "result_count": quick_search.CHAT_MAX_RESULTS,
+        "top_n": quick_search.CHAT_PAGE_FETCH_COUNT,
+    }
 
 
 def test_run_search_agent_low_relevance_refines():

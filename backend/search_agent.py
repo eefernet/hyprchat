@@ -46,6 +46,12 @@ _NEWS_TIME_CUE_RE = re.compile(
     r"happening|going\s+on|update|updates)\b",
     re.IGNORECASE,
 )
+_BROAD_SEARCH_CUE_RE = re.compile(
+    r"\b(latest|current|currently|today|recent|recently|news|updates?|"
+    r"compare|comparison|vs|versus|difference|differences|best|top|"
+    r"reviews?|alternatives?)\b",
+    re.IGNORECASE,
+)
 
 
 def _news_time_range(category: str, latest: str) -> str | None:
@@ -60,6 +66,27 @@ def _news_time_range(category: str, latest: str) -> str | None:
     if str(yr) in latest or str(yr - 1) in latest:
         return "month"
     return None
+
+
+def _search_count_for_round(category: str, latest: str, queries: list[str]) -> int:
+    """Choose per-query SearXNG count for chat Quick Search."""
+    haystack = " ".join([latest, *queries])
+    if category == "news" or len(queries) > 1 or _BROAD_SEARCH_CUE_RE.search(haystack):
+        return _qs.CHAT_SEARCH_COUNT_BROAD
+    if any(len(_qs._content_tokens(q)) <= 2 for q in queries):
+        return _qs.CHAT_SEARCH_COUNT_BROAD
+    return _qs.CHAT_SEARCH_COUNT_DEFAULT
+
+
+async def _select_top_results(http, ollama_url: str, raw: list, primary: str, category: str) -> list:
+    """Rank a large candidate pool, then embedding-dedup and backfill to 35."""
+    candidates = _qs._rank_and_filter_for_chat(
+        raw, primary, category=category, limit=_qs.CHAT_RANK_POOL_SIZE,
+    )
+    return await _qs._embed_score_and_dedup(
+        http, ollama_url, primary, candidates,
+        limit=_qs.CHAT_MAX_RESULTS, backfill=True,
+    )
 
 
 # ── JSON-mode Ollama call ──
@@ -469,8 +496,9 @@ async def run_search_agent(
     # ── Round 1: parallel search ──
     rounds_used = 1
     time_range = _news_time_range(category, latest)
+    search_count = _search_count_for_round(category, latest, queries)
     raw_lists = await asyncio.gather(
-        *[_qs._cached_search(http, q, time_range=time_range) for q in queries],
+        *[_qs._cached_search(http, q, count=search_count, time_range=time_range) for q in queries],
         return_exceptions=True,
     )
     raw = _merge_unique([r for r in raw_lists if isinstance(r, list)])
@@ -486,12 +514,9 @@ async def run_search_agent(
     # It carries the pronoun-resolved form; queries[] are the (often shorter)
     # search-optimized variants fanned out to SearXNG.
     primary = standalone
-    top = _qs._rank_and_filter_for_chat(raw, primary, category=category)
-    # Embedding rerank + dedup. Cheap (~50ms with warm nomic-embed-text) and
-    # catches synonym/paraphrase mismatches the heuristic ranker misses,
-    # plus the SearXNG-mirror dup case. Falls back to `top` unchanged on
-    # any embed failure.
-    top = await _qs._embed_score_and_dedup(http, ollama_url, primary, top)
+    # Embedding rerank + dedup runs over a larger ranked pool, then backfills
+    # from that pool so near-duplicate clusters do not shrink the final list.
+    top = await _select_top_results(http, ollama_url, raw, primary, category)
     score = relevance_score(latest, queries, top, prior_tokens)
     print(f"[SA]   triage_ok={triage_ok} round={rounds_used} sq={standalone!r} q={queries!r} relevance={score:.2f}")
 
@@ -508,7 +533,11 @@ async def run_search_agent(
                 "status": f"Round 2: refining → {refined[:60]}",
             })
             try:
-                more = await _qs._cached_search(http, refined, time_range=time_range)
+                more = await _qs._cached_search(
+                    http, refined,
+                    count=_search_count_for_round(category, latest, queries + [refined]),
+                    time_range=time_range,
+                )
             except Exception:
                 more = []
             if more:
@@ -516,15 +545,14 @@ async def run_search_agent(
                 queries = queries + [refined]
                 # Keep ranking against the standalone query — the refined query
                 # is just another search-optimized variant.
-                top = _qs._rank_and_filter_for_chat(raw, primary, category=category)
-                top = await _qs._embed_score_and_dedup(http, ollama_url, primary, top)
+                top = await _select_top_results(http, ollama_url, raw, primary, category)
                 rounds_used = 2
                 new_score = relevance_score(latest, queries, top, prior_tokens)
                 print(f"[SA]   round={rounds_used} refined={refined!r} relevance={new_score:.2f}")
 
     # ── Page-fetch + OG-image enrichment (parallel) ──
     page_text, _ = await asyncio.gather(
-        _qs._enrich_with_pages(http, top, top_n=3),
+        _qs._enrich_with_pages(http, top, top_n=_qs.CHAT_PAGE_FETCH_COUNT),
         _qs._enrich_og_images(http, top, max_fetch=4),
         return_exceptions=False,
     )

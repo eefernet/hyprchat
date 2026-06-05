@@ -40,10 +40,20 @@ _CACHE: "OrderedDict[tuple[str, str | None], tuple[float, list]]" = OrderedDict(
 _CACHE_TTL = 600
 _CACHE_MAX = 512
 
+# Chat Quick Search is a broad source gatherer. Keep the final source list
+# generous, but only fetch full page text for the highest-ranked few.
+CHAT_MAX_RESULTS = 35
+CHAT_SEARCH_COUNT_DEFAULT = 25
+CHAT_SEARCH_COUNT_BROAD = 35
+CHAT_RANK_POOL_SIZE = 105
+CHAT_PAGE_FETCH_COUNT = 8
+CHAT_CONTEXT_SNIPPET_CHARS = 280
+CHAT_CONTEXT_PAGE_CHARS = 1200
+
 
 # ── Concurrency cap on outbound HTTP fetches ──
-# SearXNG fanout (3 queries) + page-fetch (3) + OG-image-fetch (4) +
-# refine-search (1) can hit ~11 concurrent outbound HTTPs against a
+# SearXNG fanout (3 queries) + page-fetch (up to 8) + OG-image-fetch (4) +
+# refine-search (1) can hit bursts of outbound HTTPs against a
 # single LXC instance routed through ProtonVPN. Cap page+OG fetches
 # to smooth bursts. SearXNG already has internal 429 retry so we
 # don't gate it here.
@@ -321,14 +331,16 @@ def _apply_domain_bias(results: list, category: str) -> list:
 
 def _rank_and_filter_for_chat(
     results: list, query: str = "", category: str | None = None,
+    *, limit: int = CHAT_MAX_RESULTS,
 ) -> list:
     """For model context: drop YouTube/image, rank by quality, dedup, apply
-    category bias against off-fit domains, keep top 6.
+    category bias against off-fit domains, keep up to `limit`.
 
     `category` should come from triage when available — it has full
     conversation context. Falls back to regex query-classification when
     not supplied (triage-failure path).
     """
+    limit = max(1, int(limit or CHAT_MAX_RESULTS))
     text_only = [r for r in results if r.get("type", "web") not in ("youtube", "image")]
     ranked_urls = _rank_urls(text_only)
     by_url = {r.get("url"): r for r in text_only if r.get("url")}
@@ -338,7 +350,7 @@ def _rank_and_filter_for_chat(
     deduped = _dedupe_by_domain(ranked + leftover, max_per_domain=2)
     cat = category if category in _DOWNRANK_DOMAINS else _classify_query(query)
     biased = _apply_domain_bias(deduped, cat)
-    return biased[:6]
+    return biased[:limit]
 
 
 # ── Embedding-based rerank + dedup (Perplexica pattern) ──
@@ -418,21 +430,24 @@ async def _ollama_embed_batch(http, ollama_url: str, texts: list[str]) -> list[l
 
 async def _embed_score_and_dedup(
     http, ollama_url: str, query: str, results: list,
+    *, limit: int | None = None, backfill: bool = False,
 ) -> list:
     """Score each result against `query`, drop sim < 0.45, dedup near-dups
     (sim > 0.85), sort by query-similarity desc.
 
-    Returns the input list unchanged on any embed failure.
+    Returns the input list unchanged on any embed failure. When `limit` and
+    `backfill` are set, refill from the ranked candidate pool after dedup so
+    duplicate clusters do not shrink the visible source list unnecessarily.
     """
     if not results or not query:
-        return results
+        return results[:limit] if limit else results
     snippet_texts = [
         ((r.get("title") or "") + " " + (r.get("content") or r.get("snippet") or ""))[:600]
         for r in results
     ]
     embs = await _ollama_embed_batch(http, ollama_url, [query] + snippet_texts)
     if not embs or len(embs) != len(results) + 1:
-        return results
+        return results[:limit] if limit else results
     q_emb = embs[0]
     snip_embs = embs[1:]
 
@@ -445,12 +460,13 @@ async def _embed_score_and_dedup(
         # Everything scored below the floor — likely a tail-end query the
         # embed model isn't great at. Keep input order rather than zero out.
         print(f"[QS]   embed: all results below floor {_EMBED_QUERY_FLOOR}; preserving order")
-        return results
+        return results[:limit] if limit else results
     scored.sort(key=lambda x: -x[0])
 
     # Dedup: walk in score order, drop any item whose snippet embedding is
     # > _EMBED_DUP_THRESHOLD from a kept item.
     kept_indices: list[int] = []
+    kept_set: set[int] = set()
     for score, idx in scored:
         is_dup = False
         for kept_i in kept_indices:
@@ -459,8 +475,27 @@ async def _embed_score_and_dedup(
                 break
         if not is_dup:
             kept_indices.append(idx)
+            kept_set.add(idx)
+
+    if backfill and limit and len(kept_indices) < limit:
+        for idx in range(len(results)):
+            if idx in kept_set:
+                continue
+            is_dup = False
+            for kept_i in kept_indices:
+                if _cosine(snip_embs[idx], snip_embs[kept_i]) > _EMBED_DUP_THRESHOLD:
+                    is_dup = True
+                    break
+            if is_dup:
+                continue
+            kept_indices.append(idx)
+            kept_set.add(idx)
+            if len(kept_indices) >= limit:
+                break
 
     out = [results[i] for i in kept_indices]
+    if limit:
+        out = out[:limit]
     print(f"[QS]   embed-rerank: {len(results)} → {len(out)} (top sim={scored[0][0]:.2f})")
     return out
 
@@ -653,11 +688,14 @@ def _build_context(results: list, query: str, page_text: dict[str, str], allowed
         title = (r.get("title") or "")[:200]
         url = r.get("url") or ""
         domain = _registrable_domain(url)
-        snippet = (r.get("content") or r.get("snippet") or "")[:500]
-        body = page_text.get(url, snippet)
+        snippet = (r.get("content") or r.get("snippet") or "")[:CHAT_CONTEXT_SNIPPET_CHARS]
+        body = page_text.get(url, "")
         lines.append(f"{i}. **{title}** — {domain}")
         lines.append(f"   URL: {url}")
-        lines.append(f"   {body[:1500]}")
+        if snippet:
+            lines.append(f"   Snippet: {snippet}")
+        if body:
+            lines.append(f"   Page excerpt: {body[:CHAT_CONTEXT_PAGE_CHARS]}")
         thumb = r.get("thumbnail") or ""
         if thumb:
             proxied = proxy_image_url(thumb)
@@ -693,8 +731,9 @@ async def _cached_search(
     key = (query, time_range)
     cached = _CACHE.get(key)
     if cached and (now - cached[0]) < _CACHE_TTL:
-        _CACHE.move_to_end(key)
-        return cached[1]
+        if len(cached[1]) >= count:
+            _CACHE.move_to_end(key)
+            return cached[1]
     results = await _search_searxng(
         http, config.SEARXNG_URL, query, count=count,
         safesearch="0", time_range=time_range,
