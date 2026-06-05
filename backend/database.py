@@ -217,6 +217,14 @@ CREATE TABLE IF NOT EXISTS research_reports (
 CREATE INDEX IF NOT EXISTS idx_research_reports_status  ON research_reports(status);
 CREATE INDEX IF NOT EXISTS idx_research_reports_updated ON research_reports(updated_at);
 
+CREATE TABLE IF NOT EXISTS workspace_research_reports (
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+    report_id TEXT REFERENCES research_reports(id) ON DELETE CASCADE,
+    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (workspace_id, report_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_research_reports_report ON workspace_research_reports(report_id);
+
 CREATE TABLE IF NOT EXISTS research_sources (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     report_id     TEXT NOT NULL,
@@ -823,7 +831,7 @@ async def create_workspace(id: str, name: str, description: str = ""):
         await db.commit()
     finally:
         await db.close()
-    return {"id": id, "name": name, "description": description, "topics": [], "conv_count": 0, "file_count": 0}
+    return {"id": id, "name": name, "description": description, "topics": [], "conv_count": 0, "file_count": 0, "report_count": 0}
 
 
 async def get_workspaces():
@@ -832,7 +840,8 @@ async def get_workspaces():
         rows = await db.execute_fetchall("""
             SELECT w.*,
                 (SELECT COUNT(*) FROM workspace_conversations wc WHERE wc.workspace_id=w.id) as conv_count,
-                (SELECT COUNT(*) FROM conversation_files cf JOIN workspace_conversations wc2 ON cf.conversation_id=wc2.conversation_id WHERE wc2.workspace_id=w.id) as file_count
+                (SELECT COUNT(*) FROM conversation_files cf JOIN workspace_conversations wc2 ON cf.conversation_id=wc2.conversation_id WHERE wc2.workspace_id=w.id) as file_count,
+                (SELECT COUNT(*) FROM workspace_research_reports wrr WHERE wrr.workspace_id=w.id) as report_count
             FROM workspaces w ORDER BY w.updated_at DESC""")
         result = []
         for r in rows:
@@ -873,6 +882,32 @@ async def get_workspace(ws_id: str):
             (ws_id,)
         )
         ws["files"] = [dict(r) for r in file_rows]
+        report_rows = await db.execute_fetchall(
+            """SELECT rr.id,rr.title,rr.query,rr.focus,rr.report_type,rr.status,rr.depth,
+                      rr.model,rr.summary,rr.error,rr.sources_json,rr.metrics_json,
+                      rr.created_at,rr.updated_at,rr.completed_at,wrr.added_at
+               FROM research_reports rr
+               JOIN workspace_research_reports wrr ON rr.id=wrr.report_id
+               WHERE wrr.workspace_id=? ORDER BY wrr.added_at DESC""",
+            (ws_id,)
+        )
+        reports = []
+        for row in report_rows:
+            r = dict(row)
+            try:
+                sources = json.loads(r.pop("sources_json") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                sources = []
+            try:
+                metrics = json.loads(r.pop("metrics_json") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                metrics = {}
+            r["source_count"] = metrics.get("source_count") or len(sources)
+            r["pages_read"] = metrics.get("pages_read", 0)
+            r["elapsed"] = metrics.get("elapsed", 0)
+            r["metrics"] = metrics
+            reports.append(r)
+        ws["reports"] = reports
         return ws
     finally:
         await db.close()
@@ -925,6 +960,33 @@ async def remove_conv_from_workspace(ws_id: str, conv_id: str):
             "DELETE FROM workspace_conversations WHERE workspace_id=? AND conversation_id=?",
             (ws_id, conv_id)
         )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def add_research_report_to_workspace(ws_id: str, report_id: str):
+    db = await get_db()
+    try:
+        now = datetime.utcnow().isoformat()
+        await db.execute(
+            "INSERT OR IGNORE INTO workspace_research_reports(workspace_id,report_id,added_at) VALUES(?,?,?)",
+            (ws_id, report_id, now)
+        )
+        await db.execute("UPDATE workspaces SET updated_at=? WHERE id=?", (now, ws_id))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def remove_research_report_from_workspace(ws_id: str, report_id: str):
+    db = await get_db()
+    try:
+        await db.execute(
+            "DELETE FROM workspace_research_reports WHERE workspace_id=? AND report_id=?",
+            (ws_id, report_id)
+        )
+        await db.execute("UPDATE workspaces SET updated_at=? WHERE id=?", (datetime.utcnow().isoformat(), ws_id))
         await db.commit()
     finally:
         await db.close()
@@ -1405,6 +1467,7 @@ async def list_research_reports(limit: int = 50, offset: int = 0, query: str = "
 async def delete_research_report(report_id: str) -> None:
     db = await get_db()
     try:
+        await db.execute("DELETE FROM workspace_research_reports WHERE report_id=?", (report_id,))
         await db.execute("DELETE FROM research_sources WHERE report_id=?", (report_id,))
         await db.execute("DELETE FROM research_reports WHERE id=?", (report_id,))
         await db.commit()

@@ -68,6 +68,18 @@ REPORT_TEMPLATES = [
 ]
 REPORT_TEMPLATE_MAP = {t["id"]: t for t in REPORT_TEMPLATES}
 
+_RESEARCH_DEPTH_BUDGETS = {
+    1: {"queries": 6, "results_per_query": 8, "target_sources": 12, "page_reads": 5, "source_briefs": 18, "page_extracts": 7, "findings": 10, "context_chars": 52000},
+    2: {"queries": 9, "results_per_query": 10, "target_sources": 22, "page_reads": 9, "source_briefs": 28, "page_extracts": 10, "findings": 12, "context_chars": 64000},
+    3: {"queries": 13, "results_per_query": 12, "target_sources": 34, "page_reads": 14, "source_briefs": 42, "page_extracts": 14, "findings": 16, "context_chars": 76000},
+    4: {"queries": 18, "results_per_query": 14, "target_sources": 48, "page_reads": 20, "source_briefs": 60, "page_extracts": 18, "findings": 20, "context_chars": 90000},
+    5: {"queries": 24, "results_per_query": 16, "target_sources": 65, "page_reads": 28, "source_briefs": 80, "page_extracts": 24, "findings": 24, "context_chars": 110000},
+}
+
+
+def _research_depth_budget(depth: int) -> dict:
+    return _RESEARCH_DEPTH_BUDGETS.get(max(1, min(5, int(depth or 3))), _RESEARCH_DEPTH_BUDGETS[3])
+
 
 async def _search_google_fallback(http, query: str, count: int = 10) -> list:
     """Fallback: scrape Google search results when SearXNG is down."""
@@ -676,6 +688,72 @@ async def _ask_ollama(http, ollama_url: str, prompt: str, model: str = None, def
         return f"[AI synthesis failed: {e}]"
 
 
+async def _ask_ollama_json(
+    http, ollama_url: str, prompt: str, model: str = None,
+    default_model: str = "qwen3.5:27b", max_tokens: int = 4096,
+    fallback=None, expected_type=None,
+):
+    """Call Ollama in JSON mode and make one compact repair attempt."""
+    import config as _cfg
+    _num_ctx = _cfg.DEFAULT_NUM_CTX or 16384
+
+    async def call_once(call_prompt: str) -> str:
+        r = await http.post(f"{ollama_url}/api/generate", json={
+            "model": model or default_model,
+            "prompt": call_prompt,
+            "stream": False,
+            "format": "json",
+            "think": False,
+            "options": {
+                "temperature": 0.1,
+                "num_predict": max_tokens,
+                "num_ctx": _num_ctx,
+            },
+        }, timeout=180)
+        data = r.json()
+        return (data.get("response", "") or "").strip()
+
+    def expected(obj) -> bool:
+        if obj is None:
+            return False
+        if expected_type is not None and not isinstance(obj, expected_type):
+            return False
+        return True
+
+    raw = ""
+    try:
+        raw = await call_once(prompt)
+        parsed = _safe_json_obj(raw, None)
+        if expected(parsed):
+            return parsed
+
+        if expected_type is list:
+            shape = "array"
+        elif expected_type is dict:
+            shape = "object"
+        elif isinstance(expected_type, tuple) and list in expected_type and dict in expected_type:
+            shape = "array or object"
+        else:
+            shape = "JSON value"
+        repair_prompt = f"""Repair this model output into valid JSON.
+
+Return only one JSON {shape}. Do not include markdown, comments, or prose.
+If the output cannot be repaired, return an empty JSON {shape}.
+
+Original request excerpt:
+{prompt[:2400]}
+
+Invalid output:
+{(raw or "[empty]")[:5000]}"""
+        repaired = await call_once(repair_prompt)
+        parsed = _safe_json_obj(repaired, None)
+        if expected(parsed):
+            return parsed
+    except Exception as e:
+        print(f"[RESEARCH REPORT] JSON Ollama call failed: {e}")
+    return fallback
+
+
 async def _ask_ollama_streamed(
     http, ollama_url: str, events, prompt: str, conv_id: str, tool_name: str,
     model: str = None, default_model: str = "qwen3.5:27b",
@@ -757,11 +835,11 @@ def _normalize_source_ids(raw_ids, max_source_index: int) -> list[str]:
     return ids
 
 
-def _normalize_research_findings(findings, max_source_index: int) -> list[dict]:
+def _normalize_research_findings(findings, max_source_index: int, max_findings: int = 16) -> list[dict]:
     clean = []
     if not isinstance(findings, list):
         return clean
-    for item in findings[:16]:
+    for item in findings[:max_findings]:
         if isinstance(item, str):
             item = {"claim": item}
         if not isinstance(item, dict):
@@ -784,6 +862,289 @@ def _normalize_research_findings(findings, max_source_index: int) -> list[dict]:
             "implication": _one_line(str(item.get("implication") or ""), 420),
         })
     return clean
+
+
+def _domain_from_url(url: str) -> str:
+    try:
+        host = urllib.parse.urlsplit(url or "").netloc.lower()
+        return host.removeprefix("www.")
+    except Exception:
+        return ""
+
+
+def _source_is_community(src: dict) -> bool:
+    url = (src.get("url") or "").lower()
+    source_type = (src.get("type") or "").lower()
+    community_markers = (
+        "reddit.com", "news.ycombinator.com", "stackoverflow.com", "stackexchange.com",
+        "medium.com", "dev.to", "substack.com", "github.com/issues",
+        "github.com/discussions", "discourse.", "forum",
+    )
+    return source_type in {"forum", "social"} or any(marker in url for marker in community_markers)
+
+
+def _best_evidence_sentence(text: str, topic: str = "", limit: int = 360) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if not text:
+        return ""
+    topic_words = set(re.findall(r"[a-z0-9][a-z0-9_.+#-]{3,}", (topic or "").lower()))
+    candidates = re.split(r"(?<=[.!?])\s+", text)
+    if len(candidates) == 1:
+        candidates = re.split(r"\s+[•\-–]\s+|\n+", text)
+    best = ""
+    best_score = -1
+    for sent in candidates[:80]:
+        sent = _one_line(sent, limit)
+        if len(sent) < 35:
+            continue
+        words = set(re.findall(r"[a-z0-9][a-z0-9_.+#-]{3,}", sent.lower()))
+        overlap = len(words & topic_words)
+        score = overlap * 5 + min(len(sent), 220) / 55
+        if re.search(r"\b(data|benchmark|official|report|study|docs?|issue|architecture|cost|risk|model|cloud|local|private)\b", sent, re.I):
+            score += 2
+        if score > best_score:
+            best = sent
+            best_score = score
+    return best or _one_line(text, limit)
+
+
+def _weak_source_finding() -> dict:
+    return {
+        "finding_id": 1,
+        "claim": "The available source set was too weak for structured extraction.",
+        "evidence": "The runner will still synthesize a report from the source briefs and available full text.",
+        "source_ids": [],
+        "confidence": "low",
+        "evidence_strength": "thin",
+        "source_quality": "insufficient",
+        "caveat": "No source-backed findings were extracted.",
+        "implication": "Treat conclusions as preliminary.",
+    }
+
+
+def _build_source_backed_findings(query: str, focus: str, sources: list[dict], pages: list[dict], max_findings: int = 16) -> list[dict]:
+    """Deterministically create conservative findings from collected evidence."""
+    if not sources and not pages:
+        return [_weak_source_finding()]
+
+    source_by_idx = {}
+    for src in sources or []:
+        try:
+            idx = int(src.get("index") or 0)
+        except Exception:
+            idx = 0
+        if idx > 0:
+            source_by_idx[idx] = src
+
+    pages_by_source = {}
+    for page in pages or []:
+        try:
+            sid = int(page.get("source_index") or 0)
+        except Exception:
+            sid = 0
+        content = (page.get("content") or "").strip()
+        if sid <= 0 or not content:
+            continue
+        current = pages_by_source.get(sid)
+        if not current or len(content) > len(current.get("content", "")):
+            pages_by_source[sid] = page
+
+    candidates = []
+    for idx, src in source_by_idx.items():
+        page = pages_by_source.get(idx)
+        snippet = (src.get("snippet") or "").strip()
+        title = (src.get("title") or "").strip()
+        url = (src.get("url") or "").strip()
+        text = (page.get("content") if page else "") or snippet or title or url
+        if not (title or snippet or url or text):
+            continue
+        try:
+            tier = int(src.get("tier", 2))
+        except Exception:
+            tier = 2
+        candidates.append((0 if page else 1, tier, -len(text), idx, src, page, text))
+
+    if not candidates:
+        return [_weak_source_finding()]
+
+    findings = []
+    topic = f"{query} {focus or ''}".strip()
+    for _, tier, _, idx, src, page, text in sorted(candidates)[:max_findings]:
+        title = _one_line(src.get("title") or _domain_from_url(src.get("url", "")) or f"Source S{idx}", 140)
+        domain = _domain_from_url(src.get("url", ""))
+        sentence = _best_evidence_sentence(text, topic)
+        has_page = bool(page and page.get("content"))
+        is_community = _source_is_community(src)
+        if tier == 0 and has_page and len(text) > 800:
+            confidence = "high"
+        elif has_page or tier in {0, 1, 3}:
+            confidence = "medium"
+        else:
+            confidence = "low"
+        if confidence == "high":
+            strength = "strong"
+        elif is_community and tier == 2:
+            strength = "anecdotal"
+        elif confidence == "medium":
+            strength = "moderate"
+        else:
+            strength = "thin"
+        if is_community:
+            caveat = "Community or general-source evidence; treat as practical signal rather than primary empirical proof."
+        elif not has_page:
+            caveat = "Based on the collected source brief/snippet; the full page was not read during fallback extraction."
+        else:
+            caveat = "Deterministic extraction fallback; verify exact source wording before making strong claims."
+        claim = sentence
+        if title and (not claim.lower().startswith(title.lower()[:40])):
+            claim = f"{title}: {claim}"
+        findings.append({
+            "finding_id": len(findings) + 1,
+            "claim": _one_line(claim, 520),
+            "evidence": _one_line(f"{title}{f' ({domain})' if domain else ''}: {sentence}", 700),
+            "source_ids": [f"S{idx}"],
+            "confidence": confidence,
+            "evidence_strength": strength,
+            "source_quality": _one_line(f"{_source_tier_label(tier)}; {src.get('type','web')}{f'; {domain}' if domain else ''}", 260),
+            "caveat": caveat,
+            "implication": "Use this as cited support in the report, with stronger conclusions reserved for corroborated primary or empirical evidence.",
+        })
+    return findings or [_weak_source_finding()]
+
+
+def _audit_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _normalize_research_audit(audit) -> dict:
+    if not isinstance(audit, dict) or not audit:
+        return {}
+    try:
+        score = int(float(audit.get("coverage_score")))
+    except Exception:
+        return {}
+    clean = dict(audit)
+    clean["coverage_score"] = max(0, min(100, score))
+    for key in ("strengths", "finding_issues", "weaknesses", "contradictions", "missing_evidence", "source_quality_notes"):
+        clean[key] = _audit_list(clean.get(key))
+    return clean
+
+
+def _deterministic_research_audit(
+    findings: list[dict], sources: list[dict], pages: list[dict],
+    searches: int, budget: dict, reason: str = "Auditor returned invalid or empty JSON.",
+) -> dict:
+    def ratio(value: int, target: int) -> float:
+        if not target:
+            return 1.0 if value else 0.0
+        return max(0.0, min(1.0, value / max(target, 1)))
+
+    target_queries = int(budget.get("queries") or 0)
+    target_sources = int(budget.get("target_sources") or 0)
+    target_pages = int(budget.get("page_reads") or 0)
+    source_count = len(sources or [])
+    page_count = len(pages or [])
+    finding_count = len(findings or [])
+    cited_count = len([f for f in findings or [] if f.get("source_ids")])
+    caveat_count = len([f for f in findings or [] if (f.get("caveat") or "").strip()])
+    search_ratio = ratio(searches, target_queries)
+    source_ratio = ratio(source_count, target_sources)
+    page_ratio = ratio(page_count, target_pages)
+    citation_ratio = cited_count / finding_count if finding_count else 0.0
+    caveat_ratio = caveat_count / finding_count if finding_count else 0.0
+
+    tiers = {
+        "primary": len([s for s in sources or [] if s.get("tier") == 0]),
+        "investigative": len([s for s in sources or [] if s.get("tier") == 1]),
+        "general": len([s for s in sources or [] if s.get("tier") == 2]),
+        "fact_checker": len([s for s in sources or [] if s.get("tier") == 3]),
+    }
+    if source_count:
+        quality_ratio = (
+            tiers["primary"] * 1.0 +
+            tiers["investigative"] * 0.75 +
+            tiers["fact_checker"] * 0.65 +
+            tiers["general"] * 0.45
+        ) / source_count
+    else:
+        quality_ratio = 0.0
+
+    score = round(100 * (
+        search_ratio * 0.15 +
+        source_ratio * 0.15 +
+        page_ratio * 0.12 +
+        citation_ratio * 0.25 +
+        quality_ratio * 0.25 +
+        caveat_ratio * 0.08
+    ))
+    if source_count == 0:
+        score = min(score, 15)
+    if finding_count and cited_count == 0:
+        score = min(score, 25)
+    if source_count and tiers["general"] == source_count:
+        score = min(score, 62 if page_count and cited_count else 52)
+    if source_count and source_ratio < 0.25:
+        score = min(score, 55)
+    score = max(0, min(100, score))
+
+    strengths = []
+    if cited_count:
+        strengths.append(f"{cited_count}/{finding_count} findings include source IDs.")
+    if page_count:
+        strengths.append(f"{page_count} full-text page extracts were available for verification.")
+    if tiers["primary"] or tiers["investigative"]:
+        strengths.append(f"{tiers['primary'] + tiers['investigative']} primary/investigative sources were collected.")
+
+    weaknesses = []
+    if target_queries and search_ratio < 1:
+        weaknesses.append(f"Search target was partially completed: {searches}/{target_queries} searches.")
+    if target_sources and source_ratio < 1:
+        weaknesses.append(f"Source target was partially completed: {source_count}/{target_sources} sources.")
+    if target_pages and page_ratio < 1:
+        weaknesses.append(f"Page-read target was partially completed: {page_count}/{target_pages} pages.")
+    if finding_count and citation_ratio < 1:
+        weaknesses.append(f"{finding_count - cited_count}/{finding_count} findings lack source IDs.")
+    if source_count and tiers["general"] / source_count >= 0.75:
+        weaknesses.append("Most collected sources are general/community-tier evidence.")
+    if not caveat_count and finding_count:
+        weaknesses.append("Findings have limited explicit caveats about uncertainty or missing evidence.")
+    if reason:
+        weaknesses.append(reason)
+
+    missing_evidence = []
+    if source_count and tiers["primary"] == 0:
+        missing_evidence.append("No primary-source tier evidence was identifiable in the collected source set.")
+    if target_pages and page_count < target_pages:
+        missing_evidence.append("More full-text page reads would improve quote-level verification.")
+    if not cited_count:
+        missing_evidence.append("No source-backed findings were available for citation-level audit.")
+
+    contradictions = []
+    for finding in findings or []:
+        caveat = finding.get("caveat") or ""
+        if re.search(r"\b(contradict|conflict|disputed|uncertain|mixed)\b", caveat, re.I):
+            contradictions.append(f"Finding #{finding.get('finding_id', '?')} caveat signals uncertainty: {caveat}")
+    source_quality_notes = [
+        f"Source tier mix: {tiers['primary']} primary, {tiers['investigative']} investigative/archival, {tiers['general']} general/community, {tiers['fact_checker']} fact-checker.",
+        "Coverage score is evidence coverage: collection completion, citation coverage, page reads, source tier mix, and caveat coverage.",
+    ]
+    if source_count and tiers["general"] == source_count:
+        source_quality_notes.append("All collected sources are general/community by tier, so deterministic coverage is capped despite citations.")
+
+    return {
+        "coverage_score": score,
+        "audit_method": "deterministic_fallback",
+        "strengths": strengths,
+        "finding_issues": [],
+        "weaknesses": weaknesses,
+        "contradictions": contradictions,
+        "missing_evidence": missing_evidence,
+        "source_quality_notes": source_quality_notes,
+    }
 
 
 def _normalize_url(url: str) -> str:
@@ -880,6 +1241,7 @@ async def run_research_report(
 
     t_start = time.time()
     depth = max(1, min(5, int(depth or 3)))
+    budget = _research_depth_budget(depth)
     report_type = report_type if report_type in REPORT_TEMPLATE_MAP else "analyst"
     template = REPORT_TEMPLATE_MAP[report_type]
     run_model = model or default_model
@@ -916,6 +1278,7 @@ Focus: {focus or "none"}
 Report type: {template["label"]}
 Expected sections: {", ".join(template["sections"])}
 Depth: {depth}/5
+Collection budget: up to {budget["queries"]} search queries, {budget["target_sources"]} sources, and {budget["page_reads"]} full-page reads.
 
 Return strict JSON with:
 {{
@@ -927,7 +1290,7 @@ Return strict JSON with:
   "known_risks": ["..."]
 }}
 
-Prefer precise search queries, primary sources, recent sources when freshness matters, and diverse viewpoints."""
+Prefer precise search queries, primary sources, recent sources when freshness matters, diverse viewpoints, and enough query diversity to use the collection budget."""
         plan_text = await cancel_registry.await_cancellable(
             _ask_ollama(http, ollama_url, plan_prompt, model=plan_model, default_model=default_model, max_tokens=1800),
             report_id,
@@ -1032,26 +1395,40 @@ Prefer precise search queries, primary sources, recent sources when freshness ma
             planned_queries = []
         qset = []
         def add_query(q):
-            q = _one_line(q, 220)
+            q = _one_line(re.sub(r"https?://[^\s<>\]\[\"'`]+", " ", str(q or "")), 220)
             if q and q.lower() not in {x.lower() for x in qset}:
                 qset.append(q)
-        add_query(query)
+        search_topic = _one_line(re.sub(r"https?://[^\s<>\]\[\"'`]+", " ", query or ""), 220) or query
+        search_focus = _one_line(re.sub(r"https?://[^\s<>\]\[\"'`]+", " ", focus or ""), 160)
+        add_query(search_topic)
         if focus:
-            add_query(f"{query} {focus}")
+            add_query(f"{search_topic} {search_focus}")
         for q in planned_queries:
             add_query(str(q))
+        common_queries = [
+            "official documentation", "primary source", "implementation details", "architecture",
+            "benchmarks data", "failure modes", "limitations criticism", "best practices",
+            "production deployment", "security risk", "maintenance cost", "case study",
+            "community discussion", "recent 2026", "alternatives comparison", "migration guide",
+            "decision criteria", "developer experience", "testing strategy", "rollback plan",
+            "technical debt", "adoption trends", "performance tradeoffs", "source code organization",
+        ]
         template_queries = {
-            "academic": ["research paper", "literature review", "systematic review", "methodology limitations"],
-            "decision": ["pros cons risks", "cost benefit", "alternatives comparison", "implementation risk"],
-            "market": ["market size competitors", "industry analysis", "pricing business model", "customer adoption"],
-            "technical": ["architecture", "implementation details", "benchmarks", "failure modes best practices"],
-            "timeline": ["timeline chronology", "documents evidence", "key actors", "controversy investigation"],
-            "digest": ["best sources", "overview", "primary source", "expert analysis"],
-            "analyst": ["expert analysis", "latest developments", "data statistics", "criticism risks"],
+            "academic": ["research paper", "literature review", "systematic review", "methodology limitations", "empirical study", "survey paper", "replication", "open dataset"],
+            "decision": ["pros cons risks", "cost benefit", "alternatives comparison", "implementation risk", "decision matrix", "migration cost", "opportunity cost", "governance", "rollback strategy"],
+            "market": ["market size competitors", "industry analysis", "pricing business model", "customer adoption", "funding", "analyst report", "customer reviews", "growth trend", "competitive landscape"],
+            "technical": ["architecture", "implementation details", "benchmarks", "failure modes best practices", "dependency graph", "source code architecture", "build tooling", "runtime performance", "debugging", "production examples"],
+            "timeline": ["timeline chronology", "documents evidence", "key actors", "controversy investigation", "original source", "archive", "public record", "interview", "event sequence"],
+            "digest": ["best sources", "overview", "primary source", "expert analysis", "official docs", "high signal references", "source comparison", "must read", "FAQ"],
+            "analyst": ["expert analysis", "latest developments", "data statistics", "criticism risks", "strategic implications", "operational constraints", "adoption", "roadmap", "lessons learned"],
         }.get(report_type, [])
         for suffix in template_queries:
-            add_query(f"{query} {suffix}")
-        max_queries = min(len(qset), 5 + depth * 3)
+            add_query(f"{search_topic} {suffix}")
+        for suffix in common_queries:
+            if len(qset) >= budget["queries"]:
+                break
+            add_query(f"{search_topic} {suffix}")
+        max_queries = min(len(qset), budget["queries"])
         qset = qset[:max_queries]
 
         all_results = []
@@ -1063,7 +1440,7 @@ Prefer precise search queries, primary sources, recent sources when freshness ma
             for q in batch:
                 searched.add(q)
                 time_range = "year" if re.search(r"\b(latest|recent|current|today|202[5-9]|news)\b", q, re.I) else None
-                tasks.append(_search_searxng(http, searxng_url, q, count=10, time_range=time_range))
+                tasks.append(_search_searxng(http, searxng_url, q, count=budget["results_per_query"], time_range=time_range))
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for q, res in zip(batch, results):
                 if not isinstance(res, list):
@@ -1082,7 +1459,13 @@ Prefer precise search queries, primary sources, recent sources when freshness ma
         # Source normalization.
         seen_urls = {s.get("url") for s in direct_sources if s.get("url")}
         sources = []
-        for item in all_results:
+        target_web_sources = max(0, budget["target_sources"] - len(input_sources) - len(direct_sources))
+        def result_priority(item):
+            url = _normalize_url(item.get("url", ""))
+            return (_source_tier(url), -(item.get("score", 0) or 0), -len(item.get("content", "") or ""))
+        for item in sorted(all_results, key=result_priority):
+            if len(sources) >= target_web_sources:
+                break
             url = _normalize_url(item.get("url", ""))
             if not url or url in seen_urls:
                 continue
@@ -1099,7 +1482,7 @@ Prefer precise search queries, primary sources, recent sources when freshness ma
             }
             src["tier_label"] = _source_tier_label(src["tier"])
             sources.append(src)
-            if len(sources) <= 30:
+            if len(sources) <= min(budget["target_sources"], 70):
                 await _emit_report_event(events, report_id, "research_source_found", src)
         sources = input_sources + direct_sources + sources
         for i, src in enumerate(sources, start=1):
@@ -1109,6 +1492,8 @@ Prefer precise search queries, primary sources, recent sources when freshness ma
         await db.update_research_report(report_id, sources=sources, metrics={
             "searches": len(searched), "results": len(all_results),
             "source_count": len(sources), "pages_read": len(direct_pages), "elapsed": time.time() - t_start,
+            "target_queries": budget["queries"], "target_sources": budget["target_sources"],
+            "target_pages": budget["page_reads"], "depth": depth,
         })
         await db.replace_research_sources(report_id, sources)
 
@@ -1118,7 +1503,8 @@ Prefer precise search queries, primary sources, recent sources when freshness ma
         # Phase 4: read pages.
         await phase("reading", "Reading high-value sources", "Fetching full text for ranked pages", 42)
         web_results = [r for r in all_results if r.get("url")]
-        top_urls = _rank_urls(web_results, set())[:min(6 + depth * 3, 22)]
+        page_budget = max(0, budget["page_reads"] - len(direct_pages))
+        top_urls = _rank_urls(web_results, set())[:page_budget]
         pages = list(direct_pages)
         for i in range(0, len(top_urls), 4):
             await check_cancel()
@@ -1137,11 +1523,13 @@ Prefer precise search queries, primary sources, recent sources when freshness ma
             await db.update_research_report(report_id, metrics={
                 "searches": len(searched), "results": len(all_results),
                 "source_count": len(sources), "pages_read": len(pages), "elapsed": time.time() - t_start,
+                "target_queries": budget["queries"], "target_sources": budget["target_sources"],
+                "target_pages": budget["page_reads"], "depth": depth,
             })
 
         # Build bounded evidence context.
         source_briefs = []
-        for src in sources[:40]:
+        for src in sources[:budget["source_briefs"]]:
             sid = f"S{src['index']}"
             tier = src.get("tier", 2)
             metadata = src.get("metadata") if isinstance(src.get("metadata"), dict) else {}
@@ -1157,18 +1545,18 @@ Prefer precise search queries, primary sources, recent sources when freshness ma
                 f"Snippet: {src.get('snippet','')}"
             )
         page_context = []
-        for p in pages[:16]:
+        for p in pages[:budget["page_extracts"]]:
             sid = f"S{p.get('source_index')}" if p.get("source_index") else "S?"
             page_context.append(f"--- {sid} {p.get('url','')} ---\n{p.get('content','')[:3000]}")
         evidence_context = (
             ("USER/KB CONTEXT\n" + user_context + "\n\n" if user_context else "") +
             "SOURCE BRIEFS\n" + "\n\n".join(source_briefs) +
             "\n\nFULL TEXT EXTRACTS\n" + "\n\n".join(page_context)
-        )[:70000]
+        )[:budget["context_chars"]]
 
         # Phase 5: extract findings.
         await phase("extracting", "Extracting evidence", "Converting sources into claim-level findings", 62)
-        allowed_source_ids = ", ".join(f"S{s.get('index')}" for s in sources[:40])
+        allowed_source_ids = ", ".join(f"S{s.get('index')}" for s in sources[:budget["source_briefs"]])
         findings_prompt = f"""Extract the strongest findings for this report as strict JSON.
 
 Topic: {query}
@@ -1179,7 +1567,7 @@ Allowed source IDs: {allowed_source_ids}
 Evidence:
 {evidence_context}
 
-Return a JSON array of 8-16 objects:
+Return a JSON array of 8-{budget["findings"]} objects:
 [
   {{
     "finding_id": 1,
@@ -1200,24 +1588,21 @@ Rules:
 - Treat sources with Source type "github_repo" as direct repository evidence for repo-specific architecture, dependency, and file-organization claims.
 - Do not write "studies show" unless the cited source_ids contain peer-reviewed papers, official benchmarks, or primary empirical studies.
 - Mark community discussions, blogs, GitHub issues, and vendor docs as moderate, thin, or anecdotal unless they contain direct data."""
-        findings_text = await cancel_registry.await_cancellable(
-            _ask_ollama(http, ollama_url, findings_prompt, model=run_model, default_model=default_model, max_tokens=2600),
+        findings_obj = await cancel_registry.await_cancellable(
+            _ask_ollama_json(
+                http, ollama_url, findings_prompt, model=run_model,
+                default_model=default_model,
+                max_tokens=min(5200, 1900 + budget["findings"] * 150),
+                fallback=[], expected_type=(list, dict),
+            ),
             report_id,
         )
-        findings = _normalize_research_findings(_safe_json_obj(findings_text, []), len(sources))
+        if isinstance(findings_obj, dict):
+            findings_obj = findings_obj.get("findings") or findings_obj.get("items") or findings_obj.get("results") or []
+        findings = _normalize_research_findings(findings_obj, len(sources), budget["findings"])
         if not findings:
-            findings = [{
-                "finding_id": 1,
-                "claim": "The available source set was too weak for structured extraction.",
-                "evidence": "The runner will still synthesize a report from the source briefs and available full text.",
-                "source_ids": [],
-                "confidence": "low",
-                "evidence_strength": "thin",
-                "source_quality": "insufficient",
-                "caveat": "No source-backed findings were extracted.",
-                "implication": "Treat conclusions as preliminary.",
-            }]
-        for finding in findings[:16]:
+            findings = _build_source_backed_findings(query, focus, sources, pages, budget["findings"])
+        for finding in findings[:budget["findings"]]:
             await _emit_report_event(events, report_id, "research_finding", finding)
         await db.update_research_report(report_id, findings=findings)
 
@@ -1228,10 +1613,10 @@ Rules:
 Topic: {query}
 Report type: {template["label"]}
 Findings JSON:
-{json.dumps(findings[:20], indent=2)}
+{json.dumps(findings[:budget["findings"]], indent=2)}
 
 Sources:
-{chr(10).join(source_briefs[:45])}
+{chr(10).join(source_briefs[:budget["source_briefs"]])}
 
 Audit rules:
 - Refer to extracted findings as "Finding #N".
@@ -1250,13 +1635,21 @@ Return strict JSON:
   "missing_evidence": ["..."],
   "source_quality_notes": ["..."]
 }}"""
-        audit_text = await cancel_registry.await_cancellable(
-            _ask_ollama(http, ollama_url, audit_prompt, model=audit_model, default_model=default_model, max_tokens=2200),
+        audit_obj = await cancel_registry.await_cancellable(
+            _ask_ollama_json(
+                http, ollama_url, audit_prompt, model=audit_model,
+                default_model=default_model,
+                max_tokens=min(4200, 2000 + budget["findings"] * 100),
+                fallback=None, expected_type=dict,
+            ),
             report_id,
         )
-        audit = _safe_json_obj(audit_text, {})
-        if not isinstance(audit, dict):
-            audit = {"coverage_score": 0, "weaknesses": ["Audit output was not valid JSON."]}
+        audit = _normalize_research_audit(audit_obj)
+        if not audit:
+            audit = _deterministic_research_audit(
+                findings, sources, pages, len(searched), budget,
+                reason="Audit generated from deterministic fallback because the LLM auditor returned invalid or empty JSON.",
+            )
         await _emit_report_event(events, report_id, "research_audit", audit)
 
         metrics = {
@@ -1266,6 +1659,10 @@ Return strict JSON:
             "pages_read": len(pages),
             "elapsed": time.time() - t_start,
             "coverage_score": audit.get("coverage_score", 0),
+            "depth": depth,
+            "target_queries": budget["queries"],
+            "target_sources": budget["target_sources"],
+            "target_pages": budget["page_reads"],
             "tiers": {
                 "primary": len([s for s in sources if s.get("tier") == 0]),
                 "investigative": len([s for s in sources if s.get("tier") == 1]),
@@ -1289,7 +1686,7 @@ Research plan:
 {json.dumps({"questions": plan.get("research_questions", []), "criteria": plan.get("inclusion_criteria", [])}, indent=2)}
 
 Findings:
-{json.dumps(findings[:20], indent=2)}
+{json.dumps(findings[:budget["findings"]], indent=2)}
 
 Audit:
 {json.dumps(audit, indent=2)}

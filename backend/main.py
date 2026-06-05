@@ -2376,12 +2376,32 @@ async def remove_conv_from_ws(ws_id: str, conv_id: str):
     return {"ok": True}
 
 
+@app.post("/api/workspaces/{ws_id}/research-reports")
+async def add_research_report_to_ws(ws_id: str, body: dict = Body(...)):
+    report_id = body.get("report_id")
+    if not report_id:
+        raise HTTPException(400, "report_id is required")
+    if not await db.get_workspace(ws_id):
+        raise HTTPException(404, "Workspace not found")
+    if not await db.get_research_report(report_id):
+        raise HTTPException(404, "Research report not found")
+    await db.add_research_report_to_workspace(ws_id, report_id)
+    return {"ok": True}
+
+
+@app.delete("/api/workspaces/{ws_id}/research-reports/{report_id}")
+async def remove_research_report_from_ws(ws_id: str, report_id: str):
+    await db.remove_research_report_from_workspace(ws_id, report_id)
+    return {"ok": True}
+
+
 @app.post("/api/workspaces/{ws_id}/analyze")
 async def analyze_workspace_topics(ws_id: str, body: dict = Body(default={})):
     ws = await db.get_workspace(ws_id)
     if not ws:
         raise HTTPException(404)
     titles = [c["title"] for c in ws.get("conversations", []) if c.get("title")]
+    titles += [r.get("title") or r.get("query", "") for r in ws.get("reports", []) if r.get("title") or r.get("query")]
     if not titles:
         return {"topics": []}
     prompt = (
@@ -2447,6 +2467,24 @@ async def create_kb_from_workspace(ws_id: str, body: dict = Body(...)):
                 break
         if total >= MAX:
             break
+    if total < MAX:
+        for report_meta in ws.get("reports", []):
+            report = await db.get_research_report(report_meta["id"])
+            if not report:
+                continue
+            parts.append(f"\n\n=== Research Report: {report.get('title') or report.get('query', 'Untitled')} ===")
+            report_bits = [
+                f"Query: {report.get('query', '')}",
+                f"Type: {report.get('report_type', '')}",
+                f"Summary: {report.get('summary', '')}",
+                (report.get("report_markdown") or "")[:8000],
+            ]
+            chunk = "\n".join(bit for bit in report_bits if bit).strip()
+            parts.append("\n" + chunk)
+            total += len(chunk)
+            if total >= MAX:
+                parts.append("\n[...truncated...]")
+                break
     kb_content = "".join(parts)
     kb_id = f"kb-{uuid.uuid4().hex[:8]}"
     kb_name = body.get("name", ws["name"])

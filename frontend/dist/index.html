@@ -1600,7 +1600,7 @@ const Tip=({k,t})=>{const [show,setShow]=React.useState(false);const txt=TIPS[k]
 // ============================================================
 // WORKSPACE DETAIL COMPONENT
 // ============================================================
-function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onPreview,models,wsModel,onPersonaCreated}){
+function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onOpenReport,onRemoveReport,onPreview,models,wsModel,onPersonaCreated}){
   const [tab,setTab]=React.useState("convs");
   const [editMode,setEditMode]=React.useState(false);
   const [wsName,setWsName]=React.useState("");
@@ -1627,8 +1627,8 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
     setEditMode(false);
   };
   const analyzeTopics=async()=>{
-    const convTitles=(ws.conversations||[]).filter(c=>c.title&&c.title.trim());
-    if(!convTitles.length){setAnalyzeMsg({ok:false,text:"No conversation titles to analyze. Add chats with titles first."});setTimeout(()=>setAnalyzeMsg(null),4000);return;}
+    const analyzableItems=[...(ws.conversations||[]).filter(c=>c.title&&c.title.trim()),...(ws.reports||[]).filter(r=>(r.title||r.query||"").trim())];
+    if(!analyzableItems.length){setAnalyzeMsg({ok:false,text:"No chats or reports to analyze. Add workspace content first."});setTimeout(()=>setAnalyzeMsg(null),4000);return;}
     setAnalyzing(true);setAnalyzeMsg(null);
     const useModel=wsModel||models[0]||"llama3.2:3b";
     try{
@@ -1702,8 +1702,8 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
       </div>}
     </div>
     <div style={{display:"flex",gap:0,borderBottom:`1px solid ${t.brd}22`,flexShrink:0}}>
-      {[["convs","💬 Conversations"],["files","📎 Files"]].map(([id,label])=><button key={id} onClick={()=>{setTab(id);setAddPanel(false);}} style={{padding:"10px 16px",background:tab===id?`${t.acc}15`:"transparent",border:"none",borderBottom:tab===id?`2px solid ${t.acc}`:"2px solid transparent",color:tab===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:tab===id?700:400}}>{label}</button>)}
-      <button onClick={()=>setAddPanel(p=>!p)} style={{marginLeft:"auto",padding:"10px 14px",background:addPanel?`${t.warm}15`:"transparent",border:"none",borderBottom:addPanel?`2px solid ${t.warm}`:"2px solid transparent",color:addPanel?t.warm:t.mut,cursor:"pointer",fontFamily:font,fontSize:11}}>+ Add Chats</button>
+      {[["convs","💬 Conversations"],["reports","📊 Reports"],["files","📎 Files"]].map(([id,label])=><button key={id} onClick={()=>{setTab(id);setAddPanel(false);}} style={{padding:"10px 16px",background:tab===id?`${t.acc}15`:"transparent",border:"none",borderBottom:tab===id?`2px solid ${t.acc}`:"2px solid transparent",color:tab===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:tab===id?700:400}}>{label}</button>)}
+      {tab==="convs"&&<button onClick={()=>setAddPanel(p=>!p)} style={{marginLeft:"auto",padding:"10px 14px",background:addPanel?`${t.warm}15`:"transparent",border:"none",borderBottom:addPanel?`2px solid ${t.warm}`:"2px solid transparent",color:addPanel?t.warm:t.mut,cursor:"pointer",fontFamily:font,fontSize:11}}>+ Add Chats</button>}
     </div>
     {addPanel&&<div style={{padding:12,borderBottom:`1px solid ${t.brd}22`,background:`${t.warm}07`,animation:"fadeIn .2s",flexShrink:0}}>
       <input value={addSearch} onChange={e=>setAddSearch(e.target.value)} placeholder="Search conversations..." style={{...inputS,marginBottom:8}}/>
@@ -1728,6 +1728,18 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
           <button onClick={()=>onOpenConv(c.id)} style={btnS(t.acc)}>Open →</button>
           <button onClick={()=>removeConv(c.id)} style={btnS(t.err)}>✕</button>
         </div>)}
+      </div>}
+      {tab==="reports"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
+        {!(ws.reports||[]).length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No reports yet.<br/>Add reports from Deep Research.</div>}
+        {(ws.reports||[]).map(r=>{const sm={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]}[String(r.status||"queued").toLowerCase()]||[t.warm,"Queued"];return <div key={r.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}66`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
+          <span style={{fontSize:18}}>📊</span>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:12,fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.title||r.query||"Research Report"}</div>
+            <div style={{fontSize:10,color:t.mut,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sm[1]} · {r.report_type||"report"} · {r.source_count||0} sources</div>
+          </div>
+          <button onClick={()=>onOpenReport&&onOpenReport(r.id)} style={btnS(t.acc)}>Open →</button>
+          <button onClick={()=>onRemoveReport&&onRemoveReport(ws.id,r.id)} style={btnS(t.err)}>✕</button>
+        </div>;})}
       </div>}
       {tab==="files"&&<div style={{display:"flex",flexWrap:"wrap",gap:10}}>
         {!(ws.files||[]).length&&<div style={{width:"100%",textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No files yet.<br/>Files are tracked automatically when the AI downloads them in workspace chats.</div>}
@@ -2627,6 +2639,7 @@ function HyprChat(){
   const [researchDraft,setResearchDraft]=useState({query:"",focus:"",report_type:"analyst",depth:4,model:"",planner_model:"",auditor_model:"",kb_ids:[],inputs:[]});
   const [researchInputText,setResearchInputText]=useState("");
   const [researchReportFilter,setResearchReportFilter]=useState("");
+  const [researchView,setResearchView]=useState("new");
   const [researchLiveMarkdown,setResearchLiveMarkdown]=useState("");
   const researchEventRef=useRef(null);
   const researchFileRef=useRef(null);
@@ -3083,6 +3096,32 @@ function HyprChat(){
     try{await fetch(`${API}/api/research/reports/${id}`,{method:"DELETE"});}catch{}
     setResearchReports(p=>p.filter(r=>r.id!==id));
     if(activeResearchId===id){setActiveResearchId(null);setActiveResearch(null);setResearchEvents([]);setResearchLiveMarkdown("");}
+  };
+
+  const addResearchReportToWorkspace=async(reportId,wsId)=>{
+    if(!reportId||!wsId)return;
+    const ws=workspaces.find(w=>w.id===wsId);
+    try{
+      const r=await fetch(`${API}/api/workspaces/${wsId}/research-reports`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({report_id:reportId})});
+      if(!r.ok)throw new Error(`HTTP ${r.status}`);
+      const wl=await fetch(`${API}/api/workspaces`).then(r=>r.json()).catch(()=>null);
+      if(wl)setWorkspaces(wl);
+      if(activeWs===wsId){
+        const d=await fetch(`${API}/api/workspaces/${wsId}`).then(r=>r.json()).catch(()=>null);
+        if(d)setWsDetail(d);
+      }
+      notify({type:"success",text:"Report added to workspace",detail:ws?.name||""});
+    }catch(e){notify({type:"error",text:"Could not add report to workspace",detail:e.message||String(e)});}
+  };
+
+  const removeResearchReportFromWorkspace=async(wsId,reportId)=>{
+    if(!wsId||!reportId)return;
+    try{
+      await fetch(`${API}/api/workspaces/${wsId}/research-reports/${reportId}`,{method:"DELETE"});
+      setWsDetail(d=>d&&d.id===wsId?{...d,reports:(d.reports||[]).filter(r=>r.id!==reportId)}:d);
+      const wl=await fetch(`${API}/api/workspaces`).then(r=>r.json()).catch(()=>null);
+      if(wl)setWorkspaces(wl);
+    }catch(e){notify({type:"error",text:"Could not remove report",detail:e.message||String(e)});}
   };
 
   const handleResearchFiles=async(files)=>{
@@ -5141,9 +5180,9 @@ function HyprChat(){
         <button onClick={async()=>{
           const r=await fetch(`${API}/api/workspaces`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New Workspace"})});
           const d=await r.json();setWorkspaces(p=>[...p,d]);
-          setActiveWs(d.id);setWsDetail({...d,conversations:[],files:[]});
+          setActiveWs(d.id);setWsDetail({...d,conversations:[],files:[],reports:[]});
         }} style={{...btnS(t.acc),width:"100%",marginBottom:8,justifyContent:"center",fontSize:11}}><IC.Plus/> New Workspace</button>
-        {!workspaces.length&&<div style={{textAlign:"center",padding:30,color:t.mut,fontSize:11}}>No workspaces yet.<br/>Group related chats together.</div>}
+        {!workspaces.length&&<div style={{textAlign:"center",padding:30,color:t.mut,fontSize:11}}>No workspaces yet.<br/>Group related chats and reports together.</div>}
         {workspaces.map(ws=>{
           const topics=Array.isArray(ws.topics)?ws.topics:(typeof ws.topics==="string"?JSON.parse(ws.topics||"[]"):[]);
           const isA=activeWs===ws.id;
@@ -5158,7 +5197,7 @@ function HyprChat(){
               {topics.slice(0,3).map((tp,i)=><span key={i} style={{fontSize:9,padding:"2px 6px",borderRadius:10,background:tp.color+"22",color:tp.color,border:`1px solid ${tp.color}44`,fontWeight:600}}>{tp.label}</span>)}
             </div>}
             <div style={{fontSize:9,color:t.mut,display:"flex",gap:10}}>
-              <span>💬 {ws.conv_count||0}</span><span>📎 {ws.file_count||0}</span>
+              <span>💬 {ws.conv_count||0}</span><span>📊 {ws.report_count||0}</span><span>📎 {ws.file_count||0}</span>
             </div>
           </div>;
         })}
@@ -5349,6 +5388,8 @@ function HyprChat(){
             workspaces={workspaces} setWorkspaces={setWorkspaces}
             setActiveWs={setActiveWs} setWsDetail={setWsDetail}
             convs={convs} onOpenConv={id=>{setWsPanel(false);loadConversation(id);}}
+            onOpenReport={id=>{setWsPanel(false);setPanel("research");setResearchView("reports");loadResearchReport(id);}}
+            onRemoveReport={removeResearchReportFromWorkspace}
             onPreview={openPreview} models={models} wsModel={wsModel}
             onPersonaCreated={mc=>{const norm={...mc,parameters:normalizeProfileParams(mc)};setMcs(p=>[...p,norm]);setProfileTab(getProfileType(norm)==="persona"?"personas":"agents");setPanel("personas");setEditMc(mc.id);}}/>
       :panel==="kb"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
@@ -5602,9 +5643,9 @@ function HyprChat(){
     </div>
   </div>
 
-      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return `Audit complete${d.coverage_score!==undefined?` - coverage ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return d.summary?`Report complete - ${d.summary}`:"Report complete";if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const activeStatus=statusMeta(report?.status);const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=[...(report?.outline?.sections||[])].map(s=>s.heading||s).filter(Boolean);return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return `Audit complete${d.coverage_score!==undefined?` - coverage ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return d.summary?`Report complete - ${d.summary}`:"Report complete";if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=[...(report?.outline?.sections||[])].map(s=>s.heading||s).filter(Boolean);return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}>
-      <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}><IC.Search/><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Deep Research</span>{researchRunning&&<span style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.acc}14`,border:`1px solid ${t.acc}33`,color:t.acc}}>live</span>}</div>
+      <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}><IC.Search/><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Deep Research</span>{researchRunning&&<span style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.acc}14`,border:`1px solid ${t.acc}33`,color:t.acc}}>live</span>}<div style={{display:"flex",gap:3,marginLeft:8,padding:3,border:`1px solid ${t.brd}28`,borderRadius:8,background:`${t.bgDeep}88`}}>{[["new","New"],["reports",researchReports.length?`Reports ${researchReports.length}`:"Reports"]].map(([id,label])=><button key={id} onClick={()=>setResearchView(id)} style={{fontSize:10,padding:"5px 9px",borderRadius:6,border:"none",background:researchView===id?`${t.acc}22`:"transparent",color:researchView===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontWeight:researchView===id?800:600}}>{label}</button>)}</div></div>
       <div style={{display:"flex",gap:6,alignItems:"center"}}>
         {activeResearchId&&researchRunning&&<button onClick={()=>cancelResearchReport(activeResearchId)} style={btnS(t.err)}><IC.Stop/> Stop</button>}
         {activeResearchId&&<button onClick={()=>rerunResearchReport(activeResearchId)} style={btnS(t.acc)}><IC.Refresh/> Rerun</button>}
@@ -5615,6 +5656,7 @@ function HyprChat(){
     </div>
     <div style={{flex:1,display:"grid",gridTemplateColumns:"290px minmax(0,1fr) 320px",overflow:"hidden",minHeight:0}}>
       <div style={{borderRight:`1px solid ${t.brd}24`,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:12}}>
+        {researchView==="new"?<>
         <div style={{background:`${t.surface}80`,border:`1px solid ${t.brd}33`,borderRadius:8,padding:12,display:"flex",flexDirection:"column",gap:9}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
             <span style={{fontSize:11,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.6}}>New Report</span>
@@ -5663,6 +5705,7 @@ function HyprChat(){
             </div>
           </div>}
         </div>
+        </>:<>
         <div style={{display:"flex",alignItems:"center",gap:6}}>
           <input value={researchReportFilter} onChange={e=>setResearchReportFilter(e.target.value)} placeholder="Filter reports" style={{...inputS,fontSize:11,padding:"7px 9px"}}/>
           <button onClick={()=>refreshResearchReports()} style={btnS(t.mut)}><IC.Refresh/></button>
@@ -5672,6 +5715,7 @@ function HyprChat(){
             <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
               <span style={{width:7,height:7,borderRadius:"50%",background:sm[0],boxShadow:r.status==="running"?`0 0 8px ${sm[0]}99`:"none",flexShrink:0}}/>
               <span style={{fontSize:12,fontWeight:800,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{r.title||r.query}</span>
+              {workspaces.length>0&&<select value="" title="Add to workspace" onClick={e=>e.stopPropagation()} onChange={e=>{const wsId=e.target.value;if(wsId)addResearchReportToWorkspace(r.id,wsId);}} style={{maxWidth:92,fontSize:9,padding:"3px 5px",borderRadius:6,border:`1px solid ${t.brd}33`,background:t.bgDeep,color:t.mut,fontFamily:font}}><option value="">Workspace</option>{workspaces.map(ws=><option key={ws.id} value={ws.id}>{ws.name}</option>)}</select>}
               <button onClick={e=>{e.stopPropagation();deleteResearchReport(r.id);}} style={{background:"none",border:"none",color:t.err,cursor:"pointer",display:"flex",padding:2,opacity:.75}}><IC.Trash/></button>
             </div>
             <div style={{fontSize:10,color:t.mut,lineHeight:1.35,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{r.summary||r.query}</div>
@@ -5681,6 +5725,7 @@ function HyprChat(){
           </div>;})}
           {!filteredReports.length&&<div style={{textAlign:"center",padding:18,color:t.mut,fontSize:11,border:`1px dashed ${t.brd}33`,borderRadius:8}}>No research reports yet.</div>}
         </div>
+        </>}
       </div>
       <div style={{overflowY:"auto",padding:"18px 26px",minWidth:0}}>
         {report?<div style={{maxWidth:960,margin:"0 auto"}}>
@@ -5689,7 +5734,8 @@ function HyprChat(){
               <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:5}}>
                 <span style={{fontSize:10,fontWeight:900,textTransform:"uppercase",letterSpacing:.7,color:activeStatus[0]}}>{activeStatus[1]}</span>
                 <span style={{fontSize:10,color:t.mut}}>{report.report_type}</span>
-                {metrics.coverage_score!==undefined&&<span style={{fontSize:10,color:t.acc}}>coverage {metrics.coverage_score}/100</span>}
+                {metrics.coverage_score!==undefined&&<span title="Evidence coverage score" style={{fontSize:10,color:t.acc}}>coverage {metrics.coverage_score}/100</span>}
+                {activeResearchId&&workspaces.length>0&&<select value="" title="Add report to workspace" onChange={e=>{const wsId=e.target.value;if(wsId)addResearchReportToWorkspace(activeResearchId,wsId);}} style={{fontSize:9,padding:"2px 5px",borderRadius:6,border:`1px solid ${t.brd}33`,background:t.bgDeep,color:t.mut,fontFamily:font}}><option value="">Add to workspace</option>{workspaces.map(ws=><option key={ws.id} value={ws.id}>{ws.name}</option>)}</select>}
               </div>
               <h1 style={{fontSize:24,lineHeight:1.15,margin:"0 0 6px",color:t.text,letterSpacing:0}}>{report.title||report.query}</h1>
               <div style={{fontSize:12,color:t.mut,lineHeight:1.45}}>{report.query}</div>
@@ -5707,12 +5753,13 @@ function HyprChat(){
       </div>
       <div style={{borderLeft:`1px solid ${t.brd}24`,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:12}}>
         <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8}}>
-          {[["Sources",sources.length||metrics.source_count||0,t.acc],["Pages",metrics.pages_read||0,t.f1],["Searches",metrics.searches||0,t.warm],["Elapsed",metrics.elapsed?`${Math.round(metrics.elapsed)}s`:"--",t.mut]].map(([l,v,c])=><div key={l} style={{padding:10,borderRadius:8,border:`1px solid ${c}2e`,background:`${c}0d`}}>
+          {[["Sources",fmtTarget(sources.length||metrics.source_count||0,metrics.target_sources),t.acc],["Pages",fmtTarget(metrics.pages_read||0,metrics.target_pages),t.f1],["Searches",fmtTarget(metrics.searches||0,metrics.target_queries),t.warm],["Elapsed",metrics.elapsed?`${Math.round(metrics.elapsed)}s`:"--",t.mut]].map(([l,v,c])=><div key={l} style={{padding:10,borderRadius:8,border:`1px solid ${c}2e`,background:`${c}0d`}}>
             <div style={{fontSize:18,fontWeight:900,color:c,lineHeight:1}}>{v}</div><div style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.7,marginTop:5}}>{l}</div>
           </div>)}
         </div>
         {audit&&Object.keys(audit).length>0&&<div style={{border:`1px solid ${t.warm}24`,borderRadius:8,padding:11,background:`${t.warm}08`}}>
           <div style={{fontSize:10,fontWeight:900,color:t.warm,textTransform:"uppercase",letterSpacing:.6,marginBottom:7}}>Audit</div>
+          {audit.audit_method==="deterministic_fallback"&&<div style={{fontSize:10,color:t.warm,lineHeight:1.4,marginBottom:8}}>Audit generated from deterministic fallback</div>}
           {["finding_issues","weaknesses","contradictions","missing_evidence","source_quality_notes"].map(k=>(audit[k]||[]).length?<div key={k} style={{marginBottom:8}}>
             <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:3}}>{k.replaceAll("_"," ")}</div>
             {(audit[k]||[]).slice(0,3).map((x,i)=><div key={i} style={{fontSize:10,color:t.dim,lineHeight:1.4,marginBottom:3}}>• {fmtAudit(x)}</div>)}
