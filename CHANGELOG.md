@@ -8,6 +8,11 @@
 - Reworked research report PDF export to generate a cleaner document-style PDF from semantic report Markdown instead of cloning the app-themed React view.
 - Added a separate Print action with cleaner print HTML and a direct Markdown export that uses the active report title for filenames.
 
+### Quick Search
+- Rebuilt Quick Search around deterministic planning instead of default LLM triage, with speed, balanced, and quality modes.
+- Added stricter freshness handling for today/latest/current-event searches using SearXNG native filters and same-day source warnings.
+- Added provider/scraper/reranker configuration seams, optional SearXNG engine routing, richer source metadata, and clearer search-unavailable guidance.
+
 ## Alpha v17.1 — June 3, 2026
 
 ## UI Overhaul Update
