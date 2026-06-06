@@ -7,13 +7,13 @@ Usage:
     pytest tests/ -v --tb=short         # shorter tracebacks
 
 Set HYPRCHAT_URL env var to test against a different server:
-    HYPRCHAT_URL=http://192.168.1.120:8000 pytest tests/ -v
+    HYPRCHAT_URL=http://100.122.119.50:8000 pytest tests/ -v
 """
 import os
 import pytest
 import httpx
 
-BASE_URL = os.getenv("HYPRCHAT_URL", "http://192.168.1.120:8000")
+BASE_URL = os.getenv("HYPRCHAT_URL", "http://100.122.119.50:8000")
 
 
 @pytest.fixture(scope="session")

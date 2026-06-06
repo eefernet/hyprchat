@@ -16,6 +16,11 @@
 ### Bug Fixes
 - Empty new-chat screens now show the same model selector as existing conversations, and that pending selection is applied when the first message creates the chat.
 - Reviewer now scopes Python dependency install failures to the editable package manifest instead of misrouting external package compiler errors to application source files.
+- Hardened external preview and `fetch_url` paths against localhost/LAN/Tailscale/metadata SSRF targets, unsafe redirects, oversized responses, and same-origin external HTML execution.
+- Sanitized JSON-created custom tool filenames so they cannot write outside the tools directory.
+- Fixed skipped Quick Search turns leaving the composer/search chip stuck in a loading timeout state.
+- Fixed Deep Research final synthesis transport failures being saved as completed reports.
+- Updated backend test defaults to the Tailscale HTTP endpoint the service actually listens on.
 
 ## Alpha v17.1 — June 3, 2026
 

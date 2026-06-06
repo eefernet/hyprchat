@@ -173,6 +173,53 @@ async def _url_safe_for_fetch(url: str, *, resolve_dns: bool = False) -> bool:
         return False
 
 
+async def fetch_bytes_safely(
+    http,
+    url: str,
+    *,
+    timeout: float = 15,
+    headers: dict | None = None,
+    max_bytes: int = 1024 * 1024,
+    max_redirects: int = 5,
+    resolve_dns: bool = True,
+) -> tuple[int, dict, str, bytes]:
+    """Fetch a URL with SSRF checks before every redirect target."""
+    current = (url or "").strip()
+    if not current:
+        raise ValueError("URL is required")
+
+    for _ in range(max_redirects + 1):
+        if not await _url_safe_for_fetch(current, resolve_dns=resolve_dns):
+            raise ValueError("Unsafe URL")
+
+        async with http.stream(
+            "GET",
+            current,
+            timeout=timeout,
+            follow_redirects=False,
+            headers=headers,
+        ) as r:
+            location = r.headers.get("location", "")
+            if 300 <= r.status_code < 400 and location:
+                current = urllib.parse.urljoin(current, location)
+                continue
+
+            chunks = []
+            total = 0
+            async for chunk in r.aiter_bytes():
+                total += len(chunk)
+                if max_bytes and total > max_bytes:
+                    raise ValueError("Response too large")
+                chunks.append(chunk)
+
+            final_url = str(r.url)
+            if not await _url_safe_for_fetch(final_url, resolve_dns=resolve_dns):
+                raise ValueError("Unsafe redirect target")
+            return r.status_code, dict(r.headers), final_url, b"".join(chunks)
+
+    raise ValueError("Too many redirects")
+
+
 _SUSPICIOUS_TLDS = {
     "zip", "mov", "click", "country", "kim", "loan", "men", "party", "review",
     "science", "stream", "top", "trade", "work", "xyz",
@@ -1978,7 +2025,7 @@ async def _ask_report_streamed(
     except cancel_registry.RunCancelled:
         raise
     except Exception as e:
-        return f"[Report synthesis failed: {e}]"
+        raise RuntimeError(f"Report synthesis failed: {e}") from e
 
 
 async def run_research_report(

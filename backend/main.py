@@ -36,7 +36,7 @@ from agents.personas import seed_coder_bot as _seed_coder_bot, seed_coder_bot_v2
 import hf as hf_module
 from hf import parse_ollama_progress
 import rag
-from research import REPORT_TEMPLATES, REPORT_TEMPLATE_MAP, run_research_report
+from research import REPORT_TEMPLATES, REPORT_TEMPLATE_MAP, fetch_bytes_safely, run_research_report
 
 # ============================================================
 # SETTINGS — persistent JSON file
@@ -65,6 +65,29 @@ def _coerce_service_url(value: str, env_key: str, default: str) -> str:
     if "://" not in raw:
         raw = f"http://{raw}"
     return raw.rstrip("/")
+
+
+def _decode_preview_bytes(content: bytes, headers: dict) -> str:
+    ct = headers.get("content-type", "") or ""
+    m = re.search(r"charset=([^;\s]+)", ct, re.I)
+    enc = (m.group(1) if m else "utf-8").strip("\"'")
+    try:
+        return content.decode(enc, errors="replace")
+    except LookupError:
+        return content.decode("utf-8", errors="replace")
+
+
+def _sanitize_preview_html(html: str, base_url: str) -> str:
+    from html import escape as html_escape
+
+    html = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r"\son[a-z]+\s*=\s*(['\"]).*?\1", "", html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r"\son[a-z]+\s*=\s*[^\s>]+", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"javascript\s*:", "", html, flags=re.IGNORECASE)
+    base_tag = f'<base href="{html_escape(base_url, quote=True)}" target="_blank">'
+    if "<head" in html.lower():
+        return re.sub(r"(<head[^>]*>)", r"\1" + base_tag, html, count=1, flags=re.IGNORECASE)
+    return base_tag + html
 
 
 # ============================================================
@@ -1225,8 +1248,18 @@ async def fetch_url(req: FetchUrlRequest):
     })
 
     try:
-        r = await http.get(req.url, timeout=15, follow_redirects=True)
-        text = r.text[:req.max_chars]
+        max_bytes = min(max(int(req.max_chars or config.MAX_FETCH_CHARS) * 8, 65536), 1024 * 1024)
+        status, headers, final_url, content = await fetch_bytes_safely(
+            http, req.url, timeout=15, max_bytes=max_bytes
+        )
+        if status >= 400:
+            await events.emit(conv_id, "tool_error", {
+                "tool": "fetch_url",
+                "status": f"HTTP {status}: {req.url[:40]}",
+                "icon": "globe",
+            })
+            raise HTTPException(502, f"Fetch error: HTTP {status}")
+        text = _decode_preview_bytes(content, headers)[:req.max_chars]
 
         text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL)
         text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
@@ -1235,11 +1268,16 @@ async def fetch_url(req: FetchUrlRequest):
 
         await events.emit(conv_id, "tool_end", {
             "tool": "fetch_url",
-            "status": f"Read {len(text)} chars from {req.url[:40]}",
+            "status": f"Read {len(text)} chars from {final_url[:40]}",
             "icon": "globe",
         })
 
-        return {"url": req.url, "content": text[:req.max_chars], "length": len(text)}
+        return {"url": final_url, "content": text[:req.max_chars], "length": len(text)}
+    except HTTPException:
+        raise
+    except ValueError as e:
+        await events.emit(conv_id, "tool_error", {"tool": "fetch_url", "status": str(e), "icon": "globe"})
+        raise HTTPException(400, str(e))
     except Exception as e:
         await events.emit(conv_id, "tool_error", {"tool": "fetch_url", "status": str(e), "icon": "globe"})
         raise HTTPException(502, f"Fetch error: {e}")
@@ -1252,30 +1290,38 @@ async def proxy_preview(url: str):
     if not url or not url.startswith("http"):
         raise HTTPException(400, "Invalid URL")
     try:
+        max_bytes = int(os.getenv("MAX_PROXY_PREVIEW_BYTES", str(12 * 1024 * 1024)))
         headers = {
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
         }
-        r = await http.get(url, timeout=20, follow_redirects=True, headers=headers)
-        r.raise_for_status()
-        ct = r.headers.get("content-type", "")
+        status, resp_headers, final_url, content = await fetch_bytes_safely(
+            http, url, timeout=20, headers=headers, max_bytes=max_bytes
+        )
+        if status >= 400:
+            raise HTTPException(status, f"Upstream returned {status}")
+        ct = resp_headers.get("content-type", "")
+        safe_headers = {
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; img-src data: http: https:; style-src 'unsafe-inline'; font-src data: http: https:;",
+        }
         if "pdf" in ct or url.lower().endswith(".pdf"):
-            return StarletteResponse(content=r.content, media_type="application/pdf")
+            return StarletteResponse(content=content, media_type="application/pdf", headers=safe_headers)
         if any(mt in ct for mt in ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg"]):
-            return StarletteResponse(content=r.content, media_type=ct.split(";")[0])
+            return StarletteResponse(content=content, media_type=ct.split(";")[0], headers=safe_headers)
         if "html" in ct:
-            html = r.text
-            from html import escape as html_escape
-            base_tag = f'<base href="{html_escape(url, quote=True)}" target="_blank">'
-            if "<head" in html.lower():
-                html = re.sub(r'(<head[^>]*>)', r'\1' + base_tag, html, count=1, flags=re.IGNORECASE)
-            else:
-                html = base_tag + html
-            return StarletteResponse(content=html, media_type="text/html; charset=utf-8")
-        return StarletteResponse(content=r.text, media_type="text/plain; charset=utf-8")
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(e.response.status_code, f"Upstream returned {e.response.status_code}")
+            html = _sanitize_preview_html(_decode_preview_bytes(content, resp_headers), final_url)
+            return StarletteResponse(content=html, media_type="text/html; charset=utf-8", headers=safe_headers)
+        return StarletteResponse(
+            content=_decode_preview_bytes(content, resp_headers),
+            media_type="text/plain; charset=utf-8",
+            headers=safe_headers,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(502, f"Proxy error: {e}")
 
@@ -1968,13 +2014,20 @@ async def list_tools():
 @app.post("/api/tools")
 async def create_tool(req: ToolCreate):
     id = f"tool-{uuid.uuid4().hex[:12]}"
-    await db.create_tool(id, req.name, req.description, req.filename, req.code)
+    safe_name = os.path.basename(req.filename or "tool.py")
+    if not safe_name or safe_name != (req.filename or ""):
+        raise HTTPException(400, "Invalid filename")
+    filepath = os.path.abspath(os.path.join(config.TOOLS_DIR, safe_name))
+    tools_root = os.path.abspath(config.TOOLS_DIR)
+    if filepath != tools_root and not filepath.startswith(tools_root + os.sep):
+        raise HTTPException(400, "Invalid filename")
 
-    filepath = os.path.join(config.TOOLS_DIR, req.filename)
+    await db.create_tool(id, req.name, req.description, safe_name, req.code)
+    os.makedirs(config.TOOLS_DIR, exist_ok=True)
     with open(filepath, "w") as f:
         f.write(req.code)
 
-    return {"id": id, **req.model_dump()}
+    return {"id": id, **req.model_dump(exclude={"filename"}), "filename": safe_name}
 
 
 @app.post("/api/tools/upload")

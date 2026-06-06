@@ -3081,6 +3081,12 @@ function HyprChat(){
           setSearchLoading(false);
           setQuickSearchError(ev.data.error||ev.data.failed||null);
         }
+        if(["tool_done","tool_end","tool_error"].includes(ev.type)&&ev.data?.tool==="quick_search"){
+          const status=String(ev.data?.status||"");
+          setSearchLoading(false);
+          if(ev.type==="tool_error"||/failed|unavailable|error/i.test(status))setQuickSearchError(status||"Search failed");
+          else setQuickSearchError(null);
+        }
         }retryDelay=1000;}catch{}};
       es.onerror=()=>{es.close();if(!closed){retryTimer=setTimeout(()=>{retryDelay=Math.min(retryDelay*2,30000);connect();},retryDelay);}};
       sseR.current=es;
@@ -8395,7 +8401,7 @@ function HyprChat(){
                   </div>
                 </div>
                 :previewFile.type==="html"&&previewContent
-                ?<iframe sandbox="allow-scripts allow-same-origin" srcDoc={previewContent} style={{width:"100%",height:"100%",border:"none",borderRadius:6,background:"#fff",minHeight:400}} title={previewFile.filename}/>
+                ?<iframe sandbox={previewFile.isExternal?"":"allow-scripts"} srcDoc={previewContent} style={{width:"100%",height:"100%",border:"none",borderRadius:6,background:"#fff",minHeight:400}} title={previewFile.filename}/>
                 :previewFile.type==="md"&&previewContent
                 ?<div style={{lineHeight:1.7,fontSize:12,color:t.dim}}>{(() => {
                     if(!previewContent)return null;

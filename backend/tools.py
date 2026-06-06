@@ -15,7 +15,7 @@ from datetime import datetime
 import config
 import database as db
 import cancel_registry
-from research import run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
+from research import fetch_bytes_safely, run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
 
 # Strip ANSI escape codes from terminal output before feeding back to the model
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
@@ -2454,17 +2454,32 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             # Encode spaces in URL path (common input issue)
             url = url.replace(" ", "%20")
             await events.emit(conv_id, "tool_start", {"tool": "fetch_url", "icon": "globe", "status": f"Fetching: {url[:55]}"})
-            r = await http.get(url, timeout=15, follow_redirects=True)
-            if r.status_code >= 400:
-                await events.emit(conv_id, "tool_end", {"tool": "fetch_url", "icon": "globe", "status": f"HTTP {r.status_code}: {url[:40]}"})
-                return f"ERROR: HTTP {r.status_code} fetching {url}"
-            text = r.text[:config.MAX_FETCH_CHARS]
+            try:
+                status, headers, final_url, content = await fetch_bytes_safely(
+                    http,
+                    url,
+                    timeout=15,
+                    max_bytes=min(max(config.MAX_FETCH_CHARS * 8, 65536), 1024 * 1024),
+                )
+            except ValueError as e:
+                await events.emit(conv_id, "tool_error", {"tool": "fetch_url", "icon": "globe", "status": str(e)})
+                return f"ERROR: {e}"
+            if status >= 400:
+                await events.emit(conv_id, "tool_end", {"tool": "fetch_url", "icon": "globe", "status": f"HTTP {status}: {url[:40]}"})
+                return f"ERROR: HTTP {status} fetching {url}"
+            ct = headers.get("content-type", "") or ""
+            m = re.search(r"charset=([^;\s]+)", ct, re.I)
+            enc = (m.group(1) if m else "utf-8").strip("\"'")
+            try:
+                text = content.decode(enc, errors="replace")[:config.MAX_FETCH_CHARS]
+            except LookupError:
+                text = content.decode("utf-8", errors="replace")[:config.MAX_FETCH_CHARS]
             text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL)
             text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
             text = re.sub(r'<[^>]+>', ' ', text)
             text = re.sub(r'\s+', ' ', text).strip()
             await events.emit(conv_id, "tool_end", {"tool": "fetch_url", "icon": "globe", "status": f"Read {len(text)} chars"})
-            return f"**Content from {url}:**\n\n{text[:config.MAX_FETCH_CHARS]}"
+            return f"**Content from {final_url}:**\n\n{text[:config.MAX_FETCH_CHARS]}"
 
         elif name == "run_shell" or name == "install_package":
             command = args.get("command", args.get("package", ""))

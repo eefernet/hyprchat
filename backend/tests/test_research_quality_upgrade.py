@@ -30,6 +30,35 @@ class _RedirectHTTP:
         return _FakeResponse(url="http://127.0.0.1/private")
 
 
+class _StreamResponse:
+    def __init__(self, *, url, status_code=200, headers=None, content=b"ok"):
+        self.url = url
+        self.status_code = status_code
+        self.headers = headers or {"content-type": "text/plain"}
+        self._content = content
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def aiter_bytes(self):
+        yield self._content
+
+
+class _StreamHTTP:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.urls = []
+
+    def stream(self, method, url, **kwargs):
+        self.urls.append(url)
+        if not self.responses:
+            raise AssertionError(f"unexpected fetch: {url}")
+        return self.responses.pop(0)
+
+
 def test_safe_url_filtering_blocks_private_reserved_and_local_hosts():
     blocked = [
         "http://127.0.0.1/admin",
@@ -48,6 +77,36 @@ def test_safe_url_filtering_blocks_private_reserved_and_local_hosts():
 
 def test_fetch_page_rejects_redirect_to_private_host():
     assert _run(research._fetch_page(_RedirectHTTP(), "https://example.com/start")) is None
+
+
+def test_safe_fetch_rejects_private_redirect_before_fetching_target():
+    http = _StreamHTTP([
+        _StreamResponse(
+            url="https://example.com/start",
+            status_code=302,
+            headers={"location": "http://127.0.0.1/private"},
+            content=b"",
+        )
+    ])
+    try:
+        _run(research.fetch_bytes_safely(http, "https://example.com/start", resolve_dns=False))
+    except ValueError as e:
+        assert "Unsafe URL" in str(e)
+    else:
+        raise AssertionError("unsafe redirect was allowed")
+    assert http.urls == ["https://example.com/start"]
+
+
+def test_safe_fetch_rejects_oversized_response():
+    http = _StreamHTTP([
+        _StreamResponse(url="https://example.com/report", content=b"x" * 16),
+    ])
+    try:
+        _run(research.fetch_bytes_safely(http, "https://example.com/report", max_bytes=8, resolve_dns=False))
+    except ValueError as e:
+        assert "too large" in str(e).lower()
+    else:
+        raise AssertionError("oversized response was allowed")
 
 
 def test_adaptive_followup_queries_respect_budget_and_dedupe():
