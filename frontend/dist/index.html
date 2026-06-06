@@ -2438,6 +2438,7 @@ function HyprChat(){
   const [showEffortPicker,setShowEffortPicker]=useState(false);
   const [pendingEffort,setPendingEffort]=useState(null);
   const [pendingPersona,setPendingPersona]=useState(null);
+  const [pendingModel,setPendingModel]=useState(()=>{try{return localStorage.getItem("hc-last-model")||"";}catch{return "";}});
   const [showExportMenu,setShowExportMenu]=useState(false);
   const effortPickerRef=useRef(null);
   const exportMenuRef=useRef(null);
@@ -2919,6 +2920,19 @@ function HyprChat(){
   // Quick search — derived from active conversation tool_ids, or pending empty-chat selections.
   const activeToolIds=act?(act.tool_ids||[]):pendingToolIds;
   const quickSearch = activeToolIds.includes("quick_search");
+  const storedLastModel=()=>{try{return localStorage.getItem("hc-last-model")||"";}catch{return "";}};
+  const normalizeAvailableModel=(modelName)=>{
+    const chosen=modelName||"";
+    if(chosen&&models.length>0&&!models.includes(chosen))return models[0]||"";
+    return chosen;
+  };
+  const pendingChatModel=normalizeAvailableModel(pendingPersona?.model||pendingModel||storedLastModel()||models[0]||"");
+  const setPendingChatModel=(modelName)=>{
+    const chosen=normalizeAvailableModel(modelName)||modelName||"";
+    setPendingModel(chosen);
+    if(chosen)try{localStorage.setItem("hc-last-model",chosen);}catch{}
+    setPendingPersona(p=>p?{...p,model:chosen}:p);
+  };
 
   // Save helpers — persist to backend
   const saveTool=(tl)=>{fetch(`${API}/api/tools/${tl.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:tl.name,description:tl.description,code:tl.code})}).catch(()=>{});};
@@ -2963,7 +2977,7 @@ function HyprChat(){
     }else if(profileFirstMessage(payload)){
       setPendingPersona(null);setPendingToolIds([]);
       await newChat(true,{personaOverride:payload});
-    }else{setPendingPersona(payload);setPendingToolIds(payload.tool_ids||[]);}
+    }else{setPendingPersona(payload);setPendingToolIds(payload.tool_ids||[]);setPendingModel(payload.model||pendingChatModel||"");}
     setLastPersonaId(mc.id);localStorage.setItem("hc-last-persona",mc.id);setPanel("chat");
   };
   const clearPendingProfile=()=>{setPendingPersona(null);setPendingToolIds([]);setLastPersonaId(null);try{localStorage.removeItem("hc-last-persona");}catch{};};
@@ -3708,8 +3722,8 @@ function HyprChat(){
       }
     }
 
-    const lastModel=(()=>{try{return localStorage.getItem("hc-last-model")||"";}catch{return "";}})();
-    let defaultModel=persona?.model||curConv?.model||lastModel||models[0]||"qwen3.5:27b";
+    const lastModel=storedLastModel();
+    let defaultModel=persona?.model||curConv?.model||(forceBlank?pendingChatModel:"")||lastModel||models[0]||"qwen3.5:27b";
     if(defaultModel&&models.length>0&&!models.includes(defaultModel))defaultModel=models[0]||"";
     const pendingTools=forceBlank?(persona?.tool_ids||pendingToolIds):[];
     const pendingEffortValue=forceBlank&&pendingEffort!==null?pendingEffort:null;
@@ -5393,6 +5407,15 @@ function HyprChat(){
     <div style={{flex:1,display:"flex",flexDirection:"column",zIndex:5,minWidth:0,position:"relative"}}>
       <div style={{padding:"10px 18px",...glass,borderBottom:`1px solid ${t.brd}55`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0,position:"relative",zIndex:100}}>
         <div style={{display:"flex",alignItems:"center",gap:6}}>
+          {panel==="chat"&&!act&&<>
+            <ModelPicker value={pendingChatModel||models[0]||""} onChange={setPendingChatModel} models={models} modelDetails={modelDetails} t={t} font={font} compact={true} onRefresh={refreshModels}/>
+            {pendingPersona&&(()=>{const pendingProfile=getProfileForConversation(pendingPersona);const type=pendingProfile?getProfileType(pendingProfile):(isCoderPersonaName(pendingPersona.persona_name)||(pendingPersona.tool_ids||[]).length?"agent":"persona");const c=type==="persona"?t.pink:t.acc;const label=type==="persona"?"Persona":"Agent";const avatar=pendingPersona.persona_avatar||profileAvatar(pendingProfile);return <><div style={{display:"flex",alignItems:"center",gap:5,padding:"3px 10px",background:`${c}15`,border:`1px solid ${c}28`,borderRadius:20}}>
+              {avatar?<img src={avatarSrc(avatar)} style={{width:16,height:16,borderRadius:5,objectFit:"cover"}} alt=""/>:<span style={{display:"flex",color:c}}>{type==="persona"?<IC.User/>:<IC.Bot/>}</span>}
+              <span style={{fontSize:9,fontWeight:800,color:c,textTransform:"uppercase",letterSpacing:.5}}>{label}</span>
+              <span style={{fontSize:10,fontWeight:600,color:type==="persona"?t.text:c}}>{pendingPersona.persona_name}</span>
+            </div>
+            <button onClick={leaveActiveProfile} style={{display:"flex",alignItems:"center",gap:3,padding:"3px 9px",background:`${t.err}12`,border:`1px solid ${t.err}33`,borderRadius:16,cursor:"pointer",fontSize:10,fontWeight:600,color:t.err,fontFamily:font}}>✕ Leave {label}</button></>;})()}
+          </>}
           {panel==="chat"&&act&&<>
             {act.forked_from&&<div style={{display:"flex",alignItems:"center",gap:4,padding:"2px 8px",background:`${t.acc}12`,border:`1px solid ${t.acc}28`,borderRadius:16,fontSize:9,color:t.acc,cursor:"pointer"}} onClick={()=>loadConversation(act.forked_from)}>
               <IC.GitBranch/> Forked — click to view original
@@ -5411,12 +5434,6 @@ function HyprChat(){
               {avatar?<img src={avatarSrc(avatar)} style={{width:16,height:16,borderRadius:5,objectFit:"cover"}} alt=""/>:<span style={{display:"flex",color:c}}>{type==="persona"?<IC.User/>:<IC.Bot/>}</span>}
               <span style={{fontSize:9,fontWeight:800,color:c,textTransform:"uppercase",letterSpacing:.5}}>{label}</span>
               <span style={{fontSize:10,fontWeight:600,color:type==="persona"?t.text:c}}>{act.persona_name}</span>
-            </div>
-            <button onClick={leaveActiveProfile} style={{display:"flex",alignItems:"center",gap:3,padding:"3px 9px",background:`${t.err}12`,border:`1px solid ${t.err}33`,borderRadius:16,cursor:"pointer",fontSize:10,fontWeight:600,color:t.err,fontFamily:font}}>✕ Leave {label}</button></>;})()}
-            {panel==="chat"&&!act&&pendingPersona&&(()=>{const pendingProfile=getProfileForConversation(pendingPersona);const type=pendingProfile?getProfileType(pendingProfile):(isCoderPersonaName(pendingPersona.persona_name)||(pendingPersona.tool_ids||[]).length?"agent":"persona");const c=type==="persona"?t.pink:t.acc;const label=type==="persona"?"Persona":"Agent";const avatar=pendingPersona.persona_avatar||profileAvatar(pendingProfile);return <><div style={{display:"flex",alignItems:"center",gap:5,padding:"3px 10px",background:`${c}15`,border:`1px solid ${c}28`,borderRadius:20}}>
-              {avatar?<img src={avatarSrc(avatar)} style={{width:16,height:16,borderRadius:5,objectFit:"cover"}} alt=""/>:<span style={{display:"flex",color:c}}>{type==="persona"?<IC.User/>:<IC.Bot/>}</span>}
-              <span style={{fontSize:9,fontWeight:800,color:c,textTransform:"uppercase",letterSpacing:.5}}>{label}</span>
-              <span style={{fontSize:10,fontWeight:600,color:type==="persona"?t.text:c}}>{pendingPersona.persona_name}</span>
             </div>
             <button onClick={leaveActiveProfile} style={{display:"flex",alignItems:"center",gap:3,padding:"3px 9px",background:`${t.err}12`,border:`1px solid ${t.err}33`,borderRadius:16,cursor:"pointer",fontSize:10,fontWeight:600,color:t.err,fontFamily:font}}>✕ Leave {label}</button></>;})()}
             {!act.is_council&&!act.persona_name&&<div style={{position:"relative"}}>

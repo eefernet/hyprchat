@@ -280,6 +280,10 @@ _CONFIG_EXTS = (
     ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".properties",
     ".xml", ".sql", ".sh", ".env",
 )
+_MANIFEST_NAMES = {
+    "requirements.txt", "requirements-dev.txt", "dev-requirements.txt",
+    "constraints.txt", "Makefile", "go.mod", "go.sum", "Gemfile", "Procfile",
+}
 _IGNORED_PARTS = {
     ".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
     ".cache", ".venv", "venv", "node_modules", "dist", "build", "target",
@@ -354,7 +358,7 @@ def _source_file_score(path: str) -> int:
     p = (path or "").lower()
     if p.endswith(_SOURCE_EXTS):
         return 0
-    if p.endswith(_CONFIG_EXTS):
+    if p.endswith(_CONFIG_EXTS) or p.rsplit("/", 1)[-1] in _MANIFEST_NAMES:
         return 1
     return 2
 
@@ -366,7 +370,7 @@ def _valid_project_file(path: str) -> bool:
     parts = set(p.split("/"))
     if parts & _IGNORED_PARTS:
         return False
-    return p.endswith(_SOURCE_EXTS + _CONFIG_EXTS)
+    return p.endswith(_SOURCE_EXTS + _CONFIG_EXTS) or p.rsplit("/", 1)[-1] in _MANIFEST_NAMES
 
 
 async def _list_project_files(http, project_dir: str, limit: int = 5000) -> list[str]:
@@ -540,6 +544,98 @@ def _state_isolation_issue_from_failure(failure_text: str, project_dir: str,
         "deterministic_issue": "persistent_test_state",
         "state_error_signals": signals,
         "state_paths": state_paths,
+    }
+
+
+_DEP_INSTALL_PATTERNS = [
+    re.compile(p, re.I) for p in (
+        r"\bfailed building wheel for\s+([A-Za-z0-9_.-]+)",
+        r"\bfailed to build installable wheels\b",
+        r"\bcould not find a version that satisfies the requirement\b",
+        r"\bno matching distribution found\b",
+        r"\brequires a different python\b",
+        r"\bpackage .+ requires python\b",
+    )
+]
+_DEP_PACKAGE_RE = re.compile(
+    r"(?:failed building wheel for|failed to build installable wheels .*?\(|"
+    r"no matching distribution found for|requirement already satisfied:)\s*"
+    r"([A-Za-z0-9_.-]+)",
+    re.I,
+)
+_PY_VERSION_RE = re.compile(r"python(?:\s+|/|)(\d+\.\d+)", re.I)
+
+
+def _extract_failed_dependency_names(text: str) -> list[str]:
+    names = []
+    for m in _DEP_PACKAGE_RE.finditer(text or ""):
+        name = (m.group(1) or "").strip(" .,:;)").lower()
+        if name and name not in names:
+            names.append(name)
+    return names[:5]
+
+
+def _dependency_manifest_for_failure(marker: str, project_files: list[str]) -> str:
+    candidates = []
+    if marker:
+        candidates.append(marker)
+    candidates.extend([
+        "requirements.txt", "pyproject.toml", "setup.py", "setup.cfg",
+        "constraints.txt", "package.json", "Cargo.toml", "go.mod",
+    ])
+    for candidate in candidates:
+        resolved = _resolve_project_file(candidate, project_files)
+        if resolved:
+            return resolved
+    return marker or ""
+
+
+def _dependency_install_issue_from_failure(build_cmd: str, failure_text: str,
+                                           marker: str,
+                                           project_files: list[str]) -> dict | None:
+    """Classify external dependency install failures before the LLM guesses files.
+
+    Pip/compiler traces often point at generated package sources such as
+    src_c/_sdl2/sdl2.c. Those are not project files; the actionable fix is the
+    manifest pin or package choice.
+    """
+    if "pip install" not in (build_cmd or ""):
+        return None
+    if not any(p.search(failure_text or "") for p in _DEP_INSTALL_PATTERNS):
+        return None
+
+    manifest = _dependency_manifest_for_failure(marker, project_files)
+    if not manifest:
+        return None
+
+    packages = _extract_failed_dependency_names(failure_text)
+    versions = []
+    for m in _PY_VERSION_RE.finditer(failure_text or ""):
+        version = m.group(1)
+        if version and version not in versions:
+            versions.append(version)
+    package_text = f" for {', '.join(packages[:3])}" if packages else ""
+    version_text = f" on Python {versions[0]}" if versions else ""
+    summary = (
+        f"Dependency install failed{package_text}{version_text}. Update the project "
+        "dependency manifest so the pinned package versions have wheels/support "
+        "for the current runtime, or choose a compatible replacement. Do not edit "
+        "generated external package sources referenced in pip's compiler output."
+    )
+    return {
+        "status": "issues",
+        "summary": summary,
+        "issues": [{
+            "severity": "dependency",
+            "file": manifest,
+            "lines": [],
+            "summary": summary,
+            "suggested_fix_scope": [manifest],
+            "dependency_install_failure": True,
+            "failed_packages": packages,
+            "python_versions": versions[:3],
+        }],
+        "deterministic_issue": "dependency_install_failure",
     }
 
 
@@ -1012,6 +1108,44 @@ async def run_review(http, events, conv_id: str, project_dir: str,
         if any_failure:
             await _step("scan_files", "indexing real project files")
             project_files = await _list_project_files(http, project_dir)
+
+        # Deterministic dependency-install classification. If pip fails while
+        # building or resolving an external package, compiler traces can cite
+        # generated package C files. Route the fix to the real manifest instead
+        # of letting the LLM/sanitizer map that external file to app source.
+        if build_result["exit_code"] != 0:
+            dep_parsed = _dependency_install_issue_from_failure(
+                build_cmd, failure_text, marker, project_files
+            )
+            if dep_parsed:
+                envelope = {
+                    **dep_parsed,
+                    "build_cmd": build_cmd, "test_cmd": test_cmd, "lint_cmd": lint_cmd,
+                    "build_exit": build_result["exit_code"], "test_exit": test_result["exit_code"],
+                    "lint_exit": lint_result["exit_code"],
+                    "build_stdout_tail": (build_result.get("stdout", "") or "")[-3000:],
+                    "test_stdout_tail": (test_result.get("stdout", "") or "")[-5000:],
+                    "lint_stdout_tail": (lint_result.get("stdout", "") or "")[-2000:],
+                    "language": language, "marker": marker,
+                    "review_model": "(deterministic dependency classifier)",
+                    "raw_review_chars": 0,
+                    "project_dir": project_dir,
+                    "run_id": run_id,
+                }
+                n_issues = len(envelope.get("issues") or [])
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "run_review", "icon": "search-check",
+                    "status": f"⚠ Review found {n_issues} dependency issue",
+                    "run_id": run_id,
+                })
+                if run_id:
+                    try:
+                        await db.update_run(run_id, status="succeeded",
+                                            result_envelope=envelope, ended=True)
+                    except Exception:
+                        pass
+                    cancel_registry.cleanup(run_id)
+                return envelope
 
         # Deterministic stale-upload-root classification. This catches pytest
         # failures where tests still run subprocesses with cwd="/root/projects/<old>"

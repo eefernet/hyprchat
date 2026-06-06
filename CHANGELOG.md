@@ -13,6 +13,10 @@
 - Added stricter freshness handling for today/latest/current-event searches using SearXNG native filters and same-day source warnings.
 - Added provider/scraper/reranker configuration seams, optional SearXNG engine routing, richer source metadata, and clearer search-unavailable guidance. 
 
+### Bug Fixes
+- Empty new-chat screens now show the same model selector as existing conversations, and that pending selection is applied when the first message creates the chat.
+- Reviewer now scopes Python dependency install failures to the editable package manifest instead of misrouting external package compiler errors to application source files.
+
 ## Alpha v17.1 — June 3, 2026
 
 ## UI Overhaul Update
