@@ -1382,6 +1382,10 @@ async def replace_research_sources(report_id: str, sources: list[dict]) -> None:
     try:
         await db.execute("DELETE FROM research_sources WHERE report_id=?", (report_id,))
         for i, src in enumerate(sources or [], start=1):
+            metadata = dict(src.get("metadata") or {})
+            for key in ("credibility_score", "credibility_factors", "tier_label", "thumbnail", "query", "type"):
+                if key in src and key not in metadata:
+                    metadata[key] = src.get(key)
             await db.execute(
                 "INSERT INTO research_sources(report_id,source_index,title,url,snippet,tier,source_type,metadata_json) "
                 "VALUES(?,?,?,?,?,?,?,?)",
@@ -1389,7 +1393,7 @@ async def replace_research_sources(report_id: str, sources: list[dict]) -> None:
                     report_id, int(src.get("index") or i), src.get("title", ""),
                     src.get("url", ""), src.get("snippet", "") or src.get("content", ""),
                     int(src.get("tier", 2)), src.get("type", "web"),
-                    json.dumps(src.get("metadata") or {}),
+                    json.dumps(metadata),
                 ),
             )
         await db.commit()
@@ -1416,6 +1420,12 @@ async def get_research_report(report_id: str) -> dict | None:
                     src["metadata"] = json.loads(src.get("metadata_json") or "{}")
                 except (json.JSONDecodeError, TypeError):
                     src["metadata"] = {}
+                meta = src.get("metadata") or {}
+                for key in ("credibility_score", "credibility_factors", "tier_label", "thumbnail", "query", "type"):
+                    if key in meta:
+                        src[key] = meta[key]
+                if "type" not in src:
+                    src["type"] = src.get("source_type", "web")
                 src.pop("metadata_json", None)
                 parsed.append(src)
             report["sources"] = parsed

@@ -2,12 +2,15 @@
 Research engines — deep research, conspiracy research, and search helpers.
 """
 import asyncio
+import hashlib
 import ipaddress
 import json
 import os
 import re
+import socket
 import time
 import urllib.parse
+from collections import OrderedDict
 from datetime import datetime
 
 # ── Search rate-limit tuning ──
@@ -79,6 +82,217 @@ _RESEARCH_DEPTH_BUDGETS = {
 
 def _research_depth_budget(depth: int) -> dict:
     return _RESEARCH_DEPTH_BUDGETS.get(max(1, min(5, int(depth or 3))), _RESEARCH_DEPTH_BUDGETS[3])
+
+
+# ── URL safety, source credibility, and report evidence cache ──
+_DNS_CACHE: dict[str, tuple[float, bool]] = {}
+_DNS_CACHE_TTL = 300
+_REPORT_EVIDENCE_CACHE: "OrderedDict[str, tuple[float, list[dict]]]" = OrderedDict()
+_REPORT_EVIDENCE_CACHE_TTL = 3600
+_REPORT_EVIDENCE_CACHE_MAX = 64
+
+_VISUAL_REPORT_GUIDANCE = """Visual and quantitative reporting requirements:
+- Use KaTeX for formulas: `$...$` for inline math and `$$...$$` for display equations.
+- Use Mermaid fences for timelines, workflows, evidence maps, entity relationships, and decision trees.
+- Use `chart` fences with Chart.js JSON for quantitative data. `pygraph` is an alias for the same safe chart schema; it is not Python execution.
+- Use tables for comparisons and structured tradeoffs.
+- Use GitHub-style callouts (`> [!NOTE]`, `> [!WARNING]`, `> [!IMPORTANT]`) for caveats, limitations, and warnings.
+- When calculations are needed, rely on computed values from extracted data or backend/tool computation where possible, then render the formula/chart from those values. Do not hand-estimate chart data.
+"""
+
+
+def _ip_is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return not (
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_multicast or ip.is_reserved or ip.is_unspecified
+    )
+
+
+def _host_blocked(host: str) -> bool:
+    host = (host or "").strip().lower().rstrip(".")
+    if not host:
+        return True
+    if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
+        return True
+    try:
+        return not _ip_is_public(ipaddress.ip_address(host))
+    except ValueError:
+        return False
+
+
+def _resolve_host_public(host: str) -> bool:
+    host = (host or "").strip().lower().rstrip(".")
+    now = time.time()
+    cached = _DNS_CACHE.get(host)
+    if cached and (now - cached[0]) < _DNS_CACHE_TTL:
+        return cached[1]
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except (socket.gaierror, socket.herror, OSError):
+        _DNS_CACHE[host] = (now, False)
+        return False
+    safe = True
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            safe = False
+            break
+        if not _ip_is_public(ip):
+            safe = False
+            break
+    _DNS_CACHE[host] = (now, safe)
+    return safe
+
+
+def _url_safe_for_direct_fetch(url: str, *, resolve_dns: bool = False) -> bool:
+    """Guard user-provided and search-result URLs before network fetches."""
+    try:
+        p = urllib.parse.urlsplit(url)
+        if p.scheme not in {"http", "https"} or not p.hostname:
+            return False
+        host = p.hostname.lower().rstrip(".")
+        if _host_blocked(host):
+            return False
+        if resolve_dns:
+            return _resolve_host_public(host)
+        return True
+    except Exception:
+        return False
+
+
+async def _url_safe_for_fetch(url: str, *, resolve_dns: bool = False) -> bool:
+    if not _url_safe_for_direct_fetch(url, resolve_dns=False):
+        return False
+    if not resolve_dns:
+        return True
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+        return await asyncio.to_thread(_resolve_host_public, host)
+    except Exception:
+        return False
+
+
+_SUSPICIOUS_TLDS = {
+    "zip", "mov", "click", "country", "kim", "loan", "men", "party", "review",
+    "science", "stream", "top", "trade", "work", "xyz",
+}
+_LOW_CREDIBILITY_DOMAINS = {
+    "reddit.com", "quora.com", "medium.com", "dev.to", "tiktok.com",
+    "facebook.com", "x.com", "twitter.com", "instagram.com", "pinterest.com",
+}
+_MAJOR_NEWS_DOMAINS = {
+    "apnews.com", "reuters.com", "bbc.com", "bbc.co.uk", "npr.org", "pbs.org",
+    "bloomberg.com", "wsj.com", "nytimes.com", "washingtonpost.com",
+    "theguardian.com", "politico.com", "axios.com",
+}
+
+
+def _registrable_domain_from_host(host: str) -> str:
+    host = (host or "").lower().split(":", 1)[0].removeprefix("www.").rstrip(".")
+    parts = [p for p in host.split(".") if p]
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in {"co", "com", "org", "net", "gov", "ac", "edu"}:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def _score_source_credibility(url: str, source_type: str = "web", tier: int | None = None) -> dict:
+    """Return a 0-100 credibility score plus human-readable factors.
+
+    This is a ranking/audit signal, not a hard filter. Low-score sources stay
+    available so disputed topics can still surface contradictions.
+    """
+    score = 50
+    factors: list[str] = []
+    try:
+        p = urllib.parse.urlsplit(url or "")
+    except Exception:
+        p = urllib.parse.SplitResult("", "", "", "", "")
+    host = (p.hostname or "").lower().rstrip(".")
+    domain = _registrable_domain_from_host(host)
+    source_type_l = (source_type or "web").lower()
+
+    if source_type_l in {"uploaded", "file", "direct_file"}:
+        score += 20
+        factors.append("user-provided file")
+    if source_type_l == "github_repo":
+        score += 18
+        factors.append("direct GitHub repository snapshot")
+    if p.scheme == "https":
+        score += 8
+        factors.append("HTTPS")
+    elif p.scheme == "http":
+        score -= 8
+        factors.append("plain HTTP")
+    elif not url:
+        factors.append("local or uploaded context")
+
+    if tier is None:
+        try:
+            tier = _source_tier(url)
+        except Exception:
+            tier = 2
+    if tier == 0:
+        score += 20
+        factors.append("primary-source tier")
+    elif tier == 1:
+        score += 12
+        factors.append("investigative or archival tier")
+    elif tier == 3:
+        score += 5
+        factors.append("secondary fact-check tier")
+
+    if host.endswith((".gov", ".mil")):
+        score += 16
+        factors.append("government domain")
+    elif host.endswith(".edu"):
+        score += 12
+        factors.append("education domain")
+    elif domain in _MAJOR_NEWS_DOMAINS:
+        score += 9
+        factors.append("major news domain")
+    elif "docs." in host or "/docs" in (p.path or "").lower():
+        score += 7
+        factors.append("documentation path")
+
+    if domain in _LOW_CREDIBILITY_DOMAINS:
+        score -= 16
+        factors.append("community/social platform")
+    if source_type_l in {"forum", "social"}:
+        score -= 10
+        factors.append("forum/social source type")
+    tld = host.rsplit(".", 1)[-1] if "." in host else ""
+    if tld in _SUSPICIOUS_TLDS:
+        score -= 12
+        factors.append(f"suspicious TLD .{tld}")
+    if host.startswith("xn--") or ".xn--" in host:
+        score -= 8
+        factors.append("punycode hostname")
+    if len(host) > 55 or host.count("-") >= 4:
+        score -= 6
+        factors.append("unusual hostname shape")
+    if re.search(r"/(login|signup|cart|checkout|tag|category|author|search)(/|$)", p.path or "", re.I):
+        score -= 4
+        factors.append("low-evidence path")
+
+    score = max(0, min(100, int(round(score))))
+    if not factors:
+        factors.append("standard web source")
+    return {"score": score, "factors": factors[:8]}
+
+
+def _apply_source_quality(src: dict) -> dict:
+    tier = src.get("tier")
+    try:
+        tier = int(tier)
+    except Exception:
+        tier = _source_tier(src.get("url", ""))
+    cred = _score_source_credibility(src.get("url", ""), src.get("type", "web"), tier)
+    src["tier"] = tier
+    src["tier_label"] = _source_tier_label(tier)
+    src["credibility_score"] = cred["score"]
+    src["credibility_factors"] = cred["factors"]
+    return src
 
 
 async def _search_google_fallback(http, query: str, count: int = 10) -> list:
@@ -330,24 +544,6 @@ def _extract_seed_urls(*texts: str, limit: int = 12) -> list[str]:
     return urls
 
 
-def _url_safe_for_direct_fetch(url: str) -> bool:
-    """Basic guard for URLs pasted by users before direct fetching."""
-    try:
-        p = urllib.parse.urlsplit(url)
-        if p.scheme not in {"http", "https"} or not p.hostname:
-            return False
-        host = p.hostname.lower()
-        if host in {"localhost"} or host.endswith(".local"):
-            return False
-        try:
-            ip = ipaddress.ip_address(host)
-            return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved)
-        except ValueError:
-            return True
-    except Exception:
-        return False
-
-
 def _github_repo_from_url(url: str) -> tuple[str, str] | None:
     try:
         p = urllib.parse.urlsplit(url)
@@ -473,10 +669,15 @@ async def _fetch_page(http, url: str) -> dict | None:
             "fullfact.org", "mediabiasfactcheck.com"]
     if any(p in url.lower() for p in skip):
         return None
+    if not await _url_safe_for_fetch(url, resolve_dns=False):
+        return None
     try:
         r = await http.get(url, timeout=15, follow_redirects=True,
                            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"})
         if r.status_code >= 400:
+            return None
+        final_url = str(getattr(r, "url", "") or url)
+        if not await _url_safe_for_fetch(final_url, resolve_dns=False):
             return None
         ct = r.headers.get("content-type", "")
         if "text" not in ct and "json" not in ct:
@@ -499,16 +700,21 @@ async def _fetch_page(http, url: str) -> dict | None:
         text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text).strip()
         if len(text) < 200:
             return None
-        return {"url": url, "content": text[:6000]}
+        return {"url": _normalize_url(final_url), "content": text[:6000]}
     except Exception:
         return None
 
 
 async def _fetch_gov_doc_index(http, url: str) -> dict | None:
     """Fetch government document index pages (including PDF links) for conspiracy research."""
+    if not await _url_safe_for_fetch(url, resolve_dns=False):
+        return None
     try:
         r = await http.get(url, timeout=15, follow_redirects=True,
                            headers={"User-Agent": "Mozilla/5.0 (compatible; research-bot)"})
+        final_url = str(getattr(r, "url", "") or url)
+        if not await _url_safe_for_fetch(final_url, resolve_dns=False):
+            return None
         ct = r.headers.get("content-type", "")
         if "text" not in ct and "html" not in ct:
             return None
@@ -520,8 +726,8 @@ async def _fetch_gov_doc_index(http, url: str) -> dict | None:
         text = re.sub(r"<[^>]+>", " ", text)
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
-        result = {"url": url, "content": text[:5000], "pdf_links": [], "doc_links": []}
-        base = "/".join(url.split("/")[:3])
+        result = {"url": _normalize_url(final_url), "content": text[:5000], "pdf_links": [], "doc_links": []}
+        base = "/".join(final_url.split("/")[:3])
         for lnk in pdf_links[:20]:
             full = lnk if lnk.startswith("http") else base + lnk
             result["pdf_links"].append(full)
@@ -580,6 +786,8 @@ def _source_tier_label(tier) -> str:
 async def _fetch_wikileaks_page(http, url: str) -> dict | None:
     """Fetch a WikiLeaks page, extracting article text and document/PDF links."""
     lower = url.lower()
+    if not await _url_safe_for_fetch(url, resolve_dns=False):
+        return None
     if any(lower.endswith(ext) for ext in (".zip", ".tar", ".gz", ".rar", ".7z")):
         return {"url": url, "content": f"[Archive file — direct download: {url}]"}
     if ".pdf" in lower:
@@ -589,11 +797,14 @@ async def _fetch_wikileaks_page(http, url: str) -> dict | None:
                            headers={"User-Agent": "Mozilla/5.0 (compatible; research-bot)"})
         if r.status_code != 200:
             return None
+        final_url = str(getattr(r, "url", "") or url)
+        if not await _url_safe_for_fetch(final_url, resolve_dns=False):
+            return None
         ct = r.headers.get("content-type", "")
         if "text" not in ct and "html" not in ct:
             return None
         text = r.text
-        base = "/".join(url.split("/")[:3])
+        base = "/".join(final_url.split("/")[:3])
 
         wl_links = re.findall(r'href=["\']((https?://(?:www\.)?wikileaks\.org)?(/[^"\'#?][^"\']*?))["\']', text, re.IGNORECASE)
         pdf_links = re.findall(r'href=["\']([^"\']*\.pdf[^"\']*)["\']', text, re.IGNORECASE)
@@ -627,7 +838,7 @@ async def _fetch_wikileaks_page(http, url: str) -> dict | None:
         if len(text) < 100:
             return None
 
-        result: dict = {"url": url, "content": text[:6000]}
+        result: dict = {"url": _normalize_url(final_url), "content": text[:6000]}
         if doc_links:
             result["doc_links"] = doc_links
         if pdf_full:
@@ -668,6 +879,10 @@ def _rank_urls(findings: list, exclude: set = None) -> list:
         if not url or url in exclude:
             continue
         score = f.get("score", 0) or 0
+        tier = _source_tier(url)
+        credibility = _score_source_credibility(url, f.get("type", "web"), tier).get("score", 50)
+        score += credibility / 12
+        score += {0: 10, 1: 7, 2: 2, 3: 4}.get(tier, 2)
         for domain, bonus in quality.items():
             if domain in url.lower():
                 score += bonus
@@ -823,6 +1038,271 @@ def _safe_json_obj(text: str, fallback):
 
 def _one_line(text: str, limit: int = 180) -> str:
     return re.sub(r"\s+", " ", text or "").strip()[:limit]
+
+
+def _evidence_collection_name(report_id: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_-]+", "-", report_id or "report").strip("-")
+    name = f"evidence-{safe}"[:63].strip("-")
+    return name if len(name) >= 3 else "evidence-report"
+
+
+def _stash_report_evidence_records(report_id: str, records: list[dict]) -> None:
+    if not report_id:
+        return
+    _REPORT_EVIDENCE_CACHE[report_id] = (time.time(), records or [])
+    _REPORT_EVIDENCE_CACHE.move_to_end(report_id)
+    while len(_REPORT_EVIDENCE_CACHE) > _REPORT_EVIDENCE_CACHE_MAX:
+        _REPORT_EVIDENCE_CACHE.popitem(last=False)
+
+
+def _get_report_evidence_records(report_id: str) -> list[dict]:
+    entry = _REPORT_EVIDENCE_CACHE.get(report_id)
+    if not entry:
+        return []
+    ts, records = entry
+    if time.time() - ts > _REPORT_EVIDENCE_CACHE_TTL:
+        _REPORT_EVIDENCE_CACHE.pop(report_id, None)
+        return []
+    return records or []
+
+
+def _evidence_tokens(text: str) -> set[str]:
+    stop = {
+        "the", "and", "for", "with", "from", "that", "this", "there", "their",
+        "about", "into", "over", "under", "what", "when", "where", "which",
+        "would", "could", "should", "have", "has", "had", "are", "was", "were",
+    }
+    return {
+        t.rstrip("s")
+        for t in re.findall(r"[a-zA-Z][a-zA-Z0-9_.+#-]{2,}", (text or "").lower())
+        if t not in stop
+    }
+
+
+def _chunk_evidence_text(text: str, *, max_chars: int = 1800, overlap: int = 180) -> list[str]:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if not text:
+        return []
+    chunks: list[str] = []
+    start = 0
+    while start < len(text):
+        end = min(len(text), start + max_chars)
+        if end < len(text):
+            split_at = max(text.rfind(". ", start, end), text.rfind("; ", start, end), text.rfind(" ", start, end))
+            if split_at > start + max_chars // 2:
+                end = split_at + 1
+        chunk = text[start:end].strip()
+        if len(chunk) >= 80:
+            chunks.append(chunk)
+        if end >= len(text):
+            break
+        start = max(end - overlap, start + 1)
+    return chunks
+
+
+def _build_report_evidence_records(
+    report_id: str, query: str, user_context: str,
+    sources: list[dict], pages: list[dict],
+) -> list[dict]:
+    records: list[dict] = []
+    source_by_index = {}
+    source_by_url = {}
+    for src in sources or []:
+        try:
+            idx = int(src.get("index") or src.get("source_index") or 0)
+        except Exception:
+            idx = 0
+        if idx:
+            source_by_index[idx] = src
+        if src.get("url"):
+            source_by_url[_normalize_url(src.get("url", ""))] = src
+
+    def add(kind: str, text: str, src: dict | None = None, title: str = "", url: str = "") -> None:
+        if not text or len(text.strip()) < 80:
+            return
+        src = src or {}
+        try:
+            source_index = int(src.get("index") or src.get("source_index") or 0)
+        except Exception:
+            source_index = 0
+        source_id = f"S{source_index}" if source_index else ("CTX" if kind in {"user_context", "kb_context"} else "S?")
+        src_title = title or src.get("title") or src.get("filename") or source_id
+        src_url = url or src.get("url") or ""
+        credibility = src.get("credibility_score")
+        if credibility is None:
+            credibility = _score_source_credibility(src_url, src.get("type", kind), src.get("tier")).get("score", 50)
+        for ci, chunk in enumerate(_chunk_evidence_text(text)):
+            rec_id = hashlib.md5(f"{report_id}:{kind}:{source_id}:{src_url}:{ci}:{chunk[:80]}".encode()).hexdigest()
+            records.append({
+                "id": rec_id,
+                "text": chunk,
+                "kind": kind,
+                "source_id": source_id,
+                "source_index": source_index,
+                "title": _one_line(src_title, 180),
+                "url": src_url,
+                "credibility_score": int(credibility or 0),
+                "tier_label": src.get("tier_label") or _source_tier_label(src.get("tier", 2)),
+                "query": query,
+            })
+
+    if user_context:
+        add("user_context", user_context, {"type": "file", "title": "Uploaded/KB context", "credibility_score": 82})
+    for src in sources or []:
+        brief = " ".join([src.get("title", ""), src.get("snippet", ""), src.get("url", "")]).strip()
+        add("source_brief", brief, src)
+    for page in pages or []:
+        src = None
+        try:
+            sid = int(page.get("source_index") or 0)
+            src = source_by_index.get(sid)
+        except Exception:
+            src = None
+        if not src and page.get("url"):
+            src = source_by_url.get(_normalize_url(page.get("url", "")))
+        add("full_page", page.get("content", ""), src, title=page.get("title", ""), url=page.get("url", ""))
+    return records
+
+
+async def _index_report_evidence(report_id: str, records: list[dict]) -> dict:
+    """Embed report evidence into a per-report ChromaDB collection.
+
+    The in-process cache is always populated, so retrieval still works when
+    ChromaDB or the embedding model is unavailable.
+    """
+    records = records or []
+    _stash_report_evidence_records(report_id, records)
+    if not records:
+        return {"chunks": 0, "embedded": 0, "fallback": True}
+    try:
+        import rag
+
+        texts = [r["text"] for r in records]
+        embeddings = await rag.embed_texts(texts)
+        valid = [(r, e) for r, e in zip(records, embeddings) if e is not None]
+        if not valid:
+            return {"chunks": len(records), "embedded": 0, "fallback": True}
+        collection = rag.get_chroma().get_or_create_collection(
+            name=_evidence_collection_name(report_id),
+            metadata={"hnsw:space": "cosine", "kind": "research_evidence"},
+        )
+        collection.upsert(
+            ids=[r["id"] for r, _ in valid],
+            documents=[r["text"] for r, _ in valid],
+            metadatas=[{
+                "report_id": report_id,
+                "source_id": str(r.get("source_id") or ""),
+                "source_index": int(r.get("source_index") or 0),
+                "title": str(r.get("title") or "")[:300],
+                "url": str(r.get("url") or "")[:1000],
+                "kind": str(r.get("kind") or ""),
+                "credibility_score": int(r.get("credibility_score") or 0),
+                "tier_label": str(r.get("tier_label") or "")[:120],
+            } for r, _ in valid],
+            embeddings=[e for _, e in valid],
+        )
+        return {"chunks": len(records), "embedded": len(valid), "fallback": False}
+    except Exception as e:
+        print(f"[RESEARCH REPORT] Evidence index fallback for {report_id}: {e}")
+        return {"chunks": len(records), "embedded": 0, "fallback": True, "error": str(e)[:240]}
+
+
+def _lexical_retrieve_report_evidence(report_id: str, queries: list[str], top_k: int = 8) -> list[dict]:
+    records = _get_report_evidence_records(report_id)
+    if not records:
+        return []
+    q_tokens = _evidence_tokens(" ".join(queries or []))
+    scored = []
+    for rec in records:
+        r_tokens = _evidence_tokens(" ".join([rec.get("title", ""), rec.get("text", "")]))
+        if not r_tokens:
+            continue
+        overlap = len(q_tokens & r_tokens) if q_tokens else 1
+        density = overlap / max(1, len(q_tokens)) if q_tokens else 0.2
+        score = density * 0.72 + min(1.0, float(rec.get("credibility_score", 50)) / 100.0) * 0.20
+        if rec.get("kind") == "full_page":
+            score += 0.08
+        scored.append((score, rec))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    out = []
+    seen = set()
+    for score, rec in scored:
+        key = (rec.get("source_id"), rec.get("text", "")[:120])
+        if key in seen:
+            continue
+        seen.add(key)
+        item = dict(rec)
+        item["score"] = round(score, 4)
+        out.append(item)
+        if len(out) >= top_k:
+            break
+    return out
+
+
+async def _retrieve_report_evidence(report_id: str, queries: list[str], top_k: int = 8) -> list[dict]:
+    queries = [q for q in (queries or []) if str(q or "").strip()]
+    if not report_id or not queries:
+        return []
+    try:
+        import rag
+
+        query_text = "\n".join(queries)[:4000]
+        emb = await rag.embed_single(query_text)
+        if emb is None:
+            return _lexical_retrieve_report_evidence(report_id, queries, top_k=top_k)
+        collection = rag.get_chroma().get_collection(_evidence_collection_name(report_id))
+        count = collection.count()
+        if count <= 0:
+            return _lexical_retrieve_report_evidence(report_id, queries, top_k=top_k)
+        results = collection.query(
+            query_embeddings=[emb],
+            n_results=min(max(1, top_k * 2), count),
+            include=["documents", "metadatas", "distances"],
+        )
+        out = []
+        docs = (results.get("documents") or [[]])[0]
+        metas = (results.get("metadatas") or [[]])[0]
+        dists = (results.get("distances") or [[]])[0]
+        seen = set()
+        for doc, meta, dist in zip(docs, metas, dists):
+            key = (meta.get("source_id"), doc[:120])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "text": doc,
+                "source_id": meta.get("source_id") or "",
+                "source_index": meta.get("source_index") or 0,
+                "title": meta.get("title") or "",
+                "url": meta.get("url") or "",
+                "kind": meta.get("kind") or "",
+                "credibility_score": meta.get("credibility_score") or 0,
+                "tier_label": meta.get("tier_label") or "",
+                "score": round(1 - float(dist or 0), 4),
+            })
+            if len(out) >= top_k:
+                break
+        return out or _lexical_retrieve_report_evidence(report_id, queries, top_k=top_k)
+    except Exception:
+        return _lexical_retrieve_report_evidence(report_id, queries, top_k=top_k)
+
+
+def _format_targeted_evidence(snippets: list[dict], max_chars: int = 14000) -> str:
+    parts = []
+    total = 0
+    for snip in snippets or []:
+        sid = snip.get("source_id") or "CTX"
+        title = snip.get("title") or "Evidence"
+        url = snip.get("url") or "uploaded/local"
+        cred = snip.get("credibility_score", 0)
+        header = f"[{sid}] {title} | credibility {cred}/100 | {url}"
+        body = _one_line(snip.get("text", ""), 900)
+        block = f"{header}\n{body}"
+        if total + len(block) > max_chars:
+            break
+        parts.append(block)
+        total += len(block)
+    return "\n\n".join(parts)
 
 
 def _normalize_source_ids(raw_ids, max_source_index: int) -> list[str]:
@@ -1044,6 +1524,40 @@ def _normalize_research_audit(audit) -> dict:
     return clean
 
 
+def _validate_report_citations(markdown: str, sources: list[dict]) -> dict:
+    allowed = set()
+    for i, src in enumerate(sources or [], start=1):
+        try:
+            idx = int(src.get("index") or src.get("source_index") or i)
+        except Exception:
+            idx = i
+        if idx > 0:
+            allowed.add(f"S{idx}")
+    used = []
+    for match in re.findall(r"\[S\s*(\d+)\]", markdown or "", flags=re.I):
+        sid = f"S{int(match)}"
+        if sid not in used:
+            used.append(sid)
+    invalid = [sid for sid in used if sid not in allowed]
+    return {
+        "valid": not invalid,
+        "used": used,
+        "invalid": invalid,
+        "allowed_count": len(allowed),
+    }
+
+
+def _report_renderable_audit(markdown: str) -> dict:
+    text = markdown or ""
+    return {
+        "has_mermaid": bool(re.search(r"```mermaid\s+[\s\S]+?```", text, re.I)),
+        "has_chart": bool(re.search(r"```chart\s+[\s\S]+?```", text, re.I)),
+        "has_pygraph": bool(re.search(r"```pygraph\s+[\s\S]+?```", text, re.I)),
+        "has_display_equation": bool(re.search(r"\$\$[\s\S]+?\$\$", text)),
+        "citation_refs": re.findall(r"\[S\s*\d+\]", text, flags=re.I),
+    }
+
+
 def _deterministic_research_audit(
     findings: list[dict], sources: list[dict], pages: list[dict],
     searches: int, budget: dict, reason: str = "Auditor returned invalid or empty JSON.",
@@ -1080,6 +1594,12 @@ def _deterministic_research_audit(
             tiers["fact_checker"] * 0.65 +
             tiers["general"] * 0.45
         ) / source_count
+        credibility_values = [
+            float(s.get("credibility_score", _score_source_credibility(s.get("url", ""), s.get("type", "web"), s.get("tier")).get("score", 50)))
+            for s in sources or []
+        ]
+        credibility_ratio = (sum(credibility_values) / max(1, len(credibility_values))) / 100.0
+        quality_ratio = quality_ratio * 0.65 + credibility_ratio * 0.35
     else:
         quality_ratio = 0.0
 
@@ -1142,6 +1662,9 @@ def _deterministic_research_audit(
         f"Source tier mix: {tiers['primary']} primary, {tiers['investigative']} investigative/archival, {tiers['general']} general/community, {tiers['fact_checker']} fact-checker.",
         "Coverage score is evidence coverage: collection completion, citation coverage, page reads, source tier mix, and caveat coverage.",
     ]
+    if source_count:
+        avg_cred = round(sum(float(s.get("credibility_score", 50)) for s in sources or []) / source_count)
+        source_quality_notes.append(f"Average credibility score: {avg_cred}/100. Low-score sources were retained for dispute/contradiction coverage, not treated as proof.")
     if source_count and tiers["general"] == source_count:
         source_quality_notes.append("All collected sources are general/community by tier, so deterministic coverage is capped despite citations.")
 
@@ -1268,6 +1791,133 @@ def _make_report_search_queries(
             break
         add_query(_compose_report_query(search_topic, suffix))
     return qset[:min(len(qset), int(budget.get("queries") or len(qset)))]
+
+
+def _normalize_followup_queries(raw_queries, existing_queries: set[str], topic: str, remaining: int) -> list[str]:
+    """Clean model-proposed adaptive queries without exceeding budget."""
+    if remaining <= 0:
+        return []
+    out: list[str] = []
+    seen = {re.sub(r"\W+", " ", q.lower()).strip() for q in existing_queries or set()}
+    topic_tokens = _evidence_tokens(topic)
+    for raw in raw_queries or []:
+        q = _compact_search_query(str(raw or ""))
+        if not q or "http://" in q.lower() or "https://" in q.lower():
+            continue
+        key = re.sub(r"\W+", " ", q.lower()).strip()
+        if not key or key in seen:
+            continue
+        q_tokens = _evidence_tokens(q)
+        # Keep genuine contradiction/primary-source expansions even if they
+        # introduce new entities; otherwise require at least one topic anchor.
+        if topic_tokens and not (q_tokens & topic_tokens) and not re.search(r"\b(contradiction|criticism|primary source|official|data|benchmark|audit|timeline)\b", q, re.I):
+            continue
+        seen.add(key)
+        out.append(q)
+        if len(out) >= remaining:
+            break
+    return out
+
+
+def _normalize_report_sources(
+    input_sources: list[dict], direct_sources: list[dict],
+    all_results: list[dict], budget: dict,
+) -> list[dict]:
+    seen_urls = {s.get("url") for s in direct_sources if s.get("url")}
+    sources: list[dict] = []
+    target_web_sources = max(0, int(budget.get("target_sources") or 0) - len(input_sources) - len(direct_sources))
+
+    def result_priority(item):
+        url = _normalize_url(item.get("url", ""))
+        tier = _source_tier(url)
+        cred = _score_source_credibility(url, item.get("type", "web"), tier).get("score", 50)
+        raw_score = item.get("score", 0) or 0
+        try:
+            raw_score = float(raw_score)
+        except Exception:
+            raw_score = 0.0
+        return (tier, -cred, -raw_score, -len(item.get("content", "") or ""))
+
+    for item in sorted(all_results or [], key=result_priority):
+        if len(sources) >= target_web_sources:
+            break
+        url = _normalize_url(item.get("url", ""))
+        if not url or url in seen_urls:
+            continue
+        if not _url_safe_for_direct_fetch(url, resolve_dns=False):
+            continue
+        seen_urls.add(url)
+        src = {
+            "index": len(input_sources) + len(direct_sources) + len(sources) + 1,
+            "title": item.get("title", "") or url,
+            "url": url,
+            "snippet": item.get("content", "")[:320],
+            "thumbnail": item.get("thumbnail", ""),
+            "type": item.get("type", "web"),
+            "tier": _source_tier(url),
+            "query": item.get("query", ""),
+        }
+        sources.append(_apply_source_quality(src))
+
+    out = []
+    for src in list(input_sources or []) + list(direct_sources or []) + sources:
+        out.append(_apply_source_quality(dict(src)))
+    for i, src in enumerate(out, start=1):
+        src["index"] = i
+    return out
+
+
+def _normalize_adaptive_research_state(obj, max_learnings: int = 10) -> dict:
+    if not isinstance(obj, dict):
+        return {"learnings": [], "follow_up_queries": []}
+    learnings = obj.get("learnings") or obj.get("findings") or []
+    followups = obj.get("follow_up_queries") or obj.get("followups") or obj.get("queries") or []
+    if isinstance(learnings, str):
+        learnings = [learnings]
+    if isinstance(followups, str):
+        followups = [followups]
+    return {
+        "learnings": [_one_line(str(x), 420) for x in learnings[:max_learnings] if str(x or "").strip()],
+        "follow_up_queries": [str(x).strip() for x in followups if str(x or "").strip()],
+        "gaps": [_one_line(str(x), 260) for x in (obj.get("gaps") or [])[:8] if str(x or "").strip()] if isinstance(obj.get("gaps") or [], list) else [],
+    }
+
+
+async def _extract_adaptive_learnings(
+    http, ollama_url: str, default_model: str, model: str,
+    query: str, focus: str, report_type: str, round_no: int,
+    evidence_summary: str, remaining_queries: int,
+) -> dict:
+    if remaining_queries <= 0:
+        return {"learnings": [], "follow_up_queries": [], "gaps": []}
+    prompt = f"""You are the adaptive middle stage of a deep-research pipeline.
+
+Topic: {query}
+Focus: {focus or "none"}
+Report type: {report_type}
+Adaptive round: {round_no}
+Remaining search-query budget: {remaining_queries}
+
+Evidence gathered so far:
+{evidence_summary[:24000]}
+
+Return strict JSON:
+{{
+  "learnings": ["compact source-backed learning, not a final conclusion"],
+  "gaps": ["important missing evidence or unresolved contradiction"],
+  "follow_up_queries": ["specific next search query"]
+}}
+
+Rules:
+- Follow-up queries must be specific, searchable, and anchored to the topic.
+- Prefer primary sources, official docs/data, benchmarks, contradictions, and missing viewpoints.
+- Do not repeat a query already implied by the evidence summary.
+- Return at most {remaining_queries} follow_up_queries."""
+    obj = await _ask_ollama_json(
+        http, ollama_url, prompt, model=model, default_model=default_model,
+        max_tokens=1800, fallback={}, expected_type=dict,
+    )
+    return _normalize_adaptive_research_state(obj)
 
 
 async def _emit_report_event(events, report_id: str, event_type: str, data: dict):
@@ -1485,6 +2135,7 @@ Use the current date above as authoritative; do not infer "current real-world kn
                 "query": "user-provided URL",
                 "metadata": {"seed_url": url, "files": page.get("files", []), "default_branch": page.get("default_branch")},
             }
+            src = _apply_source_quality(src)
             direct_sources.append(src)
             direct_pages.append({
                 "url": direct_url,
@@ -1500,113 +2151,194 @@ Use the current date above as authoritative; do not infer "current real-world kn
             })
 
         # Phase 3: search.
-        await phase("search", "Searching the web", "Expanding and deduplicating queries", 20)
+        await phase("search", "Searching the web", "Initial source discovery and query expansion", 20)
         planned_queries = plan.get("search_queries", [])
         if not isinstance(planned_queries, list):
             planned_queries = []
-        qset = _make_report_search_queries(query, focus, planned_queries, report_type, budget)
+        full_qset = _make_report_search_queries(query, focus, planned_queries, report_type, budget)
+        initial_query_count = max(3, int(max(1, budget["queries"]) * (0.58 if depth >= 4 else 0.68)))
+        qset = full_qset[:min(len(full_qset), initial_query_count)]
 
         all_results = []
         searched = set()
-        for batch_start in range(0, len(qset), _SEARCH_BATCH_SIZE):
-            await check_cancel()
-            batch = qset[batch_start:batch_start + _SEARCH_BATCH_SIZE]
-            tasks = []
-            for q in batch:
-                searched.add(q)
-                time_range = "year" if re.search(r"\b(latest|recent|current|today|202[5-9]|news)\b", q, re.I) else None
-                tasks.append(_search_searxng(http, searxng_url, q, count=budget["results_per_query"], time_range=time_range))
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for q, res in zip(batch, results):
-                if not isinstance(res, list):
-                    continue
-                for item in res:
-                    item["query"] = q
-                    all_results.append(item)
-            await _emit_report_event(events, report_id, "research_phase", {
-                "phase": "search", "label": "Searching the web",
-                "detail": f"{min(batch_start + len(batch), len(qset))}/{len(qset)} queries complete",
-                "pct": 20 + int(18 * (batch_start + len(batch)) / max(len(qset), 1)),
-            })
-            if batch_start + _SEARCH_BATCH_SIZE < len(qset):
-                await asyncio.sleep(_SEARCH_BATCH_DELAY_DEEP)
+        pages = list(direct_pages)
+        fetched_urls = {_normalize_url(p.get("url", "")) for p in pages if p.get("url")}
+        emitted_source_urls = {s.get("url") for s in direct_sources if s.get("url")}
+        adaptive_learnings: list[str] = []
+        adaptive_gaps: list[str] = []
+        adaptive_followups: list[str] = []
 
-        # Source normalization.
-        seen_urls = {s.get("url") for s in direct_sources if s.get("url")}
-        sources = []
-        target_web_sources = max(0, budget["target_sources"] - len(input_sources) - len(direct_sources))
-        def result_priority(item):
-            url = _normalize_url(item.get("url", ""))
-            return (_source_tier(url), -(item.get("score", 0) or 0), -len(item.get("content", "") or ""))
-        for item in sorted(all_results, key=result_priority):
-            if len(sources) >= target_web_sources:
-                break
-            url = _normalize_url(item.get("url", ""))
-            if not url or url in seen_urls:
-                continue
-            seen_urls.add(url)
-            src = {
-                "index": len(input_sources) + len(direct_sources) + len(sources) + 1,
-                "title": item.get("title", "") or url,
-                "url": url,
-                "snippet": item.get("content", "")[:320],
-                "thumbnail": item.get("thumbnail", ""),
-                "type": item.get("type", "web"),
-                "tier": _source_tier(url),
-                "query": item.get("query", ""),
-            }
-            src["tier_label"] = _source_tier_label(src["tier"])
-            sources.append(src)
-            if len(sources) <= min(budget["target_sources"], 70):
+        async def run_search_queries(queries: list[str], pct_base: int, pct_span: int, detail_prefix: str):
+            if not queries:
+                return
+            for batch_start in range(0, len(queries), _SEARCH_BATCH_SIZE):
+                await check_cancel()
+                batch = queries[batch_start:batch_start + _SEARCH_BATCH_SIZE]
+                tasks = []
+                for q in batch:
+                    if q in searched:
+                        continue
+                    searched.add(q)
+                    time_range = "year" if re.search(r"\b(latest|recent|current|today|202[5-9]|news)\b", q, re.I) else None
+                    tasks.append((q, _search_searxng(http, searxng_url, q, count=budget["results_per_query"], time_range=time_range)))
+                if not tasks:
+                    continue
+                results = await asyncio.gather(*[t[1] for t in tasks], return_exceptions=True)
+                for (q, _task), res in zip(tasks, results):
+                    if not isinstance(res, list):
+                        continue
+                    for item in res:
+                        item["query"] = q
+                        all_results.append(item)
+                await _emit_report_event(events, report_id, "research_phase", {
+                    "phase": "search", "label": "Searching the web",
+                    "detail": f"{detail_prefix}: {min(batch_start + len(batch), len(queries))}/{len(queries)} queries complete",
+                    "pct": pct_base + int(pct_span * (batch_start + len(batch)) / max(len(queries), 1)),
+                })
+                if batch_start + _SEARCH_BATCH_SIZE < len(queries):
+                    await asyncio.sleep(_SEARCH_BATCH_DELAY_DEEP)
+
+        def remap_page_source_indices(current_sources: list[dict]) -> None:
+            by_url = {_normalize_url(s.get("url", "")): s for s in current_sources if s.get("url")}
+            for page in pages:
+                src = by_url.get(_normalize_url(page.get("url", "")))
+                if src:
+                    page["source_index"] = src.get("index", 0)
+
+        async def emit_new_sources(current_sources: list[dict]) -> None:
+            for src in current_sources:
+                url = src.get("url") or f"local:{src.get('title','')}"
+                if url in emitted_source_urls:
+                    continue
+                emitted_source_urls.add(url)
                 await _emit_report_event(events, report_id, "research_source_found", src)
-        sources = input_sources + direct_sources + sources
-        for i, src in enumerate(sources, start=1):
-            src["index"] = i
-        for page in direct_pages:
-            page["source_index"] = next((s["index"] for s in sources if s.get("url") == page.get("url")), page.get("source_index", 0))
-        await db.update_research_report(report_id, sources=sources, metrics={
-            "searches": len(searched), "results": len(all_results),
-            "source_count": len(sources), "pages_read": len(direct_pages), "elapsed": time.time() - t_start,
-            "target_queries": budget["queries"], "target_sources": budget["target_sources"],
-            "target_pages": budget["page_reads"], "depth": depth,
-        })
+
+        async def fetch_ranked_pages(current_sources: list[dict], max_new_pages: int) -> None:
+            if max_new_pages <= 0:
+                return
+            await phase("reading", "Reading high-value sources", "Fetching full text for ranked pages", 42)
+            web_results = [r for r in all_results if r.get("url")]
+            top_urls = [u for u in _rank_urls(web_results, fetched_urls) if u not in fetched_urls][:max_new_pages]
+            for i in range(0, len(top_urls), 4):
+                await check_cancel()
+                batch = top_urls[i:i + 4]
+                fetched = await asyncio.gather(*[_fetch_page(http, u) for u in batch], return_exceptions=True)
+                for page in fetched:
+                    if isinstance(page, dict) and page.get("content"):
+                        norm = _normalize_url(page.get("url", ""))
+                        fetched_urls.add(norm)
+                        src_meta = next((s for s in current_sources if s.get("url") == norm), {})
+                        page["source_index"] = src_meta.get("index", 0)
+                        pages.append(page)
+                        await _emit_report_event(events, report_id, "research_source_read", {
+                            "url": page.get("url", ""), "title": src_meta.get("title", ""),
+                            "source_index": page.get("source_index"),
+                            "chars": len(page.get("content", "")),
+                        })
+
+        def current_metrics(current_sources: list[dict], extra: dict | None = None) -> dict:
+            m = {
+                "searches": len(searched), "results": len(all_results),
+                "source_count": len(current_sources), "pages_read": len(pages), "elapsed": time.time() - t_start,
+                "target_queries": budget["queries"], "target_sources": budget["target_sources"],
+                "target_pages": budget["page_reads"], "depth": depth,
+                "adaptive_learnings": len(adaptive_learnings),
+                "adaptive_followup_queries": len(adaptive_followups),
+            }
+            if extra:
+                m.update(extra)
+            return m
+
+        await run_search_queries(qset, 20, 18, "initial")
+        sources = _normalize_report_sources(input_sources, direct_sources, all_results, budget)
+        remap_page_source_indices(sources)
+        await emit_new_sources(sources)
+        await db.update_research_report(report_id, sources=sources, metrics=current_metrics(sources))
         await db.replace_research_sources(report_id, sources)
 
         if not sources and not user_context:
             raise RuntimeError("No usable sources found. Check SearXNG or provide files/KB context.")
 
-        # Phase 4: read pages.
-        await phase("reading", "Reading high-value sources", "Fetching full text for ranked pages", 42)
-        web_results = [r for r in all_results if r.get("url")]
-        page_budget = max(0, budget["page_reads"] - len(direct_pages))
-        top_urls = _rank_urls(web_results, set())[:page_budget]
-        pages = list(direct_pages)
-        for i in range(0, len(top_urls), 4):
+        # Phase 4: read pages, then adaptively search gaps.
+        await fetch_ranked_pages(sources, max(0, budget["page_reads"] - len(pages)))
+        await db.update_research_report(report_id, metrics=current_metrics(sources))
+
+        max_adaptive_rounds = max(0, min(4, depth - 1))
+        for round_no in range(1, max_adaptive_rounds + 1):
             await check_cancel()
-            batch = top_urls[i:i + 4]
-            fetched = await asyncio.gather(*[_fetch_page(http, u) for u in batch], return_exceptions=True)
-            for page in fetched:
-                if isinstance(page, dict) and page.get("content"):
-                    src_meta = next((s for s in sources if s.get("url") == _normalize_url(page.get("url", ""))), {})
-                    page["source_index"] = src_meta.get("index", 0)
-                    pages.append(page)
-                    await _emit_report_event(events, report_id, "research_source_read", {
-                        "url": page.get("url", ""), "title": src_meta.get("title", ""),
-                        "source_index": page.get("source_index"),
-                        "chars": len(page.get("content", "")),
-                    })
-            await db.update_research_report(report_id, metrics={
-                "searches": len(searched), "results": len(all_results),
-                "source_count": len(sources), "pages_read": len(pages), "elapsed": time.time() - t_start,
-                "target_queries": budget["queries"], "target_sources": budget["target_sources"],
-                "target_pages": budget["page_reads"], "depth": depth,
-            })
+            remaining_queries = max(0, budget["queries"] - len(searched))
+            remaining_pages = max(0, budget["page_reads"] - len(pages))
+            if remaining_queries <= 0 and remaining_pages <= 0:
+                break
+            await phase("followup", "Adaptive follow-up", f"Round {round_no}: extracting learnings and gaps", 50 + min(10, round_no * 3))
+            interim_source_lines = [
+                f"[S{s.get('index')}] {s.get('title','')} | credibility {s.get('credibility_score', 0)}/100 | {s.get('snippet','')}"
+                for s in sources[:min(len(sources), budget["source_briefs"])]
+            ]
+            interim_page_lines = [
+                f"[S{p.get('source_index') or '?'}] {p.get('url','')}\n{p.get('content','')[:1400]}"
+                for p in pages[-min(len(pages), 8):]
+            ]
+            evidence_summary = (
+                ("Existing learnings:\n" + "\n".join(f"- {x}" for x in adaptive_learnings[-10:]) + "\n\n" if adaptive_learnings else "") +
+                "Source briefs:\n" + "\n".join(interim_source_lines) +
+                "\n\nRecent full-text evidence:\n" + "\n\n".join(interim_page_lines)
+            )
+            adaptive_state = await cancel_registry.await_cancellable(
+                _extract_adaptive_learnings(
+                    http, ollama_url, default_model, run_model,
+                    query, focus, template["label"], round_no,
+                    evidence_summary, remaining_queries,
+                ),
+                report_id,
+            )
+            new_learnings = adaptive_state.get("learnings", [])
+            new_gaps = adaptive_state.get("gaps", [])
+            adaptive_learnings.extend([x for x in new_learnings if x not in adaptive_learnings])
+            adaptive_gaps.extend([x for x in new_gaps if x not in adaptive_gaps])
+            followups = _normalize_followup_queries(
+                adaptive_state.get("follow_up_queries", []),
+                searched, query, remaining_queries,
+            )
+            if not followups and remaining_queries > 0 and round_no == 1:
+                followups = _normalize_followup_queries(
+                    [
+                        _compose_report_query(query, "primary source data"),
+                        _compose_report_query(query, "contradictions criticism limitations"),
+                        _compose_report_query(query, "official documentation benchmarks"),
+                    ],
+                    searched, query, min(remaining_queries, 3),
+                )
+            if not followups and not new_learnings:
+                break
+            if followups:
+                adaptive_followups.extend(followups)
+                await _emit_report_event(events, report_id, "research_phase", {
+                    "phase": "followup",
+                    "label": "Adaptive follow-up",
+                    "detail": f"Round {round_no}: {len(followups)} follow-up queries",
+                    "pct": 56 + min(12, round_no * 3),
+                })
+                await run_search_queries(followups, 56 + min(12, round_no * 3), 4, f"adaptive round {round_no}")
+                sources = _normalize_report_sources(input_sources, direct_sources, all_results, budget)
+                remap_page_source_indices(sources)
+                await emit_new_sources(sources)
+                await db.replace_research_sources(report_id, sources)
+            if remaining_pages > 0:
+                await fetch_ranked_pages(sources, remaining_pages)
+            await db.update_research_report(report_id, sources=sources, metrics=current_metrics(sources))
+
+        sources = _normalize_report_sources(input_sources, direct_sources, all_results, budget)
+        remap_page_source_indices(sources)
+        await db.replace_research_sources(report_id, sources)
 
         # Build bounded evidence context.
         source_briefs = []
         for src in sources[:budget["source_briefs"]]:
             sid = f"S{src['index']}"
             tier = src.get("tier", 2)
+            cred = src.get("credibility_score", 0)
+            factors = ", ".join(src.get("credibility_factors") or [])
             metadata = src.get("metadata") if isinstance(src.get("metadata"), dict) else {}
             files = metadata.get("files") or []
             file_line = f"Repository files sampled: {', '.join(files[:12])}\n" if files else ""
@@ -1616,6 +2348,7 @@ Use the current date above as authoritative; do not infer "current real-world kn
                 f"URL: {src.get('url','uploaded/local')}\n"
                 f"Source type: {src.get('type','web')}\n"
                 f"Source tier: {_source_tier_label(tier)} (T{tier})\n"
+                f"Credibility: {cred}/100 ({factors or 'standard web source'})\n"
                 f"{file_line}"
                 f"Snippet: {src.get('snippet','')}"
             )
@@ -1628,6 +2361,28 @@ Use the current date above as authoritative; do not infer "current real-world kn
             "SOURCE BRIEFS\n" + "\n\n".join(source_briefs) +
             "\n\nFULL TEXT EXTRACTS\n" + "\n\n".join(page_context)
         )[:budget["context_chars"]]
+
+        evidence_records = _build_report_evidence_records(report_id, query, user_context, sources, pages)
+        evidence_index = await cancel_registry.await_cancellable(
+            _index_report_evidence(report_id, evidence_records),
+            report_id,
+        )
+        section_queries = [query, focus] + [
+            str(q) for q in (plan.get("research_questions") or [])[:10]
+        ] + [
+            f"{o.get('heading','')} {o.get('goal','')}" for o in outline[:10] if isinstance(o, dict)
+        ] + adaptive_followups[:8]
+        targeted_evidence = await cancel_registry.await_cancellable(
+            _retrieve_report_evidence(report_id, section_queries, top_k=min(18, max(8, budget["findings"]))),
+            report_id,
+        )
+        targeted_evidence_context = _format_targeted_evidence(targeted_evidence, max_chars=16000)
+        await _emit_report_event(events, report_id, "research_phase", {
+            "phase": "evidence_index",
+            "label": "Indexing evidence",
+            "detail": f"{evidence_index.get('embedded', 0)}/{evidence_index.get('chunks', 0)} chunks embedded",
+            "pct": 60,
+        })
 
         # Phase 5: extract findings.
         await phase("extracting", "Extracting evidence", "Converting sources into claim-level findings", 62)
@@ -1642,6 +2397,12 @@ Allowed source IDs: {allowed_source_ids}
 
 Evidence:
 {evidence_context}
+
+Targeted evidence retrieved from the per-report evidence index:
+{targeted_evidence_context or "[No targeted snippets retrieved; use the evidence above.]"}
+
+Adaptive learnings and gaps:
+{json.dumps({"learnings": adaptive_learnings[:20], "gaps": adaptive_gaps[:12], "follow_up_queries": adaptive_followups[:20]}, indent=2)}
 
 Return a JSON array of 8-{budget["findings"]} objects:
 [
@@ -1663,6 +2424,8 @@ Rules:
 - Use "finding_id" only for findings. Do not call sources "claims".
 - Treat sources with Source type "github_repo" as direct repository evidence for repo-specific architecture, dependency, and file-organization claims.
 - Use the current date above as authoritative. Dates on or before that date are not future-dated.
+- Prefer per-report evidence-index snippets for exact source linkage when they answer the research question.
+- Consider credibility scores and factors when assigning evidence_strength; low-score sources can support dispute coverage but should not carry strong claims alone.
 - Do not write "studies show" unless the cited source_ids contain peer-reviewed papers, official benchmarks, or primary empirical studies.
 - Mark community discussions, blogs, GitHub issues, and vendor docs as moderate, thin, or anecdotal unless they contain direct data."""
         findings_obj = await cancel_registry.await_cancellable(
@@ -1696,10 +2459,14 @@ Findings JSON:
 Sources:
 {chr(10).join(source_briefs[:budget["source_briefs"]])}
 
+Targeted evidence retrieved from the per-report evidence index:
+{targeted_evidence_context or "[No targeted snippets retrieved.]"}
+
 Audit rules:
 - Refer to extracted findings as "Finding #N".
 - Refer to sources only as "[S#]"; never write "claim 22" or use a bare number for a source.
 - Flag any finding that uses strong causal, benchmark, quality, latency, cost, or hallucination-reduction language without primary empirical data.
+- Use credibility scores and factors to calibrate source_quality_notes and coverage language.
 - Treat community discussions, blogs, GitHub repositories, and vendor docs as practical signals, not peer-reviewed evidence.
 - Use the current date above as authoritative. Do not call sources future-dated when their dates are on or before the current date.
 - Never mention a model training cutoff or phrases like "current real-world knowledge early 2024"; audit only against the source set and current date shown here.
@@ -1743,16 +2510,28 @@ Return strict JSON:
             "target_queries": budget["queries"],
             "target_sources": budget["target_sources"],
             "target_pages": budget["page_reads"],
+            "adaptive_rounds": max_adaptive_rounds,
+            "adaptive_learnings": adaptive_learnings[:30],
+            "adaptive_gaps": adaptive_gaps[:20],
+            "adaptive_followup_queries": adaptive_followups[:30],
+            "evidence_index": evidence_index,
+            "targeted_evidence_count": len(targeted_evidence),
             "tiers": {
                 "primary": len([s for s in sources if s.get("tier") == 0]),
                 "investigative": len([s for s in sources if s.get("tier") == 1]),
                 "general": len([s for s in sources if s.get("tier") == 2]),
                 "fact_checker": len([s for s in sources if s.get("tier") == 3]),
             },
+            "credibility": {
+                "average": round(sum(float(s.get("credibility_score", 50)) for s in sources) / max(1, len(sources))),
+                "low_count": len([s for s in sources if float(s.get("credibility_score", 50)) < 45]),
+                "high_count": len([s for s in sources if float(s.get("credibility_score", 50)) >= 75]),
+            },
         }
 
         # Phase 7: synthesize final report.
         await phase("synthesis", "Writing final report", "Streaming the report into the viewer", 86)
+        visual_guidance = "\n".join(f"- {line}" for line in _VISUAL_REPORT_GUIDANCE.strip().splitlines())
         final_prompt = f"""Write a polished, advanced research report.
 
 Topic: {query}
@@ -1771,8 +2550,14 @@ Findings:
 Audit:
 {json.dumps(audit, indent=2)}
 
-Evidence context:
-{evidence_context}
+Adaptive learnings and follow-up searches:
+{json.dumps({"learnings": adaptive_learnings[:24], "gaps": adaptive_gaps[:16], "follow_up_queries": adaptive_followups[:24]}, indent=2)}
+
+Targeted evidence retrieved from the per-report evidence index:
+{targeted_evidence_context or "[No targeted snippets retrieved; use findings/source briefs only.]"}
+
+Source credibility summary:
+{json.dumps(metrics.get("credibility", {}), indent=2)}
 
 Write in Markdown. Requirements:
 - Start with "# {title}".
@@ -1786,18 +2571,37 @@ Write in Markdown. Requirements:
 - When evidence comes mostly from community posts, blogs, GitHub repos, or vendor/project docs, write it as reported practice, implementation guidance, or anecdotal evidence.
 - When a Source type "github_repo" snapshot is present, use it for repository-specific claims and do not say no direct repository review was performed.
 - If the audit coverage score is under 70 or the source set is mostly general/community sources, add an "Evidence Strength" section before recommendations.
+- Include credibility-calibrated language: low-score sources may show claims/disputes, but do not present them as established facts unless corroborated.
 - Use tables where comparisons are clearer than prose.
+{visual_guidance}
 - End with "Source Notes" summarizing source quality and follow-up searches.
 - Keep it rigorous and decision-useful, not a search-result dump."""
         report = await cancel_registry.await_cancellable(
             _ask_report_streamed(http, ollama_url, events, report_id, final_prompt, model=run_model, default_model=default_model),
             report_id,
         )
+        citation_audit = _validate_report_citations(report, sources)
+        renderable_audit = _report_renderable_audit(report)
+        if not citation_audit.get("valid"):
+            warning = (
+                "\n\n> [!WARNING]\n"
+                "> Citation audit rejected invented source IDs: "
+                + ", ".join(citation_audit.get("invalid", []))
+                + ". Treat those references as unsupported unless they are corrected against the source list."
+            )
+            report = report.rstrip() + warning + "\n"
+            await _emit_report_event(events, report_id, "research_audit", {
+                "level": "warning",
+                "message": "Final report contained invented citations.",
+                "citation_audit": citation_audit,
+            })
         summary = _one_line(re.sub(r"^# .+?\n", "", report.strip(), flags=re.DOTALL), 320)
         if not summary:
             summary = f"{template['label']} on {query}"
 
         metrics["elapsed"] = time.time() - t_start
+        metrics["citation_audit"] = citation_audit
+        metrics["renderable_audit"] = renderable_audit
         await db.update_research_report(
             report_id, status="complete", report_markdown=report, summary=summary,
             sources=sources, findings=findings, metrics={**metrics, "audit": audit},

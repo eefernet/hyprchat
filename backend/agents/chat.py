@@ -601,6 +601,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             "```mermaid\\nflowchart LR\\nA --> B\\n```\n"
             "- **Math**: use `$...$` for inline math and `$$...$$` for display equations. KaTeX renders both.\n"
             "- **Charts**: wrap Chart.js JSON in a ```chart code fence for inline data viz. "
+            "You may also use ```pygraph as an alias for the same safe chart schema. "
             "Supported types: `bar`, `line`, `pie`, `doughnut`, `scatter`, `radar`, `polarArea`. "
             "Simple form: `{\"type\":\"bar\",\"labels\":[\"A\",\"B\",\"C\"],\"data\":[4,7,2],\"title\":\"optional\"}`. "
             "Multi-series: use `\"datasets\":[{\"label\":\"X\",\"data\":[...]},{\"label\":\"Y\",\"data\":[...]}]` instead of `\"data\"`. "
@@ -821,7 +822,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     _m["content"] = (_m.get("content") or "") + _fail_note
                     break
 
-    # Inject visualization hint for non-coder chats that have execute_code + download_file
+    # Inject visualization hint for non-coder chats that have execute_code.
     _has_full_codeagent = bool(available_tool_names & (CODEAGENT_TOOLS_SET - {"execute_code", "download_file"}))
     if _is_v2_persona and _has_full_codeagent:
         _current_ctx = config.coerce_num_ctx(model_options.get("num_ctx"), fallback=config.DEFAULT_NUM_CTX)
@@ -832,13 +833,11 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     if not _has_full_codeagent and "execute_code" in available_tool_names:
         _viz_hint = (
             "\n\n## Visualization Capability\n"
-            "You have access to execute_code and download_file tools. "
-            "When a visual aid (chart, graph, diagram) would genuinely help explain something, "
-            "use execute_code to run Python with matplotlib and save the image, "
-            "then download_file to deliver it. Install packages with: "
-            'execute_code(code="import subprocess; subprocess.run([\'pip3\',\'install\',\'matplotlib\'])", language="python") '
-            "before using them. Save images to /root/projects/charts/. "
-            "Only generate visuals when they add real value — don't force them.\n"
+            "You have access to execute_code for arithmetic, aggregation, statistics, parsing, "
+            "and data transformation. When a visual aid would genuinely help, compute the "
+            "numbers with execute_code, then emit an inline ```chart or ```pygraph fence using "
+            "the computed values. Use ```mermaid fences for diagrams and `$...$` / `$$...$$` "
+            "for math. Do not save image files for charts or diagrams.\n"
         )
         if messages and messages[0]["role"] == "system":
             messages[0]["content"] += _viz_hint
@@ -1667,16 +1666,6 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                             "the actual features requested, call generate_code again with the same "
                             "project_id and a more detailed task. Otherwise present the results."
                         )})
-
-                    # After execute_code: nudge model to deliver image files
-                    if tool_name == "execute_code" and tool_result:
-                        _img_match = re.search(r'(/root/[^\s\'"]+\.(?:png|jpg|jpeg|svg|gif|webp))', tool_result)
-                        if _img_match:
-                            messages.append({"role": "tool", "content": (
-                                f"SYSTEM: Image saved at {_img_match.group(1)}. "
-                                "Call download_file to deliver it to the user."
-                            )})
-                            print(f"[CHAT]   Image detected in execute_code output — nudging download_file")
 
                 if _all_parallel:
                     break  # All were in one batch

@@ -1,0 +1,166 @@
+"""
+Pure-logic tests for the quality-first Deep Research upgrade.
+No live SearXNG, Ollama, or ChromaDB required.
+"""
+import asyncio
+import sys
+from pathlib import Path
+
+_BACKEND = Path(__file__).resolve().parent.parent
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+
+import research  # noqa: E402
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+class _FakeResponse:
+    def __init__(self, *, url, text="<html><body>" + ("public text. " * 80) + "</body></html>"):
+        self.status_code = 200
+        self.headers = {"content-type": "text/html"}
+        self.text = text
+        self.url = url
+
+
+class _RedirectHTTP:
+    async def get(self, url, **kwargs):
+        return _FakeResponse(url="http://127.0.0.1/private")
+
+
+def test_safe_url_filtering_blocks_private_reserved_and_local_hosts():
+    blocked = [
+        "http://127.0.0.1/admin",
+        "http://10.0.0.8",
+        "http://172.16.0.10",
+        "http://192.168.1.1",
+        "http://169.254.1.1",
+        "http://[::1]/",
+        "http://example.local/page",
+        "ftp://example.com/file",
+    ]
+    for url in blocked:
+        assert not research._url_safe_for_direct_fetch(url), url
+    assert research._url_safe_for_direct_fetch("https://example.com/report")
+
+
+def test_fetch_page_rejects_redirect_to_private_host():
+    assert _run(research._fetch_page(_RedirectHTTP(), "https://example.com/start")) is None
+
+
+def test_adaptive_followup_queries_respect_budget_and_dedupe():
+    existing = {"local ai assistants overview"}
+    queries = research._normalize_followup_queries(
+        [
+            "local ai assistants overview",
+            "https://example.com/not-a-query",
+            "unrelated whale migration",
+            "local AI assistants primary source data",
+            "local AI assistants benchmarks 2026",
+        ],
+        existing,
+        "local AI assistants for small business",
+        remaining=2,
+    )
+    assert queries == [
+        "local AI assistants primary source data",
+        "local AI assistants benchmarks 2026",
+    ]
+
+
+def test_per_report_lexical_evidence_retrieval_returns_source_linked_snippets():
+    report_id = "research-test-evidence"
+    records = [
+        {
+            "id": "a",
+            "text": "Cloud assistants centralize documents but can reduce local maintenance.",
+            "source_id": "S1",
+            "source_index": 1,
+            "title": "Cloud deployment guide",
+            "url": "https://vendor.example/cloud",
+            "kind": "source_brief",
+            "credibility_score": 52,
+        },
+        {
+            "id": "b",
+            "text": "Local Ollama deployments keep private documents on-prem and need GPU capacity planning.",
+            "source_id": "S2",
+            "source_index": 2,
+            "title": "Local AI architecture notes",
+            "url": "https://docs.example/local-ai",
+            "kind": "full_page",
+            "credibility_score": 82,
+        },
+    ]
+    research._stash_report_evidence_records(report_id, records)
+    out = research._lexical_retrieve_report_evidence(report_id, ["Ollama local private documents GPU"], top_k=1)
+    assert out
+    assert out[0]["source_id"] == "S2"
+    assert out[0]["url"] == "https://docs.example/local-ai"
+    assert "Ollama" in out[0]["text"]
+
+
+def test_citation_validation_rejects_invented_source_ids():
+    sources = [{"index": 1, "url": "https://a.example"}, {"index": 2, "url": "https://b.example"}]
+    audit = research._validate_report_citations("A supported claim [S1]. An invented one [S9].", sources)
+    assert audit["valid"] is False
+    assert audit["invalid"] == ["S9"]
+    assert "S1" in audit["used"]
+
+
+def test_credibility_scoring_and_source_ranking_prefers_stronger_sources():
+    official = research._score_source_credibility("https://www.nasa.gov/report", "web", 2)
+    weak = research._score_source_credibility("http://clickbait-example.xyz/login", "web", 2)
+    assert official["score"] > weak["score"]
+    assert any("HTTPS" in f or "government" in f for f in official["factors"])
+    assert any("suspicious" in f or "plain HTTP" in f for f in weak["factors"])
+
+    sources = research._normalize_report_sources([], [], [
+        {"title": "Weak", "url": "http://clickbait-example.xyz/login", "content": "thin", "score": 100},
+        {"title": "Official", "url": "https://www.nasa.gov/report", "content": "official data", "score": 1},
+    ], {"target_sources": 2})
+    assert sources[0]["title"] == "Official"
+    assert sources[0]["credibility_score"] > sources[1]["credibility_score"]
+
+
+def test_report_prompt_visual_guidance_mentions_supported_renderers():
+    guidance = research._VISUAL_REPORT_GUIDANCE.lower()
+    for term in ("katex", "mermaid", "chart", "pygraph", "callouts"):
+        assert term in guidance
+
+
+def test_mocked_final_markdown_contract_allows_citations_visuals_and_equations():
+    markdown = """# Report
+
+Claim with a valid source [S1].
+
+```mermaid
+flowchart LR
+A-->B
+```
+
+```pygraph
+{"type":"bar","labels":["A"],"data":[1]}
+```
+
+$$E = mc^2$$
+"""
+    citation = research._validate_report_citations(markdown, [{"index": 1, "url": "https://example.com"}])
+    renderables = research._report_renderable_audit(markdown)
+    assert citation["valid"] is True
+    assert renderables["has_mermaid"] is True
+    assert renderables["has_pygraph"] is True
+    assert renderables["has_display_equation"] is True
+
+
+def test_pdf_export_uses_react_markdown_renderer_and_pygraph_alias():
+    index = (_BACKEND.parent / "frontend" / "dist" / "index.html").read_text()
+    assert "ResearchPrintPage" in index
+    assert "<MDWrap>{md(bodyMd)}</MDWrap>" in index
+    assert 'lang==="chart"||lang==="pygraph"' in index
+    assert 'looksLikeChartConfig(code)' in index
+    assert 'function sanitizeMermaidCode' in index
+    assert "waitForResearchRender" in index
+    assert "html2pdf().set" in index

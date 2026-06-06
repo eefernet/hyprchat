@@ -2041,12 +2041,36 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
 
 // ============================================================
 // Mermaid diagram block — renders ```mermaid fences as SVG
+function sanitizeMermaidCode(src){
+  let out=String(src||"").replace(/\r\n/g,"\n");
+  out=out
+    .replace(/<\s*[—–-]+\s*>/g,"<-->")
+    .replace(/[—–]+>/g,"-->")
+    .replace(/<\s*[—–]+/g,"<--")
+    .replace(/\s+↔\s+/g," <--> ")
+    .replace(/\s+→\s+/g," --> ")
+    .replace(/\s+←\s+/g," <-- ")
+    .replace(/^\s*graph\s+(TD|TB|BT|LR|RL)\b/i,(m,dir)=>m.replace(/graph/i,"flowchart"));
+  out=out.replace(/(^|[^\w])([A-Za-z][\w-]*)\[([^\]\n"]+)\]/g,(m,prefix,id,label)=>{
+    const clean=label.replace(/\\"/g,'"').replace(/"/g,'\\"').trim();
+    return `${prefix}${id}["${clean}"]`;
+  });
+  out=out.split("\n").map(line=>{
+    const m=line.match(/^(\s*)([A-Za-z][\w-]*(?:\s*&\s*[A-Za-z][\w-]*)+)\s*(-->|<-->|---|--)\s*([A-Za-z][\w-]*)\s*$/);
+    if(!m)return line;
+    const [,indent,left,arrow,right]=m;
+    return left.split(/\s*&\s*/).map(node=>`${indent}${node} ${arrow} ${right}`).join("\n");
+  }).join("\n");
+  return out;
+}
+
 function MermaidBlock({code,theme,font,epoch}){
   const t=theme;
   const containerRef=useRef(null);
   const fsRef=useRef(null);
   const panZoomRef=useRef(null);
   const [err,setErr]=useState(null);
+  const [repaired,setRepaired]=useState(false);
   const [cpd,setCpd]=useState(false);
   const [showSrc,setShowSrc]=useState(false);
   const [fs,setFs]=useState(false);
@@ -2055,10 +2079,18 @@ function MermaidBlock({code,theme,font,epoch}){
     if(!window.mermaid||!containerRef.current||showSrc)return;
     let cancelled=false;
     setErr(null);
+    setRepaired(false);
     try{
-      window.mermaid.render(id,code).then(({svg})=>{
+      const repairedCode=sanitizeMermaidCode(code);
+      const renderOne=(src,suffix)=>window.mermaid.render(`${id}-${suffix}`,src);
+      renderOne(code,"raw").then(({svg})=>{
         if(!cancelled&&containerRef.current)containerRef.current.innerHTML=svg;
-      }).catch(e=>{if(!cancelled)setErr(String(e?.message||e));});
+      }).catch(firstErr=>{
+        if(repairedCode===code){if(!cancelled)setErr(String(firstErr?.message||firstErr));return;}
+        renderOne(repairedCode,"fixed").then(({svg})=>{
+          if(!cancelled&&containerRef.current){containerRef.current.innerHTML=svg;setRepaired(true);}
+        }).catch(e=>{if(!cancelled)setErr(String(e?.message||firstErr?.message||e||firstErr));});
+      });
     }catch(e){setErr(String(e?.message||e));}
     return()=>{cancelled=true;};
   },[code,epoch,showSrc,id]);
@@ -2100,7 +2132,7 @@ function MermaidBlock({code,theme,font,epoch}){
   const headerBtn={background:"none",border:"none",cursor:"pointer",padding:"3px 6px",fontSize:10,fontFamily:font,borderRadius:5,display:"flex",alignItems:"center",gap:3};
   return <div style={{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep}}>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`}}>
-      <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ mermaid</span>
+      <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ mermaid{repaired&&<span style={{color:t.warm,letterSpacing:0,textTransform:"none",fontWeight:600}}>repaired</span>}</span>
       <div style={{display:"flex",gap:4}}>
         {!err&&!showSrc&&<button onClick={()=>setFs(true)} style={{...headerBtn,color:t.dim}} title="fullscreen / zoom">⛶ expand</button>}
         <button onClick={()=>setShowSrc(s=>!s)} style={{...headerBtn,color:showSrc?t.acc:t.dim}} title={showSrc?"show diagram":"show source"}>{showSrc?"◱ diagram":"{ } source"}</button>
@@ -2130,8 +2162,31 @@ function MermaidBlock({code,theme,font,epoch}){
   </div>;
 }
 
-// Chart.js block — renders ```chart JSON fences as inline charts
-function ChartBlock({code,theme,font,epoch}){
+function parseChartConfig(code){
+  let cfg=typeof code==="string"?JSON.parse(code):code;
+  if(!cfg||typeof cfg!=="object"||Array.isArray(cfg))throw new Error("Chart config must be a JSON object");
+  const nativeData=(cfg.data&&typeof cfg.data==="object"&&!Array.isArray(cfg.data))?cfg.data:null;
+  if(nativeData&&(Array.isArray(nativeData.datasets)||Array.isArray(nativeData.labels))){
+    return {...cfg,labels:nativeData.labels||cfg.labels||[],datasets:nativeData.datasets||cfg.datasets||[]};
+  }
+  if(Array.isArray(cfg.data)&&!cfg.datasets)return {...cfg,datasets:[{label:cfg.label||"Value",data:cfg.data}]};
+  return {...cfg,datasets:cfg.datasets||[]};
+}
+function looksLikeChartConfig(code){
+  try{
+    const cfg=parseChartConfig(code);
+    const type=cfg.type||"";
+    const allowed=["bar","line","pie","doughnut","scatter","radar","polarArea","bubble"];
+    return allowed.includes(type)&&(
+      Array.isArray(cfg.datasets)||
+      Array.isArray(cfg.labels)||
+      (cfg.data&&typeof cfg.data==="object")
+    );
+  }catch{return false;}
+}
+
+// Chart.js block — renders ```chart / ```pygraph JSON fences as inline charts
+function ChartBlock({code,theme,font,epoch,kind="chart"}){
   const t=theme;
   const canvasRef=useRef(null);
   const chartRef=useRef(null);
@@ -2141,9 +2196,8 @@ function ChartBlock({code,theme,font,epoch}){
   useEffect(()=>{
     if(!window.Chart||!canvasRef.current||showSrc)return;
     let cfg;
-    try{cfg=JSON.parse(code);}
+    try{cfg=parseChartConfig(code);}
     catch(e){setErr("Invalid JSON: "+String(e.message));return;}
-    if(cfg.data&&!cfg.datasets){cfg.datasets=[{label:cfg.label||"Value",data:cfg.data}];delete cfg.data;}
     const palette=[t.acc,t.ok,t.warm,t.err||"#e06c75","#b39ddb","#80cbc4","#ffab91","#90caf9"];
     const type=cfg.type||"bar";
     const isCircular=["pie","doughnut","polarArea"].includes(type);
@@ -2188,7 +2242,7 @@ function ChartBlock({code,theme,font,epoch}){
   const headerBtn={background:"none",border:"none",cursor:"pointer",padding:"3px 6px",fontSize:10,fontFamily:font,borderRadius:5,display:"flex",alignItems:"center",gap:3};
   return <div style={{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep}}>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`}}>
-      <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ chart</span>
+      <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ {kind}</span>
       <div style={{display:"flex",gap:4}}>
         <button onClick={()=>setShowSrc(s=>!s)} style={{...headerBtn,color:showSrc?t.acc:t.dim}} title={showSrc?"show chart":"show source"}>{showSrc?"◱ chart":"{ } source"}</button>
         <button onClick={copyCode} style={{...headerBtn,color:cpd?t.ok:t.dim}} title="copy source">{cpd?"✓ copied":"⧉ copy"}</button>
@@ -3299,6 +3353,13 @@ function HyprChat(){
       a{color:#175cd3;text-decoration:none;overflow-wrap:anywhere}
       hr{border:0;border-top:1px solid #d7dde8;margin:13pt 0}
       .image-note{display:inline-block;border:1px solid #d7dde8;border-radius:4pt;padding:1pt 4pt;color:#57606a;background:#f8fafc;font-size:.9em}
+      .research-rendered-report{font-size:10.8pt;line-height:1.58;color:#161b22}
+      .research-rendered-report>div{display:block}
+      .research-rendered-report .mermaid-container{background:#fff!important;page-break-inside:avoid}
+      .research-rendered-report .mermaid-container svg{max-width:100%;height:auto}
+      .research-rendered-report canvas{max-width:100%}
+      .research-rendered-report .katex-display{overflow-x:auto;overflow-y:hidden;page-break-inside:avoid}
+      .research-rendered-report pre,.research-rendered-report blockquote,.research-rendered-report table,.research-rendered-report canvas{page-break-inside:avoid}
       .sources{margin-top:22pt;border-top:1px solid #d7dde8;padding-top:12pt}
       .sources li{margin-bottom:6pt}
       .source-title{font-weight:700;color:#1f2937}
@@ -3338,6 +3399,55 @@ function HyprChat(){
     </div>`;
   };
 
+  const ResearchPrintPage=({report,markdown})=>{
+    const bodyMd=String(markdown||"").trim().replace(/^#\s+.+(?:\n|$)/,"");
+    const metrics=report?.metrics||{};
+    const sources=report?.sources||[];
+    const stamp=report?.completed_at||report?.updated_at||report?.created_at||new Date().toISOString();
+    const meta=[
+      report?.report_type&&`type ${report.report_type}`,
+      report?.status&&`status ${report.status}`,
+      sources.length?`${sources.length} sources`:metrics.source_count?`${metrics.source_count} sources`:"",
+      metrics.pages_read?`${metrics.pages_read} pages read`:"",
+      metrics.searches?`${metrics.searches} searches`:"",
+      metrics.coverage_score!==undefined?`coverage ${metrics.coverage_score}/100`:"",
+      stamp?new Date(stamp).toLocaleString():new Date().toLocaleString(),
+    ].filter(Boolean);
+    return <div className="research-print-page">
+      <header className="report-cover">
+        <div className="eyebrow">HyprChat Deep Research</div>
+        <h1>{report?.title||report?.query||"Research Report"}</h1>
+        {report?.query&&<div className="query">{report.query}</div>}
+        {!!meta.length&&<div className="meta">{meta.map((x,i)=><span key={i}>{x}</span>)}</div>}
+      </header>
+      <section className="research-rendered-report"><MDWrap>{md(bodyMd)}</MDWrap></section>
+      {!!sources.length&&<section className="sources">
+        <h2>Sources</h2>
+        <ol>{sources.map((src,i)=>{
+          const idx=src.index||src.source_index||i+1;
+          return <li key={idx+"-"+(src.url||i)}>
+            <div className="source-title">[S{idx}] {src.title||src.url||"Source"}</div>
+            {src.url&&<div className="source-url">{src.url}</div>}
+            {src.credibility_score!==undefined&&<div className="source-url">Credibility: {src.credibility_score}/100{(src.credibility_factors||[]).length?` — ${(src.credibility_factors||[]).join(", ")}`:""}</div>}
+            {src.snippet&&<p>{src.snippet}</p>}
+          </li>;
+        })}</ol>
+      </section>}
+    </div>;
+  };
+
+  const waitForResearchRender=async(host)=>{
+    const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+    await sleep(80);
+    for(let i=0;i<80;i++){
+      const pendingMermaid=[...host.querySelectorAll(".mermaid-container")].some(el=>!el.querySelector("svg")&&!el.textContent.trim());
+      const pendingCharts=[...host.querySelectorAll("canvas")].some(c=>!c.width||!c.height);
+      if(!pendingMermaid&&!pendingCharts)break;
+      await sleep(100);
+    }
+    await sleep(250);
+  };
+
   const exportResearchMarkdown=()=>{
     const report=activeResearch;
     const body=(researchLiveMarkdown||report?.report_markdown||"").trim();
@@ -3357,9 +3467,14 @@ function HyprChat(){
     const host=document.createElement("div");
     host.style.position="fixed";host.style.left="-10000px";host.style.top="0";host.style.width="7.15in";
     host.style.background="#fff";host.style.color="#161b22";host.style.zIndex="-1";
-    host.innerHTML=`<style>${researchPrintCss()}</style>${buildResearchPrintHtml(report,body)}`;
     document.body.appendChild(host);
+    const root=ReactDOM.createRoot(host);
     try{
+      root.render(<>
+        <style>{researchPrintCss()}</style>
+        <ResearchPrintPage report={report} markdown={body}/>
+      </>);
+      await waitForResearchRender(host);
       await window.html2pdf().set({
         margin:[0.58,0.58,0.58,0.58],
         filename:researchExportName("pdf"),
@@ -3371,6 +3486,7 @@ function HyprChat(){
     }catch(e){
       notify({type:"error",text:"PDF export failed",detail:e.message||String(e)});
     }finally{
+      try{root.unmount();}catch{}
       host.remove();
     }
   };
@@ -4909,7 +5025,8 @@ function HyprChat(){
         if(_minIndent>0)code=_codeLines.map(l=>l.slice(_minIndent)).join("\n");
         const bid=`c${i}`;
         if(lang==="mermaid")return <MermaidBlock key={i} code={code} theme={t} font={font} epoch={mermaidEpoch}/>;
-        if(lang==="chart")return <ChartBlock key={i} code={code} theme={t} font={font} epoch={mermaidEpoch}/>;
+        if(lang==="chart"||lang==="pygraph")return <ChartBlock key={i} code={code} theme={t} font={font} epoch={mermaidEpoch} kind={lang}/>;
+        if((lang==="json"||!lang)&&looksLikeChartConfig(code))return <ChartBlock key={i} code={code} theme={t} font={font} epoch={mermaidEpoch} kind="chart"/>;
         const isDiff=lang==="diff";
         return <div key={i} style={{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`}}>
