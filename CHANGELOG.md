@@ -22,6 +22,7 @@
 - Added provider/scraper/reranker configuration seams, optional SearXNG engine routing, richer source metadata, and clearer search-unavailable guidance. 
 
 ### Bug Fixes
+- Cleaned up Daedalus agent prompt. 11k token prompt slimed down to only 300ish tokens. Removed descrepencies.
 - Daedalus Reviewer now dynamically verifies markerless/static projects instead of failing valid HTML, plain-source, or generic deliverables for missing package/build manifests.
 - Empty new-chat screens now show the same model selector as existing conversations, and that pending selection is applied when the first message creates the chat.
 - Reviewer now scopes Python dependency install failures to the editable package manifest instead of misrouting external package compiler errors to application source files.

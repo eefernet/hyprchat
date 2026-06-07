@@ -2064,7 +2064,64 @@ function sanitizeMermaidCode(src){
   return out;
 }
 
-function MermaidBlock({code,theme,font,epoch}){
+function initMermaidTheme(theme,font){
+  if(!window.mermaid)return;
+  const t=theme||{};
+  const bg=t.bgDeep||"#ffffff";
+  const surface=t.surface||"#f8fafc";
+  const brd=t.brd||"#d7dde8";
+  const acc=t.acc||"#175cd3";
+  const text=t.text||"#161b22";
+  const dim=t.dim||"#374151";
+  const mut=t.mut||"#667085";
+  const warm=t.warm||"#b7791f";
+  const err=t.err||"#b42318";
+  const sfHov=t.sfHov||"#eef4ff";
+  window.mermaid.initialize({
+    startOnLoad:false,
+    securityLevel:"strict",
+    theme:"base",
+    fontFamily:font,
+    themeVariables:{
+      background:bg,
+      primaryColor:surface,
+      primaryTextColor:text,
+      primaryBorderColor:brd,
+      secondaryColor:bg,
+      secondaryTextColor:dim,
+      secondaryBorderColor:brd,
+      tertiaryColor:sfHov,
+      tertiaryTextColor:text,
+      tertiaryBorderColor:brd,
+      lineColor:acc,
+      textColor:text,
+      mainBkg:surface,
+      nodeBorder:acc,
+      clusterBkg:bg,
+      clusterBorder:brd,
+      edgeLabelBackground:bg,
+      noteBkgColor:`${warm}22`,
+      noteTextColor:text,
+      noteBorderColor:warm,
+      errorBkgColor:`${err}22`,
+      errorTextColor:err,
+      actorBkg:surface,
+      actorBorder:acc,
+      actorTextColor:text,
+      actorLineColor:mut,
+      signalColor:dim,
+      signalTextColor:text,
+      labelBoxBkgColor:surface,
+      labelBoxBorderColor:brd,
+      labelTextColor:text,
+      loopTextColor:text,
+      activationBkgColor:sfHov,
+      activationBorderColor:acc
+    }
+  });
+}
+
+function MermaidBlock({code,theme,font,epoch,printMode=false}){
   const t=theme;
   const containerRef=useRef(null);
   const fsRef=useRef(null);
@@ -2081,6 +2138,7 @@ function MermaidBlock({code,theme,font,epoch}){
     setErr(null);
     setRepaired(false);
     try{
+      if(printMode)initMermaidTheme(t,font);
       const repairedCode=sanitizeMermaidCode(code);
       const renderOne=(src,suffix)=>window.mermaid.render(`${id}-${suffix}`,src);
       renderOne(code,"raw").then(({svg})=>{
@@ -2093,7 +2151,7 @@ function MermaidBlock({code,theme,font,epoch}){
       });
     }catch(e){setErr(String(e?.message||e));}
     return()=>{cancelled=true;};
-  },[code,epoch,showSrc,id]);
+  },[code,epoch,showSrc,id,printMode,t,font]);
   useEffect(()=>{
     if(!fs||!fsRef.current||!containerRef.current)return;
     const srcSvg=containerRef.current.querySelector("svg");
@@ -2130,22 +2188,28 @@ function MermaidBlock({code,theme,font,epoch}){
   },[fs]);
   const copyCode=()=>{try{navigator.clipboard.writeText(code);setCpd(true);setTimeout(()=>setCpd(false),1500);}catch{}};
   const headerBtn={background:"none",border:"none",cursor:"pointer",padding:"3px 6px",fontSize:10,fontFamily:font,borderRadius:5,display:"flex",alignItems:"center",gap:3};
-  return <div style={{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep}}>
-    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`}}>
+  const wrapStyle=printMode
+    ?{margin:"12pt 0",borderRadius:6,overflow:"hidden",border:`1px solid ${t.brd}`,background:"#ffffff",breakInside:"avoid",pageBreakInside:"avoid"}
+    :{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep};
+  const headStyle=printMode
+    ?{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5pt 8pt",background:"#f8fafc",borderBottom:`1px solid ${t.brd}`}
+    :{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`};
+  return <div className={printMode?"mermaid-print-block":undefined} style={wrapStyle}>
+    <div style={headStyle}>
       <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ mermaid{repaired&&<span style={{color:t.warm,letterSpacing:0,textTransform:"none",fontWeight:600}}>repaired</span>}</span>
-      <div style={{display:"flex",gap:4}}>
+      {!printMode&&<div style={{display:"flex",gap:4}}>
         {!err&&!showSrc&&<button onClick={()=>setFs(true)} style={{...headerBtn,color:t.dim}} title="fullscreen / zoom">⛶ expand</button>}
         <button onClick={()=>setShowSrc(s=>!s)} style={{...headerBtn,color:showSrc?t.acc:t.dim}} title={showSrc?"show diagram":"show source"}>{showSrc?"◱ diagram":"{ } source"}</button>
         <button onClick={copyCode} style={{...headerBtn,color:cpd?t.ok:t.dim}} title="copy source">{cpd?"✓ copied":"⧉ copy"}</button>
-      </div>
+      </div>}
     </div>
     {err?<div>
       <div style={{padding:"8px 12px",background:`${t.err}12`,color:t.err,fontSize:11,fontFamily:font,borderBottom:`1px solid ${t.err}33`}}>⚠ Mermaid render error: {err}</div>
       <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
     </div>
     :showSrc?<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
-    :<div ref={containerRef} className="mermaid-container" style={{background:t.bgDeep}}/>}
-    {fs&&ReactDOM.createPortal(
+    :<div ref={containerRef} className="mermaid-container" style={{background:printMode?"#ffffff":t.bgDeep}}/>}
+    {!printMode&&fs&&ReactDOM.createPortal(
       <div style={{position:"fixed",inset:0,zIndex:200,background:"rgba(0,0,0,.82)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setFs(false);}}>
         <div style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,width:"min(1600px,95vw)",height:"90vh",display:"flex",flexDirection:"column",boxShadow:`0 8px 48px #0008`,overflow:"hidden"}}>
           <div style={{padding:"10px 16px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:10,flexShrink:0,background:`${t.surface}88`}}>
@@ -2186,7 +2250,7 @@ function looksLikeChartConfig(code){
 }
 
 // Chart.js block — renders ```chart / ```pygraph JSON fences as inline charts
-function ChartBlock({code,theme,font,epoch,kind="chart"}){
+function ChartBlock({code,theme,font,epoch,kind="chart",printMode=false}){
   const t=theme;
   const canvasRef=useRef(null);
   const chartRef=useRef(null);
@@ -2198,7 +2262,15 @@ function ChartBlock({code,theme,font,epoch,kind="chart"}){
     let cfg;
     try{cfg=parseChartConfig(code);}
     catch(e){setErr("Invalid JSON: "+String(e.message));return;}
-    const palette=[t.acc,t.ok,t.warm,t.err||"#e06c75","#b39ddb","#80cbc4","#ffab91","#90caf9"];
+    const palette=printMode
+      ?["#175cd3","#0f766e","#b7791f","#b42318","#7c3aed","#0891b2","#c2410c","#2563eb"]
+      :[t.acc,t.ok,t.warm,t.err||"#e06c75","#b39ddb","#80cbc4","#ffab91","#90caf9"];
+    const chartText=printMode?"#263238":t.text;
+    const chartDim=printMode?"#475467":t.dim;
+    const chartMut=printMode?"#667085":t.mut;
+    const chartGrid=printMode?"#d7dde8":t.brd+"33";
+    const tooltipBg=printMode?"#ffffff":t.surface+"EE";
+    const tooltipBorder=printMode?"#98a2b3":t.brd;
     const type=cfg.type||"bar";
     const isCircular=["pie","doughnut","polarArea"].includes(type);
     const datasets=(cfg.datasets||[]).map((ds,i)=>{
@@ -2206,7 +2278,7 @@ function ChartBlock({code,theme,font,epoch,kind="chart"}){
       const out={label:ds.label||`Dataset ${i+1}`,data:ds.data||[],borderWidth:ds.borderWidth??2,tension:ds.tension??0.25,...ds};
       if(isCircular){
         out.backgroundColor=ds.backgroundColor||(ds.data||[]).map((_,k)=>palette[k%palette.length]+"CC");
-        out.borderColor=ds.borderColor||t.bgDeep;
+        out.borderColor=ds.borderColor||(printMode?"#ffffff":t.bgDeep);
         out.borderWidth=ds.borderWidth??2;
       }else{
         out.backgroundColor=ds.backgroundColor||(type==="line"?color+"22":color+"AA");
@@ -2223,37 +2295,44 @@ function ChartBlock({code,theme,font,epoch,kind="chart"}){
           responsive:true,
           maintainAspectRatio:false,
           plugins:{
-            legend:{labels:{color:t.dim,font:{family:font,size:11}}},
-            title:cfg.title?{display:true,text:cfg.title,color:t.text,font:{family:font,size:13,weight:"bold"},padding:{bottom:10}}:{display:false},
-            tooltip:{bodyFont:{family:font},titleFont:{family:font},backgroundColor:t.surface+"EE",borderColor:t.brd,borderWidth:1,titleColor:t.text,bodyColor:t.dim}
+            legend:{labels:{color:chartDim,font:{family:font,size:11}}},
+            title:cfg.title?{display:true,text:cfg.title,color:chartText,font:{family:font,size:13,weight:"bold"},padding:{bottom:10}}:{display:false},
+            tooltip:{bodyFont:{family:font},titleFont:{family:font},backgroundColor:tooltipBg,borderColor:tooltipBorder,borderWidth:1,titleColor:chartText,bodyColor:chartDim}
           },
           scales:isCircular?{}:{
-            x:{ticks:{color:t.mut,font:{family:font,size:10}},grid:{color:t.brd+"33"},title:cfg.xLabel?{display:true,text:cfg.xLabel,color:t.dim,font:{family:font,size:11}}:{display:false}},
-            y:{ticks:{color:t.mut,font:{family:font,size:10}},grid:{color:t.brd+"33"},title:cfg.yLabel?{display:true,text:cfg.yLabel,color:t.dim,font:{family:font,size:11}}:{display:false}}
+            x:{ticks:{color:chartMut,font:{family:font,size:10}},grid:{color:chartGrid},title:cfg.xLabel?{display:true,text:cfg.xLabel,color:chartDim,font:{family:font,size:11}}:{display:false}},
+            y:{ticks:{color:chartMut,font:{family:font,size:10}},grid:{color:chartGrid},title:cfg.yLabel?{display:true,text:cfg.yLabel,color:chartDim,font:{family:font,size:11}}:{display:false}}
           },
-          ...(cfg.options||{})
+          ...(cfg.options||{}),
+          animation:printMode?false:(cfg.options||{}).animation
         }
       });
       setErr(null);
     }catch(e){setErr("Chart error: "+String(e.message));}
     return()=>{if(chartRef.current){try{chartRef.current.destroy();}catch{}chartRef.current=null;}};
-  },[code,epoch,showSrc,t,font]);
+  },[code,epoch,showSrc,t,font,printMode]);
   const copyCode=()=>{try{navigator.clipboard.writeText(code);setCpd(true);setTimeout(()=>setCpd(false),1500);}catch{}};
   const headerBtn={background:"none",border:"none",cursor:"pointer",padding:"3px 6px",fontSize:10,fontFamily:font,borderRadius:5,display:"flex",alignItems:"center",gap:3};
-  return <div style={{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep}}>
-    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`}}>
+  const wrapStyle=printMode
+    ?{margin:"12pt 0",borderRadius:6,overflow:"hidden",border:`1px solid ${t.brd}`,background:"#ffffff",breakInside:"avoid",pageBreakInside:"avoid"}
+    :{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep};
+  const headStyle=printMode
+    ?{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5pt 8pt",background:"#f8fafc",borderBottom:`1px solid ${t.brd}`}
+    :{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`};
+  return <div className={printMode?"chart-print-block":undefined} style={wrapStyle}>
+    <div style={headStyle}>
       <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ {kind}</span>
-      <div style={{display:"flex",gap:4}}>
+      {!printMode&&<div style={{display:"flex",gap:4}}>
         <button onClick={()=>setShowSrc(s=>!s)} style={{...headerBtn,color:showSrc?t.acc:t.dim}} title={showSrc?"show chart":"show source"}>{showSrc?"◱ chart":"{ } source"}</button>
         <button onClick={copyCode} style={{...headerBtn,color:cpd?t.ok:t.dim}} title="copy source">{cpd?"✓ copied":"⧉ copy"}</button>
-      </div>
+      </div>}
     </div>
     {err?<div>
       <div style={{padding:"8px 12px",background:`${t.err}12`,color:t.err,fontSize:11,fontFamily:font,borderBottom:`1px solid ${t.err}33`}}>⚠ Chart render error: {err}</div>
       <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
     </div>
     :showSrc?<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
-    :<div style={{padding:14,height:320,position:"relative"}}><canvas ref={canvasRef}/></div>}
+    :<div style={{padding:printMode?"10pt":"14px",height:printMode?280:320,position:"relative",background:"#ffffff"}}><canvas ref={canvasRef}/></div>}
   </div>;
 }
 
@@ -2503,48 +2582,7 @@ function HyprChat(){
   useEffect(()=>{
     if(!window.mermaid)return;
     try{
-      window.mermaid.initialize({
-        startOnLoad:false,
-        securityLevel:"strict",
-        theme:"base",
-        fontFamily:font,
-        themeVariables:{
-          background:t.bgDeep,
-          primaryColor:t.surface,
-          primaryTextColor:t.text,
-          primaryBorderColor:t.brd,
-          secondaryColor:t.bgDeep,
-          secondaryTextColor:t.dim,
-          secondaryBorderColor:t.brd,
-          tertiaryColor:t.sfHov,
-          tertiaryTextColor:t.text,
-          tertiaryBorderColor:t.brd,
-          lineColor:t.acc,
-          textColor:t.text,
-          mainBkg:t.surface,
-          nodeBorder:t.acc,
-          clusterBkg:`${t.bgDeep}`,
-          clusterBorder:t.brd,
-          edgeLabelBackground:t.bgDeep,
-          noteBkgColor:`${t.warm}22`,
-          noteTextColor:t.text,
-          noteBorderColor:t.warm,
-          errorBkgColor:`${t.err}22`,
-          errorTextColor:t.err,
-          actorBkg:t.surface,
-          actorBorder:t.acc,
-          actorTextColor:t.text,
-          actorLineColor:t.mut,
-          signalColor:t.dim,
-          signalTextColor:t.text,
-          labelBoxBkgColor:t.surface,
-          labelBoxBorderColor:t.brd,
-          labelTextColor:t.text,
-          loopTextColor:t.text,
-          activationBkgColor:t.sfHov,
-          activationBorderColor:t.acc
-        }
-      });
+      initMermaidTheme(t,font);
       setMermaidEpoch(e=>e+1);
     }catch{}
   },[tm,fi]);
@@ -3293,6 +3331,19 @@ function HyprChat(){
   };
 
   const escapePrintHtml=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  const researchPrintTheme={
+    bgDeep:"#ffffff",
+    surface:"#f8fafc",
+    brd:"#d7dde8",
+    acc:"#175cd3",
+    ok:"#0f766e",
+    warm:"#b7791f",
+    err:"#b42318",
+    text:"#161b22",
+    dim:"#374151",
+    mut:"#667085",
+    sfHov:"#eef4ff"
+  };
   const inlinePrintMarkdown=text=>{
     let out=escapePrintHtml(text);
     out=out.replace(/!\[([^\]]*)\]\(([^)]+)\)/g,(_m,alt,url)=>`<span class="image-note">Image: ${alt||url}</span>`);
@@ -3367,12 +3418,14 @@ function HyprChat(){
       ul,ol{margin:0 0 9pt 18pt;padding:0}
       li{margin:0 0 4pt;padding-left:2pt}
       code{font-family:"SFMono-Regular",Menlo,Consolas,monospace;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:3pt;padding:0 3pt;color:#334155;font-size:.92em}
-      pre{white-space:pre-wrap;border:1px solid #d7dde8;background:#f8fafc;padding:8pt;border-radius:5pt;margin:9pt 0 11pt;page-break-inside:avoid}
+      pre,.print-code-block{white-space:pre-wrap;border:1px solid #d7dde8;background:#f8fafc;padding:8pt;border-radius:5pt;margin:9pt 0 11pt;page-break-inside:avoid;break-inside:avoid;color:#1f2937}
       pre code{border:0;background:transparent;padding:0;color:#1f2937}
       blockquote{border-left:3pt solid #94a3b8;margin:9pt 0;padding:4pt 0 4pt 10pt;color:#374151;background:#f8fafc}
-      table{width:100%;border-collapse:collapse;margin:9pt 0 12pt;page-break-inside:auto}
-      tr{page-break-inside:avoid;page-break-after:auto}
-      th,td{border:1px solid #d7dde8;padding:5pt 6pt;text-align:left;vertical-align:top;font-size:8.8pt;line-height:1.35;overflow-wrap:anywhere}
+      table,.print-md-table{width:100%;border-collapse:collapse;margin:9pt 0 12pt;page-break-inside:auto;break-inside:auto;table-layout:fixed;background:#fff}
+      thead{display:table-header-group}
+      tfoot{display:table-footer-group}
+      tr{page-break-inside:avoid;break-inside:avoid;page-break-after:auto}
+      th,td{border:1px solid #d7dde8;padding:5pt 6pt;text-align:left;vertical-align:top;font-size:8.8pt;line-height:1.35;overflow-wrap:anywhere;word-break:normal;color:#263238;background:#fff}
       th{background:#f1f5f9;color:#1f2937;font-weight:800}
       a{color:#175cd3;text-decoration:none;overflow-wrap:anywhere}
       hr{border:0;border-top:1px solid #d7dde8;margin:13pt 0}
@@ -3383,7 +3436,9 @@ function HyprChat(){
       .research-rendered-report .mermaid-container svg{max-width:100%;height:auto}
       .research-rendered-report canvas{max-width:100%}
       .research-rendered-report .katex-display{overflow-x:auto;overflow-y:hidden;page-break-inside:avoid}
-      .research-rendered-report pre,.research-rendered-report blockquote,.research-rendered-report table,.research-rendered-report canvas{page-break-inside:avoid}
+      .chart-print-block,.mermaid-print-block,.research-rendered-report pre,.research-rendered-report blockquote,.research-rendered-report canvas{page-break-inside:avoid;break-inside:avoid}
+      .print-details{border:1px solid #d7dde8;background:#f8fafc;border-radius:5pt;padding:7pt 9pt;margin:8pt 0}
+      .print-details-summary{font-size:8.5pt;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#475467;margin-bottom:4pt}
       .sources{margin-top:22pt;border-top:1px solid #d7dde8;padding-top:12pt}
       .sources li{margin-bottom:6pt}
       .source-title{font-weight:700;color:#1f2937}
@@ -3444,7 +3499,7 @@ function HyprChat(){
         {report?.query&&<div className="query">{report.query}</div>}
         {!!meta.length&&<div className="meta">{meta.map((x,i)=><span key={i}>{x}</span>)}</div>}
       </header>
-      <section className="research-rendered-report"><MDWrap>{md(bodyMd)}</MDWrap></section>
+      <section className="research-rendered-report markdown-print"><MDWrap>{md(bodyMd,{printMode:true,theme:researchPrintTheme})}</MDWrap></section>
       {!!sources.length&&<section className="sources">
         <h2>Sources</h2>
         <ol>{sources.map((src,i)=>{
@@ -3487,7 +3542,7 @@ function HyprChat(){
     const report=activeResearch;
     const body=(researchLiveMarkdown||report?.report_markdown||"").trim();
     if(!body){notify({type:"warning",text:"No report body to export"});return;}
-    if(!window.html2pdf){printResearchReport();return;}
+    if(!window.html2pdf){await printResearchReport();return;}
     const host=document.createElement("div");
     host.style.position="fixed";host.style.left="-10000px";host.style.top="0";host.style.width="7.15in";
     host.style.background="#fff";host.style.color="#161b22";host.style.zIndex="-1";
@@ -3502,31 +3557,67 @@ function HyprChat(){
       await window.html2pdf().set({
         margin:[0.58,0.58,0.58,0.58],
         filename:researchExportName("pdf"),
-        image:{type:"jpeg",quality:0.98},
+        image:{type:"png",quality:1},
         html2canvas:{scale:2,backgroundColor:"#ffffff",useCORS:true,logging:false},
         jsPDF:{unit:"in",format:"letter",orientation:"portrait"},
-        pagebreak:{mode:["css","legacy"],avoid:["pre","blockquote","table","tr"]}
+        pagebreak:{mode:["css","legacy"],avoid:["pre","blockquote",".chart-print-block",".mermaid-print-block"]}
       }).from(host.querySelector(".research-print-page")).save();
     }catch(e){
       notify({type:"error",text:"PDF export failed",detail:e.message||String(e)});
     }finally{
       try{root.unmount();}catch{}
       host.remove();
+      try{initMermaidTheme(t,font);setMermaidEpoch(e=>e+1);}catch{}
     }
   };
 
-  const printResearchReport=()=>{
+  const printResearchReport=async()=>{
     const report=activeResearch;
     const body=(researchLiveMarkdown||report?.report_markdown||"").trim();
     if(!body){notify({type:"warning",text:"No report body to print"});return;}
     const title=(report?.title||"HyprChat Research Report").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
     const w=window.open("","_blank");
     if(!w){notify({type:"error",text:"Print window blocked",detail:"Allow popups for HyprChat, then try Print again."});return;}
-    w.document.open();
-    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>
-      ${researchPrintCss()}
-    </style></head><body><main>${buildResearchPrintHtml(report,body)}</main><script>setTimeout(()=>{window.focus();window.print();},250);<\/script></body></html>`);
-    w.document.close();
+    const host=document.createElement("div");
+    host.style.position="fixed";host.style.left="-10000px";host.style.top="0";host.style.width="7.15in";
+    host.style.background="#fff";host.style.color="#161b22";host.style.zIndex="-1";
+    document.body.appendChild(host);
+    const root=ReactDOM.createRoot(host);
+    try{
+      root.render(<>
+        <style>{researchPrintCss()}</style>
+        <ResearchPrintPage report={report} markdown={body}/>
+      </>);
+      await waitForResearchRender(host);
+      const page=host.querySelector(".research-print-page").cloneNode(true);
+      const sourceCanvases=[...host.querySelectorAll("canvas")];
+      const cloneCanvases=[...page.querySelectorAll("canvas")];
+      sourceCanvases.forEach((canvas,i)=>{
+        try{
+          const img=document.createElement("img");
+          img.src=canvas.toDataURL("image/png");
+          img.alt="Chart";
+          img.style.maxWidth="100%";
+          img.style.display="block";
+          cloneCanvases[i]?.replaceWith(img);
+        }catch{}
+      });
+      w.document.open();
+      w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>
+        ${researchPrintCss()}
+      </style></head><body><main>${page.outerHTML}</main><script>setTimeout(()=>{window.focus();window.print();},250);<\/script></body></html>`);
+      w.document.close();
+    }catch(e){
+      w.document.open();
+      w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>
+        ${researchPrintCss()}
+      </style></head><body><main>${buildResearchPrintHtml(report,body)}</main><script>setTimeout(()=>{window.focus();window.print();},250);<\/script></body></html>`);
+      w.document.close();
+    }finally{
+      try{root.unmount();}catch{}
+      host.remove();
+      try{initMermaidTheme(t,font);setMermaidEpoch(e=>e+1);}catch{}
+    }
   };
 
   // Load conversation messages from backend when switching chats
@@ -4887,12 +4978,39 @@ function HyprChat(){
   };
 
   // Markdown
-  const inlineParse=(text)=>{
+  const inlineParse=(text,opts={})=>{
     if(!text)return null;
+    const printMode=!!opts.printMode;
     // Split by: inline-code, images, bold+link, bold, italic(*), italic(_), markdown link, bare URL, double-quoted strings (10+ chars)
     return text.split(/(`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s"'<>\])\},]+|"[^"\n]{10,}"|<kbd>[^<]+<\/kbd>|rgba?\([^)]+\)|hsla?\([^)]+\)|#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6})\b|[^]+)/g).map((s,k)=>{
       if(!s)return null;
       const imgMatch=s.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+      if(printMode){
+        const linkStyle={color:"#175cd3",textDecoration:"none",overflowWrap:"anywhere"};
+        if(imgMatch){const[,alt,src]=imgMatch;return <span key={k} className="image-note">Image: {alt||src}</span>;}
+        if(s.startsWith("`")&&s.endsWith("`")&&s.length>1)return <code key={k} style={{background:"#f1f5f9",border:"1px solid #e2e8f0",borderRadius:3,padding:"0 3px",fontFamily:font,fontSize:"0.9em",color:"#334155"}}>{s.slice(1,-1)}</code>;
+        if(s.charCodeAt(0)===0xE010){
+          const inner=s.slice(1,-1);const ci=inner.indexOf(":");
+          const pref=inner.slice(0,ci),num=inner.slice(ci+1);
+          return <sup key={k} style={{fontSize:"0.75em",lineHeight:0,margin:"0 1px"}}><a href={`#fn-${pref}-${num}`} style={{...linkStyle,fontWeight:700}}>{num}</a></sup>;
+        }
+        const boldLinkMatch=s.match(/^\*\*\[([^\]]+)\]\(([^)]+)\)\*\*$/);
+        if(boldLinkMatch){const[,lt,lu]=boldLinkMatch;return <strong key={k}><a href={lu.startsWith("/api/downloads/")?`${API}${lu}`:lu} target="_blank" rel="noopener" style={linkStyle}>{lt}</a></strong>;}
+        if(s.startsWith("**")&&s.endsWith("**")&&s.length>4)return <strong key={k} style={{color:"#161b22",fontWeight:700}}>{s.slice(2,-2)}</strong>;
+        if((s.startsWith("*")&&s.endsWith("*")&&s.length>2)||(s.startsWith("_")&&s.endsWith("_")&&s.length>2))return <em key={k} style={{fontStyle:"italic"}}>{s.slice(1,-1)}</em>;
+        const linkMatch=s.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+        if(linkMatch){const[,lt,lu]=linkMatch;return <a key={k} href={lu.startsWith("/api/downloads/")?`${API}${lu}`:lu} target="_blank" rel="noopener" style={linkStyle}>{lt}</a>;}
+        if(s.match(/^https?:\/\//)){
+          const lu=s.replace(/[.,;:!?)]+$/,"");const trail=s.slice(lu.length);
+          return <span key={k}><a href={lu} target="_blank" rel="noopener" style={linkStyle}>{lu}</a>{trail}</span>;
+        }
+        if(s.startsWith('"')&&s.endsWith('"')&&s.length>11)return <span key={k} style={{color:"#92400e",fontStyle:"italic"}}>{s}</span>;
+        if(s.startsWith("<kbd>")&&s.endsWith("</kbd>"))return <kbd key={k} style={{display:"inline-block",padding:"0 4px",border:"1px solid #d7dde8",borderRadius:3,background:"#f8fafc",fontFamily:font,fontSize:"0.82em",color:"#364152"}}>{s.slice(5,-6)}</kbd>;
+        if(s.match(/^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/)||s.match(/^(rgba?|hsla?)\(/)){
+          return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:4}}><span style={{width:9,height:9,borderRadius:2,background:s,border:"1px solid #d7dde8",flexShrink:0}}/><code style={{fontSize:"0.85em",color:"#334155",background:"transparent",border:0,padding:0,fontFamily:font}}>{s}</code></span>;
+        }
+        return s;
+      }
       if(imgMatch){const[,alt,src]=imgMatch;
         // Force any third-party image URL through our proxy: privacy (no IP/cookies leaked
         // to NYT/Wikipedia/etc), hotlink bypass (proxy sends domain-matched Referer), and
@@ -5006,8 +5124,11 @@ function HyprChat(){
     return md(t2);
   };
 
-  const md=(text)=>{
+  const md=(text,opts={})=>{
     if(!text)return null;
+    const printMode=!!opts.printMode;
+    const rt=opts.theme||t;
+    const ip=v=>inlineParse(v,opts);
     // Strip <think>...</think> blocks (model reasoning not for display)
     text = text.replace(/<think>[\s\S]*?<\/think>/g,'').trimStart();
     if(!text)return null;
@@ -5036,6 +5157,7 @@ function HyprChat(){
           .replace(/<summary[^>]*>[\s\S]*?<\/summary>/i,"")
           .trim();
         const open=/^<details[^>]*\bopen\b/i.test(p);
+        if(printMode)return <div key={i} className="print-details"><div className="print-details-summary">{summary}</div>{md(body,opts)}</div>;
         return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open}>{md(body)}</Collapsible>;
       }
       if(/^[ \t]{0,3}```/.test(p)){
@@ -5048,10 +5170,11 @@ function HyprChat(){
         const _minIndent=_indents.length?Math.min(..._indents):0;
         if(_minIndent>0)code=_codeLines.map(l=>l.slice(_minIndent)).join("\n");
         const bid=`c${i}`;
-        if(lang==="mermaid")return <MermaidBlock key={i} code={code} theme={t} font={font} epoch={mermaidEpoch}/>;
-        if(lang==="chart"||lang==="pygraph")return <ChartBlock key={i} code={code} theme={t} font={font} epoch={mermaidEpoch} kind={lang}/>;
-        if((lang==="json"||!lang)&&looksLikeChartConfig(code))return <ChartBlock key={i} code={code} theme={t} font={font} epoch={mermaidEpoch} kind="chart"/>;
+        if(lang==="mermaid")return <MermaidBlock key={i} code={code} theme={rt} font={font} epoch={mermaidEpoch} printMode={printMode}/>;
+        if(lang==="chart"||lang==="pygraph")return <ChartBlock key={i} code={code} theme={rt} font={font} epoch={mermaidEpoch} kind={lang} printMode={printMode}/>;
+        if((lang==="json"||!lang)&&looksLikeChartConfig(code))return <ChartBlock key={i} code={code} theme={rt} font={font} epoch={mermaidEpoch} kind="chart" printMode={printMode}/>;
         const isDiff=lang==="diff";
+        if(printMode)return <pre key={i} className="print-code-block"><code>{code}</code></pre>;
         return <div key={i} style={{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`}}>
             <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:1}}><IC.Terminal/>{lang||"code"}</span>
@@ -5079,19 +5202,19 @@ function HyprChat(){
       const pMasked=p.replace(/`[^`\n]+`/g,m=>m.replace(/\$\$/g,_DD).replace(/\$/g,_SD));
       return <div key={i}>{pMasked.split(/(\$\$[\s\S]+?\$\$)/g).map((seg,si)=>{
         if(seg.startsWith("$$")&&seg.endsWith("$$")&&seg.length>=4){
-          return <div key={`m${si}`} style={{margin:"12px 0",textAlign:"center",overflowX:"auto",color:t.text,fontSize:"1.05em"}}>{seg}</div>;
+          return <div key={`m${si}`} style={{margin:"12px 0",textAlign:"center",overflowX:"auto",color:rt.text,fontSize:"1.05em"}}>{seg}</div>;
         }
         seg=seg.split(_DD).join("$$").split(_SD).join("$");
         const _lines=seg.split("\n");
         const _consumed=new Set();
         return <React.Fragment key={`s${si}`}>{_lines.map((ln,j)=>{
         if(_consumed.has(j))return null;
-        if(ln.match(/^---+$|^\*\*\*+$|^___+$/))return <hr key={j} style={{border:"none",borderTop:`1px solid ${t.brd}44`,margin:"10px 0"}}/>;
-        if(ln.match(/^##### /))return <div key={j} style={{fontSize:12,fontWeight:700,color:t.acc,margin:"8px 0 3px"}}>{inlineParse(ln.slice(6))}</div>;
-        if(ln.match(/^#### /))return <div key={j} style={{fontSize:13,fontWeight:700,color:t.acc,margin:"10px 0 4px"}}>{inlineParse(ln.slice(5))}</div>;
-        if(ln.match(/^### /))return <div key={j} style={{fontSize:14,fontWeight:700,color:t.acc,margin:"12px 0 5px"}}>{inlineParse(ln.slice(4))}</div>;
-        if(ln.match(/^## /))return <div key={j} style={{fontSize:15,fontWeight:700,color:t.acc,margin:"14px 0 6px"}}>{inlineParse(ln.slice(3))}</div>;
-        if(ln.match(/^# /))return <div key={j} style={{fontSize:17,fontWeight:700,color:t.acc,margin:"16px 0 7px"}}>{inlineParse(ln.slice(2))}</div>;
+        if(ln.match(/^---+$|^\*\*\*+$|^___+$/))return <hr key={j} style={{border:"none",borderTop:`1px solid ${rt.brd}44`,margin:"10px 0"}}/>;
+        if(ln.match(/^##### /))return <div key={j} style={{fontSize:12,fontWeight:700,color:rt.acc,margin:"8px 0 3px"}}>{ip(ln.slice(6))}</div>;
+        if(ln.match(/^#### /))return <div key={j} style={{fontSize:13,fontWeight:700,color:rt.acc,margin:"10px 0 4px"}}>{ip(ln.slice(5))}</div>;
+        if(ln.match(/^### /))return <div key={j} style={{fontSize:14,fontWeight:700,color:rt.acc,margin:"12px 0 5px"}}>{ip(ln.slice(4))}</div>;
+        if(ln.match(/^## /))return <div key={j} style={{fontSize:15,fontWeight:700,color:rt.acc,margin:"14px 0 6px"}}>{ip(ln.slice(3))}</div>;
+        if(ln.match(/^# /))return <div key={j} style={{fontSize:17,fontWeight:700,color:rt.acc,margin:"16px 0 7px"}}>{ip(ln.slice(2))}</div>;
         /* GitHub-style callout: > [!NOTE|TIP|IMPORTANT|WARNING|CAUTION] */
         const mCallout=ln.match(/^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$/i);
         if(mCallout){
@@ -5106,18 +5229,18 @@ function HyprChat(){
             ck++;
           }
           const cfg={
-            NOTE:{color:t.acc,icon:"ℹ",label:"Note"},
-            TIP:{color:t.ok,icon:"💡",label:"Tip"},
-            IMPORTANT:{color:t.warm,icon:"★",label:"Important"},
+            NOTE:{color:rt.acc,icon:"i",label:"Note"},
+            TIP:{color:rt.ok,icon:"tip",label:"Tip"},
+            IMPORTANT:{color:rt.warm,icon:"*",label:"Important"},
             WARNING:{color:"#f0a030",icon:"⚠",label:"Warning"},
-            CAUTION:{color:t.err,icon:"⛔",label:"Caution"}
+            CAUTION:{color:rt.err,icon:"!",label:"Caution"}
           }[ctype];
           return <div key={j} style={{borderLeft:`3px solid ${cfg.color}`,background:`${cfg.color}12`,padding:"8px 12px 10px",borderRadius:"0 6px 6px 0",margin:"8px 0"}}>
             <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:bodyLines.length?5:0,fontSize:10,fontWeight:700,color:cfg.color,textTransform:"uppercase",letterSpacing:0.8}}>
               <span style={{fontSize:13,lineHeight:1}}>{cfg.icon}</span>
               <span>{cfg.label}</span>
             </div>
-            {bodyLines.length>0 && <div style={{color:t.text,fontSize:"0.95em",lineHeight:1.55}}>{bodyLines.map((bl,bi)=><div key={bi} style={{minHeight:bl===""?6:"auto"}}>{inlineParse(bl)}</div>)}</div>}
+            {bodyLines.length>0 && <div style={{color:rt.text,fontSize:"0.95em",lineHeight:1.55}}>{bodyLines.map((bl,bi)=><div key={bi} style={{minHeight:bl===""?6:"auto"}}>{ip(bl)}</div>)}</div>}
           </div>;
         }
         if(ln.match(/^>\s?/) && !ln.match(/^>\s?[—–]\s/)){
@@ -5135,15 +5258,15 @@ function HyprChat(){
           while(qLines.length && qLines[qLines.length-1].trim()==="")qLines.pop();
           while(qLines.length && qLines[0].trim()==="")qLines.shift();
           if(!qLines.length)return null;
-          return <div key={j} style={{borderLeft:`3px solid ${t.warm}`,margin:"6px 0",background:`${t.warm}0D`,borderRadius:"0 6px 6px 0",padding:"8px 12px"}}>
+          return <div key={j} style={{borderLeft:`3px solid ${rt.warm}`,margin:"6px 0",background:`${rt.warm}0D`,borderRadius:"0 6px 6px 0",padding:"8px 12px"}}>
             <div style={{display:"flex",alignItems:"flex-start",gap:6}}>
-              <span style={{color:t.warm,fontSize:16,lineHeight:1,flexShrink:0,marginTop:1}}>"</span>
-              <div style={{color:t.text,fontStyle:"italic",fontSize:"0.95em",lineHeight:1.6,flex:1}}>
-                {qLines.map((ql,qi)=><div key={qi} style={{minHeight:ql.trim()===""?6:"auto"}}>{inlineParse(ql)}</div>)}
+              <span style={{color:rt.warm,fontSize:16,lineHeight:1,flexShrink:0,marginTop:1}}>"</span>
+              <div style={{color:rt.text,fontStyle:"italic",fontSize:"0.95em",lineHeight:1.6,flex:1}}>
+                {qLines.map((ql,qi)=><div key={qi} style={{minHeight:ql.trim()===""?6:"auto"}}>{ip(ql)}</div>)}
               </div>
-              <span style={{color:t.warm,fontSize:16,lineHeight:1,flexShrink:0,alignSelf:"flex-end"}}>"</span>
+              <span style={{color:rt.warm,fontSize:16,lineHeight:1,flexShrink:0,alignSelf:"flex-end"}}>"</span>
             </div>
-            {attrLabel && <div style={{marginTop:4,fontSize:9,color:t.warm,opacity:0.7,textTransform:"uppercase",letterSpacing:1}}>{inlineParse(attrLabel)}</div>}
+            {attrLabel && <div style={{marginTop:4,fontSize:9,color:rt.warm,opacity:0.7,textTransform:"uppercase",letterSpacing:1}}>{ip(attrLabel)}</div>}
           </div>;
         }
         if(ln.match(/^>\s?[—–]\s/))return null;
@@ -5152,11 +5275,11 @@ function HyprChat(){
           const taskMatch=rest.match(/^\[([ xX])\]\s+(.*)$/);
           if(taskMatch){
             const checked=taskMatch[1].toLowerCase()==="x";
-            return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><input type="checkbox" checked={checked} readOnly style={{marginTop:"0.3em",accentColor:t.acc,flexShrink:0,cursor:"default",width:12,height:12}}/><span style={{flex:1,opacity:checked?0.65:1,textDecoration:checked?"line-through":"none",textDecorationColor:`${t.mut}88`}}>{inlineParse(taskMatch[2])}</span></div>;
+            return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><input type="checkbox" checked={checked} readOnly style={{marginTop:"0.3em",accentColor:rt.acc,flexShrink:0,cursor:"default",width:12,height:12}}/><span style={{flex:1,opacity:checked?0.65:1,textDecoration:checked?"line-through":"none",textDecorationColor:`${rt.mut}88`}}>{ip(taskMatch[2])}</span></div>;
           }
-          return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:t.acc,marginTop:"0.25em",fontSize:"0.7em",flexShrink:0}}>●</span><span style={{flex:1}}>{inlineParse(rest)}</span></div>;
+          return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:rt.acc,marginTop:"0.25em",fontSize:"0.7em",flexShrink:0}}>●</span><span style={{flex:1}}>{ip(rest)}</span></div>;
         }
-        if(ln.match(/^\d+\.\s+/)){const num=ln.match(/^(\d+)\./)[1];return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:t.acc,minWidth:18,flexShrink:0,fontWeight:600,fontSize:"0.9em"}}>{num}.</span><span style={{flex:1}}>{inlineParse(ln.replace(/^\d+\.\s+/,""))}</span></div>;}
+        if(ln.match(/^\d+\.\s+/)){const num=ln.match(/^(\d+)\./)[1];return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4,margin:"1px 0"}}><span style={{color:rt.acc,minWidth:18,flexShrink:0,fontWeight:600,fontSize:"0.9em"}}>{num}.</span><span style={{flex:1}}>{ip(ln.replace(/^\d+\.\s+/,""))}</span></div>;}
         if(ln.match(/^\|.+\|/)){
           /* Group contiguous pipe-rows into one <table> with header + alignment */
           const tRows=[ln];
@@ -5174,23 +5297,27 @@ function HyprChat(){
           }else{
             body=tRows.filter(r=>!isDivRow(r)).map(parseRow);
           }
+          if(printMode)return <table key={j} className="print-md-table">
+            {header&&<thead><tr>{header.map((h,hi)=><th key={hi} style={{textAlign:aligns[hi]||"left"}}>{ip(h)}</th>)}</tr></thead>}
+            <tbody>{body.map((row,ri)=><tr key={ri}>{row.map((c,ci)=><td key={ci} style={{textAlign:aligns[ci]||"left"}}>{ip(c)}</td>)}</tr>)}</tbody>
+          </table>;
           return <div key={j} style={{margin:"10px 0",overflowX:"auto",borderRadius:8,border:`1px solid ${t.brd}44`,background:`${t.bgDeep}66`}}>
             <table style={{borderCollapse:"collapse",width:"100%",fontSize:12,fontFamily:font}}>
-              {header&&<thead><tr>{header.map((h,hi)=><th key={hi} style={{textAlign:aligns[hi]||"left",padding:"7px 12px",borderBottom:`1px solid ${t.brd}66`,background:`${t.surface}AA`,color:t.acc,fontWeight:700,fontSize:10,letterSpacing:0.5,textTransform:"uppercase",whiteSpace:"nowrap"}}>{inlineParse(h)}</th>)}</tr></thead>}
-              <tbody>{body.map((row,ri)=><tr key={ri} style={{borderBottom:ri<body.length-1?`1px solid ${t.brd}22`:"none"}}>{row.map((c,ci)=><td key={ci} style={{textAlign:aligns[ci]||"left",padding:"6px 12px",color:t.dim,verticalAlign:"top",lineHeight:1.5,wordBreak:"break-word"}}>{inlineParse(c)}</td>)}</tr>)}</tbody>
+              {header&&<thead><tr>{header.map((h,hi)=><th key={hi} style={{textAlign:aligns[hi]||"left",padding:"7px 12px",borderBottom:`1px solid ${t.brd}66`,background:`${t.surface}AA`,color:t.acc,fontWeight:700,fontSize:10,letterSpacing:0.5,textTransform:"uppercase",whiteSpace:"nowrap"}}>{ip(h)}</th>)}</tr></thead>}
+              <tbody>{body.map((row,ri)=><tr key={ri} style={{borderBottom:ri<body.length-1?`1px solid ${t.brd}22`:"none"}}>{row.map((c,ci)=><td key={ci} style={{textAlign:aligns[ci]||"left",padding:"6px 12px",color:t.dim,verticalAlign:"top",lineHeight:1.5,wordBreak:"break-word"}}>{ip(c)}</td>)}</tr>)}</tbody>
             </table>
           </div>;
         }
-        return <div key={j} style={{minHeight:ln===""?8:"auto"}}>{inlineParse(ln)}</div>;
+        return <div key={j} style={{minHeight:ln===""?8:"auto"}}>{ip(ln)}</div>;
       })}</React.Fragment>;
       })}</div>;
     });
     if(_fnOrder.length>0){
-      return <React.Fragment>{_rendered}<div style={{marginTop:14,paddingTop:10,borderTop:`1px solid ${t.brd}33`,fontSize:11,color:t.mut}}>
-        <div style={{fontSize:9,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.mut,marginBottom:6,opacity:.7}}>Footnotes</div>
+      return <React.Fragment>{_rendered}<div style={{marginTop:14,paddingTop:10,borderTop:`1px solid ${rt.brd}33`,fontSize:11,color:rt.mut}}>
+        <div style={{fontSize:9,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:rt.mut,marginBottom:6,opacity:.7}}>Footnotes</div>
         {_fnOrder.map((lbl,ix)=>{const num=ix+1;return <div key={lbl} id={`fn-${_fnPrefix}-${num}`} style={{display:"flex",gap:8,margin:"2px 0",lineHeight:1.5}}>
-          <span style={{color:t.acc,fontWeight:700,flexShrink:0,minWidth:16}}>{num}.</span>
-          <span style={{flex:1,color:t.dim}}>{inlineParse(_fnDefs[lbl]||"")}</span>
+          <span style={{color:rt.acc,fontWeight:700,flexShrink:0,minWidth:16}}>{num}.</span>
+          <span style={{flex:1,color:rt.dim}}>{ip(_fnDefs[lbl]||"")}</span>
         </div>;})}
       </div></React.Fragment>;
     }
