@@ -183,7 +183,7 @@ _TOOL_ICONS = {
     "generate_code": ("wand", "🤖 OpenHands building project"),
     "research": ("search", "🔍 Searching the web"),
     "fetch_url": ("globe", "🌐 Fetching URL"),
-    "deep_research": ("microscope", "🔬 Deep research in progress"),
+    "deep_research": ("microscope", "🔬 Agent research in progress"),
     "conspiracy_research": ("eye", "🕵️ Investigating"),
     "plan_project": ("compass", "📐 Architect designing plan"),
     "run_review": ("search-check", "🔍 Reviewing project"),

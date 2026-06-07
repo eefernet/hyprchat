@@ -265,6 +265,12 @@ async def lifespan(app: FastAPI):
             fallback=config.DEFAULT_NUM_CTX,
         )
         print(f"[Config] Loaded default num_ctx: {config.DEFAULT_NUM_CTX}")
+    if "quick_search_mode" in _settings:
+        _qsm = (_settings["quick_search_mode"] or "balanced").strip().lower()
+        if _qsm not in ("speed", "balanced", "quality"):
+            _qsm = "balanced"
+        config.QUICK_SEARCH_MODE = _qsm
+        print(f"[Config] Loaded Quick Search mode: {config.QUICK_SEARCH_MODE}")
     # Run cleanup once on startup to clear any stale files
     _run_cleanup_sync()
     # Start background cleanup loop
@@ -750,7 +756,7 @@ async def list_builtin_tools():
     """Return the integrated tool suites."""
     return [
         {"id": "codeagent", "name": "⚡ CodeAgent", "description": "Code execution, shell, file management, downloads", "icon": "cpu", "builtin": True},
-        {"id": "deep_research", "name": "🔬 Deep Research", "description": "Multi-source parallel research with AI synthesis", "icon": "search", "builtin": True},
+        {"id": "deep_research", "name": "🔬 Agent Research", "description": "Agent-focused web research for current APIs, coding blockers, repeated errors, and concise implementation guidance", "icon": "search", "builtin": True},
         {"id": "conspiracy_research", "name": "🕵️ Conspiracy Research", "description": "Uncensored deep-dive into theories, cover-ups, and hidden agendas", "icon": "search", "builtin": True},
     ]
 
@@ -3163,6 +3169,7 @@ async def get_app_settings():
         "aider_auto_test": config.AIDER_AUTO_TEST,
         "aider_worker_url": config.AIDER_WORKER_URL,
         "default_num_ctx": config.DEFAULT_NUM_CTX,
+        "quick_search_mode": config.QUICK_SEARCH_MODE,
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
         "sandbox_size_bytes": size,
@@ -3181,7 +3188,7 @@ async def update_app_settings(body: dict = Body(...)):
                "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
                "openhands_reasoning_effort",
                "aider_enabled", "aider_model", "aider_num_ctx", "aider_auto_test", "aider_worker_url",
-               "default_num_ctx"}
+               "default_num_ctx", "quick_search_mode"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
@@ -3292,6 +3299,13 @@ async def update_app_settings(body: dict = Body(...)):
         )
         settings["default_num_ctx"] = config.DEFAULT_NUM_CTX
         print(f"[Config] Default num_ctx: {config.DEFAULT_NUM_CTX}")
+    if "quick_search_mode" in body:
+        _qsm = (body["quick_search_mode"] or "balanced").strip().lower()
+        if _qsm not in ("speed", "balanced", "quality"):
+            _qsm = "balanced"
+        config.QUICK_SEARCH_MODE = _qsm
+        settings["quick_search_mode"] = _qsm
+        print(f"[Config] Quick Search mode: {config.QUICK_SEARCH_MODE}")
     save_settings(settings)
     return {
         **settings,
@@ -3318,6 +3332,7 @@ async def update_app_settings(body: dict = Body(...)):
         "aider_auto_test": config.AIDER_AUTO_TEST,
         "aider_worker_url": config.AIDER_WORKER_URL,
         "default_num_ctx": config.DEFAULT_NUM_CTX,
+        "quick_search_mode": config.QUICK_SEARCH_MODE,
     }
 
 

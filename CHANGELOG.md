@@ -1,4 +1,10 @@
-## Alpha v17.1.1 — June 6, 2026
+## Alpha v17.1.1 — June 7, 2026
+
+>Deep Research overhaul update. This update focued on making sure deep research got the love it deserved. Daedalus will still use deep research but for the user front end it has been renamed to Agent Research (the togglable tool above the composer). A backend code rename could break a lot of things and that is something ill do at a later date.
+
+### Removals
+- CoderbotV1 has been completely removed and replaced by Daedalus. RIP.
+- Removed the legacy Deep Research Agent under personas and removed it from load default seeds.
 
 ### Deep Research Panel
 - Added the dedicated Deep Research workspace as a first-class panel with report creation, live run timeline, sources, findings, metrics, rerun/cancel/delete actions, Markdown export, and report history.
@@ -7,6 +13,8 @@
 - Added a running-report polling fallback so completed reports load into the main display even if the dedicated SSE stream disconnects or the browser misses the final `research_done` event.
 - Reworked research report PDF export to generate a cleaner document-style PDF from semantic report Markdown instead of cloning the app-themed React view.
 - Added a separate Print action with cleaner print HTML and a direct Markdown export that uses the active report title for filenames.
+- Deep research tool has been renamed to Agent Research on the front end to better clairify what each one is used for. Agents and AI will use Agent Research and users will use the dedicated new deep research panel. I did not renamed the deep research tool on the backend for right now.
+- Deep Research tool (now Agent Research) has been updated for better compatability for AI usage (specificially Daedalus) by improving MD prompting and parameter descriptions.
 
 ### Quick Search
 - Rebuilt Quick Search around deterministic planning instead of default LLM triage, with speed, balanced, and quality modes.

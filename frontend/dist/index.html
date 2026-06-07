@@ -904,7 +904,7 @@ const Pill = ({ev,t,expanded,onToggle})=>{
     "processing": isD ? ["⚡", "Initialized"] : ["🔮", "Connecting"],
     "execute_code": isD ? ["🎯", "Executed"] : ["⚡", "Sandbox"],
     "research": isD ? ["📡", "Signal Acquired"] : ["🔎", "Scanning"],
-    "deep_research": isD ? ["📊", "Intel Ready"] : ["🔬", "Deep Scan"],
+    "deep_research": isD ? ["📊", "Research Ready"] : ["🔬", "Agent Research"],
     "conspiracy_research": isD ? ["🕵️", "Dossier Ready"] : ["🔮", "Digging"],
     "write_file": isD ? ["💾", "Committed"] : ["📝", "Writing"],
     "read_file": isD ? ["📖", "Loaded"] : ["📂", "Reading"],
@@ -2369,6 +2369,7 @@ function HyprChat(){
   const [aiderEnabled,setAiderEnabled]=useState(()=>{try{return localStorage.getItem("hc-aider-enabled")!=="false";}catch{return true;}});
   const [aiderModel,setAiderModel]=useState(()=>{try{return localStorage.getItem("hc-aider-model")||"";}catch{return "";}});
   const [aiderAutoTest,setAiderAutoTest]=useState(()=>{try{return localStorage.getItem("hc-aider-auto-test")!=="false";}catch{return true;}});
+  const [quickSearchMode,setQuickSearchMode]=useState(()=>{try{return localStorage.getItem("hc-quick-search-mode")||"balanced";}catch{return "balanced";}});
   const [ctxTokens,setCtxTokens]=useState(0);
   const [genTokens,setGenTokens]=useState(0);
   const [previewFile,setPreviewFile]=useState(null);
@@ -2602,6 +2603,7 @@ function HyprChat(){
   useEffect(()=>{persistServerSetting("hc-aider-enabled","aider_enabled",aiderEnabled,String(aiderEnabled));},[aiderEnabled]);
   useEffect(()=>{persistServerSetting("hc-aider-model","aider_model",aiderModel);},[aiderModel]);
   useEffect(()=>{persistServerSetting("hc-aider-auto-test","aider_auto_test",aiderAutoTest,String(aiderAutoTest));},[aiderAutoTest]);
+  useEffect(()=>{persistServerSetting("hc-quick-search-mode","quick_search_mode",quickSearchMode);},[quickSearchMode]);
   useEffect(()=>{try{localStorage.setItem("hc-model-params",JSON.stringify(modelParams));}catch{}if(modelParamsSeenRef.current)flashSettingsPulse("Saved locally","success");else modelParamsSeenRef.current=true;},[modelParams]);
   useEffect(()=>{try{localStorage.setItem("hc-prompts",JSON.stringify(prompts));}catch{}},[prompts]);
   useEffect(()=>{try{localStorage.setItem("hc-conv-tags",JSON.stringify(convTags));}catch{}},[convTags]);
@@ -2896,7 +2898,7 @@ function HyprChat(){
     const tools=(mc.tool_ids||[]);
     const parts=[];
     if(tools.includes("codeagent"))parts.push("code execution");
-    if(tools.includes("deep_research"))parts.push("deep research");
+    if(tools.includes("deep_research"))parts.push("agent research");
     if(tools.includes("conspiracy_research"))parts.push("investigative research");
     if(tools.includes("quick_search"))parts.push("quick search");
     if((mc.kb_ids||[]).length)parts.push(`${(mc.kb_ids||[]).length} knowledge base${(mc.kb_ids||[]).length===1?"":"s"}`);
@@ -3046,6 +3048,7 @@ function HyprChat(){
       if(d.aider_enabled!=null)hydrateServerSetting("aider_enabled",setAiderEnabled,d.aider_enabled,aiderEnabled);
       if(d.aider_model!=null)hydrateServerSetting("aider_model",setAiderModel,d.aider_model,aiderModel);
       if(d.aider_auto_test!=null)hydrateServerSetting("aider_auto_test",setAiderAutoTest,d.aider_auto_test,aiderAutoTest);
+      if(d.quick_search_mode)hydrateServerSetting("quick_search_mode",setQuickSearchMode,d.quick_search_mode,quickSearchMode);
       settingsLoadedRef.current=true;
     }).catch(()=>{settingsLoadedRef.current=true;});
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
@@ -3058,7 +3061,7 @@ function HyprChat(){
     fetch(`${API}/api/builtin-tools`).then(r=>r.json()).then(d=>{if(Array.isArray(d))setBuiltinTools([...d,quickSearchEntry]);}).catch(()=>{
       setBuiltinTools([
         {id:"codeagent",name:"⚡ CodeAgent",description:"Code execution, shell, file management, downloads",icon:"cpu"},
-        {id:"deep_research",name:"🔬 Deep Research",description:"Multi-source parallel research with AI synthesis",icon:"search"},
+        {id:"deep_research",name:"🔬 Agent Research",description:"Agent-focused web research for current APIs, coding blockers, repeated errors, and concise implementation guidance",icon:"search"},
         quickSearchEntry,
       ]);
     });
@@ -5786,14 +5789,14 @@ function HyprChat(){
                 </div>
               </>}
               {isDr&&<>
-                <div style={{fontSize:10,color:t.dim,marginBottom:8}}>Parameters passed to the AI:</div>
+                <div style={{fontSize:10,color:t.dim,marginBottom:8}}>Agent-focused research for current docs, unfamiliar APIs, repeated build failures, and implementation blockers:</div>
                 <div style={{display:"flex",flexDirection:"column",gap:5}}>
                   <div style={{fontSize:10}}><span style={{color:t.acc,fontFamily:"monospace",fontWeight:600}}>depth</span> <span style={{color:t.mut}}>1–5</span></div>
                   <div style={{paddingLeft:10,display:"flex",flexDirection:"column",gap:2}}>
-                    {[["1","Quick fact-check (~20s)"],["2","Topic overview (~40s)"],["3","Deep-dive (~60s) ← default"],["4","Comprehensive analysis (~90s)"],["5","Exhaustive sweep (~120s)"]].map(([d,desc])=><div key={d} style={{fontSize:9,color:t.mut}}><span style={{color:t.f1,fontFamily:"monospace"}}>{d}</span> — {desc}</div>)}
+                    {[["1","Quick check"],["2","Focused coding blocker ← recommended"],["3","Broad unfamiliar tech"],["4","Comprehensive, rarely for agents"],["5","Exhaustive, avoid in fix loops"]].map(([d,desc])=><div key={d} style={{fontSize:9,color:t.mut}}><span style={{color:t.f1,fontFamily:"monospace"}}>{d}</span> — {desc}</div>)}
                   </div>
                   <div style={{fontSize:10,marginTop:2}}><span style={{color:t.acc,fontFamily:"monospace",fontWeight:600}}>mode</span> <span style={{color:t.mut}}>quick · research · compare</span></div>
-                  <div style={{fontSize:10}}><span style={{color:t.acc,fontFamily:"monospace",fontWeight:600}}>focus</span> <span style={{color:t.mut}}>"security", "performance", "recent news", …</span></div>
+                  <div style={{fontSize:10}}><span style={{color:t.acc,fontFamily:"monospace",fontWeight:600}}>focus</span> <span style={{color:t.mut}}>version, runtime, failing command, target file</span></div>
                   <div style={{fontSize:10}}><span style={{color:t.acc,fontFamily:"monospace",fontWeight:600}}>topic_b</span> <span style={{color:t.mut}}>second subject for compare mode</span></div>
                 </div>
               </>}
@@ -5805,6 +5808,9 @@ function HyprChat(){
               </>}
               {isQs&&<>
                 <div style={{fontSize:10,color:t.dim,marginBottom:6}}>Runs a SearXNG search on each message and shows results as inline cards above chat. Enabled per-conversation via the tool pill in the input bar, or permanently via an Agent.</div>
+                <div style={{display:"flex",gap:4,margin:"8px 0 4px",padding:3,border:`1px solid ${t.brd}28`,borderRadius:8,background:`${t.bgDeep}88`,width:"fit-content"}}>
+                  {["speed","balanced","quality"].map(m=><button key={m} onClick={e=>{e.stopPropagation();setQuickSearchMode(m);}} style={{fontSize:10,padding:"5px 10px",borderRadius:6,border:"none",background:quickSearchMode===m?`${t.f1}22`:"transparent",color:quickSearchMode===m?t.f1:t.mut,cursor:"pointer",fontFamily:font,fontWeight:quickSearchMode===m?800:600,textTransform:"capitalize"}}>{m}</button>)}
+                </div>
                 <div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:4}}>
                   {["YouTube thumbnails","Image previews","Web link cards","Click-to-open"].map(s=><span key={s} style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.f1}18`,color:t.f1,border:`1px solid ${t.f1}33`}}>{s}</span>)}
                 </div>

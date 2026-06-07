@@ -53,9 +53,9 @@ def inject_text_tool_prompt(messages: list, available_tool_names: set):
         )
         if "deep_research" in available_tool_names:
             examples += (
-                "Run a deep multi-round research:\n"
+                "Run Agent Research for current docs, unfamiliar APIs, or repeated coding blockers:\n"
                 "<tool_call>\n"
-                '{"name": "deep_research", "arguments": {"topic": "topic to research in depth", "depth": 3}}\n'
+                '{"name": "deep_research", "arguments": {"topic": "exact error, library/API, or implementation question", "depth": 2}}\n'
                 "</tool_call>\n\n"
             )
         if "conspiracy_research" in available_tool_names:

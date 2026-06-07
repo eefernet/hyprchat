@@ -749,11 +749,11 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "deep_research",
-            "description": "Multi-source deep research with AI synthesis. Runs parallel searches, reads top pages, and produces a comprehensive report.",
+            "description": "Agent Research: multi-source web research for coding agents. Use for current or fast-moving APIs, SDKs, libraries, framework docs, repeated reviewer/fixer failures on the same error, or the final allowed fix cycle. Include exact error messages, package names, framework/runtime versions, failing commands, and relevant file context. Prefer depth=2 for coding blockers and depth=3 for broad unfamiliar tech; avoid depth 4-5 inside fix loops.",
             "parameters": {"type": "object", "properties": {
-                "topic": {"type": "string", "description": "Research topic"},
-                "depth": {"type": "integer", "description": "Depth 1-5 (1=quick, 3=standard, 5=exhaustive)"},
-                "focus": {"type": "string", "description": "Optional focus area"},
+                "topic": {"type": "string", "description": "Exact coding/research question, error text, library/API behavior, or implementation blocker to verify"},
+                "depth": {"type": "integer", "description": "Depth 1-5. For agents use 2 for focused coding blockers, 3 for broad unfamiliar tech; avoid 4-5 in fix loops"},
+                "focus": {"type": "string", "description": "Optional constraints such as package version, framework, runtime, failing command, target file, or suspected root cause"},
                 "mode": {"type": "string", "description": "Mode: research (default), compare, quick"},
                 "topic_b": {"type": "string", "description": "Second topic for compare mode"},
             }, "required": ["topic"]},
@@ -810,7 +810,7 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "run_acceptance_review",
-            "description": "Final acceptance gate after run_review is clean. Statically inspects the project against the user's request, README/docs, manifests, tests, entrypoints, and generated artifacts. Must pass before download_project. If it returns issues, call run_fixer with its run_id.",
+            "description": "Final acceptance gate after run_review is clean. Statically inspects the project against the user's request, README/docs, manifests, tests, entrypoints, and generated artifacts. Normal delivery should wait for acceptance to pass; if it returns issues, call run_fixer with its run_id. If the user explicitly asks to ship/download anyway, disclose the known issues and package the current state.",
             "parameters": {"type": "object", "properties": {
                 "project_dir": {"type": "string", "description": "Absolute path to the project root in the sandbox. If omitted, uses the clean reviewer envelope."},
                 "reviewer_run_id": {"type": "string", "description": "Optional run_id from the clean run_review call."},
@@ -1823,9 +1823,9 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         if (_is_stuck or _is_final) and not _research_done:
                             _why_label = ("STUCK" if _is_stuck else "FINAL_CYCLE")
                             _gate_status = (
-                                "⛔ Same issue returned — call deep_research first"
+                                "⛔ Same issue returned — call Agent Research first"
                                 if _is_stuck else
-                                "⛔ Final fixer cycle — call deep_research first"
+                                "⛔ Final fixer cycle — call Agent Research first"
                             )
                             # Pull a representative error to seed the research topic.
                             _seed_iss = (_latest_rev_sf.get("result_envelope") or {}).get("issues") or []
@@ -1866,7 +1866,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                 + "\nRecurring issue(s):" + _seed_block + "\n\n"
                                 + "Your VERY NEXT tool call MUST be:\n"
                                 + "  deep_research(topic='<exact error message + library/version>', depth=2)\n\n"
-                                + "After deep_research returns, call run_fixer — the Fixer will see the "
+                                + "After Agent Research (`deep_research`) returns, call run_fixer — the Fixer will see the "
                                 + "research result in your conversation and use it to ground the next "
                                 + "edit. Use depth=2 (fast); only use depth=3 if the issue is genuinely "
                                 + "obscure. Do NOT call run_fixer, generate_code, write_file, run_shell, "
@@ -2114,7 +2114,8 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             f"  run_acceptance_review(project_dir='{_pd}', reviewer_run_id='{_reviewer_id}')\n\n"
                             f"Acceptance verifies the generated project satisfies the user's "
                             f"request, has accurate docs, sane tests, and clean packaging. "
-                            f"Do not call {name} or download_project until acceptance returns accepted.",
+                            f"Do not call {name} or download_project until acceptance returns accepted "
+                            f"unless the latest user message explicitly asks to ship/download anyway.",
                             f"⛔ Blocked — call run_acceptance_review first ({_source_role} {_rid[:14]}…)",
                             _rid,
                         )
@@ -2166,7 +2167,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         )
                     # Deadlock break: the FINAL_CYCLE gate (2 successful fixers,
                     # no research since the last reviewer) blocks run_fixer with
-                    # the message "call deep_research first". The STUCK_FIX gate
+                    # the message "call Agent Research first". The STUCK_FIX gate
                     # does the same when issues recur after a fix cycle. But this
                     # post-review gate then blocks deep_research itself ("call
                     # run_fixer first") — circular. Whitelist deep_research once
@@ -2669,7 +2670,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             else:
                                 lines = [
                                     f"BLOCKED — last run_acceptance_review returned status='{_astatus}'.",
-                                    "You CANNOT call download_project until acceptance is accepted.",
+                                    "Do not call download_project until acceptance is accepted unless the latest user message explicitly asks to ship/download anyway.",
                                     "",
                                     f"Acceptance flagged {n} issue{'s' if n != 1 else ''}:",
                                 ]
@@ -2685,7 +2686,8 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                 lines.append("")
                                 lines.append(
                                     f"REQUIRED NEXT STEP: run_fixer(reviewer_run_id='{_latest_acceptance.get('id')}'), "
-                                    "then re-run review/acceptance as instructed by the fixer."
+                                    "then re-run review/acceptance as instructed by the fixer. "
+                                    "If you cannot get it accepted, ask the user whether they want the current files as-is."
                                 )
                                 await events.emit(conv_id, "tool_end", {
                                     "tool": "download_project", "icon": "code",
@@ -2725,7 +2727,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                     f"Build: `{_env.get('build_cmd','')}` exit={_env.get('build_exit','?')}. "
                                     f"Tests: `{_env.get('test_cmd','')}` exit={_env.get('test_exit','?')}.",
                                     "",
-                                    f"You CANNOT call download_project until the project passes review. "
+                                    f"Do not call download_project until the project passes review unless the latest user message explicitly asks to ship/download anyway. "
                                     f"Reviewer flagged {n} issue{'s' if n != 1 else ''}:",
                                 ]
                                 for i, iss in enumerate(issues[:5], 1):
@@ -2739,9 +2741,9 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                         lines.append(f"     fix scope: {', '.join(scope[:5])}")
                                 lines.append("")
                                 lines.append(
-                                    "REQUIRED NEXT STEPS: 1) read each file in 'fix scope', 2) edit it with "
-                                    "write_file to address the listed summary, 3) call run_review again. "
-                                    "Repeat until run_review returns CLEAN. THEN call download_project."
+                                    "REQUIRED NEXT STEP: fix the listed issue with the appropriate fix worker, "
+                                    "then call run_review again. Repeat until run_review returns CLEAN. "
+                                    "If you cannot get it clean, ask the user whether they want the current files as-is."
                                 )
                                 await events.emit(conv_id, "tool_end", {
                                     "tool": "download_project", "icon": "code",
@@ -3288,7 +3290,8 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 f"workflow_id: {workflow_id}\n\n"
                 f"{plan}\n\n"
                 "NEXT STEP: call generate_code with the planned task. OpenHands remains the greenfield Builder; "
-                "run_review and run_acceptance_review must pass before download_project."
+                "normal delivery waits for run_review to pass and run_acceptance_review to accept. "
+                "If the user later explicitly asks to ship/download despite known issues, disclose those issues and package the current state."
             )
 
         elif name == "run_aider_fix":
@@ -3502,7 +3505,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         f"Tests: `{envelope.get('test_cmd','')}` exit={envelope.get('test_exit','?')}. "
                         f"reviewer_run_id: {reviewer_run_id}\n"
                         f"REQUIRED NEXT TOOL CALL: run_acceptance_review(reviewer_run_id='{reviewer_run_id}'). "
-                        f"Do not call download_project until acceptance is accepted.")
+                        f"Do not call download_project until acceptance is accepted unless the latest user message explicitly asks to ship/download anyway.")
             lines = [f"REVIEW FOUND {len(issues)} ISSUE(S). {summary}",
                      f"Build: `{envelope.get('build_cmd','')}` exit={envelope.get('build_exit','?')}. "
                      f"Tests: `{envelope.get('test_cmd','')}` exit={envelope.get('test_exit','?')}.",
@@ -3673,7 +3676,9 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 f"If the Fixer touches only docs, call run_acceptance_review again. "
                 f"If it touches source, tests, or manifests, call run_review first, "
                 f"then run_acceptance_review again. Do not call download_project until "
-                f"acceptance is accepted."
+                f"acceptance is accepted unless the latest user message explicitly asks "
+                f"to ship/download anyway; in that case disclose these issues and package "
+                f"the current state."
             )
             return "\n".join(lines)
 
@@ -4110,7 +4115,7 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                                  "snippet": s.get("snippet", "")} for s in sources[:12]]
                 })
 
-            parts = [f"# Deep Research: {topic}\n"]
+            parts = [f"# Agent Research: {topic}\n"]
             parts.append(f"*{sc} sources, {ss} searches, {pr} pages read ({tm:.0f}s)*\n")
             if entities:
                 parts.append(f"**Key entities:** {', '.join(entities[:10])}\n")
@@ -4864,7 +4869,8 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
                             f"explicitly lists ONLY the missing files to create, or "
                             f"(b) write each missing file directly with write_file. "
                             f"After all expected files exist, re-verify with run_shell (e.g. compile/parse) "
-                            f"before download_project."
+                            f"before download_project. If the user explicitly asks for the incomplete "
+                            f"artifact anyway, disclose the missing files and package the current state."
                         )
                         await events.emit(conv_id, "tool_progress", {
                             "tool": "generate_code", "icon": "wand",
