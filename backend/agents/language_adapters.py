@@ -49,10 +49,21 @@ EXT_TO_LANGUAGE = {
     ".jsx": "javascript",
     ".ts": "typescript",
     ".tsx": "typescript",
+    ".html": "html",
+    ".css": "html",
     ".rs": "rust",
     ".go": "go",
     ".java": "java",
     ".kt": "java",
+    ".c": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".cxx": "cpp",
+    ".h": "c",
+    ".hpp": "cpp",
+    ".rb": "ruby",
+    ".php": "php",
+    ".sh": "shell",
 }
 
 
@@ -173,6 +184,35 @@ def node_adapter(manifest: list[str], language: str) -> LanguageAdapter:
     )
 
 
+def html_adapter(manifest: list[str]) -> LanguageAdapter:
+    has_index = _top_level_has(manifest, "index.html")
+    js_lint = (
+        "if command -v node >/dev/null 2>&1; then "
+        "fail=0; for f in $(find . -name '*.js' -not -path '*/node_modules/*'); do "
+        "node --check \"$f\" || fail=1; done; exit $fail; "
+        "else echo '(node unavailable; JS syntax check skipped)'; fi"
+    )
+    return LanguageAdapter(
+        language="html",
+        build_system="static-html" if has_index else "plain-html",
+        build_cmd=("test -s index.html && grep -Eiq '<!doctype|<html' index.html"
+                   if has_index else
+                   "find . -name '*.html' -print | head -1 | grep -q ."),
+        test_cmd="",
+        smoke_cmds=[],
+        package_rules=[
+            "Static browser apps may run by opening index.html directly.",
+            "README run instructions must not require npm, a server, or a CLI unless the project includes that tooling.",
+            "Do not package browser cache, build, dist, or dependency directories.",
+        ],
+        source_extensions=[".html", ".css", ".js", ".jsx", ".svg"],
+        ignored_dirs=COMMON_IGNORES,
+        aider_test_cmd="",
+        aider_lint_cmd=js_lint,
+        safe_lint=True,
+    )
+
+
 def rust_adapter(manifest: list[str]) -> LanguageAdapter:
     return LanguageAdapter(
         language="rust",
@@ -236,6 +276,36 @@ def java_adapter(manifest: list[str]) -> LanguageAdapter:
     )
 
 
+def c_cpp_adapter(manifest: list[str], language: str) -> LanguageAdapter:
+    is_cpp = language == "cpp" or any(p.endswith((".cpp", ".cc", ".cxx", ".hpp")) for p in manifest)
+    has_cmake = _top_level_has(manifest, "CMakeLists.txt")
+    if has_cmake:
+        build_cmd = "cmake -B build -S . && cmake --build build --quiet"
+        test_cmd = "cd build && ctest --output-on-failure"
+        build_system = "cmake"
+    elif is_cpp:
+        build_cmd = "g++ -Wall -fsyntax-only $(find . -name '*.cpp' -o -name '*.cc' -o -name '*.cxx')"
+        test_cmd = ""
+        build_system = "plain-cpp"
+    else:
+        build_cmd = "gcc -Wall -fsyntax-only $(find . -name '*.c')"
+        test_cmd = ""
+        build_system = "plain-c"
+    return LanguageAdapter(
+        language="cpp" if is_cpp else "c",
+        build_system=build_system,
+        build_cmd=build_cmd,
+        test_cmd=test_cmd,
+        smoke_cmds=[],
+        package_rules=["Do not package build/, dist/, out/, coverage, or compiler outputs."],
+        source_extensions=[".cpp", ".cc", ".cxx", ".hpp", ".h"] if is_cpp else [".c", ".h"],
+        ignored_dirs=COMMON_IGNORES + ["out"],
+        aider_test_cmd=test_cmd,
+        aider_lint_cmd=build_cmd if not has_cmake else "",
+        safe_lint=not has_cmake,
+    )
+
+
 def generic_adapter(manifest: list[str], language: str = "generic") -> LanguageAdapter:
     return LanguageAdapter(
         language=language or "generic",
@@ -255,6 +325,8 @@ def generic_adapter(manifest: list[str], language: str = "generic") -> LanguageA
 def detect_adapter(manifest: list[str], language_hint: str = "") -> LanguageAdapter:
     manifest = manifest or []
     language = _detect_language(manifest, language_hint)
+    if language == "html" or _has(manifest, "index.html"):
+        return html_adapter(manifest)
     if language == "python" or _has(manifest, "pyproject.toml") or _has(manifest, "requirements.txt"):
         return python_adapter(manifest)
     if language in {"javascript", "typescript"} or _has(manifest, "package.json"):
@@ -265,6 +337,8 @@ def detect_adapter(manifest: list[str], language_hint: str = "") -> LanguageAdap
         return go_adapter(manifest)
     if language in {"java", "kotlin"} or _has(manifest, "pom.xml") or _has(manifest, "build.gradle") or _has(manifest, "build.gradle.kts"):
         return java_adapter(manifest)
+    if language in {"c", "cpp"} or _has(manifest, "CMakeLists.txt"):
+        return c_cpp_adapter(manifest, language)
     return generic_adapter(manifest, language)
 
 

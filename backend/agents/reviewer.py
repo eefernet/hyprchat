@@ -64,6 +64,38 @@ _PY_LINT_CMD = (
     "-not -path '*/.git/*' -not -path '*/__pycache__/*')"
 )
 
+_FIND_REVIEW_IGNORES = (
+    "-not -path '*/node_modules/*' -not -path '*/venv/*' "
+    "-not -path '*/.venv/*' -not -path '*/.git/*' "
+    "-not -path '*/__pycache__/*' -not -path '*/out/*' "
+    "-not -path '*/build/*' -not -path '*/target/*' "
+    "-not -path '*/dist/*' -not -path '*/.pytest_cache/*' "
+    "-not -path '*/.mypy_cache/*' -not -path '*/.ruff_cache/*' "
+    "-not -path '*/.cache/*'"
+)
+
+_STATIC_HTML_BUILD_CMD = (
+    "test -s index.html && "
+    "grep -Eiq '<!doctype|<html' index.html && "
+    "grep -Eiq '<body|<script|<canvas|<button|<main|<div' index.html && "
+    "echo '(static HTML structure ok)'"
+)
+
+_STATIC_JS_LINT_CMD = (
+    "if command -v node >/dev/null 2>&1; then "
+    "fail=0; "
+    "for f in $(find . -type f -name '*.js' "
+    f"{_FIND_REVIEW_IGNORES}); do "
+    "node --check \"$f\" || fail=1; "
+    "done; exit $fail; "
+    "else echo '(node unavailable; JS syntax check skipped)'; fi"
+)
+
+_GENERIC_STATIC_BUILD_CMD = (
+    f"find . -type f {_FIND_REVIEW_IGNORES} | head -1 | grep -q . && "
+    "echo '(generic project inventory present; no safe build command detected)'"
+)
+
 # Project-marker → (build_cmd, test_cmd, lint_cmd, language).
 # Order matters: more-specific markers first so monorepos hit the right one.
 # Each cmd runs at the project root via Codebox /command.
@@ -101,6 +133,11 @@ _PROJECT_MARKERS = [
 # Plain-source fallbacks when no formal build file exists. Order matters: we
 # pick the language with the most source files in the tree.
 _PLAIN_LANG_PROFILES = {
+    "html":   {"glob": "*.html",
+               "build": _STATIC_HTML_BUILD_CMD,
+               "test":  "echo '(static HTML app — no automated tests detected)'",
+               "lint":  _STATIC_JS_LINT_CMD,
+               "verification_level": "static-inspected"},
     "java":   {"glob": "*.java",
                # Compile production sources only — exclude ./test, ./tests,
                # *Test.java, *Tests.java. JUnit is rarely on the bare classpath
@@ -114,7 +151,8 @@ _PLAIN_LANG_PROFILES = {
                "test":  "(test -d out && find out -name '*Test*.class' -print | head -1 | grep -q . "
                         "&& cd out && java -cp . org.junit.runner.JUnitCore $(find . -name '*Test*.class' "
                         "| sed 's|^\\./||;s|\\.class$||;s|/|.|g')) || echo '(no JUnit tests)'",
-               "lint":  ""},
+               "lint":  "",
+               "verification_level": "syntax-verified"},
     "python": {"glob": "*.py",
                # Plain-source python: no pyproject/requirements means no
                # `pip install` step; we just sweep with py_compile to catch
@@ -124,32 +162,66 @@ _PLAIN_LANG_PROFILES = {
                # greenfield "no tests" project doesn't look like a failure.
                "build": _PY_LINT_CMD,
                "test":  _PY_TEST_CMD,
-               "lint":  ""},
+               "lint":  "",
+               "verification_level": "syntax-verified"},
     "go":     {"glob": "*.go",
                "build": "go build ./... 2>&1 || (find . -name '*.go' -exec gofmt -l {} \\;)",
                "test":  "go test ./... 2>&1 || echo '(no go.mod — no tests)'",
-               "lint":  "go vet ./... 2>&1 || true"},
+               "lint":  "go vet ./... 2>&1 || true",
+               "verification_level": "syntax-verified"},
     "rust":   {"glob": "*.rs",
                "build": "rustc --edition 2021 --crate-type bin $(find . -name 'main.rs' | head -1) 2>&1 "
                         "|| find . -name '*.rs' -exec rustc --edition 2021 --emit=metadata {} \\; 2>&1",
                "test":  "echo '(no Cargo.toml — tests not run)'",
-               "lint":  ""},
+               "lint":  "",
+               "verification_level": "syntax-verified"},
     "javascript": {"glob": "*.js",
-                   "build": "find . -name '*.js' -not -path '*/node_modules/*' -exec node --check {} \\; 2>&1",
+                   "build": ("if command -v node >/dev/null 2>&1; then "
+                             "fail=0; for f in $(find . -name '*.js' -not -path '*/node_modules/*'); do "
+                             "node --check \"$f\" || fail=1; done; exit $fail; "
+                             "else echo '(node unavailable; JS syntax check skipped)'; fi"),
                    "test":  "echo '(no package.json — tests not run)'",
-                   "lint":  ""},
+                   "lint":  "",
+                   "verification_level": "syntax-verified"},
     "typescript": {"glob": "*.ts",
-                   "build": "npx --yes tsc --noEmit $(find . -name '*.ts' -not -path '*/node_modules/*') 2>&1",
+                   "build": ("if command -v tsc >/dev/null 2>&1; then "
+                             "tsc --noEmit $(find . -name '*.ts' -not -path '*/node_modules/*') 2>&1; "
+                             "else echo '(tsc unavailable; TypeScript syntax check skipped)'; fi"),
                    "test":  "echo '(no package.json — tests not run)'",
-                   "lint":  ""},
+                   "lint":  "",
+                   "verification_level": "syntax-verified"},
     "c":      {"glob": "*.c",
                "build": "gcc -Wall -fsyntax-only $(find . -name '*.c') 2>&1",
                "test":  "echo '(plain C — no test runner)'",
-               "lint":  ""},
+               "lint":  "",
+               "verification_level": "syntax-verified"},
     "cpp":    {"glob": "*.cpp",
                "build": "g++ -Wall -fsyntax-only $(find . -name '*.cpp' -o -name '*.cc') 2>&1",
                "test":  "echo '(plain C++ — no test runner)'",
-               "lint":  ""},
+               "lint":  "",
+               "verification_level": "syntax-verified"},
+    "ruby":   {"glob": "*.rb",
+               "build": ("if command -v ruby >/dev/null 2>&1; then "
+                         "fail=0; for f in $(find . -name '*.rb' -not -path '*/vendor/*'); do "
+                         "ruby -c \"$f\" || fail=1; done; exit $fail; "
+                         "else echo '(ruby unavailable; Ruby syntax check skipped)'; fi"),
+               "test":  "echo '(plain Ruby — no test runner detected)'",
+               "lint":  "",
+               "verification_level": "syntax-verified"},
+    "php":    {"glob": "*.php",
+               "build": ("if command -v php >/dev/null 2>&1; then "
+                         "fail=0; for f in $(find . -name '*.php' -not -path '*/vendor/*'); do "
+                         "php -l \"$f\" || fail=1; done; exit $fail; "
+                         "else echo '(php unavailable; PHP syntax check skipped)'; fi"),
+               "test":  "echo '(plain PHP — no test runner detected)'",
+               "lint":  "",
+               "verification_level": "syntax-verified"},
+    "shell":  {"glob": "*.sh",
+               "build": ("fail=0; for f in $(find . -name '*.sh'); do "
+                         "sh -n \"$f\" || fail=1; done; exit $fail"),
+               "test":  "echo '(plain shell — no test runner detected)'",
+               "lint":  "",
+               "verification_level": "syntax-verified"},
 }
 
 
@@ -162,7 +234,8 @@ async def _detect_project(http, project_dir: str) -> dict:
          with the most sources, e.g. a `src/main/java/...` directory of .java
          files → run javac directly. Catches projects where the model wrote
          sources but skipped the build file.
-      3. Give up with marker="(none)".
+      3. If files exist but no safe build command is known, use generic static
+         inspection instead of treating "no package manager" as a project error.
     """
     listing = ""
     try:
@@ -172,7 +245,11 @@ async def _detect_project(http, project_dir: str) -> dict:
             timeout=10,
         )
         if r.status_code == 200:
-            listing = (r.json().get("stdout") or "")
+            d = r.json()
+            if int(d.get("exit_code", 0) or 0) != 0:
+                return {"error": (d.get("stdout") or d.get("stderr") or f"Cannot list {project_dir}")[:500],
+                        "build_cmd": "", "test_cmd": "", "lint_cmd": "", "language": ""}
+            listing = (d.get("stdout") or "")
     except Exception as e:
         return {"error": f"Cannot list {project_dir}: {e}",
                 "build_cmd": "", "test_cmd": "", "lint_cmd": "", "language": ""}
@@ -181,7 +258,17 @@ async def _detect_project(http, project_dir: str) -> dict:
     for marker, build, test, lint, lang in _PROJECT_MARKERS:
         if marker in files:
             return {"marker": marker, "build_cmd": build, "test_cmd": test,
-                    "lint_cmd": lint, "language": lang, "files": sorted(files)[:30]}
+                    "lint_cmd": lint, "language": lang, "files": sorted(files)[:30],
+                    "verification_level": "build-verified", "confidence": "high",
+                    "profile": f"marker:{marker}"}
+
+    if "index.html" in files:
+        prof = _PLAIN_LANG_PROFILES["html"]
+        return {"marker": "index.html", "build_cmd": prof["build"],
+                "test_cmd": prof["test"], "lint_cmd": prof["lint"],
+                "language": "html", "files": sorted(files)[:30],
+                "verification_level": prof["verification_level"],
+                "confidence": "high", "profile": "static-html"}
 
     # Layer 2: tree-walk for plain source files. Run a single find that emits
     # extension counts so we don't make N round trips.
@@ -189,11 +276,13 @@ async def _detect_project(http, project_dir: str) -> dict:
         f"cd {shlex.quote(project_dir)} && "
         "find . -type f \\( "
         "-name '*.java' -o -name '*.py' -o -name '*.go' -o -name '*.rs' "
-        "-o -name '*.js' -o -name '*.ts' -o -name '*.c' -o -name '*.cpp' -o -name '*.cc' "
+        "-o -name '*.js' -o -name '*.jsx' -o -name '*.ts' -o -name '*.tsx' "
+        "-o -name '*.html' -o -name '*.css' -o -name '*.c' -o -name '*.cpp' -o -name '*.cc' "
+        "-o -name '*.rb' -o -name '*.php' -o -name '*.cs' -o -name '*.swift' "
+        "-o -name '*.scala' -o -name '*.kt' -o -name '*.sh' "
         "\\) "
-        "-not -path '*/node_modules/*' -not -path '*/venv/*' -not -path '*/.git/*' "
-        "-not -path '*/out/*' -not -path '*/build/*' -not -path '*/target/*' -not -path '*/dist/*' "
-        "| sed -E 's/.*\\.(java|py|go|rs|js|ts|c|cpp|cc)$/\\1/' "
+        f"{_FIND_REVIEW_IGNORES} "
+        "| sed -E 's/.*\\.(java|py|go|rs|js|jsx|ts|tsx|html|css|c|cpp|cc|rb|php|cs|swift|scala|kt|sh)$/\\1/' "
         "| sort | uniq -c | sort -rn"
     )
     counts: dict[str, int] = {}
@@ -214,8 +303,10 @@ async def _detect_project(http, project_dir: str) -> dict:
     # Map ext → language profile key (cc → cpp).
     _EXT_TO_LANG = {
         "java": "java", "py": "python", "go": "go", "rs": "rust",
-        "js": "javascript", "ts": "typescript",
-        "c": "c", "cpp": "cpp", "cc": "cpp",
+        "js": "javascript", "jsx": "javascript", "ts": "typescript",
+        "tsx": "typescript", "html": "html", "css": "html",
+        "c": "c", "cpp": "cpp", "cc": "cpp", "rb": "ruby",
+        "php": "php", "kt": "java", "sh": "shell",
     }
     if counts:
         # Pick the language with the most files (resolve cc→cpp into cpp's bucket).
@@ -230,10 +321,40 @@ async def _detect_project(http, project_dir: str) -> dict:
             return {"marker": f"{lang_counts[winner]} {prof['glob']} files",
                     "build_cmd": prof["build"], "test_cmd": prof["test"],
                     "lint_cmd": prof["lint"], "language": winner,
-                    "files": sorted(files)[:30]}
+                    "files": sorted(files)[:30],
+                    "verification_level": prof["verification_level"],
+                    "confidence": "medium", "profile": f"plain-{winner}"}
 
-    return {"marker": "(none)", "build_cmd": "", "test_cmd": "", "lint_cmd": "",
-            "language": "", "files": sorted(files)[:30]}
+    inventory_cmd = (
+        f"cd {shlex.quote(project_dir)} && "
+        f"find . -type f {_FIND_REVIEW_IGNORES} | sed 's#^./##' | head -100"
+    )
+    inventory: list[str] = []
+    try:
+        r = await http.post(
+            f"{config.CODEBOX_URL}/command",
+            json={"command": inventory_cmd, "timeout": 10},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            inventory = [line.strip() for line in (r.json().get("stdout") or "").splitlines()
+                         if line.strip()]
+    except Exception:
+        pass
+
+    if inventory:
+        return {"marker": f"{len(inventory)} generic file{'s' if len(inventory) != 1 else ''}",
+                "build_cmd": _GENERIC_STATIC_BUILD_CMD,
+                "test_cmd": "echo '(generic project — no automated tests detected)'",
+                "lint_cmd": "", "language": "generic",
+                "files": inventory[:30],
+                "verification_level": "static-inspected",
+                "confidence": "low", "profile": "generic-static"}
+
+    return {"error": f"No deliverable files found at {project_dir}",
+            "marker": "(empty)", "build_cmd": "", "test_cmd": "", "lint_cmd": "",
+            "language": "", "files": [], "verification_level": "none",
+            "confidence": "none", "profile": "empty"}
 
 
 async def _run_in_sandbox(http, project_dir: str, command: str,
@@ -275,7 +396,9 @@ _FILE_REFS_RE = re.compile(
 _SOURCE_EXTS = (
     ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs", ".rb", ".php",
     ".cs", ".swift", ".scala", ".kt", ".cpp", ".cc", ".c", ".h", ".hpp",
+    ".html", ".css",
 )
+_DOC_EXTS = (".md", ".rst", ".txt")
 _CONFIG_EXTS = (
     ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".properties",
     ".xml", ".sql", ".sh", ".env",
@@ -370,7 +493,10 @@ def _valid_project_file(path: str) -> bool:
     parts = set(p.split("/"))
     if parts & _IGNORED_PARTS:
         return False
-    return p.endswith(_SOURCE_EXTS + _CONFIG_EXTS) or p.rsplit("/", 1)[-1] in _MANIFEST_NAMES
+    return (
+        p.endswith(_SOURCE_EXTS + _CONFIG_EXTS + _DOC_EXTS)
+        or p.rsplit("/", 1)[-1] in _MANIFEST_NAMES
+    )
 
 
 async def _list_project_files(http, project_dir: str, limit: int = 5000) -> list[str]:
@@ -888,6 +1014,8 @@ async def _read_file_snippet(http, project_dir: str, path: str, line: int = 0,
 
 _REVIEW_PROMPT = """You are a code reviewer for an autonomous coding agent's output.
 
+Verification profile: {verification_profile}
+Verification level: {verification_level}
 The build command was: `{build_cmd}`
 Build exit code: {build_exit}
 Test command: `{test_cmd}`
@@ -1019,14 +1147,17 @@ async def run_review(http, events, conv_id: str, project_dir: str,
     test_cmd = detect.get("test_cmd", "")
     lint_cmd = detect.get("lint_cmd", "")
     language = detect.get("language", "")
+    verification_level = detect.get("verification_level", "build-verified")
+    profile = detect.get("profile", marker)
+    confidence = detect.get("confidence", "medium")
     print(f"[REVIEWER] {project_dir}: marker={marker} build={build_cmd[:60]!r}")
-    await _step("detected", f"marker={marker} lang={language}")
+    await _step("detected", f"profile={profile} marker={marker} lang={language} verification={verification_level}")
 
     # Hard fail when we can't identify the project — a reviewer that "passes"
-    # an empty / nonexistent directory is worse than no reviewer at all,
-    # because the orchestrator then thinks the build is good and ships.
-    if marker == "(none)" or detect.get("error"):
-        why = detect.get("error") or f"No build markers found at {project_dir} (no pom.xml / Cargo.toml / package.json / go.mod / etc.)"
+    # an empty / nonexistent directory is worse than no reviewer at all. A
+    # markerless but nonempty project is reviewed with a plain/static profile.
+    if detect.get("error"):
+        why = detect.get("error") or f"Reviewer could not inspect {project_dir}"
         print(f"[REVIEWER] aborting: {why}")
         envelope = {
             "status": "error",
@@ -1041,6 +1172,9 @@ async def run_review(http, events, conv_id: str, project_dir: str,
             "build_cmd": "", "test_cmd": "", "lint_cmd": "",
             "build_exit": -1, "test_exit": -1, "lint_exit": -1,
             "language": language, "marker": marker,
+            "verification_level": verification_level,
+            "verification_profile": profile,
+            "verification_confidence": confidence,
             "project_dir": project_dir,
             "run_id": run_id,
         }
@@ -1127,6 +1261,9 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                     "test_stdout_tail": (test_result.get("stdout", "") or "")[-5000:],
                     "lint_stdout_tail": (lint_result.get("stdout", "") or "")[-2000:],
                     "language": language, "marker": marker,
+                    "verification_level": verification_level,
+                    "verification_profile": profile,
+                    "verification_confidence": confidence,
                     "review_model": "(deterministic dependency classifier)",
                     "raw_review_chars": 0,
                     "project_dir": project_dir,
@@ -1167,6 +1304,9 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                     "test_stdout_tail": (test_result.get("stdout", "") or "")[-5000:],
                     "lint_stdout_tail": (lint_result.get("stdout", "") or "")[-2000:],
                     "language": language, "marker": marker,
+                    "verification_level": verification_level,
+                    "verification_profile": profile,
+                    "verification_confidence": confidence,
                     "review_model": "(deterministic stale project-root classifier)",
                     "raw_review_chars": 0,
                     "project_dir": project_dir,
@@ -1208,6 +1348,9 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                     "test_stdout_tail": (test_result.get("stdout", "") or "")[-5000:],
                     "lint_stdout_tail": (lint_result.get("stdout", "") or "")[-2000:],
                     "language": language, "marker": marker,
+                    "verification_level": verification_level,
+                    "verification_profile": profile,
+                    "verification_confidence": confidence,
                     "review_model": "(deterministic persistent-state classifier)",
                     "raw_review_chars": 0,
                     "project_dir": project_dir,
@@ -1247,7 +1390,7 @@ async def run_review(http, events, conv_id: str, project_dir: str,
         if build_result["exit_code"] == 0 and test_result["exit_code"] == 0 and lint_result["exit_code"] == 0 and not refs:
             envelope = {
                 "status": "clean",
-                "summary": f"Build + tests + lint pass for {marker} project",
+                "summary": f"{verification_level} verification passed for {marker} project",
                 "issues": [],
                 "build_exit": 0, "test_exit": 0, "lint_exit": 0,
                 "build_cmd": build_cmd, "test_cmd": test_cmd, "lint_cmd": lint_cmd,
@@ -1255,12 +1398,15 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                 "test_stdout_tail": (test_result.get("stdout", "") or "")[-5000:],
                 "lint_stdout_tail": (lint_result.get("stdout", "") or "")[-2000:],
                 "language": language, "marker": marker,
+                "verification_level": verification_level,
+                "verification_profile": profile,
+                "verification_confidence": confidence,
                 "project_dir": project_dir,
                 "run_id": run_id,
             }
             await events.emit(conv_id, "tool_end", {
                 "tool": "run_review", "icon": "search-check",
-                "status": "✅ Review clean — build + tests + lint pass",
+                "status": f"✅ Review clean — {verification_level} checks pass",
                 "run_id": run_id,
             })
             if run_id:
@@ -1275,6 +1421,8 @@ async def run_review(http, events, conv_id: str, project_dir: str,
         # 5. Slow path: feed everything to the planning-model LLM and parse JSON.
         review_model = config.REVIEWER_MODEL or config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL
         prompt = _REVIEW_PROMPT.format(
+            verification_profile=profile,
+            verification_level=verification_level,
             build_cmd=build_cmd or "(none)",
             build_exit=build_result["exit_code"],
             test_cmd=test_cmd or "(none)",
@@ -1327,6 +1475,9 @@ async def run_review(http, events, conv_id: str, project_dir: str,
             "test_exit": test_result["exit_code"],
             "lint_exit": lint_result["exit_code"],
             "language": language, "marker": marker,
+            "verification_level": verification_level,
+            "verification_profile": profile,
+            "verification_confidence": confidence,
             "review_model": review_model,
             "project_dir": project_dir,
             "run_id": run_id,
@@ -1432,6 +1583,9 @@ async def run_review(http, events, conv_id: str, project_dir: str,
         "test_stdout_tail": (test_result.get("stdout", "") or "")[-5000:],
         "lint_stdout_tail": (lint_result.get("stdout", "") or "")[-2000:],
         "language": language, "marker": marker,
+        "verification_level": verification_level,
+        "verification_profile": profile,
+        "verification_confidence": confidence,
         "review_model": review_model,
         "raw_review_chars": len(review_text),
         "project_dir": project_dir,
@@ -1442,7 +1596,7 @@ async def run_review(http, events, conv_id: str, project_dir: str,
     n_issues = len(envelope.get("issues") or [])
     await events.emit(conv_id, "tool_end", {
         "tool": "run_review", "icon": "search-check",
-        "status": (f"✅ Review clean ({build_cmd} ok)" if envelope.get("status") == "clean"
+        "status": (f"✅ Review clean — {verification_level} checks pass" if envelope.get("status") == "clean"
                    else f"⚠ Review found {n_issues} issue{'s' if n_issues != 1 else ''}"),
         "run_id": run_id,
     })

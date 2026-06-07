@@ -1,4 +1,4 @@
-## Alpha v17.1.1 — June 4, 2026
+## Alpha v17.1.1 — June 6, 2026
 
 ### Deep Research Panel
 - Added the dedicated Deep Research workspace as a first-class panel with report creation, live run timeline, sources, findings, metrics, rerun/cancel/delete actions, Markdown export, and report history.
@@ -14,6 +14,7 @@
 - Added provider/scraper/reranker configuration seams, optional SearXNG engine routing, richer source metadata, and clearer search-unavailable guidance. 
 
 ### Bug Fixes
+- Daedalus Reviewer now dynamically verifies markerless/static projects instead of failing valid HTML, plain-source, or generic deliverables for missing package/build manifests.
 - Empty new-chat screens now show the same model selector as existing conversations, and that pending selection is applied when the first message creates the chat.
 - Reviewer now scopes Python dependency install failures to the editable package manifest instead of misrouting external package compiler errors to application source files.
 - Hardened external preview and `fetch_url` paths against localhost/LAN/Tailscale/metadata SSRF targets, unsafe redirects, oversized responses, and same-origin external HTML execution.
