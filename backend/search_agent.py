@@ -187,6 +187,16 @@ _QUESTION_PREFIX_RE = re.compile(
     r"tell me about|give me|show me|find|search for|look up)\s+",
     re.IGNORECASE,
 )
+_EVENT_FILLER_RE = re.compile(
+    r"\b(?:that\s+)?(?:just\s+)?(?:took|takes|taking)\s+place\b|"
+    r"\b(?:happened|happening|going\s+on)\b|"
+    r"\b(?:just|earlier|later|currently|current|latest|recent|recently)\b",
+    re.IGNORECASE,
+)
+_RELATIVE_DAY_RE = re.compile(
+    r"\b(today|tonight|this morning|this afternoon|this evening|yesterday)\b",
+    re.IGNORECASE,
+)
 
 
 def _clean_query_phrase(text: str) -> str:
@@ -201,12 +211,34 @@ def _clean_query_phrase(text: str) -> str:
     return q or (text or "").strip()[:120]
 
 
+def _clean_fresh_subject_phrase(text: str) -> str:
+    q = _clean_query_phrase(text)
+    q = _EVENT_FILLER_RE.sub(" ", q)
+    q = _RELATIVE_DAY_RE.sub(" ", q)
+    q = re.sub(r"\b(news|updates?)\b", " ", q, flags=re.I)
+    q = re.sub(r"\s+", " ", q).strip()
+    return q or _clean_query_phrase(text)
+
+
+def _year_from_resolved_label(resolved_label: str) -> str:
+    m = re.search(r"\b(19\d{2}|20\d{2}|21\d{2})\b", resolved_label or "")
+    return m.group(1) if m else str(datetime.now().year)
+
+
 def _query_variants(base: str, category: str, freshness_mode: str, resolved_label: str, max_queries: int) -> list[str]:
     base = _clean_query_phrase(base)
-    variants = [base]
+    subject = _clean_fresh_subject_phrase(base) if freshness_mode == "day" else base
+    variants = [subject]
     if freshness_mode == "day":
-        dated = _clean_query_phrase(f"{base} {resolved_label}") if resolved_label else base
-        variants = [dated, _clean_query_phrase(f"{base} today"), _clean_query_phrase(f"{base} news")]
+        year = _year_from_resolved_label(resolved_label)
+        dated = _clean_query_phrase(f"{subject} {resolved_label}") if resolved_label else subject
+        year_query = _clean_query_phrase(f"{subject} {year}") if year and year not in subject else subject
+        variants = [
+            year_query,
+            dated,
+            _clean_query_phrase(f"{subject} today"),
+            _clean_query_phrase(f"{subject} news"),
+        ]
     elif category == "news":
         variants = [base]
         low = f" {base.lower()} "
@@ -339,19 +371,35 @@ async def _search_provider(http, plan: SearchPlan, queries: list[str]) -> tuple[
     count = _search_count_for_plan(plan, len(queries))
     categories = _searxng_categories(plan.category, plan.freshness_mode)
     engines = plan.searxng_engines or None
+    attempts: list[tuple[str, int, str | None, str, str | None]] = [
+        (q, count, plan.time_range, categories, engines)
+        for q in queries
+    ]
+    if plan.freshness_mode == "day":
+        # SearXNG's news category and per-engine day filters can miss
+        # same-day tech/event pages until they receive date metadata. Keep the
+        # strict news/day pass, but add a small general-web fallback so pages
+        # like live blogs, official event pages, and tech coverage can surface.
+        fallback_count = max(8, min(count, plan.min_results))
+        general_engines = (getattr(config, "QUICK_SEARCH_SEARXNG_ENGINES", "") or "").strip() or None
+        for q in queries[:2]:
+            attempts.append((q, fallback_count, "day", "general", general_engines))
+            attempts.append((q, fallback_count, None, "general", general_engines))
+
     raw_lists = await asyncio.gather(
         *[
             _qs._cached_search(
-                http, q, count=count, time_range=plan.time_range,
-                categories=categories, engines=engines,
+                http, q, count=attempt_count, time_range=time_range,
+                categories=attempt_categories, engines=attempt_engines,
             )
-            for q in queries
+            for q, attempt_count, time_range, attempt_categories, attempt_engines in attempts
         ],
         return_exceptions=True,
     )
     errors = sum(1 for r in raw_lists if isinstance(r, Exception))
     usable: list[list] = []
-    for q, result in zip(queries, raw_lists):
+    for attempt, result in zip(attempts, raw_lists):
+        q, _, time_range, attempt_categories, _ = attempt
         if not isinstance(result, list):
             continue
         tagged = []
@@ -360,6 +408,8 @@ async def _search_provider(http, plan: SearchPlan, queries: list[str]) -> tuple[
                 continue
             copied = dict(item)
             copied.setdefault("query_origin", q)
+            copied.setdefault("search_time_range", time_range or "")
+            copied.setdefault("search_categories", attempt_categories)
             tagged.append(copied)
         usable.append(tagged)
     return _merge_unique(usable), errors

@@ -5901,7 +5901,7 @@ function HyprChat(){
           <input ref={importRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>{if(e.target.files?.[0])importChatJSON(e.target.files[0]);e.target.value="";}}/>
           <button onClick={()=>importRef.current?.click()} title="Import chat from JSON" style={{background:"none",border:`1px solid ${t.brd}33`,color:t.mut,cursor:"pointer",padding:"4px 8px",borderRadius:8,fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:2}}><IC.Download/> import</button>
           {panel==="chat"&&act&&(()=>{
-            // During streaming: show prompt + live gen tokens. After: show total context used.
+            // Context meter: prompt + generated tokens against the active num_ctx.
             const promptToks=ctxTokens||0;
             const liveGen=streaming&&tokC>0?tokC:0;
             const totalCtxUsed=streaming?(promptToks+liveGen):(promptToks||sessionTokens||0);
@@ -5912,7 +5912,7 @@ function HyprChat(){
             const ratio=maxCtx>0?Math.min(1,toks/maxCtx):0;
             const cc=maxCtx>0?(ratio>0.85?t.err:ratio>0.6?t.warm:t.ok):streaming?t.acc:t.warm;
             const fmtK=n=>n>=1000?`${(n/1000).toFixed(1)}k`:String(n);
-            return <div style={{display:"flex",flexDirection:"column",overflow:"hidden",borderRadius:10,border:`1px solid ${cc}45`,background:`${cc}12`,minWidth:90,cursor:"default"}} title={`Context: ${toks} tokens${maxCtx>0?` / ${maxCtx}`:""}${liveGen>0?` | Generating: +${liveGen}`:genTokens>0?` | Generated: ${genTokens}`:""}`}>
+            return <div style={{display:"flex",flexDirection:"column",overflow:"hidden",borderRadius:10,border:`1px solid ${cc}45`,background:`${cc}12`,minWidth:90,cursor:"default"}} title={`Context used: prompt + generated tokens = ${toks}${maxCtx>0?` / ${maxCtx}`:""}${liveGen>0?` | Live generation: +${liveGen} tokens`:genTokens>0?` | Generated this turn: ${genTokens} tokens`:""}`}>
               <div style={{display:"flex",alignItems:"center",gap:5,padding:"5px 11px"}}>
                 <span style={{fontSize:13,display:"inline-block",animation:streaming?"bop 1.5s ease-in-out infinite":"none"}}>🧠</span>
                 <span style={{fontSize:13,color:cc,fontWeight:700,fontFamily:font,letterSpacing:.2}}>{fmtK(toks)}</span>

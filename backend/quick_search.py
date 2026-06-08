@@ -950,7 +950,29 @@ def _format_now() -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
-def _strict_day_evidence(results: list, plan=None) -> bool:
+def _has_same_day_text_evidence(text: str, target: date) -> bool:
+    if not text:
+        return False
+    low = text.lower()
+    markers = {
+        target.isoformat().lower(),
+        f"{target.strftime('%B')} {target.day}, {target.year}".lower(),
+        f"{target.strftime('%B')} {target.day} {target.year}".lower(),
+        f"{target.strftime('%b')} {target.day}, {target.year}".lower(),
+        f"{target.strftime('%b')} {target.day} {target.year}".lower(),
+    }
+    if any(marker in low for marker in markers):
+        return True
+    if re.search(
+        r"\b(today|this morning|this afternoon|this evening|"
+        r"\d+\s+(?:minutes?|hours?)\s+ago)\b",
+        low,
+    ):
+        return True
+    return str(target.year) in low and bool(re.search(r"\blive updates?\b", low))
+
+
+def _strict_day_evidence(results: list, plan=None, page_text: dict[str, str] | None = None) -> bool:
     if _plan_get(plan, "freshness_mode", "none") != "day":
         return True
     resolved = _plan_get(plan, "resolved_date", None)
@@ -960,6 +982,14 @@ def _strict_day_evidence(results: list, plan=None) -> bool:
     for r in results:
         published = _result_published_date(r)
         if published and published == target:
+            return True
+        url = r.get("url") or ""
+        result_text = " ".join([
+            r.get("title") or "",
+            r.get("content") or r.get("snippet") or "",
+            page_text.get(url, "") if page_text else "",
+        ])
+        if _has_same_day_text_evidence(result_text, target):
             return True
     return False
 
@@ -995,7 +1025,7 @@ def _build_context(
     ]
     if searxng_engines:
         lines.insert(-1, f"SearXNG engines: {searxng_engines}")
-    if freshness_mode == "day" and not _strict_day_evidence(results, plan):
+    if freshness_mode == "day" and not _strict_day_evidence(results, plan, page_text):
         lines += [
             "FRESHNESS WARNING:",
             f"- These sources do not prove activity on {resolved}.",

@@ -1111,6 +1111,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         gen_tokens = 0
         prompt_tokens = 0
         _gen_pill_started = False  # First "generating" pill uses tool_start; subsequent ones use tool_progress so the frontend collapses them into one updating pill
+        _streamed_content = False
+        _has_tools = bool(available_tool_names)
 
         # ── Context window management: prune old tool results to stay under budget ──
         _ctx_size = sum(len(m.get("content", "")) for m in messages)
@@ -1213,9 +1215,9 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     _chunk_buf = ""
                     _repeat_window = ""  # Rolling window for repetition detection
                     _live_gen_tokens = 0  # Live token counter for streaming updates
-                    # Buffer mode: when tools are active, don't stream content immediately
-                    # so code blocks don't flash in chat before tool calls are detected
-                    _has_tools = bool(available_tool_names)
+                    # Tool-enabled rounds stream draft content live. If the
+                    # completed round resolves to a tool call, the existing
+                    # clear event removes that draft before tool execution.
 
                     # Pipe aiter_lines into a queue so we can read with timeout
                     # without corrupting the httpx stream (asyncio.wait_for cancels)
@@ -1358,29 +1360,33 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                         break
 
                                 if _has_tools:
-                                    # Buffer mode: emit a progress pill instead of streaming tokens
-                                    # Show what the model is working on via SSE event
+                                    # Keep the activity pill in token units so
+                                    # it matches the header context meter.
                                     if len(content) % 200 < len(token):
                                         _evt_type = "tool_start" if not _gen_pill_started else "tool_progress"
                                         _gen_pill_started = True
+                                        _shown_tokens = max(_live_gen_tokens, (len(content) + 3) // 4)
                                         await events.emit(conv_id, _evt_type, {
                                             "tool": "generating",
-                                            "status": f"✍️ Generating... ({len(content)} chars)",
+                                            "status": f"✍️ Generating... (~{_shown_tokens} tokens)",
                                             "icon": "edit",
                                         })
+
+                                # Stream assistant text live even when tools
+                                # are enabled. Tool-call rounds clear this
+                                # provisional text after parsing completes.
+                                _chunk_buf += token
+                                if len(_chunk_buf) >= 8 or chunk.get("done"):
+                                    yield f"data: {json.dumps({'type': 'token', 'content': _chunk_buf})}\n\n"
+                                    _streamed_content = True
+                                    _chunk_buf = ""
                                     await asyncio.sleep(0)
-                                else:
-                                    # No tools — stream content directly to chat
-                                    _chunk_buf += token
-                                    if len(_chunk_buf) >= 8 or chunk.get("done"):
-                                        yield f"data: {json.dumps({'type': 'token', 'content': _chunk_buf})}\n\n"
-                                        _chunk_buf = ""
-                                        await asyncio.sleep(0)
 
                         # Track token counts from Ollama
                         if chunk.get("done"):
                             if _chunk_buf:
                                 yield f"data: {json.dumps({'type': 'token', 'content': _chunk_buf})}\n\n"
+                                _streamed_content = True
                                 _chunk_buf = ""
                             # Finalize thinking if we were in native thinking mode
                             if _in_thinking and _thinking_buf:
@@ -1632,16 +1638,11 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 if len(_tool_history) > 5:
                     _tool_history.pop(0)
 
+            if _streamed_content:
+                yield f"data: {json.dumps({'type': 'clear'})}\n\n"
             if content:
-                if _has_tools:
-                    # Content was buffered (not streamed) — strip code, keep prose for history
-                    cleaned = re.sub(r'```\w*\n.*?```', '', content, flags=re.DOTALL).strip()
-                    msg["content"] = cleaned
-                else:
-                    # Content was streamed — tell frontend to discard it
-                    yield f"data: {json.dumps({'type': 'clear'})}\n\n"
-                    cleaned = re.sub(r'```\w*\n.*?```', '', content, flags=re.DOTALL).strip()
-                    msg["content"] = cleaned
+                cleaned = re.sub(r'```\w*\n.*?```', '', content, flags=re.DOTALL).strip()
+                msg["content"] = cleaned
 
             messages.append(msg)
             yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
@@ -1941,7 +1942,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         # No tool calls — we have a final response
         if content:
             # If content was buffered (tool mode), flush it now as the final answer
-            if _has_tools:
+            if _has_tools and not _streamed_content:
                 for i in range(0, len(content), 8):
                     yield f"data: {json.dumps({'type': 'token', 'content': content[i:i+8]})}\n\n"
                     await asyncio.sleep(0)

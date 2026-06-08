@@ -1,3 +1,21 @@
+## Alpha v17.1.2 — June 8, 2026
+
+### Quick Search
+- Improved same-day event queries so prompts like "WWDC that just took place today" search cleaner event/year/date variants instead of dragging filler words into SearXNG.
+- Added a general-web fallback for strict same-day searches so fresh official pages, live blogs, and tech coverage can surface when the news/day filter misses them.
+- Made same-day evidence handling smarter by accepting exact dates, "today", recent-hour snippets, and current-year live-update text before warning that sources are stale.
+
+### Chat Streaming & Context Meter
+- Tool-enabled chat rounds now stream assistant text live while it is generated instead of waiting for the full model output to finish.
+- If streamed draft text turns into a native or text-parsed tool call, the chat clears that draft before showing the tool execution cards/results.
+- Replaced the misleading live "Generating ... chars" status with token-based wording that matches the top-right context meter.
+- Clarified the header context meter tooltip as prompt plus generated tokens against the active `num_ctx`.
+
+### Workspace Memory & Ghost Mode
+- Added workspace-scoped memory with reviewed suggestions, accepted memories, and manual memory blocks that can be injected into workspace chats.
+- Added memory review controls for accepting, rejecting, editing, deleting, and manually creating semantic, episodic, and procedural memories.
+- Added Ghost Mode for local-only chats that are not saved, indexed, added to history, or used for workspace memory suggestions.
+
 ## Alpha v17.1.1 — June 8, 2026
 
 >Deep Research overhaul update. This update focued on making sure deep research got the love it deserved. Daedalus will still use deep research but for the user front end it has been renamed to Agent Research (the togglable tool above the composer). A backend code rename could break a lot of things and that is something ill do at a later date.

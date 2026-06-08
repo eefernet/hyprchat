@@ -401,11 +401,49 @@ def test_run_search_agent_today_uses_day_freshness_and_resolved_date():
 
     search_events = [d for _, evt, d in events.items if evt == "search_results"]
     assert out["skipped"] is False
-    assert {c.kwargs["time_range"] for c in mock_search.await_args_list} == {"day"}
-    assert {c.kwargs["categories"] for c in mock_search.await_args_list} == {"news"}
+    assert {c.kwargs["time_range"] for c in mock_search.await_args_list} == {"day", None}
+    assert {c.kwargs["categories"] for c in mock_search.await_args_list} == {"news", "general"}
     assert search_events[-1]["resolved_date"] == "2026-06-05"
     assert search_events[-1]["freshness_mode"] == "day"
     assert "Resolved date: 2026-06-05" in out["context"]
+    assert "FRESHNESS WARNING" not in out["context"]
+
+
+def test_run_search_agent_today_event_query_uses_general_web_fallback():
+    http = _FakeHTTP([])
+    messages = [{"role": "user", "content": "tell me about wwdc that just took place today"}]
+    captured: list[tuple[str, str | None, str]] = []
+
+    async def fake_cached_search(http, query, count=10, time_range=None, categories="general", engines=None):
+        captured.append((query, time_range, categories))
+        if categories == "general" and time_range is None and query == "wwdc 2026":
+            return [
+                {
+                    "title": "WWDC 2026 announcements live updates",
+                    "url": "https://example.com/wwdc-2026-live",
+                    "content": "Apple WWDC 2026 announcements from today's keynote",
+                    "engine": "test",
+                    "score": 80,
+                    "type": "web",
+                }
+            ]
+        return []
+
+    with patch.object(search_agent, "datetime", _FixedDateTime), \
+         patch.object(quick_search, "_cached_search", new=fake_cached_search), \
+         patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)):
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "test-model", "test-model",
+            events=None, conv_id="conv-wwdc", messages=messages,
+        ))
+
+    assert out["skipped"] is False
+    assert out["reason"] == ""
+    assert any(q == "wwdc 2026" and tr == "day" and cat == "news" for q, tr, cat in captured)
+    assert any(q == "wwdc 2026" and tr is None and cat == "general" for q, tr, cat in captured)
+    assert all("took place" not in q for q, _, _ in captured)
+    assert "WWDC 2026 announcements live updates" in out["context"]
     assert "FRESHNESS WARNING" not in out["context"]
 
 
