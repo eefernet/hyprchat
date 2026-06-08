@@ -14,6 +14,7 @@ import base64
 import shlex
 import urllib.parse
 import venv as _venv
+from datetime import datetime
 from typing import Optional
 from contextlib import asynccontextmanager
 
@@ -35,6 +36,7 @@ from agents.personas import seed_coder_bot as _seed_coder_bot, seed_coder_bot_v2
 import hf as hf_module
 from hf import parse_ollama_progress
 import rag
+from research import REPORT_TEMPLATES, REPORT_TEMPLATE_MAP, fetch_bytes_safely, run_research_report
 
 # ============================================================
 # SETTINGS — persistent JSON file
@@ -63,6 +65,29 @@ def _coerce_service_url(value: str, env_key: str, default: str) -> str:
     if "://" not in raw:
         raw = f"http://{raw}"
     return raw.rstrip("/")
+
+
+def _decode_preview_bytes(content: bytes, headers: dict) -> str:
+    ct = headers.get("content-type", "") or ""
+    m = re.search(r"charset=([^;\s]+)", ct, re.I)
+    enc = (m.group(1) if m else "utf-8").strip("\"'")
+    try:
+        return content.decode(enc, errors="replace")
+    except LookupError:
+        return content.decode("utf-8", errors="replace")
+
+
+def _sanitize_preview_html(html: str, base_url: str) -> str:
+    from html import escape as html_escape
+
+    html = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r"\son[a-z]+\s*=\s*(['\"]).*?\1", "", html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r"\son[a-z]+\s*=\s*[^\s>]+", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"javascript\s*:", "", html, flags=re.IGNORECASE)
+    base_tag = f'<base href="{html_escape(base_url, quote=True)}" target="_blank">'
+    if "<head" in html.lower():
+        return re.sub(r"(<head[^>]*>)", r"\1" + base_tag, html, count=1, flags=re.IGNORECASE)
+    return base_tag + html
 
 
 # ============================================================
@@ -240,6 +265,12 @@ async def lifespan(app: FastAPI):
             fallback=config.DEFAULT_NUM_CTX,
         )
         print(f"[Config] Loaded default num_ctx: {config.DEFAULT_NUM_CTX}")
+    if "quick_search_mode" in _settings:
+        _qsm = (_settings["quick_search_mode"] or "balanced").strip().lower()
+        if _qsm not in ("speed", "balanced", "quality"):
+            _qsm = "balanced"
+        config.QUICK_SEARCH_MODE = _qsm
+        print(f"[Config] Loaded Quick Search mode: {config.QUICK_SEARCH_MODE}")
     # Run cleanup once on startup to clear any stale files
     _run_cleanup_sync()
     # Start background cleanup loop
@@ -396,6 +427,18 @@ class CouncilChatRequest(BaseModel):
 class QuickSearchRequest(BaseModel):
     query: str
     count: int = 6
+
+class ResearchReportCreate(BaseModel):
+    title: Optional[str] = None
+    query: str
+    focus: str = ""
+    report_type: str = "analyst"
+    depth: Optional[int] = None
+    model: str = ""
+    planner_model: str = ""
+    auditor_model: str = ""
+    kb_ids: list[str] = []
+    inputs: list[dict] = []
 
 class KBCreate(BaseModel):
     name: str
@@ -713,7 +756,7 @@ async def list_builtin_tools():
     """Return the integrated tool suites."""
     return [
         {"id": "codeagent", "name": "⚡ CodeAgent", "description": "Code execution, shell, file management, downloads", "icon": "cpu", "builtin": True},
-        {"id": "deep_research", "name": "🔬 Deep Research", "description": "Multi-source parallel research with AI synthesis", "icon": "search", "builtin": True},
+        {"id": "deep_research", "name": "🔬 Agent Research", "description": "Agent-focused web research for current APIs, coding blockers, repeated errors, and concise implementation guidance", "icon": "search", "builtin": True},
         {"id": "conspiracy_research", "name": "🕵️ Conspiracy Research", "description": "Uncensored deep-dive into theories, cover-ups, and hidden agendas", "icon": "search", "builtin": True},
     ]
 
@@ -1211,8 +1254,18 @@ async def fetch_url(req: FetchUrlRequest):
     })
 
     try:
-        r = await http.get(req.url, timeout=15, follow_redirects=True)
-        text = r.text[:req.max_chars]
+        max_bytes = min(max(int(req.max_chars or config.MAX_FETCH_CHARS) * 8, 65536), 1024 * 1024)
+        status, headers, final_url, content = await fetch_bytes_safely(
+            http, req.url, timeout=15, max_bytes=max_bytes
+        )
+        if status >= 400:
+            await events.emit(conv_id, "tool_error", {
+                "tool": "fetch_url",
+                "status": f"HTTP {status}: {req.url[:40]}",
+                "icon": "globe",
+            })
+            raise HTTPException(502, f"Fetch error: HTTP {status}")
+        text = _decode_preview_bytes(content, headers)[:req.max_chars]
 
         text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL)
         text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
@@ -1221,11 +1274,16 @@ async def fetch_url(req: FetchUrlRequest):
 
         await events.emit(conv_id, "tool_end", {
             "tool": "fetch_url",
-            "status": f"Read {len(text)} chars from {req.url[:40]}",
+            "status": f"Read {len(text)} chars from {final_url[:40]}",
             "icon": "globe",
         })
 
-        return {"url": req.url, "content": text[:req.max_chars], "length": len(text)}
+        return {"url": final_url, "content": text[:req.max_chars], "length": len(text)}
+    except HTTPException:
+        raise
+    except ValueError as e:
+        await events.emit(conv_id, "tool_error", {"tool": "fetch_url", "status": str(e), "icon": "globe"})
+        raise HTTPException(400, str(e))
     except Exception as e:
         await events.emit(conv_id, "tool_error", {"tool": "fetch_url", "status": str(e), "icon": "globe"})
         raise HTTPException(502, f"Fetch error: {e}")
@@ -1238,30 +1296,38 @@ async def proxy_preview(url: str):
     if not url or not url.startswith("http"):
         raise HTTPException(400, "Invalid URL")
     try:
+        max_bytes = int(os.getenv("MAX_PROXY_PREVIEW_BYTES", str(12 * 1024 * 1024)))
         headers = {
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
         }
-        r = await http.get(url, timeout=20, follow_redirects=True, headers=headers)
-        r.raise_for_status()
-        ct = r.headers.get("content-type", "")
+        status, resp_headers, final_url, content = await fetch_bytes_safely(
+            http, url, timeout=20, headers=headers, max_bytes=max_bytes
+        )
+        if status >= 400:
+            raise HTTPException(status, f"Upstream returned {status}")
+        ct = resp_headers.get("content-type", "")
+        safe_headers = {
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; img-src data: http: https:; style-src 'unsafe-inline'; font-src data: http: https:;",
+        }
         if "pdf" in ct or url.lower().endswith(".pdf"):
-            return StarletteResponse(content=r.content, media_type="application/pdf")
+            return StarletteResponse(content=content, media_type="application/pdf", headers=safe_headers)
         if any(mt in ct for mt in ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg"]):
-            return StarletteResponse(content=r.content, media_type=ct.split(";")[0])
+            return StarletteResponse(content=content, media_type=ct.split(";")[0], headers=safe_headers)
         if "html" in ct:
-            html = r.text
-            from html import escape as html_escape
-            base_tag = f'<base href="{html_escape(url, quote=True)}" target="_blank">'
-            if "<head" in html.lower():
-                html = re.sub(r'(<head[^>]*>)', r'\1' + base_tag, html, count=1, flags=re.IGNORECASE)
-            else:
-                html = base_tag + html
-            return StarletteResponse(content=html, media_type="text/html; charset=utf-8")
-        return StarletteResponse(content=r.text, media_type="text/plain; charset=utf-8")
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(e.response.status_code, f"Upstream returned {e.response.status_code}")
+            html = _sanitize_preview_html(_decode_preview_bytes(content, resp_headers), final_url)
+            return StarletteResponse(content=html, media_type="text/html; charset=utf-8", headers=safe_headers)
+        return StarletteResponse(
+            content=_decode_preview_bytes(content, resp_headers),
+            media_type="text/plain; charset=utf-8",
+            headers=safe_headers,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(502, f"Proxy error: {e}")
 
@@ -1327,6 +1393,147 @@ async def event_stream(conversation_id: str):
             await events.unsubscribe(conversation_id, queue)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# ============================================================
+# DEEP RESEARCH — durable report workspace
+# ============================================================
+def _research_default_depth(report_type: str, depth: Optional[int]) -> int:
+    if depth is not None:
+        return max(1, min(5, int(depth or 3)))
+    tmpl = REPORT_TEMPLATE_MAP.get(report_type or "analyst") or REPORT_TEMPLATE_MAP["analyst"]
+    return int(tmpl.get("default_depth") or 3)
+
+
+async def _create_and_start_research_report(req: ResearchReportCreate) -> dict:
+    query = (req.query or "").strip()
+    if not query:
+        raise HTTPException(400, "Research query is required")
+    report_type = req.report_type if req.report_type in REPORT_TEMPLATE_MAP else "analyst"
+    depth = _research_default_depth(report_type, req.depth)
+    report_id = f"research-{uuid.uuid4().hex[:10]}"
+    await db.create_research_report(
+        report_id,
+        title=(req.title or query[:80]).strip(),
+        query=query,
+        focus=req.focus or "",
+        report_type=report_type,
+        depth=depth,
+        model=req.model or config.DEFAULT_MODEL,
+        planner_model=req.planner_model or "",
+        auditor_model=req.auditor_model or "",
+        kb_ids=req.kb_ids or [],
+        inputs=req.inputs or [],
+        status="queued",
+    )
+
+    async def _runner():
+        try:
+            await run_research_report(
+                http, config.OLLAMA_URL, config.DEFAULT_MODEL, events, report_id,
+                query=query,
+                depth=depth,
+                focus=req.focus or "",
+                report_type=report_type,
+                model=req.model or config.DEFAULT_MODEL,
+                planner_model=req.planner_model or "",
+                auditor_model=req.auditor_model or "",
+                kb_ids=req.kb_ids or [],
+                inputs=req.inputs or [],
+            )
+        except Exception as e:
+            print(f"[RESEARCH REPORT] Background task failed: {e}")
+            await db.update_research_report(
+                report_id,
+                status="failed",
+                error=str(e),
+                completed_at=datetime.utcnow().isoformat(),
+            )
+            await db.append_research_event(report_id, {
+                "type": "research_error",
+                "data": {"status": "failed", "error": str(e)},
+                "timestamp": time.time(),
+            })
+            await events.emit(report_id, "research_error", {"status": "failed", "error": str(e)})
+
+    asyncio.create_task(_runner())
+    return await db.get_research_report(report_id)
+
+
+@app.get("/api/research/templates")
+async def get_research_templates():
+    return {"templates": REPORT_TEMPLATES}
+
+
+@app.get("/api/research/reports")
+async def list_research_reports(limit: int = Query(50), offset: int = Query(0),
+                                q: str = Query("")):
+    return await db.list_research_reports(limit=limit, offset=offset, query=q)
+
+
+@app.post("/api/research/reports")
+async def create_research_report(req: ResearchReportCreate):
+    return await _create_and_start_research_report(req)
+
+
+@app.get("/api/research/reports/{report_id}")
+async def get_research_report(report_id: str):
+    report = await db.get_research_report(report_id)
+    if not report:
+        raise HTTPException(404, "Research report not found")
+    return report
+
+
+@app.delete("/api/research/reports/{report_id}")
+async def delete_research_report(report_id: str):
+    await db.delete_research_report(report_id)
+    return {"ok": True}
+
+
+@app.post("/api/research/reports/{report_id}/cancel")
+async def cancel_research_report(report_id: str):
+    import cancel_registry
+
+    signaled = cancel_registry.signal(report_id)
+    report = await db.get_research_report(report_id)
+    if not report:
+        raise HTTPException(404, "Research report not found")
+    marked = False
+    if report.get("status") in ("queued", "running"):
+        marked = True
+        await db.update_research_report(
+            report_id,
+            status="cancelled",
+            error="Cancelled by user",
+            completed_at=datetime.utcnow().isoformat(),
+        )
+        ev = {
+            "type": "research_error",
+            "data": {"status": "cancelled", "error": "Cancelled by user"},
+            "timestamp": time.time(),
+        }
+        await db.append_research_event(report_id, ev)
+        await events.emit(report_id, "research_error", ev["data"])
+    return {"report_id": report_id, "signaled": signaled, "marked": marked}
+
+
+@app.post("/api/research/reports/{report_id}/rerun")
+async def rerun_research_report(report_id: str):
+    report = await db.get_research_report(report_id)
+    if not report:
+        raise HTTPException(404, "Research report not found")
+    return await _create_and_start_research_report(ResearchReportCreate(
+        title=report.get("title") or report.get("query", "")[:80],
+        query=report.get("query", ""),
+        focus=report.get("focus", ""),
+        report_type=report.get("report_type", "analyst"),
+        depth=report.get("depth") or None,
+        model=report.get("model", "") or config.DEFAULT_MODEL,
+        planner_model=report.get("planner_model", ""),
+        auditor_model=report.get("auditor_model", ""),
+        kb_ids=report.get("kb_ids", []),
+        inputs=report.get("inputs", []),
+    ))
 
 
 # ============================================================
@@ -1813,13 +2020,20 @@ async def list_tools():
 @app.post("/api/tools")
 async def create_tool(req: ToolCreate):
     id = f"tool-{uuid.uuid4().hex[:12]}"
-    await db.create_tool(id, req.name, req.description, req.filename, req.code)
+    safe_name = os.path.basename(req.filename or "tool.py")
+    if not safe_name or safe_name != (req.filename or ""):
+        raise HTTPException(400, "Invalid filename")
+    filepath = os.path.abspath(os.path.join(config.TOOLS_DIR, safe_name))
+    tools_root = os.path.abspath(config.TOOLS_DIR)
+    if filepath != tools_root and not filepath.startswith(tools_root + os.sep):
+        raise HTTPException(400, "Invalid filename")
 
-    filepath = os.path.join(config.TOOLS_DIR, req.filename)
+    await db.create_tool(id, req.name, req.description, safe_name, req.code)
+    os.makedirs(config.TOOLS_DIR, exist_ok=True)
     with open(filepath, "w") as f:
         f.write(req.code)
 
-    return {"id": id, **req.model_dump()}
+    return {"id": id, **req.model_dump(exclude={"filename"}), "filename": safe_name}
 
 
 @app.post("/api/tools/upload")
@@ -2221,12 +2435,32 @@ async def remove_conv_from_ws(ws_id: str, conv_id: str):
     return {"ok": True}
 
 
+@app.post("/api/workspaces/{ws_id}/research-reports")
+async def add_research_report_to_ws(ws_id: str, body: dict = Body(...)):
+    report_id = body.get("report_id")
+    if not report_id:
+        raise HTTPException(400, "report_id is required")
+    if not await db.get_workspace(ws_id):
+        raise HTTPException(404, "Workspace not found")
+    if not await db.get_research_report(report_id):
+        raise HTTPException(404, "Research report not found")
+    await db.add_research_report_to_workspace(ws_id, report_id)
+    return {"ok": True}
+
+
+@app.delete("/api/workspaces/{ws_id}/research-reports/{report_id}")
+async def remove_research_report_from_ws(ws_id: str, report_id: str):
+    await db.remove_research_report_from_workspace(ws_id, report_id)
+    return {"ok": True}
+
+
 @app.post("/api/workspaces/{ws_id}/analyze")
 async def analyze_workspace_topics(ws_id: str, body: dict = Body(default={})):
     ws = await db.get_workspace(ws_id)
     if not ws:
         raise HTTPException(404)
     titles = [c["title"] for c in ws.get("conversations", []) if c.get("title")]
+    titles += [r.get("title") or r.get("query", "") for r in ws.get("reports", []) if r.get("title") or r.get("query")]
     if not titles:
         return {"topics": []}
     prompt = (
@@ -2292,6 +2526,24 @@ async def create_kb_from_workspace(ws_id: str, body: dict = Body(...)):
                 break
         if total >= MAX:
             break
+    if total < MAX:
+        for report_meta in ws.get("reports", []):
+            report = await db.get_research_report(report_meta["id"])
+            if not report:
+                continue
+            parts.append(f"\n\n=== Research Report: {report.get('title') or report.get('query', 'Untitled')} ===")
+            report_bits = [
+                f"Query: {report.get('query', '')}",
+                f"Type: {report.get('report_type', '')}",
+                f"Summary: {report.get('summary', '')}",
+                (report.get("report_markdown") or "")[:8000],
+            ]
+            chunk = "\n".join(bit for bit in report_bits if bit).strip()
+            parts.append("\n" + chunk)
+            total += len(chunk)
+            if total >= MAX:
+                parts.append("\n[...truncated...]")
+                break
     kb_content = "".join(parts)
     kb_id = f"kb-{uuid.uuid4().hex[:8]}"
     kb_name = body.get("name", ws["name"])
@@ -2917,6 +3169,7 @@ async def get_app_settings():
         "aider_auto_test": config.AIDER_AUTO_TEST,
         "aider_worker_url": config.AIDER_WORKER_URL,
         "default_num_ctx": config.DEFAULT_NUM_CTX,
+        "quick_search_mode": config.QUICK_SEARCH_MODE,
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
         "sandbox_size_bytes": size,
@@ -2935,7 +3188,7 @@ async def update_app_settings(body: dict = Body(...)):
                "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
                "openhands_reasoning_effort",
                "aider_enabled", "aider_model", "aider_num_ctx", "aider_auto_test", "aider_worker_url",
-               "default_num_ctx"}
+               "default_num_ctx", "quick_search_mode"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
@@ -3046,6 +3299,13 @@ async def update_app_settings(body: dict = Body(...)):
         )
         settings["default_num_ctx"] = config.DEFAULT_NUM_CTX
         print(f"[Config] Default num_ctx: {config.DEFAULT_NUM_CTX}")
+    if "quick_search_mode" in body:
+        _qsm = (body["quick_search_mode"] or "balanced").strip().lower()
+        if _qsm not in ("speed", "balanced", "quality"):
+            _qsm = "balanced"
+        config.QUICK_SEARCH_MODE = _qsm
+        settings["quick_search_mode"] = _qsm
+        print(f"[Config] Quick Search mode: {config.QUICK_SEARCH_MODE}")
     save_settings(settings)
     return {
         **settings,
@@ -3072,6 +3332,7 @@ async def update_app_settings(body: dict = Body(...)):
         "aider_auto_test": config.AIDER_AUTO_TEST,
         "aider_worker_url": config.AIDER_WORKER_URL,
         "default_num_ctx": config.DEFAULT_NUM_CTX,
+        "quick_search_mode": config.QUICK_SEARCH_MODE,
     }
 
 

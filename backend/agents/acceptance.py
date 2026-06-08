@@ -431,6 +431,7 @@ Acceptance criteria:
 - packaging: package metadata, entrypoints, generated artifacts, and archive hygiene must be sane.
 - tests: tests must be meaningful and isolated; they must not write to a real home directory or depend on host state.
 - runtime: flag likely user-visible behavior bugs that static inspection reveals, but do not speculate.
+- verification: accept static-only projects when the user's requested app type has no build step, but flag docs or delivery claims that imply stronger verification than the Reviewer actually performed.
 
 Rules:
 - If there are no blocking delivery issues, emit status "accepted" and issues [].
@@ -593,6 +594,9 @@ async def run_acceptance_review(http, events, conv_id: str, *,
             "lint_cmd": review_env.get("lint_cmd", ""),
             "language": review_env.get("language", ""),
             "marker": review_env.get("marker", ""),
+            "verification_level": review_env.get("verification_level", ""),
+            "verification_profile": review_env.get("verification_profile", ""),
+            "verification_confidence": review_env.get("verification_confidence", ""),
         }, indent=2)
 
         artifact_block = "\n".join(artifacts[:80]) if artifacts else "(none)"

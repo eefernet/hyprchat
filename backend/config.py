@@ -71,11 +71,26 @@ EXECUTION_TIMEOUT = int(os.getenv("EXECUTION_TIMEOUT", "60"))
 SEARCH_RESULTS_COUNT = int(os.getenv("SEARCH_RESULTS_COUNT", "15"))
 MAX_FETCH_CHARS = int(os.getenv("MAX_FETCH_CHARS", "8000"))
 
-# Multi-round search agent (replaces the old single-shot quick_search rewrite
-# pipeline). Triage runs against the chat model by default to avoid VRAM-swap
-# latency on single-GPU homelabs; set QUICK_SEARCH_TRIAGE_MODEL to override
-# with e.g. a small workspace model (only worthwhile if it stays co-resident
-# in VRAM with the chat model).
+# Quick Search answer-grounding pipeline. Default "balanced" targets enough
+# sources for grounded answers without making LLM triage or embeddings part of
+# every turn's critical path.
+QUICK_SEARCH_MODE = os.getenv("QUICK_SEARCH_MODE", "balanced").strip().lower()
+QUICK_SEARCH_PROVIDER = os.getenv("QUICK_SEARCH_PROVIDER", "searxng").strip().lower()
+QUICK_SEARCH_SCRAPER = os.getenv("QUICK_SEARCH_SCRAPER", "local").strip().lower()
+QUICK_SEARCH_RERANKER = os.getenv("QUICK_SEARCH_RERANKER", "none").strip().lower()
+QUICK_SEARCH_MIN_RESULTS = int(os.getenv("QUICK_SEARCH_MIN_RESULTS", "10"))
+QUICK_SEARCH_TARGET_RESULTS = int(os.getenv("QUICK_SEARCH_TARGET_RESULTS", "24"))
+QUICK_SEARCH_MAX_RESULTS = int(os.getenv("QUICK_SEARCH_MAX_RESULTS", "35"))
+QUICK_SEARCH_PAGE_READS_BALANCED = int(os.getenv("QUICK_SEARCH_PAGE_READS_BALANCED", "8"))
+QUICK_SEARCH_SEARXNG_ENGINES = os.getenv("QUICK_SEARCH_SEARXNG_ENGINES", "").strip()
+QUICK_SEARCH_SEARXNG_NEWS_ENGINES = os.getenv("QUICK_SEARCH_SEARXNG_NEWS_ENGINES", "").strip()
+QUICK_SEARCH_SEARXNG_CODE_ENGINES = os.getenv("QUICK_SEARCH_SEARXNG_CODE_ENGINES", "").strip()
+QUICK_SEARCH_SEARXNG_RECIPE_ENGINES = os.getenv("QUICK_SEARCH_SEARXNG_RECIPE_ENGINES", "").strip()
+QUICK_SEARCH_EMBED_RERANK = os.getenv("QUICK_SEARCH_EMBED_RERANK", "false").lower() == "true"
+QUICK_SEARCH_EMBED_TIMEOUT = float(os.getenv("QUICK_SEARCH_EMBED_TIMEOUT", "1.5"))
+
+# Optional LLM model for the quality-mode refinement round. The normal planner
+# is deterministic-first; this override is only used when refinement is allowed.
 QUICK_SEARCH_TRIAGE_MODEL = os.getenv("QUICK_SEARCH_TRIAGE_MODEL", "")
 
 # ============================================================
@@ -158,7 +173,7 @@ DEFAULT_SYSTEM_PROMPT = """You are CodeAgent, an autonomous coding assistant wit
 6. NEVER use sys.argv in execute_code — it has no arguments. Use write_file + run_shell instead.
 7. When code FAILS: read the error carefully, fix the root cause, then retry. Do NOT retry the same broken code.
 8. For complex tasks: state your plan in 1-2 sentences, then immediately start using tools.
-9. Deliver output files (charts, CSVs, etc) to the user with download_file. Only call download_file ONCE per file.
+9. Deliver real output files (CSVs, archives, generated assets) with download_file. Inline charts/diagrams should be emitted as markdown fences instead of saved image files.
 10. Be concise — let executed output speak for itself.
 
 ## Tool Quick Reference
@@ -174,15 +189,13 @@ DEFAULT_SYSTEM_PROMPT = """You are CodeAgent, an autonomous coding assistant wit
 | Generate code | generate_code | task="build a web scraper for ...", language="python" |
 | Web search | research | query="python requests timeout" |
 | Fetch URL | fetch_url | url="https://docs.python.org/3/..." |
-| Give file | download_file | path="/root/projects/myapp/output.png" |
+| Give file | download_file | path="/root/projects/myapp/output.csv" |
 
 ## generate_code — Agentic Code Generation
 The `generate_code` tool delegates to an OpenHands coding agent that writes, tests, and fixes code automatically in the sandbox. Use it for complete standalone programs. After it returns a filepath, run it with run_shell and deliver with download_file.
 
 ## Charts & Visualizations
-matplotlib is available (install with pip3 if needed). To create visual output:
-1. Write code that saves a figure: `plt.savefig("/root/projects/{name}/chart.png", dpi=150, bbox_inches="tight")`
-2. Deliver it with download_file — images render inline in chat automatically.
+Use execute_code for arithmetic, aggregation, statistics, parsing, and data transformation. Then emit an inline ```chart or ```pygraph fence with the computed values. Use ```mermaid fences for diagrams and `$...$` / `$$...$$` for math. Do not save image files for charts or diagrams.
 
 ## Error Recovery
 - Read the traceback carefully — the error message tells you what to fix

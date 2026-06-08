@@ -1,3 +1,39 @@
+## Alpha v17.1.1 — June 8, 2026
+
+>Deep Research overhaul update. This update focued on making sure deep research got the love it deserved. Daedalus will still use deep research but for the user front end it has been renamed to Agent Research (the togglable tool above the composer). A backend code rename could break a lot of things and that is something ill do at a later date.
+
+### Removals
+- CoderbotV1 has been completely removed and replaced by Daedalus. RIP.
+- Removed the legacy Deep Research Agent under personas and removed it from load default seeds.
+
+### Deep Research Panel
+- Added the dedicated Deep Research workspace as a first-class panel with report creation, live run timeline, sources, findings, metrics, rerun/cancel/delete actions, Markdown export, and report history.
+- Added report inputs for pasted notes, uploaded files/PDF text extraction, knowledge-base selection, report templates, depth, and role-model overrides.
+- Deep Research reports now persist `events_log`, findings, source metadata, metrics, and rendered report Markdown so completed runs can be reopened from the report list.
+- Added a running-report polling fallback so completed reports load into the main display even if the dedicated SSE stream disconnects or the browser misses the final `research_done` event.
+- Reworked research report PDF export to generate a cleaner document-style PDF from semantic report Markdown instead of cloning the app-themed React view.
+- Added a separate Print action with cleaner print HTML and a direct Markdown export that uses the active report title for filenames.
+- Deep research tool has been renamed to Agent Research on the front end to better clairify what each one is used for. Agents and AI will use Agent Research and users will use the dedicated new deep research panel. I did not renamed the deep research tool on the backend for right now.
+- Deep Research tool (now Agent Research) has been updated for better compatability for AI usage (specificially Daedalus) by improving MD prompting and parameter descriptions.
+
+### Quick Search
+- Rebuilt Quick Search around deterministic planning instead of default LLM triage, with speed, balanced, and quality modes.
+- Added stricter freshness handling for today/latest/current-event searches using SearXNG native filters and same-day source warnings.
+- Added provider/scraper/reranker configuration seams, optional SearXNG engine routing, richer source metadata, and clearer search-unavailable guidance. 
+
+### Bug Fixes
+- Cleaned up Daedalus agent prompt. 11k token prompt slimed down to only 300ish tokens. Removed descrepencies.
+- Daedalus Reviewer now dynamically verifies markerless/static projects instead of failing valid HTML, plain-source, or generic deliverables for missing package/build manifests.
+- Empty new-chat screens now show the same model selector as existing conversations, and that pending selection is applied when the first message creates the chat.
+- Reviewer now scopes Python dependency install failures to the editable package manifest instead of misrouting external package compiler errors to application source files.
+- Hardened external preview and `fetch_url` paths against localhost/LAN/Tailscale/metadata SSRF targets, unsafe redirects, oversized responses, and same-origin external HTML execution.
+- Sanitized JSON-created custom tool filenames so they cannot write outside the tools directory.
+- Fixed skipped Quick Search turns leaving the composer/search chip stuck in a loading timeout state.
+- Fixed Deep Research final synthesis transport failures being saved as completed reports.
+- Fixed Deep Research panel cancel/delete/rerun state so active reports do not stay stuck as running or duplicate report rows.
+- Added regression coverage for Agent Research cache handoff, Daedalus stuck-fix research gating, and durable Deep Research report persistence.
+- Updated backend test defaults to the Tailscale HTTP endpoint the service actually listens on.
+
 ## Alpha v17.1 — June 3, 2026
 
 ## UI Overhaul Update
@@ -31,6 +67,10 @@
 - Empty-chat effort selection and Daedalus activation now work before the first message; pending choices are applied when the real conversation is created.
 - Added inline PDF extraction failure feedback with retry/remove actions.
 - Quick Search failures now surface as a compact warning chip instead of silently clearing results or spinning indefinitely.
+- Expanded chat Quick Search from a 6-source helper to a broader fast search that can return up to 35 source cards when enough useful results are available.
+- Increased Quick Search SearXNG retrieval to pull larger candidate pools, with broader/current/news/comparison searches requesting more results before ranking and dedupe.
+- Updated Quick Search ranking to run domain diversity and embedding dedupe over the larger pool, then backfill from remaining candidates so dedupe does not unnecessarily shrink the final source list.
+- Kept Quick Search context compact by injecting title, URL, domain, and snippets for up to 35 sources while fetching full page excerpts only for the top few results.
 
 ### Sidebar, Search & Chat Utilities
 - Cleaned up sidebar search: title filtering and full-message search now live behind a single rail search action above Chat.

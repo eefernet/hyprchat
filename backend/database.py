@@ -187,6 +187,59 @@ CREATE INDEX IF NOT EXISTS idx_runs_conv    ON runs(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_parent  ON runs(parent_run_id);
 
+-- First-class Deep Research reports. The existing deep_research tool remains
+-- compatibility-focused; these rows back the dedicated report workspace.
+CREATE TABLE IF NOT EXISTS research_reports (
+    id              TEXT PRIMARY KEY,
+    title           TEXT NOT NULL DEFAULT '',
+    query           TEXT NOT NULL,
+    focus           TEXT DEFAULT '',
+    report_type     TEXT NOT NULL DEFAULT 'analyst',
+    status          TEXT NOT NULL DEFAULT 'queued',
+    depth           INTEGER DEFAULT 3,
+    model           TEXT DEFAULT '',
+    planner_model   TEXT DEFAULT '',
+    auditor_model   TEXT DEFAULT '',
+    kb_ids          TEXT DEFAULT '[]',
+    inputs_json     TEXT DEFAULT '[]',
+    outline_json    TEXT DEFAULT '{}',
+    findings_json   TEXT DEFAULT '[]',
+    sources_json    TEXT DEFAULT '[]',
+    metrics_json    TEXT DEFAULT '{}',
+    report_markdown TEXT DEFAULT '',
+    summary         TEXT DEFAULT '',
+    error           TEXT DEFAULT '',
+    events_log      TEXT DEFAULT '[]',
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at    TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_research_reports_status  ON research_reports(status);
+CREATE INDEX IF NOT EXISTS idx_research_reports_updated ON research_reports(updated_at);
+
+CREATE TABLE IF NOT EXISTS workspace_research_reports (
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+    report_id TEXT REFERENCES research_reports(id) ON DELETE CASCADE,
+    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (workspace_id, report_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_research_reports_report ON workspace_research_reports(report_id);
+
+CREATE TABLE IF NOT EXISTS research_sources (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id     TEXT NOT NULL,
+    source_index  INTEGER DEFAULT 0,
+    title         TEXT DEFAULT '',
+    url           TEXT DEFAULT '',
+    snippet       TEXT DEFAULT '',
+    tier          INTEGER DEFAULT 2,
+    source_type   TEXT DEFAULT 'web',
+    metadata_json TEXT DEFAULT '{}',
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (report_id) REFERENCES research_reports(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_research_sources_report ON research_sources(report_id);
+
 -- Coder Bot v2 hybrid workflow state. A workflow is the user-facing unit of
 -- work; runs remain the per-agent invocations attached to that workflow.
 CREATE TABLE IF NOT EXISTS coder_workflows (
@@ -276,114 +329,14 @@ async def init_db():
             # Rebuild index from existing messages
             await db.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
             print("[DB MIGRATION] Created FTS5 search index for messages")
-        # Seed preset personas (idempotent — fixed ID)
-        DEEP_RESEARCHER_PROMPT = """You are Deep Researcher — an expert research analyst powered by real-time multi-source intelligence gathering.
-
-## Primary Directive
-Use deep_research as your first action for any substantive question. Training data goes stale — always verify with live research.
-
-## Depth Selection
-Default to **depth 3** for most questions. Scale up/down:
-- **1** — Quick fact-check, simple definition, current price/stat (~20s)
-- **2** — Topic overview, recent news summary (~40s)
-- **3** — Technical deep-dive, how-something-works, best practices (~60s) ← DEFAULT
-- **4** — Comprehensive analysis, policy/legal/medical topics (~90s)
-- **5** — Exhaustive sweep — explicitly requested or genuinely complex (~120s)
-
-## Mode & Focus
-- Set `mode:"compare"` + `topic_b` for any head-to-head question (e.g. "X vs Y")
-- Set `focus` to the user's specific angle: security, performance, cost, recent developments, tutorials, etc.
-- Use `mode:"quick"` only for trivially simple lookups
-
-## Avoiding Research Loops — CRITICAL
-Every `deep_research` call costs ~1–3 minutes of wall-clock and ~1,500–3,000 prompt tokens. Chaining them is expensive and rarely productive. Hard rules:
-
-- **Same-topic cap — 2 calls maximum.** If you've called `deep_research` twice on the same underlying topic (even with reworded `focus` / `topic`) and both returned approximate, similar, or "as-of" data, **STOP searching**. That IS the data. Move to synthesis: use `execute_code` on the approximations if math is needed, then present findings. Flag any uncertainty in a `> [!NOTE]` callout. Do not call `deep_research` a third time hoping a new wording will surface magically-exact numbers.
-- **Recency realism.** Do not hunt for exact current-year or very-recent figures that may not yet be audited or published. If research returns "projected" / "estimated" / "preliminary" / "YTD" / "as of [date]" figures, treat those as the answer — **use them**, compute with them if needed, and flag the preliminary status in a `> [!NOTE]` or `> [!CAUTION]` callout. Re-searching for exact figures that don't exist yet is a loop, not rigor.
-- **Reframe before re-searching.** If the first call's data feels insufficient, ask: is the gap *real* (a legitimately missing angle) or *perfectionism* (wanting a rounder number)? Only re-search for the former. For perfectionism, synthesize what you have.
-
-A chart built from approximate-but-acknowledged numbers with a `[!NOTE]` about data freshness is strictly better than an infinite hunt for exact numbers that don't exist.
-
-## After Research Returns
-Synthesize — don't dump. Your value is in analysis:
-1. **Lead with the answer** — direct response to what was asked
-2. **Structure clearly** — headers, tables, bullets; make it scannable
-3. **Cite sources** — reference [N] citations where they add weight
-4. **Add analysis** — implications, caveats, confidence level, what's still uncertain
-5. **Offer follow-ups** — 2-3 targeted directions to go deeper
-
-## Computation — Use `execute_code` for Real Math
-You have `execute_code` for a reason: LLM mental math is unreliable past trivial cases, and research findings are worthless if the numbers are wrong.
-
-**Always call `execute_code` for:**
-- Compound growth rates (CAGR, CMGR), weighted averages, variance, standard deviation
-- Percentage shares summing to 100 (e.g. market-share breakdowns)
-- Aggregating / filtering / sorting numbers pulled from research
-- Date arithmetic, unit conversion, currency conversion
-- Anything where the user would notice if you were off by 5%
-
-**The compute-then-chart pattern is standard:**
-1. Research returns numbers (raw sources, survey results, benchmarks).
-2. Call `execute_code` to compute derived values — print them as JSON to stdout so they're easy to read back.
-3. Emit a ```chart fence using the computed numbers.
-
-Never hand-compute a CAGR, weighted average, or percentage split when `execute_code` would be exact. A chart with wrong numbers is worse than no chart.
-
-## Presenting Findings — Use Rich Rendering
-The chat UI renders rich inline formats. Reach for these when they fit the content — don't fall back on bare numbers or "imagine a chart of..." text:
-- **Quantitative data** (benchmarks, growth, market share, survey results, distributions — any 3+ comparable numbers) → emit a ```chart fence. Pick the type that fits: `bar` for categorical comparison, `line` for trends over time, `pie`/`doughnut` for proportions of a whole, `scatter` for correlation, `radar` for multi-attribute profiles. The fence renders directly — never write Python/matplotlib/plotly to SAVE a chart image. (You may use `execute_code` to COMPUTE the numbers that go into the fence — that's encouraged — but the visual itself is always a ```chart fence.)
-- **Source conflicts or uncertainty** → `> [!NOTE]` callout so the reader knows not to take the synthesis at face value
-- **Findings that materially change the conclusion** → `> [!IMPORTANT]` callout
-- **Deprecations, security issues, breaking changes, harmful misinformation** → `> [!WARNING]` or `> [!CAUTION]` callout
-- **Practical recommendations / actionable advice** → `> [!TIP]` callout
-- **Multi-attribute comparisons** → markdown tables with column alignment (`|:---|---:|:---:|`) — right-align numbers, center-align status
-- **Commands, keyboard shortcuts** → `<kbd>` tags for keys, inline code for commands
-- **Hex / RGB / HSL colors** → write them literally in the text; swatches auto-render
-
-When the answer hinges on "which is bigger / faster / more common / trending up", a chart fence is almost always better than a paragraph. Prefer a 20-word intro + chart over a 200-word number dump.
-
-## Tool Selection — Which One, When
-- **`deep_research`** — first action for substantive questions requiring live sources
-- **`execute_code`** — pure math, numerical aggregation, statistical work, date/unit conversion, or computing derived values from research results
-- **Skip both** when: the user says "quickly" / "from memory" / "off the top of your head", or a follow-up is already covered by prior research in this chat
-
-Be rigorous, structured, and honest about uncertainty. When sources conflict, say so."""
+        # The legacy Deep Researcher agent duplicates the first-class Deep
+        # Research workspace and the Agent Research tool. Remove only the fixed
+        # preset row; user-created research agents use their own IDs.
         try:
-            exists = await db.execute_fetchall(
-                "SELECT id FROM model_configs WHERE id='mc-preset-deepresearch'"
-            )
-            now = datetime.utcnow().isoformat()
-            DEEP_RESEARCHER_TOOLS = '["deep_research", "execute_code"]'
-            DEEP_RESEARCHER_PARAMS = {
-                "profile_type": "agent",
-                "description": "Research-first agent for multi-source investigations, citations, and synthesized reports.",
-            }
-            if not exists:
-                await db.execute(
-                    "INSERT INTO model_configs(id,name,base_model,system_prompt,tool_ids,kb_ids,parameters,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                    ("mc-preset-deepresearch", "🔬 Deep Researcher", "qwen3.5:27b",
-                     DEEP_RESEARCHER_PROMPT, DEEP_RESEARCHER_TOOLS, '[]', json.dumps(DEEP_RESEARCHER_PARAMS), now, now)
-                )
-            else:
-                # Refresh prompt + tool_ids on version bumps so existing installs pick up guidance
-                # updates and newly-required tools (e.g. execute_code for numerical reliability).
-                # Preserves base_model, kb_ids, and custom parameters while adding profile_type.
-                existing_params = {}
-                try:
-                    row = await db.execute_fetchall(
-                        "SELECT parameters FROM model_configs WHERE id='mc-preset-deepresearch'"
-                    )
-                    if row:
-                        existing_params = json.loads(row[0][0] or "{}")
-                except Exception:
-                    existing_params = {}
-                merged_params = {**DEEP_RESEARCHER_PARAMS, **existing_params, "profile_type": existing_params.get("profile_type") or "agent"}
-                await db.execute(
-                    "UPDATE model_configs SET system_prompt=?, tool_ids=?, parameters=?, updated_at=? WHERE id='mc-preset-deepresearch'",
-                    (DEEP_RESEARCHER_PROMPT, DEEP_RESEARCHER_TOOLS, json.dumps(merged_params), now)
-                )
+            await db.execute("DELETE FROM model_configs WHERE id='mc-preset-deepresearch'")
+            await db.execute("DELETE FROM model_configs WHERE name='💻 Coder Bot'")
         except Exception as e:
-            print(f"[DB SEED] {e}")
+            print(f"[DB SEED] Legacy agent cleanup failed: {e}")
         await db.commit()
     finally:
         await db.close()
@@ -778,7 +731,7 @@ async def create_workspace(id: str, name: str, description: str = ""):
         await db.commit()
     finally:
         await db.close()
-    return {"id": id, "name": name, "description": description, "topics": [], "conv_count": 0, "file_count": 0}
+    return {"id": id, "name": name, "description": description, "topics": [], "conv_count": 0, "file_count": 0, "report_count": 0}
 
 
 async def get_workspaces():
@@ -787,7 +740,8 @@ async def get_workspaces():
         rows = await db.execute_fetchall("""
             SELECT w.*,
                 (SELECT COUNT(*) FROM workspace_conversations wc WHERE wc.workspace_id=w.id) as conv_count,
-                (SELECT COUNT(*) FROM conversation_files cf JOIN workspace_conversations wc2 ON cf.conversation_id=wc2.conversation_id WHERE wc2.workspace_id=w.id) as file_count
+                (SELECT COUNT(*) FROM conversation_files cf JOIN workspace_conversations wc2 ON cf.conversation_id=wc2.conversation_id WHERE wc2.workspace_id=w.id) as file_count,
+                (SELECT COUNT(*) FROM workspace_research_reports wrr WHERE wrr.workspace_id=w.id) as report_count
             FROM workspaces w ORDER BY w.updated_at DESC""")
         result = []
         for r in rows:
@@ -828,6 +782,32 @@ async def get_workspace(ws_id: str):
             (ws_id,)
         )
         ws["files"] = [dict(r) for r in file_rows]
+        report_rows = await db.execute_fetchall(
+            """SELECT rr.id,rr.title,rr.query,rr.focus,rr.report_type,rr.status,rr.depth,
+                      rr.model,rr.summary,rr.error,rr.sources_json,rr.metrics_json,
+                      rr.created_at,rr.updated_at,rr.completed_at,wrr.added_at
+               FROM research_reports rr
+               JOIN workspace_research_reports wrr ON rr.id=wrr.report_id
+               WHERE wrr.workspace_id=? ORDER BY wrr.added_at DESC""",
+            (ws_id,)
+        )
+        reports = []
+        for row in report_rows:
+            r = dict(row)
+            try:
+                sources = json.loads(r.pop("sources_json") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                sources = []
+            try:
+                metrics = json.loads(r.pop("metrics_json") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                metrics = {}
+            r["source_count"] = metrics.get("source_count") or len(sources)
+            r["pages_read"] = metrics.get("pages_read", 0)
+            r["elapsed"] = metrics.get("elapsed", 0)
+            r["metrics"] = metrics
+            reports.append(r)
+        ws["reports"] = reports
         return ws
     finally:
         await db.close()
@@ -880,6 +860,33 @@ async def remove_conv_from_workspace(ws_id: str, conv_id: str):
             "DELETE FROM workspace_conversations WHERE workspace_id=? AND conversation_id=?",
             (ws_id, conv_id)
         )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def add_research_report_to_workspace(ws_id: str, report_id: str):
+    db = await get_db()
+    try:
+        now = datetime.utcnow().isoformat()
+        await db.execute(
+            "INSERT OR IGNORE INTO workspace_research_reports(workspace_id,report_id,added_at) VALUES(?,?,?)",
+            (ws_id, report_id, now)
+        )
+        await db.execute("UPDATE workspaces SET updated_at=? WHERE id=?", (now, ws_id))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def remove_research_report_from_workspace(ws_id: str, report_id: str):
+    db = await get_db()
+    try:
+        await db.execute(
+            "DELETE FROM workspace_research_reports WHERE workspace_id=? AND report_id=?",
+            (ws_id, report_id)
+        )
+        await db.execute("UPDATE workspaces SET updated_at=? WHERE id=?", (datetime.utcnow().isoformat(), ws_id))
         await db.commit()
     finally:
         await db.close()
@@ -1154,6 +1161,226 @@ async def get_token_usage(days: int = 30, group_by: str = "day"):
                    GROUP BY date(created_at) ORDER BY date ASC"""
         cursor = await db.execute(q, (f"-{days} days",))
         return [dict(r) for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+
+# ============================================================
+# DEEP RESEARCH REPORTS
+# ============================================================
+def _parse_research_report(row) -> dict:
+    r = dict(row)
+    for key, default in (
+        ("kb_ids", []),
+        ("inputs_json", []),
+        ("outline_json", {}),
+        ("findings_json", []),
+        ("sources_json", []),
+        ("metrics_json", {}),
+        ("events_log", []),
+    ):
+        try:
+            r[key] = json.loads(r.get(key) or json.dumps(default))
+        except (json.JSONDecodeError, TypeError):
+            r[key] = default
+    r["inputs"] = r.pop("inputs_json", [])
+    r["outline"] = r.pop("outline_json", {})
+    r["findings"] = r.pop("findings_json", [])
+    r["sources"] = r.pop("sources_json", [])
+    r["metrics"] = r.pop("metrics_json", {})
+    return r
+
+
+async def create_research_report(report_id: str, *, query: str, title: str = "",
+                                 focus: str = "", report_type: str = "analyst",
+                                 depth: int = 3, model: str = "",
+                                 planner_model: str = "", auditor_model: str = "",
+                                 kb_ids: list = None, inputs: list = None,
+                                 status: str = "queued") -> None:
+    db = await get_db()
+    try:
+        now = datetime.utcnow().isoformat()
+        await db.execute(
+            "INSERT INTO research_reports(id,title,query,focus,report_type,status,depth,"
+            "model,planner_model,auditor_model,kb_ids,inputs_json,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                report_id, title or query[:80], query, focus or "", report_type or "analyst",
+                status, int(depth or 3), model or "", planner_model or "",
+                auditor_model or "", json.dumps(kb_ids or []), json.dumps(inputs or []),
+                now, now,
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def update_research_report(report_id: str, **kwargs) -> None:
+    if not kwargs:
+        return
+    json_fields = {
+        "kb_ids": "kb_ids",
+        "inputs": "inputs_json",
+        "outline": "outline_json",
+        "findings": "findings_json",
+        "sources": "sources_json",
+        "metrics": "metrics_json",
+        "events_log": "events_log",
+    }
+    allowed = {
+        "title", "query", "focus", "report_type", "status", "depth", "model",
+        "planner_model", "auditor_model", "summary", "error", "report_markdown",
+        "completed_at",
+        *json_fields.keys(),
+    }
+    sets = []
+    vals = []
+    for key, value in kwargs.items():
+        if key not in allowed:
+            continue
+        col = json_fields.get(key, key)
+        sets.append(f"{col}=?")
+        vals.append(json.dumps(value) if key in json_fields else value)
+    if not sets:
+        return
+    sets.append("updated_at=?")
+    vals.append(datetime.utcnow().isoformat())
+    vals.append(report_id)
+    db = await get_db()
+    try:
+        await db.execute(f"UPDATE research_reports SET {', '.join(sets)} WHERE id=?", tuple(vals))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def append_research_event(report_id: str, event: dict) -> None:
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT events_log FROM research_reports WHERE id=?", (report_id,))
+        if not rows:
+            return
+        try:
+            log = json.loads(rows[0]["events_log"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            log = []
+        if "ts" not in event:
+            event = {**event, "ts": datetime.utcnow().isoformat()}
+        log.append(event)
+        await db.execute(
+            "UPDATE research_reports SET events_log=?, updated_at=? WHERE id=?",
+            (json.dumps(log), datetime.utcnow().isoformat(), report_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def replace_research_sources(report_id: str, sources: list[dict]) -> None:
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM research_sources WHERE report_id=?", (report_id,))
+        for i, src in enumerate(sources or [], start=1):
+            metadata = dict(src.get("metadata") or {})
+            for key in ("credibility_score", "credibility_factors", "tier_label", "thumbnail", "query", "type"):
+                if key in src and key not in metadata:
+                    metadata[key] = src.get(key)
+            await db.execute(
+                "INSERT INTO research_sources(report_id,source_index,title,url,snippet,tier,source_type,metadata_json) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    report_id, int(src.get("index") or i), src.get("title", ""),
+                    src.get("url", ""), src.get("snippet", "") or src.get("content", ""),
+                    int(src.get("tier", 2)), src.get("type", "web"),
+                    json.dumps(metadata),
+                ),
+            )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_research_report(report_id: str) -> dict | None:
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT * FROM research_reports WHERE id=?", (report_id,))
+        if not rows:
+            return None
+        report = _parse_research_report(rows[0])
+        src_rows = await db.execute_fetchall(
+            "SELECT * FROM research_sources WHERE report_id=? ORDER BY source_index ASC, id ASC",
+            (report_id,),
+        )
+        if src_rows:
+            parsed = []
+            for row in src_rows:
+                src = dict(row)
+                try:
+                    src["metadata"] = json.loads(src.get("metadata_json") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    src["metadata"] = {}
+                meta = src.get("metadata") or {}
+                for key in ("credibility_score", "credibility_factors", "tier_label", "thumbnail", "query", "type"):
+                    if key in meta:
+                        src[key] = meta[key]
+                if "type" not in src:
+                    src["type"] = src.get("source_type", "web")
+                src.pop("metadata_json", None)
+                parsed.append(src)
+            report["sources"] = parsed
+        return report
+    finally:
+        await db.close()
+
+
+async def list_research_reports(limit: int = 50, offset: int = 0, query: str = "") -> list[dict]:
+    db = await get_db()
+    try:
+        if query:
+            like = f"%{query}%"
+            rows = await db.execute_fetchall(
+                "SELECT id,title,query,focus,report_type,status,depth,model,summary,error,"
+                "sources_json,metrics_json,created_at,updated_at,completed_at "
+                "FROM research_reports WHERE title LIKE ? OR query LIKE ? OR summary LIKE ? "
+                "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (like, like, like, limit, offset),
+            )
+        else:
+            rows = await db.execute_fetchall(
+                "SELECT id,title,query,focus,report_type,status,depth,model,summary,error,"
+                "sources_json,metrics_json,created_at,updated_at,completed_at "
+                "FROM research_reports ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            )
+        reports = []
+        for row in rows:
+            r = dict(row)
+            try:
+                sources = json.loads(r.pop("sources_json") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                sources = []
+            try:
+                metrics = json.loads(r.pop("metrics_json") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                metrics = {}
+            r["source_count"] = metrics.get("source_count") or len(sources)
+            r["pages_read"] = metrics.get("pages_read", 0)
+            r["elapsed"] = metrics.get("elapsed", 0)
+            r["metrics"] = metrics
+            reports.append(r)
+        return reports
+    finally:
+        await db.close()
+
+
+async def delete_research_report(report_id: str) -> None:
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM workspace_research_reports WHERE report_id=?", (report_id,))
+        await db.execute("DELETE FROM research_sources WHERE report_id=?", (report_id,))
+        await db.execute("DELETE FROM research_reports WHERE id=?", (report_id,))
+        await db.commit()
     finally:
         await db.close()
 

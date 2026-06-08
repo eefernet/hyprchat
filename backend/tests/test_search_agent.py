@@ -7,7 +7,9 @@ network. Run with:
 """
 import asyncio
 import json
+import math
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch, AsyncMock
 
@@ -18,6 +20,7 @@ if str(_BACKEND) not in sys.path:
 
 import search_agent  # noqa: E402
 import quick_search  # noqa: E402  (we patch helpers on this module)
+import config  # noqa: E402
 
 
 def _run(coro):
@@ -47,6 +50,14 @@ class _FakeHTTP:
         if isinstance(nxt, Exception):
             raise nxt
         return _FakeResponse(nxt)
+
+
+class _FakeEvents:
+    def __init__(self):
+        self.items = []
+
+    async def emit(self, conv_id, evt, data):
+        self.items.append((conv_id, evt, data))
 
 
 def _ollama_response(text: str) -> dict:
@@ -241,6 +252,20 @@ def _searxng_results(*titles_urls):
     return [{"title": t, "url": u, "content": f"snippet about {t}"} for t, u in titles_urls]
 
 
+def _many_web_results(n: int, *, prefix: str = "Result") -> list[dict]:
+    return [
+        {
+            "title": f"{prefix} {i}",
+            "url": f"https://source{i}.test/article",
+            "content": f"snippet about latest broad search result {i}",
+            "engine": "test",
+            "score": 10,
+            "type": "web",
+        }
+        for i in range(n)
+    ]
+
+
 def test_run_search_agent_skip_gate():
     """Greetings short-circuit before any LLM call."""
     http = _FakeHTTP([])  # no responses queued — would error if triage ran
@@ -272,14 +297,8 @@ def test_run_search_agent_triage_skip():
 
 
 def test_run_search_agent_high_relevance_no_refine():
-    """One round when relevance is high — refine_query is never called."""
-    plan = json.dumps({
-        "needs_search": True,
-        "queries": ["UK general election 2026 results"],
-        "category": "news",
-        "reason": "follow-up",
-    })
-    http = _FakeHTTP([_ollama_response(plan)])
+    """Balanced mode plans deterministically and does not call refine."""
+    http = _FakeHTTP([])
 
     fake_results = _searxng_results(
         ("UK general election 2026 results", "https://bbc.co.uk/election"),
@@ -299,19 +318,14 @@ def test_run_search_agent_high_relevance_no_refine():
             events=None, conv_id=None, messages=messages,
         ))
         assert out["skipped"] is False
-        assert mock_search.await_count == 1   # single round
+        assert mock_search.await_count >= 1
+        assert http.calls == []               # no LLM planning call
         assert mock_refine.await_count == 0   # no refinement
 
 
 def test_run_search_agent_news_recency_passes_month_time_range():
     """News plans with recency cues pass time_range='month' into SearXNG."""
-    plan = json.dumps({
-        "needs_search": True,
-        "queries": ["UK general election latest updates"],
-        "category": "news",
-        "reason": "current news",
-    })
-    http = _FakeHTTP([_ollama_response(plan)])
+    http = _FakeHTTP([])
     fake_results = _searxng_results(
         ("Latest UK general election updates", "https://bbc.co.uk/latest"),
     )
@@ -326,19 +340,228 @@ def test_run_search_agent_news_recency_passes_month_time_range():
             events=None, conv_id=None, messages=messages,
         ))
         assert out["skipped"] is False
-        assert mock_search.await_count == 1
-        assert mock_search.await_args.kwargs["time_range"] == "month"
+        assert mock_search.await_count >= 2
+        assert {c.kwargs["time_range"] for c in mock_search.await_args_list} == {"month"}
+        assert {c.kwargs["categories"] for c in mock_search.await_args_list} == {"news"}
+        assert http.calls == []
+
+
+def test_run_search_agent_passes_configured_searxng_engines():
+    http = _FakeHTTP([])
+    fake_results = _searxng_results(
+        ("Latest UK general election updates", "https://bbc.co.uk/latest"),
+    )
+    messages = [{"role": "user", "content": "latest UK general election updates"}]
+
+    with patch.object(config, "QUICK_SEARCH_SEARXNG_NEWS_ENGINES", "brave,reuters"), \
+         patch.object(quick_search, "_cached_search", new=AsyncMock(return_value=fake_results)) as mock_search, \
+         patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)):
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "test-model", "test-model",
+            events=None, conv_id=None, messages=messages,
+        ))
+
+    assert out["skipped"] is False
+    assert {c.kwargs["engines"] for c in mock_search.await_args_list} == {"brave,reuters"}
+    assert "SearXNG engines: brave,reuters" in out["context"]
+
+
+class _FixedDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        fixed = cls(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
+        return fixed.astimezone(tz) if tz else fixed
+
+
+def test_run_search_agent_today_uses_day_freshness_and_resolved_date():
+    http = _FakeHTTP([])
+    events = _FakeEvents()
+    messages = [{"role": "user", "content": "what was the california elections like today?"}]
+    fake_results = [
+        {
+            "title": "California elections update",
+            "url": "https://apnews.com/california-election",
+            "content": "California election coverage from today",
+            "engine": "test",
+            "score": 80,
+            "type": "web",
+            "published_date": "2026-06-05",
+        }
+    ]
+
+    with patch.object(search_agent, "datetime", _FixedDateTime), \
+         patch.object(quick_search, "_cached_search", new=AsyncMock(return_value=fake_results)) as mock_search, \
+         patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)):
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "test-model", "test-model",
+            events=events, conv_id="conv-today", messages=messages,
+        ))
+
+    search_events = [d for _, evt, d in events.items if evt == "search_results"]
+    assert out["skipped"] is False
+    assert {c.kwargs["time_range"] for c in mock_search.await_args_list} == {"day"}
+    assert {c.kwargs["categories"] for c in mock_search.await_args_list} == {"news"}
+    assert search_events[-1]["resolved_date"] == "2026-06-05"
+    assert search_events[-1]["freshness_mode"] == "day"
+    assert "Resolved date: 2026-06-05" in out["context"]
+    assert "FRESHNESS WARNING" not in out["context"]
+
+
+def test_run_search_agent_today_warns_when_sources_are_not_same_day():
+    http = _FakeHTTP([])
+    messages = [{"role": "user", "content": "what was the california elections like today?"}]
+    stale_results = [
+        {
+            "title": "California election background",
+            "url": "https://example.com/california-election",
+            "content": "Older California election coverage",
+            "engine": "test",
+            "score": 80,
+            "type": "web",
+            "published_date": "2026-06-04",
+        }
+    ]
+
+    with patch.object(search_agent, "datetime", _FixedDateTime), \
+         patch.object(quick_search, "_cached_search", new=AsyncMock(return_value=stale_results)), \
+         patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)):
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "test-model", "test-model",
+            events=None, conv_id=None, messages=messages,
+        ))
+
+    assert "FRESHNESS WARNING" in out["context"]
+    assert "do not prove activity on 2026-06-05" in out["context"]
+
+
+def test_run_search_agent_returns_balanced_target_chat_results():
+    http = _FakeHTTP([])
+    events = _FakeEvents()
+    messages = [{"role": "user", "content": "latest broad search topic"}]
+
+    async def fake_cached_search(http, query, count=10, time_range=None, categories="general", engines=None):
+        assert 10 <= count <= quick_search.CHAT_SEARCH_COUNT_BROAD
+        assert time_range == "month"
+        assert categories == "news"
+        return _many_web_results(40)
+
+    with patch.object(quick_search, "_cached_search", new=fake_cached_search), \
+         patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
+         patch.object(search_agent, "refine_query", new=AsyncMock(return_value="should-not-be-called")):
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "test-model", "test-model",
+            events=events, conv_id="conv-1", messages=messages,
+        ))
+
+    search_events = [d for _, evt, d in events.items if evt == "search_results"]
+    done_events = [d for _, evt, d in events.items if evt == "tool_done"]
+    assert out["skipped"] is False
+    assert len(search_events[-1]["results"]) == quick_search.CHAT_TARGET_RESULTS
+    assert search_events[-1]["freshness_mode"] == "month"
+    assert "score_reason" in search_events[-1]["results"][0]
+    assert done_events[-1]["status"] == f"Found {quick_search.CHAT_TARGET_RESULTS} results"
+    assert f"{quick_search.CHAT_TARGET_RESULTS}. **" in out["context"]
+    assert f"{quick_search.CHAT_TARGET_RESULTS + 1}. **" not in out["context"]
+
+
+def test_embed_dedup_backfills_to_35_when_candidates_exist():
+    results = _many_web_results(40, prefix="Candidate")
+    dim = 50
+    q = [1.0] + [0.0] * (dim - 1)
+    high_dup = [1.0] + [0.0] * (dim - 1)
+    low_unique_mag = math.sqrt(1.0 - 0.2 ** 2)
+    embeddings = [q]
+    for i in range(40):
+        if i < 6:
+            embeddings.append(high_dup)
+        else:
+            v = [0.2] + [0.0] * (dim - 1)
+            v[i - 5] = low_unique_mag
+            embeddings.append(v)
+
+    async def fake_embed_batch(http, ollama_url, texts):
+        assert len(texts) == 41
+        return embeddings
+
+    with patch.object(quick_search, "_ollama_embed_batch", new=fake_embed_batch):
+        out = _run(quick_search._embed_score_and_dedup(
+            None, "http://ollama", "query", results,
+            limit=quick_search.CHAT_MAX_RESULTS, backfill=True,
+        ))
+
+    urls = [r["url"] for r in out]
+    assert len(out) == quick_search.CHAT_MAX_RESULTS
+    assert urls[:1] == [results[0]["url"]]
+    assert all(results[i]["url"] not in urls for i in range(1, 6))
+
+
+def test_rank_domain_limit_still_reaches_35_with_diverse_sources():
+    repeated = [
+        {
+            "title": f"Repeated {i}",
+            "url": f"https://example.com/article-{i}",
+            "content": "search topic repeated domain",
+            "score": 100 - i,
+            "type": "web",
+        }
+        for i in range(20)
+    ]
+    diverse = [
+        {
+            "title": f"Diverse {i}",
+            "url": f"https://diverse{i}.org/article",
+            "content": "search topic diverse domain",
+            "score": 50,
+            "type": "web",
+        }
+        for i in range(60)
+    ]
+
+    out = quick_search._rank_and_filter_for_chat(
+        repeated + diverse, "search topic", category="general",
+        limit=quick_search.CHAT_MAX_RESULTS,
+    )
+    domains = [quick_search._registrable_domain(r["url"]) for r in out]
+    assert len(out) == quick_search.CHAT_MAX_RESULTS
+    assert domains.count("example.com") <= 2
+
+
+def test_run_search_agent_page_enrichment_only_uses_top_configured_results():
+    http = _FakeHTTP([])
+    messages = [{"role": "user", "content": "latest broad search topic"}]
+    captured = {}
+
+    async def fake_cached_search(http, query, count=10, time_range=None, categories="general", engines=None):
+        return _many_web_results(40)
+
+    async def fake_enrich_with_pages(http, results, top_n=3):
+        captured["result_count"] = len(results)
+        captured["top_n"] = top_n
+        return {}
+
+    with patch.object(quick_search, "_cached_search", new=fake_cached_search), \
+         patch.object(quick_search, "_enrich_with_pages", new=fake_enrich_with_pages), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
+         patch.object(search_agent, "refine_query", new=AsyncMock(return_value="should-not-be-called")):
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "test-model", "test-model",
+            events=None, conv_id=None, messages=messages,
+        ))
+
+    assert out["skipped"] is False
+    assert captured == {
+        "result_count": quick_search.CHAT_TARGET_RESULTS,
+        "top_n": quick_search.CHAT_PAGE_FETCH_COUNT,
+    }
 
 
 def test_run_search_agent_low_relevance_refines():
-    """Low relevance → refine_query is called once and the refined query is searched."""
-    plan = json.dumps({
-        "needs_search": True,
-        "queries": ["election"],  # too vague — returns off-topic vocabulary
-        "category": "news",
-        "reason": "follow-up",
-    })
-    http = _FakeHTTP([_ollama_response(plan)])
+    """Quality mode can run one refinement round after weak deterministic results."""
+    http = _FakeHTTP([])
 
     # Off-topic results share NO content tokens with the user message — that's
     # what the relevance heuristic is designed to catch.
@@ -356,13 +579,14 @@ def test_run_search_agent_low_relevance_refines():
 
     cached_calls = {"n": 0}
 
-    async def fake_cached_search(http, query, count=10, time_range=None):
+    async def fake_cached_search(http, query, count=10, time_range=None, categories="general", engines=None):
         cached_calls["n"] += 1
-        return off_topic if cached_calls["n"] == 1 else on_topic_after_refine
+        return on_topic_after_refine if query == "UK Reform Party 2026 election" else off_topic
 
     with patch.object(quick_search, "_cached_search", new=fake_cached_search), \
          patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
          patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
+         patch.object(config, "QUICK_SEARCH_MODE", "quality"), \
          patch.object(search_agent, "refine_query", new=AsyncMock(return_value="UK Reform Party 2026 election")) as mock_refine:
         out = _run(search_agent.run_search_agent(
             http, "http://ollama", "test-model", "test-model",
@@ -370,26 +594,23 @@ def test_run_search_agent_low_relevance_refines():
         ))
         assert out["skipped"] is False
         assert mock_refine.await_count == 1   # refined exactly once
-        assert cached_calls["n"] == 2          # round 1 + refined round
+        assert cached_calls["n"] >= 2          # initial fanout + refined round
 
 
 def test_run_search_agent_max_rounds_caps():
     """Even with persistently low relevance, refinement runs at most once."""
-    plan = json.dumps({
-        "needs_search": True, "queries": ["bad query"],
-        "category": "general", "reason": "x",
-    })
-    http = _FakeHTTP([_ollama_response(plan)])
+    http = _FakeHTTP([])
 
     off_topic = _searxng_results(("totally unrelated", "https://x.com/a"))
     messages = [{"role": "user", "content": "tell me about UK Reform Party 2026 elections politics"}]
 
-    async def fake_cached_search(http, query, count=10, time_range=None):
+    async def fake_cached_search(http, query, count=10, time_range=None, categories="general", engines=None):
         return off_topic  # always off topic
 
     with patch.object(quick_search, "_cached_search", new=fake_cached_search) as mock_search, \
          patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
          patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
+         patch.object(config, "QUICK_SEARCH_MODE", "quality"), \
          patch.object(search_agent, "refine_query", new=AsyncMock(return_value="another query")) as mock_refine:
         out = _run(search_agent.run_search_agent(
             http, "http://ollama", "test-model", "test-model",
@@ -417,8 +638,27 @@ def test_run_search_agent_no_results():
         assert out["reason"] == "no results"
 
 
-def test_run_search_agent_triage_failure_searches_raw_message():
-    """If triage returns invalid JSON, the agent searches the raw user message."""
+def test_run_search_agent_search_failure_injects_unavailable_context():
+    http = _FakeHTTP([])
+    messages = [{"role": "user", "content": "latest UK general election updates"}]
+
+    async def failing_search(http, query, count=10, time_range=None, categories="general", engines=None):
+        raise RuntimeError("searxng down")
+
+    with patch.object(quick_search, "_cached_search", new=failing_search):
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "test-model", "test-model",
+            events=None, conv_id=None, messages=messages,
+        ))
+
+    assert out["skipped"] is False
+    assert out["reason"] == "no results"
+    assert "WEB SEARCH UNAVAILABLE" in out["context"]
+    assert "cannot verify it from fresh sources" in out["context"]
+
+
+def test_run_search_agent_default_path_does_not_call_triage():
+    """Default Quick Search uses deterministic planning instead of LLM triage."""
     http = _FakeHTTP([_ollama_response("garbage that is not json")])
     user_msg = "tell me about UK Reform Party recent gains"
     messages = [{"role": "user", "content": user_msg}]
@@ -426,7 +666,7 @@ def test_run_search_agent_triage_failure_searches_raw_message():
     fake_results = _searxng_results(("UK Reform results", "https://bbc.co.uk/x"))
     captured_queries: list[str] = []
 
-    async def fake_cached_search(http, query, count=10, time_range=None):
+    async def fake_cached_search(http, query, count=10, time_range=None, categories="general", engines=None):
         captured_queries.append(query)
         return fake_results
 
@@ -439,6 +679,6 @@ def test_run_search_agent_triage_failure_searches_raw_message():
             default_model="test-model",
         ))
         assert out["skipped"] is False
-        # Triage failed → searched the raw user message verbatim
-        assert captured_queries == [user_msg]
+        assert http.calls == []
+        assert captured_queries[0] == "UK Reform Party recent gains"
         assert out["rewritten_query"] == user_msg
