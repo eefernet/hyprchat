@@ -223,3 +223,27 @@ def test_pdf_export_uses_react_markdown_renderer_and_pygraph_alias():
     assert 'function sanitizeMermaidCode' in index
     assert "waitForResearchRender" in index
     assert "html2pdf().set" in index
+
+
+def test_deep_research_panel_state_contracts_are_guarded_in_frontend():
+    index = (_BACKEND.parent / "frontend" / "dist" / "index.html").read_text()
+
+    # Live SSE appends token chunks, while polling replaces from durable
+    # report_markdown. That keeps the two paths from duplicating the body.
+    assert "setResearchLiveMarkdown(p=>p+ev.data.content)" in index
+    assert "if(d.report_markdown)setResearchLiveMarkdown(d.report_markdown||\"\")" in index
+
+    # All terminal states release the running flag.
+    assert "if(ev.type===\"research_done\"||ev.type===\"research_error\")" in index
+    assert "[\"complete\",\"failed\",\"cancelled\"].includes(String(d.status||\"\").toLowerCase())" in index
+    assert "setResearchRunning(false);" in index
+
+    # Rerun switches to the new id without overwriting an existing report row.
+    assert "setActiveResearchId(d.id);setActiveResearch(d);setResearchEvents(d.events_log||[]);setResearchReports(p=>[d,...p.filter(x=>x.id!==d.id)])" in index
+
+    # Deleting the active report clears active state and stops live UI state.
+    assert "setActiveResearchId(null);setActiveResearch(null);setResearchEvents([]);setResearchLiveMarkdown(\"\");setResearchRunning(false);" in index
+
+    # Labels stay distinct: panel is durable Deep Research, chat tool is Agent Research.
+    assert "Deep Research" in index
+    assert "Agent Research" in index

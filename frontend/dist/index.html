@@ -3213,6 +3213,7 @@ function HyprChat(){
     try{await fetch(`${API}/api/research/reports/${id}/cancel`,{method:"POST"});}catch{}
     setResearchRunning(false);
     setResearchReports(p=>p.map(r=>r.id===id?{...r,status:"cancelled",error:"Cancelled by user"}:r));
+    if(activeResearchId===id)setActiveResearch(p=>p?{...p,status:"cancelled",error:"Cancelled by user"}:p);
   };
 
   const rerunResearchReport=async(id=activeResearchId)=>{
@@ -3222,7 +3223,7 @@ function HyprChat(){
       const r=await fetch(`${API}/api/research/reports/${id}/rerun`,{method:"POST"});
       if(!r.ok)throw new Error(`HTTP ${r.status}`);
       const d=await r.json();
-      setActiveResearchId(d.id);setActiveResearch(d);setResearchReports(p=>[d,...p]);setPanel("research");
+      setActiveResearchId(d.id);setActiveResearch(d);setResearchEvents(d.events_log||[]);setResearchReports(p=>[d,...p.filter(x=>x.id!==d.id)]);setPanel("research");
     }catch(e){setResearchRunning(false);notify({type:"error",text:"Research rerun failed",detail:e.message||String(e)});}
   };
 
@@ -3232,7 +3233,7 @@ function HyprChat(){
     if(!ok)return;
     try{await fetch(`${API}/api/research/reports/${id}`,{method:"DELETE"});}catch{}
     setResearchReports(p=>p.filter(r=>r.id!==id));
-    if(activeResearchId===id){setActiveResearchId(null);setActiveResearch(null);setResearchEvents([]);setResearchLiveMarkdown("");}
+    if(activeResearchId===id){setActiveResearchId(null);setActiveResearch(null);setResearchEvents([]);setResearchLiveMarkdown("");setResearchRunning(false);}
   };
 
   const addResearchReportToWorkspace=async(reportId,wsId)=>{
