@@ -821,6 +821,7 @@ const IC={
   Trash:()=>sv(<><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></>,14),
   Sidebar:()=>sv(<><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></>,18),
   Bot:()=>sv(<><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/></>),
+  Ghost:()=>sv(<><path d="M9 10h.01"/><path d="M15 10h.01"/><path d="M12 2a7 7 0 0 0-7 7v11l2-1.5L9 20l3-2 3 2 2-1.5L19 20V9a7 7 0 0 0-7-7z"/></>,15),
   User:()=>sv(<><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></>),
   Copy:()=>sv(<><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></>,14),
   Check:()=>sv(<polyline points="20 6 9 17 4 12"/>,14),
@@ -1660,17 +1661,40 @@ const Tip=({k,t})=>{const [show,setShow]=React.useState(false);const txt=TIPS[k]
 // ============================================================
 // WORKSPACE DETAIL COMPONENT
 // ============================================================
-function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onOpenReport,onRemoveReport,onPreview,models,wsModel,onPersonaCreated}){
+function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onOpenReport,onRemoveReport,onPreview,models,wsModel,onPersonaCreated,notify}){
   const [tab,setTab]=React.useState("convs");
   const [editMode,setEditMode]=React.useState(false);
   const [wsName,setWsName]=React.useState("");
   const [wsDesc,setWsDesc]=React.useState("");
+  const [wsInstructions,setWsInstructions]=React.useState("");
   const [addPanel,setAddPanel]=React.useState(false);
   const [addSearch,setAddSearch]=React.useState("");
   const [analyzing,setAnalyzing]=React.useState(false);
   const [analyzeMsg,setAnalyzeMsg]=React.useState(null);
   const [creatingKb,setCreatingKb]=React.useState(false);
-  React.useEffect(()=>{if(ws){setWsName(ws.name||"");setWsDesc(ws.description||"");};},[ws?.id]);
+  const [memories,setMemories]=React.useState([]);
+  const [memBlocks,setMemBlocks]=React.useState([]);
+  const [memLoading,setMemLoading]=React.useState(false);
+  const [memEdit,setMemEdit]=React.useState(null);
+  const [memEditText,setMemEditText]=React.useState("");
+  const [newMemText,setNewMemText]=React.useState("");
+  const [newMemType,setNewMemType]=React.useState("semantic");
+  const [memScanning,setMemScanning]=React.useState(false);
+  React.useEffect(()=>{if(ws){setWsName(ws.name||"");setWsDesc(ws.description||"");setWsInstructions(ws.instructions||"");};},[ws?.id]);
+  const refreshMemory=React.useCallback(async()=>{
+    if(!ws?.id)return;
+    setMemLoading(true);
+    try{
+      const [mr,br]=await Promise.all([
+        fetch(`${API}/api/workspaces/${ws.id}/memories?status=all`).then(r=>r.json()),
+        fetch(`${API}/api/workspaces/${ws.id}/memory-blocks`).then(r=>r.json()),
+      ]);
+      setMemories(Array.isArray(mr.memories)?mr.memories:[]);
+      setMemBlocks(Array.isArray(br.blocks)?br.blocks:[]);
+    }catch(e){notify&&notify({type:"error",text:"Memory failed to load",detail:e.message||String(e)});}
+    setMemLoading(false);
+  },[API,ws?.id,notify]);
+  React.useEffect(()=>{if(ws?.id&&tab==="memory")refreshMemory();},[ws?.id,tab,refreshMemory]);
   if(wsLoading)return<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.mut}}><div style={{textAlign:"center"}}><div style={{fontSize:24,marginBottom:8}}>⏳</div>Loading workspace...</div></div>;
   if(!ws)return<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.mut}}><div style={{textAlign:"center"}}><div style={{fontSize:36,marginBottom:8}}>🗂</div>Select a workspace</div></div>;
   const font="'JetBrains Mono',monospace";
@@ -1729,6 +1753,71 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
     setWorkspaces(p=>p.filter(w=>w.id!==ws.id));
     setActiveWs(null);setWsDetail(null);
   };
+  const patchWsMemory=async(fields)=>{
+    await fetch(`${API}/api/workspaces/${ws.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(fields)}).catch(()=>{});
+    setWsDetail(d=>({...d,...fields}));
+    setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,...fields}:w));
+  };
+  const toggleMemory=()=>patchWsMemory({memory_enabled:(ws.memory_enabled==="1"||ws.memory_enabled===1||ws.memory_enabled===true)?0:1});
+  const saveInstructions=async()=>{
+    await patchWsMemory({instructions:wsInstructions});
+    notify&&notify({type:"success",text:"Workspace instructions saved",duration:2200});
+  };
+  const scanMemory=async()=>{
+    if(!ws?.id)return;
+    setMemScanning(true);
+    try{
+      const r=await fetch(`${API}/api/workspaces/${ws.id}/memories/suggest`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})});
+      const d=await r.json();
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      await refreshMemory();
+      notify&&notify({type:d.created?"success":"info",text:d.created?`Queued ${d.created} memory suggestion${d.created===1?"":"s"}`:"No new memory suggestions",detail:d.message||"",duration:4200});
+    }catch(e){notify&&notify({type:"error",text:"Memory scan failed",detail:e.message||String(e)});}
+    setMemScanning(false);
+  };
+  const saveBlocks=async(blocks=memBlocks)=>{
+    try{
+      const r=await fetch(`${API}/api/workspaces/${ws.id}/memory-blocks`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({blocks})});
+      const d=await r.json();
+      setMemBlocks(d.blocks||[]);
+      notify&&notify({type:"success",text:"Memory blocks saved",duration:2200});
+    }catch(e){notify&&notify({type:"error",text:"Memory block save failed",detail:e.message||String(e)});}
+  };
+  const updateBlock=(id,patch)=>setMemBlocks(p=>p.map(b=>b.id===id?{...b,...patch}:b));
+  const updateMemoryLocal=(m)=>setMemories(p=>p.map(x=>x.id===m.id?m:x));
+  const acceptMemory=async(m)=>{
+    try{const r=await fetch(`${API}/api/workspaces/${ws.id}/memories/${m.id}/accept`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});updateMemoryLocal(await r.json());notify&&notify({type:"success",text:"Memory accepted",duration:2200});}
+    catch(e){notify&&notify({type:"error",text:"Accept failed",detail:e.message||String(e)});}
+  };
+  const rejectMemory=async(m)=>{
+    try{const r=await fetch(`${API}/api/workspaces/${ws.id}/memories/${m.id}/reject`,{method:"POST"});updateMemoryLocal(await r.json());}
+    catch(e){notify&&notify({type:"error",text:"Reject failed",detail:e.message||String(e)});}
+  };
+  const patchMemory=async(m,patch)=>{
+    try{const r=await fetch(`${API}/api/workspaces/${ws.id}/memories/${m.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)});updateMemoryLocal(await r.json());}
+    catch(e){notify&&notify({type:"error",text:"Memory update failed",detail:e.message||String(e)});}
+  };
+  const deleteMemory=async(m)=>{
+    try{await fetch(`${API}/api/workspaces/${ws.id}/memories/${m.id}`,{method:"DELETE"});setMemories(p=>p.filter(x=>x.id!==m.id));}
+    catch(e){notify&&notify({type:"error",text:"Delete failed",detail:e.message||String(e)});}
+  };
+  const startMemEdit=(m)=>{setMemEdit(m.id);setMemEditText(m.content||"");};
+  const saveMemEdit=async(m,accept=false)=>{
+    const r=await fetch(`${API}/api/workspaces/${ws.id}/memories/${m.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:memEditText})});
+    let updated=await r.json();
+    if(accept&&updated.status!=="accepted"){
+      const ar=await fetch(`${API}/api/workspaces/${ws.id}/memories/${m.id}/accept`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});
+      updated=await ar.json();
+    }
+    updateMemoryLocal(updated);setMemEdit(null);setMemEditText("");
+  };
+  const createManualMemory=async()=>{
+    const content=newMemText.trim();if(!content)return;
+    try{
+      const r=await fetch(`${API}/api/workspaces/${ws.id}/memories`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({content,type:newMemType,status:"accepted",importance:3})});
+      const m=await r.json();setMemories(p=>[m,...p]);setNewMemText("");notify&&notify({type:"success",text:"Memory added",duration:2200});
+    }catch(e){notify&&notify({type:"error",text:"Memory add failed",detail:e.message||String(e)});}
+  };
   const fileIcon=(filename)=>{
     const ext=(filename||"").split(".").pop().toLowerCase();
     if(["py","js","ts","rs","go","java","c","cpp"].includes(ext))return "💻";
@@ -1762,7 +1851,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
       </div>}
     </div>
     <div style={{display:"flex",gap:0,borderBottom:`1px solid ${t.brd}22`,flexShrink:0}}>
-      {[["convs","💬 Conversations"],["reports","📊 Reports"],["files","📎 Files"]].map(([id,label])=><button key={id} onClick={()=>{setTab(id);setAddPanel(false);}} style={{padding:"10px 16px",background:tab===id?`${t.acc}15`:"transparent",border:"none",borderBottom:tab===id?`2px solid ${t.acc}`:"2px solid transparent",color:tab===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:tab===id?700:400}}>{label}</button>)}
+      {[["convs","💬 Conversations"],["memory","🧠 Memory"],["reports","📊 Reports"],["files","📎 Files"]].map(([id,label])=><button key={id} onClick={()=>{setTab(id);setAddPanel(false);}} style={{padding:"10px 16px",background:tab===id?`${t.acc}15`:"transparent",border:"none",borderBottom:tab===id?`2px solid ${t.acc}`:"2px solid transparent",color:tab===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:tab===id?700:400}}>{label}</button>)}
       {tab==="convs"&&<button onClick={()=>setAddPanel(p=>!p)} style={{marginLeft:"auto",padding:"10px 14px",background:addPanel?`${t.warm}15`:"transparent",border:"none",borderBottom:addPanel?`2px solid ${t.warm}`:"2px solid transparent",color:addPanel?t.warm:t.mut,cursor:"pointer",fontFamily:font,fontSize:11}}>+ Add Chats</button>}
     </div>
     {addPanel&&<div style={{padding:12,borderBottom:`1px solid ${t.brd}22`,background:`${t.warm}07`,animation:"fadeIn .2s",flexShrink:0}}>
@@ -1789,6 +1878,67 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
           <button onClick={()=>removeConv(c.id)} style={btnS(t.err)}>✕</button>
         </div>)}
       </div>}
+      {tab==="memory"&&(()=>{const enabled=ws.memory_enabled==="1"||ws.memory_enabled===1||ws.memory_enabled===true;const byStatus=s=>memories.filter(m=>m.status===s);const accepted=byStatus("accepted").filter(m=>!m.valid_until);const suggested=byStatus("suggested");const hidden=memories.filter(m=>["rejected","archived"].includes(m.status)||m.valid_until);const typeMeta={semantic:["Facts & Preferences",t.acc],episodic:["Decisions & Events",t.warm],procedural:["Procedures",t.pink]};const card=(m,mode)=>{const meta=typeMeta[m.type]||typeMeta.semantic;const editing=memEdit===m.id;return <div key={m.id} style={{padding:"10px 12px",borderRadius:10,background:`${t.surface}66`,border:`1px solid ${meta[1]}33`,display:"flex",flexDirection:"column",gap:7}}>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <span style={{fontSize:9,fontWeight:800,color:meta[1],textTransform:"uppercase",letterSpacing:.6}}>{meta[0]}</span>
+            <span style={{fontSize:9,color:t.mut}}>importance {m.importance||3}</span>
+            {m.pinned? <span style={{fontSize:9,color:t.warm}}>pinned</span>:null}
+            {m.confidence? <span style={{fontSize:9,color:t.mut}}>{Math.round((m.confidence||0)*100)}%</span>:null}
+          </div>
+          {editing?<textarea value={memEditText} onChange={e=>setMemEditText(e.target.value)} style={{...inputS,minHeight:72,lineHeight:1.5,resize:"vertical"}}/>:<div style={{fontSize:12,lineHeight:1.55,color:t.text,whiteSpace:"pre-wrap"}}>{m.content}</div>}
+          {m.metadata?.reason&&<div style={{fontSize:10,color:t.mut,lineHeight:1.4}}>Why: {m.metadata.reason}</div>}
+          <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
+            {editing?<><button onClick={()=>saveMemEdit(m,mode==="suggested")} style={btnS(t.ok)}>{mode==="suggested"?"Save + Accept":"Save"}</button><button onClick={()=>{setMemEdit(null);setMemEditText("");}} style={btnS(t.mut)}>Cancel</button></>
+            :mode==="suggested"?<><button onClick={()=>acceptMemory(m)} style={btnS(t.ok)}>Accept</button><button onClick={()=>startMemEdit(m)} style={btnS(t.acc)}>Edit</button><button onClick={()=>rejectMemory(m)} style={btnS(t.err)}>Reject</button></>
+            :<><button onClick={()=>patchMemory(m,{pinned:m.pinned?0:1})} style={btnS(m.pinned?t.warm:t.mut)}>{m.pinned?"Unpin":"Pin"}</button><button onClick={()=>startMemEdit(m)} style={btnS(t.acc)}>Edit</button><button onClick={()=>patchMemory(m,{status:"archived"})} style={btnS(t.mut)}>Archive</button><button onClick={()=>deleteMemory(m)} style={btnS(t.err)}>Delete</button></>}
+            {m.source_conversation_id&&<button onClick={()=>onOpenConv&&onOpenConv(m.source_conversation_id)} style={{...btnS(t.f1),marginLeft:"auto"}}>Source →</button>}
+          </div>
+        </div>;};return <div style={{display:"flex",flexDirection:"column",gap:14}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:10,background:`${enabled?t.ok:t.surface}10`,border:`1px solid ${enabled?t.ok:t.brd}33`}}>
+          <button onClick={toggleMemory} style={btnS(enabled?t.ok:t.mut)}>{enabled?"On":"Off"}</button>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:12,fontWeight:700,color:enabled?t.ok:t.text}}>Workspace memory {enabled?"enabled":"disabled"}</div>
+            <div style={{fontSize:10,color:t.mut,marginTop:2}}>Accepted memories and enabled blocks are injected into workspace chats. Suggestions are never injected until accepted.</div>
+          </div>
+          <button onClick={scanMemory} disabled={memScanning} style={btnS(t.warm)}>{memScanning?"Scanning":"Scan Recent"}</button>
+          <button onClick={refreshMemory} disabled={memLoading} style={btnS(t.acc)}>{memLoading?"Loading":"Refresh"}</button>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(260px,.55fr)",gap:12,alignItems:"start"}}>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            <div style={{fontSize:10,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.7}}>Workspace Instructions</div>
+            <textarea value={wsInstructions} onChange={e=>setWsInstructions(e.target.value)} placeholder="Stable project instructions, constraints, tone, or goals..." style={{...inputS,minHeight:92,lineHeight:1.5,resize:"vertical"}}/>
+            <button onClick={saveInstructions} style={{...btnS(t.ok),alignSelf:"flex-start"}}>Save Instructions</button>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            <div style={{fontSize:10,fontWeight:800,color:t.pink,textTransform:"uppercase",letterSpacing:.7}}>Add Memory</div>
+            <select value={newMemType} onChange={e=>setNewMemType(e.target.value)} style={inputS}><option value="semantic">Semantic</option><option value="episodic">Episodic</option><option value="procedural">Procedural</option></select>
+            <textarea value={newMemText} onChange={e=>setNewMemText(e.target.value)} placeholder="Add an accepted memory manually..." style={{...inputS,minHeight:78,lineHeight:1.5,resize:"vertical"}}/>
+            <button onClick={createManualMemory} disabled={!newMemText.trim()} style={{...btnS(t.ok),opacity:newMemText.trim()?1:.45,alignSelf:"flex-start"}}>Add Accepted Memory</button>
+          </div>
+        </div>
+        {memBlocks.length>0&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{fontSize:10,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.7}}>Pinned Blocks</div><button onClick={()=>saveBlocks()} style={btnS(t.ok)}>Save Blocks</button></div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:8}}>
+            {memBlocks.map(b=><div key={b.id} style={{padding:10,borderRadius:10,background:`${t.surface}55`,border:`1px solid ${b.enabled?t.acc:t.brd}28`,display:"flex",flexDirection:"column",gap:6}}>
+              <div style={{display:"flex",alignItems:"center",gap:8}}><button onClick={()=>updateBlock(b.id,{enabled:b.enabled?0:1})} style={btnS(b.enabled?t.ok:t.mut)}>{b.enabled?"On":"Off"}</button><div style={{fontSize:11,fontWeight:800,color:t.text}}>{b.label}</div></div>
+              <div style={{fontSize:10,color:t.mut,lineHeight:1.35}}>{b.description}</div>
+              <textarea value={b.value||""} onChange={e=>updateBlock(b.id,{value:e.target.value})} style={{...inputS,minHeight:76,lineHeight:1.45,resize:"vertical"}}/>
+            </div>)}
+          </div>
+        </div>}
+        {suggested.length>0&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{fontSize:10,fontWeight:800,color:t.warm,textTransform:"uppercase",letterSpacing:.7}}>Suggestions ({suggested.length})</div>
+          {suggested.map(m=>card(m,"suggested"))}
+        </div>}
+        {Object.entries(typeMeta).map(([typ,[label,color]])=>{const items=accepted.filter(m=>m.type===typ);return <div key={typ} style={{display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{fontSize:10,fontWeight:800,color,textTransform:"uppercase",letterSpacing:.7}}>{label} ({items.length})</div>
+          {items.length?items.map(m=>card(m,"accepted")):<div style={{fontSize:11,color:t.mut,padding:"12px 0"}}>No accepted {typ} memories.</div>}
+        </div>;})}
+        {hidden.length>0&&<details style={{borderTop:`1px solid ${t.brd}22`,paddingTop:10}}>
+          <summary style={{fontSize:10,color:t.mut,cursor:"pointer",fontWeight:800,textTransform:"uppercase",letterSpacing:.7}}>Rejected, archived, or superseded ({hidden.length})</summary>
+          <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:8}}>{hidden.map(m=>card(m,"hidden"))}</div>
+        </details>}
+      </div>;})()}
       {tab==="reports"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
         {!(ws.reports||[]).length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No reports yet.<br/>Add reports from Deep Research.</div>}
         {(ws.reports||[]).map(r=>{const sm={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]}[String(r.status||"queued").toLowerCase()]||[t.warm,"Queued"];return <div key={r.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}66`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
@@ -2674,6 +2824,7 @@ function HyprChat(){
   const [dragOver,setDragOver]=useState(false);
   const [prevDarkTheme,setPrevDarkTheme]=useState(()=>{try{return localStorage.getItem("hc-prev-dark")||"hyprflat";}catch{return "hyprflat";}});
   const [autoTitle,setAutoTitle]=useState(()=>{try{return localStorage.getItem("hc-auto-title")!=="false";}catch{return true;}});
+  const [ghostMode,setGhostMode]=useState(false);
   useEffect(()=>{try{localStorage.setItem("hc-auto-title",autoTitle?"true":"false");}catch{}},[autoTitle]);
   const [showSysPromptPicker,setShowSysPromptPicker]=useState(false);
   const [tokC,setTokC]=useState(0);
@@ -2828,6 +2979,8 @@ function HyprChat(){
   const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0),chatScrollRef=useRef(null),dlPanelRef=useRef(null),quickMenuRef=useRef(null),promptPickerRef=useRef(null),actIdRef=useRef(actId),titleSearchRef=useRef(null),ftsRef=useRef(null),importRef=useRef(null),charCardImportRef=useRef(null);
   actIdRef.current=actId;
   const act = convs.find(c=>c.id===actId);
+  const isGhostConv=(c)=>!!c?.ephemeral||String(c?.id||"").startsWith("ghost-");
+  const ghostActive=ghostMode||isGhostConv(act);
   const DAEDALUS_AVATAR="data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAxMDAgMTAwJz48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9J2cnIHgxPScxMicgeTE9JzgnIHgyPSc4OCcgeTI9JzkyJyBncmFkaWVudFVuaXRzPSd1c2VyU3BhY2VPblVzZSc+PHN0b3Agc3RvcC1jb2xvcj0nIzBiMTIyMCcvPjxzdG9wIG9mZnNldD0nLjU1JyBzdG9wLWNvbG9yPScjMWQyYTQ0Jy8+PHN0b3Agb2Zmc2V0PScxJyBzdG9wLWNvbG9yPScjNGIyZDczJy8+PC9saW5lYXJHcmFkaWVudD48bGluZWFyR3JhZGllbnQgaWQ9J2EnIHgxPScyNCcgeTE9JzE4JyB4Mj0nNzgnIHkyPSc4NCcgZ3JhZGllbnRVbml0cz0ndXNlclNwYWNlT25Vc2UnPjxzdG9wIHN0b3AtY29sb3I9JyM4ZmQ4ZmYnLz48c3RvcCBvZmZzZXQ9Jy41NScgc3RvcC1jb2xvcj0nI2E4OGNmZicvPjxzdG9wIG9mZnNldD0nMScgc3RvcC1jb2xvcj0nIzZmZmZkMicvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPjxyZWN0IHdpZHRoPScxMDAnIGhlaWdodD0nMTAwJyByeD0nMTgnIGZpbGw9J3VybCgjZyknLz48cGF0aCBkPSdNMTggNDloMTVNNjcgNDloMTVNNTAgMTh2MTNNNTAgNjl2MTNNMjkgMjlsLTktOU03MSA3MWw5IDknIHN0cm9rZT0nIzZmZmZkMicgc3Ryb2tlLXdpZHRoPSczJyBzdHJva2UtbGluZWNhcD0ncm91bmQnIG9wYWNpdHk9Jy43MicvPjxwYXRoIGQ9J00yOCA3MlYyOGgyMmMxNiAwIDI2IDkgMjYgMjJTNjYgNzIgNTAgNzJIMjh6JyBmaWxsPSdub25lJyBzdHJva2U9J3VybCgjYSknIHN0cm9rZS13aWR0aD0nNycgc3Ryb2tlLWxpbmVqb2luPSdyb3VuZCcvPjxwYXRoIGQ9J000MiAzNnYyOGg4YzkgMCAxNS01IDE1LTE0UzU5IDM2IDUwIDM2aC04eicgZmlsbD0nIzExMTgyNycgc3Ryb2tlPScjZDhlNmZmJyBzdHJva2Utd2lkdGg9JzMnIHN0cm9rZS1saW5lam9pbj0ncm91bmQnLz48Y2lyY2xlIGN4PSc1MCcgY3k9JzUwJyByPSc1JyBmaWxsPScjNmZmZmQyJy8+PGNpcmNsZSBjeD0nMjAnIGN5PScyMCcgcj0nNCcgZmlsbD0nI2E4OGNmZicvPjxjaXJjbGUgY3g9JzgwJyBjeT0nODAnIHI9JzQnIGZpbGw9JyM4ZmQ4ZmYnLz48L3N2Zz4=";
   const isDaedalusProfileName=(name)=>String(name||"").toLowerCase().includes("daedalus");
   const isCoderPersonaName = (name)=>{const n=(name||"").toLowerCase();return n.includes("coder")||n.includes("daedalus");};
@@ -2960,6 +3113,8 @@ function HyprChat(){
   // Quick search — derived from active conversation tool_ids, or pending empty-chat selections.
   const activeToolIds=act?(act.tool_ids||[]):pendingToolIds;
   const quickSearch = activeToolIds.includes("quick_search");
+  const activeMemoryWs=(wsDetail&&wsDetail.id&&Array.isArray(wsDetail.conversations)&&actId&&wsDetail.conversations.some(wc=>wc.id===actId))?wsDetail:null;
+  const memoryActive=!ghostActive&&activeMemoryWs&&(activeMemoryWs.memory_enabled==="1"||activeMemoryWs.memory_enabled===1||activeMemoryWs.memory_enabled===true);
   const storedLastModel=()=>{try{return localStorage.getItem("hc-last-model")||"";}catch{return "";}};
   const normalizeAvailableModel=(modelName)=>{
     const chosen=modelName||"";
@@ -2996,6 +3151,7 @@ function HyprChat(){
   const persistProfileFirstMessage=async(convId,payload)=>{
     const msg=makeProfileFirstMessage(payload);
     if(!msg)return null;
+    if(String(convId||"").startsWith("ghost-"))return msg;
     try{
       const r=await fetch(`${API}/api/conversations/${convId}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:msg.content,metadata:msg.metadata})});
       const d=await r.json().catch(()=>({}));
@@ -3627,13 +3783,15 @@ function HyprChat(){
       // Check if messages exist — if not, fall through to reload from DB
       let _hasMessages=false;
       setConvs(prev=>{_hasMessages=prev.some(c=>c.id===id&&c.messages?.length>0);return prev;});
-      if(_hasMessages){setPanel("chat");return;}
+      if(_hasMessages){setGhostMode(false);setPanel("chat");return;}
     }
     // Save current council stream state to ref before switching away
     if(councilStreamRef.current?.cid===actIdRef.current&&councilStreamRef.current?.running){
       // Already tracked in ref by the stream loop — no action needed
     }
     const reqId = ++loadReqRef.current;
+    setConvs(prev=>prev.filter(c=>!isGhostConv(c)));
+    setGhostMode(false);
     setActId(id);setPanel("chat");setEvts([]);setExpandedPill(null);setQuickResults([]);
     // Check if we're navigating back to an active council stream
     const activeStream=councilStreamRef.current;
@@ -3781,7 +3939,7 @@ function HyprChat(){
       }
       // Remember last-used model for new chats
       if(patch.model)try{localStorage.setItem("hc-last-model",patch.model);}catch{}
-      if(Object.keys(patch).length&&!id.startsWith("l-")){
+      if(Object.keys(patch).length&&!id.startsWith("l-")&&!id.startsWith("ghost-")){
         fetch(`${API}/api/conversations/${id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)}).catch(()=>{});
       }
       return updated;
@@ -3815,6 +3973,8 @@ function HyprChat(){
     let persona=null;
     if(forceBlank&&opts.personaOverride){
       persona={...opts.personaOverride,tool_ids:opts.personaOverride.tool_ids||[]};
+    }else if(forceBlank&&opts.carryCurrent&&curConv?.persona_name){
+      persona={model:curConv.model,system_prompt:curConv.system_prompt||"",tool_ids:curConv.tool_ids||[],model_config_id:curConv.model_config_id,persona_name:curConv.persona_name,persona_avatar:curConv.persona_avatar};
     }else if(forceBlank&&pendingPersona){
       persona={...pendingPersona,tool_ids:pendingToolIds};
     }else if(!forceBlank){
@@ -3826,8 +3986,19 @@ function HyprChat(){
     const lastModel=storedLastModel();
     let defaultModel=persona?.model||curConv?.model||(forceBlank?pendingChatModel:"")||lastModel||models[0]||"qwen3.5:27b";
     if(defaultModel&&models.length>0&&!models.includes(defaultModel))defaultModel=models[0]||"";
-    const pendingTools=forceBlank?(persona?.tool_ids||pendingToolIds):[];
+    const pendingTools=forceBlank?(persona?.tool_ids||(opts.carryCurrent?(curConv?.tool_ids||[]):pendingToolIds)):[];
     const pendingEffortValue=forceBlank&&pendingEffort!==null?pendingEffort:null;
+    const useGhost=ghostMode||opts.ephemeral;
+    if(useGhost){
+      const newId=`ghost-${Date.now()}-${Math.random().toString(16).slice(2,8)}`;
+      const c={id:newId,title:"Ghost Chat",messages:[],model:defaultModel,system_prompt:persona?.system_prompt||(opts.carryCurrent?(curConv?.system_prompt||""):""),...(persona||{}),tool_ids:pendingTools,ephemeral:true};
+      const firstMsg=persona?makeProfileFirstMessage(persona):null;
+      if(firstMsg)c.messages=[firstMsg];
+      if(pendingEffortValue!==null)setEffortPerChat(p=>({...p,[newId]:pendingEffortValue}));
+      setConvs(p=>[c,...p]);setActId(newId);setGhostMode(true);
+      setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
+      return opts.returnConv?c:newId;
+    }
     try{
       const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:"New Chat",model:defaultModel})});
       const c=await r.json();c.messages=[];
@@ -3859,6 +4030,8 @@ function HyprChat(){
   };
 
   const startBlankChat=()=>{
+    setGhostMode(false);
+    setConvs(p=>p.filter(c=>!isGhostConv(c)));
     setActId(null);
     clearPendingProfile();
     setPanel("chat");
@@ -3874,6 +4047,30 @@ function HyprChat(){
     setCouncilResponses({});
     setCouncilHostContent("");
     setLoadingConv(false);
+  };
+
+  const toggleGhostMode=async()=>{
+    if(streaming||councilRunning){
+      notify({type:"warning",text:"Finish the current response first",detail:"Ghost mode can only change between turns."});
+      return;
+    }
+    if(ghostActive){
+      setGhostMode(false);
+      if(isGhostConv(act)){
+        setConvs(p=>p.filter(c=>!isGhostConv(c)));
+        setActId(null);
+        setEvts([]);setQuickResults([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);
+      }
+      notify({type:"info",text:"Ghost mode off",detail:"Saved chats will work normally again.",duration:2600});
+      return;
+    }
+    setGhostMode(true);
+    if(act&&!isGhostConv(act)){
+      await newChat(true,{ephemeral:true,carryCurrent:true});
+      notify({type:"info",text:"Ghost chat started",detail:"This chat stays local and is discarded on reload.",duration:3600});
+    }else{
+      notify({type:"info",text:"Ghost mode on",detail:"The next chat will not be saved or indexed.",duration:3600});
+    }
   };
 
   const closeSidebarSearch=()=>{
@@ -3902,7 +4099,7 @@ function HyprChat(){
   });
 
   const delChat=async id=>{
-    fetch(`${API}/api/conversations/${id}`,{method:"DELETE"}).catch(()=>{});
+    if(!String(id||"").startsWith("ghost-"))fetch(`${API}/api/conversations/${id}`,{method:"DELETE"}).catch(()=>{});
     setConvTags(p=>{const n={...p};delete n[id];return n;});
     setConvs(p=>{const n=p.filter(c=>c.id!==id);if(actId===id){setActId(n[0]?.id||null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");}return n;});
   };
@@ -4080,6 +4277,7 @@ function HyprChat(){
     // doing it from the client too would race and create duplicates.
     try{
       const cv=convs.find(c=>c.id===cid)||{tool_ids:pendingToolIds,system_prompt:pendingPersona?.system_prompt||"",model_config_id:pendingPersona?.model_config_id||null,persona_name:pendingPersona?.persona_name||null,persona_avatar:pendingPersona?.persona_avatar||null,model:pendingPersona?.model};
+      const isGhostSend=!!overrides.ephemeral||ghostMode||isGhostConv(cv)||String(cid||"").startsWith("ghost-");
       let am = messagesToSend.map(m=>{
         let baseContent=m._fullContent||m.content||"";
         // After reload _fullContent is gone; reconstruct the `[Attached N image: ...]` hint
@@ -4131,6 +4329,9 @@ function HyprChat(){
 
       const ctrl=new AbortController();abortR.current=ctrl;
       const body={conversation_id:cid,model:modelName,messages:am,system_prompt:cv?.system_prompt||"",tool_ids:cv?.tool_ids||[],persona_id:overrides.persona_id!==undefined?overrides.persona_id:(cv?.model_config_id||null)};
+      if(isGhostSend)body.ephemeral=true;
+      const _wsForChat=(wsDetail&&wsDetail.id&&Array.isArray(wsDetail.conversations)&&wsDetail.conversations.some(wc=>wc.id===cid))?wsDetail:null;
+      if(_wsForChat?.id&&!isGhostSend)body.workspace_id=_wsForChat.id;
       // Send the user's typed text + attachment metadata separately so the backend's
       // defensive save persists the clean content + image previews (not the bloated
       // `[Attached N image: ...]` model-facing string).
@@ -4198,13 +4399,16 @@ function HyprChat(){
       // Save final assistant message state to DB. PATCH the row the backend already
       // created at stream start (preferred — exactly one row per turn). Fall back to
       // POST for older backends or if init/done didn't include a message_id.
-      if(_streamMsgId){
+      if(isGhostSend){
+        // Ghost chats are intentionally local-only: no assistant PATCH/POST,
+        // no title generation, no workspace memory suggestion source row.
+      }else if(_streamMsgId){
         fetch(`${API}/api/conversations/${cid}/messages/${_streamMsgId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:full,metadata:_msgMeta})}).catch(()=>{});
       }else{
         fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:full,metadata:_msgMeta})}).catch(()=>{});
       }
       // Auto-generate title after first exchange
-      if(autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const curTitle=cv2?.title||"";if(!curTitle||curTitle==="New Chat"||curTitle===appendUser.slice(0,40))fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
+      if(!isGhostSend&&autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const curTitle=cv2?.title||"";if(!curTitle||curTitle==="New Chat"||curTitle===appendUser.slice(0,40))fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
     }catch(e){if(e.name!=="AbortError"){setCurrentRunNotice({type:"failed",label:"Failed",detail:e.message||"Stream failed",at:Date.now()});uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:`\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false};return{...c,messages:m};});}}
     setStreaming(false);setAttachments([]);streamingCidRef.current=null;
   };
@@ -4761,7 +4965,7 @@ function HyprChat(){
       setConvs(prev=>prev.map(c=>{
         if(c.model===m){
           const patch={model:fallback};
-          if(!c.id.startsWith("l-"))fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)}).catch(()=>{});
+          if(!c.id.startsWith("l-")&&!c.id.startsWith("ghost-"))fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)}).catch(()=>{});
           return{...c,...patch};
         }
         return c;
@@ -5331,6 +5535,7 @@ function HyprChat(){
   const nb=(p,ico,lab)=><button onClick={()=>setPanel(p)} title={lab} style={{width:52,height:showNavLabels?48:46,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:8,cursor:"pointer",border:`1px solid ${panel===p?`${t.acc}55`:"transparent"}`,background:panel===p?`${t.acc}14`:"transparent",color:panel===p?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:"none",padding:showNavLabels?"3px 0 1px":0}}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{panel===p&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}</button>;
   const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?"#f0a030":t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${n}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
+    if(isGhostConv(c))return false;
     const matchSearch=(c.title||"").toLowerCase().includes(sq.toLowerCase());
     const tags=convTags[c.id]||[];
     const matchTag=!activeTagFilter||tags.includes(activeTagFilter);
@@ -5579,13 +5784,13 @@ function HyprChat(){
               </button>
               {showSysPromptPicker&&<div style={{position:"absolute",top:"calc(100% + 6px)",left:0,zIndex:9999,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:260,maxWidth:340,padding:8,animation:"fadeIn .15s"}}>
                 {(()=>{const sysPrompts=prompts.filter(p=>p.is_system||(p.category&&p.category.toLowerCase()==="system prompt"));return sysPrompts.length?<><div style={{maxHeight:200,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
-                  {sysPrompts.map(p=><div key={p.id} onClick={()=>{uConv(actId,{system_prompt:p.content});fetch(`${API}/api/conversations/${actId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({system_prompt:p.content})});setShowSysPromptPicker(false);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.warm}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
+                  {sysPrompts.map(p=><div key={p.id} onClick={()=>{uConv(actId,{system_prompt:p.content});if(!isGhostConv(act))fetch(`${API}/api/conversations/${actId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({system_prompt:p.content})});setShowSysPromptPicker(false);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.warm}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
                     <div style={{fontSize:11,fontWeight:600,color:t.text}}>{p.title}</div>
                     <div style={{fontSize:9,color:t.mut,marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.content.slice(0,80)}...</div>
                   </div>)}
                 </div>
                 {act.system_prompt&&<div style={{borderTop:`1px solid ${t.brd}22`,marginTop:4,paddingTop:4}}>
-                  <button onClick={()=>{uConv(actId,{system_prompt:""});fetch(`${API}/api/conversations/${actId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({system_prompt:""})});setShowSysPromptPicker(false);}} style={{...btnS(t.err),width:"100%",justifyContent:"center",fontSize:9}}>Clear System Prompt</button>
+                  <button onClick={()=>{uConv(actId,{system_prompt:""});if(!isGhostConv(act))fetch(`${API}/api/conversations/${actId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({system_prompt:""})});setShowSysPromptPicker(false);}} style={{...btnS(t.err),width:"100%",justifyContent:"center",fontSize:9}}>Clear System Prompt</button>
                 </div>}</>
                 :<div style={{padding:12,textAlign:"center",color:t.mut,fontSize:11}}>No system prompt templates. Check "Available as System Prompt" on any prompt in the Prompt Library.</div>;})()}
               </div>}
@@ -5672,6 +5877,15 @@ function HyprChat(){
                 </div>}
             </div>;
           })()}
+          {panel==="chat"&&memoryActive&&<span title={`Workspace memory active: ${activeMemoryWs.name}`} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 9px",borderRadius:8,background:`${t.ok}10`,border:`1px solid ${t.ok}30`,color:t.ok,fontSize:10,fontWeight:800,maxWidth:160,overflow:"hidden",whiteSpace:"nowrap"}}>
+            <span style={{width:6,height:6,borderRadius:"50%",background:t.ok,flexShrink:0}}/>
+            Memory
+            <span style={{color:t.mut,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis"}}>{activeMemoryWs.name}</span>
+          </span>}
+          {panel==="chat"&&ghostActive&&<span title="Ghost mode: this chat stays local and is not saved, indexed, or added to history." style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 9px",borderRadius:8,background:`${t.pink}10`,border:`1px solid ${t.pink}30`,color:t.pink,fontSize:10,fontWeight:800,whiteSpace:"nowrap"}}>
+            <IC.Ghost/> Ghost
+          </span>}
+          {panel==="chat"&&<button onClick={toggleGhostMode} aria-pressed={ghostActive} title={ghostActive?"Ghost mode on: this chat is local only and will not be saved or indexed":"Ghost mode: start a chat that is never saved or indexed"} style={{background:ghostActive?`${t.pink}18`:"none",border:`1px solid ${ghostActive?t.pink:t.brd}33`,color:ghostActive?t.pink:t.mut,cursor:"pointer",padding:"4px 8px",borderRadius:8,fontSize:13,display:"flex",alignItems:"center",boxShadow:ghostActive?`0 0 0 1px ${t.pink}22 inset`:"none"}}><IC.Ghost/></button>}
           {/* Dark/Light mode toggle */}
           <button onClick={()=>{if(isLightTheme){setTm(prevDarkTheme);}else{setPrevDarkTheme(tm);localStorage.setItem("hc-prev-dark",tm);setTm(LIGHT_PAIRS[tm]||"oneLight");}}} title={isLightTheme?"Switch to dark mode":"Switch to light mode"} style={{background:"none",border:`1px solid ${t.brd}33`,color:t.mut,cursor:"pointer",padding:"4px 8px",borderRadius:8,fontSize:13,display:"flex",alignItems:"center"}}>{isLightTheme?"\u2600\uFE0F":"\uD83C\uDF19"}</button>
           {/* Export / Import */}
@@ -5727,6 +5941,7 @@ function HyprChat(){
             onOpenReport={id=>{setWsPanel(false);setPanel("research");setResearchView("reports");loadResearchReport(id);}}
             onRemoveReport={removeResearchReportFromWorkspace}
             onPreview={openPreview} models={models} wsModel={wsModel}
+            notify={notify}
             onPersonaCreated={mc=>{const norm={...mc,parameters:normalizeProfileParams(mc)};setMcs(p=>[...p,norm]);setProfileTab(getProfileType(norm)==="persona"?"personas":"agents");setPanel("personas");setEditMc(mc.id);}}/>
       :panel==="kb"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -8324,7 +8539,7 @@ function HyprChat(){
                     {isU&&!streaming&&<button onClick={()=>setEditingMsg({index:i,content:msg.content})} style={msgActionS(t.mut)}>
                       <IC.Pencil/> edit
                     </button>}
-                    {!streaming&&<button onClick={()=>forkAt(i)} title="Fork conversation from this point" style={msgActionS(t.mut)}>
+                    {!streaming&&!ghostActive&&<button onClick={()=>forkAt(i)} title="Fork conversation from this point" style={msgActionS(t.mut)}>
                       <IC.GitBranch/> fork
                     </button>}
                     {!streaming&&<button onClick={()=>delMsg(i)} title="Delete this message" style={msgActionS(t.mut)}>
@@ -8347,7 +8562,7 @@ function HyprChat(){
               const on=activeToolIds.includes(tl.id);
               const isQs=tl.id==="quick_search";
               const col=isQs?t.f1:t.warm;
-              return <button key={tl.id} onClick={()=>{
+              return <button key={tl.id} title={tl.description||tl.name} onClick={()=>{
                 if(!actId){
                   setPendingToolIds(ids=>on?ids.filter(x=>x!==tl.id):[...ids,tl.id]);
                   return;

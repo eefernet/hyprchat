@@ -345,6 +345,12 @@ class ChatRequest(BaseModel):
     # Metadata for the latest user message (e.g. {"images":[{name,dataUrl,mime}], "pdfs":[...]})
     # so image previews survive page reload.
     user_metadata: Optional[dict] = None
+    # Optional workspace context. When memory is enabled for this workspace, the
+    # chat agent injects accepted workspace memories and queues new suggestions.
+    workspace_id: Optional[str] = None
+    # Ghost/private mode. When true, this stream must not persist messages,
+    # workspace memories, token usage, or RAG/research memory for the turn.
+    ephemeral: bool = False
 
 class ExecuteRequest(BaseModel):
     conversation_id: Optional[str] = None
@@ -2452,6 +2458,223 @@ async def add_research_report_to_ws(ws_id: str, body: dict = Body(...)):
 async def remove_research_report_from_ws(ws_id: str, report_id: str):
     await db.remove_research_report_from_workspace(ws_id, report_id)
     return {"ok": True}
+
+
+def _extract_memory_json_array(text: str) -> list:
+    raw = re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL).strip()
+    start, end = raw.find("["), raw.rfind("]")
+    if start == -1 or end <= start:
+        return []
+    try:
+        data = json.loads(raw[start:end + 1])
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+@app.get("/api/workspaces/{ws_id}/memories")
+async def list_workspace_memories_ep(
+    ws_id: str,
+    status: str = Query("all"),
+    type: str = Query("all"),
+):
+    if not await db.get_workspace_basic(ws_id):
+        raise HTTPException(404, "Workspace not found")
+    memories = await db.list_workspace_memories(
+        ws_id,
+        status=status,
+        memory_type=type,
+        include_archived=True,
+    )
+    return {"memories": memories}
+
+
+@app.post("/api/workspaces/{ws_id}/memories/suggest")
+async def suggest_workspace_memories_ep(ws_id: str, body: dict = Body(default={})):
+    ws = await db.get_workspace(ws_id)
+    if not ws:
+        raise HTTPException(404, "Workspace not found")
+
+    conv_id = body.get("conversation_id")
+    conv_refs = []
+    if conv_id:
+        conv_refs = [{"id": conv_id}]
+    else:
+        conv_refs = sorted(
+            ws.get("conversations", []),
+            key=lambda c: c.get("updated_at") or "",
+            reverse=True,
+        )[:4]
+
+    transcript_parts = []
+    for conv_ref in conv_refs:
+        conv = await db.get_conversation(conv_ref.get("id", ""))
+        if not conv:
+            continue
+        bits = [f"Conversation: {conv.get('title') or conv.get('id')}"]
+        for msg in (conv.get("messages") or [])[-8:]:
+            if msg.get("role") not in {"user", "assistant"}:
+                continue
+            meta = msg.get("metadata") or {}
+            if meta.get("persona_first_message"):
+                continue
+            content = (msg.get("content") or "").strip()
+            if not content:
+                continue
+            role = "User" if msg.get("role") == "user" else "Assistant"
+            bits.append(f"{role}: {content[:2500]}")
+        if len(bits) > 1:
+            transcript_parts.append("\n".join(bits))
+
+    transcript = "\n\n---\n\n".join(transcript_parts)[:18000]
+    if len(transcript) < 80:
+        return {"created": 0, "memories": [], "message": "No recent workspace chat content to scan."}
+
+    model = body.get("model") or getattr(config, "WORKSPACE_MODEL", "") or config.DEFAULT_MODEL
+    prompt = (
+        "You extract useful long-term workspace memories from recent chat transcript.\n"
+        "Return ONLY a JSON array with 0-8 objects. Do not include markdown.\n"
+        "Each object shape:\n"
+        "{\"type\":\"semantic|episodic|procedural\",\"content\":\"one durable memory\","
+        "\"importance\":1-5,\"confidence\":0-1,\"entities\":[\"short names\"],"
+        "\"reason\":\"why it should be remembered\"}\n\n"
+        "Rules:\n"
+        "- Suggest only durable, reusable information for this workspace.\n"
+        "- semantic = stable facts/preferences/constraints.\n"
+        "- episodic = dated decisions, outcomes, blockers, or events.\n"
+        "- procedural = repeatable workflows, commands, deployment steps, lessons learned.\n"
+        "- Do not save secrets, credentials, private keys, passwords, or raw tokens.\n"
+        "- Do not save generic facts that are obvious from the chat app.\n"
+        "- Prefer fewer high-value memories over many weak ones.\n\n"
+        f"Workspace: {ws.get('name') or ws_id}\n\n{transcript}"
+    )
+
+    try:
+        r = await http.post(
+            f"{config.OLLAMA_URL}/api/generate",
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "think": False,
+                "options": {"temperature": 0.1, "num_ctx": _WORKSPACE_HELPER_NUM_CTX, "num_predict": 900},
+            },
+            timeout=60,
+        )
+        if r.status_code != 200:
+            detail = r.text[:240] if r.text else f"HTTP {r.status_code}"
+            raise HTTPException(r.status_code, f"Ollama error ({model}): {detail}")
+        suggestions = _extract_memory_json_array(r.json().get("response", ""))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Memory scan failed: {e}")
+
+    existing = await db.list_workspace_memories(ws_id, status="all")
+    existing_norm = {re.sub(r"\s+", " ", (m.get("content") or "").strip().lower()) for m in existing}
+    created = []
+    for item in suggestions[:8]:
+        if not isinstance(item, dict):
+            continue
+        content = re.sub(r"\s+", " ", str(item.get("content") or "").strip())
+        if len(content) < 12 or len(content) > 800:
+            continue
+        norm = content.lower()
+        if norm in existing_norm:
+            continue
+        if re.search(r"(password|api[_ -]?key|secret|private key|token)\s*[:=]", content, re.I):
+            continue
+        mem = await db.create_workspace_memory(
+            ws_id,
+            content=content,
+            memory_type=item.get("type", "semantic"),
+            status="suggested",
+            importance=item.get("importance", 3),
+            source_conv_id=conv_id,
+            source_conversation_id=conv_id,
+            confidence=item.get("confidence", 0),
+            entities=item.get("entities") if isinstance(item.get("entities"), list) else [],
+            metadata={"reason": item.get("reason", ""), "suggested_by": "workspace_scan", "model": model},
+        )
+        existing_norm.add(norm)
+        created.append(mem)
+
+    return {"created": len(created), "memories": created}
+
+
+@app.post("/api/workspaces/{ws_id}/memories")
+async def create_workspace_memory_ep(ws_id: str, body: dict = Body(...)):
+    if not await db.get_workspace_basic(ws_id):
+        raise HTTPException(404, "Workspace not found")
+    try:
+        mem = await db.create_workspace_memory(
+            ws_id,
+            content=body.get("content", ""),
+            memory_type=body.get("type", "semantic"),
+            status=body.get("status", "suggested"),
+            category=body.get("category", "General"),
+            importance=body.get("importance", 3),
+            pinned=body.get("pinned", 0),
+            source_conv_id=body.get("source_conv_id") or body.get("source_conversation_id"),
+            source_conversation_id=body.get("source_conversation_id") or body.get("source_conv_id"),
+            source_message_id=body.get("source_message_id"),
+            confidence=body.get("confidence", 0),
+            valid_from=body.get("valid_from"),
+            valid_until=body.get("valid_until"),
+            supersedes_id=body.get("supersedes_id"),
+            entities=body.get("entities") or [],
+            metadata=body.get("metadata") or {},
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return mem
+
+
+@app.patch("/api/workspaces/{ws_id}/memories/{memory_id}")
+async def update_workspace_memory_ep(ws_id: str, memory_id: str, body: dict = Body(...)):
+    mem = await db.update_workspace_memory(memory_id, ws_id, **body)
+    if not mem:
+        raise HTTPException(404, "Memory not found")
+    return mem
+
+
+@app.delete("/api/workspaces/{ws_id}/memories/{memory_id}")
+async def delete_workspace_memory_ep(ws_id: str, memory_id: str):
+    ok = await db.delete_workspace_memory(memory_id, ws_id)
+    if not ok:
+        raise HTTPException(404, "Memory not found")
+    return {"ok": True}
+
+
+@app.post("/api/workspaces/{ws_id}/memories/{memory_id}/accept")
+async def accept_workspace_memory_ep(ws_id: str, memory_id: str, body: dict = Body(default={})):
+    mem = await db.accept_workspace_memory(memory_id, ws_id, supersedes_id=body.get("supersedes_id"))
+    if not mem:
+        raise HTTPException(404, "Memory not found")
+    return mem
+
+
+@app.post("/api/workspaces/{ws_id}/memories/{memory_id}/reject")
+async def reject_workspace_memory_ep(ws_id: str, memory_id: str):
+    mem = await db.reject_workspace_memory(memory_id, ws_id)
+    if not mem:
+        raise HTTPException(404, "Memory not found")
+    return mem
+
+
+@app.get("/api/workspaces/{ws_id}/memory-blocks")
+async def get_workspace_memory_blocks_ep(ws_id: str):
+    if not await db.get_workspace_basic(ws_id):
+        raise HTTPException(404, "Workspace not found")
+    return {"blocks": await db.get_workspace_memory_blocks(ws_id)}
+
+
+@app.patch("/api/workspaces/{ws_id}/memory-blocks")
+async def update_workspace_memory_blocks_ep(ws_id: str, body: dict = Body(...)):
+    if not await db.get_workspace_basic(ws_id):
+        raise HTTPException(404, "Workspace not found")
+    blocks = await db.update_workspace_memory_blocks(ws_id, body.get("blocks") or [])
+    return {"blocks": blocks}
 
 
 @app.post("/api/workspaces/{ws_id}/analyze")

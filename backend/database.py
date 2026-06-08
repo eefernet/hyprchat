@@ -5,6 +5,8 @@ Stores conversations, messages, knowledge bases, tools, model configs.
 import aiosqlite
 import os
 import json
+import uuid
+import re
 from datetime import datetime
 from config import DATABASE_PATH
 
@@ -81,6 +83,8 @@ CREATE TABLE IF NOT EXISTS workspaces (
     name TEXT NOT NULL,
     description TEXT DEFAULT '',
     topics TEXT DEFAULT '[]',
+    memory_enabled INTEGER DEFAULT 0,
+    instructions TEXT DEFAULT '',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -121,13 +125,40 @@ CREATE TABLE IF NOT EXISTS council_members (
 
 CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY,
+    workspace_id TEXT,
     content TEXT NOT NULL,
+    type TEXT DEFAULT 'semantic',
+    status TEXT DEFAULT 'accepted',
     category TEXT DEFAULT 'General',
     importance INTEGER DEFAULT 3,
     pinned INTEGER DEFAULT 0,
     source_conv_id TEXT,
+    source_conversation_id TEXT,
+    source_message_id INTEGER,
+    confidence REAL DEFAULT 0,
+    valid_from TIMESTAMP,
+    valid_until TIMESTAMP,
+    supersedes_id TEXT,
+    entities_json TEXT DEFAULT '[]',
+    metadata_json TEXT DEFAULT '{}',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS workspace_memory_blocks (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    label TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    value TEXT DEFAULT '',
+    limit_chars INTEGER DEFAULT 1200,
+    read_only INTEGER DEFAULT 0,
+    enabled INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(workspace_id, label)
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_memory_blocks_ws ON workspace_memory_blocks(workspace_id);
 
 CREATE TABLE IF NOT EXISTS service_health_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -290,6 +321,54 @@ async def init_db():
             except Exception as e:
                 if "duplicate column" not in str(e).lower():
                     print(f"[DB MIGRATION] Warning: {e}")
+        # Migrate workspaces: add reviewed-memory controls
+        for col, coltype, default in [("memory_enabled", "INTEGER", "0"), ("instructions", "TEXT", "''")]:
+            try:
+                await db.execute(f"ALTER TABLE workspaces ADD COLUMN {col} {coltype} DEFAULT {default}")
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    print(f"[DB MIGRATION] Warning: {e}")
+        # Migrate memories: evolve the legacy global memory table into
+        # workspace-scoped reviewed memories. Old rows remain valid but are not
+        # injected unless assigned to a workspace.
+        for col, coltype, default in [
+            ("workspace_id", "TEXT", "NULL"),
+            ("type", "TEXT", "'semantic'"),
+            ("status", "TEXT", "'accepted'"),
+            ("source_conversation_id", "TEXT", "NULL"),
+            ("source_message_id", "INTEGER", "NULL"),
+            ("confidence", "REAL", "0"),
+            ("valid_from", "TIMESTAMP", "NULL"),
+            ("valid_until", "TIMESTAMP", "NULL"),
+            ("supersedes_id", "TEXT", "NULL"),
+            ("entities_json", "TEXT", "'[]'"),
+            ("metadata_json", "TEXT", "'{}'"),
+            ("updated_at", "TIMESTAMP", "NULL"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE memories ADD COLUMN {col} {coltype} DEFAULT {default}")
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    print(f"[DB MIGRATION] Warning: {e}")
+        await db.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_memories_workspace ON memories(workspace_id);
+            CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
+            CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type);
+            CREATE TABLE IF NOT EXISTS workspace_memory_blocks (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                label TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                value TEXT DEFAULT '',
+                limit_chars INTEGER DEFAULT 1200,
+                read_only INTEGER DEFAULT 0,
+                enabled INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(workspace_id, label)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_memory_blocks_ws ON workspace_memory_blocks(workspace_id);
+        """)
         # Migrate council_configs: add debate_rounds and kb_ids columns
         for col, coltype, default in [("debate_rounds", "INTEGER", "0"), ("kb_ids", "TEXT", "'[]'")]:
             try:
@@ -725,13 +804,17 @@ async def create_workspace(id: str, name: str, description: str = ""):
     try:
         now = datetime.utcnow().isoformat()
         await db.execute(
-            "INSERT INTO workspaces(id,name,description,topics,created_at,updated_at) VALUES(?,?,?,'[]',?,?)",
+            "INSERT INTO workspaces(id,name,description,topics,memory_enabled,instructions,created_at,updated_at) VALUES(?,?,?,'[]',0,'',?,?)",
             (id, name, description, now, now)
         )
         await db.commit()
     finally:
         await db.close()
-    return {"id": id, "name": name, "description": description, "topics": [], "conv_count": 0, "file_count": 0, "report_count": 0}
+    return {
+        "id": id, "name": name, "description": description, "topics": [],
+        "memory_enabled": 0, "instructions": "",
+        "conv_count": 0, "file_count": 0, "report_count": 0,
+    }
 
 
 async def get_workspaces():
@@ -814,12 +897,14 @@ async def get_workspace(ws_id: str):
 
 
 async def update_workspace(ws_id: str, **kwargs):
-    allowed = {"name", "description", "topics"}
+    allowed = {"name", "description", "topics", "memory_enabled", "instructions"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return
     if "topics" in fields and isinstance(fields["topics"], list):
         fields["topics"] = json.dumps(fields["topics"])
+    if "memory_enabled" in fields:
+        fields["memory_enabled"] = 1 if str(fields["memory_enabled"]).lower() in {"1", "true", "yes", "on"} else 0
     fields["updated_at"] = datetime.utcnow().isoformat()
     set_clause = ",".join(f"{k}=?" for k in fields)
     db = await get_db()
@@ -903,6 +988,458 @@ async def add_conversation_file(id: str, conv_id: str, filename: str, url: str):
         await db.commit()
     finally:
         await db.close()
+
+
+# ============================================================
+# WORKSPACE MEMORY
+# ============================================================
+_MEMORY_TYPES = {"semantic", "episodic", "procedural"}
+_MEMORY_STATUSES = {"suggested", "accepted", "rejected", "archived"}
+_DEFAULT_MEMORY_BLOCKS = [
+    {
+        "label": "workspace_instructions",
+        "description": "Stable instructions for all chats in this workspace.",
+        "value": "",
+        "limit_chars": 1800,
+        "read_only": 0,
+        "enabled": 1,
+    },
+    {
+        "label": "preferences",
+        "description": "Recurring user or project preferences that should stay in context.",
+        "value": "",
+        "limit_chars": 1200,
+        "read_only": 0,
+        "enabled": 1,
+    },
+    {
+        "label": "procedures",
+        "description": "Reusable workflows, commands, deploy steps, or lessons learned.",
+        "value": "",
+        "limit_chars": 1600,
+        "read_only": 0,
+        "enabled": 1,
+    },
+]
+
+
+def _loads_json(value, fallback):
+    if isinstance(value, (list, dict)):
+        return value
+    try:
+        return json.loads(value or "")
+    except Exception:
+        return fallback
+
+
+def _normalize_memory_row(row) -> dict:
+    d = dict(row)
+    d["entities"] = _loads_json(d.pop("entities_json", "[]"), [])
+    d["metadata"] = _loads_json(d.pop("metadata_json", "{}"), {})
+    d["pinned"] = int(d.get("pinned") or 0)
+    d["importance"] = int(d.get("importance") or 3)
+    try:
+        d["confidence"] = float(d.get("confidence") or 0)
+    except Exception:
+        d["confidence"] = 0.0
+    return d
+
+
+def _normalize_memory_type(value: str) -> str:
+    value = (value or "semantic").strip().lower()
+    return value if value in _MEMORY_TYPES else "semantic"
+
+
+def _normalize_memory_status(value: str) -> str:
+    value = (value or "suggested").strip().lower()
+    return value if value in _MEMORY_STATUSES else "suggested"
+
+
+async def get_workspace_basic(ws_id: str) -> dict | None:
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT * FROM workspaces WHERE id=?", (ws_id,))
+        return dict(rows[0]) if rows else None
+    finally:
+        await db.close()
+
+
+async def get_workspace_for_conversation(conv_id: str) -> dict | None:
+    """Infer a workspace only when the conversation belongs to exactly one.
+
+    This keeps chat context predictable while still supporting older frontend
+    clients that do not send workspace_id yet.
+    """
+    if not conv_id:
+        return None
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            """SELECT w.* FROM workspaces w
+               JOIN workspace_conversations wc ON wc.workspace_id=w.id
+               WHERE wc.conversation_id=?
+               ORDER BY wc.added_at DESC""",
+            (conv_id,),
+        )
+        return dict(rows[0]) if len(rows) == 1 else None
+    finally:
+        await db.close()
+
+
+async def _ensure_workspace_memory_blocks(conn: aiosqlite.Connection, ws_id: str) -> None:
+    now = datetime.utcnow().isoformat()
+    for block in _DEFAULT_MEMORY_BLOCKS:
+        await conn.execute(
+            """INSERT OR IGNORE INTO workspace_memory_blocks
+               (id,workspace_id,label,description,value,limit_chars,read_only,enabled,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                f"wmb-{uuid.uuid4().hex[:12]}", ws_id, block["label"],
+                block["description"], block["value"], block["limit_chars"],
+                block["read_only"], block["enabled"], now, now,
+            ),
+        )
+
+
+def _normalize_block_row(row) -> dict:
+    d = dict(row)
+    d["enabled"] = int(d.get("enabled") or 0)
+    d["read_only"] = int(d.get("read_only") or 0)
+    d["limit_chars"] = int(d.get("limit_chars") or 1200)
+    return d
+
+
+async def get_workspace_memory_blocks(ws_id: str) -> list[dict]:
+    db = await get_db()
+    try:
+        await _ensure_workspace_memory_blocks(db, ws_id)
+        await db.commit()
+        rows = await db.execute_fetchall(
+            "SELECT * FROM workspace_memory_blocks WHERE workspace_id=? ORDER BY rowid ASC",
+            (ws_id,),
+        )
+        return [_normalize_block_row(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def update_workspace_memory_blocks(ws_id: str, blocks: list[dict]) -> list[dict]:
+    db = await get_db()
+    try:
+        await _ensure_workspace_memory_blocks(db, ws_id)
+        now = datetime.utcnow().isoformat()
+        for block in blocks or []:
+            block_id = block.get("id")
+            label = block.get("label")
+            if not block_id and not label:
+                continue
+            sets = []
+            vals = []
+            for key in ("description", "value"):
+                if key in block:
+                    sets.append(f"{key}=?")
+                    vals.append(_scrub_surrogates(block.get(key) or ""))
+            if "limit_chars" in block:
+                sets.append("limit_chars=?")
+                vals.append(max(200, min(8000, int(block.get("limit_chars") or 1200))))
+            if "enabled" in block:
+                sets.append("enabled=?")
+                vals.append(1 if block.get("enabled") else 0)
+            if "read_only" in block:
+                sets.append("read_only=?")
+                vals.append(1 if block.get("read_only") else 0)
+            if not sets:
+                continue
+            sets.append("updated_at=?")
+            vals.append(now)
+            if block_id:
+                vals.extend([ws_id, block_id])
+                await db.execute(
+                    f"UPDATE workspace_memory_blocks SET {', '.join(sets)} WHERE workspace_id=? AND id=?",
+                    vals,
+                )
+            else:
+                vals.extend([ws_id, label])
+                await db.execute(
+                    f"UPDATE workspace_memory_blocks SET {', '.join(sets)} WHERE workspace_id=? AND label=?",
+                    vals,
+                )
+        await db.commit()
+        rows = await db.execute_fetchall(
+            "SELECT * FROM workspace_memory_blocks WHERE workspace_id=? ORDER BY rowid ASC",
+            (ws_id,),
+        )
+        return [_normalize_block_row(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def list_workspace_memories(
+    ws_id: str,
+    *,
+    status: str | None = None,
+    memory_type: str | None = None,
+    include_archived: bool = True,
+) -> list[dict]:
+    clauses = ["workspace_id=?"]
+    vals = [ws_id]
+    if status and status != "all":
+        clauses.append("status=?")
+        vals.append(_normalize_memory_status(status))
+    elif not include_archived:
+        clauses.append("status!='archived'")
+    if memory_type and memory_type != "all":
+        clauses.append("type=?")
+        vals.append(_normalize_memory_type(memory_type))
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            f"""SELECT * FROM memories WHERE {' AND '.join(clauses)}
+                ORDER BY
+                  CASE status WHEN 'suggested' THEN 0 WHEN 'accepted' THEN 1 ELSE 2 END,
+                  pinned DESC,
+                  importance DESC,
+                  COALESCE(updated_at, created_at) DESC""",
+            vals,
+        )
+        return [_normalize_memory_row(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def create_workspace_memory(
+    ws_id: str,
+    *,
+    content: str,
+    memory_type: str = "semantic",
+    status: str = "suggested",
+    category: str = "General",
+    importance: int = 3,
+    pinned: int = 0,
+    source_conv_id: str | None = None,
+    source_conversation_id: str | None = None,
+    source_message_id: int | None = None,
+    confidence: float = 0,
+    valid_from: str | None = None,
+    valid_until: str | None = None,
+    supersedes_id: str | None = None,
+    entities: list | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    mem_id = f"mem-{uuid.uuid4().hex[:12]}"
+    now = datetime.utcnow().isoformat()
+    clean_content = _scrub_surrogates((content or "").strip())
+    if not clean_content:
+        raise ValueError("memory content is required")
+    mtype = _normalize_memory_type(memory_type)
+    mstatus = _normalize_memory_status(status)
+    importance = max(1, min(5, int(importance or 3)))
+    db = await get_db()
+    try:
+        await db.execute(
+            """INSERT INTO memories
+               (id,workspace_id,content,type,status,category,importance,pinned,
+                source_conv_id,source_conversation_id,source_message_id,confidence,
+                valid_from,valid_until,supersedes_id,entities_json,metadata_json,updated_at,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                mem_id, ws_id, clean_content, mtype, mstatus, category or "General",
+                importance, 1 if pinned else 0, source_conv_id or source_conversation_id,
+                source_conversation_id or source_conv_id, source_message_id,
+                float(confidence or 0), valid_from, valid_until, supersedes_id,
+                json.dumps(entities or []), json.dumps(metadata or {}), now, now,
+            ),
+        )
+        await db.execute("UPDATE workspaces SET updated_at=? WHERE id=?", (now, ws_id))
+        await db.commit()
+        rows = await db.execute_fetchall("SELECT * FROM memories WHERE id=?", (mem_id,))
+        return _normalize_memory_row(rows[0])
+    finally:
+        await db.close()
+
+
+async def update_workspace_memory(memory_id: str, ws_id: str, **kwargs) -> dict | None:
+    allowed = {
+        "content", "type", "status", "category", "importance", "pinned",
+        "confidence", "valid_from", "valid_until", "supersedes_id",
+        "entities", "metadata",
+    }
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        rows = await list_workspace_memories(ws_id, status="all")
+        return next((m for m in rows if m["id"] == memory_id), None)
+    if "type" in fields:
+        fields["type"] = _normalize_memory_type(fields["type"])
+    if "status" in fields:
+        fields["status"] = _normalize_memory_status(fields["status"])
+    if "importance" in fields:
+        fields["importance"] = max(1, min(5, int(fields["importance"] or 3)))
+    if "pinned" in fields:
+        fields["pinned"] = 1 if fields["pinned"] else 0
+    if "content" in fields:
+        fields["content"] = _scrub_surrogates((fields["content"] or "").strip())
+    if "entities" in fields:
+        fields["entities_json"] = json.dumps(fields.pop("entities") or [])
+    if "metadata" in fields:
+        fields["metadata_json"] = json.dumps(fields.pop("metadata") or {})
+    fields["updated_at"] = datetime.utcnow().isoformat()
+    sets = ",".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [memory_id, ws_id]
+    db = await get_db()
+    try:
+        await db.execute(f"UPDATE memories SET {sets} WHERE id=? AND workspace_id=?", vals)
+        await db.execute("UPDATE workspaces SET updated_at=? WHERE id=?", (fields["updated_at"], ws_id))
+        await db.commit()
+        rows = await db.execute_fetchall("SELECT * FROM memories WHERE id=? AND workspace_id=?", (memory_id, ws_id))
+        return _normalize_memory_row(rows[0]) if rows else None
+    finally:
+        await db.close()
+
+
+async def accept_workspace_memory(memory_id: str, ws_id: str, supersedes_id: str | None = None) -> dict | None:
+    now = datetime.utcnow().isoformat()
+    db = await get_db()
+    try:
+        if supersedes_id:
+            await db.execute(
+                "UPDATE memories SET valid_until=?, updated_at=? WHERE id=? AND workspace_id=?",
+                (now, now, supersedes_id, ws_id),
+            )
+        await db.execute(
+            """UPDATE memories
+               SET status='accepted',
+                   supersedes_id=COALESCE(?, supersedes_id),
+                   valid_from=COALESCE(valid_from, ?),
+                   updated_at=?
+               WHERE id=? AND workspace_id=?""",
+            (supersedes_id, now, now, memory_id, ws_id),
+        )
+        await db.execute("UPDATE workspaces SET updated_at=? WHERE id=?", (now, ws_id))
+        await db.commit()
+        rows = await db.execute_fetchall("SELECT * FROM memories WHERE id=? AND workspace_id=?", (memory_id, ws_id))
+        return _normalize_memory_row(rows[0]) if rows else None
+    finally:
+        await db.close()
+
+
+async def reject_workspace_memory(memory_id: str, ws_id: str) -> dict | None:
+    return await update_workspace_memory(memory_id, ws_id, status="rejected")
+
+
+async def delete_workspace_memory(memory_id: str, ws_id: str) -> bool:
+    db = await get_db()
+    try:
+        cur = await db.execute("DELETE FROM memories WHERE id=? AND workspace_id=?", (memory_id, ws_id))
+        await db.commit()
+        return cur.rowcount > 0
+    finally:
+        await db.close()
+
+
+def _content_tokens(text: str) -> set[str]:
+    words = re.findall(r"[a-zA-Z0-9_]{3,}", (text or "").lower())
+    stop = {
+        "the", "and", "for", "with", "that", "this", "from", "have", "what",
+        "when", "where", "would", "could", "should", "about", "into", "your",
+    }
+    return {w for w in words if w not in stop}
+
+
+def _memory_current_clause(now: str) -> str:
+    return "(valid_until IS NULL OR valid_until='' OR valid_until>?)"
+
+
+async def build_workspace_memory_context(
+    *,
+    workspace_id: str | None = None,
+    conversation_id: str | None = None,
+    query: str = "",
+    max_chars: int = 5200,
+) -> dict:
+    ws = await get_workspace_basic(workspace_id) if workspace_id else None
+    if not ws and conversation_id:
+        ws = await get_workspace_for_conversation(conversation_id)
+    if not ws or not int(ws.get("memory_enabled") or 0):
+        return {"workspace": ws, "context": "", "memory_ids": [], "block_ids": []}
+
+    ws_id = ws["id"]
+    remaining = max(1000, int(max_chars or 5200))
+    lines = [f"Workspace: {ws.get('name') or ws_id}"]
+    has_memory_content = False
+    block_ids = []
+
+    instructions = (ws.get("instructions") or "").strip()
+    if instructions:
+        chunk = instructions[:min(len(instructions), remaining, 1800)]
+        lines.append("\n[Instructions]\n" + chunk)
+        has_memory_content = True
+        remaining -= len(chunk)
+
+    for block in await get_workspace_memory_blocks(ws_id):
+        if remaining <= 400:
+            break
+        value = (block.get("value") or "").strip()
+        if not value or not int(block.get("enabled") or 0):
+            continue
+        limit = max(200, min(int(block.get("limit_chars") or 1200), remaining))
+        label = block.get("label") or "memory"
+        lines.append(f"\n[{label}]\n{value[:limit]}")
+        has_memory_content = True
+        block_ids.append(block["id"])
+        remaining -= min(len(value), limit)
+
+    now = datetime.utcnow().isoformat()
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            f"""SELECT * FROM memories
+                WHERE workspace_id=?
+                  AND status='accepted'
+                  AND {_memory_current_clause(now)}
+                ORDER BY pinned DESC, importance DESC, COALESCE(updated_at, created_at) DESC
+                LIMIT 80""",
+            (ws_id, now),
+        )
+    finally:
+        await db.close()
+
+    q_tokens = _content_tokens(query)
+    scored = []
+    for row in rows:
+        mem = _normalize_memory_row(row)
+        m_tokens = _content_tokens(mem.get("content") or "")
+        overlap = len(q_tokens & m_tokens)
+        score = (20 if mem.get("pinned") else 0) + int(mem.get("importance") or 3) * 4 + overlap * 6
+        scored.append((score, mem))
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    memory_ids = []
+    grouped = {"semantic": [], "episodic": [], "procedural": []}
+    for _, mem in scored:
+        if remaining <= 500:
+            break
+        content = (mem.get("content") or "").strip()
+        if not content:
+            continue
+        prefix = "[pinned] " if mem.get("pinned") else ""
+        item = f"- {prefix}{content}"
+        if len(item) > remaining:
+            item = item[:remaining - 20] + "..."
+        grouped.setdefault(mem.get("type") or "semantic", []).append(item)
+        memory_ids.append(mem["id"])
+        remaining -= len(item)
+        if len(memory_ids) >= 10:
+            break
+
+    for typ, title in [("semantic", "Facts and Preferences"), ("episodic", "Past Decisions and Events"), ("procedural", "Procedures")]:
+        if grouped.get(typ):
+            lines.append(f"\n[{title}]\n" + "\n".join(grouped[typ]))
+            has_memory_content = True
+
+    context = "\n".join(lines).strip() if has_memory_content else ""
+    if len(context) > max_chars:
+        context = context[:max_chars - 40] + "\n[...workspace memory truncated...]"
+    return {"workspace": ws, "context": context, "memory_ids": memory_ids, "block_ids": block_ids}
 
 
 # ============================================================
