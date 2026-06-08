@@ -1,4 +1,4 @@
-## Alpha v17.1.1 — June 7, 2026
+## Alpha v17.1.1 — June 8, 2026
 
 >Deep Research overhaul update. This update focued on making sure deep research got the love it deserved. Daedalus will still use deep research but for the user front end it has been renamed to Agent Research (the togglable tool above the composer). A backend code rename could break a lot of things and that is something ill do at a later date.
 
