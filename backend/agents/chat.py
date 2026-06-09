@@ -27,6 +27,26 @@ _PERSONA_RATING_GUIDANCE = {
     "Unrated": "Unrated (max XXX): Broadest adult setting. Explicit consenting-adult NSFW is allowed within safety boundaries. Avoid minors, coercion, illegal content, and non-consensual sexual content.",
 }
 
+_PERSONA_PLACEHOLDER_RE = re.compile(
+    r"\{\{\s*(user|char)\s*\}\}|\{\s*(user|char)\s*\}",
+    re.IGNORECASE,
+)
+
+
+def _replace_persona_placeholders(text: str, *, user_name: str, char_name: str) -> str:
+    if not text:
+        return text or ""
+    names = {
+        "user": (user_name or "User").strip() or "User",
+        "char": (char_name or "the character").strip() or "the character",
+    }
+
+    def repl(match: re.Match) -> str:
+        key = (match.group(1) or match.group(2) or "").lower()
+        return names.get(key, match.group(0))
+
+    return _PERSONA_PLACEHOLDER_RE.sub(repl, str(text))
+
 
 def _normalize_persona_rating(value) -> str:
     s = re.sub(r"[\s_]+", "", str(value or "PG-13").strip().lower())
@@ -649,6 +669,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     persona_system_prompt = None
     persona_kb_ids = []
     persona_think_budget = None
+    persona_placeholder_ctx = None
     _is_v2_persona = False
     if req.persona_id:
         all_configs = await db.get_model_configs()
@@ -659,7 +680,17 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             if "v2" in _persona_name_l or "daedalus" in _persona_name_l:
                 _is_v2_persona = True
             params = mc.get("parameters", {})
-            if _model_config_profile_type(mc, params) == "persona":
+            profile_type = _model_config_profile_type(mc, params)
+            if profile_type == "persona":
+                try:
+                    current_user = await db.get_user()
+                    user_name = (current_user or {}).get("name") or "User"
+                except Exception:
+                    user_name = "User"
+                persona_placeholder_ctx = {
+                    "user_name": user_name,
+                    "char_name": mc.get("name") or "the character",
+                }
                 persona_fields = params.get("persona") if isinstance(params.get("persona"), dict) else {}
                 thinking_mode = _normalize_persona_thinking_mode(persona_fields.get("thinking_mode", params.get("thinking_mode")))
                 if thinking_mode != "auto":
@@ -671,6 +702,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         persona_system_prompt += rating_block
                 else:
                     persona_system_prompt = rating_block.strip()
+                persona_system_prompt = _replace_persona_placeholders(
+                    persona_system_prompt or "",
+                    **persona_placeholder_ctx,
+                )
             for key in ("temperature", "num_ctx", "top_p", "top_k"):
                 if params.get(key) is not None:
                     if key == "num_ctx":
@@ -1011,7 +1046,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         print(f"[CHAT] Injected active project context: {_active_project.get('name', '?')} ({len(_ap_files)} files)")
 
     for m in req.messages:
-        _msg = {"role": m["role"], "content": m["content"]}
+        _content = m["content"]
+        if persona_placeholder_ctx and m.get("role") in {"assistant", "system"}:
+            _content = _replace_persona_placeholders(_content, **persona_placeholder_ctx)
+        _msg = {"role": m["role"], "content": _content}
         # Pass image attachments through to vision-capable Ollama models.
         # Non-vision models silently ignore the field.
         if m.get("images"):

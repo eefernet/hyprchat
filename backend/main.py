@@ -315,8 +315,76 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-HyprChat-User", "X-HyprChat-Session"],
 )
+
+_USER_SCOPED_PREFIXES = (
+    "/api/conversations",
+    "/api/chat/stream",
+    "/api/council/chat/stream",
+    "/api/coder",
+    "/api/runs",
+    "/api/knowledge-bases",
+    "/api/tools",
+    "/api/model-configs",
+    "/api/workspaces",
+    "/api/memory",
+    "/api/research/reports",
+    "/api/councils",
+    "/api/analytics",
+    "/api/events",
+)
+
+
+def _request_user_id(request: Request) -> str:
+    raw = (
+        request.headers.get("x-hyprchat-user")
+        or request.query_params.get("user_id")
+        or db.DEFAULT_USER_ID
+    )
+    raw = re.sub(r"[^a-zA-Z0-9_.:-]", "", str(raw or ""))[:80]
+    return raw or db.DEFAULT_USER_ID
+
+
+def _request_session_token(request: Request) -> str:
+    return (
+        request.headers.get("x-hyprchat-session")
+        or request.query_params.get("session")
+        or ""
+    )
+
+
+def _is_user_scoped_path(path: str) -> bool:
+    return any(path.startswith(prefix) for prefix in _USER_SCOPED_PREFIXES)
+
+
+async def _validated_request_user(request: Request) -> dict:
+    user_id = _request_user_id(request)
+    user = await db.get_user_private(user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if user.get("password_hash") and not await db.validate_user_session(user_id, _request_session_token(request)):
+        raise HTTPException(401, "Password required")
+    return user
+
+
+@app.middleware("http")
+async def user_context_middleware(request: Request, call_next):
+    user_id = _request_user_id(request)
+    user = await db.get_user_private(user_id)
+    if not user:
+        user_id = db.DEFAULT_USER_ID
+        user = await db.get_user_private(user_id)
+    valid = True
+    if user and user.get("password_hash"):
+        valid = await db.validate_user_session(user_id, _request_session_token(request))
+    if _is_user_scoped_path(request.url.path) and not valid:
+        return JSONResponse({"detail": "Password required"}, status_code=401)
+    token = db.set_current_user_id(user_id if valid else db.DEFAULT_USER_ID)
+    try:
+        return await call_next(request)
+    finally:
+        db.reset_current_user_id(token)
 
 HTTP_VERIFY_SSL = config.HTTP_VERIFY_SSL
 http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0), verify=HTTP_VERIFY_SSL)
@@ -496,6 +564,82 @@ class ConversationSearchRequest(BaseModel):
 
 class ForkRequest(BaseModel):
     message_id: int
+
+class UserCreate(BaseModel):
+    name: str
+    password: Optional[str] = ""
+
+class UserLogin(BaseModel):
+    user_id: str
+    password: Optional[str] = ""
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    password: Optional[str] = None
+    clear_password: Optional[bool] = False
+
+
+# ============================================================
+# USERS — lightweight local profile switching
+# ============================================================
+@app.get("/api/users")
+async def list_users_ep():
+    return {"users": await db.list_users()}
+
+
+@app.get("/api/users/current")
+async def current_user_ep(request: Request):
+    user = await _validated_request_user(request)
+    return {"user": await db.get_user(user["id"])}
+
+
+@app.post("/api/users")
+async def create_user_ep(req: UserCreate):
+    user = await db.create_user(req.name, req.password or "")
+    return {"user": user}
+
+
+@app.post("/api/users/login")
+async def login_user_ep(req: UserLogin):
+    user, session_token = await db.login_user(req.user_id, req.password or "")
+    if not user:
+        raise HTTPException(401, "Invalid user or password")
+    return {"user": user, "session_token": session_token}
+
+
+@app.post("/api/users/logout")
+async def logout_user_ep(request: Request):
+    user_id = _request_user_id(request)
+    await db.logout_user_session(user_id, _request_session_token(request) or None)
+    return {"ok": True}
+
+
+@app.patch("/api/users/{user_id}")
+async def update_user_ep(user_id: str, req: UserUpdate, request: Request):
+    current = await _validated_request_user(request)
+    user, _ = await db.update_user(
+        user_id,
+        name=req.name,
+        password=req.password,
+        clear_password=bool(req.clear_password),
+    )
+    if not user:
+        raise HTTPException(404, "User not found")
+    session_token = None
+    if user_id == current["id"] and req.password is not None and not req.clear_password and req.password:
+        session_token = await db.create_user_session(user_id)
+    return {"user": user, "session_token": session_token}
+
+
+@app.delete("/api/users/{user_id}")
+async def delete_user_ep(user_id: str, request: Request):
+    await _validated_request_user(request)
+    if user_id == db.DEFAULT_USER_ID:
+        raise HTTPException(400, "The Main user cannot be deleted")
+    ok = await db.delete_user(user_id)
+    if not ok:
+        raise HTTPException(404, "User not found")
+    return {"ok": True}
 
 
 # ============================================================
@@ -697,9 +841,18 @@ async def chat_stream(req: ChatRequest):
     _all_custom = await db.get_tools()
     custom_tool_map: dict = {t["name"]: t for t in _all_custom}
     custom_tool_id_map: dict = {t["id"]: t for t in _all_custom}
+    user_id = db.current_user_id()
+
+    async def _stream():
+        token = db.set_current_user_id(user_id)
+        try:
+            async for chunk in chat_stream_generate(req, http, events, custom_tool_map, custom_tool_id_map):
+                yield chunk
+        finally:
+            db.reset_current_user_id(token)
 
     return StreamingResponse(
-        chat_stream_generate(req, http, events, custom_tool_map, custom_tool_id_map),
+        _stream(),
         media_type="text/event-stream",
     )
 
@@ -1445,8 +1598,10 @@ async def _create_and_start_research_report(req: ResearchReportCreate) -> dict:
         inputs=req.inputs or [],
         status="queued",
     )
+    user_id = db.current_user_id()
 
     async def _runner():
+        token = db.set_current_user_id(user_id)
         try:
             await run_research_report(
                 http, config.OLLAMA_URL, config.DEFAULT_MODEL, events, report_id,
@@ -1474,6 +1629,8 @@ async def _create_and_start_research_report(req: ResearchReportCreate) -> dict:
                 "timestamp": time.time(),
             })
             await events.emit(report_id, "research_error", {"status": "failed", "error": str(e)})
+        finally:
+            db.reset_current_user_id(token)
 
     asyncio.create_task(_runner())
     return await db.get_research_report(report_id)
@@ -1710,20 +1867,29 @@ async def delete_conversation(conv_id: str):
 
 @app.delete("/api/conversations")
 async def delete_all_conversations():
-    """Delete ALL conversations, messages, and related data."""
+    """Delete all conversations for the active local user/profile."""
     conn = await db.get_db()
+    user_id = db.current_user_id()
     try:
-        await conn.execute("DELETE FROM messages")
-        await conn.execute("DELETE FROM conversation_files")
-        await conn.execute("DELETE FROM workspace_conversations")
-        await conn.execute("DELETE FROM conversations")
+        row = await conn.execute_fetchall("SELECT COUNT(*) AS n FROM conversations WHERE user_id=?", (user_id,))
+        count = row[0]["n"] if row else 0
+        await conn.execute(
+            "DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
+            (user_id,),
+        )
+        await conn.execute(
+            "DELETE FROM conversation_files WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
+            (user_id,),
+        )
+        await conn.execute(
+            "DELETE FROM workspace_conversations WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
+            (user_id,),
+        )
+        await conn.execute("DELETE FROM conversations WHERE user_id=?", (user_id,))
         await conn.commit()
-        cursor = await conn.execute("SELECT changes()")
-        row = await cursor.fetchone()
-        count = row[0] if row else 0
     finally:
         await conn.close()
-    print(f"[Cleanup] Deleted all conversations and related data")
+    print(f"[Cleanup] Deleted {count} conversations and related data for user {user_id}")
     return {"deleted": count}
 
 
@@ -1802,6 +1968,9 @@ async def update_kb(kb_id: str, req: KBCreate):
 
 @app.delete("/api/knowledge-bases/{kb_id}")
 async def delete_kb(kb_id: str):
+    owned = next((k for k in await db.get_kbs() if k["id"] == kb_id), None)
+    if not owned:
+        raise HTTPException(404, "KB not found")
     kb_dir = os.path.join(config.KB_DIR, kb_id)
     if os.path.exists(kb_dir):
         shutil.rmtree(kb_dir)
@@ -1820,6 +1989,9 @@ _indexing_status: dict[str, dict] = {}  # key: "kb_id:filename" → status dict
 
 @app.post("/api/knowledge-bases/{kb_id}/files")
 async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
+    owned = next((k for k in await db.get_kbs() if k["id"] == kb_id), None)
+    if not owned:
+        raise HTTPException(404, "KB not found")
     kb_dir = os.path.join(config.KB_DIR, kb_id)
     os.makedirs(kb_dir, exist_ok=True)
 
@@ -1859,6 +2031,9 @@ async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
 @app.get("/api/knowledge-bases/{kb_id}/files/{filename}/status")
 async def get_file_index_status(kb_id: str, filename: str):
     """Check background indexing status for a file."""
+    owned = next((k for k in await db.get_kbs() if k["id"] == kb_id), None)
+    if not owned:
+        raise HTTPException(404, "KB not found")
     status_key = f"{kb_id}:{filename}"
     status = _indexing_status.get(status_key)
     if status:
@@ -1872,9 +2047,15 @@ async def get_file_index_status(kb_id: str, filename: str):
 @app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/preview")
 async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200):
     """Preview first N lines of a KB file."""
+    user_id = db.current_user_id()
     _db = await db.get_db()
     try:
-        cursor = await _db.execute("SELECT filename FROM kb_files WHERE id = ? AND kb_id = ?", (file_id, kb_id))
+        cursor = await _db.execute(
+            """SELECT f.filename FROM kb_files f
+               JOIN knowledge_bases kb ON kb.id=f.kb_id
+               WHERE f.id=? AND f.kb_id=? AND kb.user_id=?""",
+            (file_id, kb_id, user_id),
+        )
         row = await cursor.fetchone()
     finally:
         await _db.close()
@@ -1900,9 +2081,15 @@ async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200):
 @app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/pdf-text")
 async def pdf_text_preview(kb_id: str, file_id: int, pages: int = 10):
     """Extract text from first N pages of a PDF for quick preview."""
+    user_id = db.current_user_id()
     _db = await db.get_db()
     try:
-        cursor = await _db.execute("SELECT filename FROM kb_files WHERE id = ? AND kb_id = ?", (file_id, kb_id))
+        cursor = await _db.execute(
+            """SELECT f.filename FROM kb_files f
+               JOIN knowledge_bases kb ON kb.id=f.kb_id
+               WHERE f.id=? AND f.kb_id=? AND kb.user_id=?""",
+            (file_id, kb_id, user_id),
+        )
         row = await cursor.fetchone()
     finally:
         await _db.close()
@@ -1961,9 +2148,15 @@ async def extract_pdf(file: UploadFile = File(...)):
 @app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/raw")
 async def raw_kb_file(kb_id: str, file_id: int):
     """Serve a KB file raw (for PDF/image preview in browser)."""
+    user_id = db.current_user_id()
     _db = await db.get_db()
     try:
-        cursor = await _db.execute("SELECT filename FROM kb_files WHERE id = ? AND kb_id = ?", (file_id, kb_id))
+        cursor = await _db.execute(
+            """SELECT f.filename FROM kb_files f
+               JOIN knowledge_bases kb ON kb.id=f.kb_id
+               WHERE f.id=? AND f.kb_id=? AND kb.user_id=?""",
+            (file_id, kb_id, user_id),
+        )
         row = await cursor.fetchone()
     finally:
         await _db.close()
@@ -1982,12 +2175,20 @@ async def raw_kb_file(kb_id: str, file_id: int):
 @app.delete("/api/knowledge-bases/files/{file_id}")
 async def delete_kb_file(file_id: int):
     # Get file info before deleting so we can remove from RAG index
+    user_id = db.current_user_id()
     _db = await db.get_db()
     try:
-        cursor = await _db.execute("SELECT kb_id, filename FROM kb_files WHERE id = ?", (file_id,))
+        cursor = await _db.execute(
+            """SELECT f.kb_id, f.filename FROM kb_files f
+               JOIN knowledge_bases kb ON kb.id=f.kb_id
+               WHERE f.id=? AND kb.user_id=?""",
+            (file_id, user_id),
+        )
         row = await cursor.fetchone()
     finally:
         await _db.close()
+    if not row:
+        raise HTTPException(404, "File not found")
 
     await db.delete_kb_file(file_id)
 
@@ -2373,6 +2574,9 @@ async def fix_model_template(model_name: str, body: dict = Body(default={})):
 @app.post("/api/model-configs/{mc_id}/avatar")
 async def upload_persona_avatar(mc_id: str, file: UploadFile = File(...)):
     """Upload an avatar image for a persona/model config."""
+    existing = await db.get_model_config(mc_id)
+    if not existing:
+        raise HTTPException(404, "Model config not found")
     avatar_dir = os.path.join(config.UPLOAD_DIR, "avatars")
     os.makedirs(avatar_dir, exist_ok=True)
 
@@ -2387,7 +2591,6 @@ async def upload_persona_avatar(mc_id: str, file: UploadFile = File(...)):
     with open(avatar_path, "wb") as f:
         f.write(content)
 
-    existing = await db.get_model_config(mc_id)
     params = existing.get("parameters", {}) if existing else {}
     await db.update_model_config(mc_id, parameters={**params, "avatar": f"/api/avatars/{mc_id}.{ext}"})
     return {"avatar_url": f"/api/avatars/{mc_id}.{ext}"}
@@ -3508,9 +3711,18 @@ async def council_chat_stream_ep(req: CouncilChatRequest):
 
     # Merge kb_ids from council config and request
     kb_ids = list(set((council.get("kb_ids") or []) + (req.kb_ids or [])))
+    user_id = db.current_user_id()
+
+    async def _stream():
+        token = db.set_current_user_id(user_id)
+        try:
+            async for chunk in stream_council_chat(http, events, council, req.messages, req.conversation_id, req.quick_search, kb_ids=kb_ids):
+                yield chunk
+        finally:
+            db.reset_current_user_id(token)
 
     return StreamingResponse(
-        stream_council_chat(http, events, council, req.messages, req.conversation_id, req.quick_search, kb_ids=kb_ids),
+        _stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
