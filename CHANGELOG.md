@@ -23,6 +23,15 @@
 - Replaced the misleading live "Generating ... chars" status with token-based wording that matches the top-right context meter.
 - Clarified the header context meter tooltip as prompt plus generated tokens against the active `num_ctx`.
 
+### Multi-User support (Not for concurrent usage, only for splitting up your chats)
+- Now you have the option to have different users for different things. Keep all your chats, workspaces and configurations separate from each other by signing into the appropriate user.
+- Each user has the option to have a password or not.
+- Manage users in the settings panel. You can set passwords, reset passwords, add users and remove users.
+
+
+### Bug Fixes
+- Fixed a fresh empty-chat race where selecting a model in the top-left picker and immediately sending could create the chat with the selected model but stream the first response through a stale/default model before React state caught up.
+
 
 ## Alpha v17.1.1 — June 8, 2026
 
