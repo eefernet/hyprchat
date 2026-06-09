@@ -1352,17 +1352,64 @@ const artifactKindMeta=(kind,t,metadata={})=>{
 function ArtifactPreviewBlock({preview,t,font}){
   const [mode,setMode]=useState("rendered");
   const [filter,setFilter]=useState("");
+  const [archiveDir,setArchiveDir]=useState("");
+  const [archiveQuery,setArchiveQuery]=useState("");
+  const [entryPreview,setEntryPreview]=useState(null);
+  const [entryLoading,setEntryLoading]=useState(false);
+  useEffect(()=>{setMode("rendered");setFilter("");setArchiveDir("");setArchiveQuery("");setEntryPreview(null);},[preview?.id,preview?.updated_at,preview?.preview_type]);
   if(!preview)return <div style={{padding:18,color:t.mut,fontSize:12}}>Loading preview...</div>;
   const type=preview.preview_type||"metadata";
   if(type==="missing")return <div style={{padding:14,border:`1px solid ${t.err}35`,background:`${t.err}08`,borderRadius:8,color:t.err,fontSize:12}}>File metadata is retained, but the physical file is missing.</div>;
   if(type==="image")return <img src={`${API}${preview.download_url||preview.url}`} alt={preview.filename} style={{maxWidth:"100%",borderRadius:8,border:`1px solid ${t.brd}22`,display:"block"}}/>;
   if(type==="pdf")return <iframe src={`${API}${preview.download_url||preview.url}`} title={preview.filename} style={{width:"100%",height:520,border:`1px solid ${t.brd}22`,borderRadius:8,background:"#fff"}}/>;
   if(type==="archive"){
-    const entries=(preview.preview?.entries||[]).filter(e=>e.name!=="./"&&e.name!=="."&&e.name!=="/");
-    return <div style={{border:`1px solid ${t.brd}22`,borderRadius:8,overflow:"hidden"}}>
-      <div style={{padding:"8px 10px",background:`${t.surface}66`,display:"flex",justifyContent:"space-between",fontSize:11,color:t.mut}}><span>{preview.preview?.file_count||0} files</span><span>{entries.length} entries shown</span></div>
-      <div style={{maxHeight:420,overflow:"auto"}}>
-        {entries.map((entry,i)=>{const depth=Math.max(0,(entry.name.match(/\//g)||[]).length-(entry.is_dir?1:0));const base=entry.is_dir?entry.name.replace(/\/$/,"").split("/").pop()+"/":entry.name.split("/").pop();return <div key={i} style={{display:"flex",gap:6,padding:"5px 10px",paddingLeft:10+depth*14,borderTop:i?`1px solid ${t.brd}12`:"none",fontSize:11,color:entry.is_dir?t.warm:t.dim}}><span>{entry.is_dir?"▸":"•"}</span><span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{base}</span>{!entry.is_dir&&<span style={{fontSize:9,color:t.mut,fontFamily:"monospace"}}>{entry.size||0}B</span>}</div>;})}
+    const raw=(preview.preview?.entries||[]).filter(e=>e.name!=="./"&&e.name!=="."&&e.name!=="/");
+    const norm=raw.map(e=>{const path=(e.path||String(e.name||"").replace(/\/$/,"")).replace(/^\.\/+/,"");const parent=e.parent??(path.includes("/")?path.split("/").slice(0,-1).join("/"):"");const base=e.display_name||String(e.name||path).replace(/\/$/,"").split("/").pop()+(e.is_dir?"/":"");return{...e,path,parent,display_name:base};});
+    const q=archiveQuery.trim().toLowerCase();
+    const shown=norm.filter(e=>q?(e.path||e.name||"").toLowerCase().includes(q):(e.parent||"")===archiveDir);
+    const crumbs=archiveDir?archiveDir.split("/").filter(Boolean):[];
+    const openEntry=async(entry)=>{
+      if(entry.is_dir){setArchiveDir(entry.path||"");setEntryPreview(null);return;}
+      if(!entry.previewable){setEntryPreview({error:entry.preview_blocked_reason||"Preview unavailable",entry});return;}
+      setEntryLoading(true);setEntryPreview(null);
+      try{
+        const r=await fetch(`${API}/api/artifacts/${encodeURIComponent(preview.id)}/archive-entry?path=${encodeURIComponent(entry.path)}`);
+        const d=await r.json().catch(()=>({}));
+        if(!r.ok)throw new Error(d.detail||d.error||`HTTP ${r.status}`);
+        setEntryPreview(d);
+      }catch(e){setEntryPreview({error:e.message||String(e),entry});}
+      setEntryLoading(false);
+    };
+    return <div style={{border:`1px solid ${t.brd}22`,borderRadius:8,overflow:"hidden",display:"grid",gridTemplateRows:"auto auto minmax(240px,1fr)",maxHeight:680}}>
+      <div style={{padding:"8px 10px",background:`${t.surface}66`,display:"flex",justifyContent:"space-between",gap:8,fontSize:11,color:t.mut}}>
+        <span>{preview.preview?.file_count||0} files · {preview.preview?.folder_count||0} folders</span>
+        <span>{preview.preview?.archive_type||"archive"}</span>
+      </div>
+      <div style={{padding:8,borderTop:`1px solid ${t.brd}12`,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+        <button onClick={()=>{setArchiveDir("");setEntryPreview(null);}} style={{background:archiveDir?`${t.surface}66`:`${t.acc}14`,border:`1px solid ${archiveDir?t.brd:t.acc}35`,color:archiveDir?t.mut:t.acc,borderRadius:6,padding:"4px 7px",fontSize:10,fontFamily:font,cursor:"pointer"}}>/</button>
+        {crumbs.map((part,i)=>{const next=crumbs.slice(0,i+1).join("/");return <button key={next} onClick={()=>{setArchiveDir(next);setEntryPreview(null);}} style={{background:next===archiveDir?`${t.acc}14`:`${t.surface}66`,border:`1px solid ${next===archiveDir?t.acc:t.brd}35`,color:next===archiveDir?t.acc:t.mut,borderRadius:6,padding:"4px 7px",fontSize:10,fontFamily:font,cursor:"pointer"}}>{part}</button>;})}
+        <input value={archiveQuery} onChange={e=>setArchiveQuery(e.target.value)} placeholder="Filter files" style={{marginLeft:"auto",minWidth:120,background:t.bgDeep,border:`1px solid ${t.brd}35`,color:t.text,padding:"5px 8px",borderRadius:6,fontFamily:font,fontSize:10,outline:"none"}}/>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"minmax(130px,42%) minmax(0,1fr)",minHeight:0,borderTop:`1px solid ${t.brd}12`}}>
+        <div style={{overflow:"auto",borderRight:`1px solid ${t.brd}18`,minHeight:240}}>
+          {!shown.length&&<div style={{padding:14,color:t.mut,fontSize:11}}>No entries.</div>}
+          {shown.map((entry,i)=><button key={`${entry.path}-${i}`} onClick={()=>openEntry(entry)} style={{width:"100%",display:"grid",gridTemplateColumns:"18px 1fr auto",gap:6,alignItems:"center",padding:"7px 9px",border:"none",borderTop:i?`1px solid ${t.brd}10`:"none",background:entryPreview?.entry?.path===entry.path?`${t.acc}12`:"transparent",color:entry.is_dir?t.warm:entry.previewable?t.dim:t.mut,cursor:"pointer",fontFamily:font,fontSize:11,textAlign:"left"}}>
+            <span>{entry.is_dir?"▸":entry.previewable?"•":"-"}</span>
+            <span title={entry.path} style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{entry.display_name||entry.name||entry.path}</span>
+            {!entry.is_dir&&<span style={{fontSize:9,color:t.mut,fontFamily:"monospace"}}>{entry.size||0}B</span>}
+          </button>)}
+        </div>
+        <div style={{overflow:"auto",padding:10,minHeight:240}}>
+          {entryLoading&&<div style={{fontSize:11,color:t.mut}}>Loading entry...</div>}
+          {!entryLoading&&!entryPreview&&<div style={{fontSize:11,color:t.mut,lineHeight:1.6}}>Select a small text-like file to preview it inside the archive.</div>}
+          {!entryLoading&&entryPreview?.error&&<div style={{border:`1px solid ${t.warm}30`,background:`${t.warm}08`,borderRadius:7,padding:10,color:t.warm,fontSize:11,lineHeight:1.55}}>
+            <div style={{fontWeight:900,marginBottom:4}}>Preview unavailable</div>
+            <div>{entryPreview.error}</div>
+            {entryPreview.entry&&<div style={{marginTop:6,color:t.mut,wordBreak:"break-word"}}>{entryPreview.entry.path} · {entryPreview.entry.size||0}B</div>}
+            <div style={{marginTop:6,color:t.mut}}>Download the archive to inspect this entry.</div>
+          </div>}
+          {!entryLoading&&entryPreview?.content!=null&&<pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:11,color:t.dim,fontFamily:font,lineHeight:1.55}}>{entryPreview.content}</pre>}
+        </div>
       </div>
     </div>;
   }
@@ -1400,14 +1447,16 @@ function ArtifactPreviewBlock({preview,t,font}){
   return <pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:11,color:t.dim,fontFamily:font,lineHeight:1.55}}>{preview.content||preview.message||"No preview available."}</pre>;
 }
 
-function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onDelete,onUseInChat,notify,onRefreshList}){
+function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onDelete,onUseInChat,notify,onRefreshList,onOpenArtifact}){
   const [preview,setPreview]=useState(null);
+  const [timeline,setTimeline]=useState([]);
   const [tagDraft,setTagDraft]=useState("");
   const [kbId,setKbId]=useState(kbs?.[0]?.id||"");
   const a=artifact||{};
   const btnS=(c,bg)=>({background:bg||`${c}14`,border:`1px solid ${c}35`,color:c,padding:"6px 9px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:10,fontWeight:800,display:"inline-flex",alignItems:"center",gap:5,textDecoration:"none"});
   useEffect(()=>{if(!kbId&&kbs?.[0]?.id)setKbId(kbs[0].id);},[kbs,kbId]);
   useEffect(()=>{let stop=false;setPreview(null);if(!a.id)return;fetch(`${API}/api/artifacts/${encodeURIComponent(a.id)}/preview`).then(r=>r.json()).then(d=>{if(!stop)setPreview(d);}).catch(e=>{if(!stop)setPreview({preview_type:"metadata",message:e.message||String(e)});});return()=>{stop=true;};},[a.id,a.updated_at,a.exists_status]);
+  useEffect(()=>{let stop=false;setTimeline([]);if(!a.id)return;fetch(`${API}/api/artifacts/${encodeURIComponent(a.id)}/timeline`).then(r=>r.ok?r.json():{events:[]}).then(d=>{if(!stop)setTimeline(d.events||[]);}).catch(()=>{if(!stop)setTimeline([]);});return()=>{stop=true;};},[a.id,a.updated_at,a.status,a.exists_status]);
   if(!a.id)return null;
   const meta=a.metadata||{};
   const km=artifactKindMeta(a.kind,t,meta);
@@ -1418,10 +1467,25 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
       const r=await fetch(`${API}/api/artifacts/${encodeURIComponent(a.id)}/${name}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
       const d=await r.json().catch(()=>({}));
       if(!r.ok)throw new Error(d.detail||d.error||`HTTP ${r.status}`);
+      fetch(`${API}/api/artifacts/${encodeURIComponent(a.id)}/timeline`).then(r=>r.ok?r.json():{events:[]}).then(x=>setTimeline(x.events||[])).catch(()=>{});
       return d;
     }catch(e){notify&&notify({type:"error",text:"Artifact action failed",detail:e.message||String(e)});throw e;}
   };
+  const refreshDetail=()=>{if(onOpenArtifact&&a.id)onOpenArtifact(a.id);};
+  const mergeDuplicate=async(duplicateId)=>{
+    try{
+      const r=await fetch(`${API}/api/artifacts/${encodeURIComponent(a.id)}/merge-duplicate`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({duplicate_id:duplicateId})});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||d.error||`HTTP ${r.status}`);
+      notify&&notify({type:"success",text:"Duplicate metadata merged",duration:2200});
+      onRefreshList?.();
+      refreshDetail();
+    }catch(e){notify&&notify({type:"error",text:"Duplicate merge failed",detail:e.message||String(e)});}
+  };
+  const archiveDuplicate=async(duplicateId)=>{await onPatch?.(duplicateId,{status:"archived"});onRefreshList?.();refreshDetail();};
   const addTag=async()=>{const tag=tagDraft.trim();if(!tag)return;await patch({tags:[...(a.tags||[]),tag]});setTagDraft("");};
+  const duplicateRows=a.duplicates||[];
+  const timelineRows=timeline||[];
   return <div style={{width:"clamp(320px,42vw,430px)",maxWidth:"100vw",borderLeft:`1px solid ${t.brd}28`,background:t.bgDeep,display:"flex",flexDirection:"column",overflow:"hidden",flexShrink:0}}>
     <div style={{padding:"12px 14px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:8}}>
       <span style={{color:km.color,display:"flex"}}>{DetailIcon?<DetailIcon/>:null}</span>
@@ -1447,6 +1511,34 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
           <button onClick={async()=>{const d=await action("check-file");await onPatch?.(a.id,{});notify&&notify({type:"success",text:"File health checked",detail:d.exists_status||"",duration:1800});}} style={btnS(t.mut)}>Check file</button>
         </div>
       </section>
+      {duplicateRows.length>0&&<section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Duplicates</div>
+        <div style={{display:"flex",flexDirection:"column",gap:7}}>
+          {duplicateRows.map(d=><div key={d.id} style={{border:`1px solid ${t.brd}24`,background:`${t.surface}44`,borderRadius:8,padding:8,display:"flex",flexDirection:"column",gap:6}}>
+            <div style={{display:"flex",gap:8,alignItems:"center",minWidth:0}}>
+              <div style={{minWidth:0,flex:1}}><div style={{fontSize:11,color:t.text,fontWeight:800,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.title||d.filename}</div><div style={{fontSize:9,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.filename}</div></div>
+              <span style={{fontSize:9,color:d.status==="archived"?t.mut:t.warm,border:`1px solid ${t.brd}24`,borderRadius:6,padding:"2px 5px"}}>{d.status}</span>
+            </div>
+            <div style={{fontSize:10,color:t.mut,display:"flex",gap:7,flexWrap:"wrap"}}><span>{d.file_health?.size_bytes?`${(d.file_health.size_bytes/1024).toFixed(0)} KB`:"unknown size"}</span>{d.pinned? <span style={{color:t.warm}}>pinned</span>:null}{(d.workspaces||[]).slice(0,2).map(w=><span key={w.id}>{w.name}</span>)}</div>
+            <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+              <button onClick={()=>onOpenArtifact?.(d.id)} style={btnS(t.f1)}>Open</button>
+              <button onClick={()=>archiveDuplicate(d.id)} style={btnS(t.warm)}>Archive duplicate</button>
+              <button onClick={()=>mergeDuplicate(d.id)} style={btnS(t.ok)}>Merge metadata</button>
+            </div>
+          </div>)}
+        </div>
+      </section>}
+      {timelineRows.length>0&&<section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Timeline</div>
+        <div style={{display:"flex",flexDirection:"column",gap:7}}>
+          {timelineRows.slice(0,40).map(ev=>{const md=ev.metadata||{};const rel=md.related_artifact_id||(Array.isArray(md.related_artifact_ids)?md.related_artifact_ids[0]:null);return <div key={ev.id} style={{display:"grid",gridTemplateColumns:"82px 1fr",gap:8,fontSize:11,color:t.dim,lineHeight:1.45}}>
+            <div style={{color:t.mut,fontSize:9}}>{ev.created_at?new Date(ev.created_at).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):""}</div>
+            <div style={{borderLeft:`2px solid ${ev.source==="event"?t.acc:t.brd}55`,paddingLeft:8,minWidth:0}}>
+              <div style={{color:t.text,fontWeight:800,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{String(ev.event_type||"event").replace(/_/g," ")}</div>
+              <div style={{wordBreak:"break-word"}}>{ev.summary||""}</div>
+              {rel&&<button onClick={()=>onOpenArtifact?.(rel)} style={{marginTop:4,background:"transparent",border:"none",padding:0,color:t.acc,cursor:"pointer",fontFamily:font,fontSize:10}}>Open related artifact</button>}
+            </div>
+          </div>;})}
+        </div>
+      </section>}
       <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Tags</div>
         <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:7}}>{(a.tags||[]).map(tag=><button key={tag} onClick={()=>patch({tags:(a.tags||[]).filter(x=>x!==tag)})} title="Remove tag" style={{background:`${t.acc}12`,border:`1px solid ${t.acc}30`,color:t.acc,padding:"3px 7px",borderRadius:6,fontSize:10,cursor:"pointer",fontFamily:font}}>#{tag} ×</button>)}</div>
         <div style={{display:"flex",gap:6}}><input value={tagDraft} onChange={e=>setTagDraft(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")addTag();}} placeholder="Add tag" style={{flex:1,background:t.bg,border:`1px solid ${t.brd}35`,color:t.text,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:11,outline:"none"}}/><button onClick={addTag} style={btnS(t.acc)}>Add</button></div>
@@ -1618,7 +1710,7 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
       </div>
     </div>
   </div>
-  {detail&&<ArtifactDetailPanel artifact={detail} t={t} font={font} workspaces={workspaces} kbs={kbs} onClose={()=>setDetail(null)} onPatch={patchArtifact} onDelete={deleteArtifact} onUseInChat={onUseInChat} notify={notify} onRefreshList={load}/>}
+  {detail&&<ArtifactDetailPanel artifact={detail} t={t} font={font} workspaces={workspaces} kbs={kbs} onClose={()=>setDetail(null)} onPatch={patchArtifact} onDelete={deleteArtifact} onUseInChat={onUseInChat} notify={notify} onRefreshList={load} onOpenArtifact={openDetail}/>}
   </div>;
 }
 
@@ -3460,6 +3552,12 @@ function HyprChat(){
   const [expandedBuiltin,setExpandedBuiltin]=useState(null);
   const [editKb,setEditKb]=useState(null);
   const [builtinTools,setBuiltinTools]=useState([]);
+  const [connectorTools,setConnectorTools]=useState([]);
+  const [mcpServers,setMcpServers]=useState([]);
+  const [openapiConnectors,setOpenapiConnectors]=useState([]);
+  const [mcpDraft,setMcpDraft]=useState(()=>({name:"",transport:"stdio",command:"",url:"",args:"[]",env:"{}",headers:"{}",allow_private:false}));
+  const [openapiDraft,setOpenapiDraft]=useState(()=>({name:"",spec_url:"",base_url:"",auth:"{}",headers:"{}",allow_private:false}));
+  const [connectorBusy,setConnectorBusy]=useState("");
   const [expandedPill,setExpandedPill]=useState(null);
   const [loadingConv,setLoadingConv]=useState(false);
   const [editingMsg,setEditingMsg]=useState(null); // {index, content}
@@ -3822,6 +3920,33 @@ function HyprChat(){
   };
   const clearPendingProfile=()=>{setPendingPersona(null);setPendingToolIds([]);setLastPersonaId(null);try{localStorage.removeItem("hc-last-persona");}catch{};};
   const saveKb=(kb)=>{fetch(`${API}/api/knowledge-bases/${kb.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:kb.name,description:kb.description})}).catch(()=>{});};
+  const parseConnectorJson=(txt,fallback,label)=>{
+    try{return (txt||"").trim()?JSON.parse(txt):fallback;}catch(e){notify({type:"error",text:`Invalid ${label}`,detail:e.message||String(e)});throw e;}
+  };
+  const refreshConnectors=async()=>{
+    try{
+      const [mcp,oa,ct]=await Promise.all([
+        fetch(`${API}/api/mcp-servers`).then(r=>r.ok?r.json():[]),
+        fetch(`${API}/api/openapi-connectors`).then(r=>r.ok?r.json():[]),
+        fetch(`${API}/api/connector-tools`).then(r=>r.ok?r.json():[]),
+      ]);
+      setMcpServers(Array.isArray(mcp)?mcp:[]);
+      setOpenapiConnectors(Array.isArray(oa)?oa:[]);
+      setConnectorTools(Array.isArray(ct)?ct:[]);
+    }catch(e){console.error("Connectors:",e);}
+  };
+  const discoverConnector=async(kind,id)=>{
+    setConnectorBusy(`${kind}:${id}`);
+    try{
+      const path=kind==="mcp"?`mcp-servers/${id}`:`openapi-connectors/${id}`;
+      const r=await fetch(`${API}/api/${path}/discover`,{method:"POST"});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      notify({type:"success",text:"Connector discovered",detail:`${d.tool_count||0} tools available`});
+      await refreshConnectors();
+    }catch(e){notify({type:"error",text:"Connector discovery failed",detail:e.message||String(e)});}
+    finally{setConnectorBusy("");}
+  };
 
   // Combined tool list for agents/personas (builtin + custom uploaded tools)
   const allTools = (() => {
@@ -3829,6 +3954,7 @@ function HyprChat(){
     const merged = [];
     // builtinTools already includes custom tools from /api/builtin-tools
     for (const tl of builtinTools) { if (!seen.has(tl.id)) { seen.add(tl.id); merged.push(tl); } }
+    for (const tl of connectorTools) { if (!seen.has(tl.id)) { seen.add(tl.id); merged.push({id:tl.id,name:tl.name||tl.display_name,description:tl.description||tl.external_name,icon:"plug",connector:true}); } }
     // Only add from tools DB if not already present
     for (const tl of tools) { if (!seen.has(tl.id)) { seen.add(tl.id); merged.push({id:tl.id, name:tl.name, description:tl.description||tl.filename, icon:"code"}); } }
     return merged;
@@ -3837,6 +3963,7 @@ function HyprChat(){
   const resetUserScopedState=()=>{
     setConvs([]);setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];
     setKbs([]);setTools([]);setMcs([]);setWorkspaces([]);setActiveWs(null);setWsDetail(null);setWsPanel(false);
+    setConnectorTools([]);setMcpServers([]);setOpenapiConnectors([]);
     setResearchReports([]);setActiveResearchId(null);setActiveResearch(null);setResearchEvents([]);setResearchLiveMarkdown("");setResearchRunning(false);
     setCouncils([]);setActiveCouncilId(null);setCouncilReport(null);setQuickResults([]);setSearchLoading(false);setQuickSearchError(null);
     setCoderWorkflows([]);setCoderProjInfo(null);setAttachments([]);setFtsResults([]);setArtifactFocusId(null);setPanel("chat");setLoadingConv(false);
@@ -3991,6 +4118,7 @@ function HyprChat(){
     }}).catch(()=>{});
     fetch(`${API}/api/knowledge-bases`).then(r=>r.json()).then(setKbs).catch(()=>{});
     fetch(`${API}/api/tools`).then(r=>r.json()).then(setTools).catch(()=>{});
+    refreshConnectors();
     fetch(`${API}/api/model-configs`).then(r=>r.json()).then(d=>setMcs((d||[]).map(mc=>({...mc,parameters:normalizeProfileParams(mc)})))).catch(()=>{});
     fetch(`${API}/api/health`).then(r=>r.json()).then(d=>setHealth(d.services||{})).catch(()=>{});
     fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{
@@ -7048,6 +7176,84 @@ function HyprChat(){
           </div>;
         })}
       </div>}
+      <div style={{marginBottom:16}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+          <div style={{fontSize:9,fontWeight:700,color:t.mut,letterSpacing:1,textTransform:"uppercase"}}>Connectors</div>
+          <button onClick={refreshConnectors} style={{...btnS(t.mut),fontSize:10,padding:"4px 8px"}}>Refresh</button>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:10,marginBottom:10}}>
+          <div style={{...cardS,borderColor:`${t.acc}33`}}>
+            <div style={{fontSize:12,fontWeight:800,color:t.acc,marginBottom:8}}>MCP Server</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 110px",gap:8,marginBottom:8}}>
+              <input value={mcpDraft.name} onChange={e=>setMcpDraft(p=>({...p,name:e.target.value}))} placeholder="GitHub MCP" style={inputS}/>
+              <select value={mcpDraft.transport} onChange={e=>setMcpDraft(p=>({...p,transport:e.target.value}))} style={inputS}>
+                <option value="stdio">stdio</option><option value="http">http</option><option value="streamable_http">streamable_http</option><option value="sse">sse</option>
+              </select>
+            </div>
+            <input value={mcpDraft.command} onChange={e=>setMcpDraft(p=>({...p,command:e.target.value}))} placeholder="Command for stdio, e.g. npx" style={{...inputS,marginBottom:8,fontFamily:"monospace"}}/>
+            <input value={mcpDraft.url} onChange={e=>setMcpDraft(p=>({...p,url:e.target.value}))} placeholder="HTTP endpoint for Streamable HTTP/SSE" style={{...inputS,marginBottom:8,fontFamily:"monospace"}}/>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+              <textarea value={mcpDraft.args} onChange={e=>setMcpDraft(p=>({...p,args:e.target.value}))} rows={3} placeholder={'["-y","@modelcontextprotocol/server-github"]'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/>
+              <textarea value={mcpDraft.env} onChange={e=>setMcpDraft(p=>({...p,env:e.target.value}))} rows={3} placeholder={'{"GITHUB_TOKEN":"GITHUB_TOKEN"}'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/>
+            </div>
+            <textarea value={mcpDraft.headers} onChange={e=>setMcpDraft(p=>({...p,headers:e.target.value}))} rows={2} placeholder={'{"Authorization":"Bearer ${TOKEN}"}'} style={{...inputS,fontFamily:"monospace",resize:"vertical",marginBottom:8}}/>
+            <label style={{display:"flex",alignItems:"center",gap:7,fontSize:10,color:t.mut,marginBottom:8}}><input type="checkbox" checked={mcpDraft.allow_private} onChange={e=>setMcpDraft(p=>({...p,allow_private:e.target.checked}))}/> Allow private/local URL</label>
+            <button disabled={connectorBusy==="create:mcp"} onClick={async()=>{
+              setConnectorBusy("create:mcp");
+              try{
+                const payload={name:mcpDraft.name.trim()||"MCP Server",transport:mcpDraft.transport,command:mcpDraft.command.trim(),url:mcpDraft.url.trim(),args:parseConnectorJson(mcpDraft.args,[],"MCP args"),env:parseConnectorJson(mcpDraft.env,{},"MCP env"),headers:parseConnectorJson(mcpDraft.headers,{},"MCP headers"),allow_private:mcpDraft.allow_private};
+                const r=await fetch(`${API}/api/mcp-servers`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+                const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+                setMcpDraft({name:"",transport:"stdio",command:"",url:"",args:"[]",env:"{}",headers:"{}",allow_private:false});
+                notify({type:"success",text:"MCP server saved"});await refreshConnectors();
+              }catch(e){notify({type:"error",text:"MCP save failed",detail:e.message||String(e)});}
+              finally{setConnectorBusy("");}
+            }} style={{...btnS(t.acc),opacity:connectorBusy==="create:mcp"?0.5:1}}>Add MCP</button>
+          </div>
+          <div style={{...cardS,borderColor:`${t.f1}33`}}>
+            <div style={{fontSize:12,fontWeight:800,color:t.f1,marginBottom:8}}>OpenAPI Connector</div>
+            <input value={openapiDraft.name} onChange={e=>setOpenapiDraft(p=>({...p,name:e.target.value}))} placeholder="Service name" style={{...inputS,marginBottom:8}}/>
+            <input value={openapiDraft.spec_url} onChange={e=>setOpenapiDraft(p=>({...p,spec_url:e.target.value}))} placeholder="OpenAPI JSON/YAML URL" style={{...inputS,marginBottom:8,fontFamily:"monospace"}}/>
+            <input value={openapiDraft.base_url} onChange={e=>setOpenapiDraft(p=>({...p,base_url:e.target.value}))} placeholder="Base URL override (optional)" style={{...inputS,marginBottom:8,fontFamily:"monospace"}}/>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+              <textarea value={openapiDraft.auth} onChange={e=>setOpenapiDraft(p=>({...p,auth:e.target.value}))} rows={4} placeholder={'{"type":"bearer","token_placeholder":"GITHUB_TOKEN"}'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/>
+              <textarea value={openapiDraft.headers} onChange={e=>setOpenapiDraft(p=>({...p,headers:e.target.value}))} rows={4} placeholder={'{"X-Api-Key":"${API_KEY}"}'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/>
+            </div>
+            <label style={{display:"flex",alignItems:"center",gap:7,fontSize:10,color:t.mut,marginBottom:8}}><input type="checkbox" checked={openapiDraft.allow_private} onChange={e=>setOpenapiDraft(p=>({...p,allow_private:e.target.checked}))}/> Allow private/local URL</label>
+            <button disabled={connectorBusy==="create:openapi"} onClick={async()=>{
+              setConnectorBusy("create:openapi");
+              try{
+                const payload={name:openapiDraft.name.trim()||"OpenAPI Connector",spec_url:openapiDraft.spec_url.trim(),base_url:openapiDraft.base_url.trim(),auth:parseConnectorJson(openapiDraft.auth,{},"OpenAPI auth"),headers:parseConnectorJson(openapiDraft.headers,{},"OpenAPI headers"),allow_private:openapiDraft.allow_private};
+                const r=await fetch(`${API}/api/openapi-connectors`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+                const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+                setOpenapiDraft({name:"",spec_url:"",base_url:"",auth:"{}",headers:"{}",allow_private:false});
+                notify({type:"success",text:"OpenAPI connector saved"});await refreshConnectors();
+              }catch(e){notify({type:"error",text:"OpenAPI save failed",detail:e.message||String(e)});}
+              finally{setConnectorBusy("");}
+            }} style={{...btnS(t.f1),opacity:connectorBusy==="create:openapi"?0.5:1}}>Add OpenAPI</button>
+          </div>
+        </div>
+        {[...mcpServers.map(x=>({...x,kind:"mcp"})),...openapiConnectors.map(x=>({...x,kind:"openapi"}))].map(c=>{
+          const col=c.kind==="mcp"?t.acc:t.f1;const busy=connectorBusy===`${c.kind}:${c.id}`;const basePath=c.kind==="mcp"?"mcp-servers":"openapi-connectors";
+          return <div key={`${c.kind}:${c.id}`} style={{...cardS,borderColor:`${col}33`,marginBottom:8}}>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <div style={{width:30,height:30,borderRadius:8,background:`${col}18`,border:`1px solid ${col}33`,display:"flex",alignItems:"center",justifyContent:"center",color:col}}>↔</div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:12,fontWeight:800,color:col,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.name}</div>
+                <div style={{fontSize:10,color:t.mut}}>{c.kind.toUpperCase()} · {c.health||"unknown"} · {c.tool_count||0} tools</div>
+              </div>
+              <button disabled={busy} onClick={()=>discoverConnector(c.kind,c.id)} style={{...btnS(col),fontSize:10,padding:"4px 8px",opacity:busy?0.5:1}}>{busy?"Checking":"Discover"}</button>
+              <button onClick={async()=>{await fetch(`${API}/api/${basePath}/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:!c.enabled})});await refreshConnectors();}} style={{...btnS(c.enabled?t.ok:t.mut),fontSize:10,padding:"4px 8px"}}>{c.enabled?"On":"Off"}</button>
+              <button onClick={async()=>{await fetch(`${API}/api/${basePath}/${c.id}`,{method:"DELETE"}).catch(()=>{});await refreshConnectors();}} style={{...btnS(t.err),fontSize:10,padding:"4px 8px"}}><IC.Trash/></button>
+            </div>
+            {c.last_error&&<div style={{fontSize:10,color:t.err,marginTop:7,whiteSpace:"pre-wrap"}}>{c.last_error}</div>}
+          </div>;
+        })}
+        {connectorTools.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:8}}>
+          {connectorTools.slice(0,40).map(tl=><span key={tl.id} title={tl.description} style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.acc}12`,border:`1px solid ${t.acc}28`,color:t.acc}}>{tl.name||tl.display_name}</span>)}
+          {connectorTools.length>40&&<span style={{fontSize:10,color:t.mut,padding:"3px 8px"}}>+{connectorTools.length-40} more</span>}
+        </div>}
+      </div>
       {!tools.length&&!pasteMode&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>
         <div style={{fontSize:28,marginBottom:8}}>⚙️</div>
         <div style={{fontWeight:600,marginBottom:4}}>No custom tools yet</div>

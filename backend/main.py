@@ -17,10 +17,12 @@ import re
 import base64
 import shlex
 import urllib.parse
+import posixpath
+import stat
 import venv as _venv
 import zipfile
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 from contextlib import asynccontextmanager
 
 import httpx
@@ -41,6 +43,7 @@ from agents.personas import seed_coder_bot as _seed_coder_bot, seed_coder_bot_v2
 import hf as hf_module
 from hf import parse_ollama_progress
 import rag
+import connectors
 from research import (
     REPORT_TEMPLATES,
     REPORT_TEMPLATE_MAP,
@@ -115,32 +118,260 @@ def _resolve_download_path(filename: str) -> tuple[str, str] | tuple[None, str]:
     return None, safe_name
 
 
+_ARCHIVE_PREVIEW_EXTS = {
+    ".txt", ".md", ".csv", ".tsv", ".json", ".jsonl", ".html", ".htm", ".py",
+    ".js", ".ts", ".css", ".sh", ".yaml", ".yml", ".toml", ".xml", ".log",
+    ".ini", ".conf",
+}
+_ARCHIVE_ENTRY_MAX_BYTES = 512 * 1024
+_ARCHIVE_ENTRY_MAX_CHARS = 200000
+
+
+def _normalize_archive_path(path: str) -> str:
+    raw = str(path or "").replace("\\", "/").strip()
+    while raw.startswith("./"):
+        raw = raw[2:]
+    if not raw or raw.startswith("/") or re.match(r"^[A-Za-z]:/", raw):
+        raise HTTPException(400, "Invalid archive path")
+    norm = posixpath.normpath(raw)
+    if norm in {"", "."} or norm.startswith("../") or norm == ".." or "/../" in f"/{norm}/":
+        raise HTTPException(400, "Invalid archive path")
+    return norm
+
+
+def _archive_path_is_safe(path: str) -> bool:
+    try:
+        _normalize_archive_path(path)
+        return True
+    except HTTPException:
+        return False
+
+
+def _zipinfo_is_symlink(info: zipfile.ZipInfo) -> bool:
+    mode = (info.external_attr >> 16) & 0o170000
+    return stat.S_ISLNK(mode)
+
+
+def _archive_entry_previewable(path: str, size: int, is_dir: bool, unsafe: bool = False, encrypted: bool = False, symlink: bool = False) -> bool:
+    if is_dir or unsafe or encrypted or symlink or int(size or 0) > _ARCHIVE_ENTRY_MAX_BYTES:
+        return False
+    return os.path.splitext(path.lower())[1] in _ARCHIVE_PREVIEW_EXTS
+
+
+def _archive_entry_record(
+    path: str,
+    *,
+    size: int = 0,
+    is_dir: bool = False,
+    compressed_size: int | None = None,
+    modified_at: str | None = None,
+    encrypted: bool = False,
+    symlink: bool = False,
+) -> dict:
+    display_path = str(path or "").replace("\\", "/")
+    unsafe = not _archive_path_is_safe(display_path.rstrip("/") or display_path)
+    clean = display_path.strip("/")
+    if not unsafe:
+        clean = _normalize_archive_path(display_path.rstrip("/") or display_path)
+    clean = clean.rstrip("/") if is_dir else clean
+    parent = posixpath.dirname(clean) if "/" in clean else ""
+    name = posixpath.basename(clean) + ("/" if is_dir else "")
+    ext = os.path.splitext(clean.lower())[1]
+    depth = 0 if not parent else len(parent.split("/"))
+    previewable = _archive_entry_previewable(clean, size, is_dir, unsafe, encrypted, symlink)
+    reason = ""
+    if unsafe:
+        reason = "unsafe path"
+    elif symlink:
+        reason = "symlink"
+    elif encrypted:
+        reason = "encrypted"
+    elif is_dir:
+        reason = "directory"
+    elif int(size or 0) > _ARCHIVE_ENTRY_MAX_BYTES:
+        reason = "oversized"
+    elif ext not in _ARCHIVE_PREVIEW_EXTS:
+        reason = "unsupported type"
+    return {
+        "name": clean + ("/" if is_dir and not clean.endswith("/") else ""),
+        "path": clean,
+        "display_name": name,
+        "parent": parent,
+        "depth": depth,
+        "size": int(size or 0),
+        "compressed_size": compressed_size,
+        "is_dir": bool(is_dir),
+        "modified_at": modified_at,
+        "ext": ext,
+        "previewable": previewable,
+        "unsafe": unsafe,
+        "encrypted": encrypted,
+        "symlink": symlink,
+        "preview_blocked_reason": "" if previewable else reason,
+    }
+
+
 def _archive_contents_for_path(filepath: str, safe_name: str) -> dict:
     import tarfile
-    import zipfile
 
     entries = []
+    archive_type = ""
+    dirs = set()
     if tarfile.is_tarfile(filepath):
+        archive_type = "tar"
         with tarfile.open(filepath, "r:*") as tf:
             for m in tf.getmembers():
-                entries.append({"name": m.name, "size": m.size, "is_dir": m.isdir()})
+                entries.append(_archive_entry_record(
+                    m.name,
+                    size=m.size,
+                    is_dir=m.isdir(),
+                    modified_at=datetime.utcfromtimestamp(m.mtime).isoformat() if m.mtime else None,
+                    symlink=m.issym() or m.islnk(),
+                ))
     elif zipfile.is_zipfile(filepath):
+        archive_type = "zip"
         with zipfile.ZipFile(filepath) as zf:
             for info in zf.infolist():
-                entries.append({"name": info.filename, "size": info.file_size, "is_dir": info.is_dir()})
+                modified_at = None
+                try:
+                    modified_at = datetime(*info.date_time).isoformat()
+                except Exception:
+                    modified_at = None
+                entries.append(_archive_entry_record(
+                    info.filename,
+                    size=info.file_size,
+                    compressed_size=info.compress_size,
+                    is_dir=info.is_dir(),
+                    modified_at=modified_at,
+                    encrypted=bool(info.flag_bits & 0x1),
+                    symlink=_zipinfo_is_symlink(info),
+                ))
     else:
         raise HTTPException(400, "Not a supported archive")
 
+    for entry in list(entries):
+        path = entry.get("path") or ""
+        if entry.get("unsafe"):
+            continue
+        parts = path.split("/")[:-1] if not entry.get("is_dir") else path.split("/")
+        accum = []
+        for part in parts:
+            if not part:
+                continue
+            accum.append(part)
+            dirs.add("/".join(accum))
+    existing_paths = {e["path"] for e in entries if not e.get("unsafe")}
+    for directory in sorted(dirs):
+        if directory and directory not in existing_paths:
+            entries.append(_archive_entry_record(directory, is_dir=True))
+
     def _sort_key(e):
-        parts = e["name"].rstrip("/").split("/")
+        parts = (e.get("path") or "").rstrip("/").split("/")
         key = []
         for i, p in enumerate(parts):
-            is_last = (i == len(parts) - 1)
-            key.append((0 if (e["is_dir"] or not is_last) else 1, p.lower()))
+            is_last = i == len(parts) - 1
+            key.append((0 if (e.get("is_dir") or not is_last) else 1, p.lower()))
         return key
 
     entries.sort(key=_sort_key)
-    return {"filename": safe_name, "file_count": len([e for e in entries if not e["is_dir"]]), "entries": entries}
+    file_count = len([e for e in entries if not e["is_dir"] and not e.get("unsafe")])
+    folder_count = len([e for e in entries if e["is_dir"] and not e.get("unsafe")])
+    return {
+        "filename": safe_name,
+        "archive_type": archive_type,
+        "file_count": file_count,
+        "folder_count": folder_count,
+        "entries": entries,
+        "preview_entry_max_bytes": _ARCHIVE_ENTRY_MAX_BYTES,
+        "preview_max_chars": _ARCHIVE_ENTRY_MAX_CHARS,
+    }
+
+
+def _looks_binary(raw: bytes) -> bool:
+    if b"\x00" in raw:
+        return True
+    if not raw:
+        return False
+    sample = raw[:4096]
+    control = sum(1 for b in sample if b < 32 and b not in {9, 10, 12, 13})
+    return control / max(1, len(sample)) > 0.08
+
+
+def _archive_entry_preview_for_path(filepath: str, safe_name: str, entry_path: str) -> dict:
+    import tarfile
+
+    wanted = _normalize_archive_path(entry_path)
+    if not zipfile.is_zipfile(filepath) and not tarfile.is_tarfile(filepath):
+        raise HTTPException(400, "Artifact is not a supported archive")
+    ext = os.path.splitext(wanted.lower())[1]
+    if ext not in _ARCHIVE_PREVIEW_EXTS:
+        raise HTTPException(415, "Archive entry type is not safe to preview")
+
+    raw = b""
+    meta = {"path": wanted, "filename": safe_name}
+    if zipfile.is_zipfile(filepath):
+        with zipfile.ZipFile(filepath) as zf:
+            matches = [info for info in zf.infolist() if _archive_path_is_safe(info.filename.rstrip("/")) and _normalize_archive_path(info.filename.rstrip("/")) == wanted]
+            if not matches:
+                raise HTTPException(404, "Archive entry not found")
+            info = matches[0]
+            record = _archive_entry_record(
+                info.filename,
+                size=info.file_size,
+                compressed_size=info.compress_size,
+                is_dir=info.is_dir(),
+                encrypted=bool(info.flag_bits & 0x1),
+                symlink=_zipinfo_is_symlink(info),
+            )
+            if record["is_dir"]:
+                raise HTTPException(400, "Archive entry is a directory")
+            if record["symlink"]:
+                raise HTTPException(400, "Archive entry is a symlink")
+            if record["encrypted"]:
+                raise HTTPException(400, "Archive entry is encrypted")
+            if record["size"] > _ARCHIVE_ENTRY_MAX_BYTES:
+                raise HTTPException(413, "Archive entry is too large to preview")
+            raw = zf.read(info)
+            meta.update(record)
+    else:
+        with tarfile.open(filepath, "r:*") as tf:
+            members = [m for m in tf.getmembers() if _archive_path_is_safe(m.name.rstrip("/")) and _normalize_archive_path(m.name.rstrip("/")) == wanted]
+            if not members:
+                raise HTTPException(404, "Archive entry not found")
+            member = members[0]
+            record = _archive_entry_record(
+                member.name,
+                size=member.size,
+                is_dir=member.isdir(),
+                symlink=member.issym() or member.islnk(),
+            )
+            if record["is_dir"]:
+                raise HTTPException(400, "Archive entry is a directory")
+            if record["symlink"]:
+                raise HTTPException(400, "Archive entry is a symlink")
+            if record["size"] > _ARCHIVE_ENTRY_MAX_BYTES:
+                raise HTTPException(413, "Archive entry is too large to preview")
+            extracted = tf.extractfile(member)
+            if not extracted:
+                raise HTTPException(400, "Archive entry cannot be read")
+            raw = extracted.read(_ARCHIVE_ENTRY_MAX_BYTES + 1)
+            meta.update(record)
+
+    if len(raw) > _ARCHIVE_ENTRY_MAX_BYTES:
+        raise HTTPException(413, "Archive entry is too large to preview")
+    if _looks_binary(raw):
+        raise HTTPException(415, "Archive entry appears to be binary")
+    content = _decode_preview_bytes(raw, {"content-type": ""})[:_ARCHIVE_ENTRY_MAX_CHARS]
+    return {
+        "artifact_filename": safe_name,
+        "path": wanted,
+        "preview_type": "archive_entry",
+        "content": content,
+        "language": _language_hint(wanted, "text"),
+        "size": len(raw),
+        "truncated": len(content) >= _ARCHIVE_ENTRY_MAX_CHARS,
+        "entry": meta,
+    }
 
 
 def _artifact_text_preview_allowed(artifact: dict) -> bool:
@@ -715,6 +946,48 @@ class ToolUpdate(BaseModel):
     description: Optional[str] = None
     code: Optional[str] = None
 
+class MCPServerCreate(BaseModel):
+    name: str
+    transport: str = "stdio"
+    command: str = ""
+    url: str = ""
+    args: list[str] = []
+    env: dict = {}
+    headers: dict = {}
+    allow_private: bool = False
+    enabled: bool = True
+
+class MCPServerUpdate(BaseModel):
+    name: Optional[str] = None
+    transport: Optional[str] = None
+    command: Optional[str] = None
+    url: Optional[str] = None
+    args: Optional[list[str]] = None
+    env: Optional[dict] = None
+    headers: Optional[dict] = None
+    allow_private: Optional[bool] = None
+    enabled: Optional[bool] = None
+
+class OpenAPIConnectorCreate(BaseModel):
+    name: str
+    spec_url: str = ""
+    spec_json: Any = ""
+    base_url: str = ""
+    auth: dict = {}
+    headers: dict = {}
+    allow_private: bool = False
+    enabled: bool = True
+
+class OpenAPIConnectorUpdate(BaseModel):
+    name: Optional[str] = None
+    spec_url: Optional[str] = None
+    spec_json: Optional[Any] = None
+    base_url: Optional[str] = None
+    auth: Optional[dict] = None
+    headers: Optional[dict] = None
+    allow_private: Optional[bool] = None
+    enabled: Optional[bool] = None
+
 class ModelConfigCreate(BaseModel):
     name: str
     base_model: str
@@ -796,6 +1069,9 @@ class ArtifactBundleRequest(BaseModel):
     title: Optional[str] = None
     filename: Optional[str] = None
     workspace_ids: Optional[list[str]] = None
+
+class ArtifactMergeDuplicateRequest(BaseModel):
+    duplicate_id: str
 
 
 # ============================================================
@@ -1060,12 +1336,23 @@ async def chat_stream(req: ChatRequest):
     _all_custom = await db.get_tools()
     custom_tool_map: dict = {t["name"]: t for t in _all_custom}
     custom_tool_id_map: dict = {t["id"]: t for t in _all_custom}
+    _all_connector_tools = await db.get_connector_tools(enabled_only=True)
+    connector_tool_id_map: dict = {t["id"]: t for t in _all_connector_tools}
+    connector_tool_name_map: dict = {t["tool_name"]: t for t in _all_connector_tools}
     user_id = db.current_user_id()
 
     async def _stream():
         token = db.set_current_user_id(user_id)
         try:
-            async for chunk in chat_stream_generate(req, http, events, custom_tool_map, custom_tool_id_map):
+            async for chunk in chat_stream_generate(
+                req,
+                http,
+                events,
+                custom_tool_map,
+                custom_tool_id_map,
+                connector_tool_id_map,
+                connector_tool_name_map,
+            ):
                 yield chunk
         finally:
             db.reset_current_user_id(token)
@@ -1120,6 +1407,33 @@ async def get_artifact_ep(artifact_id: str):
     if not artifact:
         raise HTTPException(404, "Artifact not found")
     return artifact
+
+
+@app.get("/api/artifacts/{artifact_id}/duplicates")
+async def get_artifact_duplicates_ep(artifact_id: str):
+    duplicates = await db.get_artifact_duplicates(artifact_id)
+    if duplicates is None:
+        raise HTTPException(404, "Artifact not found")
+    return {"artifact_id": artifact_id, "duplicates": duplicates}
+
+
+@app.get("/api/artifacts/{artifact_id}/timeline")
+async def get_artifact_timeline_ep(artifact_id: str):
+    timeline = await db.get_artifact_timeline(artifact_id)
+    if timeline is None:
+        raise HTTPException(404, "Artifact not found")
+    return {"artifact_id": artifact_id, "events": timeline}
+
+
+@app.post("/api/artifacts/{artifact_id}/merge-duplicate")
+async def merge_artifact_duplicate_ep(artifact_id: str, req: ArtifactMergeDuplicateRequest):
+    try:
+        merged = await db.merge_duplicate_artifact(artifact_id, req.duplicate_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not merged:
+        raise HTTPException(404, "Artifact not found")
+    return merged
 
 
 @app.patch("/api/artifacts/{artifact_id}")
@@ -1264,6 +1578,25 @@ async def preview_artifact_ep(artifact_id: str, max_chars: int = Query(200000, g
         return JSONResponse({"error": f"Failed to read preview: {e}"}, status_code=500)
 
 
+@app.get("/api/artifacts/{artifact_id}/archive-entry")
+async def preview_artifact_archive_entry_ep(artifact_id: str, path: str = Query(..., min_length=1)):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    if (artifact.get("kind") or "").lower() != "archive":
+        raise HTTPException(400, "Artifact is not an archive")
+    filepath, safe_name = _artifact_path_for_row(artifact)
+    if not filepath:
+        await db.update_artifact_file_metadata(artifact_id, exists_status="missing")
+        raise HTTPException(404, "Artifact file is missing")
+    try:
+        return _archive_entry_preview_for_path(filepath, safe_name or artifact.get("filename") or "", path)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Failed to preview archive entry: {e}")
+
+
 @app.post("/api/artifacts/{artifact_id}/check-file")
 async def check_artifact_file_ep(artifact_id: str):
     artifact = await db.get_artifact(artifact_id)
@@ -1349,6 +1682,12 @@ async def add_artifact_to_kb_ep(artifact_id: str, req: ArtifactAddToKBRequest):
             print(f"[RAG] Artifact KB import indexing failed for {safe_name}: {e}")
 
     asyncio.create_task(_bg_index_artifact_import())
+    await db.add_artifact_event(
+        artifact_id,
+        "added_to_kb",
+        f"Added to knowledge base {owned.get('name') or req.kb_id}",
+        {"kb_id": req.kb_id, "kb_name": owned.get("name"), "file_id": file_id, "filename": safe_name},
+    )
     return {"artifact_id": artifact_id, "kb_id": req.kb_id, "file_id": file_id, "filename": safe_name, "indexing": True}
 
 
@@ -1363,7 +1702,7 @@ async def send_artifact_to_research_ep(artifact_id: str, req: ArtifactResearchRe
         content = _extract_indexable_text(filepath, artifact.get("kind") or "", artifact.get("mime_type") or "", max_chars=req.max_chars)
     title = req.title or f"Research: {artifact.get('title') or artifact.get('filename')}"
     query = req.query or f"Analyze this artifact: {artifact.get('title') or artifact.get('filename')}"
-    return await _create_and_start_research_report(ResearchReportCreate(
+    report = await _create_and_start_research_report(ResearchReportCreate(
         title=title,
         query=query,
         focus=req.focus or f"Use artifact {artifact_id} as primary context.",
@@ -1381,6 +1720,13 @@ async def send_artifact_to_research_ep(artifact_id: str, req: ArtifactResearchRe
             "content": content[: max(1000, min(req.max_chars or 50000, 200000))],
         }],
     ))
+    await db.add_artifact_event(
+        artifact_id,
+        "sent_to_research",
+        f"Sent to research report {report.get('title') or report.get('id') or ''}".strip(),
+        {"report_id": report.get("id"), "title": report.get("title"), "query": query},
+    )
+    return report
 
 
 @app.post("/api/artifacts/{artifact_id}/fork-to-codebox")
@@ -1404,7 +1750,7 @@ async def fork_artifact_to_codebox_ep(artifact_id: str):
         data = r.json()
         if r.status_code >= 400 or data.get("exit_code", 0) != 0:
             raise HTTPException(502, data.get("stderr") or "Codebox copy failed")
-        return {
+        result = {
             "artifact_id": artifact_id,
             "path": remote_path,
             "project_path": f"/root/artifacts/{artifact_id}",
@@ -1412,6 +1758,13 @@ async def fork_artifact_to_codebox_ep(artifact_id: str):
             "size_bytes": size,
             "stdout": data.get("stdout", "")[:1000],
         }
+        await db.add_artifact_event(
+            artifact_id,
+            "forked_to_codebox",
+            f"Copied to Codebox at {remote_path}",
+            {"path": remote_path, "project_path": result["project_path"], "size_bytes": size},
+        )
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -1466,6 +1819,18 @@ async def revise_artifact_ep(artifact_id: str, req: ArtifactReviseRequest):
         content_text=content_text,
         tags=req.tags if req.tags is not None else artifact.get("tags", []),
         metadata={**(artifact.get("metadata") or {}), "source_tool": "artifact_revise", "revised_from": artifact["id"]},
+    )
+    await db.add_artifact_event(
+        artifact["id"],
+        "revised",
+        f"Created revision {new_artifact.get('id')}",
+        {"related_artifact_id": new_artifact.get("id"), "filename": new_name},
+    )
+    await db.add_artifact_event(
+        new_artifact["id"],
+        "supersedes",
+        f"Supersedes {artifact['id']}",
+        {"related_artifact_id": artifact["id"], "parent_artifact_id": parent_id},
     )
     return new_artifact
 
@@ -1534,6 +1899,19 @@ async def bundle_artifacts_ep(req: ArtifactBundleRequest):
         tags=["bundle"],
         metadata={"source_tool": "artifact_bundle", "artifact_ids": ids[:100]},
     )
+    await db.add_artifact_event(
+        bundle["id"],
+        "bundled_from",
+        f"Bundled {len(artifacts)} artifact(s)",
+        {"related_artifact_ids": ids[:100]},
+    )
+    for artifact, _path, _safe in artifacts:
+        await db.add_artifact_event(
+            artifact["id"],
+            "included_in_bundle",
+            f"Included in bundle {bundle.get('id')}",
+            {"related_artifact_id": bundle.get("id"), "filename": safe_bundle},
+        )
     return bundle
 
 
@@ -2940,6 +3318,156 @@ async def update_tool_put(tool_id: str, req: ToolUpdate):
     if kwargs:
         await db.update_tool(tool_id, **kwargs)
     return {"status": "updated"}
+
+
+# ============================================================
+# CONNECTORS
+# ============================================================
+def _spec_json_to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value)
+
+
+def _connector_tool_public(tl: dict) -> dict:
+    out = dict(tl)
+    out["name"] = tl.get("display_name") or tl.get("external_name") or tl.get("tool_name")
+    out["description"] = tl.get("description", "")
+    out["icon"] = "plug"
+    out["connector"] = True
+    return out
+
+
+@app.get("/api/connector-tools")
+async def list_connector_tools(enabled_only: bool = Query(True)):
+    tools = await db.get_connector_tools(enabled_only=enabled_only)
+    return [_connector_tool_public(t) for t in tools]
+
+
+@app.get("/api/mcp-servers")
+async def list_mcp_servers():
+    return await db.get_mcp_servers()
+
+
+@app.post("/api/mcp-servers")
+async def create_mcp_server(req: MCPServerCreate):
+    server_id = f"mcp-{uuid.uuid4().hex[:12]}"
+    transport = (req.transport or "stdio").strip().lower()
+    if transport not in {"stdio", "http", "streamable_http", "sse"}:
+        raise HTTPException(400, "transport must be stdio, http, streamable_http, or sse")
+    await db.create_mcp_server(
+        server_id,
+        req.name,
+        transport=transport,
+        command=req.command,
+        url=req.url,
+        args=req.args,
+        env=req.env,
+        headers=req.headers,
+        allow_private=req.allow_private,
+        enabled=req.enabled,
+    )
+    return await db.get_mcp_server(server_id)
+
+
+@app.patch("/api/mcp-servers/{server_id}")
+async def update_mcp_server(server_id: str, req: MCPServerUpdate):
+    kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
+    if "transport" in kwargs:
+        kwargs["transport"] = (kwargs["transport"] or "stdio").strip().lower()
+        if kwargs["transport"] not in {"stdio", "http", "streamable_http", "sse"}:
+            raise HTTPException(400, "transport must be stdio, http, streamable_http, or sse")
+    await db.update_mcp_server(server_id, **kwargs)
+    return await db.get_mcp_server(server_id)
+
+
+@app.delete("/api/mcp-servers/{server_id}")
+async def delete_mcp_server(server_id: str):
+    await db.delete_mcp_server(server_id)
+    return {"status": "deleted"}
+
+
+@app.post("/api/mcp-servers/{server_id}/discover")
+async def discover_mcp_server(server_id: str):
+    try:
+        return await connectors.discover_mcp_server(http, server_id)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/mcp-servers/{server_id}/health")
+async def health_mcp_server(server_id: str):
+    try:
+        result = await connectors.discover_mcp_server(http, server_id)
+        return {"status": "ok", "tool_count": result.get("tool_count", 0)}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/mcp-servers/{server_id}/tools")
+async def list_mcp_server_tools(server_id: str):
+    return [_connector_tool_public(t) for t in await db.get_connector_tools("mcp", server_id, enabled_only=False)]
+
+
+@app.get("/api/openapi-connectors")
+async def list_openapi_connectors():
+    return await db.get_openapi_connectors()
+
+
+@app.post("/api/openapi-connectors")
+async def create_openapi_connector(req: OpenAPIConnectorCreate):
+    connector_id = f"openapi-{uuid.uuid4().hex[:12]}"
+    await db.create_openapi_connector(
+        connector_id,
+        req.name,
+        spec_url=req.spec_url,
+        spec_json=_spec_json_to_text(req.spec_json),
+        base_url=req.base_url,
+        auth=req.auth,
+        headers=req.headers,
+        allow_private=req.allow_private,
+        enabled=req.enabled,
+    )
+    return await db.get_openapi_connector(connector_id)
+
+
+@app.patch("/api/openapi-connectors/{connector_id}")
+async def update_openapi_connector(connector_id: str, req: OpenAPIConnectorUpdate):
+    kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
+    if "spec_json" in kwargs:
+        kwargs["spec_json"] = _spec_json_to_text(kwargs["spec_json"])
+    await db.update_openapi_connector(connector_id, **kwargs)
+    return await db.get_openapi_connector(connector_id)
+
+
+@app.delete("/api/openapi-connectors/{connector_id}")
+async def delete_openapi_connector(connector_id: str):
+    await db.delete_openapi_connector(connector_id)
+    return {"status": "deleted"}
+
+
+@app.post("/api/openapi-connectors/{connector_id}/discover")
+async def discover_openapi_connector(connector_id: str):
+    try:
+        return await connectors.discover_openapi_connector(http, connector_id)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/openapi-connectors/{connector_id}/health")
+async def health_openapi_connector(connector_id: str):
+    try:
+        result = await connectors.discover_openapi_connector(http, connector_id)
+        return {"status": "ok", "tool_count": result.get("tool_count", 0)}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/openapi-connectors/{connector_id}/tools")
+async def list_openapi_connector_tools(connector_id: str):
+    return [_connector_tool_public(t) for t in await db.get_connector_tools("openapi", connector_id, enabled_only=False)]
 
 
 # ============================================================

@@ -54,6 +54,7 @@ SANDBOX_WORKSPACE_DIR = os.path.join(SANDBOX_DIR, "workspace")  # temp working d
 # SETTINGS FILE (persistent JSON for runtime-editable options)
 # ============================================================
 SETTINGS_PATH = os.getenv("SETTINGS_PATH", "/opt/hyprchat/data/settings.json")
+CONNECTOR_SECRETS_PATH = os.getenv("CONNECTOR_SECRETS_PATH", "/opt/hyprchat/data/connector_secrets.json")
 DEFAULT_SETTINGS = {
     "file_cleanup_days": 30,  # 0 = never clean
     "ollama_url": "",  # empty = use OLLAMA_URL from env/default

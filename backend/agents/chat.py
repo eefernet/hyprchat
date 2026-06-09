@@ -14,6 +14,7 @@ import config
 import database as db
 import rag
 from tools import CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls, strip_tool_calls
+from connectors import tool_def_from_connector_tool
 from events import inject_text_tool_prompt, parse_tool_params
 from quick_search import run_quick_search_for_chat
 
@@ -600,7 +601,7 @@ async def _blocked_tool_summary(conv_id: str, tool_name: str, tool_result: str) 
     return "\n".join(lines)
 
 
-async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_id_map):
+async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_id_map, connector_tool_id_map=None, connector_tool_name_map=None):
     """Async generator that yields SSE events for a streaming chat with tool-calling.
 
     Args:
@@ -1060,6 +1061,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     available_tool_names = set()
     ollama_tools = []
     requested_tool_ids = list(req.tool_ids or [])
+    connector_tool_id_map = connector_tool_id_map or {}
+    connector_tool_name_map = connector_tool_name_map or {}
 
     for tid in requested_tool_ids:
         if tid == "codeagent":
@@ -1082,6 +1085,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 }
             })
             available_tool_names.add(ct["name"])
+        elif tid in connector_tool_id_map:
+            ct = connector_tool_id_map[tid]
+            ollama_tools.append(tool_def_from_connector_tool(ct))
+            available_tool_names.add(ct["tool_name"])
         else:
             for tname, tdef in CODEAGENT_TOOLS.items():
                 if tname == tid:
@@ -1897,7 +1904,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     _tool_chars = [0]
                     async def _run_tool_bg(_n=tool_name, _a=tool_args, _c=conv_id, _f=_tf, _tc=_tool_chars, _kb=persona_kb_ids):
                         try:
-                            r = await exec_tool(http, events, _n, _a, _c, custom_tool_map, conv_model=req.model, kb_ids=_kb, artifact_message_id=_assistant_msg_id)
+                            r = await exec_tool(http, events, _n, _a, _c, custom_tool_map, connector_tool_name_map=connector_tool_name_map, conv_model=req.model, kb_ids=_kb, artifact_message_id=_assistant_msg_id)
                             _tc[0] = len(r) if r else 0
                             if not _f.done(): _f.set_result(r)
                         except Exception as _e:

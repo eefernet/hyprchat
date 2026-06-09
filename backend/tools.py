@@ -16,6 +16,7 @@ from datetime import datetime
 import config
 import database as db
 import cancel_registry
+from connectors import execute_connector_tool
 from research import fetch_bytes_safely, run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
 
 # Strip ANSI escape codes from terminal output before feeding back to the model
@@ -1585,12 +1586,14 @@ async def exec_tool(
     args: dict,
     conv_id: str,
     custom_tool_map: dict = None,
+    connector_tool_name_map: dict = None,
     conv_model: str = "",
     kb_ids: list = None,
     artifact_message_id: int | None = None,
 ) -> str:
     """Execute a built-in or custom tool and return the result string."""
     custom_tool_map = custom_tool_map or {}
+    connector_tool_name_map = connector_tool_name_map or {}
     try:
         # ─── v2 workflow gate (deterministic over persuasion) ───────────────
         # Two interlocking states gate every non-meta tool call. Both fire
@@ -5354,6 +5357,29 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                                     for s in (steps[-5:] if steps else [])],
                 })
                 return err_resp
+
+        elif name in connector_tool_name_map:
+            ct = connector_tool_name_map[name]
+            await events.emit(conv_id, "tool_start", {
+                "tool": name,
+                "icon": "plug",
+                "status": f"Calling {ct.get('display_name') or name}...",
+            })
+            try:
+                result = await execute_connector_tool(http, ct, args or {})
+                await events.emit(conv_id, "tool_end", {
+                    "tool": name,
+                    "icon": "plug",
+                    "status": f"OK {ct.get('display_name') or name}",
+                })
+                return result or "No output"
+            except Exception as exec_e:
+                await events.emit(conv_id, "tool_error", {
+                    "tool": name,
+                    "icon": "plug",
+                    "status": f"Error: {str(exec_e)}",
+                })
+                return f"**Connector tool error ({name}):** {str(exec_e)}"
 
         elif name in custom_tool_map:
             ct = custom_tool_map[name]

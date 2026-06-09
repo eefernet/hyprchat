@@ -164,3 +164,130 @@ def test_artifact_v2_filters_tags_workspaces_and_lineage(artifact_db, tmp_path):
     assert detail["parent_artifact_id"] == artifact["id"]
     assert detail["supersedes_artifact_id"] == artifact["id"]
     assert [v["id"] for v in detail["versions"]] == [artifact["id"], child["id"]]
+
+
+def test_artifact_duplicates_are_user_scoped_and_merge_is_non_destructive(artifact_db, tmp_path):
+    db = artifact_db
+    _run(db.create_workspace("ws-canonical", "Canonical"))
+    _run(db.create_workspace("ws-duplicate", "Duplicate"))
+
+    canonical_file = tmp_path / "same-a.txt"
+    duplicate_file = tmp_path / "same-b.txt"
+    canonical_file.write_text("same content", encoding="utf-8")
+    duplicate_file.write_text("same content", encoding="utf-8")
+    sha = "abc123same"
+
+    canonical = _run(db.add_artifact(
+        filename="same-a.txt",
+        url="/api/downloads/same-a.txt",
+        storage_path=str(canonical_file),
+        size_bytes=canonical_file.stat().st_size,
+        sha256=sha,
+        exists_status="present",
+        workspace_ids=["ws-canonical"],
+        tags=["keep"],
+    ))
+    duplicate = _run(db.add_artifact(
+        filename="same-b.txt",
+        url="/api/downloads/same-b.txt",
+        storage_path=str(duplicate_file),
+        size_bytes=duplicate_file.stat().st_size,
+        sha256=sha,
+        exists_status="present",
+        workspace_ids=["ws-duplicate"],
+        tags=["copy-me"],
+    ))
+    _run(db.add_artifact(filename="empty-sha.txt", url="/api/downloads/empty-sha.txt", sha256=""))
+
+    other_user = _run(db.create_user("Other"))
+    token = db.set_current_user_id(other_user["id"])
+    try:
+        _run(db.add_artifact(filename="other.txt", url="/api/downloads/other.txt", sha256=sha))
+    finally:
+        db.reset_current_user_id(token)
+
+    duplicates = _run(db.get_artifact_duplicates(canonical["id"]))
+    assert [d["id"] for d in duplicates] == [duplicate["id"]]
+    detail = _run(db.get_artifact(canonical["id"]))
+    assert [d["id"] for d in detail["duplicates"]] == [duplicate["id"]]
+
+    merged = _run(db.merge_duplicate_artifact(canonical["id"], duplicate["id"]))
+    assert merged["copied_tags"] == ["copy-me"]
+    assert merged["copied_workspace_ids"] == ["ws-duplicate"]
+    assert sorted(merged["canonical"]["tags"]) == ["copy-me", "keep"]
+    assert sorted(merged["canonical"]["workspace_ids"]) == ["ws-canonical", "ws-duplicate"]
+    assert merged["duplicate"]["status"] == "archived"
+    assert canonical_file.exists()
+    assert duplicate_file.exists()
+
+    canonical_timeline = _run(db.get_artifact_timeline(canonical["id"]))
+    duplicate_timeline = _run(db.get_artifact_timeline(duplicate["id"]))
+    assert "duplicate_merged" in {e["event_type"] for e in canonical_timeline}
+    assert "duplicate_archived" in {e["event_type"] for e in duplicate_timeline}
+
+
+def test_artifact_timeline_blends_synthetic_and_durable_events(artifact_db):
+    db = artifact_db
+    parent = _run(db.add_artifact(
+        filename="report.md",
+        url="/api/downloads/report.md",
+        title="Report",
+        sha256="parent-sha",
+        metadata={"source_tool": "download_file"},
+    ))
+    child = _run(db.add_artifact(
+        filename="report-v2.md",
+        url="/api/downloads/report-v2.md",
+        parent_artifact_id=parent["id"],
+        supersedes_artifact_id=parent["id"],
+    ))
+    bundle = _run(db.add_artifact(
+        filename="bundle.zip",
+        url="/api/downloads/bundle.zip",
+        kind="archive",
+        metadata={"source_tool": "artifact_bundle", "artifact_ids": [parent["id"]]},
+    ))
+    _run(db.add_artifact_event(parent["id"], "added_to_kb", "Added to KB", {"kb_id": "kb-1"}))
+
+    parent_timeline = _run(db.get_artifact_timeline(parent["id"]))
+    parent_types = [e["event_type"] for e in parent_timeline]
+    assert "created" in parent_types
+    assert "sourced" in parent_types
+    assert "superseded_by" in parent_types
+    assert "included_in_bundle" in parent_types
+    assert "added_to_kb" in parent_types
+    assert [e["created_at"] for e in parent_timeline] == sorted(e["created_at"] for e in parent_timeline)
+
+    child_timeline = _run(db.get_artifact_timeline(child["id"]))
+    assert "revised" in {e["event_type"] for e in child_timeline}
+
+    bundle_timeline = _run(db.get_artifact_timeline(bundle["id"]))
+    assert "bundled_from" in {e["event_type"] for e in bundle_timeline}
+
+
+def test_archive_entry_preview_helper_safeguards(tmp_path):
+    import zipfile
+
+    main = pytest.importorskip("main")
+    archive = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("docs/readme.md", "# Hello\n")
+        zf.writestr("bin/blob.bin", b"\x00\x01\x02")
+        zf.writestr("large.txt", "x" * (512 * 1024 + 1))
+        zf.writestr("../escape.txt", "nope")
+
+    listing = main._archive_contents_for_path(str(archive), "bundle.zip")
+    readme = next(e for e in listing["entries"] if e["path"] == "docs/readme.md")
+    unsafe = next(e for e in listing["entries"] if "escape.txt" in e["path"])
+    assert readme["previewable"] is True
+    assert unsafe["unsafe"] is True
+
+    preview = main._archive_entry_preview_for_path(str(archive), "bundle.zip", "docs/readme.md")
+    assert preview["content"].startswith("# Hello")
+
+    with pytest.raises(main.HTTPException):
+        main._archive_entry_preview_for_path(str(archive), "bundle.zip", "../escape.txt")
+    with pytest.raises(main.HTTPException):
+        main._archive_entry_preview_for_path(str(archive), "bundle.zip", "large.txt")
+    with pytest.raises(main.HTTPException):
+        main._archive_entry_preview_for_path(str(archive), "bundle.zip", "bin/blob.bin")
