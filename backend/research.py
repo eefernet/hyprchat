@@ -13,6 +13,52 @@ import urllib.parse
 from collections import OrderedDict
 from datetime import datetime
 
+import httpx
+
+import config
+
+
+_WEB_FETCH_CLIENT = None
+_WEB_FETCH_CLIENT_PROXY = None
+
+
+def _outbound_proxy_url() -> str:
+    return (getattr(config, "OUTBOUND_PROXY_URL", "") or "").strip()
+
+
+def _web_fetch_client(http):
+    """Return the normal client or a proxy-scoped client for public web fetches."""
+    proxy = _outbound_proxy_url()
+    if not proxy:
+        return http
+    global _WEB_FETCH_CLIENT, _WEB_FETCH_CLIENT_PROXY
+    if _WEB_FETCH_CLIENT is None or _WEB_FETCH_CLIENT_PROXY != proxy:
+        _WEB_FETCH_CLIENT = httpx.AsyncClient(
+            timeout=httpx.Timeout(300.0, connect=10.0),
+            verify=getattr(config, "HTTP_VERIFY_SSL", True),
+            proxy=proxy,
+            trust_env=False,
+        )
+        _WEB_FETCH_CLIENT_PROXY = proxy
+    return _WEB_FETCH_CLIENT
+
+
+async def close_web_fetch_client() -> None:
+    global _WEB_FETCH_CLIENT, _WEB_FETCH_CLIENT_PROXY
+    if _WEB_FETCH_CLIENT is not None:
+        await _WEB_FETCH_CLIENT.aclose()
+    _WEB_FETCH_CLIENT = None
+    _WEB_FETCH_CLIENT_PROXY = None
+
+
+async def web_get(http, url: str, **kwargs):
+    return await _web_fetch_client(http).get(url, **kwargs)
+
+
+def web_stream(http, method: str, url: str, **kwargs):
+    return _web_fetch_client(http).stream(method, url, **kwargs)
+
+
 # ── Search rate-limit tuning ──
 _SEARCH_BATCH_SIZE = 3
 _SEARCH_BATCH_DELAY_DEEP = 2.0          # seconds between batches in deep research
@@ -192,7 +238,8 @@ async def fetch_bytes_safely(
         if not await _url_safe_for_fetch(current, resolve_dns=resolve_dns):
             raise ValueError("Unsafe URL")
 
-        async with http.stream(
+        async with web_stream(
+            http,
             "GET",
             current,
             timeout=timeout,
@@ -351,7 +398,7 @@ async def _search_google_fallback(http, query: str, count: int = 10) -> list:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
         }
-        r = await http.get(f"https://www.google.com/search?{params}", timeout=12, headers=headers, follow_redirects=True)
+        r = await web_get(http, f"https://www.google.com/search?{params}", timeout=12, headers=headers, follow_redirects=True)
         if r.status_code != 200:
             return []
         html = r.text
@@ -463,7 +510,8 @@ async def _search_wikileaks(http, searxng_url: str, query: str, count: int = 15)
     results = []
     try:
         params = urllib.parse.urlencode({"query": query, "include_onion": "false"})
-        r = await http.get(
+        r = await web_get(
+            http,
             f"https://search.wikileaks.org/?{params}",
             timeout=15,
             headers={"Accept": "application/json, text/html", "User-Agent": "Mozilla/5.0"},
@@ -644,12 +692,13 @@ async def _fetch_github_repo_snapshot(http, url: str) -> dict | None:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
-        meta_r = await http.get(f"https://api.github.com/repos/{owner}/{name}", headers=headers, timeout=15)
+        meta_r = await web_get(http, f"https://api.github.com/repos/{owner}/{name}", headers=headers, timeout=15)
         if meta_r.status_code >= 400:
             return None
         meta = meta_r.json()
         branch = meta.get("default_branch") or "main"
-        tree_r = await http.get(
+        tree_r = await web_get(
+            http,
             f"https://api.github.com/repos/{owner}/{name}/git/trees/{urllib.parse.quote(branch, safe='')}?recursive=1",
             headers=headers,
             timeout=20,
@@ -671,7 +720,7 @@ async def _fetch_github_repo_snapshot(http, url: str) -> dict | None:
             file_url = f"https://api.github.com/repos/{owner}/{name}/contents/{urllib.parse.quote(path, safe='/')}"
             try:
                 file_headers = {**headers, "Accept": "application/vnd.github.raw"}
-                fr = await http.get(file_url, params={"ref": branch}, headers=file_headers, timeout=15)
+                fr = await web_get(http, file_url, params={"ref": branch}, headers=file_headers, timeout=15)
                 if fr.status_code >= 400:
                     continue
                 text = fr.text
@@ -719,8 +768,8 @@ async def _fetch_page(http, url: str) -> dict | None:
     if not await _url_safe_for_fetch(url, resolve_dns=False):
         return None
     try:
-        r = await http.get(url, timeout=15, follow_redirects=True,
-                           headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"})
+        r = await web_get(http, url, timeout=15, follow_redirects=True,
+                          headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"})
         if r.status_code >= 400:
             return None
         final_url = str(getattr(r, "url", "") or url)
@@ -757,8 +806,8 @@ async def _fetch_gov_doc_index(http, url: str) -> dict | None:
     if not await _url_safe_for_fetch(url, resolve_dns=False):
         return None
     try:
-        r = await http.get(url, timeout=15, follow_redirects=True,
-                           headers={"User-Agent": "Mozilla/5.0 (compatible; research-bot)"})
+        r = await web_get(http, url, timeout=15, follow_redirects=True,
+                          headers={"User-Agent": "Mozilla/5.0 (compatible; research-bot)"})
         final_url = str(getattr(r, "url", "") or url)
         if not await _url_safe_for_fetch(final_url, resolve_dns=False):
             return None
@@ -840,8 +889,8 @@ async def _fetch_wikileaks_page(http, url: str) -> dict | None:
     if ".pdf" in lower:
         return {"url": url, "content": f"[PDF document — direct download: {url}]"}
     try:
-        r = await http.get(url, timeout=15, follow_redirects=True,
-                           headers={"User-Agent": "Mozilla/5.0 (compatible; research-bot)"})
+        r = await web_get(http, url, timeout=15, follow_redirects=True,
+                          headers={"User-Agent": "Mozilla/5.0 (compatible; research-bot)"})
         if r.status_code != 200:
             return None
         final_url = str(getattr(r, "url", "") or url)
@@ -2039,7 +2088,6 @@ async def run_research_report(
     This is intentionally additive. `run_deep_research` below keeps the existing
     tool contract used by chat agents and Daedalus.
     """
-    import config
     import database as db
     import rag
     import cancel_registry

@@ -41,6 +41,7 @@ REMOTE_AGENTS = REMOTE_BACKEND + "agents/"
 REMOTE_FRONTEND = "/opt/hyprchat/frontend/dist/"
 REMOTE_OPENHANDS_WORKER = "/opt/openhands-worker/"
 REMOTE_AIDER_VENV = REMOTE_OPENHANDS_WORKER + "aider-venv"
+SEARXNG_PRIVACY_SCRIPT = "scripts/setup-searxng-privacy.sh"
 
 # ── Watched files → (label, remote_dir, needs_restart) ──
 # needs_restart: whether deploying this file requires restarting hyprchat service
@@ -112,7 +113,7 @@ def normalize_config(cfg):
     """Accept both old deploy_monitor keys and the AGENTS.md template keys."""
     if not cfg:
         return cfg
-    for key in ("hyprchat", "codebox"):
+    for key in ("hyprchat", "codebox", "searxng"):
         server = cfg.get(key)
         if not isinstance(server, dict):
             continue
@@ -121,6 +122,8 @@ def normalize_config(cfg):
         if not server.get("pass") and server.get("password"):
             server["pass"] = server["password"]
         server.setdefault("user", "root")
+        if key == "searxng":
+            server.setdefault("dev_ip", server.get("dev") or server.get("dev_host") or "")
     return cfg
 
 
@@ -148,6 +151,38 @@ def prompt_server(label, default_ip="", default_user="root", default_pass=""):
     return {"ip": ip, "user": user, "pass": pw}
 
 
+def prompt_optional_searxng(default=None):
+    """Prompt for the optional SearXNG host. Empty on first setup means skip."""
+    default = default or {}
+    has_default = bool(default.get("ip") or default.get("host"))
+    prompt = "[Y/n]" if has_default else "[y/N]"
+    choice = input(
+        f"  {BLD}{Y}Configure optional SearXNG privacy host?{RST} {prompt} > "
+    ).strip().lower()
+    if not choice and not has_default:
+        print()
+        return None
+    if choice in ("n", "no", "skip", "s"):
+        print()
+        return None
+
+    sx = prompt_server(
+        "SearXNG Server (existing install)",
+        default_ip=default.get("ip") or default.get("host", ""),
+        default_user=default.get("user", "root"),
+        default_pass=default.get("pass") or default.get("password", ""),
+    )
+    if not sx.get("ip"):
+        return None
+    dev_default = default.get("dev_ip") or default.get("dev", "")
+    dev_ip = input(
+        f"    {DIM}Optional dev IP allowed to use :8888{RST} [{C}{dev_default}{RST}]: "
+    ).strip() or dev_default
+    sx["dev_ip"] = dev_ip
+    print()
+    return sx
+
+
 def setup_servers():
     """Interactive first-time setup or reconfigure."""
     clear()
@@ -161,6 +196,7 @@ def setup_servers():
     cfg = normalize_config(load_config() or {})
     hypr_def = cfg.get("hyprchat", {})
     cb_def   = cfg.get("codebox", {})
+    sx_def   = cfg.get("searxng", {})
 
     print(f"  {BLD}{Y}HyprChat Server{RST} {DIM}(backend + frontend){RST}")
     hypr = prompt_server("",
@@ -174,7 +210,11 @@ def setup_servers():
         default_user=cb_def.get("user", "root"),
         default_pass=cb_def.get("pass") or cb_def.get("password", ""))
 
+    sx = prompt_optional_searxng(sx_def)
+
     cfg = {"hyprchat": hypr, "codebox": cb}
+    if sx:
+        cfg["searxng"] = sx
     save_config(cfg)
     print(f"  {G}Config saved to {CONFIG_FILE}{RST}")
     print()
@@ -243,8 +283,13 @@ def _show_journal(target, unit, lines=20):
             print(f"  {DIM}{line}{RST}")
 
 
-def _default_env_text(codebox_ip):
+def _server_configured(server):
+    return isinstance(server, dict) and bool(server.get("ip"))
+
+
+def _default_env_text(codebox_ip, searxng_ip=""):
     """Minimal .env for a fresh HyprChat host. Existing .env files are kept."""
+    searxng_url = f"http://{searxng_ip}:8888" if searxng_ip else "http://127.0.0.1:8888"
     return "\n".join([
         "HOST=0.0.0.0",
         "PORT=8000",
@@ -252,6 +297,8 @@ def _default_env_text(codebox_ip):
         f"CODEBOX_URL=http://{codebox_ip}:8585",
         f"OPENHANDS_URL=http://{codebox_ip}:8586",
         f"AIDER_WORKER_URL=http://{codebox_ip}:8586",
+        f"SEARXNG_URL={searxng_url}",
+        "HYPRCHAT_OUTBOUND_PROXY=",
         "DATABASE_PATH=/opt/hyprchat/data/hyprchat.db",
         "UPLOAD_DIR=/opt/hyprchat/data/uploads",
         "TOOLS_DIR=/opt/hyprchat/data/tools",
@@ -274,8 +321,8 @@ def _hyprchat_host_ready(hypr):
     return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], cmd, timeout=20)
 
 
-def _bootstrap_hyprchat_host(hypr, codebox_ip):
-    env_text = shlex.quote(_default_env_text(codebox_ip))
+def _bootstrap_hyprchat_host(hypr, codebox_ip, searxng_ip=""):
+    env_text = shlex.quote(_default_env_text(codebox_ip, searxng_ip))
     cmd = (
         "set -u\n"
         "if command -v apt-get >/dev/null 2>&1; then\n"
@@ -293,6 +340,107 @@ def _bootstrap_hyprchat_host(hypr, codebox_ip):
         "chown -R hyprchat:hyprchat /opt/hyprchat/data 2>/dev/null || chown -R hyprchat /opt/hyprchat/data\n"
     )
     return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], cmd, timeout=180)
+
+
+def _set_hyprchat_env(hypr, key, value):
+    """Set or replace one key in /opt/hyprchat/.env on the HyprChat host."""
+    cmd = (
+        "set -u\n"
+        "env=/opt/hyprchat/.env\n"
+        f"key={shlex.quote(key)}\n"
+        f"value={shlex.quote(value)}\n"
+        "touch \"$env\"\n"
+        "cp -a \"$env\" \"$env.bak.$(date +%Y%m%d%H%M%S)\" 2>/dev/null || true\n"
+        "tmp=\"${env}.tmp.$$\"\n"
+        "awk -v k=\"$key\" -v v=\"$value\" 'BEGIN{done=0} "
+        "$0 ~ \"^\" k \"=\" {print k \"=\" v; done=1; next} "
+        "{print} END{if(!done) print k \"=\" v}' \"$env\" > \"$tmp\"\n"
+        "mv \"$tmp\" \"$env\"\n"
+        "chmod 640 \"$env\" 2>/dev/null || true\n"
+        "chown hyprchat:hyprchat \"$env\" 2>/dev/null || chown hyprchat \"$env\" 2>/dev/null || true\n"
+    )
+    return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], cmd, timeout=30)
+
+
+def _restart_hyprchat(hypr):
+    ok, out, err = ssh_cmd(
+        hypr["ip"], hypr["user"], hypr["pass"],
+        "systemctl restart hyprchat 2>&1", timeout=150,
+    )
+    if not ok:
+        return False, out, err
+    time.sleep(3)
+    ok2, out2, err2 = ssh_cmd(
+        hypr["ip"], hypr["user"], hypr["pass"],
+        "systemctl is-active hyprchat 2>&1", timeout=20,
+    )
+    return ok2 and "active" in out2, out2, err2
+
+
+def _run_first_time_searxng_setup(cfg):
+    """Run optional SearXNG privacy setup and wire HyprChat to the proxy if active."""
+    sx = cfg.get("searxng")
+    if not _server_configured(sx):
+        print(f"  {DIM}No SearXNG host configured; skipping privacy setup.{RST}")
+        return
+
+    hypr = cfg["hyprchat"]
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), SEARXNG_PRIVACY_SCRIPT)
+    if not os.path.exists(script_path):
+        print(f"  {Y}!{RST} SearXNG privacy script missing: {SEARXNG_PRIVACY_SCRIPT}")
+        return
+
+    print()
+    print(f"  {Y}\u25b6{RST} Running first-time SearXNG privacy setup...")
+    remote_script = f"/root/{os.path.basename(SEARXNG_PRIVACY_SCRIPT)}"
+    ok, err = scp(script_path, sx["ip"], "/root/", sx["user"], sx.get("pass", ""))
+    if not ok:
+        print(f"  {Y}!{RST} Could not copy SearXNG setup script: {err[:300]}")
+        return
+
+    env_parts = [
+        f"HYPRCHAT_IP={shlex.quote(hypr['ip'])}",
+        f"DEV_IP={shlex.quote(sx.get('dev_ip', ''))}",
+        "PROTON_OPENVPN=auto",
+    ]
+    cmd = " ".join(env_parts + ["bash", shlex.quote(remote_script)])
+    ok, out, err = ssh_cmd(sx["ip"], sx["user"], sx.get("pass", ""), cmd, timeout=300)
+    setup_output = "\n".join(x for x in (out, err) if x).strip()
+    if setup_output:
+        for line in setup_output.splitlines()[-24:]:
+            print(f"  {DIM}{line}{RST}")
+    if not ok:
+        print(f"  {Y}!{RST} SearXNG privacy setup failed; HyprChat deploy remains usable.")
+        return
+
+    env_changed = False
+    searxng_url = f"http://{sx['ip']}:8888"
+    ok_env, env_out, env_err = _set_hyprchat_env(hypr, "SEARXNG_URL", searxng_url)
+    if ok_env:
+        env_changed = True
+        print(f"  {G}\u2713{RST} HyprChat SEARXNG_URL set to {searxng_url}")
+    else:
+        print(f"  {Y}!{RST} Could not set SEARXNG_URL: {(env_err or env_out)[:300]}")
+
+    proxy_active = any(line.strip() == "HYPRCHAT_PROXY_ACTIVE=1" for line in setup_output.splitlines())
+    if proxy_active:
+        proxy_url = f"http://{sx['ip']}:8899"
+        ok_env, env_out, env_err = _set_hyprchat_env(hypr, "HYPRCHAT_OUTBOUND_PROXY", proxy_url)
+        if ok_env:
+            env_changed = True
+            print(f"  {G}\u2713{RST} HyprChat outbound proxy set to {proxy_url}")
+        else:
+            print(f"  {Y}!{RST} Could not set HYPRCHAT_OUTBOUND_PROXY: {(env_err or env_out)[:300]}")
+    else:
+        print(f"  {Y}!{RST} SearXNG proxy was not activated; outbound proxy was not set.")
+
+    if env_changed:
+        print(f"  {Y}\u25b6{RST} Restarting HyprChat after SearXNG env update...")
+        ok_restart, restart_out, restart_err = _restart_hyprchat(hypr)
+        if ok_restart:
+            print(f"  {G}\u2713{RST} HyprChat restarted")
+        else:
+            print(f"  {Y}!{RST} HyprChat restart check failed: {(restart_err or restart_out)[:300]}")
 
 
 def _codebox_host_ready(cb):
@@ -417,6 +565,7 @@ def _aider_worker_ready(cb):
 def deploy_changes(changed, cfg):
     """Deploy changed files and restart service only if needed."""
     hypr = cfg["hyprchat"]
+    sx = cfg.get("searxng") if _server_configured(cfg.get("searxng")) else None
     needs_restart = False
     needs_pip = False
     results = []
@@ -428,7 +577,7 @@ def deploy_changes(changed, cfg):
     print(f"  {Y}\u25b6{RST} Checking remote install prerequisites...")
     hypr_ready, _out, hypr_err = _hyprchat_host_ready(hypr)
     if not hypr_ready:
-        ok, out, err = _bootstrap_hyprchat_host(hypr, cb["ip"])
+        ok, out, err = _bootstrap_hyprchat_host(hypr, cb["ip"], sx["ip"] if sx else "")
         if ok:
             print(f"  {G}\u2713{RST} HyprChat host bootstrapped")
         else:
@@ -596,6 +745,9 @@ def draw_monitor(file_states, prev_times, cfg, last_event=""):
     print(f"  {bar()}")
     print(f"  {C}\u25cf{RST} {BLD}HyprChat{RST}  {G}{hypr['user']}@{hypr['ip']}{RST}")
     print(f"  {M}\u25cf{RST} {BLD}Codebox{RST}   {G}{cb['user']}@{cb['ip']}{RST}")
+    sx = cfg.get("searxng")
+    if _server_configured(sx):
+        print(f"  {Y}\u25cf{RST} {BLD}SearXNG{RST}   {G}{sx['user']}@{sx['ip']}{RST}")
     print(f"  {bar()}")
     print()
 
@@ -665,11 +817,16 @@ def main():
         print()
         hypr = cfg["hyprchat"]
         cb   = cfg["codebox"]
+        sx   = cfg.get("searxng")
+        sx_lines = []
+        if _server_configured(sx):
+            sx_lines = [f"  {Y}SearXNG{RST}   {sx['user']}@{sx['ip']}"]
         print(box([
             f"{BLD}     HyprChat Deploy Monitor{RST}",
             "",
             f"  {C}HyprChat{RST}  {hypr['user']}@{hypr['ip']}",
             f"  {M}Codebox{RST}   {cb['user']}@{cb['ip']}",
+            *sx_lines,
             "",
             f"  {BLD}Enter{RST}  Start watching        ",
             f"  {BLD}p{RST}      Push all files now     ",
@@ -696,6 +853,7 @@ def main():
         choice = input(f"  {BLD}Run first-time full deploy now? {RST}[{G}Y{RST}/{R}n{RST}] > ").strip().lower()
         if choice in ("", "y", "yes"):
             push_all(cfg, file_states)
+            _run_first_time_searxng_setup(cfg)
 
     last_event = f"{DIM}Watching for changes...{RST}"
     draw_monitor(file_states, prev_times, cfg, last_event)

@@ -36,7 +36,14 @@ from agents.personas import seed_coder_bot as _seed_coder_bot, seed_coder_bot_v2
 import hf as hf_module
 from hf import parse_ollama_progress
 import rag
-from research import REPORT_TEMPLATES, REPORT_TEMPLATE_MAP, fetch_bytes_safely, run_research_report
+from research import (
+    REPORT_TEMPLATES,
+    REPORT_TEMPLATE_MAP,
+    close_web_fetch_client,
+    fetch_bytes_safely,
+    run_research_report,
+    web_get,
+)
 
 # ============================================================
 # SETTINGS — persistent JSON file
@@ -292,6 +299,7 @@ async def lifespan(app: FastAPI):
         if task:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+    await close_web_fetch_client()
 
 app = FastAPI(title="HyprChat", version="2.0.0", lifespan=lifespan)
 
@@ -310,7 +318,7 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
 
-HTTP_VERIFY_SSL = os.getenv("HTTP_VERIFY_SSL", "true").lower() == "true"
+HTTP_VERIFY_SSL = config.HTTP_VERIFY_SSL
 http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0), verify=HTTP_VERIFY_SSL)
 
 # Workspace helpers only do short classification/title/suggestion work. Keep
@@ -348,6 +356,9 @@ class ChatRequest(BaseModel):
     # Optional workspace context. When memory is enabled for this workspace, the
     # chat agent injects accepted workspace memories and queues new suggestions.
     workspace_id: Optional[str] = None
+    # Optional global HyprChat memory context. When true, the chat agent injects
+    # accepted user-profile/global memories and queues new suggestions.
+    use_memories: Optional[bool] = None
     # Ghost/private mode. When true, this stream must not persist messages,
     # workspace memories, token usage, or RAG/research memory for the turn.
     ephemeral: bool = False
@@ -386,6 +397,7 @@ class ConversationCreate(BaseModel):
     model: str = config.DEFAULT_MODEL
     system_prompt: str = ""
     model_config_id: Optional[str] = None
+    use_memories: Optional[str] = "0"
 
 class ConversationUpdate(BaseModel):
     title: Optional[str] = None
@@ -398,6 +410,7 @@ class ConversationUpdate(BaseModel):
     council_config_id: Optional[str] = None
     model_config_id: Optional[str] = None
     pinned: Optional[str] = None
+    use_memories: Optional[str] = None
 
 class CouncilCreate(BaseModel):
     name: str = "My Council"
@@ -1665,7 +1678,7 @@ async def cancel_coder_workflow(workflow_id: str):
 @app.post("/api/conversations")
 async def create_conversation(req: ConversationCreate):
     id = f"conv-{uuid.uuid4().hex[:12]}"
-    await db.create_conversation(id, req.title, req.model, req.system_prompt, req.model_config_id)
+    await db.create_conversation(id, req.title, req.model, req.system_prompt, req.model_config_id, req.use_memories or "0")
     return {"id": id, **req.model_dump()}
 
 
@@ -2470,6 +2483,202 @@ def _extract_memory_json_array(text: str) -> list:
         return data if isinstance(data, list) else []
     except Exception:
         return []
+
+
+def _looks_like_secret_memory(text: str) -> bool:
+    return bool(re.search(r"(password|api[_ -]?key|secret|private key|token)\s*[:=]", text or "", re.I))
+
+
+@app.get("/api/memory/profile")
+async def get_memory_profile_ep():
+    return await db.get_user_profile()
+
+
+@app.patch("/api/memory/profile")
+async def update_memory_profile_ep(body: dict = Body(...)):
+    return await db.update_user_profile(**body)
+
+
+@app.get("/api/memory/memories")
+async def list_global_memories_ep(
+    status: str = Query("all"),
+    type: str = Query("all"),
+):
+    memories = await db.list_global_memories(
+        status=status,
+        memory_type=type,
+        include_archived=True,
+    )
+    return {"memories": memories}
+
+
+@app.post("/api/memory/memories")
+async def create_global_memory_ep(body: dict = Body(...)):
+    try:
+        mem = await db.create_global_memory(
+            content=body.get("content", ""),
+            memory_type=body.get("type", "semantic"),
+            status=body.get("status", "suggested"),
+            category=body.get("category", "General"),
+            importance=body.get("importance", 3),
+            pinned=body.get("pinned", 0),
+            source_conv_id=body.get("source_conv_id") or body.get("source_conversation_id"),
+            source_conversation_id=body.get("source_conversation_id") or body.get("source_conv_id"),
+            source_message_id=body.get("source_message_id"),
+            confidence=body.get("confidence", 0),
+            valid_from=body.get("valid_from"),
+            valid_until=body.get("valid_until"),
+            supersedes_id=body.get("supersedes_id"),
+            entities=body.get("entities") or [],
+            metadata=body.get("metadata") or {},
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return mem
+
+
+@app.patch("/api/memory/memories/{memory_id}")
+async def update_global_memory_ep(memory_id: str, body: dict = Body(...)):
+    mem = await db.update_global_memory(memory_id, **body)
+    if not mem:
+        raise HTTPException(404, "Memory not found")
+    return mem
+
+
+@app.delete("/api/memory/memories/{memory_id}")
+async def delete_global_memory_ep(memory_id: str):
+    ok = await db.delete_global_memory(memory_id)
+    if not ok:
+        raise HTTPException(404, "Memory not found")
+    return {"ok": True}
+
+
+@app.post("/api/memory/memories/{memory_id}/accept")
+async def accept_global_memory_ep(memory_id: str, body: dict = Body(default={})):
+    mem = await db.accept_global_memory(memory_id, supersedes_id=body.get("supersedes_id"))
+    if not mem:
+        raise HTTPException(404, "Memory not found")
+    return mem
+
+
+@app.post("/api/memory/memories/{memory_id}/reject")
+async def reject_global_memory_ep(memory_id: str):
+    mem = await db.reject_global_memory(memory_id)
+    if not mem:
+        raise HTTPException(404, "Memory not found")
+    return mem
+
+
+@app.post("/api/memory/suggest")
+async def suggest_global_memories_ep(body: dict = Body(default={})):
+    conv_id = body.get("conversation_id")
+    conv_refs = []
+    if conv_id:
+        conv_refs = [{"id": conv_id}]
+    else:
+        conv_refs = [
+            c for c in await db.get_conversations(limit=20)
+            if str(c.get("use_memories") or "0").lower() in {"1", "true", "yes", "on"}
+        ][:4]
+
+    transcript_parts = []
+    for conv_ref in conv_refs:
+        conv = await db.get_conversation(conv_ref.get("id", ""))
+        if not conv:
+            continue
+        bits = [f"Conversation: {conv.get('title') or conv.get('id')}"]
+        for msg in (conv.get("messages") or [])[-10:]:
+            if msg.get("role") not in {"user", "assistant"}:
+                continue
+            meta = msg.get("metadata") or {}
+            if meta.get("persona_first_message"):
+                continue
+            content = (msg.get("content") or "").strip()
+            if not content:
+                continue
+            role = "User" if msg.get("role") == "user" else "Assistant"
+            bits.append(f"{role}: {content[:2500]}")
+        if len(bits) > 1:
+            transcript_parts.append("\n".join(bits))
+
+    transcript = "\n\n---\n\n".join(transcript_parts)[:18000]
+    if len(transcript) < 80:
+        return {"created": 0, "memories": [], "message": "No recent memory-enabled chat content to scan."}
+
+    profile = await db.get_user_profile()
+    profile_hint = json.dumps({
+        "display_name": profile.get("display_name", ""),
+        "interests": profile.get("interests", []),
+        "bio": profile.get("bio", ""),
+    }, ensure_ascii=False)[:2000]
+    model = body.get("model") or getattr(config, "WORKSPACE_MODEL", "") or config.DEFAULT_MODEL
+    prompt = (
+        "You extract useful long-term personal memories for a cross-chat AI assistant.\n"
+        "Return ONLY a JSON array with 0-8 objects. Do not include markdown.\n"
+        "Each object shape:\n"
+        "{\"type\":\"semantic|episodic|procedural\",\"content\":\"one durable memory\","
+        "\"importance\":1-5,\"confidence\":0-1,\"entities\":[\"short names\"],"
+        "\"reason\":\"why it should be remembered\"}\n\n"
+        "Rules:\n"
+        "- Suggest only durable information useful across many future chats.\n"
+        "- Good semantic memories include user preferences, personal background, important people, birthdays, interests, names, and stable constraints.\n"
+        "- Good episodic memories include dated user-confirmed events, decisions, or outcomes.\n"
+        "- Good procedural memories include reusable workflows or recurring user instructions.\n"
+        "- Do not save secrets, credentials, private keys, passwords, raw tokens, or credential-bearing URLs.\n"
+        "- Do not infer sensitive facts; only save what the user clearly states or confirms.\n"
+        "- Do not save generic assistant claims or one-off trivia.\n"
+        "- Prefer fewer high-value memories over many weak ones.\n\n"
+        f"Existing user profile summary: {profile_hint}\n\n{transcript}"
+    )
+
+    try:
+        r = await http.post(
+            f"{config.OLLAMA_URL}/api/generate",
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "think": False,
+                "options": {"temperature": 0.1, "num_ctx": _WORKSPACE_HELPER_NUM_CTX, "num_predict": 900},
+            },
+            timeout=60,
+        )
+        if r.status_code != 200:
+            detail = r.text[:240] if r.text else f"HTTP {r.status_code}"
+            raise HTTPException(r.status_code, f"Ollama error ({model}): {detail}")
+        suggestions = _extract_memory_json_array(r.json().get("response", ""))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Memory scan failed: {e}")
+
+    existing = await db.list_global_memories(status="all")
+    existing_norm = {re.sub(r"\s+", " ", (m.get("content") or "").strip().lower()) for m in existing}
+    created = []
+    for item in suggestions[:8]:
+        if not isinstance(item, dict):
+            continue
+        content = re.sub(r"\s+", " ", str(item.get("content") or "").strip())
+        if len(content) < 12 or len(content) > 800:
+            continue
+        norm = content.lower()
+        if norm in existing_norm or _looks_like_secret_memory(content):
+            continue
+        mem = await db.create_global_memory(
+            content=content,
+            memory_type=item.get("type", "semantic"),
+            status="suggested",
+            importance=item.get("importance", 3),
+            source_conv_id=conv_id,
+            source_conversation_id=conv_id,
+            confidence=item.get("confidence", 0),
+            entities=item.get("entities") if isinstance(item.get("entities"), list) else [],
+            metadata={"reason": item.get("reason", ""), "suggested_by": "global_scan", "model": model},
+        )
+        existing_norm.add(norm)
+        created.append(mem)
+
+    return {"created": len(created), "memories": created}
 
 
 @app.get("/api/workspaces/{ws_id}/memories")
@@ -3321,7 +3530,8 @@ async def img_proxy(u: str):
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="bad url")
     try:
-        r = await http.get(
+        r = await web_get(
+            http,
             u, timeout=8, follow_redirects=True,
             headers={
                 "User-Agent": "Mozilla/5.0 (compatible; image-proxy)",

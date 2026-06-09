@@ -31,7 +31,7 @@ from datetime import date, datetime
 from email.utils import parsedate_to_datetime
 
 import config
-from research import _search_searxng, _rank_urls
+from research import _search_searxng, _rank_urls, web_get
 
 
 # ── 10-min TTL cache, keyed by (query, time_range, categories, engines), bounded LRU ──
@@ -813,7 +813,8 @@ async def _fetch_clean_page(http, url: str) -> dict | None:
         return None
     try:
         async with _FETCH_SEMA:
-            r = await http.get(
+            r = await web_get(
+                http,
                 url, timeout=15, follow_redirects=True,
                 headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                                        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"},
@@ -1153,7 +1154,8 @@ async def _fetch_og_image(http, page_url: str) -> str:
         return ""
     try:
         async with _FETCH_SEMA:
-            resp = await http.get(
+            resp = await web_get(
+                http,
                 page_url, timeout=6, follow_redirects=True,
                 headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

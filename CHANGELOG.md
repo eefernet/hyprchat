@@ -1,4 +1,16 @@
-## Alpha v17.1.2 — June 8, 2026
+## Alpha v17.1.2 — June 10, 2026
+
+### HyprChat Memory & Navigation
+- Added global HyprChat memory that can persist across chats when memory is enabled for a conversation.
+- Added a user profile and memory management panel for profile details, interests, links, manual memories, and reviewed memory suggestions.
+- Added a per-chat memory toggle, including support for enabling memory on an empty chat before the first message creates the saved conversation.
+- Reorganized the left rail so Search, Chat, Research, Council, Memory, Agents, and Prompt Library are always visible.
+- Moved Knowledge Bases, Tools, Model Manager, and Analytics behind an inline expandable More section that opens inside the rail instead of a separate popout.
+
+### Workspace Memory & Ghost Mode
+- Added workspace-scoped memory with reviewed suggestions, accepted memories, and manual memory blocks that can be injected into workspace chats.
+- Added memory review controls for accepting, rejecting, editing, deleting, and manually creating semantic, episodic, and procedural memories.
+- Added Ghost Mode for local-only chats that are not saved, indexed, added to history, or used for workspace memory suggestions.
 
 ### Quick Search
 - Improved same-day event queries so prompts like "WWDC that just took place today" search cleaner event/year/date variants instead of dragging filler words into SearXNG.
@@ -11,10 +23,6 @@
 - Replaced the misleading live "Generating ... chars" status with token-based wording that matches the top-right context meter.
 - Clarified the header context meter tooltip as prompt plus generated tokens against the active `num_ctx`.
 
-### Workspace Memory & Ghost Mode
-- Added workspace-scoped memory with reviewed suggestions, accepted memories, and manual memory blocks that can be injected into workspace chats.
-- Added memory review controls for accepting, rejecting, editing, deleting, and manually creating semantic, episodic, and procedural memories.
-- Added Ghost Mode for local-only chats that are not saved, indexed, added to history, or used for workspace memory suggestions.
 
 ## Alpha v17.1.1 — June 8, 2026
 

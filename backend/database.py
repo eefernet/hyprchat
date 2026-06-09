@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     tool_ids TEXT DEFAULT '[]',
     persona_name TEXT DEFAULT '',
     persona_avatar TEXT DEFAULT '',
+    use_memories TEXT DEFAULT '0',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -143,6 +144,20 @@ CREATE TABLE IF NOT EXISTS memories (
     metadata_json TEXT DEFAULT '{}',
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS user_profile (
+    id TEXT PRIMARY KEY DEFAULT 'default',
+    display_name TEXT DEFAULT '',
+    legal_name TEXT DEFAULT '',
+    birthday TEXT DEFAULT '',
+    age TEXT DEFAULT '',
+    bio TEXT DEFAULT '',
+    interests_json TEXT DEFAULT '[]',
+    links_json TEXT DEFAULT '[]',
+    extra_json TEXT DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS workspace_memory_blocks (
@@ -354,6 +369,20 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_memories_workspace ON memories(workspace_id);
             CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
             CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type);
+            CREATE INDEX IF NOT EXISTS idx_memories_global_status ON memories(status, type) WHERE workspace_id IS NULL;
+            CREATE TABLE IF NOT EXISTS user_profile (
+                id TEXT PRIMARY KEY DEFAULT 'default',
+                display_name TEXT DEFAULT '',
+                legal_name TEXT DEFAULT '',
+                birthday TEXT DEFAULT '',
+                age TEXT DEFAULT '',
+                bio TEXT DEFAULT '',
+                interests_json TEXT DEFAULT '[]',
+                links_json TEXT DEFAULT '[]',
+                extra_json TEXT DEFAULT '{}',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
             CREATE TABLE IF NOT EXISTS workspace_memory_blocks (
                 id TEXT PRIMARY KEY,
                 workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -424,12 +453,26 @@ async def init_db():
 # ============================================================
 # CONVERSATION CRUD
 # ============================================================
-async def create_conversation(id: str, title: str = "New Chat", model: str = "", system_prompt: str = "", model_config_id: str = None):
+async def create_conversation(
+    id: str,
+    title: str = "New Chat",
+    model: str = "",
+    system_prompt: str = "",
+    model_config_id: str = None,
+    use_memories: str = "0",
+):
     db = await get_db()
     try:
         await db.execute(
-            "INSERT INTO conversations (id, title, model, system_prompt, model_config_id) VALUES (?, ?, ?, ?, ?)",
-            (id, title, model, system_prompt, model_config_id)
+            "INSERT INTO conversations (id, title, model, system_prompt, model_config_id, use_memories) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                id,
+                title,
+                model,
+                system_prompt,
+                model_config_id,
+                "1" if str(use_memories).lower() in {"1", "true", "yes", "on"} else "0",
+            ),
         )
         await db.commit()
     finally:
@@ -490,6 +533,19 @@ async def get_conversation(id: str):
         await db.close()
 
 
+async def get_conversation_use_memories(id: str) -> bool:
+    if not id:
+        return False
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT use_memories FROM conversations WHERE id=?", (id,))
+        if not rows:
+            return False
+        return str(rows[0]["use_memories"] or "0").lower() in {"1", "true", "yes", "on"}
+    finally:
+        await db.close()
+
+
 def _scrub_surrogates(v):
     """SQLite's UTF-8 bindings reject any string containing a surrogate
     codepoint (lone \\uD83D etc.). The frontend occasionally sends unpaired
@@ -528,6 +584,8 @@ async def update_conversation(id: str, **kwargs):
         # Serialize list/dict fields
         if "tool_ids" in kwargs and isinstance(kwargs["tool_ids"], list):
             kwargs["tool_ids"] = json.dumps(kwargs["tool_ids"])
+        if "use_memories" in kwargs:
+            kwargs["use_memories"] = "1" if str(kwargs["use_memories"]).lower() in {"1", "true", "yes", "on"} else "0"
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         vals = [_scrub_surrogates(v) for v in kwargs.values()] + [id]
         await db.execute(f"UPDATE conversations SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?", vals)
@@ -1055,6 +1113,92 @@ def _normalize_memory_status(value: str) -> str:
     return value if value in _MEMORY_STATUSES else "suggested"
 
 
+def _coerce_text_list(value) -> list[str]:
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v or "").strip()]
+    if isinstance(value, str):
+        return [v.strip() for v in re.split(r"[\n,]+", value) if v.strip()]
+    return []
+
+
+def _coerce_links(value) -> list:
+    if not isinstance(value, list):
+        return []
+    links = []
+    for item in value:
+        if isinstance(item, dict):
+            label = _scrub_surrogates(str(item.get("label") or item.get("title") or "").strip())
+            url = _scrub_surrogates(str(item.get("url") or item.get("href") or "").strip())
+            note = _scrub_surrogates(str(item.get("note") or "").strip())
+            if label or url:
+                row = {"label": label, "url": url}
+                if note:
+                    row["note"] = note
+                links.append(row)
+        elif str(item or "").strip():
+            links.append({"label": "", "url": _scrub_surrogates(str(item).strip())})
+    return links
+
+
+def _normalize_profile_row(row) -> dict:
+    d = dict(row)
+    d["interests"] = _loads_json(d.pop("interests_json", "[]"), [])
+    d["links"] = _loads_json(d.pop("links_json", "[]"), [])
+    d["extra"] = _loads_json(d.pop("extra_json", "{}"), {})
+    return d
+
+
+async def _ensure_user_profile(conn: aiosqlite.Connection) -> None:
+    now = datetime.utcnow().isoformat()
+    await conn.execute(
+        """INSERT OR IGNORE INTO user_profile
+           (id,display_name,legal_name,birthday,age,bio,interests_json,links_json,extra_json,created_at,updated_at)
+           VALUES('default','','','','','','[]','[]','{}',?,?)""",
+        (now, now),
+    )
+
+
+async def get_user_profile() -> dict:
+    db = await get_db()
+    try:
+        await _ensure_user_profile(db)
+        await db.commit()
+        rows = await db.execute_fetchall("SELECT * FROM user_profile WHERE id='default'")
+        return _normalize_profile_row(rows[0])
+    finally:
+        await db.close()
+
+
+async def update_user_profile(**kwargs) -> dict:
+    allowed = {
+        "display_name", "legal_name", "birthday", "age", "bio",
+        "interests", "links", "extra",
+    }
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    db = await get_db()
+    try:
+        await _ensure_user_profile(db)
+        if fields:
+            if "interests" in fields:
+                fields["interests_json"] = json.dumps(_coerce_text_list(fields.pop("interests")))
+            if "links" in fields:
+                fields["links_json"] = json.dumps(_coerce_links(fields.pop("links")))
+            if "extra" in fields:
+                extra = fields.pop("extra")
+                fields["extra_json"] = json.dumps(extra if isinstance(extra, dict) else {"notes": str(extra or "")})
+            for key in ("display_name", "legal_name", "birthday", "age", "bio"):
+                if key in fields:
+                    fields[key] = _scrub_surrogates(str(fields[key] or "").strip())
+            fields["updated_at"] = datetime.utcnow().isoformat()
+            sets = ",".join(f"{k}=?" for k in fields)
+            await db.execute(f"UPDATE user_profile SET {sets} WHERE id='default'", tuple(fields.values()))
+        await db.commit()
+        rows = await db.execute_fetchall("SELECT * FROM user_profile WHERE id='default'")
+        return _normalize_profile_row(rows[0])
+    finally:
+        await db.close()
+
+
 async def get_workspace_basic(ws_id: str) -> dict | None:
     db = await get_db()
     try:
@@ -1347,6 +1491,270 @@ def _content_tokens(text: str) -> set[str]:
 
 def _memory_current_clause(now: str) -> str:
     return "(valid_until IS NULL OR valid_until='' OR valid_until>?)"
+
+
+async def list_global_memories(
+    *,
+    status: str | None = None,
+    memory_type: str | None = None,
+    include_archived: bool = True,
+) -> list[dict]:
+    clauses = ["workspace_id IS NULL"]
+    vals = []
+    if status and status != "all":
+        clauses.append("status=?")
+        vals.append(_normalize_memory_status(status))
+    elif not include_archived:
+        clauses.append("status!='archived'")
+    if memory_type and memory_type != "all":
+        clauses.append("type=?")
+        vals.append(_normalize_memory_type(memory_type))
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            f"""SELECT * FROM memories WHERE {' AND '.join(clauses)}
+                ORDER BY
+                  CASE status WHEN 'suggested' THEN 0 WHEN 'accepted' THEN 1 ELSE 2 END,
+                  pinned DESC,
+                  importance DESC,
+                  COALESCE(updated_at, created_at) DESC""",
+            vals,
+        )
+        return [_normalize_memory_row(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def create_global_memory(
+    *,
+    content: str,
+    memory_type: str = "semantic",
+    status: str = "suggested",
+    category: str = "General",
+    importance: int = 3,
+    pinned: int = 0,
+    source_conv_id: str | None = None,
+    source_conversation_id: str | None = None,
+    source_message_id: int | None = None,
+    confidence: float = 0,
+    valid_from: str | None = None,
+    valid_until: str | None = None,
+    supersedes_id: str | None = None,
+    entities: list | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    mem_id = f"mem-{uuid.uuid4().hex[:12]}"
+    now = datetime.utcnow().isoformat()
+    clean_content = _scrub_surrogates((content or "").strip())
+    if not clean_content:
+        raise ValueError("memory content is required")
+    mtype = _normalize_memory_type(memory_type)
+    mstatus = _normalize_memory_status(status)
+    importance = max(1, min(5, int(importance or 3)))
+    db = await get_db()
+    try:
+        await db.execute(
+            """INSERT INTO memories
+               (id,workspace_id,content,type,status,category,importance,pinned,
+                source_conv_id,source_conversation_id,source_message_id,confidence,
+                valid_from,valid_until,supersedes_id,entities_json,metadata_json,updated_at,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                mem_id, None, clean_content, mtype, mstatus, category or "General",
+                importance, 1 if pinned else 0, source_conv_id or source_conversation_id,
+                source_conversation_id or source_conv_id, source_message_id,
+                float(confidence or 0), valid_from, valid_until, supersedes_id,
+                json.dumps(entities or []), json.dumps(metadata or {}), now, now,
+            ),
+        )
+        await db.commit()
+        rows = await db.execute_fetchall("SELECT * FROM memories WHERE id=?", (mem_id,))
+        return _normalize_memory_row(rows[0])
+    finally:
+        await db.close()
+
+
+async def update_global_memory(memory_id: str, **kwargs) -> dict | None:
+    allowed = {
+        "content", "type", "status", "category", "importance", "pinned",
+        "confidence", "valid_from", "valid_until", "supersedes_id",
+        "entities", "metadata",
+    }
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        rows = await list_global_memories(status="all")
+        return next((m for m in rows if m["id"] == memory_id), None)
+    if "type" in fields:
+        fields["type"] = _normalize_memory_type(fields["type"])
+    if "status" in fields:
+        fields["status"] = _normalize_memory_status(fields["status"])
+    if "importance" in fields:
+        fields["importance"] = max(1, min(5, int(fields["importance"] or 3)))
+    if "pinned" in fields:
+        fields["pinned"] = 1 if fields["pinned"] else 0
+    if "content" in fields:
+        fields["content"] = _scrub_surrogates((fields["content"] or "").strip())
+    if "entities" in fields:
+        fields["entities_json"] = json.dumps(fields.pop("entities") or [])
+    if "metadata" in fields:
+        fields["metadata_json"] = json.dumps(fields.pop("metadata") or {})
+    fields["updated_at"] = datetime.utcnow().isoformat()
+    sets = ",".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [memory_id]
+    db = await get_db()
+    try:
+        await db.execute(f"UPDATE memories SET {sets} WHERE id=? AND workspace_id IS NULL", vals)
+        await db.commit()
+        rows = await db.execute_fetchall("SELECT * FROM memories WHERE id=? AND workspace_id IS NULL", (memory_id,))
+        return _normalize_memory_row(rows[0]) if rows else None
+    finally:
+        await db.close()
+
+
+async def accept_global_memory(memory_id: str, supersedes_id: str | None = None) -> dict | None:
+    now = datetime.utcnow().isoformat()
+    db = await get_db()
+    try:
+        if supersedes_id:
+            await db.execute(
+                "UPDATE memories SET valid_until=?, updated_at=? WHERE id=? AND workspace_id IS NULL",
+                (now, now, supersedes_id),
+            )
+        await db.execute(
+            """UPDATE memories
+               SET status='accepted',
+                   supersedes_id=COALESCE(?, supersedes_id),
+                   valid_from=COALESCE(valid_from, ?),
+                   updated_at=?
+               WHERE id=? AND workspace_id IS NULL""",
+            (supersedes_id, now, now, memory_id),
+        )
+        await db.commit()
+        rows = await db.execute_fetchall("SELECT * FROM memories WHERE id=? AND workspace_id IS NULL", (memory_id,))
+        return _normalize_memory_row(rows[0]) if rows else None
+    finally:
+        await db.close()
+
+
+async def reject_global_memory(memory_id: str) -> dict | None:
+    return await update_global_memory(memory_id, status="rejected")
+
+
+async def delete_global_memory(memory_id: str) -> bool:
+    db = await get_db()
+    try:
+        cur = await db.execute("DELETE FROM memories WHERE id=? AND workspace_id IS NULL", (memory_id,))
+        await db.commit()
+        return cur.rowcount > 0
+    finally:
+        await db.close()
+
+
+def _format_profile_context(profile: dict, remaining: int) -> tuple[list[str], int, bool]:
+    lines = []
+    has_content = False
+    field_rows = [
+        ("Preferred name", profile.get("display_name")),
+        ("Legal name", profile.get("legal_name")),
+        ("Birthday", profile.get("birthday")),
+        ("Age", profile.get("age")),
+        ("Bio", profile.get("bio")),
+    ]
+    profile_bits = []
+    for label, value in field_rows:
+        text = str(value or "").strip()
+        if text:
+            profile_bits.append(f"{label}: {text}")
+    interests = [str(v).strip() for v in (profile.get("interests") or []) if str(v or "").strip()]
+    if interests:
+        profile_bits.append("Interests: " + ", ".join(interests[:30]))
+    links = []
+    for link in profile.get("links") or []:
+        if not isinstance(link, dict):
+            continue
+        label = str(link.get("label") or "").strip()
+        url = str(link.get("url") or "").strip()
+        note = str(link.get("note") or "").strip()
+        if label and url:
+            item = f"{label}: {url}"
+        else:
+            item = label or url
+        if item and note:
+            item += f" ({note})"
+        if item:
+            links.append(item)
+    if links:
+        profile_bits.append("Links: " + "; ".join(links[:12]))
+    extra = profile.get("extra") if isinstance(profile.get("extra"), dict) else {}
+    notes = str(extra.get("notes") or "").strip()
+    if notes:
+        profile_bits.append("Notes: " + notes)
+    if profile_bits and remaining > 300:
+        text = "\n".join(profile_bits)
+        chunk = text[:min(len(text), remaining, 2200)]
+        lines.append("[User Profile]\n" + chunk)
+        remaining -= len(chunk)
+        has_content = True
+    return lines, remaining, has_content
+
+
+async def build_global_memory_context(*, query: str = "", max_chars: int = 4200) -> dict:
+    profile = await get_user_profile()
+    remaining = max(1000, int(max_chars or 4200))
+    lines, remaining, has_memory_content = _format_profile_context(profile, remaining)
+
+    now = datetime.utcnow().isoformat()
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            f"""SELECT * FROM memories
+                WHERE workspace_id IS NULL
+                  AND status='accepted'
+                  AND {_memory_current_clause(now)}
+                ORDER BY pinned DESC, importance DESC, COALESCE(updated_at, created_at) DESC
+                LIMIT 80""",
+            (now,),
+        )
+    finally:
+        await db.close()
+
+    q_tokens = _content_tokens(query)
+    scored = []
+    for row in rows:
+        mem = _normalize_memory_row(row)
+        m_tokens = _content_tokens(mem.get("content") or "")
+        overlap = len(q_tokens & m_tokens)
+        score = (20 if mem.get("pinned") else 0) + int(mem.get("importance") or 3) * 4 + overlap * 6
+        scored.append((score, mem))
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    memory_ids = []
+    grouped = {"semantic": [], "episodic": [], "procedural": []}
+    for _, mem in scored:
+        if remaining <= 500:
+            break
+        content = (mem.get("content") or "").strip()
+        if not content:
+            continue
+        prefix = "[pinned] " if mem.get("pinned") else ""
+        item = f"- {prefix}{content}"
+        if len(item) > remaining:
+            item = item[:remaining - 20] + "..."
+        grouped.setdefault(mem.get("type") or "semantic", []).append(item)
+        memory_ids.append(mem["id"])
+        remaining -= len(item)
+        if len(memory_ids) >= 12:
+            break
+
+    for typ, title in [("semantic", "Facts and Preferences"), ("episodic", "Past Events"), ("procedural", "Procedures")]:
+        if grouped.get(typ):
+            lines.append(f"\n[{title}]\n" + "\n".join(grouped[typ]))
+            has_memory_content = True
+
+    context = "\n".join(lines).strip() if has_memory_content else ""
+    if len(context) > max_chars:
+        context = context[:max_chars - 38] + "\n[...HyprChat memory truncated...]"
+    return {"profile": profile, "context": context, "memory_ids": memory_ids}
 
 
 async def build_workspace_memory_context(

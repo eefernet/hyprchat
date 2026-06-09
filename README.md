@@ -204,11 +204,16 @@ OLLAMA_URL=http://127.0.0.1:11434
 CODEBOX_URL=http://127.0.0.1:8585
 OPENHANDS_URL=http://127.0.0.1:8586
 SEARXNG_URL=http://127.0.0.1:8888
+HYPRCHAT_OUTBOUND_PROXY=
 
 DEFAULT_MODEL=qwen3.5:27b
 PLANNING_MODEL=qwen3.5:27b
 CODER_MODEL=qwen2.5-coder:14b
 ```
+
+`HYPRCHAT_OUTBOUND_PROXY` is optional. The first-time deploy monitor can set it
+to `http://<searxng-host>:8899` after the SearXNG privacy setup verifies that a
+Proton OpenVPN tunnel and host-local proxy are active.
 
 Runtime settings live in the Settings overlay. Source defaults live in `backend/config.py`.
 
@@ -221,6 +226,30 @@ python3 deploy_monitor.py
 ```
 
 It reads `.deploy_config.json`, pushes changed backend/frontend files, restarts HyprChat after backend changes, and deploys `backend/openhands_worker.py` to Codebox when needed.
+
+Optional `.deploy_config.json` SearXNG entry:
+
+```json
+{
+  "hyprchat": {"host": "192.168.1.120", "user": "root", "password": "<local-only-password>"},
+  "codebox": {"host": "192.168.1.201", "user": "root", "password": "<local-only-password>"},
+  "searxng": {
+    "host": "192.168.1.141",
+    "user": "root",
+    "password": "<local-only-password>",
+    "dev_ip": "<optional-dev-ip>"
+  }
+}
+```
+
+On first-time full deploy, a configured `searxng` host runs
+`scripts/setup-searxng-privacy.sh`. The script hardens an existing SearXNG
+install; it does not install SearXNG or create Proton credentials. To activate
+the VPN-backed proxy, place Proton OpenVPN files at
+`/etc/openvpn/proton-ovpn/*.ovpn` and credentials at
+`/etc/openvpn/proton-ovpn/auth.txt` on the SearXNG host before running setup. If
+those files are absent, deploy continues with a warning and does not set
+`HYPRCHAT_OUTBOUND_PROXY`.
 
 Manual deploy:
 

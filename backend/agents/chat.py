@@ -193,6 +193,105 @@ async def _suggest_workspace_memories(
         print(f"[CHAT] workspace memory suggestion failed (non-fatal): {e}")
 
 
+async def _suggest_global_memories(
+    req,
+    http,
+    events,
+    conv_id: str,
+    user_text: str,
+    assistant_text: str,
+    assistant_msg_id: int | None,
+):
+    if len((user_text or "") + (assistant_text or "")) < 120:
+        return
+    model = getattr(config, "WORKSPACE_MODEL", "") or getattr(req, "model", "") or config.DEFAULT_MODEL
+    prompt = (
+        "You extract useful long-term personal memories for a cross-chat AI assistant.\n"
+        "Return ONLY a JSON array with 0-5 objects. Do not include markdown.\n"
+        "Each object shape:\n"
+        "{\"type\":\"semantic|episodic|procedural\",\"content\":\"one durable memory\","
+        "\"importance\":1-5,\"confidence\":0-1,\"entities\":[\"short names\"],"
+        "\"reason\":\"why it should be remembered\"}\n\n"
+        "Rules:\n"
+        "- Suggest only durable information useful across many future chats.\n"
+        "- Good semantic memories include user preferences, personal background, important people, birthdays, interests, names, and stable constraints.\n"
+        "- Good episodic memories include dated user-confirmed events, decisions, or outcomes.\n"
+        "- Good procedural memories include reusable workflows or recurring user instructions.\n"
+        "- Do not save secrets, credentials, private keys, passwords, raw tokens, or credential-bearing URLs.\n"
+        "- Do not infer sensitive facts; only save what the user clearly states or confirms.\n"
+        "- Do not save generic assistant claims or one-off trivia.\n"
+        "- Prefer fewer high-value memories over many weak ones.\n\n"
+        f"User turn:\n{(user_text or '')[:5000]}\n\n"
+        f"Assistant answer:\n{(assistant_text or '')[:7000]}"
+    )
+    try:
+        await events.emit(conv_id, "tool_start", {
+            "tool": "memory", "icon": "brain",
+            "status": "Reviewing turn for HyprChat memory suggestions...",
+        })
+        r = await http.post(
+            f"{config.OLLAMA_URL}/api/generate",
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "think": False,
+                "options": {"temperature": 0.1, "num_ctx": 4096, "num_predict": 700},
+            },
+            timeout=45,
+        )
+        if r.status_code != 200:
+            await events.emit(conv_id, "tool_done", {
+                "tool": "memory", "icon": "brain",
+                "status": "HyprChat memory suggestion skipped (helper model unavailable).",
+            })
+            return
+        suggestions = _extract_json_array(r.json().get("response", ""))
+        if not suggestions:
+            await events.emit(conv_id, "tool_done", {
+                "tool": "memory", "icon": "brain",
+                "status": "No new HyprChat memories suggested.",
+            })
+            return
+        existing = await db.list_global_memories(status="all")
+        existing_norm = {re.sub(r"\s+", " ", (m.get("content") or "").strip().lower()) for m in existing}
+        created = 0
+        for item in suggestions[:5]:
+            if not isinstance(item, dict):
+                continue
+            content = re.sub(r"\s+", " ", str(item.get("content") or "").strip())
+            if len(content) < 12 or len(content) > 800:
+                continue
+            norm = content.lower()
+            if norm in existing_norm:
+                continue
+            if re.search(r"(password|api[_ -]?key|secret|private key|token)\s*[:=]", content, re.I):
+                continue
+            try:
+                await db.create_global_memory(
+                    content=content,
+                    memory_type=item.get("type", "semantic"),
+                    status="suggested",
+                    importance=item.get("importance", 3),
+                    source_conv_id=conv_id,
+                    source_conversation_id=conv_id,
+                    source_message_id=assistant_msg_id,
+                    confidence=item.get("confidence", 0),
+                    entities=item.get("entities") if isinstance(item.get("entities"), list) else [],
+                    metadata={"reason": item.get("reason", ""), "suggested_by": "global_helper"},
+                )
+                existing_norm.add(norm)
+                created += 1
+            except Exception as _ce:
+                print(f"[CHAT] global memory suggestion insert failed: {_ce}")
+        await events.emit(conv_id, "tool_done", {
+            "tool": "memory", "icon": "brain",
+            "status": f"Queued {created} HyprChat memory suggestion{'s' if created != 1 else ''} for review." if created else "No new HyprChat memories suggested.",
+        })
+    except Exception as e:
+        print(f"[CHAT] global memory suggestion failed (non-fatal): {e}")
+
+
 # ── Tool-calling templates keyed by model family ──
 TOOL_TEMPLATES = {
     "chatml": {
@@ -690,6 +789,38 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     if "num_ctx" not in model_options:
         model_options["num_ctx"] = config.coerce_num_ctx(config.DEFAULT_NUM_CTX)
 
+    global_memory_enabled = False
+    if not ephemeral:
+        raw_use_memories = getattr(req, "use_memories", None)
+        if raw_use_memories is None:
+            try:
+                global_memory_enabled = await db.get_conversation_use_memories(conv_id)
+            except Exception as _gme:
+                print(f"[CHAT] Conversation memory flag lookup failed (non-fatal): {_gme}")
+                global_memory_enabled = False
+        else:
+            global_memory_enabled = str(raw_use_memories).lower() in {"1", "true", "yes", "on"}
+
+    global_memory_info = {"profile": None, "context": "", "memory_ids": []}
+    if global_memory_enabled and not ephemeral:
+        try:
+            global_memory_info = await db.build_global_memory_context(
+                query=last_user_msg,
+                max_chars=4200,
+            )
+            if global_memory_info.get("context"):
+                mem_count = len(global_memory_info.get("memory_ids") or [])
+                await events.emit(conv_id, "tool_done", {
+                    "tool": "memory", "icon": "brain",
+                    "status": (
+                        f"Recalled {mem_count} HyprChat memor{'y' if mem_count == 1 else 'ies'}"
+                        if mem_count else "Recalled HyprChat profile"
+                    ),
+                })
+        except Exception as _gme:
+            print(f"[CHAT] HyprChat memory context failed (non-fatal): {_gme}")
+            global_memory_info = {"profile": None, "context": "", "memory_ids": []}
+
     workspace_memory_info = {"workspace": None, "context": "", "memory_ids": [], "block_ids": []}
     if not ephemeral:
         try:
@@ -720,6 +851,15 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             "the user's query. Use them to accurately answer questions. "
             "Each excerpt shows its source file and relevance score.\n\n"
             + kb_context
+        )
+    if global_memory_info.get("context"):
+        effective_system += (
+            "\n\n=== HYPRCHAT MEMORY ===\n"
+            "The following user profile and cross-chat memories were explicitly entered "
+            "or accepted by the user. Use them as persistent context when relevant. "
+            "If this context conflicts with the latest user message, ask or follow the "
+            "latest explicit user instruction.\n\n"
+            + global_memory_info["context"]
         )
     if workspace_memory_info.get("context"):
         effective_system += (
@@ -2012,6 +2152,16 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 except Exception as _te:
                     print(f"[CHAT] Token recording error: {_te}")
             if not ephemeral:
+                if global_memory_enabled:
+                    await _suggest_global_memories(
+                        req,
+                        http,
+                        events,
+                        conv_id,
+                        last_user_msg,
+                        content,
+                        _assistant_msg_id,
+                    )
                 await _suggest_workspace_memories(
                     req,
                     http,
