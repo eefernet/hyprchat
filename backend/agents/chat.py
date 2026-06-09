@@ -1897,7 +1897,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     _tool_chars = [0]
                     async def _run_tool_bg(_n=tool_name, _a=tool_args, _c=conv_id, _f=_tf, _tc=_tool_chars, _kb=persona_kb_ids):
                         try:
-                            r = await exec_tool(http, events, _n, _a, _c, custom_tool_map, conv_model=req.model, kb_ids=_kb)
+                            r = await exec_tool(http, events, _n, _a, _c, custom_tool_map, conv_model=req.model, kb_ids=_kb, artifact_message_id=_assistant_msg_id)
                             _tc[0] = len(r) if r else 0
                             if not _f.done(): _f.set_result(r)
                         except Exception as _e:

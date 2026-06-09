@@ -55,6 +55,7 @@ anthropic_api_key*
 # -------------------------
 # AI agent local files
 # -------------------------
+docs/hyprchat-feature-roadmap.md
 .codex/
 .claude/
 .agents/

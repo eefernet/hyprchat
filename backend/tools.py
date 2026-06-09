@@ -4,6 +4,7 @@ Tool definitions and execution dispatch for HyprChat's integrated CodeAgent.
 import asyncio
 import base64
 import calendar
+import hashlib
 import json
 import os
 import re
@@ -21,6 +22,55 @@ from research import fetch_bytes_safely, run_deep_research, run_conspiracy_resea
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub('', text)
+
+
+def _artifact_file_metadata(path: str) -> dict:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return {"size_bytes": os.path.getsize(path), "sha256": h.hexdigest()}
+
+
+def _artifact_index_text(path: str, filename: str, kind: str, mime_type: str = "", max_chars: int = 500000) -> str:
+    kind = (kind or db.artifact_kind_for_filename(filename, mime_type)).lower()
+    lower = (filename or "").lower()
+    try:
+        if kind in {"image", "pdf"}:
+            meta = _artifact_file_metadata(path)
+            return f"{filename}\n{kind.upper()} artifact\nsize_bytes={meta['size_bytes']}\nsha256={meta['sha256']}"
+        if kind == "archive":
+            import tarfile
+            import zipfile
+            lines = [f"Archive: {filename}"]
+            if tarfile.is_tarfile(path):
+                with tarfile.open(path, "r:*") as tf:
+                    for member in tf.getmembers()[:500]:
+                        lines.append(f"{member.name}{'/' if member.isdir() else ''} {member.size} bytes")
+            elif zipfile.is_zipfile(path):
+                with zipfile.ZipFile(path) as zf:
+                    for info in zf.infolist()[:500]:
+                        lines.append(f"{info.filename}{'/' if info.is_dir() else ''} {info.file_size} bytes")
+            return "\n".join(lines)[:max_chars]
+        text_exts = (
+            ".txt", ".log", ".md", ".markdown", ".html", ".htm", ".py", ".js", ".jsx",
+            ".ts", ".tsx", ".json", ".jsonl", ".csv", ".tsv", ".css", ".sh", ".rs",
+            ".go", ".java", ".c", ".cpp", ".yaml", ".yml", ".toml", ".xml", ".ini",
+            ".conf", ".cfg",
+        )
+        if kind in {"html", "markdown", "code", "data", "text"} or lower.endswith(text_exts):
+            with open(path, "rb") as f:
+                raw = f.read(min(max_chars * 4, 4 * 1024 * 1024))
+            text = raw.decode("utf-8", errors="replace")
+            if kind == "html" or lower.endswith((".html", ".htm")):
+                text = re.sub(r"<script[^>]*>.*?</script>", " ", text, flags=re.I | re.S)
+                text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.I | re.S)
+                text = re.sub(r"<[^>]+>", " ", text)
+                text = re.sub(r"\s+", " ", text).strip()
+            return text[:max_chars]
+    except Exception as e:
+        print(f"[ArtifactIndex] {e}")
+    return ""
 
 
 def _parse_ts_loose(s) -> "datetime | None":
@@ -1528,7 +1578,17 @@ def _get_run_cmd(language: str, filepath: str) -> str:
 
 # ── Tool execution dispatcher ──
 
-async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_tool_map: dict = None, conv_model: str = "", kb_ids: list = None) -> str:
+async def exec_tool(
+    http,
+    events,
+    name: str,
+    args: dict,
+    conv_id: str,
+    custom_tool_map: dict = None,
+    conv_model: str = "",
+    kb_ids: list = None,
+    artifact_message_id: int | None = None,
+) -> str:
     """Execute a built-in or custom tool and return the result string."""
     custom_tool_map = custom_tool_map or {}
     try:
@@ -2582,6 +2642,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, filename)
                 with open(filepath, "wb") as f:
                     f.write(base64.b64decode(b64_data))
+                file_meta = _artifact_file_metadata(filepath)
                 download_url = f"/api/downloads/{filename}"
                 await events.emit(conv_id, "tool_end", {"tool": "download_file", "icon": "code",
                     "status": f"{filename} ready",
@@ -2589,15 +2650,41 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 })
                 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
                 _ext = os.path.splitext(filename)[1].lower()
+                artifact = None
+                try:
+                    cf_id = f"cf-{uuid.uuid4().hex[:8]}"
+                    _mime = db.artifact_mime_type_for_filename(filename)
+                    _kind = db.artifact_kind_for_filename(filename, _mime)
+                    artifact = await db.add_conversation_file(
+                        cf_id,
+                        conv_id,
+                        filename,
+                        download_url,
+                        message_id=artifact_message_id,
+                        kind=_kind,
+                        mime_type=_mime,
+                        storage_path=filepath,
+                        size_bytes=file_meta["size_bytes"],
+                        sha256=file_meta["sha256"],
+                        exists_status="present",
+                        status="draft",
+                        content_text=_artifact_index_text(filepath, filename, _kind, _mime),
+                        metadata={
+                            "source_tool": "download_file",
+                            "source_path": path,
+                            "size_bytes": file_meta["size_bytes"],
+                            "sha256": file_meta["sha256"],
+                        },
+                    )
+                except Exception as e:
+                    print(f"[FileTrack] {e}")
                 await events.emit(conv_id, "file_ready", {
                     "filename": filename, "url": download_url,
                     "is_image": _ext in _IMAGE_EXTS,
+                    "artifact_id": (artifact or {}).get("id"),
+                    "kind": (artifact or {}).get("kind") or db.artifact_kind_for_filename(filename),
+                    "mime_type": (artifact or {}).get("mime_type") or db.artifact_mime_type_for_filename(filename),
                 })
-                try:
-                    cf_id = f"cf-{uuid.uuid4().hex[:8]}"
-                    await db.add_conversation_file(cf_id, conv_id, filename, download_url)
-                except Exception as e:
-                    print(f"[FileTrack] {e}")
                 if _ext in _IMAGE_EXTS:
                     return f"![{filename}]({download_url})\n\n**[Download {filename}]({download_url})**"
                 return f"**[Download {filename}]({download_url})**"
@@ -2860,6 +2947,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, tarname)
                 with open(filepath, "wb") as f:
                     f.write(base64.b64decode(b64_data))
+                file_meta = _artifact_file_metadata(filepath)
                 download_url = f"/api/downloads/{tarname}"
                 await events.emit(conv_id, "tool_end", {"tool": "download_project", "icon": "code",
                     "status": f"{tarname} ready",
@@ -2872,21 +2960,75 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         "excluded_examples": excluded_examples[:10],
                     }),
                 })
-                await events.emit(conv_id, "file_ready", {
-                    "filename": tarname, "url": download_url,
-                })
+                _wf = None
+                _proj_for_wf = ""
+                _partial = bool(_download_warning_lines)
                 try:
-                    cf_id = f"cf-{uuid.uuid4().hex[:8]}"
-                    await db.add_conversation_file(cf_id, conv_id, tarname, download_url)
-                except Exception as e:
-                    print(f"[FileTrack] {e}")
-                try:
-                    _proj_for_wf = ""
                     if directory.startswith("/root/projects/"):
                         _proj_for_wf = directory.rstrip("/").rsplit("/", 1)[-1]
                     _wf = await db.get_latest_coder_workflow(conv_id, project_id=_proj_for_wf)
+                except Exception as _wfe:
+                    print(f"[WORKFLOW] latest workflow lookup failed: {_wfe}")
+                artifact = None
+                try:
+                    cf_id = f"cf-{uuid.uuid4().hex[:8]}"
+                    _mime = db.artifact_mime_type_for_filename(tarname)
+                    _previous_artifact = None
+                    if (_wf or {}).get("id"):
+                        try:
+                            _prior = await db.list_artifacts(workflow_id=_wf["id"], kind="archive", limit=1)
+                            _previous_artifact = _prior[0] if _prior else None
+                        except Exception as _pae:
+                            print(f"[FileTrack] previous artifact lookup failed: {_pae}")
+                    artifact = await db.add_conversation_file(
+                        cf_id,
+                        conv_id,
+                        tarname,
+                        download_url,
+                        message_id=artifact_message_id,
+                        run_id=(_wf or {}).get("active_run_id"),
+                        workflow_id=(_wf or {}).get("id"),
+                        kind="archive",
+                        mime_type=_mime,
+                        storage_path=filepath,
+                        size_bytes=file_meta["size_bytes"],
+                        sha256=file_meta["sha256"],
+                        exists_status="present",
+                        status="draft" if _partial else "accepted",
+                        parent_artifact_id=(
+                            (_previous_artifact or {}).get("parent_artifact_id")
+                            or ((_previous_artifact or {}).get("id") if _previous_artifact else None)
+                        ),
+                        supersedes_artifact_id=(_previous_artifact or {}).get("id"),
+                        content_text=_artifact_index_text(filepath, tarname, "archive", _mime),
+                        tags=["project"] if _proj_for_wf else [],
+                        metadata={
+                            "source_tool": "download_project",
+                            "directory": directory,
+                            "project_id": _proj_for_wf,
+                            "included_count": included_count,
+                            "excluded_count": excluded_count,
+                            "excluded_examples": excluded_examples[:10],
+                            "artifact_status": "partial_delivered" if _partial else "delivered",
+                            "partial": _partial,
+                            "size_bytes": file_meta["size_bytes"],
+                            "sha256": file_meta["sha256"],
+                        },
+                    )
+                except Exception as e:
+                    print(f"[FileTrack] {e}")
+                await events.emit(conv_id, "file_ready", {
+                    "filename": tarname,
+                    "url": download_url,
+                    "artifact_id": (artifact or {}).get("id"),
+                    "kind": "archive",
+                    "mime_type": (artifact or {}).get("mime_type") or db.artifact_mime_type_for_filename(tarname),
+                    "workflow_id": (_wf or {}).get("id"),
+                    "project_id": _proj_for_wf,
+                    "artifact_status": "partial_delivered" if _partial else "delivered",
+                })
+                try:
                     if _wf:
-                        _partial = bool(_download_warning_lines)
                         await db.update_coder_workflow(
                             _wf["id"],
                             state="partial_delivered" if _partial else "accepted",

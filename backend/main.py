@@ -4,6 +4,10 @@ Full-stack backend with Ollama streaming, Codebox execution,
 SearXNG research, n8n webhook proxy, and SSE status events.
 """
 import asyncio
+import csv
+import hashlib
+import html
+import io
 import json
 import os
 import uuid
@@ -14,6 +18,7 @@ import base64
 import shlex
 import urllib.parse
 import venv as _venv
+import zipfile
 from datetime import datetime
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -95,6 +100,173 @@ def _sanitize_preview_html(html: str, base_url: str) -> str:
     if "<head" in html.lower():
         return re.sub(r"(<head[^>]*>)", r"\1" + base_tag, html, count=1, flags=re.IGNORECASE)
     return base_tag + html
+
+
+def _resolve_download_path(filename: str) -> tuple[str, str] | tuple[None, str]:
+    safe_name = os.path.basename(filename or "")
+    if not safe_name or safe_name != filename:
+        raise HTTPException(400, "Invalid filename")
+    for search_dir in [config.SANDBOX_OUTPUTS_DIR, config.UPLOAD_DIR]:
+        filepath = os.path.join(search_dir, safe_name)
+        if not os.path.abspath(filepath).startswith(os.path.abspath(search_dir)):
+            continue
+        if os.path.exists(filepath):
+            return filepath, safe_name
+    return None, safe_name
+
+
+def _archive_contents_for_path(filepath: str, safe_name: str) -> dict:
+    import tarfile
+    import zipfile
+
+    entries = []
+    if tarfile.is_tarfile(filepath):
+        with tarfile.open(filepath, "r:*") as tf:
+            for m in tf.getmembers():
+                entries.append({"name": m.name, "size": m.size, "is_dir": m.isdir()})
+    elif zipfile.is_zipfile(filepath):
+        with zipfile.ZipFile(filepath) as zf:
+            for info in zf.infolist():
+                entries.append({"name": info.filename, "size": info.file_size, "is_dir": info.is_dir()})
+    else:
+        raise HTTPException(400, "Not a supported archive")
+
+    def _sort_key(e):
+        parts = e["name"].rstrip("/").split("/")
+        key = []
+        for i, p in enumerate(parts):
+            is_last = (i == len(parts) - 1)
+            key.append((0 if (e["is_dir"] or not is_last) else 1, p.lower()))
+        return key
+
+    entries.sort(key=_sort_key)
+    return {"filename": safe_name, "file_count": len([e for e in entries if not e["is_dir"]]), "entries": entries}
+
+
+def _artifact_text_preview_allowed(artifact: dict) -> bool:
+    kind = (artifact.get("kind") or "").lower()
+    if kind in {"html", "markdown", "code", "data", "text"}:
+        return True
+    ext = os.path.splitext((artifact.get("filename") or "").lower())[1]
+    return ext in {
+        ".txt", ".log", ".md", ".html", ".htm", ".py", ".js", ".ts", ".json",
+        ".css", ".sh", ".rs", ".go", ".java", ".c", ".cpp", ".yaml", ".yml",
+        ".toml", ".xml", ".csv", ".ini", ".conf", ".cfg",
+    }
+
+
+def _safe_local_artifact_path(path: str | None) -> str | None:
+    if not path:
+        return None
+    try:
+        abs_path = os.path.abspath(os.path.expanduser(path))
+    except Exception:
+        return None
+    roots = [
+        config.SANDBOX_OUTPUTS_DIR,
+        config.UPLOAD_DIR,
+        config.KB_DIR,
+    ]
+    for root in roots:
+        root_abs = os.path.abspath(root)
+        if abs_path == root_abs or abs_path.startswith(root_abs + os.sep):
+            return abs_path
+    return None
+
+
+def _artifact_path_for_row(artifact: dict) -> tuple[str | None, str]:
+    storage_path = _safe_local_artifact_path(artifact.get("storage_path"))
+    if storage_path:
+        return (storage_path if os.path.exists(storage_path) else None), os.path.basename(storage_path)
+    filename = os.path.basename(artifact.get("filename") or "")
+    if not filename and artifact.get("url"):
+        filename = os.path.basename(urllib.parse.urlparse(artifact["url"]).path)
+    if not filename:
+        return None, ""
+    return _resolve_download_path(filename)
+
+
+def _artifact_file_metadata(filepath: str) -> dict:
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return {"size_bytes": os.path.getsize(filepath), "sha256": h.hexdigest()}
+
+
+def _language_hint(filename: str, kind: str = "") -> str:
+    ext = os.path.splitext((filename or "").lower())[1].lstrip(".")
+    aliases = {"md": "markdown", "markdown": "markdown", "py": "python", "js": "javascript", "ts": "typescript", "sh": "bash", "yml": "yaml"}
+    if ext:
+        return aliases.get(ext, ext)
+    return (kind or "text").lower()
+
+
+def _strip_html_text(raw_html: str, max_chars: int) -> str:
+    text = re.sub(r"<script[^>]*>.*?</script>", " ", raw_html, flags=re.I | re.S)
+    text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(re.sub(r"\s+", " ", text)).strip()
+    return text[:max_chars]
+
+
+def _extract_indexable_text(filepath: str, kind: str, mime_type: str = "", max_chars: int = 500000) -> str:
+    filename = os.path.basename(filepath)
+    lower = filename.lower()
+    kind = (kind or db.artifact_kind_for_filename(filename, mime_type)).lower()
+    try:
+        if kind in {"image", "pdf"}:
+            meta = _artifact_file_metadata(filepath)
+            return f"{filename}\n{kind.upper()} artifact\nsize_bytes={meta['size_bytes']}\nsha256={meta['sha256']}"
+        if kind == "archive":
+            preview = _archive_contents_for_path(filepath, filename)
+            lines = [f"Archive: {filename}", f"Files: {preview.get('file_count', 0)}"]
+            for entry in preview.get("entries", [])[:500]:
+                suffix = "/" if entry.get("is_dir") and not str(entry.get("name", "")).endswith("/") else ""
+                lines.append(f"{entry.get('name','')}{suffix} {entry.get('size',0)} bytes")
+            return "\n".join(lines)[:max_chars]
+        with open(filepath, "rb") as f:
+            raw = f.read(min(max_chars * 4, 4 * 1024 * 1024))
+        text = _decode_preview_bytes(raw, {"content-type": mime_type or ""})
+        if kind == "html" or lower.endswith((".html", ".htm")):
+            return _strip_html_text(text, max_chars)
+        return text[:max_chars]
+    except Exception:
+        return ""
+
+
+def _render_markdown_safe(markdown_text: str) -> str:
+    blocks = []
+    in_code = False
+    code_lines = []
+    for line in (markdown_text or "").splitlines()[:2000]:
+        if line.strip().startswith("```"):
+            if in_code:
+                blocks.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+                code_lines = []
+                in_code = False
+            else:
+                in_code = True
+            continue
+        if in_code:
+            code_lines.append(line)
+            continue
+        escaped = html.escape(line)
+        if not escaped.strip():
+            blocks.append("<br>")
+        elif escaped.startswith("### "):
+            blocks.append(f"<h3>{escaped[4:]}</h3>")
+        elif escaped.startswith("## "):
+            blocks.append(f"<h2>{escaped[3:]}</h2>")
+        elif escaped.startswith("# "):
+            blocks.append(f"<h1>{escaped[2:]}</h1>")
+        elif escaped.startswith("- "):
+            blocks.append(f"<div>&bull; {escaped[2:]}</div>")
+        else:
+            blocks.append(f"<p>{escaped}</p>")
+    if in_code:
+        blocks.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+    return "\n".join(blocks)
 
 
 # ============================================================
@@ -320,6 +492,7 @@ app.add_middleware(
 
 _USER_SCOPED_PREFIXES = (
     "/api/conversations",
+    "/api/artifacts",
     "/api/chat/stream",
     "/api/council/chat/stream",
     "/api/coder",
@@ -577,6 +750,52 @@ class UserUpdate(BaseModel):
     name: Optional[str] = None
     password: Optional[str] = None
     clear_password: Optional[bool] = False
+
+class ArtifactUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    workspace_id: Optional[str] = None
+    workspace_ids: Optional[list[str]] = None
+    status: Optional[str] = None
+    pinned: Optional[bool] = None
+    tags: Optional[list[str]] = None
+    parent_artifact_id: Optional[str] = None
+    supersedes_artifact_id: Optional[str] = None
+
+class ArtifactUseInChatRequest(BaseModel):
+    conversation_id: Optional[str] = None
+    max_chars: int = 20000
+
+class ArtifactAddToKBRequest(BaseModel):
+    kb_id: str
+    filename: Optional[str] = None
+    max_chars: int = 500000
+
+class ArtifactResearchRequest(BaseModel):
+    query: Optional[str] = None
+    title: Optional[str] = None
+    focus: str = ""
+    report_type: str = "analyst"
+    depth: Optional[int] = None
+    model: str = ""
+    planner_model: str = ""
+    auditor_model: str = ""
+    kb_ids: list[str] = []
+    max_chars: int = 50000
+
+class ArtifactReviseRequest(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    filename: Optional[str] = None
+    content: Optional[str] = None
+    tags: Optional[list[str]] = None
+    workspace_ids: Optional[list[str]] = None
+
+class ArtifactBundleRequest(BaseModel):
+    artifact_ids: list[str]
+    title: Optional[str] = None
+    filename: Optional[str] = None
+    workspace_ids: Optional[list[str]] = None
 
 
 # ============================================================
@@ -858,64 +1077,488 @@ async def chat_stream(req: ChatRequest):
 
 
 # ============================================================
+# ARTIFACTS
+# ============================================================
+@app.get("/api/artifacts")
+async def list_artifacts_ep(
+    conversation_id: Optional[str] = Query(None),
+    workspace_id: Optional[str] = Query(None),
+    run_id: Optional[str] = Query(None),
+    workflow_id: Optional[str] = Query(None),
+    kind: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    pinned: Optional[str] = Query(None),
+    tag: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    source: Optional[str] = Query(None),
+    limit: int = Query(80, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    return await db.list_artifacts(
+        conversation_id=conversation_id,
+        workspace_id=workspace_id,
+        run_id=run_id,
+        workflow_id=workflow_id,
+        kind=kind,
+        status=status,
+        pinned=pinned,
+        tag=tag,
+        q=q,
+        date_from=date_from,
+        date_to=date_to,
+        source=source,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/api/artifacts/{artifact_id}")
+async def get_artifact_ep(artifact_id: str):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    return artifact
+
+
+@app.patch("/api/artifacts/{artifact_id}")
+async def update_artifact_ep(artifact_id: str, req: ArtifactUpdate):
+    artifact = await db.update_artifact(
+        artifact_id,
+        **{k: v for k, v in req.dict(exclude_unset=True).items()},
+    )
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    return artifact
+
+
+@app.delete("/api/artifacts/{artifact_id}")
+async def delete_artifact_ep(artifact_id: str):
+    ok = await db.delete_artifact(artifact_id)
+    if not ok:
+        raise HTTPException(404, "Artifact not found")
+    return {"status": "deleted", "deleted_file": False}
+
+
+@app.get("/api/artifacts/{artifact_id}/preview")
+async def preview_artifact_ep(artifact_id: str, max_chars: int = Query(200000, ge=1000, le=1000000)):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    filepath, safe_name = _artifact_path_for_row(artifact)
+    if not filepath:
+        updated = await db.update_artifact_file_metadata(artifact_id, exists_status="missing")
+        return {
+            **(updated or artifact),
+            "id": artifact_id,
+            "filename": safe_name or artifact.get("filename") or "",
+            "kind": artifact.get("kind") or "file",
+            "mime_type": artifact.get("mime_type") or "",
+            "exists_status": "missing",
+            "preview_type": "missing",
+            "error": "File not found. It may have been cleaned up.",
+        }
+
+    kind = (artifact.get("kind") or "file").lower()
+    lower_name = (safe_name or artifact.get("filename") or "").lower()
+    file_meta = _artifact_file_metadata(filepath)
+    if kind == "archive":
+        try:
+            return {
+                **artifact,
+                "preview": _archive_contents_for_path(filepath, safe_name),
+                "preview_type": "archive",
+                "file_size": file_meta["size_bytes"],
+                "download_url": artifact.get("url"),
+            }
+        except HTTPException as e:
+            return JSONResponse({"error": e.detail, "preview_type": "archive"}, status_code=e.status_code)
+        except Exception as e:
+            return JSONResponse({"error": str(e), "preview_type": "archive"}, status_code=500)
+    if kind in {"image", "pdf"}:
+        return {
+            **artifact,
+            "preview_type": kind,
+            "file_size": file_meta["size_bytes"],
+            "sha256": file_meta["sha256"],
+            "download_url": artifact.get("url"),
+        }
+    if not _artifact_text_preview_allowed(artifact):
+        return {
+            **artifact,
+            "preview_type": "metadata",
+            "file_size": file_meta["size_bytes"],
+            "sha256": file_meta["sha256"],
+            "message": "Binary preview is not available for this artifact type.",
+        }
+    try:
+        with open(filepath, "rb") as f:
+            raw = f.read(min(max_chars * 4, 4 * 1024 * 1024))
+        content = _decode_preview_bytes(raw, {"content-type": artifact.get("mime_type") or ""})[:max_chars]
+        truncated = os.path.getsize(filepath) > len(raw) or len(content) >= max_chars
+        if lower_name.endswith((".csv", ".tsv")):
+            delimiter = "\t" if lower_name.endswith(".tsv") else ","
+            reader = csv.reader(io.StringIO(content), delimiter=delimiter)
+            parsed = list(reader)
+            columns = parsed[0] if parsed else []
+            rows = parsed[1:201] if len(parsed) > 1 else []
+            return {
+                **artifact,
+                "preview_type": "table",
+                "table_type": "csv" if delimiter == "," else "tsv",
+                "columns": columns,
+                "rows": rows,
+                "row_count": max(0, len(parsed) - 1),
+                "truncated": truncated or len(parsed) > 201,
+                "file_size": file_meta["size_bytes"],
+            }
+        if lower_name.endswith((".json", ".jsonl", ".ndjson")):
+            parsed = None
+            parse_error = ""
+            try:
+                if lower_name.endswith((".jsonl", ".ndjson")):
+                    parsed = [json.loads(line) for line in content.splitlines() if line.strip()][:200]
+                else:
+                    parsed = json.loads(content)
+            except Exception as e:
+                parse_error = str(e)
+            return {
+                **artifact,
+                "preview_type": "json",
+                "content": content,
+                "json": parsed,
+                "parse_error": parse_error,
+                "truncated": truncated,
+                "file_size": file_meta["size_bytes"],
+            }
+        if kind == "markdown" or lower_name.endswith((".md", ".markdown", ".mdx")):
+            return {
+                **artifact,
+                "preview_type": "markdown",
+                "content": content,
+                "html": _render_markdown_safe(content),
+                "truncated": truncated,
+                "file_size": file_meta["size_bytes"],
+            }
+        if kind == "html" or lower_name.endswith((".html", ".htm")):
+            title_match = re.search(r"<title[^>]*>(.*?)</title>", content, flags=re.I | re.S)
+            return {
+                **artifact,
+                "preview_type": "html",
+                "content": _sanitize_preview_html(content, artifact.get("url") or ""),
+                "metadata": {"title": html.unescape(re.sub(r"\s+", " ", title_match.group(1)).strip()) if title_match else ""},
+                "download_url": artifact.get("url"),
+                "truncated": truncated,
+                "file_size": file_meta["size_bytes"],
+            }
+        return {
+            **artifact,
+            "preview_type": "text",
+            "content": content,
+            "language": _language_hint(safe_name, kind),
+            "truncated": truncated,
+            "file_size": file_meta["size_bytes"],
+        }
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to read preview: {e}"}, status_code=500)
+
+
+@app.post("/api/artifacts/{artifact_id}/check-file")
+async def check_artifact_file_ep(artifact_id: str):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    filepath, _safe_name = _artifact_path_for_row(artifact)
+    if not filepath:
+        updated = await db.update_artifact_file_metadata(artifact_id, exists_status="missing")
+        return updated or {**artifact, "exists_status": "missing"}
+    meta = _artifact_file_metadata(filepath)
+    content_text = _extract_indexable_text(filepath, artifact.get("kind") or "", artifact.get("mime_type") or "")
+    updated = await db.update_artifact_file_metadata(
+        artifact_id,
+        storage_path=filepath,
+        size_bytes=meta["size_bytes"],
+        sha256=meta["sha256"],
+        exists_status="present",
+        content_text=content_text,
+    )
+    return updated
+
+
+@app.post("/api/artifacts/{artifact_id}/use-in-chat")
+async def use_artifact_in_chat_ep(artifact_id: str, req: ArtifactUseInChatRequest):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    filepath, _safe_name = _artifact_path_for_row(artifact)
+    content = (artifact.get("content_text") or "").strip()
+    if not content and filepath:
+        content = _extract_indexable_text(filepath, artifact.get("kind") or "", artifact.get("mime_type") or "", max_chars=req.max_chars)
+    if not content:
+        content = f"[Artifact: {artifact.get('title') or artifact.get('filename')} ({artifact.get('kind') or 'file'})]"
+    content = content[: max(1000, min(req.max_chars or 20000, 100000))]
+    attachment = {
+        "name": artifact.get("title") or artifact.get("filename") or artifact_id,
+        "content": content,
+        "type": "text",
+        "artifact_id": artifact_id,
+        "url": artifact.get("url"),
+    }
+    return {
+        "artifact_id": artifact_id,
+        "conversation_id": req.conversation_id,
+        "attachment": attachment,
+        "context": f"Artifact: {attachment['name']}\n{content}",
+    }
+
+
+@app.post("/api/artifacts/{artifact_id}/add-to-kb")
+async def add_artifact_to_kb_ep(artifact_id: str, req: ArtifactAddToKBRequest):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    owned = next((k for k in await db.get_kbs() if k["id"] == req.kb_id), None)
+    if not owned:
+        raise HTTPException(404, "KB not found")
+    filepath, _safe_name = _artifact_path_for_row(artifact)
+    content = (artifact.get("content_text") or "").strip()
+    if not content and filepath:
+        content = _extract_indexable_text(filepath, artifact.get("kind") or "", artifact.get("mime_type") or "", max_chars=req.max_chars)
+    if not content or (artifact.get("kind") or "").lower() in {"image", "pdf"}:
+        raise HTTPException(400, "Artifact does not have safe text content to import")
+    kb_dir = os.path.join(config.KB_DIR, req.kb_id)
+    os.makedirs(kb_dir, exist_ok=True)
+    base_name = os.path.basename(req.filename or artifact.get("filename") or f"{artifact_id}.txt")
+    if not os.path.splitext(base_name)[1]:
+        base_name += ".txt"
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", base_name)[:180] or f"{artifact_id}.txt"
+    if not safe_name.lower().endswith((".txt", ".md", ".csv", ".json", ".jsonl", ".html", ".htm", ".py", ".js", ".ts", ".css", ".sh", ".yaml", ".yml", ".toml", ".xml")):
+        safe_name += ".txt"
+    dest = os.path.abspath(os.path.join(kb_dir, safe_name))
+    if not dest.startswith(os.path.abspath(kb_dir) + os.sep):
+        raise HTTPException(400, "Invalid KB filename")
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write(content[: max(1000, min(req.max_chars or 500000, 1000000))])
+    file_id = await db.add_kb_file(req.kb_id, safe_name, dest, os.path.getsize(dest), "text/plain")
+
+    async def _bg_index_artifact_import():
+        try:
+            await rag.index_file(req.kb_id, safe_name, dest)
+        except Exception as e:
+            print(f"[RAG] Artifact KB import indexing failed for {safe_name}: {e}")
+
+    asyncio.create_task(_bg_index_artifact_import())
+    return {"artifact_id": artifact_id, "kb_id": req.kb_id, "file_id": file_id, "filename": safe_name, "indexing": True}
+
+
+@app.post("/api/artifacts/{artifact_id}/send-to-research")
+async def send_artifact_to_research_ep(artifact_id: str, req: ArtifactResearchRequest):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    filepath, _safe_name = _artifact_path_for_row(artifact)
+    content = (artifact.get("content_text") or "").strip()
+    if not content and filepath:
+        content = _extract_indexable_text(filepath, artifact.get("kind") or "", artifact.get("mime_type") or "", max_chars=req.max_chars)
+    title = req.title or f"Research: {artifact.get('title') or artifact.get('filename')}"
+    query = req.query or f"Analyze this artifact: {artifact.get('title') or artifact.get('filename')}"
+    return await _create_and_start_research_report(ResearchReportCreate(
+        title=title,
+        query=query,
+        focus=req.focus or f"Use artifact {artifact_id} as primary context.",
+        report_type=req.report_type or "analyst",
+        depth=req.depth,
+        model=req.model,
+        planner_model=req.planner_model,
+        auditor_model=req.auditor_model,
+        kb_ids=req.kb_ids,
+        inputs=[{
+            "type": "artifact",
+            "artifact_id": artifact_id,
+            "title": artifact.get("title") or artifact.get("filename"),
+            "filename": artifact.get("filename"),
+            "content": content[: max(1000, min(req.max_chars or 50000, 200000))],
+        }],
+    ))
+
+
+@app.post("/api/artifacts/{artifact_id}/fork-to-codebox")
+async def fork_artifact_to_codebox_ep(artifact_id: str):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    filepath, safe_name = _artifact_path_for_row(artifact)
+    if not filepath:
+        raise HTTPException(404, "Artifact file is missing")
+    size = os.path.getsize(filepath)
+    if size > config.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+        raise HTTPException(413, f"Artifact exceeds {config.MAX_UPLOAD_SIZE_MB}MB Codebox copy limit")
+    with open(filepath, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    remote_dir = f"/root/artifacts/{shlex.quote(artifact_id)}"
+    remote_path = f"/root/artifacts/{artifact_id}/{safe_name}"
+    cmd = f"mkdir -p {remote_dir} && printf '%s' {shlex.quote(b64)} | base64 -d > {shlex.quote(remote_path)} && ls -lah {shlex.quote(remote_path)}"
+    try:
+        r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 60}, timeout=70)
+        data = r.json()
+        if r.status_code >= 400 or data.get("exit_code", 0) != 0:
+            raise HTTPException(502, data.get("stderr") or "Codebox copy failed")
+        return {
+            "artifact_id": artifact_id,
+            "path": remote_path,
+            "project_path": f"/root/artifacts/{artifact_id}",
+            "filename": safe_name,
+            "size_bytes": size,
+            "stdout": data.get("stdout", "")[:1000],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Codebox copy failed: {e}")
+
+
+@app.post("/api/artifacts/{artifact_id}/revise")
+async def revise_artifact_ep(artifact_id: str, req: ArtifactReviseRequest):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    filepath, safe_name = _artifact_path_for_row(artifact)
+    os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
+    filename = os.path.basename(req.filename or safe_name or artifact.get("filename") or f"{artifact_id}.txt")
+    stem, ext = os.path.splitext(filename)
+    if not ext:
+        ext = ".txt"
+    new_name = f"{stem}-revision-{uuid.uuid4().hex[:6]}{ext}"
+    dest = os.path.abspath(os.path.join(config.SANDBOX_OUTPUTS_DIR, new_name))
+    if not dest.startswith(os.path.abspath(config.SANDBOX_OUTPUTS_DIR) + os.sep):
+        raise HTTPException(400, "Invalid revision filename")
+    if req.content is not None:
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write(req.content)
+    elif filepath:
+        shutil.copy2(filepath, dest)
+    else:
+        raise HTTPException(404, "Original artifact file is missing; provide content to revise")
+    mime_type = db.artifact_mime_type_for_filename(new_name)
+    kind = db.artifact_kind_for_filename(new_name, mime_type)
+    meta = _artifact_file_metadata(dest)
+    content_text = _extract_indexable_text(dest, kind, mime_type)
+    parent_id = artifact.get("parent_artifact_id") or artifact["id"]
+    new_artifact = await db.add_artifact(
+        conversation_id=artifact.get("conversation_id"),
+        message_id=artifact.get("message_id"),
+        workspace_ids=req.workspace_ids if req.workspace_ids is not None else artifact.get("workspace_ids", []),
+        run_id=artifact.get("run_id"),
+        workflow_id=artifact.get("workflow_id"),
+        filename=new_name,
+        url=f"/api/downloads/{new_name}",
+        kind=kind,
+        mime_type=mime_type,
+        title=req.title or f"{artifact.get('title') or artifact.get('filename')} revision",
+        description=req.description if req.description is not None else artifact.get("description", ""),
+        storage_path=dest,
+        size_bytes=meta["size_bytes"],
+        sha256=meta["sha256"],
+        exists_status="present",
+        parent_artifact_id=parent_id,
+        supersedes_artifact_id=artifact["id"],
+        content_text=content_text,
+        tags=req.tags if req.tags is not None else artifact.get("tags", []),
+        metadata={**(artifact.get("metadata") or {}), "source_tool": "artifact_revise", "revised_from": artifact["id"]},
+    )
+    return new_artifact
+
+
+@app.post("/api/artifacts/bundle")
+async def bundle_artifacts_ep(req: ArtifactBundleRequest):
+    ids = []
+    seen = set()
+    for artifact_id in req.artifact_ids or []:
+        if artifact_id and artifact_id not in seen:
+            seen.add(artifact_id)
+            ids.append(artifact_id)
+    if not ids:
+        raise HTTPException(400, "No artifacts selected")
+    artifacts = []
+    for artifact_id in ids[:100]:
+        artifact = await db.get_artifact(artifact_id)
+        if not artifact:
+            raise HTTPException(404, f"Artifact not found: {artifact_id}")
+        filepath, safe_name = _artifact_path_for_row(artifact)
+        if not filepath:
+            raise HTTPException(404, f"Artifact file is missing: {artifact.get('filename') or artifact_id}")
+        artifacts.append((artifact, filepath, safe_name or os.path.basename(filepath)))
+    os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
+    raw_name = os.path.basename(req.filename or (req.title or f"artifact-bundle-{uuid.uuid4().hex[:6]}.zip"))
+    if not raw_name.lower().endswith(".zip"):
+        raw_name += ".zip"
+    safe_bundle = re.sub(r"[^A-Za-z0-9._-]+", "-", raw_name)[:180] or f"artifact-bundle-{uuid.uuid4().hex[:6]}.zip"
+    dest = os.path.abspath(os.path.join(config.SANDBOX_OUTPUTS_DIR, safe_bundle))
+    if not dest.startswith(os.path.abspath(config.SANDBOX_OUTPUTS_DIR) + os.sep):
+        raise HTTPException(400, "Invalid bundle filename")
+    with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        used_names = set()
+        for artifact, filepath, safe_name in artifacts:
+            arcname = safe_name
+            if arcname in used_names:
+                stem, ext = os.path.splitext(arcname)
+                arcname = f"{stem}-{artifact['id']}{ext}"
+            used_names.add(arcname)
+            zf.write(filepath, arcname)
+    meta = _artifact_file_metadata(dest)
+    content_text = _extract_indexable_text(dest, "archive", "application/zip")
+    workspace_ids = req.workspace_ids
+    if workspace_ids is None:
+        ws_seen = set()
+        workspace_ids = []
+        for artifact, _path, _safe in artifacts:
+            for ws_id in artifact.get("workspace_ids", []):
+                if ws_id not in ws_seen:
+                    ws_seen.add(ws_id)
+                    workspace_ids.append(ws_id)
+    bundle = await db.add_artifact(
+        filename=safe_bundle,
+        url=f"/api/downloads/{safe_bundle}",
+        kind="archive",
+        mime_type="application/zip",
+        title=req.title or "Artifact bundle",
+        description=f"Bundle of {len(artifacts)} artifact(s).",
+        storage_path=dest,
+        size_bytes=meta["size_bytes"],
+        sha256=meta["sha256"],
+        exists_status="present",
+        status="draft",
+        workspace_ids=workspace_ids,
+        content_text=content_text,
+        tags=["bundle"],
+        metadata={"source_tool": "artifact_bundle", "artifact_ids": ids[:100]},
+    )
+    return bundle
+
+
+# ============================================================
 # FILE DOWNLOADS
 # ============================================================
 @app.get("/api/downloads/{filename}")
 async def download_file_endpoint(filename: str):
     """Serve tool-generated files. Looks in sandbox/outputs first, falls back to legacy UPLOAD_DIR."""
-    safe_name = os.path.basename(filename)
-    if not safe_name or safe_name != filename:
-        raise HTTPException(400, "Invalid filename")
-    for search_dir in [config.SANDBOX_OUTPUTS_DIR, config.UPLOAD_DIR]:
-        filepath = os.path.join(search_dir, safe_name)
-        if not os.path.abspath(filepath).startswith(os.path.abspath(search_dir)):
-            continue
-        if os.path.exists(filepath):
-            return FileResponse(filepath, filename=safe_name)
+    filepath, safe_name = _resolve_download_path(filename)
+    if filepath:
+        return FileResponse(filepath, filename=safe_name)
     return JSONResponse({"error": "File not found"}, status_code=404)
 
 
 @app.get("/api/downloads/{filename}/contents")
 async def archive_contents(filename: str):
     """List files inside a .tar.gz or .zip archive for preview."""
-    import tarfile
-    import zipfile
-    safe_name = os.path.basename(filename)
-    if not safe_name or safe_name != filename:
-        raise HTTPException(400, "Invalid filename")
-    filepath = None
-    for search_dir in [config.SANDBOX_OUTPUTS_DIR, config.UPLOAD_DIR]:
-        candidate = os.path.join(search_dir, safe_name)
-        if os.path.exists(candidate):
-            filepath = candidate
-            break
+    filepath, safe_name = _resolve_download_path(filename)
     if not filepath:
         return JSONResponse({"error": "File not found"}, status_code=404)
     try:
-        entries = []
-        if tarfile.is_tarfile(filepath):
-            with tarfile.open(filepath, "r:*") as tf:
-                for m in tf.getmembers():
-                    entries.append({"name": m.name, "size": m.size, "is_dir": m.isdir()})
-        elif zipfile.is_zipfile(filepath):
-            with zipfile.ZipFile(filepath) as zf:
-                for info in zf.infolist():
-                    entries.append({"name": info.filename, "size": info.file_size, "is_dir": info.is_dir()})
-        else:
-            return JSONResponse({"error": "Not a supported archive"}, status_code=400)
-        # Sort by path so files appear under their parent directories
-        # For each entry, sort key is the directory path + a flag (dirs before files at same level)
-        def _sort_key(e):
-            parts = e["name"].rstrip("/").split("/")
-            # Build a key that sorts dirs before files at the same level
-            key = []
-            for i, p in enumerate(parts):
-                is_last = (i == len(parts) - 1)
-                # Directories sort before files at the same level
-                key.append((0 if (e["is_dir"] or not is_last) else 1, p.lower()))
-            return key
-        entries.sort(key=_sort_key)
-        return {"filename": safe_name, "file_count": len([e for e in entries if not e["is_dir"]]), "entries": entries}
+        return _archive_contents_for_path(filepath, safe_name)
+    except HTTPException as e:
+        return JSONResponse({"error": e.detail}, status_code=e.status_code)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 

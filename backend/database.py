@@ -7,6 +7,7 @@ import base64
 import contextvars
 import hashlib
 import hmac
+import mimetypes
 import os
 import json
 import secrets
@@ -177,6 +178,58 @@ CREATE TABLE IF NOT EXISTS conversation_files (
     url TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS artifacts (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL DEFAULT 'default',
+    conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+    message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
+    run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+    workflow_id TEXT REFERENCES coder_workflows(id) ON DELETE SET NULL,
+    filename TEXT NOT NULL,
+    url TEXT NOT NULL,
+    kind TEXT DEFAULT 'file',
+    mime_type TEXT DEFAULT '',
+    title TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    storage_path TEXT DEFAULT '',
+    size_bytes INTEGER DEFAULT 0,
+    sha256 TEXT DEFAULT '',
+    exists_status TEXT DEFAULT 'unknown',
+    last_checked_at TIMESTAMP,
+    status TEXT DEFAULT 'draft',
+    pinned INTEGER DEFAULT 0,
+    parent_artifact_id TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
+    supersedes_artifact_id TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
+    content_text TEXT DEFAULT '',
+    content_indexed_at TIMESTAMP,
+    metadata_json TEXT DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_artifacts_user_created ON artifacts(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_artifacts_conv ON artifacts(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_workspace ON artifacts(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_workflow ON artifacts(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind);
+
+CREATE TABLE IF NOT EXISTS artifact_workspaces (
+    artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (artifact_id, workspace_id)
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_workspaces_ws ON artifact_workspaces(workspace_id, added_at);
+
+CREATE TABLE IF NOT EXISTS artifact_tags (
+    artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (artifact_id, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_tags_tag ON artifact_tags(tag);
 
 CREATE TABLE IF NOT EXISTS council_configs (
     id TEXT PRIMARY KEY,
@@ -441,6 +494,253 @@ async def _ensure_user_column(conn: aiosqlite.Connection, table: str) -> None:
         print(f"[DB MIGRATION] Warning backfilling {table}.user_id: {e}")
 
 
+_ARTIFACT_EXT_GROUPS = {
+    "image": {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".ico", ".avif"},
+    "html": {".html", ".htm"},
+    "markdown": {".md", ".markdown", ".mdx"},
+    "code": {
+        ".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".css", ".scss",
+        ".rs", ".go", ".java", ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp",
+        ".cs", ".rb", ".php", ".swift", ".kt", ".kts", ".lua", ".r", ".sh",
+        ".bash", ".zsh", ".fish", ".sql", ".dockerfile",
+    },
+    "data": {
+        ".csv", ".tsv", ".json", ".jsonl", ".xml", ".yaml", ".yml", ".toml",
+        ".parquet", ".ndjson", ".sqlite", ".db", ".xls", ".xlsx",
+    },
+    "archive": {".zip", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".7z", ".rar"},
+    "pdf": {".pdf"},
+    "text": {".txt", ".text", ".log", ".ini", ".cfg", ".conf", ".env", ".out", ".err"},
+}
+_ARTIFACT_KIND_SET = set(_ARTIFACT_EXT_GROUPS) | {"file", "project"}
+_ARTIFACT_STATUSES = {"draft", "accepted", "archived"}
+
+
+def artifact_kind_for_filename(filename: str, mime_type: str = "") -> str:
+    lower = (filename or "").lower()
+    if lower.endswith((".tar.gz", ".tar.bz2", ".tar.xz")):
+        return "archive"
+    ext = os.path.splitext(lower)[1]
+    for kind, exts in _ARTIFACT_EXT_GROUPS.items():
+        if ext in exts:
+            return kind
+    mt = (mime_type or "").lower()
+    if mt.startswith("image/"):
+        return "image"
+    if mt in {"text/html", "application/xhtml+xml"}:
+        return "html"
+    if mt in {"text/markdown", "text/x-markdown"}:
+        return "markdown"
+    if mt == "application/pdf":
+        return "pdf"
+    if any(x in mt for x in ("zip", "tar", "gzip", "x-7z", "rar")):
+        return "archive"
+    if mt.startswith("text/"):
+        return "text"
+    return "file"
+
+
+def artifact_mime_type_for_filename(filename: str) -> str:
+    lower = (filename or "").lower()
+    if lower.endswith(".tar.gz") or lower.endswith(".tgz"):
+        return "application/gzip"
+    if lower.endswith(".tar.bz2") or lower.endswith(".tbz2"):
+        return "application/x-bzip2"
+    if lower.endswith(".tar.xz") or lower.endswith(".txz"):
+        return "application/x-xz"
+    mime, _ = mimetypes.guess_type(filename or "")
+    return mime or ""
+
+
+def _normalize_artifact_kind(kind: str, filename: str = "", mime_type: str = "") -> str:
+    value = (kind or "").strip().lower()
+    if value == "project":
+        return "archive"
+    return value if value in _ARTIFACT_KIND_SET - {"project"} else artifact_kind_for_filename(filename, mime_type)
+
+
+def _normalize_artifact_row(row) -> dict:
+    d = dict(row)
+    try:
+        d["metadata"] = json.loads(d.pop("metadata_json", "{}") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        d["metadata"] = {}
+    d["status"] = (d.get("status") or "draft").strip().lower()
+    if d["status"] not in _ARTIFACT_STATUSES:
+        d["status"] = "draft"
+    d["pinned"] = 1 if str(d.get("pinned") or "0").lower() in {"1", "true", "yes", "on"} else 0
+    d["exists_status"] = (d.get("exists_status") or "unknown").strip().lower() or "unknown"
+    d["size_bytes"] = int(d.get("size_bytes") or 0)
+    d.setdefault("tags", [])
+    d.setdefault("workspaces", [])
+    d.setdefault("workspace_ids", [])
+    return d
+
+
+def _clean_artifact_tags(tags) -> list[str]:
+    cleaned: list[str] = []
+    seen = set()
+    for tag in tags or []:
+        value = re.sub(r"\s+", "-", str(tag or "").strip().lower())
+        value = re.sub(r"[^a-z0-9_.:-]", "", value)[:48]
+        if value and value not in seen:
+            seen.add(value)
+            cleaned.append(value)
+    return cleaned[:24]
+
+
+async def _hydrate_artifact_rows_conn(conn: aiosqlite.Connection, artifacts: list[dict]) -> list[dict]:
+    if not artifacts:
+        return artifacts
+    ids = [a["id"] for a in artifacts if a.get("id")]
+    if not ids:
+        return artifacts
+    placeholders = ",".join("?" for _ in ids)
+    tags_by_id = {artifact_id: [] for artifact_id in ids}
+    for row in await conn.execute_fetchall(
+        f"SELECT artifact_id, tag FROM artifact_tags WHERE artifact_id IN ({placeholders}) ORDER BY tag",
+        tuple(ids),
+    ):
+        tags_by_id.setdefault(row["artifact_id"], []).append(row["tag"])
+    ws_by_id = {artifact_id: [] for artifact_id in ids}
+    for row in await conn.execute_fetchall(
+        f"""SELECT aw.artifact_id, w.id, w.name, aw.added_at
+            FROM artifact_workspaces aw
+            JOIN workspaces w ON w.id=aw.workspace_id
+            WHERE aw.artifact_id IN ({placeholders})
+            ORDER BY aw.added_at DESC, w.name COLLATE NOCASE""",
+        tuple(ids),
+    ):
+        ws_by_id.setdefault(row["artifact_id"], []).append({
+            "id": row["id"],
+            "name": row["name"],
+            "added_at": row["added_at"],
+        })
+    for artifact in artifacts:
+        aid = artifact.get("id")
+        artifact["tags"] = tags_by_id.get(aid, [])
+        artifact["workspaces"] = ws_by_id.get(aid, [])
+        artifact["workspace_ids"] = [w["id"] for w in artifact["workspaces"]]
+        if not artifact.get("workspace_id") and artifact["workspaces"]:
+            artifact["workspace_id"] = artifact["workspaces"][0]["id"]
+        if not artifact.get("workspace_name") and artifact["workspaces"]:
+            artifact["workspace_name"] = artifact["workspaces"][0]["name"]
+    return artifacts
+
+
+async def _set_artifact_workspaces_conn(
+    conn: aiosqlite.Connection,
+    artifact_id: str,
+    workspace_ids,
+    user_id: str,
+) -> str | None:
+    clean_ids: list[str] = []
+    seen = set()
+    for ws_id in workspace_ids or []:
+        value = (str(ws_id or "").strip())
+        if value and value not in seen:
+            seen.add(value)
+            clean_ids.append(value)
+    valid_rows = []
+    if clean_ids:
+        placeholders = ",".join("?" for _ in clean_ids)
+        valid_rows = await conn.execute_fetchall(
+            f"SELECT id FROM workspaces WHERE user_id=? AND id IN ({placeholders})",
+            (user_id, *clean_ids),
+        )
+    valid = {row["id"] for row in valid_rows}
+    now = datetime.utcnow().isoformat()
+    await conn.execute("DELETE FROM artifact_workspaces WHERE artifact_id=?", (artifact_id,))
+    first_valid: str | None = None
+    for ws_id in clean_ids:
+        if ws_id not in valid:
+            continue
+        if first_valid is None:
+            first_valid = ws_id
+        await conn.execute(
+            "INSERT OR IGNORE INTO artifact_workspaces(artifact_id,workspace_id,added_at) VALUES(?,?,?)",
+            (artifact_id, ws_id, now),
+        )
+    await conn.execute(
+        "UPDATE artifacts SET workspace_id=?, updated_at=? WHERE id=? AND user_id=?",
+        (first_valid, now, artifact_id, user_id),
+    )
+    return first_valid
+
+
+async def _set_artifact_tags_conn(conn: aiosqlite.Connection, artifact_id: str, tags) -> None:
+    clean_tags = _clean_artifact_tags(tags)
+    now = datetime.utcnow().isoformat()
+    await conn.execute("DELETE FROM artifact_tags WHERE artifact_id=?", (artifact_id,))
+    for tag in clean_tags:
+        await conn.execute(
+            "INSERT OR IGNORE INTO artifact_tags(artifact_id,tag,created_at) VALUES(?,?,?)",
+            (artifact_id, tag, now),
+        )
+
+
+async def _backfill_artifact_workspaces_conn(conn: aiosqlite.Connection) -> None:
+    await conn.execute(
+        """INSERT OR IGNORE INTO artifact_workspaces(artifact_id,workspace_id,added_at)
+           SELECT a.id, a.workspace_id, COALESCE(a.created_at, CURRENT_TIMESTAMP)
+           FROM artifacts a
+           JOIN workspaces w ON w.id=a.workspace_id AND w.user_id=a.user_id
+           WHERE a.workspace_id IS NOT NULL AND a.workspace_id<>''"""
+    )
+
+
+async def _backfill_artifacts_conn(conn: aiosqlite.Connection) -> None:
+    rows = await conn.execute_fetchall(
+        """SELECT cf.*, c.user_id
+           FROM conversation_files cf
+           JOIN conversations c ON c.id=cf.conversation_id
+           WHERE NOT EXISTS (
+             SELECT 1 FROM artifacts a
+             WHERE a.conversation_id=cf.conversation_id
+               AND a.filename=cf.filename
+               AND a.url=cf.url
+           )"""
+    )
+    if not rows:
+        return
+    now = datetime.utcnow().isoformat()
+    for row in rows:
+        filename = row["filename"]
+        mime_type = artifact_mime_type_for_filename(filename)
+        kind = artifact_kind_for_filename(filename, mime_type)
+        ws_rows = await conn.execute_fetchall(
+            """SELECT wc.workspace_id
+               FROM workspace_conversations wc
+               JOIN workspaces w ON w.id=wc.workspace_id
+               WHERE wc.conversation_id=? AND w.user_id=?
+               ORDER BY wc.added_at DESC LIMIT 1""",
+            (row["conversation_id"], row["user_id"]),
+        )
+        workspace_id = ws_rows[0]["workspace_id"] if ws_rows else None
+        metadata = {"source": "conversation_files_backfill", "conversation_file_id": row["id"]}
+        await conn.execute(
+            """INSERT INTO artifacts(
+                   id,user_id,conversation_id,workspace_id,filename,url,kind,mime_type,
+                   title,description,metadata_json,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                f"art-{uuid.uuid4().hex[:12]}",
+                row["user_id"] or DEFAULT_USER_ID,
+                row["conversation_id"],
+                workspace_id,
+                filename,
+                row["url"],
+                kind,
+                mime_type,
+                filename,
+                "",
+                json.dumps(metadata),
+                row["created_at"] or now,
+                now,
+            ),
+        )
+
+
 async def list_users() -> list[dict]:
     db = await get_db()
     try:
@@ -635,6 +935,8 @@ async def delete_user(user_id: str) -> bool:
         await db.execute("DELETE FROM workspace_research_reports WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id=?)", (uid,))
         await db.execute("DELETE FROM workspace_research_reports WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
         await db.execute("DELETE FROM research_sources WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
+        await db.execute("DELETE FROM artifact_tags WHERE artifact_id IN (SELECT id FROM artifacts WHERE user_id=?)", (uid,))
+        await db.execute("DELETE FROM artifact_workspaces WHERE artifact_id IN (SELECT id FROM artifacts WHERE user_id=?)", (uid,))
         for table in (
             "messages",
             "runs",
@@ -648,6 +950,7 @@ async def delete_user(user_id: str) -> bool:
             "conversations", "knowledge_bases", "tools", "model_configs",
             "workspaces", "council_configs", "memories", "research_reports",
             "token_usage", "coding_projects",
+            "artifacts",
         ):
             await db.execute(f"DELETE FROM {table} WHERE user_id=?", (uid,))
         await db.execute("DELETE FROM user_profile WHERE id=?", (uid,))
@@ -667,9 +970,27 @@ async def init_db():
         for table in (
             "conversations", "knowledge_bases", "tools", "model_configs",
             "workspaces", "council_configs", "memories", "token_usage",
-            "coding_projects", "research_reports",
+            "coding_projects", "research_reports", "artifacts",
         ):
             await _ensure_user_column(db, table)
+        for col, coltype, default in [
+            ("storage_path", "TEXT", "''"),
+            ("size_bytes", "INTEGER", "0"),
+            ("sha256", "TEXT", "''"),
+            ("exists_status", "TEXT", "'unknown'"),
+            ("last_checked_at", "TIMESTAMP", "NULL"),
+            ("status", "TEXT", "'draft'"),
+            ("pinned", "INTEGER", "0"),
+            ("parent_artifact_id", "TEXT", "NULL"),
+            ("supersedes_artifact_id", "TEXT", "NULL"),
+            ("content_text", "TEXT", "''"),
+            ("content_indexed_at", "TIMESTAMP", "NULL"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE artifacts ADD COLUMN {col} {coltype} DEFAULT {default}")
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    print(f"[DB MIGRATION] Warning adding artifacts.{col}: {e}")
         await db.executescript("""
             CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at);
             CREATE INDEX IF NOT EXISTS idx_knowledge_bases_user ON knowledge_bases(user_id, updated_at);
@@ -681,6 +1002,30 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_token_usage_user ON token_usage(user_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_coding_projects_user ON coding_projects(user_id, updated_at);
             CREATE INDEX IF NOT EXISTS idx_research_reports_user ON research_reports(user_id, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_artifacts_user_created ON artifacts(user_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_artifacts_conv ON artifacts(conversation_id);
+            CREATE INDEX IF NOT EXISTS idx_artifacts_workspace ON artifacts(workspace_id);
+            CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
+            CREATE INDEX IF NOT EXISTS idx_artifacts_workflow ON artifacts(workflow_id);
+            CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind);
+            CREATE INDEX IF NOT EXISTS idx_artifacts_status ON artifacts(status);
+            CREATE INDEX IF NOT EXISTS idx_artifacts_pinned ON artifacts(pinned);
+            CREATE INDEX IF NOT EXISTS idx_artifacts_parent ON artifacts(parent_artifact_id);
+            CREATE INDEX IF NOT EXISTS idx_artifacts_supersedes ON artifacts(supersedes_artifact_id);
+            CREATE TABLE IF NOT EXISTS artifact_workspaces (
+                artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (artifact_id, workspace_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_artifact_workspaces_ws ON artifact_workspaces(workspace_id, added_at);
+            CREATE TABLE IF NOT EXISTS artifact_tags (
+                artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+                tag TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (artifact_id, tag)
+            );
+            CREATE INDEX IF NOT EXISTS idx_artifact_tags_tag ON artifact_tags(tag);
         """)
         # HyprChat automation now lives in external n8n; remove legacy internal
         # tables on startup so old installs do not keep stale definitions/runs.
@@ -805,6 +1150,11 @@ async def init_db():
             await db.execute("DELETE FROM model_configs WHERE name='💻 Coder Bot' AND user_id=?", (DEFAULT_USER_ID,))
         except Exception as e:
             print(f"[DB SEED] Legacy agent cleanup failed: {e}")
+        try:
+            await _backfill_artifacts_conn(db)
+            await _backfill_artifact_workspaces_conn(db)
+        except Exception as e:
+            print(f"[DB MIGRATION] Artifact backfill failed: {e}")
         await db.commit()
     finally:
         await db.close()
@@ -968,6 +1318,7 @@ async def delete_conversation(id: str):
         if not rows:
             return
         # Explicitly delete related rows (don't rely solely on CASCADE)
+        await db.execute("UPDATE artifacts SET conversation_id=NULL, message_id=NULL, updated_at=CURRENT_TIMESTAMP WHERE conversation_id=? AND user_id=?", (id, user_id))
         await db.execute("DELETE FROM messages WHERE conversation_id = ?", (id,))
         await db.execute("DELETE FROM conversation_files WHERE conversation_id = ?", (id,))
         await db.execute("DELETE FROM workspace_conversations WHERE conversation_id = ?", (id,))
@@ -1292,7 +1643,11 @@ async def get_workspaces():
         rows = await db.execute_fetchall("""
             SELECT w.*,
                 (SELECT COUNT(*) FROM workspace_conversations wc WHERE wc.workspace_id=w.id) as conv_count,
-                (SELECT COUNT(*) FROM conversation_files cf JOIN workspace_conversations wc2 ON cf.conversation_id=wc2.conversation_id WHERE wc2.workspace_id=w.id) as file_count,
+                (SELECT COUNT(DISTINCT a.id) FROM artifacts a
+                   LEFT JOIN workspace_conversations wc2 ON a.conversation_id=wc2.conversation_id
+                  WHERE a.user_id=w.user_id
+                    AND (a.workspace_id=w.id OR wc2.workspace_id=w.id
+                         OR EXISTS (SELECT 1 FROM artifact_workspaces aw WHERE aw.artifact_id=a.id AND aw.workspace_id=w.id))) as file_count,
                 (SELECT COUNT(*) FROM workspace_research_reports wrr WHERE wrr.workspace_id=w.id) as report_count
             FROM workspaces w WHERE w.user_id=? ORDER BY w.updated_at DESC""", (user_id,))
         result = []
@@ -1328,13 +1683,19 @@ async def get_workspace(ws_id: str):
         )
         ws["conversations"] = [dict(r) for r in conv_rows]
         file_rows = await db.execute_fetchall(
-            """SELECT cf.*,c.title as conversation_title FROM conversation_files cf
-               JOIN workspace_conversations wc ON cf.conversation_id=wc.conversation_id
-               LEFT JOIN conversations c ON c.id=cf.conversation_id
-               WHERE wc.workspace_id=? AND c.user_id=? ORDER BY cf.created_at DESC""",
-            (ws_id, user_id)
+            """SELECT a.*, c.title AS conversation_title, w.name AS workspace_name
+               FROM artifacts a
+               LEFT JOIN conversations c ON c.id=a.conversation_id
+               LEFT JOIN workspaces w ON w.id=a.workspace_id
+               LEFT JOIN workspace_conversations wc
+                      ON wc.conversation_id=a.conversation_id AND wc.workspace_id=?
+               WHERE a.user_id=?
+                 AND (a.workspace_id=? OR wc.workspace_id=?
+                      OR EXISTS (SELECT 1 FROM artifact_workspaces aw WHERE aw.artifact_id=a.id AND aw.workspace_id=?))
+               ORDER BY a.created_at DESC""",
+            (ws_id, user_id, ws_id, ws_id, ws_id),
         )
-        ws["files"] = [dict(r) for r in file_rows]
+        ws["files"] = await _hydrate_artifact_rows_conn(db, [_normalize_artifact_row(r) for r in file_rows])
         report_rows = await db.execute_fetchall(
             """SELECT rr.id,rr.title,rr.query,rr.focus,rr.report_type,rr.status,rr.depth,
                       rr.model,rr.summary,rr.error,rr.sources_json,rr.metrics_json,
@@ -1390,6 +1751,11 @@ async def delete_workspace(ws_id: str):
     user_id = _scope_user()
     db = await get_db()
     try:
+        await db.execute(
+            "DELETE FROM artifact_workspaces WHERE workspace_id IN (SELECT id FROM workspaces WHERE id=? AND user_id=?)",
+            (ws_id, user_id),
+        )
+        await db.execute("UPDATE artifacts SET workspace_id=NULL, updated_at=CURRENT_TIMESTAMP WHERE workspace_id=? AND user_id=?", (ws_id, user_id))
         await db.execute("DELETE FROM workspaces WHERE id=? AND user_id=?", (ws_id, user_id))
         await db.commit()
     finally:
@@ -1473,19 +1839,527 @@ async def remove_research_report_from_workspace(ws_id: str, report_id: str):
         await db.close()
 
 
-async def add_conversation_file(id: str, conv_id: str, filename: str, url: str):
+async def _valid_workspace_conn(conn: aiosqlite.Connection, ws_id: str | None, user_id: str) -> str | None:
+    if not ws_id:
+        return None
+    rows = await conn.execute_fetchall("SELECT id FROM workspaces WHERE id=? AND user_id=?", (ws_id, user_id))
+    return ws_id if rows else None
+
+
+async def _default_workspace_for_conversation_conn(conn: aiosqlite.Connection, conv_id: str, user_id: str) -> str | None:
+    rows = await conn.execute_fetchall(
+        """SELECT wc.workspace_id
+           FROM workspace_conversations wc
+           JOIN workspaces w ON w.id=wc.workspace_id
+           WHERE wc.conversation_id=? AND w.user_id=?
+           ORDER BY wc.added_at DESC LIMIT 1""",
+        (conv_id, user_id),
+    )
+    return rows[0]["workspace_id"] if rows else None
+
+
+async def _valid_message_conn(conn: aiosqlite.Connection, message_id: int | None, conv_id: str | None, user_id: str) -> int | None:
+    if not message_id:
+        return None
+    rows = await conn.execute_fetchall(
+        """SELECT m.id FROM messages m
+           JOIN conversations c ON c.id=m.conversation_id
+           WHERE m.id=? AND c.user_id=? AND (? IS NULL OR m.conversation_id=?)""",
+        (int(message_id), user_id, conv_id, conv_id),
+    )
+    return int(message_id) if rows else None
+
+
+async def _valid_run_conn(conn: aiosqlite.Connection, run_id: str | None, user_id: str) -> str | None:
+    if not run_id:
+        return None
+    rows = await conn.execute_fetchall(
+        "SELECT id FROM runs WHERE id=? AND conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
+        (run_id, user_id),
+    )
+    return run_id if rows else None
+
+
+async def _valid_workflow_conn(conn: aiosqlite.Connection, workflow_id: str | None, user_id: str) -> str | None:
+    if not workflow_id:
+        return None
+    rows = await conn.execute_fetchall(
+        "SELECT id FROM coder_workflows WHERE id=? AND conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
+        (workflow_id, user_id),
+    )
+    return workflow_id if rows else None
+
+
+async def add_artifact(
+    *,
+    artifact_id: str | None = None,
+    conversation_id: str | None = None,
+    message_id: int | None = None,
+    workspace_id: str | None = None,
+    workspace_ids: list[str] | None = None,
+    run_id: str | None = None,
+    workflow_id: str | None = None,
+    filename: str,
+    url: str,
+    kind: str | None = None,
+    mime_type: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    storage_path: str | None = None,
+    size_bytes: int | None = None,
+    sha256: str | None = None,
+    exists_status: str | None = None,
+    status: str | None = None,
+    pinned: bool | int = False,
+    parent_artifact_id: str | None = None,
+    supersedes_artifact_id: str | None = None,
+    content_text: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict | None = None,
+) -> dict | None:
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        conv_id = (conversation_id or "").strip() or None
+        if conv_id:
+            rows = await db.execute_fetchall("SELECT id FROM conversations WHERE id=? AND user_id=?", (conv_id, user_id))
+            if not rows:
+                return None
+        workspace_id = await _valid_workspace_conn(db, workspace_id, user_id)
+        if not workspace_id and conv_id:
+            workspace_id = await _default_workspace_for_conversation_conn(db, conv_id, user_id)
+        message_id = await _valid_message_conn(db, message_id, conv_id, user_id)
+        run_id = await _valid_run_conn(db, run_id, user_id)
+        workflow_id = await _valid_workflow_conn(db, workflow_id, user_id)
+        mime_type = (mime_type or artifact_mime_type_for_filename(filename)).strip()
+        kind = _normalize_artifact_kind(kind or "", filename, mime_type)
+        for linked_id in (parent_artifact_id, supersedes_artifact_id):
+            if linked_id:
+                rows = await db.execute_fetchall("SELECT id FROM artifacts WHERE id=? AND user_id=?", (linked_id, user_id))
+                if not rows:
+                    return None
+        status = (status or "draft").strip().lower()
+        if status not in _ARTIFACT_STATUSES:
+            status = "draft"
+        exists_status = (exists_status or "unknown").strip().lower() or "unknown"
+        content_text = _scrub_surrogates(str(content_text or ""))[:800000]
+        now = datetime.utcnow().isoformat()
+        artifact_id = artifact_id or f"art-{uuid.uuid4().hex[:12]}"
+        await db.execute(
+            """INSERT INTO artifacts(
+                   id,user_id,conversation_id,message_id,workspace_id,run_id,workflow_id,
+                   filename,url,kind,mime_type,title,description,storage_path,size_bytes,sha256,
+                   exists_status,last_checked_at,status,pinned,parent_artifact_id,supersedes_artifact_id,
+                   content_text,content_indexed_at,metadata_json,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                artifact_id, user_id, conv_id, message_id, workspace_id, run_id, workflow_id,
+                filename, url, kind, mime_type, title or filename, description or "",
+                storage_path or "", int(size_bytes or 0), sha256 or "",
+                exists_status, now if exists_status != "unknown" else None, status,
+                1 if pinned else 0, parent_artifact_id, supersedes_artifact_id,
+                content_text, now if content_text else None, json.dumps(metadata or {}), now, now,
+            ),
+        )
+        if workspace_ids is None:
+            workspace_ids = [workspace_id] if workspace_id else []
+        await _set_artifact_workspaces_conn(db, artifact_id, workspace_ids, user_id)
+        await _set_artifact_tags_conn(db, artifact_id, tags)
+        await db.commit()
+        return await _get_artifact_conn(db, artifact_id, user_id)
+    finally:
+        await db.close()
+
+
+async def add_conversation_file(
+    id: str,
+    conv_id: str,
+    filename: str,
+    url: str,
+    *,
+    message_id: int | None = None,
+    workspace_id: str | None = None,
+    workspace_ids: list[str] | None = None,
+    run_id: str | None = None,
+    workflow_id: str | None = None,
+    kind: str | None = None,
+    mime_type: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    storage_path: str | None = None,
+    size_bytes: int | None = None,
+    sha256: str | None = None,
+    exists_status: str | None = None,
+    status: str | None = None,
+    pinned: bool | int = False,
+    parent_artifact_id: str | None = None,
+    supersedes_artifact_id: str | None = None,
+    content_text: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict | None = None,
+) -> dict | None:
     user_id = _scope_user()
     db = await get_db()
     try:
         rows = await db.execute_fetchall("SELECT id FROM conversations WHERE id=? AND user_id=?", (conv_id, user_id))
         if not rows:
-            return
+            return None
         now = datetime.utcnow().isoformat()
         await db.execute(
             "INSERT OR IGNORE INTO conversation_files(id,conversation_id,filename,url,created_at) VALUES(?,?,?,?,?)",
             (id, conv_id, filename, url, now)
         )
+        workspace_id = await _valid_workspace_conn(db, workspace_id, user_id)
+        if not workspace_id:
+            workspace_id = await _default_workspace_for_conversation_conn(db, conv_id, user_id)
+        message_id = await _valid_message_conn(db, message_id, conv_id, user_id)
+        run_id = await _valid_run_conn(db, run_id, user_id)
+        workflow_id = await _valid_workflow_conn(db, workflow_id, user_id)
+        mime_type = (mime_type or artifact_mime_type_for_filename(filename)).strip()
+        kind = _normalize_artifact_kind(kind or "", filename, mime_type)
+        for linked_id in (parent_artifact_id, supersedes_artifact_id):
+            if linked_id:
+                linked_rows = await db.execute_fetchall("SELECT id FROM artifacts WHERE id=? AND user_id=?", (linked_id, user_id))
+                if not linked_rows:
+                    return None
+        status = (status or "draft").strip().lower()
+        if status not in _ARTIFACT_STATUSES:
+            status = "draft"
+        exists_status = (exists_status or "unknown").strip().lower() or "unknown"
+        content_text = _scrub_surrogates(str(content_text or ""))[:800000]
+        artifact_id = f"art-{uuid.uuid4().hex[:12]}"
+        metadata = {**(metadata or {}), "conversation_file_id": id}
+        await db.execute(
+            """INSERT INTO artifacts(
+                   id,user_id,conversation_id,message_id,workspace_id,run_id,workflow_id,
+                   filename,url,kind,mime_type,title,description,storage_path,size_bytes,sha256,
+                   exists_status,last_checked_at,status,pinned,parent_artifact_id,supersedes_artifact_id,
+                   content_text,content_indexed_at,metadata_json,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                artifact_id, user_id, conv_id, message_id, workspace_id, run_id, workflow_id,
+                filename, url, kind, mime_type, title or filename, description or "",
+                storage_path or "", int(size_bytes or 0), sha256 or "",
+                exists_status, now if exists_status != "unknown" else None, status,
+                1 if pinned else 0, parent_artifact_id, supersedes_artifact_id,
+                content_text, now if content_text else None, json.dumps(metadata), now, now,
+            ),
+        )
+        if workspace_ids is None:
+            workspace_ids = [workspace_id] if workspace_id else []
+        await _set_artifact_workspaces_conn(db, artifact_id, workspace_ids, user_id)
+        await _set_artifact_tags_conn(db, artifact_id, tags)
         await db.commit()
+        return await _get_artifact_conn(db, artifact_id, user_id)
+    finally:
+        await db.close()
+
+
+async def list_artifacts(
+    *,
+    conversation_id: str | None = None,
+    workspace_id: str | None = None,
+    run_id: str | None = None,
+    workflow_id: str | None = None,
+    kind: str | None = None,
+    status: str | None = None,
+    pinned: bool | int | str | None = None,
+    tag: str | None = None,
+    q: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    source: str | None = None,
+    limit: int = 80,
+    offset: int = 0,
+) -> list[dict]:
+    user_id = _scope_user()
+    limit = max(1, min(200, int(limit or 80)))
+    offset = max(0, int(offset or 0))
+    clauses = ["a.user_id=?"]
+    params: list = [user_id]
+    if conversation_id:
+        clauses.append("a.conversation_id=?")
+        params.append(conversation_id)
+    if run_id:
+        clauses.append("a.run_id=?")
+        params.append(run_id)
+    if workflow_id:
+        clauses.append("a.workflow_id=?")
+        params.append(workflow_id)
+    if workspace_id:
+        clauses.append(
+            """(a.workspace_id=?
+                OR EXISTS (SELECT 1 FROM artifact_workspaces aw WHERE aw.artifact_id=a.id AND aw.workspace_id=?)
+                OR a.conversation_id IN (
+                    SELECT wc.conversation_id FROM workspace_conversations wc
+                    JOIN workspaces w ON w.id=wc.workspace_id
+                    WHERE wc.workspace_id=? AND w.user_id=?
+                ))"""
+        )
+        params.extend([workspace_id, workspace_id, workspace_id, user_id])
+    kind_norm = (kind or "").strip().lower()
+    if kind_norm and kind_norm != "all":
+        if kind_norm == "recent":
+            pass
+        if kind_norm == "project":
+            clauses.append("(a.kind='archive' AND (a.workflow_id IS NOT NULL OR a.metadata_json LIKE '%\"project_id\"%'))")
+        elif kind_norm in _ARTIFACT_KIND_SET:
+            clauses.append("a.kind=?")
+            params.append(_normalize_artifact_kind(kind_norm))
+    status_norm = (status or "").strip().lower()
+    if status_norm and status_norm != "all":
+        if status_norm in _ARTIFACT_STATUSES:
+            clauses.append("a.status=?")
+            params.append(status_norm)
+    if pinned is not None and str(pinned).lower() not in {"", "all"}:
+        clauses.append("a.pinned=?")
+        params.append(1 if str(pinned).lower() in {"1", "true", "yes", "on"} else 0)
+    tag_norm = _clean_artifact_tags([tag])[0] if tag else ""
+    if tag_norm:
+        clauses.append("EXISTS (SELECT 1 FROM artifact_tags at WHERE at.artifact_id=a.id AND at.tag=?)")
+        params.append(tag_norm)
+    if date_from:
+        clauses.append("a.created_at>=?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("a.created_at<=?")
+        params.append(date_to)
+    if source:
+        like = f"%{source.strip()}%"
+        clauses.append("(a.metadata_json LIKE ? OR a.url LIKE ?)")
+        params.extend([like, like])
+    if q:
+        like = f"%{q.strip()}%"
+        clauses.append(
+            """(a.filename LIKE ? OR a.title LIKE ? OR a.description LIKE ?
+                OR a.content_text LIKE ? OR c.title LIKE ? OR w.name LIKE ?
+                OR EXISTS (SELECT 1 FROM artifact_tags qt WHERE qt.artifact_id=a.id AND qt.tag LIKE ?)
+                OR EXISTS (
+                    SELECT 1 FROM artifact_workspaces qaw
+                    JOIN workspaces qw ON qw.id=qaw.workspace_id
+                    WHERE qaw.artifact_id=a.id AND qw.name LIKE ?
+                ))"""
+        )
+        params.extend([like, like, like, like, like, like, like, like])
+    params.extend([limit, offset])
+    sql = f"""
+        SELECT a.*, c.title AS conversation_title, w.name AS workspace_name
+        FROM artifacts a
+        LEFT JOIN conversations c ON c.id=a.conversation_id
+        LEFT JOIN workspaces w ON w.id=a.workspace_id
+        WHERE {' AND '.join(clauses)}
+        ORDER BY a.created_at DESC, a.id DESC
+        LIMIT ? OFFSET ?
+    """
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(sql, tuple(params))
+        return await _hydrate_artifact_rows_conn(db, [_normalize_artifact_row(r) for r in rows])
+    finally:
+        await db.close()
+
+
+async def _get_artifact_conn(conn: aiosqlite.Connection, artifact_id: str, user_id: str, *, detail: bool = True) -> dict | None:
+    rows = await conn.execute_fetchall(
+        """SELECT a.*, c.title AS conversation_title, w.name AS workspace_name
+           FROM artifacts a
+           LEFT JOIN conversations c ON c.id=a.conversation_id
+           LEFT JOIN workspaces w ON w.id=a.workspace_id
+           WHERE a.id=? AND a.user_id=?""",
+        (artifact_id, user_id),
+    )
+    if not rows:
+        return None
+    artifact = (await _hydrate_artifact_rows_conn(conn, [_normalize_artifact_row(rows[0])]))[0]
+    if not detail:
+        return artifact
+    artifact["file_health"] = {
+        "exists_status": artifact.get("exists_status") or "unknown",
+        "last_checked_at": artifact.get("last_checked_at"),
+        "size_bytes": artifact.get("size_bytes") or 0,
+        "sha256": artifact.get("sha256") or "",
+        "storage_path": artifact.get("storage_path") or "",
+    }
+    artifact["provenance"] = {
+        "conversation_id": artifact.get("conversation_id"),
+        "conversation_title": artifact.get("conversation_title"),
+        "message_id": artifact.get("message_id"),
+        "run_id": artifact.get("run_id"),
+        "workflow_id": artifact.get("workflow_id"),
+        "source_tool": (artifact.get("metadata") or {}).get("source_tool") or (artifact.get("metadata") or {}).get("source"),
+        "source_path": (artifact.get("metadata") or {}).get("source_path") or (artifact.get("metadata") or {}).get("directory"),
+    }
+    root_id = artifact.get("parent_artifact_id") or artifact.get("id")
+    version_rows = await conn.execute_fetchall(
+        """SELECT a.*, c.title AS conversation_title, w.name AS workspace_name
+           FROM artifacts a
+           LEFT JOIN conversations c ON c.id=a.conversation_id
+           LEFT JOIN workspaces w ON w.id=a.workspace_id
+           WHERE a.user_id=? AND (a.id=? OR a.parent_artifact_id=? OR a.id=? OR a.supersedes_artifact_id=?)
+           ORDER BY a.created_at ASC, a.id ASC""",
+        (
+            user_id,
+            root_id,
+            root_id,
+            artifact.get("parent_artifact_id") or "",
+            artifact.get("id"),
+        ),
+    )
+    versions = await _hydrate_artifact_rows_conn(conn, [_normalize_artifact_row(r) for r in version_rows])
+    seen_versions = {}
+    for version in versions:
+        seen_versions[version["id"]] = version
+    artifact["versions"] = list(seen_versions.values())
+    related_rows = await conn.execute_fetchall(
+        """SELECT DISTINCT a.*, c.title AS conversation_title, w.name AS workspace_name
+           FROM artifacts a
+           LEFT JOIN conversations c ON c.id=a.conversation_id
+           LEFT JOIN workspaces w ON w.id=a.workspace_id
+           LEFT JOIN artifact_tags at ON at.artifact_id=a.id
+           WHERE a.user_id=? AND a.id<>? AND (
+                (? IS NOT NULL AND a.conversation_id=?)
+                OR (? IS NOT NULL AND a.workflow_id=?)
+                OR (? IS NOT NULL AND a.run_id=?)
+                OR at.tag IN (SELECT tag FROM artifact_tags WHERE artifact_id=?)
+                OR EXISTS (
+                    SELECT 1 FROM artifact_workspaces aw
+                    WHERE aw.artifact_id=a.id
+                      AND aw.workspace_id IN (SELECT workspace_id FROM artifact_workspaces WHERE artifact_id=?)
+                )
+           )
+           ORDER BY a.created_at DESC LIMIT 12""",
+        (
+            user_id,
+            artifact_id,
+            artifact.get("conversation_id"), artifact.get("conversation_id"),
+            artifact.get("workflow_id"), artifact.get("workflow_id"),
+            artifact.get("run_id"), artifact.get("run_id"),
+            artifact_id,
+            artifact_id,
+        ),
+    )
+    artifact["related"] = await _hydrate_artifact_rows_conn(conn, [_normalize_artifact_row(r) for r in related_rows])
+    return artifact
+
+
+async def get_artifact(artifact_id: str) -> dict | None:
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        return await _get_artifact_conn(db, artifact_id, user_id)
+    finally:
+        await db.close()
+
+
+async def update_artifact(artifact_id: str, **kwargs) -> dict | None:
+    user_id = _scope_user()
+    allowed = {
+        "title", "description", "workspace_id", "workspace_ids", "status", "pinned",
+        "tags", "parent_artifact_id", "supersedes_artifact_id",
+    }
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT id FROM artifacts WHERE id=? AND user_id=?", (artifact_id, user_id))
+        if not rows:
+            return None
+        workspace_ids_sentinel = object()
+        workspace_ids = workspace_ids_sentinel
+        if "workspace_ids" in fields:
+            raw_ws = fields.pop("workspace_ids")
+            workspace_ids = raw_ws if isinstance(raw_ws, list) else []
+        elif "workspace_id" in fields:
+            ws_id = (fields.pop("workspace_id") or "").strip() or None
+            workspace_ids = [ws_id] if ws_id else []
+        tags_sentinel = object()
+        tags = tags_sentinel
+        if "tags" in fields:
+            tags = fields.pop("tags")
+        for link_key in ("parent_artifact_id", "supersedes_artifact_id"):
+            if link_key in fields:
+                link_id = (fields.get(link_key) or "").strip() or None
+                if link_id == artifact_id:
+                    fields[link_key] = None
+                elif link_id:
+                    linked = await db.execute_fetchall("SELECT id FROM artifacts WHERE id=? AND user_id=?", (link_id, user_id))
+                    fields[link_key] = link_id if linked else None
+                else:
+                    fields[link_key] = None
+        if "status" in fields:
+            status_norm = (fields.get("status") or "draft").strip().lower()
+            fields["status"] = status_norm if status_norm in _ARTIFACT_STATUSES else "draft"
+        if "pinned" in fields:
+            fields["pinned"] = 1 if str(fields.get("pinned")).lower() in {"1", "true", "yes", "on"} else 0
+        for key in ("title", "description"):
+            if key in fields and fields[key] is not None:
+                fields[key] = _scrub_surrogates(str(fields[key]))[:500 if key == "title" else 3000]
+        if fields:
+            fields["updated_at"] = datetime.utcnow().isoformat()
+            sets = ", ".join(f"{k}=?" for k in fields)
+            await db.execute(
+                f"UPDATE artifacts SET {sets} WHERE id=? AND user_id=?",
+                (*fields.values(), artifact_id, user_id),
+            )
+        if workspace_ids is not workspace_ids_sentinel:
+            await _set_artifact_workspaces_conn(db, artifact_id, workspace_ids, user_id)
+        if tags is not tags_sentinel:
+            await _set_artifact_tags_conn(db, artifact_id, tags)
+        await db.commit()
+        return await _get_artifact_conn(db, artifact_id, user_id)
+    finally:
+        await db.close()
+
+
+async def update_artifact_file_metadata(
+    artifact_id: str,
+    *,
+    storage_path: str | None = None,
+    size_bytes: int | None = None,
+    sha256: str | None = None,
+    exists_status: str = "unknown",
+    content_text: str | None = None,
+) -> dict | None:
+    user_id = _scope_user()
+    now = datetime.utcnow().isoformat()
+    fields = {
+        "exists_status": (exists_status or "unknown").strip().lower() or "unknown",
+        "last_checked_at": now,
+    }
+    if storage_path is not None:
+        fields["storage_path"] = storage_path
+    if size_bytes is not None:
+        fields["size_bytes"] = int(size_bytes or 0)
+    if sha256 is not None:
+        fields["sha256"] = sha256 or ""
+    if content_text is not None:
+        fields["content_text"] = _scrub_surrogates(str(content_text or ""))[:800000]
+        fields["content_indexed_at"] = now if content_text else None
+    fields["updated_at"] = now
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT id FROM artifacts WHERE id=? AND user_id=?", (artifact_id, user_id))
+        if not rows:
+            return None
+        sets = ", ".join(f"{k}=?" for k in fields)
+        await db.execute(
+            f"UPDATE artifacts SET {sets} WHERE id=? AND user_id=?",
+            (*fields.values(), artifact_id, user_id),
+        )
+        await db.commit()
+        return await _get_artifact_conn(db, artifact_id, user_id)
+    finally:
+        await db.close()
+
+
+async def delete_artifact(artifact_id: str) -> bool:
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM artifact_tags WHERE artifact_id=?", (artifact_id,))
+        await db.execute("DELETE FROM artifact_workspaces WHERE artifact_id=?", (artifact_id,))
+        cur = await db.execute("DELETE FROM artifacts WHERE id=? AND user_id=?", (artifact_id, user_id))
+        await db.commit()
+        return cur.rowcount > 0
     finally:
         await db.close()
 
