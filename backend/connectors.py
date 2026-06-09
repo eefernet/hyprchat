@@ -14,7 +14,7 @@ import re
 import socket
 import urllib.parse
 from typing import Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 
@@ -135,9 +135,11 @@ def _url_private(host: str) -> bool:
     except ValueError:
         pass
     try:
-        infos = socket.getaddrinfo(host, None)
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
     except Exception:
-        return False
+        # Fail closed like quick_search._url_safe and research._resolve_host_public:
+        # an unresolvable host is blocked, not allowed through.
+        return True
     for info in infos:
         addr = info[4][0]
         try:
@@ -246,7 +248,22 @@ async def _mcp_stdio_exchange(server: dict, method: str, params: dict | None = N
     )
     next_id = 1
 
-    async def request(req_method: str, req_params: dict | None = None) -> dict:
+    # Drain stderr continuously — a server that logs more than the OS pipe
+    # buffer would otherwise block and deadlock the stdout read loop.
+    stderr_tail = bytearray()
+
+    async def _drain_stderr():
+        assert proc.stderr is not None
+        while True:
+            chunk = await proc.stderr.read(4096)
+            if not chunk:
+                return
+            stderr_tail.extend(chunk)
+            del stderr_tail[:-2048]
+
+    stderr_task = asyncio.create_task(_drain_stderr())
+
+    async def request(req_method: str, req_params: dict | None = None, read_timeout: float = 20) -> dict:
         nonlocal next_id
         req_id = next_id
         next_id += 1
@@ -256,7 +273,7 @@ async def _mcp_stdio_exchange(server: dict, method: str, params: dict | None = N
         await proc.stdin.drain()
         while True:
             assert proc.stdout is not None
-            msg = await _read_mcp_message(proc.stdout)
+            msg = await _read_mcp_message(proc.stdout, timeout=read_timeout)
             if msg.get("id") == req_id:
                 if msg.get("error"):
                     raise ConnectorError(str(msg["error"]))
@@ -271,8 +288,14 @@ async def _mcp_stdio_exchange(server: dict, method: str, params: dict | None = N
         assert proc.stdin is not None
         proc.stdin.write(_jsonrpc_message({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}))
         await proc.stdin.drain()
-        return await request(method, params or {})
+        return await request(method, params or {}, read_timeout=120)
+    except Exception as e:
+        tail = stderr_tail.decode("utf-8", errors="replace").strip()
+        if tail:
+            raise ConnectorError(f"{e or type(e).__name__} | server stderr: {tail[-400:]}") from e
+        raise
     finally:
+        stderr_task.cancel()
         try:
             proc.terminate()
             await asyncio.wait_for(proc.wait(), timeout=2)
@@ -295,7 +318,7 @@ async def _mcp_http_exchange(http: httpx.AsyncClient, server: dict, method: str,
     headers.update(expand_placeholders(server.get("headers") or {}, required=True))
     session_id = ""
 
-    async def post(req_id: int, req_method: str, req_params: dict | None = None) -> tuple[dict, httpx.Headers]:
+    async def post(req_id: int, req_method: str, req_params: dict | None = None, timeout: float = 30) -> tuple[dict, httpx.Headers]:
         request_headers = dict(headers)
         if session_id:
             request_headers["Mcp-Session-Id"] = session_id
@@ -303,15 +326,21 @@ async def _mcp_http_exchange(http: httpx.AsyncClient, server: dict, method: str,
             url,
             json={"jsonrpc": "2.0", "id": req_id, "method": req_method, "params": req_params or {}},
             headers=request_headers,
-            timeout=30,
+            timeout=timeout,
         )
         r.raise_for_status()
         text = r.text.strip()
-        if text.startswith("event:") or "\ndata:" in text:
+        if text.startswith(("event:", "data:", "id:", ":")) or "\ndata:" in text:
+            # SSE data may span multiple consecutive `data:` lines; join the
+            # first event's data lines instead of taking only the first one.
+            data_lines: list[str] = []
             for line in text.splitlines():
                 if line.startswith("data:"):
-                    text = line[5:].strip()
+                    data_lines.append(line[5:].lstrip())
+                elif not line.strip() and data_lines:
                     break
+            if data_lines:
+                text = "\n".join(data_lines)
         msg = json.loads(text)
         if msg.get("error"):
             raise ConnectorError(str(msg["error"]))
@@ -335,7 +364,7 @@ async def _mcp_http_exchange(http: httpx.AsyncClient, server: dict, method: str,
         )
     except Exception:
         pass
-    result, _ = await post(2, method, params or {})
+    result, _ = await post(2, method, params or {}, timeout=120)
     return result
 
 
@@ -361,7 +390,7 @@ async def discover_mcp_server(http: httpx.AsyncClient, server_id: str) -> dict:
             server_id,
             health="ok",
             last_error="",
-            discovered_at=datetime.utcnow().isoformat(),
+            discovered_at=datetime.now(timezone.utc).isoformat(),
         )
         return {"status": "ok", "tool_count": len(tools), "tools": tools}
     except Exception as e:
@@ -500,7 +529,7 @@ async def discover_openapi_connector(http: httpx.AsyncClient, connector_id: str)
             connector_id,
             health="ok",
             last_error="",
-            discovered_at=datetime.utcnow().isoformat(),
+            discovered_at=datetime.now(timezone.utc).isoformat(),
         )
         return {"status": "ok", "tool_count": len(tools), "tools": tools}
     except Exception as e:
@@ -621,20 +650,19 @@ async def execute_openapi_tool(http: httpx.AsyncClient, tool: dict, args: dict) 
     assert_url_allowed(url, allow_private=bool(connector.get("allow_private")))
 
     r = await http.request(method, url, params=query, headers=headers, json=body, timeout=45)
-    text = r.text
     content_type = r.headers.get("content-type", "")
     summary = {
         "status_code": r.status_code,
         "reason": r.reason_phrase,
         "content_type": content_type,
     }
-    if len(text) > 18000:
-        text = text[:12000] + f"\n\n[... {len(text) - 18000} chars omitted ...]\n\n" + text[-6000:]
     try:
         parsed = r.json()
         body_text = json.dumps(parsed, indent=2, ensure_ascii=False)
     except Exception:
-        body_text = text
+        body_text = r.text
+    if len(body_text) > 18000:
+        body_text = body_text[:12000] + f"\n\n[... {len(body_text) - 18000} chars omitted ...]\n\n" + body_text[-6000:]
     return json.dumps(summary, ensure_ascii=False) + "\n\n" + body_text
 
 

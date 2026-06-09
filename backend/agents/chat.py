@@ -14,7 +14,8 @@ import config
 import database as db
 import model_providers
 import rag
-from tools import CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls, strip_tool_calls
+from tools import (CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls,
+                   strip_tool_calls, _v2_name_match)
 from connectors import tool_def_from_connector_tool
 from events import inject_text_tool_prompt, parse_tool_params
 from quick_search import run_quick_search_for_chat
@@ -456,19 +457,21 @@ _TERMINAL_WORKFLOW_STATES = {"accepted", "completed", "cancelled", "blocked"}
 
 
 def _blocked_tool_signature(tool_name: str, tool_result: str) -> str:
+    # Keyed on the blocking trigger only (run-id or first line), NOT the tool
+    # name — a model alternating read_file → list_files → run_shell against
+    # the same blocking run must still trip the duplicate-BLOCKED stop.
     if not (tool_result or "").lstrip().startswith("BLOCKED"):
         return ""
     first_line = next((line.strip() for line in tool_result.splitlines() if line.strip()), "")
     trigger = _BLOCKED_RUN_RE.search(tool_result or "")
-    trigger_key = trigger.group(1) if trigger else first_line[:140]
-    return f"{tool_name}:{trigger_key}"
+    return trigger.group(1) if trigger else first_line[:140]
 
 
 def _record_blocked_tool_result(state: dict, tool_name: str, tool_result: str) -> bool:
     sig = _blocked_tool_signature(tool_name, tool_result)
     if not sig:
-        state["key"] = ""
-        state["count"] = 0
+        # A non-blocked sibling result (e.g. one OK tool in the same batch)
+        # must not reset the counter mid-detection.
         return False
     if state.get("key") == sig:
         state["count"] = int(state.get("count") or 0) + 1
@@ -476,6 +479,18 @@ def _record_blocked_tool_result(state: dict, tool_name: str, tool_result: str) -
         state["key"] = sig
         state["count"] = 1
     return state["count"] >= 2
+
+
+def _qa_run_qualifies(run: dict, stream_started_at: str) -> bool:
+    """True when a qa run can be streamed verbatim as this turn's answer:
+    succeeded, not a change request, has an answer, and was created by THIS
+    stream — a stale qa run from a previous turn must never be replayed."""
+    if (run.get("started_at") or "") < (stream_started_at or ""):
+        return False
+    env = run.get("result_envelope") or {}
+    return (run.get("status") == "succeeded"
+            and not env.get("looks_like_change_request")
+            and bool((env.get("answer") or "").strip()))
 
 
 def _next_action_from_blocked_result(tool_result: str) -> str:
@@ -685,8 +700,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         mc = next((c for c in all_configs if c["id"] == req.persona_id), None)
         if mc:
             persona_system_prompt = mc.get("system_prompt") or None
-            _persona_name_l = (mc.get("name") or "").lower()
-            if "v2" in _persona_name_l or "daedalus" in _persona_name_l:
+            # Same matching rules as the tools.py gate (_is_v2_persona); the
+            # two still differ on source — req.persona_id here vs the
+            # conversation's model_config_id there.
+            if _v2_name_match(mc.get("name") or ""):
                 _is_v2_persona = True
             params = mc.get("parameters", {})
             profile_type = _model_config_profile_type(mc, params)
@@ -987,7 +1004,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
     if _active_project:
         _ap_files = _active_project.get("file_manifest") or []
-        _ap_id = _active_project.get("id", "") or ""
+        # On-disk dir is openhands_project_id when present (worker may have
+        # dedupe-renamed); every tools.py consumer resolves the same way.
+        _ap_id = (_active_project.get("openhands_project_id")
+                  or _active_project.get("id", "") or "")
         _ap_path = f"/root/projects/{_ap_id}" if _ap_id else ""
         _ap_lines = [
             "## ACTIVE PROJECT (this conversation already has a built project)",
@@ -2211,13 +2231,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     for _qr in _qa_runs:
                         if _qr.get("role") != "qa":
                             continue
-                        _qa_env = _qr.get("result_envelope") or {}
                         # Only short-circuit when the QA succeeded AND wasn't a
-                        # change request. Change requests should fall through to
-                        # the LLM round so it can route to generate_code/etc.
-                        if (_qr.get("status") == "succeeded"
-                                and not _qa_env.get("looks_like_change_request")
-                                and (_qa_env.get("answer") or "").strip()):
+                        # change request AND belongs to this stream — without
+                        # the stream-start filter, a failed ask_project this
+                        # turn would replay the previous turn's stale answer.
+                        if _qa_run_qualifies(_qr, _stream_started_at):
+                            _qa_env = _qr.get("result_envelope") or {}
                             _qa_answer = _qa_env["answer"]
                             print(f"[CHAT]   QA short-circuit: streaming "
                                   f"{len(_qa_answer)} chars from {_qr.get('id')}")

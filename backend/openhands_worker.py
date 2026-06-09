@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -35,6 +36,9 @@ AIDER_REPEAT_LINE_LIMIT = int(os.environ.get("AIDER_REPEAT_LINE_LIMIT", "120"))
 
 
 def _register_run(run_id: str, conversation, cancel_event: threading.Event) -> None:
+    """conversation may be None during early registration (before model
+    preload); re-registering with the real conversation reuses the same
+    cancel_event so a cancel that landed in between is not lost."""
     if not run_id:
         return
     with _ACTIVE_RUNS_LOCK:
@@ -48,11 +52,29 @@ def _deregister_run(run_id: str) -> None:
         _ACTIVE_RUNS.pop(run_id, None)
 
 
-def _register_aider_run(run_id: str, process: subprocess.Popen, cancel_event: threading.Event) -> None:
+def _register_aider_run(run_id: str, process, cancel_event: threading.Event) -> None:
+    """process may be None during early registration (before Popen)."""
     if not run_id:
         return
     with _ACTIVE_AIDER_RUNS_LOCK:
         _ACTIVE_AIDER_RUNS[run_id] = {"process": process, "cancel": cancel_event}
+
+
+def _terminate_proc_tree(proc, sig=signal.SIGTERM) -> None:
+    """Signal the whole process group — aider spawns --test-cmd shells that
+    plain terminate()/kill() would orphan."""
+    if proc is None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except Exception:
+        try:
+            if sig == signal.SIGKILL:
+                proc.kill()
+            else:
+                proc.terminate()
+        except Exception:
+            pass
 
 
 def _deregister_aider_run(run_id: str) -> None:
@@ -203,6 +225,11 @@ def _persist_tool_cache():
         print(f"[OH-Worker] Failed to persist tool cache: {e}")
 
 
+# Serializes evict+preload: without it, two overlapping runs with different
+# num_ctx (or models) evict each other's actively-used model mid-run.
+_ENSURE_LOADED_LOCK = threading.Lock()
+
+
 def _ensure_loaded(ollama_base: str, model: str, num_ctx: int) -> None:
     """Force-load `model` into Ollama's VRAM with exactly `num_ctx` context.
 
@@ -215,6 +242,11 @@ def _ensure_loaded(ollama_base: str, model: str, num_ctx: int) -> None:
     """
     import requests
 
+    with _ENSURE_LOADED_LOCK:
+        _ensure_loaded_inner(ollama_base, model, num_ctx, requests)
+
+
+def _ensure_loaded_inner(ollama_base: str, model: str, num_ctx: int, requests) -> None:
     try:
         ps = requests.get(f"{ollama_base}/api/ps", timeout=5).json()
         for m in (ps.get("models") or []):
@@ -620,6 +652,9 @@ def _run_aider_blocking(req: AiderRunRequest, stream_cb=None) -> dict:
     env.setdefault("AIDER_ANALYTICS_DISABLE", "true")
 
     cancel_event = threading.Event()
+    # Register before Popen so a cancel arriving in the setup window isn't
+    # lost as not_found; re-registered with the real process below.
+    _register_aider_run(req.run_id, None, cancel_event)
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
     repeat_counts: dict[str, int] = {}
@@ -637,6 +672,7 @@ def _run_aider_blocking(req: AiderRunRequest, stream_cb=None) -> dict:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
         _register_aider_run(req.run_id, proc, cancel_event)
 
@@ -680,11 +716,11 @@ def _run_aider_blocking(req: AiderRunRequest, stream_cb=None) -> dict:
                 internal_stop["reason"] = f"timeout after {AIDER_MAX_SECONDS}s"
                 cancel_event.set()
             if cancel_event.is_set():
-                proc.terminate()
+                _terminate_proc_tree(proc, signal.SIGTERM)
                 try:
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
+                    _terminate_proc_tree(proc, signal.SIGKILL)
                 break
             time.sleep(0.2)
 
@@ -813,7 +849,7 @@ def cancel_aider_run(run_id: str):
     proc = entry.get("process")
     try:
         if proc and proc.poll() is None:
-            proc.terminate()
+            _terminate_proc_tree(proc, signal.SIGTERM)
     except Exception as e:
         print(f"[Aider-Worker] terminate during cancel failed: {e}")
     return {"status": "cancelled", "run_id": run_id}
@@ -840,7 +876,13 @@ async def run_aider_stream(req: AiderRunRequest):
     async def generate():
         fut = loop.run_in_executor(None, _run_sync)
         while True:
-            item = await queue.get()
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                # Keepalive during silent Aider phases so proxies/read
+                # timeouts don't drop the stream (same as /run-stream).
+                yield ": keepalive\n\n"
+                continue
             if item is None:
                 break
             yield f"data: {json.dumps(item)}\n\n"
@@ -937,6 +979,9 @@ def run_task(req: RunRequest):
     progress_log = []
     cancel_event = threading.Event()
     conversation = None
+    # Register before the tool-support probe + model preload (can take
+    # minutes) so a cancel in that window isn't lost as not_found.
+    _register_run(req.run_id, None, cancel_event)
 
     try:
         ollama_base = req.ollama_url.rstrip("/")
@@ -1161,9 +1206,11 @@ def cancel_run(run_id: str):
     entry["cancel"].set()
     # Also call pause() so the SDK exits at the next iteration even if the
     # callback hasn't fired yet (e.g., model is mid-stream). close() runs in
-    # the worker thread's finally block.
+    # the worker thread's finally block. conversation is None while the run
+    # is still in model-preload — the event alone is enough then.
     try:
-        entry["conversation"].pause()
+        if entry.get("conversation") is not None:
+            entry["conversation"].pause()
     except Exception as e:
         print(f"[OH-Worker] pause() during cancel failed (non-fatal): {e}")
     print(f"[OH-Worker] Cancel signalled for run_id={run_id}")
@@ -1186,6 +1233,9 @@ async def run_task_stream(req: RunRequest):
     loop = asyncio.get_event_loop()
     cancel_event = threading.Event()
     conversation_holder = [None]  # populated once Conversation is built
+    # Register before the tool-support probe + model preload (can take
+    # minutes) so a cancel in that window isn't lost as not_found.
+    _register_run(req.run_id, None, cancel_event)
 
     def _send_sse(data):
         try:

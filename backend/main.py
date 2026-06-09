@@ -582,6 +582,12 @@ _cleanup_task_ref = None
 async def lifespan(app: FastAPI):
     global _cleanup_task_ref, _health_task_ref
     await db.init_db()
+    try:
+        _reaped = await db.reap_stale_runs()
+        if _reaped.get("runs_reaped") or _reaped.get("workflows_blocked"):
+            print(f"[Startup] Reaped stale runs: {_reaped}")
+    except Exception as _re:
+        print(f"[Startup] Stale-run reaper failed (non-fatal): {_re}")
     os.makedirs(config.UPLOAD_DIR, exist_ok=True)
     os.makedirs(config.TOOLS_DIR, exist_ok=True)
     os.makedirs(config.KB_DIR, exist_ok=True)
@@ -2247,20 +2253,25 @@ async def upload_coder_project(
         print(f"[CoderUpload] DB save failed (non-fatal): {e}")
 
     workflow_id = f"cw-{uuid.uuid4().hex[:12]}"
-    try:
-        await db.create_coder_workflow(
-            workflow_id,
-            conv_id,
-            project_id=project_id,
-            mode="fix_uploaded_project",
-            state="planning",
-            user_task=f"Uploaded project: {safe_name}",
-            contract=project_contract,
-            artifact_status="not_ready",
-        )
-    except Exception as e:
-        print(f"[CoderUpload] workflow create failed (non-fatal): {e}")
-        workflow_id = ""
+    workflow_status = "created"
+    for _wf_attempt in (1, 2):
+        try:
+            await db.create_coder_workflow(
+                workflow_id,
+                conv_id,
+                project_id=project_id,
+                mode="fix_uploaded_project",
+                state="planning",
+                user_task=f"Uploaded project: {safe_name}",
+                contract=project_contract,
+                artifact_status="not_ready",
+            )
+            break
+        except Exception as e:
+            print(f"[CoderUpload] workflow create failed (attempt {_wf_attempt}): {e}")
+            if _wf_attempt == 2:
+                workflow_id = ""
+                workflow_status = "failed"
 
     # Phase 4.2 — fire the Project Indexer in the background. It walks the
     # uploaded tree, detects build system, and seeds ChromaDB code_memory so
@@ -2306,6 +2317,7 @@ async def upload_coder_project(
     return {
         "project_id": project_id,
         "workflow_id": workflow_id,
+        "workflow_status": workflow_status,
         "name": project_name,
         "language": language,
         "file_count": len(manifest),
@@ -2802,7 +2814,7 @@ async def cancel_run(run_id: str):
     db_marked = False
     try:
         row = await db.get_run(run_id)
-        if row and row.get("status") in ("running", "pending"):
+        if row and row.get("status") in ("running", "pending", "queued"):
             envelope = row.get("result_envelope") or {}
             if not isinstance(envelope, dict):
                 envelope = {}

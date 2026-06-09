@@ -5,9 +5,12 @@ Ollama remains the default provider. Cloud model IDs are prefixed:
 `openai:<model>` or `anthropic:<model>`. Unprefixed IDs are treated as
 Ollama for backward compatibility with existing conversations and personas.
 """
+import base64
 import json
 import os
-from datetime import datetime
+import re
+import time
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
 import httpx
@@ -123,6 +126,7 @@ async def save_provider(provider: str, api_key: str | None = None, enabled: bool
         api_key=(api_key.strip() if isinstance(api_key, str) and api_key.strip() else None),
         enabled=enabled,
     )
+    invalidate_model_cache()
     return next(s for s in await provider_statuses() if s["provider"] == provider)
 
 
@@ -130,6 +134,7 @@ async def delete_provider(provider: str) -> dict:
     if provider not in CLOUD_PROVIDERS:
         raise ProviderError(f"Unsupported model provider: {provider}", provider=provider)
     await db.delete_model_provider_credential(provider)
+    invalidate_model_cache()
     return next(s for s in await provider_statuses() if s["provider"] == provider)
 
 
@@ -227,7 +232,21 @@ async def list_anthropic_models(http: httpx.AsyncClient, key: str) -> tuple[list
     return [prefixed_model_id("anthropic", mid) for mid in ids], details
 
 
+# /api/models is hit every time the model picker opens; without a short cache
+# each open costs two cloud round-trips.
+_MODEL_LIST_CACHE: dict[str, Any] = {"at": 0.0, "result": None}
+_MODEL_LIST_TTL = 60.0
+
+
+def invalidate_model_cache() -> None:
+    _MODEL_LIST_CACHE["result"] = None
+
+
 async def list_cloud_models(http: httpx.AsyncClient) -> tuple[list[str], dict, dict]:
+    now = time.monotonic()
+    cached = _MODEL_LIST_CACHE["result"]
+    if cached is not None and now - _MODEL_LIST_CACHE["at"] < _MODEL_LIST_TTL:
+        return cached
     models: list[str] = []
     details: dict = {}
     errors: dict = {}
@@ -245,15 +264,23 @@ async def list_cloud_models(http: httpx.AsyncClient) -> tuple[list[str], dict, d
         except Exception as e:
             errors[provider] = str(e)
             print(f"[model-providers] {provider} model list skipped: {e}")
-    return models, details, errors
+    result = (models, details, errors)
+    if not errors:
+        _MODEL_LIST_CACHE["at"] = now
+        _MODEL_LIST_CACHE["result"] = result
+    return result
 
 
 async def test_provider(http: httpx.AsyncClient, provider: str, api_key: str | None = None) -> dict:
     if provider not in CLOUD_PROVIDERS:
         raise ProviderError(f"Unsupported model provider: {provider}", provider=provider)
-    key = (api_key or "").strip() or await get_api_key(provider)
+    stored_key = await get_api_key(provider)
+    key = (api_key or "").strip() or stored_key
     if not key:
         raise ProviderError(f"{provider_label(provider)} API key is not configured.", provider=provider)
+    # Only persist the test result when the tested key is the stored/effective
+    # one — testing an unsaved key must not relabel the saved credential.
+    persist = key == stored_key
     try:
         if provider == "openai":
             models, _ = await list_openai_models(http, key)
@@ -265,20 +292,22 @@ async def test_provider(http: httpx.AsyncClient, provider: str, api_key: str | N
             "model_count": len(models),
             "sample_models": models[:5],
         }
-        await db.upsert_model_provider_credential(
-            provider,
-            last_test_status="ok",
-            last_test_error="",
-            last_test_at=datetime.utcnow().isoformat(),
-        )
+        if persist:
+            await db.upsert_model_provider_credential(
+                provider,
+                last_test_status="ok",
+                last_test_error="",
+                last_test_at=datetime.now(timezone.utc).isoformat(),
+            )
         return status
     except Exception as e:
-        await db.upsert_model_provider_credential(
-            provider,
-            last_test_status="error",
-            last_test_error=str(e)[:500],
-            last_test_at=datetime.utcnow().isoformat(),
-        )
+        if persist:
+            await db.upsert_model_provider_credential(
+                provider,
+                last_test_status="error",
+                last_test_error=str(e)[:500],
+                last_test_at=datetime.now(timezone.utc).isoformat(),
+            )
         raise
 
 
@@ -296,11 +325,38 @@ def _http_error_text(resp: httpx.Response, fallback: str) -> str:
     return text[:500] if text else fallback
 
 
-def _data_url(image_b64: str, mime: str = "image/png") -> str:
+def _image_media_type(image_b64: str) -> str:
+    """Detect the image MIME type from a data URL header or base64 magic bytes.
+
+    The frontend strips the data-URL prefix before sending, so JPEG/GIF/WebP
+    uploads arrive as raw base64 — Anthropic rejects them if media_type says png.
+    """
+    raw = (image_b64 or "").strip()
+    if raw.startswith("data:"):
+        mime = raw.split(",", 1)[0][5:].split(";", 1)[0].strip()
+        if mime:
+            return mime
+        return "image/png"
+    try:
+        head = base64.b64decode(raw[:32])
+    except Exception:
+        return "image/png"
+    if head.startswith(b"\x89PNG"):
+        return "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png"
+
+
+def _data_url(image_b64: str) -> str:
     raw = image_b64 or ""
     if raw.startswith("data:"):
         return raw
-    return f"data:{mime};base64,{raw}"
+    return f"data:{_image_media_type(raw)};base64,{raw}"
 
 
 def _coerce_text(value: Any) -> str:
@@ -361,7 +417,7 @@ def _anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
                     "type": "image",
                     "source": {
                         "type": "base64",
-                        "media_type": "image/png",
+                        "media_type": _image_media_type(str(image)),
                         "data": str(image).split(",", 1)[-1],
                     },
                 })
@@ -429,7 +485,10 @@ async def _stream_openai(
     # Some current OpenAI models reject sampling controls on the Responses API.
     # HyprChat sends default temperature/top_p for Ollama, so omit them here
     # unless we add explicit per-model capability metadata later.
-    max_tokens = _max_output_tokens(options, default=4096)
+    # Reasoning models spend invisible reasoning tokens inside max_output_tokens,
+    # so a 4096 default can produce a truncated or empty visible answer.
+    _is_reasoning = bool(re.match(r"^o\d", model_name.lower())) or model_name.lower().startswith("gpt-5")
+    max_tokens = _max_output_tokens(options, default=16384 if _is_reasoning else 4096)
     if max_tokens:
         payload["max_output_tokens"] = max_tokens
 
@@ -450,13 +509,21 @@ async def _stream_openai(
                 delta = obj.get("delta", "")
                 if delta:
                     yield {"type": "token", "content": delta}
-            elif typ == "response.completed":
-                usage = (obj.get("response") or {}).get("usage") or {}
+            elif typ in ("response.completed", "response.incomplete"):
+                resp_obj = obj.get("response") or {}
+                usage = resp_obj.get("usage") or {}
                 yield {
                     "type": "usage",
                     "prompt_tokens": int(usage.get("input_tokens") or 0),
                     "gen_tokens": int(usage.get("output_tokens") or 0),
                 }
+                if typ == "response.incomplete":
+                    reason = (resp_obj.get("incomplete_details") or {}).get("reason") or "max_output_tokens"
+                    yield {"type": "token", "content": f"\n\n[Response truncated by OpenAI: {reason}]"}
+            elif typ == "response.failed":
+                err = (obj.get("response") or {}).get("error") or {}
+                msg = err.get("message") if isinstance(err, dict) else str(err)
+                raise ProviderError(msg or "OpenAI response failed", provider="openai")
             elif typ == "error" or obj.get("error"):
                 err = obj.get("error") or {}
                 msg = err.get("message") if isinstance(err, dict) else str(err)
@@ -473,10 +540,11 @@ async def _stream_anthropic(
     if not key:
         raise ProviderError("Anthropic API key is not configured.", provider="anthropic")
     system, anth_messages = _anthropic_messages(messages)
+    max_tokens = _max_output_tokens(options, default=4096)
     payload: dict[str, Any] = {
         "model": model_name,
         "messages": anth_messages,
-        "max_tokens": _max_output_tokens(options, default=4096),
+        "max_tokens": max_tokens,
         "stream": True,
     }
     if system:
@@ -488,38 +556,57 @@ async def _stream_anthropic(
 
     input_tokens = 0
     output_tokens = 0
-    async with http.stream(
-        "POST",
-        SUPPORTED_PROVIDERS["anthropic"]["messages_url"],
-        headers=_anthropic_headers(key),
-        json=payload,
-        timeout=300,
-    ) as resp:
-        if resp.status_code >= 400:
-            body = await resp.aread()
-            text = body.decode("utf-8", errors="replace")
-            raise ProviderError(text[:500] or f"Anthropic HTTP {resp.status_code}", provider="anthropic", status_code=resp.status_code)
-        async for obj in _iter_sse_json(resp):
-            typ = obj.get("type", "")
-            if typ == "message_start":
-                usage = (obj.get("message") or {}).get("usage") or {}
-                input_tokens = int(usage.get("input_tokens") or input_tokens or 0)
-                output_tokens = int(usage.get("output_tokens") or output_tokens or 0)
-            elif typ == "content_block_delta":
-                delta = obj.get("delta") or {}
-                if delta.get("type") == "text_delta" and delta.get("text"):
-                    yield {"type": "token", "content": delta["text"]}
-                elif delta.get("type") == "thinking_delta" and delta.get("thinking"):
-                    yield {"type": "thinking", "content": delta["thinking"]}
-            elif typ == "message_delta":
-                usage = obj.get("usage") or {}
-                output_tokens = int(usage.get("output_tokens") or output_tokens or 0)
-            elif typ == "message_stop":
-                yield {"type": "usage", "prompt_tokens": input_tokens, "gen_tokens": output_tokens}
-            elif typ == "error" or obj.get("error"):
-                err = obj.get("error") or {}
-                msg = err.get("message") if isinstance(err, dict) else str(err)
-                raise ProviderError(msg or "Anthropic stream error", provider="anthropic")
+    retried_max_tokens = False
+    while True:
+        async with http.stream(
+            "POST",
+            SUPPORTED_PROVIDERS["anthropic"]["messages_url"],
+            headers=_anthropic_headers(key),
+            json=payload,
+            timeout=300,
+        ) as resp:
+            if resp.status_code >= 400:
+                body = await resp.aread()
+                text = body.decode("utf-8", errors="replace")
+                # Older Claude models cap max_tokens at 4096/8192 and 400 on
+                # higher values; retry once at the universally safe cap.
+                if (
+                    not retried_max_tokens
+                    and resp.status_code == 400
+                    and "max_tokens" in text
+                    and payload["max_tokens"] > 4096
+                ):
+                    retried_max_tokens = True
+                    payload["max_tokens"] = 4096
+                    continue
+                raise ProviderError(text[:500] or f"Anthropic HTTP {resp.status_code}", provider="anthropic", status_code=resp.status_code)
+            async for event in _anthropic_stream_events(resp, input_tokens, output_tokens):
+                yield event
+            return
+
+
+async def _anthropic_stream_events(resp: httpx.Response, input_tokens: int, output_tokens: int) -> AsyncIterator[dict]:
+    async for obj in _iter_sse_json(resp):
+        typ = obj.get("type", "")
+        if typ == "message_start":
+            usage = (obj.get("message") or {}).get("usage") or {}
+            input_tokens = int(usage.get("input_tokens") or input_tokens or 0)
+            output_tokens = int(usage.get("output_tokens") or output_tokens or 0)
+        elif typ == "content_block_delta":
+            delta = obj.get("delta") or {}
+            if delta.get("type") == "text_delta" and delta.get("text"):
+                yield {"type": "token", "content": delta["text"]}
+            elif delta.get("type") == "thinking_delta" and delta.get("thinking"):
+                yield {"type": "thinking", "content": delta["thinking"]}
+        elif typ == "message_delta":
+            usage = obj.get("usage") or {}
+            output_tokens = int(usage.get("output_tokens") or output_tokens or 0)
+        elif typ == "message_stop":
+            yield {"type": "usage", "prompt_tokens": input_tokens, "gen_tokens": output_tokens}
+        elif typ == "error" or obj.get("error"):
+            err = obj.get("error") or {}
+            msg = err.get("message") if isinstance(err, dict) else str(err)
+            raise ProviderError(msg or "Anthropic stream error", provider="anthropic")
 
 
 async def _iter_sse_json(resp: httpx.Response) -> AsyncIterator[dict]:

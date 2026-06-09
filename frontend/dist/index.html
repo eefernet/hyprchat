@@ -1178,7 +1178,7 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact})=>{
     // when liveEvts haven't yet filled in. Stops as soon as we see a terminal status.
     const id = setInterval(()=>{
       setRun(cur=>{
-        if(cur && (cur.status==="succeeded"||cur.status==="failed"||cur.status==="partial")){clearInterval(id);return cur;}
+        if(cur && (cur.status==="succeeded"||cur.status==="failed"||cur.status==="partial"||cur.status==="cancelled"||cur.status==="skipped")){clearInterval(id);return cur;}
         load(); return cur;
       });
     }, 4000);
@@ -1214,10 +1214,12 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact})=>{
   const colour = status==="succeeded" ? t.ok :
                  status==="failed" ? t.err :
                  status==="partial" ? "#e9a45a" :
+                 (status==="cancelled"||status==="skipped") ? t.mut :
                  t.acc;
   const statusLabel = {
     queued:"queued", running:"running…", succeeded:"succeeded",
-    failed:"failed", partial:"partial", loading:"loading…",
+    failed:"failed", partial:"partial", cancelled:"cancelled",
+    skipped:"skipped", loading:"loading…",
   }[status] || status;
   const role = run?.role || "builder";
   const visual = _roleVisual(role);
@@ -1286,7 +1288,7 @@ const WorkflowCard = ({workflow, t, font, onOpenArtifact})=>{
   useEffect(()=>{setWf(workflow);},[workflow?.id,workflow?.updated_at]);
   useEffect(()=>{
     if(!wf?.id)return;
-    const active=["planning","building","reviewing","fixing","answering","accepting","packaging"].includes(wf.state);
+    const active=["planning","reviewing","fixing","accepting"].includes(wf.state);
     if(!active)return;
     let stop=false;
     const tick=async()=>{

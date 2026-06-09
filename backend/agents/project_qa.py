@@ -28,6 +28,8 @@ import config
 import database as db
 import cancel_registry
 
+from agents.acceptance import _configured_num_ctx, _ollama_response_text
+
 
 # Common English "stopwords" that aren't useful as grep targets. Keep small —
 # we want to filter out fillers but keep technical terms intact.
@@ -292,7 +294,7 @@ async def _read_file_full(http, project_dir: str, path: str,
     """Read a file's full contents (capped at max_bytes). Used for filename-
     targeted reads where the user explicitly asked to see/break down a file."""
     rel = path
-    full = (f"{project_dir.rstrip('/')}/{rel.lstrip('./')}"
+    full = (f"{project_dir.rstrip('/')}/{rel.removeprefix('./')}"
             if not rel.startswith("/") else rel)
     cmd = f"head -c {max_bytes} {shlex.quote(full)}"
     try:
@@ -312,7 +314,7 @@ async def _read_snippet(http, project_dir: str, path: str, line: int = 0,
                          radius: int = 18) -> str:
     """Read a chunk of a file centered on `line`. If line is 0, read the head."""
     rel = path
-    full = f"{project_dir.rstrip('/')}/{rel.lstrip('./')}" if not rel.startswith("/") else rel
+    full = f"{project_dir.rstrip('/')}/{rel.removeprefix('./')}" if not rel.startswith("/") else rel
     if line and line > radius:
         start = line - radius
         n = radius * 2 + 1
@@ -611,13 +613,16 @@ async def run_project_qa(http, events, conv_id: str, *,
                     "model": qa_model,
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
-                    "options": {"temperature": 0.3, "num_ctx": config.DEFAULT_NUM_CTX},
+                    "think": False,
+                    "options": {"temperature": 0.3, "num_ctx": _configured_num_ctx()},
                 },
                 timeout=600,
             )
             r = await cancel_registry.await_cancellable(coro, run_id)
             if r.status_code == 200:
-                answer = (r.json().get("message", {}).get("content") or "").strip()
+                # Reasoning models can route the answer to the thinking field
+                # even with think disabled — read both.
+                answer = _ollama_response_text(r.json())
             else:
                 answer = f"(LLM call failed: HTTP {r.status_code})"
         except cancel_registry.RunCancelled:

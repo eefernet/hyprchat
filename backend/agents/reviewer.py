@@ -357,6 +357,21 @@ async def _detect_project(http, project_dir: str) -> dict:
             "confidence": "none", "profile": "empty"}
 
 
+class _SandboxTransportError(Exception):
+    """Codebox transport failure — the project was never actually exercised."""
+
+
+def _transport_failure_detail(res: dict) -> str:
+    """Detect _run_in_sandbox's transport-failure sentinels (exit -1 with an
+    'Exception:'/'Codebox HTTP' stderr). These mean the command never ran —
+    radically different from a failing build, and must not be reviewed as one."""
+    if res.get("exit_code") == -1:
+        err = (res.get("stderr") or "").strip()
+        if err.startswith("Exception:") or err.startswith("Codebox HTTP"):
+            return err
+    return ""
+
+
 async def _run_in_sandbox(http, project_dir: str, command: str,
                           timeout: int = 300, run_id: str = "") -> dict:
     """Run a shell command at project_dir via Codebox. Returns truncated stdout/stderr.
@@ -1204,6 +1219,7 @@ async def run_review(http, events, conv_id: str, project_dir: str,
     project_files: list[str] = []
     _cancel_phase = "build"
     _ticker = None
+    _phase_exc = ""
 
     try:
         if build_cmd:
@@ -1211,27 +1227,43 @@ async def run_review(http, events, conv_id: str, project_dir: str,
             await _step("build", build_cmd)
             build_result = await _run_in_sandbox(http, project_dir, build_cmd, timeout=300, run_id=run_id)
             await _step("build_done", f"exit={build_result['exit_code']}")
+            _tf = _transport_failure_detail(build_result)
+            if _tf:
+                raise _SandboxTransportError(_tf)
 
         if test_cmd:
             _cancel_phase = "test"
             await _step("test", test_cmd)
             test_result = await _run_in_sandbox(http, project_dir, test_cmd, timeout=300, run_id=run_id)
             await _step("test_done", f"exit={test_result['exit_code']}")
+            _tf = _transport_failure_detail(test_result)
+            if _tf:
+                raise _SandboxTransportError(_tf)
 
         if lint_cmd:
             _cancel_phase = "lint"
             await _step("lint", lint_cmd)
             lint_result = await _run_in_sandbox(http, project_dir, lint_cmd, timeout=120, run_id=run_id)
             await _step("lint_done", f"exit={lint_result['exit_code']}")
+            _tf = _transport_failure_detail(lint_result)
+            if _tf:
+                raise _SandboxTransportError(_tf)
 
-        # 3. Pull file snippets for any failures.
+        # 3. Pull file snippets for any failures. Include stderr — transport
+        # and runner errors land there, not in the merged stdout.
         failure_text = ""
         if build_result["exit_code"] != 0:
             failure_text += build_result.get("stdout", "")
+            if build_result.get("stderr"):
+                failure_text += "\n" + build_result["stderr"]
         if test_result["exit_code"] != 0:
             failure_text += "\n" + test_result.get("stdout", "")
+            if test_result.get("stderr"):
+                failure_text += "\n" + test_result["stderr"]
         if lint_result["exit_code"] != 0:
             failure_text += "\n" + lint_result.get("stdout", "")
+            if lint_result.get("stderr"):
+                failure_text += "\n" + lint_result["stderr"]
         refs = _extract_file_refs(failure_text)
         any_failure = (
             build_result["exit_code"] != 0
@@ -1498,7 +1530,11 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                 pass
             cancel_registry.cleanup(run_id)
         return cancelled_env
+    except _SandboxTransportError as e:
+        _phase_exc = f"Sandbox/transport failure during {_cancel_phase}: {e}"
+        print(f"[REVIEWER] {_phase_exc}")
     except Exception as e:
+        _phase_exc = f"{type(e).__name__}: {e}"
         print(f"[REVIEWER] review phase failed ({_cancel_phase}): {e}")
     finally:
         if _ticker:
@@ -1507,6 +1543,51 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                 await _ticker
             except asyncio.CancelledError:
                 pass
+
+    if _phase_exc:
+        # A phase exception means the project was NOT actually exercised. The
+        # old path fell into the parse fallback whose pristine exit-code-0
+        # defaults fabricated a "clean" verdict for a project never built.
+        envelope = {
+            "status": "error",
+            "summary": f"Review aborted during {_cancel_phase}: {_phase_exc}"[:400],
+            "issues": [{
+                "severity": "infra",
+                "file": "",
+                "lines": [],
+                "summary": (f"Reviewer infrastructure failure — {_phase_exc[:200]}. "
+                            "The project was NOT verified; this is not a code issue. "
+                            "Check Codebox/Ollama health and re-run run_review."),
+                "suggested_fix_scope": [],
+            }],
+            "build_cmd": build_cmd, "test_cmd": test_cmd, "lint_cmd": lint_cmd,
+            "build_exit": build_result["exit_code"],
+            "test_exit": test_result["exit_code"],
+            "lint_exit": lint_result["exit_code"],
+            "language": language, "marker": marker,
+            "verification_level": verification_level,
+            "verification_profile": profile,
+            "verification_confidence": confidence,
+            "review_model": review_model,
+            "project_dir": project_dir,
+            "run_id": run_id,
+        }
+        try:
+            await events.emit(conv_id, "tool_end", {
+                "tool": "run_review", "icon": "search-check",
+                "status": f"⚠ Review aborted — {_cancel_phase} infrastructure failure",
+                "run_id": run_id,
+            })
+        except Exception:
+            pass
+        if run_id:
+            try:
+                await db.update_run(run_id, status="failed",
+                                    result_envelope=envelope, ended=True)
+            except Exception:
+                pass
+            cancel_registry.cleanup(run_id)
+        return envelope
 
     parsed = _try_parse_review_json(review_text)
     if not parsed or "status" not in parsed:

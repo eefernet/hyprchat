@@ -246,3 +246,204 @@ def test_v2_gate_allows_agent_research_after_fixer_attempt(tmp_path, monkeypatch
     assert result.startswith("# Agent Research: API mismatch exact error")
     assert tools._get_recent_research("conv-v2") is not None
     assert any(ev[1] == "tool_start" and ev[2].get("tool") == "deep_research" for ev in events.events)
+
+
+# ---------------------------------------------------------------------------
+# Turn-scoped gate policy (G1/G2) + research-anchor unification
+# ---------------------------------------------------------------------------
+
+async def _set_message_times(conv_id: str, ts: str):
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            "UPDATE messages SET created_at=? WHERE conversation_id=?",
+            (ts, conv_id),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+def _patch_fixer_config(monkeypatch):
+    monkeypatch.setattr(fixer.config, "CODEBOX_URL", "http://codebox")
+    monkeypatch.setattr(fixer.config, "OLLAMA_URL", "http://ollama")
+    monkeypatch.setattr(fixer.config, "FIXER_MODEL", "fixer-test-model")
+    monkeypatch.setattr(fixer.config, "CODER_MODEL", "")
+    monkeypatch.setattr(fixer.config, "PLANNING_MODEL", "")
+    monkeypatch.setattr(fixer.config, "DEFAULT_MODEL", "fallback-model")
+    monkeypatch.setattr(fixer.config, "DEFAULT_NUM_CTX", 8192)
+    monkeypatch.setattr(fixer.config, "AIDER_ENABLED", False)
+
+
+def _seed_cap_conversation(conv_id: str, mc_id: str, *, fix_role: str = "fixer"):
+    """Three successful reviewer-driven fix runs + a reviewer with issues."""
+    _run(db.create_model_config(mc_id, "Daedalus Coder v2", "test-model",
+                                tool_ids=["run_fixer"]))
+    _run(db.create_conversation(conv_id, "Cap Test", model_config_id=mc_id))
+    for i in range(3):
+        rid = f"run-fx-{conv_id}-{i}"
+        _run(db.create_run(rid, conv_id, role=fix_role, status="succeeded"))
+        _run(db.update_run(rid, status="succeeded", result_envelope={
+            "status": "applied", "source_role": "reviewer",
+        }, ended=True))
+        _run(_set_run_times(rid, f"2026-01-01T00:00:0{i}", f"2026-01-01T00:00:0{i}"))
+    _run(db.create_run(f"run-rev-{conv_id}", conv_id, role="reviewer", status="succeeded"))
+    _run(db.update_run(f"run-rev-{conv_id}", status="succeeded", result_envelope={
+        "status": "issues", "summary": "still broken",
+        "project_dir": "/root/projects/demo",
+        "issues": [{"file": "app.py", "summary": "boom",
+                    "suggested_fix_scope": ["app.py"]}],
+    }, ended=True))
+    _run(_set_run_times(f"run-rev-{conv_id}", "2026-01-01T00:00:05", "2026-01-01T00:00:06"))
+
+
+def test_cycle_cap_resets_after_new_user_message(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _seed_cap_conversation("conv-capr", "mc-capr")
+    # The user sends a NEW request after the three exhausted cycles.
+    _run(db.add_message("conv-capr", "user", "try a different approach"))
+    _run(_set_message_times("conv-capr", "2026-01-01 00:01:00"))
+    _patch_fixer_config(monkeypatch)
+
+    result = _run(tools.exec_tool(
+        http=_FixerHTTP(), events=_FakeEvents(),
+        name="run_fixer", args={"reviewer_run_id": "run-rev-conv-capr"},
+        conv_id="conv-capr",
+    ))
+
+    assert "Hard cap" not in result
+    assert "BLOCKED" not in result
+
+
+def test_cycle_cap_blocks_within_same_user_turn(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _seed_cap_conversation("conv-capb", "mc-capb")
+    # The user message predates the three cycles — same request, cap holds.
+    _run(db.add_message("conv-capb", "user", "fix my app"))
+    _run(_set_message_times("conv-capb", "2025-12-31 00:00:00"))
+    _patch_fixer_config(monkeypatch)
+
+    result = _run(tools.exec_tool(
+        http=_FixerHTTP(), events=_FakeEvents(),
+        name="run_fixer", args={"reviewer_run_id": "run-rev-conv-capb"},
+        conv_id="conv-capb",
+    ))
+
+    assert "BLOCKED" in result and "Hard cap" in result
+
+
+def test_aider_success_counts_toward_cap(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _seed_cap_conversation("conv-capa", "mc-capa", fix_role="aider.fix")
+    _run(db.add_message("conv-capa", "user", "fix my app"))
+    _run(_set_message_times("conv-capa", "2025-12-31 00:00:00"))
+    _patch_fixer_config(monkeypatch)
+
+    result = _run(tools.exec_tool(
+        http=_FixerHTTP(), events=_FakeEvents(),
+        name="run_aider_fix", args={"task": "fix the reviewer issues"},
+        conv_id="conv-capa",
+    ))
+
+    assert "BLOCKED" in result and "Hard cap" in result
+
+
+def _seed_qa_conversation(conv_id: str, mc_id: str):
+    _run(db.create_model_config(mc_id, "Daedalus Coder v2", "test-model",
+                                tool_ids=["ask_project"]))
+    _run(db.create_conversation(conv_id, "QA Test", model_config_id=mc_id))
+    _run(db.create_run(f"run-qa-{conv_id}", conv_id, role="qa", status="succeeded"))
+    _run(db.update_run(f"run-qa-{conv_id}", status="succeeded", result_envelope={
+        "status": "answered", "answer": "It works like this.",
+        "looks_like_change_request": False,
+    }, ended=True))
+    _run(_set_run_times(f"run-qa-{conv_id}", "2026-01-01T00:00:10", "2026-01-01T00:00:11"))
+
+
+def test_qa_terminal_gate_releases_on_new_user_turn(tmp_path):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _seed_qa_conversation("conv-qar", "mc-qar")
+    _run(db.add_message("conv-qar", "user", "now run the tests"))
+    _run(_set_message_times("conv-qar", "2026-01-01 00:01:00"))
+
+    result = _run(tools.exec_tool(
+        http=object(), events=_FakeEvents(),
+        name="read_file", args={"path": "/root/projects/demo/app.py"},
+        conv_id="conv-qar",
+    ))
+
+    # Gate released — the tool reaches its dispatcher (which then fails on the
+    # stub http object, proving we got past the gate).
+    assert "BLOCKED" not in result
+
+
+def test_qa_terminal_gate_blocks_same_turn(tmp_path):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _seed_qa_conversation("conv-qab", "mc-qab")
+    _run(db.add_message("conv-qab", "user", "how does it work?"))
+    _run(_set_message_times("conv-qab", "2026-01-01 00:00:00"))
+
+    result = _run(tools.exec_tool(
+        http=object(), events=_FakeEvents(),
+        name="read_file", args={"path": "/root/projects/demo/app.py"},
+        conv_id="conv-qab",
+    ))
+
+    assert "BLOCKED" in result and "ask_project" in result
+
+
+def test_research_release_uses_reviewer_started_at(tmp_path, monkeypatch):
+    """Research stashed while the review was still running satisfies the
+    fix-needed gate's whitelist check, so deep_research is NOT re-whitelisted
+    (it would be redundant) and run_fixer is NOT research-blocked."""
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_model_config("mc-anchor", "Daedalus Coder v2", "test-model",
+                                tool_ids=["run_fixer", "deep_research"]))
+    _run(db.create_conversation("conv-anchor", "Anchor Test", model_config_id="mc-anchor"))
+
+    _run(db.create_run("run-fx-anchor", "conv-anchor", role="fixer", status="succeeded"))
+    _run(db.update_run("run-fx-anchor", status="succeeded", result_envelope={
+        "status": "applied", "source_role": "reviewer",
+    }, ended=True))
+    _run(_set_run_times("run-fx-anchor", "1970-01-01T00:16:00", "1970-01-01T00:16:10"))
+
+    _run(db.create_run("run-rev-anchor", "conv-anchor", role="reviewer", status="succeeded"))
+    _run(db.update_run("run-rev-anchor", status="succeeded", result_envelope={
+        "status": "issues", "summary": "still broken",
+        "project_dir": "/root/projects/demo",
+        "issues": [{"file": "app.py", "summary": "boom",
+                    "suggested_fix_scope": ["app.py"]}],
+    }, ended=True))
+    # Review ran from 00:16:40 (=1000s) to 00:17:00 (=1020s).
+    _run(_set_run_times("run-rev-anchor", "1970-01-01T00:16:40", "1970-01-01T00:17:00"))
+
+    # Research stashed at t=1010 — between the review's start and end.
+    tools._RECENT_RESEARCH.clear()
+    monkeypatch.setattr(tools.time, "time", lambda: 1010.0)
+    tools._stash_research_result("conv-anchor", "boom error", "use the new API")
+    monkeypatch.setattr(tools.config, "AIDER_ENABLED", False)
+    _patch_fixer_config(monkeypatch)
+
+    # deep_research is no longer whitelisted (research already done since
+    # started_at) → fix-needed gate blocks it and routes to run_fixer.
+    res_dr = _run(tools.exec_tool(
+        http=object(), events=_FakeEvents(),
+        name="deep_research", args={"topic": "boom", "depth": 2},
+        conv_id="conv-anchor",
+    ))
+    assert "BLOCKED" in res_dr and "run_fixer" in res_dr
+
+    # ...and run_fixer is NOT research-blocked (STUCK uses the same anchor).
+    res_fx = _run(tools.exec_tool(
+        http=_FixerHTTP(), events=_FakeEvents(),
+        name="run_fixer", args={"reviewer_run_id": "run-rev-anchor"},
+        conv_id="conv-anchor",
+    ))
+    assert "Agent Research first" not in res_fx
+    assert "BLOCKED" not in res_fx

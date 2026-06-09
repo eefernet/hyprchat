@@ -150,3 +150,61 @@ def test_language_adapter_detects_plain_cpp_contract():
     assert contract["language"] == "cpp"
     assert contract["build_system"] == "plain-cpp"
     assert "g++" in contract["build_cmd"]
+
+
+# ---------------------------------------------------------------------------
+# Infra-failure honesty: transport/phase errors must never yield "clean"
+# ---------------------------------------------------------------------------
+
+class _NullEvents:
+    async def emit(self, *a, **k):
+        pass
+
+
+class _TransportFailHTTP(_FakeHTTP):
+    """Detection works; any actual build/test command (cd …) explodes."""
+
+    async def post(self, url, json=None, timeout=None):
+        command = (json or {}).get("command", "")
+        if "&& (" in command:
+            raise ConnectionError("codebox unreachable")
+        return await super().post(url, json=json, timeout=timeout)
+
+
+def test_reviewer_transport_failure_yields_error_envelope():
+    http = _TransportFailHTTP(["src/main.py", "README.md"])
+
+    envelope = _run(reviewer.run_review(
+        http, _NullEvents(), "conv-x", "/root/projects/tool",
+    ))
+
+    assert envelope["status"] == "error"
+    assert "transport" in envelope["summary"].lower() or "Sandbox" in envelope["summary"]
+    assert envelope["issues"][0]["severity"] == "infra"
+
+
+def test_reviewer_phase_exception_never_reports_clean(monkeypatch):
+    async def _boom(*a, **k):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(reviewer, "_run_in_sandbox", _boom)
+    http = _FakeHTTP(["src/main.py", "README.md"])
+
+    envelope = _run(reviewer.run_review(
+        http, _NullEvents(), "conv-x", "/root/projects/tool",
+    ))
+
+    assert envelope["status"] == "error"
+    assert "kaboom" in envelope["summary"]
+
+
+def test_transport_failure_detail_sentinels():
+    assert reviewer._transport_failure_detail(
+        {"exit_code": -1, "stderr": "Exception: boom"}) == "Exception: boom"
+    assert reviewer._transport_failure_detail(
+        {"exit_code": -1, "stderr": "Codebox HTTP 502: bad gateway"}).startswith("Codebox HTTP")
+    # Real build failures (non -1 exit) are not transport failures.
+    assert reviewer._transport_failure_detail(
+        {"exit_code": 1, "stderr": "SyntaxError"}) == ""
+    assert reviewer._transport_failure_detail(
+        {"exit_code": -1, "stderr": "(no command)"}) == ""

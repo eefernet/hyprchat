@@ -4923,6 +4923,59 @@ async def get_runs_by_project(project_id: str, limit: int = 50) -> list[dict]:
         await db.close()
 
 
+_REAPER_TERMINAL_WORKFLOW_STATES = (
+    "accepted", "partial_delivered", "cancelled", "blocked", "answering",
+)
+
+
+async def reap_stale_runs() -> dict:
+    """Mark runs left non-terminal by a previous process as failed.
+
+    Called once at startup before any requests. Cross-user raw SQL by design:
+    a restart orphans every in-flight run regardless of owner, and the v2 gate
+    treats a 'running' active_run_id as an in-flight workflow forever.
+    """
+    db = await get_db()
+    reaped: list[str] = []
+    workflows_blocked = 0
+    try:
+        now = datetime.utcnow().isoformat()
+        rows = await db.execute_fetchall(
+            "SELECT id, result_envelope FROM runs WHERE status IN ('queued','pending','running')"
+        )
+        for row in rows:
+            try:
+                env = json.loads(row["result_envelope"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                env = {}
+            if not isinstance(env, dict):
+                env = {}
+            env.update({"status": "error", "summary": "orphaned by backend restart"})
+            await db.execute(
+                "UPDATE runs SET status='failed', result_envelope=?, ended_at=? WHERE id=?",
+                (json.dumps(env), now, row["id"]),
+            )
+            reaped.append(row["id"])
+        if reaped:
+            placeholders = ",".join("?" * len(reaped))
+            wrows = await db.execute_fetchall(
+                f"SELECT id FROM coder_workflows WHERE active_run_id IN ({placeholders}) "
+                f"AND state NOT IN ({','.join('?' * len(_REAPER_TERMINAL_WORKFLOW_STATES))})",
+                tuple(reaped) + _REAPER_TERMINAL_WORKFLOW_STATES,
+            )
+            for w in wrows:
+                await db.execute(
+                    "UPDATE coder_workflows SET state='blocked', artifact_status='not_ready', "
+                    "updated_at=? WHERE id=?",
+                    (now, w["id"]),
+                )
+                workflows_blocked += 1
+        await db.commit()
+    finally:
+        await db.close()
+    return {"runs_reaped": len(reaped), "workflows_blocked": workflows_blocked}
+
+
 # ============================================================
 # CODER WORKFLOWS — user-facing Coder Bot v2 workflow state
 # ============================================================

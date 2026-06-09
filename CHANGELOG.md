@@ -1,3 +1,23 @@
+## Alpha v17.2.0 — June 10, 2026
+
+### Daedalus (Coder Bot v2) Hardening
+- Added a startup reaper: runs left `queued/pending/running` by a crash or restart are marked failed ("orphaned by backend restart") and their workflows unblocked, so conversations no longer lock up permanently after a mid-run restart.
+- Fixed the Fixer's edit parser silently truncating (and writing!) files that contain markdown code fences; unterminated fences from cut-off model output are now refused instead of written.
+- Fixer runs now report honest statuses: `partial` when some writes failed (no longer counts against the fix-cycle cap), accurate `issues_addressed`, and scope-truncation notes no longer downgrade clean runs.
+- Reviewer can no longer report "clean" for a project it never exercised: Codebox transport failures and phase exceptions now produce an explicit infra `error` envelope; stderr is included in failure analysis.
+- Acceptance survives Ollama timeouts (generic exception handler persists the run as failed), and its prompt section budgets now derive from the configured context window instead of fixed caps that overflowed a 16K window several times over.
+- **Fix-cycle caps are now per user request** (reviewer-driven 3, acceptance-driven 2), reset by a new user message, and `run_aider_fix` successes count toward the same budget; the Q&A-terminal gate is turn-scoped the same way.
+- Unified the STUCK_FIX/FINAL_CYCLE research anchors on reviewer `started_at` so the gates can't disagree about whether research already happened.
+- Fixed the dead clean-check in acceptance's reviewer lookup, the inverted condition that stacked synthetic reviewer envelopes on top of real issue reports, and the recursive `exec_tool` calls that passed arguments positionally misaligned.
+- Cancellation fixes: cancelling an Aider run now marks the workflow `cancelled` instead of terminal `blocked` and never overwrites a user-issued cancel; the runs cancel route accepts `queued` rows; Aider stream failures no longer launch a second concurrent Aider against the same project; the worker registers runs before model preload so early cancels aren't lost; Aider child processes are killed by process group.
+- Worker: `/aider/run-stream` emits keepalives during silent phases; model evict+preload is serialized so concurrent runs can't evict each other's model.
+- Uploaded-project indexer now prioritizes entrypoints and larger source files (it previously indexed the 100 *smallest* files), is cancellable via Stop, and survives unexpected exceptions; dotfile reads (`.env` etc.) no longer resolve to the wrong path in indexer/ProjectQA.
+- ProjectQA disables thinking and reads the thinking-field fallback; Architect respects the configured context window instead of a hardcoded 16384.
+- Active-project prompt injection now uses the on-disk `openhands_project_id` so the model is told the correct `/root/projects/...` path.
+- Duplicate-BLOCKED loop detection now keys on the blocking trigger (not the tool name), so alternating blocked tools trip the stop; the QA short-circuit can no longer replay a stale answer from a previous turn.
+- Frontend: run cards stop polling on `cancelled`/`skipped`; workflow cards stop polling terminal states (removed never-set `building`/`packaging`, terminal `answering`).
+- Persona prompt and tool descriptions updated to match the new cap semantics (requires `POST /api/seed/coder-bot-v2` after deploy).
+
 ## Alpha v17.1.2 — June 10, 2026
 
 ### HyprChat Memory & Navigation

@@ -92,6 +92,43 @@ def _parse_ts_loose(s) -> "datetime | None":
     return None
 
 
+async def _latest_user_msg_ts(conv_id: str, conv_row: dict | None = None):
+    """Timestamp of the newest persisted user message, or None.
+
+    The cycle-cap / Q&A-terminal gates scope their counters to runs newer than
+    this so a new user request resets the budget instead of inheriting an
+    exhausted cap from earlier work on the same conversation."""
+    try:
+        conv = conv_row or await db.get_conversation(conv_id)
+        for m in reversed((conv or {}).get("messages") or []):
+            if m.get("role") == "user":
+                return _parse_ts_loose(m.get("created_at"))
+    except Exception as _e:
+        print(f"[v2-gate] latest-user-msg lookup failed (non-fatal): {_e}")
+    return None
+
+
+def _runs_since(runs: list, ts) -> list:
+    """Runs whose started_at >= ts. ts=None keeps all runs (fail-safe: gates
+    fall back to the old whole-conversation behavior, never crash open)."""
+    if ts is None:
+        return runs
+    out = []
+    for r in runs:
+        rts = _parse_ts_loose(r.get("started_at"))
+        if rts is None or rts >= ts:
+            out.append(r)
+    return out
+
+
+def _v2_name_match(name: str) -> bool:
+    """Match v2/Daedalus persona names. Word-boundary 'v2' so unrelated names
+    that merely contain the substring (e.g. 'v2ray helper') don't enable the
+    workflow gate."""
+    n = (name or "").lower()
+    return "daedalus" in n or re.search(r"\bv2\b", n) is not None
+
+
 # In-process cache of the most recent deep_research result per conversation.
 # The full research report only exists in the orchestrator's in-memory tool
 # history for the current turn — saved_events keeps a summary but not the
@@ -517,9 +554,11 @@ async def _synthesize_reviewer_from_test_failure(
     rev_env = last_review.get("result_envelope") or {}
     rev_test_exit = rev_env.get("test_exit", -1)
     rev_status = (rev_env.get("status") or "").lower()
-    # Only synthesize if reviewer claimed clean. If reviewer already reported
-    # issues, the model has a real envelope to fix against.
-    if rev_status != "clean" and rev_test_exit != 0:
+    # Only synthesize if reviewer claimed clean (or a legacy envelope with no
+    # status whose tests passed). If reviewer already reported issues, the
+    # model has a real envelope to fix against — stacking a synthetic one on
+    # top would shift the gate's "latest reviewer" baseline.
+    if not (rev_status == "clean" or (not rev_status and rev_test_exit == 0)):
         return ""
 
     # Parse test output into structured issues. Group by file so multiple
@@ -684,8 +723,11 @@ async def _is_v2_persona(conv_id: str, conv_row: dict | None = None) -> bool:
         if not _mc_id:
             return False
         _mc = await db.get_model_config(_mc_id)
-        _name = (_mc.get("name") or "").lower() if _mc else ""
-        return bool(_mc and ("v2" in _name or "daedalus" in _name))
+        # NOTE: chat.py detects v2 from req.persona_id's config name; this
+        # gate detects it from conversation.model_config_id. The matching
+        # rules are shared via _v2_name_match so the two can only diverge on
+        # *which* config they look at, not on how the name is interpreted.
+        return bool(_mc and _v2_name_match(_mc.get("name") or ""))
     except Exception as _e:
         print(f"[v2-gate] persona lookup failed (non-fatal): {_e}")
         return False
@@ -873,7 +915,7 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "run_fixer",
-            "description": "Fallback targeted editor for issues identified by run_review or run_acceptance_review. For uploaded-project fixes, prefer run_aider_fix; run_fixer is mainly for greenfield/OpenHands projects or when Aider is disabled/unavailable. After reviewer-driven fixes, call run_review again. After docs-only acceptance fixes, call run_acceptance_review again; otherwise call run_review. Hard caps: 3 reviewer-driven fix cycles, 2 acceptance-driven fix cycles.",
+            "description": "Fallback targeted editor for issues identified by run_review or run_acceptance_review. For uploaded-project fixes, prefer run_aider_fix; run_fixer is mainly for greenfield/OpenHands projects or when Aider is disabled/unavailable. After reviewer-driven fixes, call run_review again. After docs-only acceptance fixes, call run_acceptance_review again; otherwise call run_review. Hard caps per user request: 3 reviewer-driven and 2 acceptance-driven successful fix cycles (run_aider_fix counts toward the same budget); a new user message resets the budget.",
             "parameters": {"type": "object", "properties": {
                 "reviewer_run_id": {"type": "string", "description": "The run_id of the run_review or run_acceptance_review call whose issues you want to fix (e.g. 'run-bd6f9dc7b4e3'). If omitted, the most recent actionable review/acceptance run is used."},
             }, "required": []},
@@ -896,7 +938,7 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "run_aider_fix",
-            "description": "Apply surgical edits to an existing uploaded project using Aider in the Codebox worker. Use this for uploaded-project fixes instead of generate_code/OpenHands. After it returns, call run_review to verify.",
+            "description": "Apply surgical edits to an existing uploaded project using Aider in the Codebox worker. Use this for uploaded-project fixes instead of generate_code/OpenHands. After it returns, call run_review to verify. Counts toward the same per-user-request fix-cycle caps as run_fixer (3 reviewer-driven, 2 acceptance-driven).",
             "parameters": {"type": "object", "properties": {
                 "project_dir": {"type": "string", "description": "Absolute project root in Codebox, e.g. /root/projects/proj-... . If omitted, uses the active uploaded project."},
                 "task": {"type": "string", "description": "The user's requested fix/change, verbatim when possible."},
@@ -1654,6 +1696,15 @@ async def exec_tool(
                     if (_role_qt in {"reviewer", "acceptance", "fixer", "aider.fix"}
                             or _role_qt.startswith("builder")):
                         break
+                if _terminal_qa_run is not None:
+                    # Turn-scoped: a QA answer is terminal only for the turn it
+                    # answered. A newer user message ("now run the tests")
+                    # releases the gate instead of blocking forever.
+                    _uts_qt = await _latest_user_msg_ts(conv_id)
+                    _qa_ts = _parse_ts_loose(_terminal_qa_run.get("started_at"))
+                    if (_uts_qt is not None and _qa_ts is not None
+                            and _qa_ts < _uts_qt):
+                        _terminal_qa_run = None
                 if _terminal_qa_run is not None and await _check_v2():
                     _qid = _terminal_qa_run.get("id", "?")
                     await events.emit(conv_id, "tool_end", {
@@ -1710,10 +1761,15 @@ async def exec_tool(
                 print(f"[v2-gate] uploaded-project bootstrap check failed (non-fatal): {_upe}")
 
         _runs_for_cap = None
-        if conv_id and name == "run_fixer":
+        _uts_cap = None
+        if conv_id and name in {"run_fixer", "run_aider_fix"}:
             _parent_role_for_cap = "reviewer"
             try:
-                _runs_for_cap = await db.get_runs_by_conversation(conv_id, limit=20)
+                # limit=50 so the cap window isn't silently truncated by run
+                # scroll; counters below are additionally scoped to the
+                # current user request via _runs_since.
+                _runs_for_cap = await db.get_runs_by_conversation(conv_id, limit=50)
+                _uts_cap = await _latest_user_msg_ts(conv_id)
                 _run_role_by_id_cap = {r.get("id"): r.get("role") for r in _runs_for_cap}
                 _requested_parent_id = (args.get("reviewer_run_id") or "").strip()
                 _parent_role_for_cap = ""
@@ -1733,8 +1789,11 @@ async def exec_tool(
                 # Uploaded-project fixes are owned by Aider. This redirect is
                 # deliberately before cycle/research gates so stale personas
                 # that still call run_fixer do not get stuck in the old scoped
-                # Fixer loop.
-                if _parent_role_for_cap == "reviewer" and getattr(config, "AIDER_ENABLED", True):
+                # Fixer loop. v2-only: a v1 persona's run_fixer must not be
+                # silently rerouted.
+                if (name == "run_fixer" and _parent_role_for_cap == "reviewer"
+                        and getattr(config, "AIDER_ENABLED", True)
+                        and await _check_v2()):
                     _requested_parent_id = (args.get("reviewer_run_id") or "").strip()
                     _issue_run_for_aider = await _latest_actionable_issue_run(conv_id, _requested_parent_id)
                     _aider_ctx = await _uploaded_project_aider_context(
@@ -1760,7 +1819,12 @@ async def exec_tool(
                                 "project_dir": _project_dir,
                                 "issue_run_id": _issue_run_id,
                             },
-                            conv_id, custom_tool_map, conv_model, kb_ids,
+                            conv_id,
+                            custom_tool_map=custom_tool_map,
+                            connector_tool_name_map=connector_tool_name_map,
+                            conv_model=conv_model,
+                            kb_ids=kb_ids,
+                            artifact_message_id=artifact_message_id,
                         )
 
                 def _fixer_source_role_cap(_fr):
@@ -1769,9 +1833,13 @@ async def exec_tool(
                             or _run_role_by_id_cap.get(_fr.get("parent_run_id"))
                             or "reviewer")
 
+                # Turn-scoped (G1) and Aider-inclusive (G2): only successful
+                # fix runs since the latest user message count, and aider.fix
+                # consumes the same budget as the scoped Fixer.
                 _fixer_succ = sum(
-                    1 for r in _runs_for_cap
-                    if (r.get("role") == "fixer" and r.get("status") == "succeeded"
+                    1 for r in _runs_since(_runs_for_cap, _uts_cap)
+                    if (r.get("role") in {"fixer", "aider.fix"}
+                        and r.get("status") == "succeeded"
                         and _fixer_source_role_cap(r) == _parent_role_for_cap)
                 )
                 _cap_limit = 2 if _parent_role_for_cap == "acceptance" else 3
@@ -1799,16 +1867,16 @@ async def exec_tool(
                                 + f" — {(_iss.get('summary','') or '')[:160]}"
                             )
                         await events.emit(conv_id, "tool_end", {
-                            "tool": "run_fixer", "icon": "wrench",
+                            "tool": name, "icon": "wrench",
                             "status": f"⛔ Cycle cap reached ({_fixer_succ}/{_cap_limit}) — summarize and stop",
                         })
-                        print(f"[v2-gate] CYCLE CAP: blocking run_fixer (already "
-                              f"{_fixer_succ} succeeded {_parent_role_for_cap}-driven fixer runs "
-                              f"on this conv)", flush=True)
+                        print(f"[v2-gate] CYCLE CAP: blocking {name} (already "
+                              f"{_fixer_succ} succeeded {_parent_role_for_cap}-driven fix runs "
+                              f"since the latest user message)", flush=True)
                         return (
                             f"BLOCKED — Hard cap of {_cap_limit} {_parent_role_for_cap}/fix "
-                            f"cycles already attempted on this conversation "
-                            f"({_fixer_succ} successful fixer runs).\n\n"
+                            f"cycles already attempted for this user request "
+                            f"({_fixer_succ} successful fix runs).\n\n"
                             f"The same class of issue is persisting and another fixer call "
                             f"will not help. Your VERY NEXT output MUST be plain text to the "
                             f"user that:\n"
@@ -1818,8 +1886,8 @@ async def exec_tool(
                             + (("\n" + "\n".join(_issue_lines)) if _issue_lines else "")
                             + "\n  3. Asks the user for guidance — what behavior they actually "
                             f"want, or whether to skip this issue and ship anyway.\n\n"
-                            f"Do NOT call run_fixer, run_review, generate_code, write_file, "
-                            f"run_shell, or plan_project. You MAY call download_project / "
+                            f"Do NOT call run_fixer, run_aider_fix, run_review, generate_code, "
+                            f"write_file, run_shell, or plan_project. You MAY call download_project / "
                             f"download_file to deliver what was built so far if the user wants "
                             f"to ship as-is. Otherwise, respond to the user with text."
                         )
@@ -1840,18 +1908,23 @@ async def exec_tool(
             try:
                 _runs_sf = _runs_for_cap
                 if _runs_sf is None:
-                    _runs_sf = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _runs_sf = await db.get_runs_by_conversation(conv_id, limit=50)
                 if _parent_role_for_cap == "acceptance":
                     raise StopAsyncIteration("acceptance fixes do not use research nudge")
+                # Same turn-scoped window as the cycle cap, counting both fix
+                # paths — the gates must agree on how many cycles happened.
                 _fsucc_sf = sum(
-                    1 for r in _runs_sf
-                    if (r.get("role") == "fixer" and r.get("status") == "succeeded"
+                    1 for r in _runs_since(_runs_sf, _uts_cap)
+                    if (r.get("role") in {"fixer", "aider.fix"}
+                        and r.get("status") == "succeeded"
                         and ((r.get("result_envelope") or {}).get("source_role")
                              or "reviewer") != "acceptance")
                 )
                 # 1 ≤ fixer_succ ≤ 2: between first failure and final cycle.
                 # 0 = first attempt, no gate. ≥3 = cap (handled above).
-                if 1 <= _fsucc_sf <= 2 and await _check_v2():
+                # Research nudge text is fixer-specific; Aider already requires
+                # a follow-up run_review, so only run_fixer is gated here.
+                if name == "run_fixer" and 1 <= _fsucc_sf <= 2 and await _check_v2():
                     _latest_rev_sf = next(
                         (r for r in _runs_sf if r.get("role") == "reviewer"),
                         None,
@@ -2015,13 +2088,7 @@ async def exec_tool(
             try:
                 _conv_full = await db.get_conversation(conv_id)
                 if await _check_v2(cr=_conv_full):
-                    # Find the most recent user message timestamp.
-                    _msgs_rb = (_conv_full or {}).get("messages") or []
-                    _latest_user_ts = None
-                    for _m in reversed(_msgs_rb):
-                        if _m.get("role") == "user":
-                            _latest_user_ts = _parse_ts_loose(_m.get("created_at"))
-                            break
+                    _latest_user_ts = await _latest_user_msg_ts(conv_id, conv_row=_conv_full)
 
                     if _latest_user_ts is not None:
                         _runs_rb = await db.get_runs_by_conversation(conv_id, limit=20)
@@ -2082,7 +2149,6 @@ async def exec_tool(
                 _pending_kind = ""
                 _pending_review = None  # state 2 trigger
                 _pending_acceptance_needed = None  # clean review must be accepted before delivery
-                _terminal_qa = None    # state 3 trigger
 
                 # Walk newest-first.
                 # Builder/fixer runs in ANY non-trivial state require verification.
@@ -2096,11 +2162,8 @@ async def exec_tool(
                 for _r in _runs_for_v2_gate:
                     _role = _r.get("role", "")
                     if _role == "qa":
-                        # Most recent qa: state 3 if it succeeded and isn't a change request.
-                        _env_q = _r.get("result_envelope") or {}
-                        if (_r.get("status") == "succeeded"
-                                and not _env_q.get("looks_like_change_request", False)):
-                            _terminal_qa = _r
+                        # Q&A-terminal handling lives in the pre-gate at the
+                        # top of exec_tool; here a qa run just ends the walk.
                         break
                     if _role == "reviewer":
                         # Most recent reviewer: issues need fixer; clean needs acceptance.
@@ -2204,13 +2267,17 @@ async def exec_tool(
                         return (_fenv.get("source_role")
                                 or _run_role_by_id.get(_fr.get("parent_run_id"))
                                 or "reviewer")
+                    # Same turn-scoped window as the cycle cap, so cap and
+                    # cap-release agree on how many attempts happened.
+                    _uts_gate = await _latest_user_msg_ts(conv_id)
+                    _runs_gate_window = _runs_since(_runs_for_v2_gate, _uts_gate)
                     _fixer_attempts_gate = sum(
-                        1 for _r in _runs_for_v2_gate
+                        1 for _r in _runs_gate_window
                         if (_r.get("role") in {"fixer", "aider.fix"} and _r.get("status") in _FIXER_TERMINAL
                             and _fixer_source_role(_r) == _pending_role)
                     )
                     _fixer_succ_gate = sum(
-                        1 for _r in _runs_for_v2_gate
+                        1 for _r in _runs_gate_window
                         if (_r.get("role") in {"fixer", "aider.fix"} and _r.get("status") == "succeeded"
                             and _fixer_source_role(_r) == _pending_role)
                     )
@@ -2239,11 +2306,14 @@ async def exec_tool(
                     # the next round. Below 1 fixer attempt the model should
                     # actually try fixing before researching.
                     _cap_limit_gate = 2 if _pending_role == "acceptance" else 3
+                    # Anchor on started_at to match the STUCK/FINAL gates —
+                    # research stashed while the review was still running must
+                    # satisfy both, or the gates disagree and loop.
                     if (name == "deep_research"
                             and _pending_role != "acceptance"
                             and _fixer_attempts_gate >= 1
                             and not await _deep_research_called_since(
-                                conv_id, _pending_review.get("ended_at"))):
+                                conv_id, _pending_review.get("started_at"))):
                         print(f"[v2-gate] research-release: allowing deep_research "
                               f"despite fix-needed (fixer_attempts={_fixer_attempts_gate}, "
                               f"required by FINAL_CYCLE/STUCK_FIX)", flush=True)
@@ -2291,25 +2361,6 @@ async def exec_tool(
                             f"⛔ Blocked — call run_fixer first ({_pending_role} {_rid[:14]}… has issues)",
                             _rid,
                         )
-                elif _terminal_qa is not None:
-                    _qid = _terminal_qa.get("id", "?")
-                    _gate_msg = (
-                        "state", "qa-terminal",
-                        f"BLOCKED — ask_project ({_qid}) just answered the user's question. "
-                        f"The user asked something; you have the answer. Your VERY NEXT output "
-                        f"MUST be plain text relaying that answer to the user.\n\n"
-                        f"Do NOT call run_review, run_fixer, generate_code, read_file, "
-                        f"write_file, run_shell, download_project, or any other tool. The "
-                        f"build is already done; the user is asking ABOUT it, not asking you "
-                        f"to redo it.\n\n"
-                        f"If they follow up with another question, call ask_project again. "
-                        f"If they explicitly request a change ('add X', 'fix Y', 'refactor Z'), "
-                        f"call generate_code or write_file then. But for THIS turn, just "
-                        f"answer the user.",
-                        f"⛔ Blocked — answer the user (ask_project {_qid[:14]}… is terminal)",
-                        _qid,
-                    )
-
                 if _gate_msg is not None:
                     # v1 has no run_review or run_fixer in its workflow, so
                     # the gate only blocks v2 personas.
@@ -3412,7 +3463,12 @@ async def exec_tool(
                 answer = await exec_tool(
                     http, events, "ask_project",
                     {"question": task, "project_dir": f"/root/projects/{project_id}" if project_id else ""},
-                    conv_id, custom_tool_map, conv_model, kb_ids,
+                    conv_id,
+                    custom_tool_map=custom_tool_map,
+                    connector_tool_name_map=connector_tool_name_map,
+                    conv_model=conv_model,
+                    kb_ids=kb_ids,
+                    artifact_message_id=artifact_message_id,
                 )
                 await db.update_coder_workflow(workflow_id, state="answering", artifact_status="not_applicable")
                 return f"workflow_id: {workflow_id}\n\n{answer}"
@@ -3421,14 +3477,24 @@ async def exec_tool(
                 result = await exec_tool(
                     http, events, "run_aider_fix",
                     {"task": task, "project_dir": f"/root/projects/{project_id}" if project_id else ""},
-                    conv_id, custom_tool_map, conv_model, kb_ids,
+                    conv_id,
+                    custom_tool_map=custom_tool_map,
+                    connector_tool_name_map=connector_tool_name_map,
+                    conv_model=conv_model,
+                    kb_ids=kb_ids,
+                    artifact_message_id=artifact_message_id,
                 )
                 return f"workflow_id: {workflow_id}\n\n{result}"
 
             plan = await exec_tool(
                 http, events, "plan_project",
                 {"task": task, "language": language, "constraints": "Return a machine-checkable project contract for OpenHands before build."},
-                conv_id, custom_tool_map, conv_model, kb_ids,
+                conv_id,
+                custom_tool_map=custom_tool_map,
+                connector_tool_name_map=connector_tool_name_map,
+                conv_model=conv_model,
+                kb_ids=kb_ids,
+                artifact_message_id=artifact_message_id,
             )
             await db.update_coder_workflow(workflow_id, state="planning", artifact_status="not_ready")
             return (
@@ -3447,7 +3513,12 @@ async def exec_tool(
                 return await exec_tool(
                     http, events, "run_fixer",
                     {"reviewer_run_id": issue_run_id} if issue_run_id else {},
-                    conv_id, custom_tool_map, conv_model, kb_ids,
+                    conv_id,
+                    custom_tool_map=custom_tool_map,
+                    connector_tool_name_map=connector_tool_name_map,
+                    conv_model=conv_model,
+                    kb_ids=kb_ids,
+                    artifact_message_id=artifact_message_id,
                 )
 
             task = (args.get("task") or args.get("description") or "").strip()
@@ -3690,7 +3761,7 @@ async def exec_tool(
                     f"targeted edits, and writes them back. AFTER run_fixer returns, call "
                     f"run_review again to verify the project is now CLEAN. Do NOT manually "
                     f"read_file / write_file for these issues — that's the v1 antipattern that "
-                    f"burns rounds. Hard cap: 3 review/fix cycles."
+                    f"burns rounds. Hard cap: 3 review/fix cycles per user request."
                 )
             return "\n".join(lines)
 
@@ -3731,10 +3802,13 @@ async def exec_tool(
                     for _r in _runs:
                         if _r.get("role") != "reviewer":
                             continue
+                        # Only the MOST RECENT reviewer counts — an older clean
+                        # review may predate later fixes, so don't scan past
+                        # the newest one looking for a clean status.
                         _env = _r.get("result_envelope") or {}
                         if (_env.get("status") or "").lower() == "clean":
                             return _r
-                        return _r
+                        return None
                 except Exception as _re:
                     print(f"[run_acceptance_review] reviewer lookup failed: {_re}")
                 return None
@@ -5194,6 +5268,12 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                     })
                     try:
                         wf = await db.get_latest_coder_workflow(conv_id, project_id=_project_id)
+                        if not wf:
+                            # The worker may have dedupe-renamed the project so
+                            # _project_id no longer matches the workflow row;
+                            # fall back to the conversation's latest workflow
+                            # (the update below writes the new project_id back).
+                            wf = await db.get_latest_coder_workflow(conv_id)
                         if wf:
                             await db.update_coder_workflow(
                                 wf["id"],

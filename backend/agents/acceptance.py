@@ -53,7 +53,6 @@ _README_CONTEXT_BYTES = 12000
 _MANIFEST_CONTEXT_BYTES = 12000
 _TEST_CONTEXT_BYTES = 12000
 _SOURCE_CONTEXT_BYTES = 128000
-_SOURCE_SECTION_CAP_MIN = 90000
 _SOURCE_SECTION_CAP_MAX = 220000
 
 
@@ -292,15 +291,28 @@ def _configured_num_ctx() -> int:
     return n if n > 0 else 16384
 
 
-def _source_section_cap(num_ctx: int) -> int:
-    """Approximate a source-character budget from the configured token context."""
+def _section_budgets(num_ctx: int) -> dict:
+    """Derive per-section character caps from the configured token context.
+
+    Whole-prompt budget ≈ num_ctx × 3 chars; the remainder after these
+    sections covers the task/plan/file-list/prompt scaffold. The old fixed
+    caps (90K-char source floor plus 84K for the other sections) overflowed
+    a 16K-token window several times over and Ollama silently truncated the
+    prompt — usually dropping the instructions at one end.
+    """
     try:
         n = int(num_ctx)
     except Exception:
         n = 16384
     if n <= 0:
         n = 16384
-    return max(_SOURCE_SECTION_CAP_MIN, min(_SOURCE_SECTION_CAP_MAX, n * 4))
+    budget = n * 3
+    return {
+        "readme": max(4000, int(budget * 0.10)),
+        "manifest": max(4000, int(budget * 0.10)),
+        "tests": max(4000, int(budget * 0.15)),
+        "source": max(4000, min(_SOURCE_SECTION_CAP_MAX, int(budget * 0.50))),
+    }
 
 
 def _normalize_issue(issue: dict, project_dir: str) -> dict:
@@ -585,6 +597,7 @@ async def run_acceptance_review(http, events, conv_id: str, *,
         original_task, latest_task = _latest_user_task(conv)
         plan = await _project_plan(conv_id, project_id=project_id)
         num_ctx = _configured_num_ctx()
+        _budgets = _section_budgets(num_ctx)
 
         review_summary = json.dumps({
             "reviewer_run_id": reviewer_run_id,
@@ -611,10 +624,10 @@ async def run_acceptance_review(http, events, conv_id: str, *,
             file_count=len(files),
             manifest="\n".join(files[:300]) or "(no files found)",
             artifact_block=artifact_block,
-            readme_sections=_sections(readmes, cap=24000, per_file_cap=_README_CONTEXT_BYTES),
-            manifest_sections=_sections(manifests, cap=24000, per_file_cap=_MANIFEST_CONTEXT_BYTES),
-            test_sections=_sections(tests, cap=36000, per_file_cap=_TEST_CONTEXT_BYTES),
-            source_sections=_sections(source, cap=_source_section_cap(num_ctx), per_file_cap=_SOURCE_CONTEXT_BYTES),
+            readme_sections=_sections(readmes, cap=_budgets["readme"], per_file_cap=_README_CONTEXT_BYTES),
+            manifest_sections=_sections(manifests, cap=_budgets["manifest"], per_file_cap=_MANIFEST_CONTEXT_BYTES),
+            test_sections=_sections(tests, cap=_budgets["tests"], per_file_cap=_TEST_CONTEXT_BYTES),
+            source_sections=_sections(source, cap=_budgets["source"], per_file_cap=_SOURCE_CONTEXT_BYTES),
         )
 
         model = (getattr(config, "ACCEPTANCE_MODEL", "")
@@ -714,6 +727,30 @@ async def run_acceptance_review(http, events, conv_id: str, *,
             })
             if run_id:
                 await db.update_run(run_id, status="cancelled", result_envelope=envelope, ended=True)
+        except Exception:
+            pass
+        return envelope
+    except Exception as e:
+        # Ollama timeouts / transport errors must not strand the run at 'running' —
+        # the v2 gate treats an in-flight active_run_id as blocking forever.
+        envelope = {
+            "status": "error",
+            "summary": f"Acceptance review failed: {type(e).__name__}: {e}",
+            "issues": [],
+            "project_dir": project_dir,
+            "reviewer_run_id": reviewer_run_id,
+            "run_id": run_id,
+        }
+        print(f"[ACCEPTANCE] run failed: {type(e).__name__}: {e}")
+        try:
+            await events.emit(conv_id, "tool_end", {
+                "tool": "run_acceptance_review",
+                "icon": "clipboard-check",
+                "status": f"⚠ Acceptance failed: {type(e).__name__}",
+                "run_id": run_id,
+            })
+            if run_id:
+                await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
         except Exception:
             pass
         return envelope

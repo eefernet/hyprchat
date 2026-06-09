@@ -25,6 +25,7 @@ import asyncio
 import shlex
 import uuid
 
+import cancel_registry
 import config
 import database as db
 
@@ -103,11 +104,13 @@ async def _list_source_files(http, project_dir: str, cap: int = 100) -> list[str
     build artifacts and vendored deps."""
     excludes = " ".join(f"-not -path '*/{d}/*'" for d in _EXCLUDE_DIRS)
     name_filter = " -o ".join(f"-name '*{ext}'" for ext in _SOURCE_EXTS)
+    # Bound the listing at the largest 1000 candidates; the real selection
+    # (entrypoints first, then larger files) happens client-side below.
     cmd = (
         f"cd {shlex.quote(project_dir)} && "
         f"find . -type f \\( {name_filter} \\) {excludes} "
         f"-printf '%s %p\\n' 2>/dev/null "
-        f"| sort -n | head -{cap}"
+        f"| sort -rn | head -1000"
     )
     try:
         r = await http.post(
@@ -122,7 +125,7 @@ async def _list_source_files(http, project_dir: str, cap: int = 100) -> list[str
         print(f"[INDEXER] file walk failed: {e}")
         return []
 
-    paths: list[str] = []
+    sized: list[tuple[int, str]] = []
     for line in stdout.splitlines():
         # `find -printf '%s %p\n'` → "<size> <path>"
         parts = line.strip().split(None, 1)
@@ -136,13 +139,27 @@ async def _list_source_files(http, project_dir: str, cap: int = 100) -> list[str
         # Skip empty files and very large ones (likely generated/binary).
         if size < 8 or size > 200_000:
             continue
-        paths.append(path)
-    return paths
+        sized.append((size, path))
+
+    # Entrypoints and top-level files first, then descending size. The old
+    # `sort -n | head -{cap}` kept only the SMALLEST files, so on big uploads
+    # the substantive sources were exactly the ones dropped from the index.
+    def _priority(item: tuple[int, str]):
+        size, path = item
+        rel = path.removeprefix("./")
+        base = rel.rsplit("/", 1)[-1].lower()
+        stem = base.split(".", 1)[0]
+        is_entry = stem in ("main", "app", "index", "cli", "server", "__main__", "setup")
+        return (0 if is_entry else 1, -size)
+
+    sized.sort(key=_priority)
+    return [path for _, path in sized[:cap]]
 
 
 async def _read_file(http, project_dir: str, rel_path: str) -> str:
     """Read a file from Codebox. Returns empty string on failure."""
-    full = f"{project_dir.rstrip('/')}/{rel_path.lstrip('./')}" if not rel_path.startswith("/") else rel_path
+    # removeprefix, not lstrip: lstrip('./') would mangle dotfiles (.env → env).
+    full = f"{project_dir.rstrip('/')}/{rel_path.removeprefix('./')}" if not rel_path.startswith("/") else rel_path
     try:
         r = await http.post(
             f"{config.CODEBOX_URL}/command",
@@ -174,6 +191,56 @@ async def run_project_indexer(http, events, conv_id: str, *,
         print(f"[INDEXER] create_run failed (non-fatal): {e}")
         run_id = ""
 
+    if run_id:
+        cancel_registry.register(run_id)
+    try:
+        return await _indexer_body(http, events, conv_id, run_id,
+                                   project_id=project_id, project_dir=project_dir,
+                                   project_name=project_name, file_cap=file_cap)
+    except cancel_registry.RunCancelled:
+        envelope = {
+            "status": "cancelled",
+            "summary": "Indexing cancelled by user.",
+            "project_dir": project_dir, "project_id": project_id,
+            "run_id": run_id, "files_indexed": [], "indexed_chunks": 0,
+        }
+        try:
+            await events.emit(conv_id, "tool_end", {
+                "tool": "project_indexer", "icon": "database",
+                "status": "⛔ Indexing cancelled by user", "run_id": run_id,
+            })
+            if run_id:
+                await db.update_run(run_id, status="cancelled", result_envelope=envelope, ended=True)
+        except Exception:
+            pass
+        return envelope
+    except Exception as e:
+        # An unexpected exception must not strand the run at 'running'.
+        envelope = {
+            "status": "error",
+            "summary": f"Indexer failed: {type(e).__name__}: {e}",
+            "project_dir": project_dir, "project_id": project_id,
+            "run_id": run_id, "files_indexed": [], "indexed_chunks": 0,
+        }
+        print(f"[INDEXER] run failed: {type(e).__name__}: {e}")
+        try:
+            await events.emit(conv_id, "tool_end", {
+                "tool": "project_indexer", "icon": "database",
+                "status": f"⚠ Indexing failed: {type(e).__name__}", "run_id": run_id,
+            })
+            if run_id:
+                await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
+        except Exception:
+            pass
+        return envelope
+    finally:
+        if run_id:
+            cancel_registry.cleanup(run_id)
+
+
+async def _indexer_body(http, events, conv_id: str, run_id: str, *,
+                        project_id: str, project_dir: str,
+                        project_name: str, file_cap: int) -> dict:
     _step_n = [0]
 
     async def _step(action: str, detail: str = ""):
@@ -237,9 +304,9 @@ async def run_project_indexer(http, events, conv_id: str, *,
         batch = paths[batch_start:batch_start + _READ_CONCURRENCY]
         if batch_start > 0:
             await _step("reading", f"{batch_start}/{len(paths)}")
-        results = await asyncio.gather(
-            *[_read_one(rel) for rel in batch],
-            return_exceptions=True,
+        results = await cancel_registry.await_cancellable(
+            asyncio.gather(*[_read_one(rel) for rel in batch], return_exceptions=True),
+            run_id,
         )
         for res in results:
             if isinstance(res, tuple):
@@ -271,13 +338,18 @@ async def run_project_indexer(http, events, conv_id: str, *,
     await _step("indexing", f"chunking + embedding {len(file_contents)} file(s)")
     try:
         import rag
-        index_result = await rag.index_generated_code(
-            task=f"Uploaded project: {project_name or project_id}",
-            language=language or "unknown",
-            file_contents=file_contents,
-            conv_id=conv_id,
-            project_id=project_id,
+        index_result = await cancel_registry.await_cancellable(
+            rag.index_generated_code(
+                task=f"Uploaded project: {project_name or project_id}",
+                language=language or "unknown",
+                file_contents=file_contents,
+                conv_id=conv_id,
+                project_id=project_id,
+            ),
+            run_id,
         )
+    except cancel_registry.RunCancelled:
+        raise
     except Exception as e:
         print(f"[INDEXER] index_generated_code failed: {e}")
         index_result = {"indexed": False, "reason": f"{type(e).__name__}: {e}"}

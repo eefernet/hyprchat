@@ -109,7 +109,7 @@ async def _write_file_sandbox(http, path: str, content: str) -> tuple[bool, str]
         b64 = base64.b64encode(content.encode("utf-8", errors="replace")).decode()
         qp = shlex.quote(path)
         cmd = (
-            f"mkdir -p $(dirname {qp}) && "
+            f'mkdir -p "$(dirname {qp})" && '
             f"printf '%s' {shlex.quote(b64)} | base64 -d > {qp} && echo OK"
         )
         r = await http.post(
@@ -138,14 +138,57 @@ async def _write_file_sandbox(http, path: str, content: str) -> tuple[bool, str]
 #   <content lines>
 #   ```
 # - path captured (no newline allowed)
-# - content captured lazily, terminated by closing fence
+# - content runs from the section's first fence line to its LAST bare ```
+#   line, with the next ### header (not the first inner fence) bounding the
+#   section — files that themselves contain markdown fences survive intact
 # - tolerates an optional language tag after the opening fence
-_EDIT_RE = re.compile(
-    r"###\s*EDIT\s*:\s*([^\n]+?)\s*\n```[A-Za-z0-9_.+#\-]*\s*\n(.*?)\n```",
-    re.DOTALL,
-)
+_EDIT_HEADER_RE = re.compile(r"^###\s*EDIT\s*:\s*([^\n]+?)\s*$", re.MULTILINE)
+_SECTION_HEADER_RE = re.compile(r"^###\s*(?:EDIT\s*:|SUMMARY|CANNOT[_\s]?FIX)", re.MULTILINE)
+_FENCE_OPEN_RE = re.compile(r"^```[A-Za-z0-9_.+#\-]*\s*$", re.MULTILINE)
+_FENCE_CLOSE_RE = re.compile(r"^```\s*$", re.MULTILINE)
 _SUMMARY_RE = re.compile(r"###\s*SUMMARY\s*:?\s*(.+?)(?=\n\s*###|\Z)", re.DOTALL)
 _CANNOT_FIX_RE = re.compile(r"###\s*CANNOT[_\s]?FIX\s*:?\s*(.+?)(?=\n\s*###|\Z)", re.DOTALL)
+
+
+def _extract_edits(text: str) -> tuple[list[dict], list[str]]:
+    """Extract `### EDIT:` sections. Returns (edits, parse_errors).
+
+    An unterminated fence (truncated model output) yields a parse error and
+    NO edit — the old regex parser silently wrote truncated file content.
+    """
+    edits: list[dict] = []
+    parse_errors: list[str] = []
+    for m in _EDIT_HEADER_RE.finditer(text):
+        path = m.group(1).strip()
+        sec_start = m.end()
+        nxt = _SECTION_HEADER_RE.search(text, sec_start)
+        sec_end = nxt.start() if nxt else len(text)
+        section = text[sec_start:sec_end]
+
+        open_m = _FENCE_OPEN_RE.search(section)
+        if not open_m:
+            parse_errors.append(f"{path}: no fenced content after EDIT header — skipped")
+            continue
+        body_start = open_m.end()
+        close_start = -1
+        for fm in _FENCE_CLOSE_RE.finditer(section, body_start):
+            close_start = fm.start()
+        if close_start < 0:
+            parse_errors.append(
+                f"{path}: unterminated code fence (model output truncated?) — "
+                f"refused to write partial content"
+            )
+            continue
+        content = section[body_start:close_start]
+        if content.startswith("\n"):
+            content = content[1:]
+        if content.endswith("\n"):
+            content = content[:-1]
+        # Strip a single extra trailing newline if the model added one inside the fence.
+        if content.endswith("\n") and not content.endswith("\n\n"):
+            content = content[:-1]
+        edits.append({"path": path, "content": content})
+    return edits, parse_errors
 
 
 def _paths_are_docs_only(paths: list[str]) -> bool:
@@ -172,24 +215,18 @@ def _parse_fixer_output(text: str) -> dict:
 
     # CANNOT_FIX is a hard exit — return early with no edits.
     cf = _CANNOT_FIX_RE.search(text)
-    if cf and not _EDIT_RE.search(text):
+    if cf and not _EDIT_HEADER_RE.search(text):
         return {"edits": [], "summary": f"Cannot fix — {cf.group(1).strip()[:200]}",
-                "cannot_fix": True}
+                "cannot_fix": True, "parse_errors": []}
 
-    edits = []
-    for m in _EDIT_RE.finditer(text):
-        path = m.group(1).strip()
-        content = m.group(2)
-        # Strip a single trailing newline if the model added one inside the fence.
-        if content.endswith("\n") and not content.endswith("\n\n"):
-            content = content[:-1]
-        edits.append({"path": path, "content": content})
+    edits, parse_errors = _extract_edits(text)
 
     s = _SUMMARY_RE.search(text)
     summary = s.group(1).strip()[:200] if s else ""
     if not summary and edits:
         summary = f"Applied {len(edits)} edit(s)"
-    return {"edits": edits, "summary": summary, "cannot_fix": False}
+    return {"edits": edits, "summary": summary, "cannot_fix": False,
+            "parse_errors": parse_errors}
 
 
 async def run_fixer(http, events, conv_id: str, *,
@@ -431,12 +468,14 @@ async def run_fixer(http, events, conv_id: str, *,
         })
         return envelope
 
-    # Cap total scope files to keep prompt size bounded.
+    # Cap total scope files to keep prompt size bounded. This is a note, not
+    # an error — it must not downgrade an otherwise clean run to 'partial'.
     capped_scope = all_scope[:15]
     _allowed_set = set(capped_scope)
+    notes: list[str] = []
     if len(all_scope) > 15:
-        errors.append(f"Scope truncated from {len(all_scope)} to 15 files — "
-                      f"{len(all_scope) - 15} file(s) not shown to fixer")
+        notes.append(f"Scope truncated from {len(all_scope)} to 15 files — "
+                     f"{len(all_scope) - 15} file(s) not shown to fixer")
 
     issue_block = "\n\n".join(issue_blocks)
 
@@ -537,6 +576,7 @@ async def run_fixer(http, events, conv_id: str, *,
         parsed = _parse_fixer_output(text)
         edits = parsed.get("edits") or []
         edit_summary = (parsed.get("summary") or "")[:140]
+        errors.extend(parsed.get("parse_errors") or [])
 
         if parsed.get("cannot_fix"):
             errors.append(f"Fixer declined — {edit_summary}")
@@ -572,15 +612,27 @@ async def run_fixer(http, events, conv_id: str, *,
     else:
         status = "no_op"
 
+    # An issue counts as addressed only when a file in its scope was actually
+    # written — `len(issues) - skipped` over-reported on cannot_fix/no-op runs.
+    issues_addressed = 0
+    for issue in issues:
+        _paths = list(issue.get("suggested_fix_scope") or [])
+        if issue.get("file"):
+            _paths.append(issue["file"])
+        _norm = {ap for ap in (_normalize_path(p) for p in _paths) if ap}
+        if _norm & files_touched:
+            issues_addressed += 1
+
     envelope = {
         "status": status,
         "summary": (f"Applied edits to {len(files_touched)} file(s) across "
                     f"{len(issues)} issue(s)") if files_touched
                    else "No edits applied — see errors",
-        "issues_addressed": len(issues) - skipped,
+        "issues_addressed": issues_addressed,
         "files_touched": sorted(files_touched),
         "diffs": diffs[:20],
         "errors": errors[:10],
+        "notes": notes[:5],
         "fixer_model": fixer_model,
         "project_dir": project_dir,
         "language": language,
@@ -600,9 +652,14 @@ async def run_fixer(http, events, conv_id: str, *,
     })
     if run_id:
         try:
+            # 'partial' (some writes failed / out-of-scope refusals) is its own
+            # run status: it still forces PENDING_REVIEW but does not consume a
+            # cycle-cap slot, which counts only 'succeeded' fixer runs.
+            _run_status = ("succeeded" if status == "applied"
+                           else "partial" if status == "partial" else "failed")
             await db.update_run(
                 run_id,
-                status=("succeeded" if files_touched else "failed"),
+                status=_run_status,
                 result_envelope=envelope, ended=True,
             )
         except Exception as e:

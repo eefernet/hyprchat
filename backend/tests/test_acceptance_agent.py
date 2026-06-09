@@ -176,3 +176,65 @@ def test_acceptance_invalid_json_returns_error():
     assert envelope["status"] == "error"
     assert envelope["summary"] == "Acceptance model did not return valid JSON."
     assert envelope["issues"][0]["summary"] == "Acceptance reviewer output could not be parsed."
+
+
+def test_acceptance_generic_exception_persists_failed():
+    """An Ollama transport error must not strand the run at 'running'."""
+
+    class _ExplodingHTTP(_FakeHTTP):
+        async def post(self, url, json=None, timeout=None):
+            if url.endswith("/api/chat"):
+                raise RuntimeError("simulated ollama timeout")
+            return await super().post(url, json=json, timeout=timeout)
+
+    http = _ExplodingHTTP({})
+    events = _FakeEvents()
+    clean_review = {
+        "status": "clean",
+        "summary": "Build, tests, and lint pass.",
+        "project_dir": "/root/projects/demo",
+        "language": "python",
+    }
+    update_run = AsyncMock(return_value=None)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(acceptance.db, "create_run", new=AsyncMock(return_value=None)))
+        stack.enter_context(patch.object(acceptance.db, "update_run", new=update_run))
+        stack.enter_context(patch.object(acceptance.db, "get_run", new=AsyncMock(return_value={
+            "result_envelope": clean_review,
+        })))
+        stack.enter_context(patch.object(acceptance.db, "get_conversation", new=AsyncMock(return_value={
+            "messages": [{"role": "user", "content": "Build a tiny Python demo."}],
+        })))
+        stack.enter_context(patch.object(acceptance, "_project_plan", new=AsyncMock(return_value="plan")))
+        stack.enter_context(patch.object(acceptance.config, "CODEBOX_URL", "http://codebox"))
+        stack.enter_context(patch.object(acceptance.config, "OLLAMA_URL", "http://ollama"))
+        stack.enter_context(patch.object(acceptance.config, "ACCEPTANCE_MODEL", ""))
+        stack.enter_context(patch.object(acceptance.config, "PLANNING_MODEL", "acceptance-test-model"))
+        stack.enter_context(patch.object(acceptance.config, "DEFAULT_MODEL", "fallback-model"))
+        stack.enter_context(patch.object(acceptance.config, "DEFAULT_NUM_CTX", 8192))
+
+        envelope = _run(acceptance.run_acceptance_review(
+            http, events, "conv-1",
+            project_dir="/root/projects/demo",
+            reviewer_run_id="run-review",
+        ))
+
+    assert envelope["status"] == "error"
+    assert "simulated ollama timeout" in envelope["summary"]
+    final_calls = [c for c in update_run.await_args_list if c.kwargs.get("ended")]
+    assert final_calls, "run must be finalized"
+    assert final_calls[-1].kwargs["status"] == "failed"
+
+
+def test_section_caps_fit_configured_ctx():
+    """Σ(section caps) must fit inside the prompt budget at the default ctx."""
+    for ctx in (16384, 65536):
+        budgets = acceptance._section_budgets(ctx)
+        assert sum(budgets.values()) <= ctx * 3
+    # Source budget grows with ctx but never exceeds the absolute ceiling.
+    assert (acceptance._section_budgets(262144)["source"]
+            == acceptance._SOURCE_SECTION_CAP_MAX)
+    # Auto/0 and garbage fall back to the 16384 default.
+    assert acceptance._section_budgets(0) == acceptance._section_budgets(16384)
+    assert acceptance._section_budgets("x") == acceptance._section_budgets(16384)

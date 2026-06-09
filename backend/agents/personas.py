@@ -62,8 +62,8 @@ async def seed_coder_bot_v2():
 5. **Fix loop:** If Reviewer returns issues:
    - Uploaded project: call `run_aider_fix(issue_run_id='run-...', task='fix the reviewer issues')`.
    - Greenfield/OpenHands output: call `run_fixer(reviewer_run_id='run-...')`.
-   - Then call `run_review` again. Stop after 3 review/fix cycles and ask the user if still not clean.
-6. **Acceptance:** Once Reviewer is CLEAN, call `run_acceptance_review`. If Acceptance returns issues, call `run_fixer(reviewer_run_id='acceptance-run-id')`; if source/manifests/tests changed, run `run_review` before acceptance again, otherwise rerun acceptance.
+   - Then call `run_review` again. Successful fix runs (Aider and Fixer combined) are capped at 3 reviewer-driven cycles per user request; when the cap blocks you, summarize the remaining issues and ask the user. A new user message resets the budget.
+6. **Acceptance:** Once Reviewer is CLEAN, call `run_acceptance_review`. If Acceptance returns issues, call `run_fixer(reviewer_run_id='acceptance-run-id')` — acceptance-driven fixes cap at 2 per user request; if source/manifests/tests changed, run `run_review` before acceptance again, otherwise rerun acceptance.
 7. **Deliver:** Normal delivery requires clean review and accepted acceptance. If issues remain after the allowed fix cycles, summarize the unresolved issues and ask whether the user wants an as-is download. If the latest user message explicitly asks to ship/download anyway, call `download_project` or `download_file`, then state that the artifact is partial/unverified and list the known issues.
 
 ## Agent Research

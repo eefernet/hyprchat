@@ -26,6 +26,8 @@ import config
 import database as db
 import cancel_registry
 
+from agents.acceptance import _configured_num_ctx
+
 
 # Required top-level keys in the validated plan.
 _REQUIRED_KEYS = {"project_id", "language", "build_system", "build_cmd",
@@ -120,7 +122,7 @@ def _validate_plan(plan: dict) -> tuple[bool, str]:
 
 
 async def _call_planning_model(http, model: str, prompt: str,
-                                num_ctx: int = 16384,
+                                num_ctx: int | None = None,
                                 run_id: str = "") -> str:
     """Single non-streaming call to Ollama, returns the message content.
 
@@ -129,6 +131,8 @@ async def _call_planning_model(http, model: str, prompt: str,
     `run_architect` can mark the run cancelled instead of letting it dangle
     on the 600s timeout.
     """
+    if not num_ctx:
+        num_ctx = _configured_num_ctx()
     try:
         coro = http.post(
             f"{config.OLLAMA_URL}/api/chat",

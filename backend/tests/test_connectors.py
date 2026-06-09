@@ -76,7 +76,7 @@ def test_execute_openapi_tool_builds_request(monkeypatch):
     connector = {
         "id": "openapi-test",
         "name": "Demo",
-        "base_url": "https://api.example.test",
+        "base_url": "https://example.com",
         "auth": {},
         "headers": {"X-Test": "yes"},
         "enabled": True,
@@ -107,7 +107,7 @@ def test_execute_openapi_tool_builds_request(monkeypatch):
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
-        assert str(request.url) == "https://api.example.test/items/abc?verbose=true"
+        assert str(request.url) == "https://example.com/items/abc?verbose=true"
         assert request.headers["X-Test"] == "yes"
         assert request.content == b'{"name":"demo"}'
         return httpx.Response(200, json={"ok": True})
