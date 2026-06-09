@@ -1617,9 +1617,11 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             msg["tool_calls"] = tool_calls
 
         # ── Text-based tool call fallback ──
+        _text_tool_call_round = False
         if not tool_calls and content and available_tool_names:
             tool_calls = parse_text_tool_calls(content, available_tool_names)
             if tool_calls:
+                _text_tool_call_round = True
                 content = strip_tool_calls(content)
                 # Clean up residual garbage (backticks, braces, etc.) left after stripping
                 cleaned_residue = re.sub(r'[`{}\[\]\s"\']', '', content).strip()
@@ -1816,7 +1818,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 if len(_tool_history) > 5:
                     _tool_history.pop(0)
 
-            if _streamed_content:
+            if _streamed_content and _text_tool_call_round:
                 yield f"data: {json.dumps({'type': 'clear'})}\n\n"
             if content:
                 cleaned = re.sub(r'```\w*\n.*?```', '', content, flags=re.DOTALL).strip()

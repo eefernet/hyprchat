@@ -2497,12 +2497,13 @@ function initMermaidTheme(theme,font){
   });
 }
 
-function MermaidBlock({code,theme,font,epoch,printMode=false}){
+function MermaidBlock({code,theme,font,epoch,printMode=false,streaming=false}){
   const t=theme;
   const containerRef=useRef(null);
   const fsRef=useRef(null);
   const panZoomRef=useRef(null);
   const [err,setErr]=useState(null);
+  const [pending,setPending]=useState(false);
   const [repaired,setRepaired]=useState(false);
   const [cpd,setCpd]=useState(false);
   const [showSrc,setShowSrc]=useState(false);
@@ -2513,21 +2514,36 @@ function MermaidBlock({code,theme,font,epoch,printMode=false}){
     let cancelled=false;
     setErr(null);
     setRepaired(false);
+    setPending(true);
     try{
       if(printMode)initMermaidTheme(t,font);
       const repairedCode=sanitizeMermaidCode(code);
       const renderOne=(src,suffix)=>window.mermaid.render(`${id}-${suffix}`,src);
       renderOne(code,"raw").then(({svg})=>{
-        if(!cancelled&&containerRef.current)containerRef.current.innerHTML=svg;
+        if(!cancelled&&containerRef.current){containerRef.current.innerHTML=svg;setPending(false);}
       }).catch(firstErr=>{
-        if(repairedCode===code){if(!cancelled)setErr(String(firstErr?.message||firstErr));return;}
+        if(repairedCode===code){
+          if(!cancelled){
+            if(streaming){setErr(null);setPending(true);}
+            else{setPending(false);setErr(String(firstErr?.message||firstErr));}
+          }
+          return;
+        }
         renderOne(repairedCode,"fixed").then(({svg})=>{
-          if(!cancelled&&containerRef.current){containerRef.current.innerHTML=svg;setRepaired(true);}
-        }).catch(e=>{if(!cancelled)setErr(String(e?.message||firstErr?.message||e||firstErr));});
+          if(!cancelled&&containerRef.current){containerRef.current.innerHTML=svg;setRepaired(true);setPending(false);}
+        }).catch(e=>{
+          if(!cancelled){
+            if(streaming){setErr(null);setPending(true);}
+            else{setPending(false);setErr(String(e?.message||firstErr?.message||e||firstErr));}
+          }
+        });
       });
-    }catch(e){setErr(String(e?.message||e));}
+    }catch(e){
+      if(streaming){setErr(null);setPending(true);}
+      else{setPending(false);setErr(String(e?.message||e));}
+    }
     return()=>{cancelled=true;};
-  },[code,epoch,showSrc,id,printMode,t,font]);
+  },[code,epoch,showSrc,id,printMode,t,font,streaming]);
   useEffect(()=>{
     if(!fs||!fsRef.current||!containerRef.current)return;
     const srcSvg=containerRef.current.querySelector("svg");
@@ -2584,7 +2600,13 @@ function MermaidBlock({code,theme,font,epoch,printMode=false}){
       <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
     </div>
     :showSrc?<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
-    :<div ref={containerRef} className="mermaid-container" style={{background:printMode?"#ffffff":t.bgDeep}}/>}
+    :<div style={{position:"relative",background:printMode?"#ffffff":t.bgDeep}}>
+      <div ref={containerRef} className="mermaid-container" style={{background:printMode?"#ffffff":t.bgDeep,minHeight:streaming&&pending?120:undefined,opacity:streaming&&pending?0:1,transition:"opacity .18s ease"}}/>
+      {streaming&&pending&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",gap:8,color:t.mut,fontSize:11,fontFamily:font,background:t.bgDeep}}>
+        <span style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:"pulse 1.4s infinite"}}/>
+        rendering diagram...
+      </div>}
+    </div>}
     {!printMode&&fs&&ReactDOM.createPortal(
       <div style={{position:"fixed",inset:0,zIndex:200,background:"rgba(0,0,0,.82)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setFs(false);}}>
         <div style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,width:"min(1600px,95vw)",height:"90vh",display:"flex",flexDirection:"column",boxShadow:`0 8px 48px #0008`,overflow:"hidden"}}>
@@ -2626,18 +2648,24 @@ function looksLikeChartConfig(code){
 }
 
 // Chart.js block — renders ```chart / ```pygraph JSON fences as inline charts
-function ChartBlock({code,theme,font,epoch,kind="chart",printMode=false}){
+function ChartBlock({code,theme,font,epoch,kind="chart",printMode=false,streaming=false}){
   const t=theme;
   const canvasRef=useRef(null);
   const chartRef=useRef(null);
   const [err,setErr]=useState(null);
+  const [pending,setPending]=useState(false);
   const [cpd,setCpd]=useState(false);
   const [showSrc,setShowSrc]=useState(false);
   useEffect(()=>{
-    if(!window.Chart||!canvasRef.current||showSrc)return;
+    if(!window.Chart||!canvasRef.current||showSrc){if(streaming&&!showSrc)setPending(true);return;}
     let cfg;
     try{cfg=parseChartConfig(code);}
-    catch(e){setErr("Invalid JSON: "+String(e.message));return;}
+    catch(e){
+      if(streaming){setErr(null);setPending(true);}
+      else{setPending(false);setErr("Invalid JSON: "+String(e.message));}
+      return;
+    }
+    setPending(false);
     const palette=printMode
       ?["#175cd3","#0f766e","#b7791f","#b42318","#7c3aed","#0891b2","#c2410c","#2563eb"]
       :[t.acc,t.ok,t.warm,t.err||"#e06c75","#b39ddb","#80cbc4","#ffab91","#90caf9"];
@@ -2684,9 +2712,12 @@ function ChartBlock({code,theme,font,epoch,kind="chart",printMode=false}){
         }
       });
       setErr(null);
-    }catch(e){setErr("Chart error: "+String(e.message));}
+    }catch(e){
+      if(streaming){setErr(null);setPending(true);}
+      else{setPending(false);setErr("Chart error: "+String(e.message));}
+    }
     return()=>{if(chartRef.current){try{chartRef.current.destroy();}catch{}chartRef.current=null;}};
-  },[code,epoch,showSrc,t,font,printMode]);
+  },[code,epoch,showSrc,t,font,printMode,streaming]);
   const copyCode=()=>{try{navigator.clipboard.writeText(code);setCpd(true);setTimeout(()=>setCpd(false),1500);}catch{}};
   const headerBtn={background:"none",border:"none",cursor:"pointer",padding:"3px 6px",fontSize:10,fontFamily:font,borderRadius:5,display:"flex",alignItems:"center",gap:3};
   const wrapStyle=printMode
@@ -2708,7 +2739,13 @@ function ChartBlock({code,theme,font,epoch,kind="chart",printMode=false}){
       <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
     </div>
     :showSrc?<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
-    :<div style={{padding:printMode?"10pt":"14px",height:printMode?280:320,position:"relative",background:"#ffffff"}}><canvas ref={canvasRef}/></div>}
+    :<div style={{padding:printMode?"10pt":"14px",height:printMode?280:320,position:"relative",background:printMode?"#ffffff":t.bgDeep}}>
+      <canvas ref={canvasRef} style={{opacity:streaming&&pending?0:1,transition:"opacity .18s ease"}}/>
+      {streaming&&pending&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",gap:8,color:t.mut,fontSize:11,fontFamily:font,background:t.bgDeep}}>
+        <span style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:"pulse 1.4s infinite"}}/>
+        rendering chart...
+      </div>}
+    </div>}
   </div>;
 }
 
@@ -2721,6 +2758,28 @@ function CodeBlock({code,lang,t,font}){
   },[code,lang]);
   const cls=lang?`language-${lang}`:"language-none";
   return <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,background:"transparent"}}><code ref={ref} className={cls} style={{fontFamily:font,background:"transparent",color:t.dim,padding:0,textShadow:"none"}}>{code}</code></pre>;
+}
+
+function InlineMath({code,raw,theme,font,printMode=false}){
+  const html=useMemo(()=>{
+    if(!window.katex)return null;
+    try{
+      return window.katex.renderToString(code,{displayMode:false,throwOnError:false,strict:"ignore",trust:false});
+    }catch{return null;}
+  },[code]);
+  if(!html)return <span>{raw||`$${code}$`}</span>;
+  return <span style={{color:"inherit",fontFamily:printMode?undefined:font}} dangerouslySetInnerHTML={{__html:html}}/>;
+}
+
+function InlineColorSwatch({value,theme,font,printMode=false}){
+  const t=theme||{};
+  const bg=printMode?"#f8fafc":`${t.surface||"#0f172a"}BB`;
+  const brd=printMode?"#d7dde8":`${t.brd||"#334155"}55`;
+  const label=printMode?"#334155":(t.warm||"#facc15");
+  return <span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"1px 6px 1px 4px",background:bg,border:`1px solid ${brd}`,borderRadius:4,verticalAlign:"middle",margin:"0 1px"}}>
+    <span style={{width:10,height:10,borderRadius:2,background:value,border:`1px solid ${brd}`,flexShrink:0,boxShadow:"inset 0 0 0 1px rgba(255,255,255,.08)"}}/>
+    <code style={{fontSize:"0.85em",color:label,background:"none",padding:0,fontFamily:font}}>{value}</code>
+  </span>;
 }
 
 // Collapsible <details>/<summary> block
@@ -5610,10 +5669,19 @@ function HyprChat(){
   const inlineParse=(text,opts={})=>{
     if(!text)return null;
     const printMode=!!opts.printMode;
-    // Split by: inline-code, images, bold+link, bold, italic(*), italic(_), markdown link, bare URL, double-quoted strings (10+ chars)
-    return text.split(/(`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s"'<>\])\},]+|"[^"\n]{10,}"|<kbd>[^<]+<\/kbd>|rgba?\([^)]+\)|hsla?\([^)]+\)|#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6})\b|[^]+)/g).map((s,k)=>{
+    const mathish=v=>/\\[a-zA-Z]+|[\^_=+\-*/{}]/.test(v||"");
+    const namedColorRe=/^(black|silver|gray|grey|white|maroon|red|purple|fuchsia|magenta|green|lime|olive|yellow|navy|blue|teal|aqua|cyan|orange|aliceblue|rebeccapurple|transparent)$/i;
+    const colorish=v=>/^#[0-9a-fA-F]{3,8}$/.test(v||"")||/^(rgba?|hsla?)\(/i.test(v||"")||namedColorRe.test(v||"");
+    // Split by: math, inline-code, images, bold+link, bold, italic(*), italic(_), markdown link, bare URL, double-quoted strings (10+ chars)
+    return text.split(/(`\$(?=[^`\n]*?(?:\\[a-zA-Z]+|[\^_=+\-*/{}]))[^`\n]+?\$`|(?<![\\$])\$(?![\d\s])(?=[^$\n]*?(?:\\[a-zA-Z]+|[\^_=+\-*/{}]))[^$\n]+?(?<!\\)\$|`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s"'<>\])\},]+|"[^"\n]{10,}"|<kbd>[^<]+<\/kbd>|rgba?\([^)]+\)|hsla?\([^)]+\)|#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6})\b|[^]+)/g).map((s,k)=>{
       if(!s)return null;
       const imgMatch=s.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+      const codeText=(s.startsWith("`")&&s.endsWith("`")&&s.length>1)?s.slice(1,-1):null;
+      const codeMath=s.match(/^`\$([\s\S]+)\$`$/);
+      const bareMath=s.match(/^\$([\s\S]+)\$$/);
+      if(codeMath&&mathish(codeMath[1]))return <InlineMath key={k} code={codeMath[1]} raw={s} theme={t} font={font} printMode={printMode}/>;
+      if(bareMath&&mathish(bareMath[1]))return <InlineMath key={k} code={bareMath[1]} raw={s} theme={t} font={font} printMode={printMode}/>;
+      if(codeText&&colorish(codeText))return <InlineColorSwatch key={k} value={codeText} theme={t} font={font} printMode={printMode}/>;
       if(printMode){
         const linkStyle={color:"#175cd3",textDecoration:"none",overflowWrap:"anywhere"};
         if(imgMatch){const[,alt,src]=imgMatch;return <span key={k} className="image-note">Image: {alt||src}</span>;}
@@ -5730,10 +5798,7 @@ function HyprChat(){
       }
       // Inline color swatch: #rrggbb, #rrggbbaa, rgb(), rgba(), hsl(), hsla()
       if(s.match(/^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/)||s.match(/^(rgba?|hsla?)\(/)){
-        return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:4,padding:"1px 6px 1px 4px",background:`${t.surface}BB`,border:`1px solid ${t.brd}55`,borderRadius:4,verticalAlign:"middle",margin:"0 1px"}}>
-          <span style={{width:10,height:10,borderRadius:2,background:s,border:`1px solid ${t.brd}66`,flexShrink:0,boxShadow:"inset 0 0 0 1px rgba(255,255,255,.08)"}}/>
-          <code style={{fontSize:"0.85em",color:t.warm,background:"none",padding:0,fontFamily:font}}>{s}</code>
-        </span>;
+        return <InlineColorSwatch key={k} value={s} theme={t} font={font} printMode={printMode}/>;
       }
       return s;
     });
@@ -5750,12 +5815,13 @@ function HyprChat(){
     const stripped=t2.replace(/```/g,"");
     const ticks=(stripped.match(/`/g)||[]).length;
     if(ticks%2!==0)t2+="`";
-    return md(t2);
+    return md(t2,{streaming:true});
   };
 
   const md=(text,opts={})=>{
     if(!text)return null;
     const printMode=!!opts.printMode;
+    const streaming=!!opts.streaming;
     const rt=opts.theme||t;
     const ip=v=>inlineParse(v,opts);
     // Strip <think>...</think> blocks (model reasoning not for display)
@@ -5787,7 +5853,7 @@ function HyprChat(){
           .trim();
         const open=/^<details[^>]*\bopen\b/i.test(p);
         if(printMode)return <div key={i} className="print-details"><div className="print-details-summary">{summary}</div>{md(body,opts)}</div>;
-        return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open}>{md(body)}</Collapsible>;
+        return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open}>{md(body,opts)}</Collapsible>;
       }
       if(/^[ \t]{0,3}```/.test(p)){
         const m=p.match(/^[ \t]*```(\w*)\n?([\s\S]*?)\n?[ \t]*```[ \t]*$/);
@@ -5799,9 +5865,9 @@ function HyprChat(){
         const _minIndent=_indents.length?Math.min(..._indents):0;
         if(_minIndent>0)code=_codeLines.map(l=>l.slice(_minIndent)).join("\n");
         const bid=`c${i}`;
-        if(lang==="mermaid")return <MermaidBlock key={i} code={code} theme={rt} font={font} epoch={mermaidEpoch} printMode={printMode}/>;
-        if(lang==="chart"||lang==="pygraph")return <ChartBlock key={i} code={code} theme={rt} font={font} epoch={mermaidEpoch} kind={lang} printMode={printMode}/>;
-        if((lang==="json"||!lang)&&looksLikeChartConfig(code))return <ChartBlock key={i} code={code} theme={rt} font={font} epoch={mermaidEpoch} kind="chart" printMode={printMode}/>;
+        if(lang==="mermaid")return <MermaidBlock key={i} code={code} theme={rt} font={font} epoch={mermaidEpoch} printMode={printMode} streaming={streaming}/>;
+        if(lang==="chart"||lang==="pygraph")return <ChartBlock key={i} code={code} theme={rt} font={font} epoch={mermaidEpoch} kind={lang} printMode={printMode} streaming={streaming}/>;
+        if((lang==="json"||!lang)&&looksLikeChartConfig(code))return <ChartBlock key={i} code={code} theme={rt} font={font} epoch={mermaidEpoch} kind="chart" printMode={printMode} streaming={streaming}/>;
         const isDiff=lang==="diff";
         if(printMode)return <pre key={i} className="print-code-block"><code>{code}</code></pre>;
         return <div key={i} style={{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep}}>
