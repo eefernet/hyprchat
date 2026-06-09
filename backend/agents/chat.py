@@ -12,6 +12,7 @@ from datetime import datetime
 
 import config
 import database as db
+import model_providers
 import rag
 from tools import CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls, strip_tool_calls
 from connectors import tool_def_from_connector_tool
@@ -32,6 +33,10 @@ _PERSONA_PLACEHOLDER_RE = re.compile(
     r"\{\{\s*(user|char)\s*\}\}|\{\s*(user|char)\s*\}",
     re.IGNORECASE,
 )
+
+
+class _ProviderStreamComplete(Exception):
+    pass
 
 
 def _replace_persona_placeholders(text: str, *, user_name: str, char_name: str) -> str:
@@ -648,21 +653,24 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     await events.emit(conv_id, "tool_start", {"tool": "processing", "status": "🔮 Connecting to neural oracle...", "icon": "activity"})
 
     print(f"[CHAT] conv={conv_id} model={req.model} tool_ids={req.tool_ids} msgs={len(req.messages)} persona={req.persona_id} ephemeral={ephemeral}")
+    _model_provider, _provider_model_name = model_providers.split_model_id(req.model)
+    _is_cloud_provider = _model_provider in model_providers.CLOUD_PROVIDERS
 
     # ── Validate model exists in Ollama before streaming ──
-    try:
-        _tags_r = await http.get(f"{config.OLLAMA_URL}/api/tags", timeout=10)
-        if _tags_r.status_code == 200:
-            _available = [m["name"] for m in _tags_r.json().get("models", [])]
-            if req.model and req.model not in _available:
-                _suggestion = _available[0] if _available else "unknown"
-                _err_msg = f"Model '{req.model}' is not available. It may have been deleted. Available models: {', '.join(_available[:5])}"
-                print(f"[CHAT] Model not found: {req.model}")
-                await events.emit(conv_id, "error", {"status": f"Model not found: {req.model}"})
-                yield f"data: {json.dumps({'type': 'error', 'error': _err_msg})}\n\n"
-                return
-    except Exception as _e:
-        print(f"[CHAT] Could not validate model (continuing anyway): {_e}")
+    if not _is_cloud_provider:
+        try:
+            _tags_r = await http.get(f"{config.OLLAMA_URL}/api/tags", timeout=10)
+            if _tags_r.status_code == 200:
+                _available = [m["name"] for m in _tags_r.json().get("models", [])]
+                _ollama_model_name = _provider_model_name if _model_provider == "ollama" else req.model
+                if _ollama_model_name and _ollama_model_name not in _available:
+                    _err_msg = f"Model '{req.model}' is not available. It may have been deleted. Available models: {', '.join(_available[:5])}"
+                    print(f"[CHAT] Model not found: {req.model}")
+                    await events.emit(conv_id, "error", {"status": f"Model not found: {req.model}"})
+                    yield f"data: {json.dumps({'type': 'error', 'error': _err_msg})}\n\n"
+                    return
+        except Exception as _e:
+            print(f"[CHAT] Could not validate model (continuing anyway): {_e}")
 
     # Resolve persona (model config) if provided — apply parameters and KB
     model_options = {}
@@ -1274,6 +1282,11 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         except Exception as _ase:
             print(f"[CHAT] Failed to create assistant message stub: {_ase}")
     _text_fallback_done = False
+    if _is_cloud_provider and available_tool_names:
+        print(f"[CHAT] Cloud model {req.model} using text tool-call fallback")
+        ollama_tools = []
+        inject_text_tool_prompt(messages, available_tool_names)
+        _text_fallback_done = True
     _prev_tool_key = None  # Track previous tool call to detect loops
     _tool_history = []     # Last N tool keys for near-duplicate detection
     _dup_break_count = 0   # How many times we broke out of duplicate loops
@@ -1316,7 +1329,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             await events.emit(conv_id, "tool_start", {"tool": "processing", "status": "🔄 Processing tool results...", "icon": "activity"})
 
         payload = {
-            "model": req.model,
+            "model": _provider_model_name if _model_provider == "ollama" else req.model,
             "messages": messages,
             "stream": True,
             "options": model_options,
@@ -1343,6 +1356,116 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': _est_prompt_pre, 'live': True})}\n\n"
 
         try:
+            if _is_cloud_provider:
+                print(f"[CHAT] Sending to {model_providers.provider_label(_model_provider)}: model={req.model} options={model_options}")
+                _in_thinking = False
+                _thinking_buf = ""
+                _chunk_buf = ""
+                _repeat_window = ""
+                _live_gen_tokens = 0
+                async for event in model_providers.stream_provider_chat(
+                    http,
+                    req.model,
+                    messages,
+                    options=model_options,
+                ):
+                    etype = event.get("type")
+                    if etype == "usage":
+                        gen_tokens = int(event.get("gen_tokens") or 0)
+                        prompt_tokens = int(event.get("prompt_tokens") or 0)
+                        if gen_tokens or prompt_tokens:
+                            yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': gen_tokens, 'prompt_tokens': prompt_tokens})}\n\n"
+                        continue
+                    if etype == "thinking":
+                        _thinking_token = event.get("content", "")
+                        if not _thinking_token:
+                            continue
+                        _thinking_buf += _thinking_token
+                        _in_thinking = True
+                        _live_gen_tokens += 1
+                        if _live_gen_tokens % 10 == 0:
+                            yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': _live_gen_tokens, 'prompt_tokens': prompt_tokens, 'live': True})}\n\n"
+                        if len(_thinking_buf) % 100 < len(_thinking_token):
+                            snip = _thinking_buf[-60:].replace("\n", " ")
+                            await events.emit(conv_id, "thinking", {"status": f"💭 {snip}...", "detail": json.dumps({"thinking": _thinking_buf[-3000:]})})
+                        continue
+                    if etype != "token":
+                        continue
+                    token = event.get("content", "")
+                    if not token:
+                        continue
+
+                    if "<think>" in token:
+                        _in_thinking = True
+                        token = token.split("<think>", 1)[1]
+                    if _in_thinking:
+                        if "</think>" in token:
+                            before_end = token.split("</think>", 1)[0]
+                            after_end = token.split("</think>", 1)[1]
+                            _thinking_buf += before_end
+                            thinking = _thinking_buf
+                            _in_thinking = False
+                            token = after_end
+                            if thinking:
+                                snip = thinking[-60:].replace("\n", " ")
+                                await events.emit(conv_id, "thinking", {"status": f"💭 {snip}...", "detail": json.dumps({"thinking": thinking[-3000:]})})
+                        else:
+                            _thinking_buf += token
+                            if len(_thinking_buf) % 100 < len(token):
+                                snip = _thinking_buf[-60:].replace("\n", " ")
+                                await events.emit(conv_id, "thinking", {"status": f"💭 {snip}...", "detail": json.dumps({"thinking": _thinking_buf[-3000:]})})
+                            continue
+
+                    if not token:
+                        continue
+                    content += token
+                    _live_gen_tokens += 1
+                    if _live_gen_tokens % 10 == 0:
+                        yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': _live_gen_tokens, 'prompt_tokens': prompt_tokens, 'live': True})}\n\n"
+
+                    _repeat_window = (_repeat_window + token)[-200:]
+                    _in_fence = (content.count("```") % 2) == 1
+                    if not _in_fence and len(_repeat_window) >= 120:
+                        for plen in range(2, 25):
+                            pat = _repeat_window[-plen:]
+                            if not pat.strip():
+                                continue
+                            count = _repeat_window.count(pat)
+                            min_count = 20 if plen <= 4 else 8
+                            if count >= min_count and count * plen > len(_repeat_window) * 0.85:
+                                print(f"[CHAT]   Repetition detected: {pat!r} x{count} — stopping generation")
+                                content = content[:content.rfind(pat)]
+                                break
+                        else:
+                            pat = None
+                        if pat:
+                            break
+
+                    if _has_tools and len(content) % 200 < len(token):
+                        _evt_type = "tool_start" if not _gen_pill_started else "tool_progress"
+                        _gen_pill_started = True
+                        _shown_tokens = max(_live_gen_tokens, (len(content) + 3) // 4)
+                        await events.emit(conv_id, _evt_type, {
+                            "tool": "generating",
+                            "status": f"✍️ Generating... (~{_shown_tokens} tokens)",
+                            "icon": "edit",
+                        })
+
+                    _chunk_buf += token
+                    if len(_chunk_buf) >= 8:
+                        yield f"data: {json.dumps({'type': 'token', 'content': _chunk_buf})}\n\n"
+                        _streamed_content = True
+                        _chunk_buf = ""
+                        await asyncio.sleep(0)
+
+                if _chunk_buf:
+                    yield f"data: {json.dumps({'type': 'token', 'content': _chunk_buf})}\n\n"
+                    _streamed_content = True
+                if _in_thinking and _thinking_buf:
+                    thinking = _thinking_buf
+                    _in_thinking = False
+                raise _ProviderStreamComplete()
+
             async with http.stream("POST", f"{config.OLLAMA_URL}/api/chat",
                                    json=payload, timeout=300) as resp:
                 if resp.status_code != 200:
@@ -1597,6 +1720,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         except (asyncio.CancelledError, Exception):
                             pass
 
+        except _ProviderStreamComplete:
+            pass
         except Exception as e:
             # Log the actual cause — previously this catch silently emitted str(e) to the
             # client, leaving the journal blank when Ollama streams died in unexpected ways.
@@ -1604,17 +1729,18 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             traceback.print_exc()
             err_msg = str(e) or f"{type(e).__name__} (no message)"
             err_lower = err_msg.lower()
+            _provider_label = model_providers.provider_label(_model_provider) if _is_cloud_provider else "Ollama"
             # Provide clearer error messages for common failures
-            if "peer closed" in err_lower or "incomplete chunked" in err_lower:
+            if not _is_cloud_provider and ("peer closed" in err_lower or "incomplete chunked" in err_lower):
                 err_msg = (f"Ollama connection dropped while streaming model '{req.model}'. "
                            f"This usually means the model is too large for available GPU memory (VRAM). "
                            f"Try a smaller model or reduce num_ctx. Original: {err_msg[:200]}")
             elif "timeout" in err_lower or "timed out" in err_lower:
-                err_msg = f"Ollama request timed out for model '{req.model}'. The model may be too slow or overloaded. {err_msg[:200]}"
-            elif "input stream" in err_lower or "failed to load" in err_lower or "ggml" in err_lower:
+                err_msg = f"{_provider_label} request timed out for model '{req.model}'. The model may be too slow or overloaded. {err_msg[:200]}"
+            elif not _is_cloud_provider and ("input stream" in err_lower or "failed to load" in err_lower or "ggml" in err_lower):
                 err_msg = (f"Model '{req.model}' failed mid-stream — it may be corrupt or hit a context-buffer issue. "
                            f"Try `ollama stop {req.model}` and retry, or reduce num_ctx. Original: {err_msg[:200]}")
-            await events.emit(conv_id, "error", {"status": f"Ollama: {err_msg[:200]}"})
+            await events.emit(conv_id, "error", {"status": f"{_provider_label}: {err_msg[:200]}"})
             yield f"data: {json.dumps({'type': 'error', 'error': err_msg})}\n\n"
             return
 

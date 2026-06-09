@@ -2697,6 +2697,15 @@ function SandboxSection({t,btnS,labelS,notify,addActivity,updateActivity}){
 
 // ============================================================
 // ModelPicker — custom dropdown replacing plain <select> for model selection
+const cloudModelProvider=(m)=>{
+  const s=String(m||"");
+  if(s.startsWith("openai:"))return"openai";
+  if(s.startsWith("anthropic:"))return"anthropic";
+  return"";
+};
+const isCloudModelName=(m)=>!!cloudModelProvider(m);
+const cloudModelName=(m)=>String(m||"").replace(/^(openai|anthropic):/,"");
+
 function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact=false,onRefresh}){
   const [open,setOpen]=useState(false);
   const [dropPos,setDropPos]=useState({top:0,left:0,width:220});
@@ -2721,16 +2730,18 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
     setOpen(p=>!p);
     if(willOpen&&onRefresh)onRefresh();
   };
-  const famIcon=(n)=>{const b=(n||"").toLowerCase();if(b.includes("qwen"))return"🌸";if(b.includes("llama"))return"🦙";if(b.includes("mistral")||b.includes("mixtral"))return"💨";if(b.includes("gemma"))return"💎";if(b.includes("phi"))return"φ";if(b.includes("deepseek"))return"🔍";if(b.includes("coder")||b.includes("codestral"))return"💻";if(b.includes("wizard"))return"🧙";if(b.includes("hf.co"))return"🤗";return"🤖";};
+  const famIcon=(n)=>{const b=(n||"").toLowerCase();if(b.startsWith("openai:")||b==="openai")return"◎";if(b.startsWith("anthropic:")||b==="anthropic")return"✦";if(b.includes("qwen"))return"🌸";if(b.includes("llama"))return"🦙";if(b.includes("mistral")||b.includes("mixtral"))return"💨";if(b.includes("gemma"))return"💎";if(b.includes("phi"))return"φ";if(b.includes("deepseek"))return"🔍";if(b.includes("coder")||b.includes("codestral"))return"💻";if(b.includes("wizard"))return"🧙";if(b.includes("hf.co"))return"🤗";return"🤖";};
   const szCol=(tag)=>{const l=(tag||"").toLowerCase();if(l.match(/70b|65b|72b/))return t.err;if(l.match(/30b|32b|34b/))return t.warm;if(l.match(/13b|14b|27b/))return t.acc;if(l.match(/7b|8b/))return t.ok;if(l.match(/1b|3b|4b/))return t.f1;return t.mut;};
   const modelCaps=(m)=>{const b=(m||"").toLowerCase();const caps=[];
+    if(b.startsWith("openai:")||b.startsWith("anthropic:"))return[{emoji:"☁",color:"#4aa3ff",label:"Cloud"}];
     if(b.match(/embed/))return[{emoji:"🔢",color:"#9b59b6",label:"Embed"}];
     if(b.match(/llava|vision|[\-:]vl[\-:$]/)||b.match(/vl\b/))caps.push({emoji:"👁",color:"#e67e22",label:"Vision"});
     if(b.match(/qwen3|deepseek-r1|r1[\-:]|qwq/))caps.push({emoji:"💭",color:"#c792ea",label:"Thinking"});
     if(b.match(/coder|codestral|starcoder|deepseek-coder/))caps.push({emoji:"💻",color:"#2ecc71",label:"Code"});
     if(!b.match(/embed/)&&b.match(/qwen|llama3|llama-3|mistral|mixtral|command|hermes|deepseek|phi3|phi-3|wizardlm|gemma|llama3\./))caps.push({emoji:"🔧",color:"#3498db",label:"Tools"});
     return caps;};
-  const [name,tag="latest"]=(value||"").split(":");
+  const curProvider=cloudModelProvider(value);
+  const [name,tag="latest"]=curProvider?[curProvider,cloudModelName(value)]:(value||"").split(":");
   const sc=szCol(tag);
   const caps=modelCaps(value||"");
   const md=modelDetails?.[value]||{};
@@ -2740,7 +2751,7 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
     <div onClick={openDropdown} style={{display:"flex",alignItems:"center",gap:6,padding:compact?"3px 8px":"5px 10px",background:isMissing?`${t.err}15`:open?`${t.acc}15`:t.bgDeep,border:`1px solid ${isMissing?t.err:open?t.acc:t.brd}${open||isMissing?"55":"33"}`,borderRadius:8,cursor:"pointer",minWidth:compact?100:150,transition:"all .15s",userSelect:"none"}}>
       <span style={{fontSize:compact?12:14,flexShrink:0}}>{isMissing?"⚠️":famIcon(name)}</span>
       <div style={{flex:1,minWidth:0}}>
-        <div style={{fontSize:compact?10:11,fontWeight:600,color:isMissing?t.err:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{isMissing?`${name} (deleted)`:(name||"Select model")}</div>
+        <div style={{fontSize:compact?10:11,fontWeight:600,color:isMissing?t.err:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{isMissing?`${curProvider?tag:name} (deleted)`:(curProvider?tag:(name||"Select model"))}</div>
         {!compact&&<div style={{display:"flex",gap:3,flexWrap:"wrap",marginTop:1}}>
           <span style={{fontSize:8,color:sc,fontWeight:700}}>{tag}</span>
           {paramSz&&<span style={{fontSize:8,color:t.mut}}>{paramSz}</span>}
@@ -2752,6 +2763,8 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
     </div>
     {open&&(()=>{
       const getMaker=(m)=>{
+        if(m.startsWith("openai:"))return"OpenAI";
+        if(m.startsWith("anthropic:"))return"Anthropic";
         if(m.startsWith("hf.co/")){const parts=m.replace("hf.co/","").split("/");return parts[0]||"HuggingFace";}
         const b=m.toLowerCase();
         if(b.includes("qwen"))return"Alibaba";
@@ -2782,19 +2795,21 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
           <div style={{padding:"5px 10px 3px",fontSize:8,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.8,borderTop:maker===sortedMakers[0]?"none":`1px solid ${t.brd}22`,marginTop:maker===sortedMakers[0]?0:4,paddingTop:maker===sortedMakers[0]?5:7}}>{maker}</div>
           {grouped[maker].map(m=>{
             const isHF=m.startsWith("hf.co/");
-            const [mn,mt="latest"]=m.split(":");
-            const displayName=isHF?m.replace("hf.co/","").split("/").pop()?.split(":")[0]||mn:mn;
+            const provider=cloudModelProvider(m);
+            const [mn,mt="latest"]=provider?[provider,cloudModelName(m)]:m.split(":");
+            const displayName=provider?mt:(isHF?m.replace("hf.co/","").split("/").pop()?.split(":")[0]||mn:mn);
             const sc2=szCol(mt);const sel=m===value;
             const mc=modelCaps(m);const mdi=modelDetails?.[m]||{};const ps=mdi.details?.parameter_size||"";
             return <div key={m} onClick={()=>{onChange(m);setOpen(false);}}
               style={{display:"flex",alignItems:"center",gap:8,padding:"6px 9px",borderRadius:7,cursor:"pointer",background:sel?`${t.acc}18`:isHF?`#ff660008`:"transparent",border:`1px solid ${sel?t.acc:isHF?"#ff660033":"transparent"}`,marginBottom:1,transition:"background .1s"}}
               onMouseEnter={e=>{if(!sel)e.currentTarget.style.background=isHF?`#ff660015`:`${t.surface}88`;}}
               onMouseLeave={e=>{if(!sel)e.currentTarget.style.background=isHF?`#ff660008`:"transparent";}}>
-              <span style={{fontSize:15,flexShrink:0}}>{isHF?"🤗":famIcon(mn)}</span>
+              <span style={{fontSize:15,flexShrink:0}}>{isHF?"🤗":famIcon(provider||mn)}</span>
               <div style={{flex:1,minWidth:0}}>
                 <div style={{display:"flex",alignItems:"center",gap:4}}>
                   <div style={{fontSize:11,fontWeight:sel?700:500,color:sel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{displayName}</div>
                   {isHF&&<span style={{fontSize:7,padding:"1px 4px",borderRadius:3,background:"#ff660022",color:"#ff6600",fontWeight:700,flexShrink:0,border:"1px solid #ff660033"}}>HF</span>}
+                  {provider&&<span style={{fontSize:7,padding:"1px 4px",borderRadius:3,background:`${provider==="openai"?t.ok:t.pink}22`,color:provider==="openai"?t.ok:t.pink,fontWeight:700,flexShrink:0,border:`1px solid ${provider==="openai"?t.ok:t.pink}33`}}>{provider==="openai"?"OpenAI":"Claude"}</span>}
                 </div>
                 <div style={{display:"flex",gap:3,alignItems:"center",marginTop:1,flexWrap:"wrap"}}>
                   <span style={{fontSize:8,color:sc2,fontWeight:700}}>{mt}</span>
@@ -3332,6 +3347,9 @@ function HyprChat(){
   const [codeboxUrl,setCodeboxUrl]=useState("");
   const [searxngUrl,setSearxngUrl]=useState("");
   const [n8nUrl,setN8nUrl]=useState("");
+  const [modelProviders,setModelProviders]=useState({});
+  const [providerKeys,setProviderKeys]=useState({openai:"",anthropic:""});
+  const [providerBusy,setProviderBusy]=useState({});
   const [connectionsSaving,setConnectionsSaving]=useState(false);
   const [connectionsSaveState,setConnectionsSaveState]=useState(null); // saving|saved|failed
   const [ragSettings,setRagSettings]=useState({embed_model:"nomic-embed-text",chunk_size:500,chunk_overlap:50,top_k:6,max_context_chars:6000,research_top_k:4,research_max_chars:3000});
@@ -4140,6 +4158,7 @@ function HyprChat(){
     refreshConnectors();
     fetch(`${API}/api/model-configs`).then(r=>r.json()).then(d=>setMcs((d||[]).map(mc=>({...mc,parameters:normalizeProfileParams(mc)})))).catch(()=>{});
     fetch(`${API}/api/health`).then(r=>r.json()).then(d=>setHealth(d.services||{})).catch(()=>{});
+    fetch(`${API}/api/model-providers`).then(r=>r.json()).then(d=>{const map={};(d.providers||[]).forEach(p=>{map[p.provider]=p;});setModelProviders(map);}).catch(()=>{});
     fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{
       if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);
       if(d.current_codebox_url)setCodeboxUrl(d.current_codebox_url);
@@ -5908,6 +5927,60 @@ function HyprChat(){
   // Refresh models from Ollama (single source of truth)
   const refreshModels=async()=>{try{const r=await fetch(`${API}/api/models`);const d=await r.json();const next=d.models||[];setModels(next);setModelDetails(d.model_details||{});try{const last=localStorage.getItem("hc-last-model")||"";if(last&&next.length&&!next.includes(last))localStorage.setItem("hc-last-model",next[0]||"");}catch{}}catch{}};
 
+  const refreshModelProviders=async()=>{
+    try{
+      const r=await fetch(`${API}/api/model-providers`);
+      const d=await r.json();
+      const map={};
+      (d.providers||[]).forEach(p=>{map[p.provider]=p;});
+      setModelProviders(map);
+      return map;
+    }catch{return modelProviders;}
+  };
+  const saveModelProvider=async(provider,patch={})=>{
+    setProviderBusy(p=>({...p,[provider]:"saving"}));
+    try{
+      const key=(providerKeys[provider]||"").trim();
+      const body={...patch};
+      if(key)body.api_key=key;
+      const r=await fetch(`${API}/api/model-providers/${provider}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      setModelProviders(p=>({...p,[provider]:d}));
+      setProviderKeys(p=>({...p,[provider]:""}));
+      await refreshModels();
+      notify({type:"success",text:"Provider saved",detail:d.label||provider,duration:2400});
+    }catch(e){notify({type:"error",text:"Provider save failed",detail:e.message||String(e)});}
+    setProviderBusy(p=>({...p,[provider]:null}));
+  };
+  const testModelProvider=async(provider)=>{
+    setProviderBusy(p=>({...p,[provider]:"testing"}));
+    try{
+      const key=(providerKeys[provider]||"").trim();
+      const r=await fetch(`${API}/api/model-providers/${provider}/test`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(key?{api_key:key}:{})});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      await refreshModelProviders();
+      notify({type:"success",text:"Provider test passed",detail:`${d.model_count||0} models available`,duration:2600});
+    }catch(e){await refreshModelProviders();notify({type:"error",text:"Provider test failed",detail:e.message||String(e),duration:6000});}
+    setProviderBusy(p=>({...p,[provider]:null}));
+  };
+  const deleteModelProvider=async(provider)=>{
+    const ok=await confirmAction({title:"Remove provider key",body:`Remove the saved ${provider==="openai"?"OpenAI":"Anthropic"} API key for this HyprChat user?`,confirmLabel:"Remove Key",tone:"danger"});
+    if(!ok)return;
+    setProviderBusy(p=>({...p,[provider]:"deleting"}));
+    try{
+      const r=await fetch(`${API}/api/model-providers/${provider}`,{method:"DELETE"});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      setModelProviders(p=>({...p,[provider]:d}));
+      setProviderKeys(p=>({...p,[provider]:""}));
+      await refreshModels();
+      notify({type:"success",text:"Provider key removed",detail:d.label||provider,duration:2400});
+    }catch(e){notify({type:"error",text:"Provider delete failed",detail:e.message||String(e)});}
+    setProviderBusy(p=>({...p,[provider]:null}));
+  };
+
   // Delete model and clean up all references (active conv, coder model, workspace model, etc.)
   const deleteModel=async(m)=>{
     const ok=await confirmAction({title:"Delete model",body:`Delete ${m}? This removes the local Ollama model and clears references to it in HyprChat.`,confirmLabel:"Delete Model",tone:"danger"});
@@ -7218,10 +7291,10 @@ function HyprChat(){
             <input value={mcpDraft.command} onChange={e=>setMcpDraft(p=>({...p,command:e.target.value}))} placeholder="Command for stdio, e.g. npx" style={{...inputS,marginBottom:8,fontFamily:"monospace"}}/>
             <input value={mcpDraft.url} onChange={e=>setMcpDraft(p=>({...p,url:e.target.value}))} placeholder="HTTP endpoint for Streamable HTTP/SSE" style={{...inputS,marginBottom:8,fontFamily:"monospace"}}/>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
-              <textarea value={mcpDraft.args} onChange={e=>setMcpDraft(p=>({...p,args:e.target.value}))} rows={3} placeholder={'["-y","@modelcontextprotocol/server-github"]'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/>
-              <textarea value={mcpDraft.env} onChange={e=>setMcpDraft(p=>({...p,env:e.target.value}))} rows={3} placeholder={'{"GITHUB_TOKEN":"GITHUB_TOKEN"}'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/>
+              <div><div style={{fontSize:9,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.5,margin:"0 0 4px 2px"}}>Args JSON array</div><textarea value={mcpDraft.args} onChange={e=>setMcpDraft(p=>({...p,args:e.target.value}))} rows={3} placeholder={'["-y","@modelcontextprotocol/server-github"]'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/></div>
+              <div><div style={{fontSize:9,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.5,margin:"0 0 4px 2px"}}>Env placeholders</div><textarea value={mcpDraft.env} onChange={e=>setMcpDraft(p=>({...p,env:e.target.value}))} rows={3} placeholder={'{"GITHUB_TOKEN":"GITHUB_TOKEN"}'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/></div>
             </div>
-            <textarea value={mcpDraft.headers} onChange={e=>setMcpDraft(p=>({...p,headers:e.target.value}))} rows={2} placeholder={'{"Authorization":"Bearer ${TOKEN}"}'} style={{...inputS,fontFamily:"monospace",resize:"vertical",marginBottom:8}}/>
+            <div style={{marginBottom:8}}><div style={{fontSize:9,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.5,margin:"0 0 4px 2px"}}>HTTP headers</div><textarea value={mcpDraft.headers} onChange={e=>setMcpDraft(p=>({...p,headers:e.target.value}))} rows={2} placeholder={'{"Authorization":"Bearer ${TOKEN}"}'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/></div>
             <label style={{display:"flex",alignItems:"center",gap:7,fontSize:10,color:t.mut,marginBottom:8}}><input type="checkbox" checked={mcpDraft.allow_private} onChange={e=>setMcpDraft(p=>({...p,allow_private:e.target.checked}))}/> Allow private/local URL</label>
             <button disabled={connectorBusy==="create:mcp"} onClick={async()=>{
               setConnectorBusy("create:mcp");
@@ -7241,8 +7314,8 @@ function HyprChat(){
             <input value={openapiDraft.spec_url} onChange={e=>setOpenapiDraft(p=>({...p,spec_url:e.target.value}))} placeholder="OpenAPI JSON/YAML URL" style={{...inputS,marginBottom:8,fontFamily:"monospace"}}/>
             <input value={openapiDraft.base_url} onChange={e=>setOpenapiDraft(p=>({...p,base_url:e.target.value}))} placeholder="Base URL override (optional)" style={{...inputS,marginBottom:8,fontFamily:"monospace"}}/>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
-              <textarea value={openapiDraft.auth} onChange={e=>setOpenapiDraft(p=>({...p,auth:e.target.value}))} rows={4} placeholder={'{"type":"bearer","token_placeholder":"GITHUB_TOKEN"}'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/>
-              <textarea value={openapiDraft.headers} onChange={e=>setOpenapiDraft(p=>({...p,headers:e.target.value}))} rows={4} placeholder={'{"X-Api-Key":"${API_KEY}"}'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/>
+              <div><div style={{fontSize:9,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.5,margin:"0 0 4px 2px"}}>Auth JSON</div><textarea value={openapiDraft.auth} onChange={e=>setOpenapiDraft(p=>({...p,auth:e.target.value}))} rows={4} placeholder={'{"type":"bearer","token_placeholder":"GITHUB_TOKEN"}'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/></div>
+              <div><div style={{fontSize:9,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.5,margin:"0 0 4px 2px"}}>Headers JSON</div><textarea value={openapiDraft.headers} onChange={e=>setOpenapiDraft(p=>({...p,headers:e.target.value}))} rows={4} placeholder={'{"X-Api-Key":"${API_KEY}"}'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/></div>
             </div>
             <label style={{display:"flex",alignItems:"center",gap:7,fontSize:10,color:t.mut,marginBottom:8}}><input type="checkbox" checked={openapiDraft.allow_private} onChange={e=>setOpenapiDraft(p=>({...p,allow_private:e.target.checked}))}/> Allow private/local URL</label>
             <button disabled={connectorBusy==="create:openapi"} onClick={async()=>{
@@ -7930,7 +8003,7 @@ function HyprChat(){
         </div>
       </div>
       <div style={{display:"flex",alignItems:"center",gap:4,padding:3,borderRadius:8,border:`1px solid ${t.brd}28`,background:`${t.surface}44`}}>
-        {[["ollama","Installed",models.length],["hf","HuggingFace",models.filter(m=>m.startsWith("hf.co/")).length]].map(([key,label,count])=>{
+        {[["ollama","Installed",models.filter(m=>!isCloudModelName(m)).length],["hf","HuggingFace",models.filter(m=>m.startsWith("hf.co/")).length]].map(([key,label,count])=>{
           const active=modelsTab===key;
           return <button key={key} onClick={()=>setModelsTab(key)} style={{padding:"7px 13px",borderRadius:7,border:"none",background:active?`${t.acc}18`:"transparent",color:active?t.acc:t.mut,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:active?900:700,display:"flex",alignItems:"center",gap:7,transition:"all .15s"}}>
             <span>{key==="ollama"?"📦":"🤗"}</span><span>{label}</span><span style={{...mmChipS(active?t.acc:t.mut,active?`${t.acc}12`:`${t.surface}66`),fontSize:8,padding:"1px 5px"}}>{count}</span>
@@ -7960,14 +8033,15 @@ function HyprChat(){
           </div>
           <div style={{display:"flex",gap:6,alignItems:"center",justifyContent:"space-between"}}>
             <span style={mmKickerS}>Inventory</span>
-            <span style={mmMetaS}>{models.filter(m=>!m.startsWith("hf.co/")).length} local · {models.filter(m=>m.startsWith("hf.co/")).length} HF</span>
+            <span style={mmMetaS}>{models.filter(m=>!m.startsWith("hf.co/")&&!isCloudModelName(m)).length} local · {models.filter(m=>m.startsWith("hf.co/")).length} HF</span>
           </div>
         </div>
         <div style={{flex:1,overflowY:"auto",padding:"10px 12px 14px"}}>
           {(()=>{
             const searchLower=modelSearch.toLowerCase();
             const families={};
-            models.filter(m=>!searchLower||m.toLowerCase().includes(searchLower)).forEach(m=>{
+            const visibleModels=models.filter(m=>!isCloudModelName(m));
+            visibleModels.filter(m=>!searchLower||m.toLowerCase().includes(searchLower)).forEach(m=>{
               const [name,tag="latest"]=m.split(":");
               const base=name.toLowerCase();
               let fam="Other";
@@ -7988,7 +8062,7 @@ function HyprChat(){
             const icon=(n)=>{const b=n.toLowerCase();if(b.startsWith("hf.co/"))return"🤗";if(b.includes("qwen"))return"🌸";if(b.includes("llama"))return"🦙";if(b.includes("mistral")||b.includes("mixtral"))return"💨";if(b.includes("gemma"))return"💎";if(b.includes("phi"))return"φ";if(b.includes("deepseek"))return"🔍";if(b.includes("coder")||b.includes("code"))return"💻";if(b.includes("wizard"))return"🧙";return"🤖";};
             const famEmoji={HuggingFace:"🤗",Qwen:"🌸",Llama:"🦙",Mistral:"💨",Gemma:"💎",Phi:"φ",DeepSeek:"🔍",Command:"⚡",WizardLM:"🧙",Hermes:"🏛",Other:"🤖"};
             const allItems=Object.values(families).flat();
-            if(!models.length)return <div style={{...mmPanelS,padding:"28px 14px",color:t.mut,fontSize:12,textAlign:"center",lineHeight:1.6}}>No installed models yet.<br/>Pull one from Ollama to start.</div>;
+            if(!visibleModels.length)return <div style={{...mmPanelS,padding:"28px 14px",color:t.mut,fontSize:12,textAlign:"center",lineHeight:1.6}}>No installed models yet.<br/>Pull one from Ollama to start.</div>;
             if(allItems.length===0&&searchLower)return <div style={{...mmPanelS,padding:"28px 14px",color:t.mut,fontSize:12,textAlign:"center"}}>No models matching "{modelSearch}"</div>;
             return Object.entries(families).map(([fam,items])=><div key={fam} style={{marginBottom:16}}>
               <div style={{fontSize:11,color:t.mut,textTransform:"uppercase",letterSpacing:.7,margin:"0 2px 7px",display:"flex",alignItems:"center",gap:7}}>
@@ -8043,7 +8117,7 @@ function HyprChat(){
                   <div style={{fontSize:12,color:t.mut,marginTop:5,maxWidth:520,lineHeight:1.5}}>Applied to every model unless that model has its own override. Select a model from the inventory to tune context and sampling individually.</div>
                 </div>
                 <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"flex-end"}}>
-                  <span style={mmChipS(t.acc)}>{models.length} installed</span>
+                  <span style={mmChipS(t.acc)}>{models.filter(m=>!isCloudModelName(m)).length} installed</span>
                   <span style={mmChipS(t.warm)}>{Object.keys(modelParams).filter(k=>Object.values(modelParams[k]||{}).some(v=>v&&v!=="default")).length} overrides</span>
                 </div>
               </div>
@@ -8712,6 +8786,48 @@ function HyprChat(){
               {s?.response_ms!=null&&<span style={{fontSize:10,color:t.mut}}>{s.response_ms}ms</span>}
               {rl&&<span style={{padding:"1px 6px",borderRadius:4,background:"#f0a03020",border:"1px solid #f0a03044",fontSize:9,fontWeight:800,color:"#f0a030"}}>Limited</span>}
             </div>;})}
+          </div>
+        </div>
+        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
+          <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"baseline",marginBottom:10}}>
+            <div>
+              <div style={{fontSize:12,fontWeight:900,color:t.dim,textTransform:"uppercase",letterSpacing:.7}}>Cloud Models</div>
+              <div style={{fontSize:10,color:t.mut,marginTop:3}}>API keys are stored for the current HyprChat user.</div>
+            </div>
+            <button onClick={async()=>{await refreshModelProviders();await refreshModels();}} style={{...btnS(t.f1),fontSize:10,padding:"5px 9px"}}><IC.Refresh/> Refresh</button>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr",gap:10}}>
+            {[["openai","OpenAI","sk-...","ChatGPT / GPT models"],["anthropic","Anthropic","sk-ant-...","Claude models"]].map(([provider,label,placeholder,hint])=>{
+              const st=modelProviders[provider]||{provider,label,enabled:false,has_key:false,key_source:"none",key_hint:""};
+              const busy=providerBusy[provider];
+              const enabled=!!st.enabled;
+              const key=providerKeys[provider]||"";
+              const statusColor=enabled&&st.has_key?t.ok:st.has_key?t.warm:t.mut;
+              return <div key={provider} style={{display:"grid",gridTemplateColumns:"120px minmax(0,1fr) auto",gap:10,alignItems:"center",background:t.bgDeep,border:`1px solid ${t.brd}24`,borderRadius:8,padding:"10px 11px"}}>
+                <div>
+                  <div style={{display:"flex",alignItems:"center",gap:7,fontSize:12,fontWeight:900,color:t.text}}><span>{provider==="openai"?"◎":"✦"}</span>{label}</div>
+                  <div style={{fontSize:9,color:t.mut,marginTop:3}}>{hint}</div>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"minmax(180px,1fr) auto",gap:8,alignItems:"center"}}>
+                  <input type="password" value={key} onChange={e=>setProviderKeys(p=>({...p,[provider]:e.target.value}))} placeholder={st.key_hint?`Saved ${st.key_hint}`:placeholder} style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
+                  <label style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:enabled?t.ok:t.mut,cursor:"pointer",whiteSpace:"nowrap"}}>
+                    <input type="checkbox" checked={enabled} onChange={e=>saveModelProvider(provider,{enabled:e.target.checked})} disabled={!!busy}/>
+                    Enabled
+                  </label>
+                  <div style={{gridColumn:"1 / -1",display:"flex",gap:8,alignItems:"center",fontSize:9,color:statusColor}}>
+                    <span style={{width:7,height:7,borderRadius:"50%",background:statusColor,boxShadow:`0 0 6px ${statusColor}66`}}/>
+                    <span>{st.has_key?(enabled?`Ready (${st.key_source})`:`Key disabled`):"No key saved"}</span>
+                    {st.last_test_status==="ok"&&<span style={{color:t.ok}}>Test passed</span>}
+                    {st.last_test_status==="error"&&<span title={st.last_test_error||""} style={{color:t.err}}>Test failed</span>}
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:6,justifyContent:"flex-end",flexWrap:"wrap"}}>
+                  <button onClick={()=>testModelProvider(provider)} disabled={!!busy||(!key&&!st.has_key)} style={{...btnS(t.f1),fontSize:10,padding:"6px 9px",opacity:(busy||(!key&&!st.has_key))?0.5:1}}>{busy==="testing"?"Testing...":"Test"}</button>
+                  <button onClick={()=>saveModelProvider(provider,{enabled})} disabled={!!busy||!key} style={{...btnS(t.ok),fontSize:10,padding:"6px 9px",opacity:(busy||!key)?0.5:1}}>{busy==="saving"?"Saving...":"Save"}</button>
+                  <button onClick={()=>deleteModelProvider(provider)} disabled={!!busy||!st.has_key} style={{...btnS(t.err),fontSize:10,padding:"6px 8px",opacity:(busy||!st.has_key)?0.45:1}}><IC.Trash/></button>
+                </div>
+              </div>;
+            })}
           </div>
         </div>
         <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14}}>

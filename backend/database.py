@@ -204,6 +204,19 @@ CREATE TABLE IF NOT EXISTS model_configs (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS model_provider_credentials (
+    user_id TEXT NOT NULL DEFAULT 'default',
+    provider TEXT NOT NULL,
+    api_key TEXT DEFAULT '',
+    enabled INTEGER DEFAULT 1,
+    last_test_status TEXT DEFAULT '',
+    last_test_error TEXT DEFAULT '',
+    last_test_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, provider)
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_kb_files_kb ON kb_files(kb_id);
 
@@ -1176,6 +1189,7 @@ async def init_db():
             "workspaces", "council_configs", "memories", "token_usage",
             "coding_projects", "research_reports", "artifacts",
             "mcp_servers", "openapi_connectors", "connector_tools",
+            "model_provider_credentials",
         ):
             await _ensure_user_column(db, table)
         for table in ("mcp_servers", "openapi_connectors"):
@@ -1214,6 +1228,7 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_knowledge_bases_user ON knowledge_bases(user_id, updated_at);
             CREATE INDEX IF NOT EXISTS idx_tools_user ON tools(user_id, updated_at);
             CREATE INDEX IF NOT EXISTS idx_model_configs_user ON model_configs(user_id, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_model_provider_credentials_user ON model_provider_credentials(user_id, provider);
             CREATE INDEX IF NOT EXISTS idx_workspaces_user ON workspaces(user_id, updated_at);
             CREATE INDEX IF NOT EXISTS idx_council_configs_user ON council_configs(user_id, updated_at);
             CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id, updated_at);
@@ -2134,6 +2149,114 @@ async def replace_connector_tools(connector_type: str, connector_id: str, tools:
                 ),
             )
         await db.commit()
+    finally:
+        await db.close()
+
+
+# ============================================================
+# MODEL PROVIDER CREDENTIALS
+# ============================================================
+def _normalize_model_provider(row: dict, include_secret: bool = False) -> dict:
+    row["enabled"] = bool(row.get("enabled", 1))
+    row["has_key"] = bool(row.get("api_key"))
+    if not include_secret:
+        row.pop("api_key", None)
+    return row
+
+
+async def list_model_provider_credentials(include_secret: bool = False) -> list[dict]:
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM model_provider_credentials WHERE user_id=? ORDER BY provider",
+            (user_id,),
+        )
+        return [_normalize_model_provider(dict(r), include_secret=include_secret) for r in rows]
+    finally:
+        await db.close()
+
+
+async def get_model_provider_credential(provider: str, include_secret: bool = False) -> dict | None:
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM model_provider_credentials WHERE user_id=? AND provider=?",
+            (user_id, provider),
+        )
+        return _normalize_model_provider(dict(rows[0]), include_secret=include_secret) if rows else None
+    finally:
+        await db.close()
+
+
+async def upsert_model_provider_credential(
+    provider: str,
+    *,
+    api_key: str | None = None,
+    enabled: bool | None = None,
+    last_test_status: str | None = None,
+    last_test_error: str | None = None,
+    last_test_at: str | None = None,
+) -> None:
+    user_id = _scope_user()
+    existing = await get_model_provider_credential(provider, include_secret=True)
+    fields = {
+        "api_key": existing.get("api_key", "") if existing else "",
+        "enabled": existing.get("enabled", True) if existing else True,
+        "last_test_status": existing.get("last_test_status", "") if existing else "",
+        "last_test_error": existing.get("last_test_error", "") if existing else "",
+        "last_test_at": existing.get("last_test_at") if existing else None,
+    }
+    if api_key is not None:
+        fields["api_key"] = api_key
+    if enabled is not None:
+        fields["enabled"] = bool(enabled)
+    if last_test_status is not None:
+        fields["last_test_status"] = last_test_status
+    if last_test_error is not None:
+        fields["last_test_error"] = last_test_error
+    if last_test_at is not None:
+        fields["last_test_at"] = last_test_at
+
+    db = await get_db()
+    try:
+        await db.execute(
+            """INSERT INTO model_provider_credentials
+               (user_id, provider, api_key, enabled, last_test_status, last_test_error, last_test_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, provider) DO UPDATE SET
+                 api_key=excluded.api_key,
+                 enabled=excluded.enabled,
+                 last_test_status=excluded.last_test_status,
+                 last_test_error=excluded.last_test_error,
+                 last_test_at=excluded.last_test_at,
+                 updated_at=CURRENT_TIMESTAMP""",
+            (
+                user_id,
+                provider,
+                fields["api_key"],
+                1 if fields["enabled"] else 0,
+                fields["last_test_status"],
+                fields["last_test_error"],
+                fields["last_test_at"],
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def delete_model_provider_credential(provider: str) -> bool:
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "DELETE FROM model_provider_credentials WHERE user_id=? AND provider=?",
+            (user_id, provider),
+        )
+        await db.commit()
+        return cur.rowcount > 0
     finally:
         await db.close()
 

@@ -44,6 +44,7 @@ import hf as hf_module
 from hf import parse_ollama_progress
 import rag
 import connectors
+import model_providers
 from research import (
     REPORT_TEMPLATES,
     REPORT_TEMPLATE_MAP,
@@ -1313,21 +1314,35 @@ async def health_history(days: int = Query(default=90, ge=1, le=365)):
 # ============================================================
 @app.get("/api/models")
 async def list_models():
-    """Fetch available models from Ollama."""
+    """Fetch available models from Ollama plus enabled cloud providers."""
+    models: list[str] = []
+    model_details: dict[str, Any] = {}
+    ollama_error: Exception | None = None
     try:
         r = await http.get(f"{config.OLLAMA_URL}/api/tags")
         r.raise_for_status()
         data = r.json()
         raw = data.get("models", [])
-        model_details = {m["name"]: {
+        model_details.update({m["name"]: {
             "size": m.get("size", 0),
             "modified_at": m.get("modified_at", ""),
             "details": m.get("details", {}),
             "digest": m.get("digest", ""),
-        } for m in raw}
-        return {"models": [m["name"] for m in raw], "model_details": model_details}
+        } for m in raw})
+        models.extend([m["name"] for m in raw])
     except Exception as e:
-        raise HTTPException(502, f"Failed to reach Ollama: {e}")
+        ollama_error = e
+
+    cloud_models, cloud_details, cloud_errors = await model_providers.list_cloud_models(http)
+    models.extend(cloud_models)
+    model_details.update(cloud_details)
+    if not models and ollama_error:
+        raise HTTPException(502, f"Failed to reach Ollama: {ollama_error}")
+    return {
+        "models": models,
+        "model_details": model_details,
+        **({"provider_errors": cloud_errors} if cloud_errors else {}),
+    }
 
 
 @app.post("/api/chat/stream")
@@ -4950,6 +4965,55 @@ async def quick_search(req: QuickSearchRequest):
 # ============================================================
 # SETTINGS & SANDBOX API
 # ============================================================
+@app.get("/api/model-providers")
+async def get_model_provider_settings():
+    return {"providers": await model_providers.provider_statuses()}
+
+
+@app.patch("/api/model-providers/{provider}")
+async def update_model_provider_settings(provider: str, body: dict = Body(...)):
+    if provider not in model_providers.CLOUD_PROVIDERS:
+        raise HTTPException(404, "Unsupported model provider")
+    api_key = body.get("api_key")
+    enabled = body.get("enabled") if "enabled" in body else None
+    try:
+        status = await model_providers.save_provider(
+            provider,
+            api_key=api_key if isinstance(api_key, str) and api_key.strip() else None,
+            enabled=bool(enabled) if enabled is not None else None,
+        )
+        return status
+    except model_providers.ProviderError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/model-providers/{provider}")
+async def delete_model_provider_settings(provider: str):
+    if provider not in model_providers.CLOUD_PROVIDERS:
+        raise HTTPException(404, "Unsupported model provider")
+    try:
+        return await model_providers.delete_provider(provider)
+    except model_providers.ProviderError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/model-providers/{provider}/test")
+async def test_model_provider_settings(provider: str, body: dict = Body(default={})):
+    if provider not in model_providers.CLOUD_PROVIDERS:
+        raise HTTPException(404, "Unsupported model provider")
+    api_key = body.get("api_key") if isinstance(body, dict) else None
+    try:
+        return await model_providers.test_provider(
+            http,
+            provider,
+            api_key=api_key if isinstance(api_key, str) and api_key.strip() else None,
+        )
+    except model_providers.ProviderError as e:
+        raise HTTPException(e.status_code or 400, str(e))
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/settings")
 async def get_app_settings():
     settings = load_settings()
