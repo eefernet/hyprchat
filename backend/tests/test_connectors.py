@@ -57,6 +57,8 @@ def test_openapi_operation_to_connector_maps_parameters_and_body():
     assert props["verbose"]["type"] == "boolean"
     assert "body" in props
     assert set(converted["input_schema"]["required"]) == {"item_id", "body"}
+    assert "query" in props
+    assert "headers" in props
 
 
 def test_private_openapi_url_is_blocked():
@@ -121,3 +123,43 @@ def test_execute_openapi_tool_builds_request(monkeypatch):
     result = asyncio.run(run())
     assert '"status_code": 200' in result
     assert '"ok": true' in result
+
+
+def test_execute_openapi_tool_supports_extra_query(monkeypatch):
+    connector = {
+        "id": "openapi-test",
+        "name": "HTTPBin",
+        "base_url": "https://httpbin.org",
+        "auth": {},
+        "headers": {},
+        "enabled": True,
+        "allow_private": False,
+    }
+    tool = connectors.openapi_operation_to_connector(
+        connector,
+        {"openapi": "3.1.0"},
+        "/anything",
+        "get",
+        {"operationId": "get_anything"},
+        [],
+    )
+
+    async def fake_get_openapi_connector(connector_id):
+        return connector
+
+    monkeypatch.setattr(connectors.db, "get_openapi_connector", fake_get_openapi_connector, raising=False)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://httpbin.org/anything?anything=hyprchat-test"
+        return httpx.Response(200, json={"args": {"anything": "hyprchat-test"}})
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await connectors.execute_openapi_tool(
+                client,
+                tool,
+                {"query": {"anything": "hyprchat-test"}},
+            )
+
+    result = asyncio.run(run())
+    assert "hyprchat-test" in result

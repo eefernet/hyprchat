@@ -428,6 +428,23 @@ def openapi_operation_to_connector(connector: dict, spec: dict, path: str, metho
         properties["body"].setdefault("description", "JSON request body")
         if body_required:
             required.append("body")
+    if "query" not in properties:
+        properties["query"] = {
+            "type": "object",
+            "description": "Additional query string parameters not explicitly modeled by the OpenAPI spec.",
+            "additionalProperties": {},
+        }
+    if "headers" not in properties:
+        properties["headers"] = {
+            "type": "object",
+            "description": "Additional request headers not explicitly modeled by the OpenAPI spec.",
+            "additionalProperties": {"type": "string"},
+        }
+    if method.upper() not in {"GET", "HEAD"} and "body" not in properties:
+        properties["body"] = {
+            "type": "object",
+            "description": "Optional JSON request body for APIs whose spec omits a requestBody schema.",
+        }
     input_schema = {"type": "object", "properties": properties, "required": required}
     summary = op.get("summary") or op.get("description") or f"{method.upper()} {path}"
     return {
@@ -569,6 +586,17 @@ async def execute_openapi_tool(http: httpx.AsyncClient, tool: dict, args: dict) 
     headers: dict[str, str] = {}
     path_values: dict[str, Any] = {}
     body = (args or {}).get("body", None)
+
+    extra_query = (args or {}).get("query")
+    if isinstance(extra_query, dict):
+        for key, value in extra_query.items():
+            if key and value is not None:
+                query[str(key)] = value
+    extra_headers = (args or {}).get("headers")
+    if isinstance(extra_headers, dict):
+        for key, value in extra_headers.items():
+            if key and value is not None:
+                headers[str(key)] = str(value)
 
     for item in metadata.get("arg_map") or []:
         arg_name = item.get("arg")
