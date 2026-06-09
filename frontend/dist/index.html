@@ -3347,6 +3347,7 @@ function HyprChat(){
   const [prompts,setPrompts]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-prompts")||"[]");}catch{return [];}});
   const [showPromptPicker,setShowPromptPicker]=useState(false);
   const [showQuickMenu,setShowQuickMenu]=useState(false);
+  const [showConnectorPicker,setShowConnectorPicker]=useState(false);
   const [showEffortPicker,setShowEffortPicker]=useState(false);
   const [pendingEffort,setPendingEffort]=useState(null);
   const [pendingPersona,setPendingPersona]=useState(null);
@@ -3356,6 +3357,7 @@ function HyprChat(){
   const effortPickerRef=useRef(null);
   const exportMenuRef=useRef(null);
   const [promptSearch,setPromptSearch]=useState("");
+  const [connectorSearch,setConnectorSearch]=useState("");
   const [editPrompt,setEditPrompt]=useState(null); // {id, title, content, category}
 
   const [convTags,setConvTags]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-conv-tags")||"{}");}catch{return {};}});
@@ -3679,7 +3681,7 @@ function HyprChat(){
   const [currentRunNotice,setCurrentRunNotice]=useState(null); // {type,label,detail,at}
   const [composerFocused,setComposerFocused]=useState(false);
 
-  const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0),chatScrollRef=useRef(null),dlPanelRef=useRef(null),quickMenuRef=useRef(null),promptPickerRef=useRef(null),actIdRef=useRef(actId),titleSearchRef=useRef(null),ftsRef=useRef(null),importRef=useRef(null),charCardImportRef=useRef(null);
+  const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0),chatScrollRef=useRef(null),dlPanelRef=useRef(null),quickMenuRef=useRef(null),promptPickerRef=useRef(null),connectorPickerRef=useRef(null),actIdRef=useRef(actId),titleSearchRef=useRef(null),ftsRef=useRef(null),importRef=useRef(null),charCardImportRef=useRef(null);
   actIdRef.current=actId;
   const act = convs.find(c=>c.id===actId);
   const isGhostConv=(c)=>!!c?.ephemeral||String(c?.id||"").startsWith("ghost-");
@@ -3959,6 +3961,23 @@ function HyprChat(){
     for (const tl of tools) { if (!seen.has(tl.id)) { seen.add(tl.id); merged.push({id:tl.id, name:tl.name, description:tl.description||tl.filename, icon:"code"}); } }
     return merged;
   })();
+  const connectorOperationTools=allTools.filter(tl=>tl.connector);
+  const activeConnectorTools=connectorOperationTools.filter(tl=>activeToolIds.includes(tl.id));
+  const activeConnectorCount=activeConnectorTools.length;
+  const composerToolChips=allTools.filter(tl=>!tl.connector).concat(activeConnectorTools.slice(0,3));
+  const filteredConnectorTools=connectorOperationTools.filter(tl=>{
+    const q=connectorSearch.trim().toLowerCase();
+    if(!q)return true;
+    return String(tl.name||"").toLowerCase().includes(q)||String(tl.description||"").toLowerCase().includes(q)||String(tl.id||"").toLowerCase().includes(q);
+  });
+  const toggleToolId=(toolId)=>{
+    if(!toolId)return;
+    if(!actId){
+      setPendingToolIds(ids=>ids.includes(toolId)?ids.filter(x=>x!==toolId):[...ids,toolId]);
+      return;
+    }
+    uConv(actId,c=>{const ids=c.tool_ids||[];return{...c,tool_ids:ids.includes(toolId)?ids.filter(x=>x!==toolId):[...ids,toolId]};});
+  };
 
   const resetUserScopedState=()=>{
     setConvs([]);setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];
@@ -4791,7 +4810,7 @@ function HyprChat(){
   useEffect(()=>{
     const handler=(e)=>{
       if(e.key!=="Escape")return;
-      setDownloadsExpanded(false);setShowPromptPicker(false);setShowQuickMenu(false);setShowEffortPicker(false);setShowExportMenu(false);setShowSysPromptPicker(false);setShowNavMore(false);setRegenPopover(null);setQuickSearchError(null);
+      setDownloadsExpanded(false);setShowPromptPicker(false);setShowQuickMenu(false);setShowConnectorPicker(false);setShowEffortPicker(false);setShowExportMenu(false);setShowSysPromptPicker(false);setShowNavMore(false);setRegenPopover(null);setQuickSearchError(null);
       setConfirmDialog(d=>{if(d?.resolve)d.resolve(false);return null;});
       if(panel==="chat")setTimeout(()=>{try{inpRef.current?.focus({preventScroll:true});}catch{inpRef.current?.focus();}},0);
     };
@@ -4810,6 +4829,12 @@ function HyprChat(){
     document.addEventListener("mousedown",handler);
     return()=>document.removeEventListener("mousedown",handler);
   },[showQuickMenu]);
+  useEffect(()=>{
+    if(!showConnectorPicker)return;
+    const handler=(e)=>{if(connectorPickerRef.current&&!connectorPickerRef.current.contains(e.target))setShowConnectorPicker(false);};
+    document.addEventListener("mousedown",handler);
+    return()=>document.removeEventListener("mousedown",handler);
+  },[showConnectorPicker]);
   useEffect(()=>{
     if(!showExportMenu)return;
     const handler=(e)=>{if(exportMenuRef.current&&!exportMenuRef.current.contains(e.target))setShowExportMenu(false);};
@@ -9760,21 +9785,36 @@ function HyprChat(){
         <div style={{flexShrink:0,position:"relative",transform:emptyComposerLift,transition:"transform .7s cubic-bezier(.2,.8,.2,1)",willChange:"transform",zIndex:120,pointerEvents:"auto"}}>
         {/* TOOL TOGGLES BAR + QUICK SEARCH */}
         <div style={{padding:"0 16px",flexShrink:0}}>
-          <div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",gap:6,overflowX:"auto",padding:"6px 0",alignItems:"center",minHeight:32}}>
-            {!act?.is_council&&allTools.map(tl=>{
-              const on=activeToolIds.includes(tl.id);
-              const isQs=tl.id==="quick_search";
-              const col=isQs?t.f1:t.warm;
-              return <button key={tl.id} title={tl.description||tl.name} onClick={()=>{
-                if(!actId){
-                  setPendingToolIds(ids=>on?ids.filter(x=>x!==tl.id):[...ids,tl.id]);
-                  return;
-                }
-                uConv(actId,c=>{const ids=c.tool_ids||[];return{...c,tool_ids:on?ids.filter(x=>x!==tl.id):[...ids,tl.id]};});
-              }} style={{display:"flex",alignItems:"center",gap:4,padding:"4px 10px",borderRadius:8,fontSize:10,fontWeight:on?700:500,cursor:"pointer",whiteSpace:"nowrap",background:on?`${col}18`:`${t.surface}D9`,border:`1px solid ${on?col:t.brd}44`,color:on?col:t.mut,transition:"all .15s",boxShadow:"none"}}>
-                {isQs&&searchLoading?<span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span>:(on?<IC.ToggleOn/>:<IC.ToggleOff/>)}{tl.name}
-              </button>;
-            })}
+          <div ref={connectorPickerRef} style={{maxWidth:chatWidth,margin:"0 auto",position:"relative"}}>
+            <div style={{display:"flex",gap:6,overflowX:"auto",padding:"6px 0",alignItems:"center",minHeight:32}}>
+              {!act?.is_council&&composerToolChips.map(tl=>{
+                const on=activeToolIds.includes(tl.id);
+                const isQs=tl.id==="quick_search";
+                const col=isQs?t.f1:tl.connector?t.acc:t.warm;
+                return <button key={tl.id} title={tl.description||tl.name} onClick={()=>toggleToolId(tl.id)} style={{display:"flex",alignItems:"center",gap:4,padding:"4px 10px",borderRadius:8,fontSize:10,fontWeight:on?700:500,cursor:"pointer",whiteSpace:"nowrap",background:on?`${col}18`:`${t.surface}D9`,border:`1px solid ${on?col:t.brd}44`,color:on?col:t.mut,transition:"all .15s",boxShadow:"none",maxWidth:tl.connector?180:"none",overflow:"hidden",textOverflow:"ellipsis",flexShrink:0}}>
+                  {isQs&&searchLoading?<span style={{display:"inline-block",animation:"spin .8s linear infinite",flexShrink:0}}>⟳</span>:(on?<IC.ToggleOn/>:<IC.ToggleOff/>)}<span style={{overflow:"hidden",textOverflow:"ellipsis"}}>{tl.name}</span>
+                </button>;
+              })}
+              {!act?.is_council&&connectorOperationTools.length>0&&<button onClick={()=>{setShowConnectorPicker(p=>!p);setConnectorSearch("");}} title="Connector tools" style={{display:"flex",alignItems:"center",gap:4,padding:"4px 10px",borderRadius:8,fontSize:10,fontWeight:showConnectorPicker||activeConnectorCount?800:600,cursor:"pointer",whiteSpace:"nowrap",background:showConnectorPicker||activeConnectorCount?`${t.acc}18`:`${t.surface}D9`,border:`1px solid ${showConnectorPicker||activeConnectorCount?t.acc:t.brd}44`,color:showConnectorPicker||activeConnectorCount?t.acc:t.mut,transition:"all .15s",boxShadow:"none",flexShrink:0}}>
+                <IC.Tool/> Connectors{activeConnectorCount?` ${activeConnectorCount}`:""}
+              </button>}
+            </div>
+            {!act?.is_council&&showConnectorPicker&&connectorOperationTools.length>0&&<div style={{position:"absolute",bottom:"calc(100% + 6px)",left:0,zIndex:310,width:300,maxWidth:"calc(100vw - 32px)",maxHeight:260,overflow:"hidden",background:`${t.bgDeep}F7`,border:`1px solid ${t.brd}55`,borderRadius:10,boxShadow:`0 10px 28px #0009`,padding:8,display:"flex",flexDirection:"column",gap:7,backdropFilter:"blur(8px)"}}>
+              <div style={{display:"flex",alignItems:"center",gap:7}}>
+                <div style={{fontSize:10,fontWeight:900,color:t.acc,textTransform:"uppercase",letterSpacing:.7,whiteSpace:"nowrap"}}>Connectors</div>
+                <div style={{fontSize:9,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{activeConnectorCount} active · {connectorOperationTools.length} available</div>
+                <button onClick={()=>setShowConnectorPicker(false)} title="Close" style={{background:"transparent",border:"none",color:t.mut,cursor:"pointer",padding:2,fontSize:13,lineHeight:1}}>×</button>
+              </div>
+              <input value={connectorSearch} onChange={e=>setConnectorSearch(e.target.value)} placeholder="Search connector tools" style={{...inputS,fontSize:10,padding:"6px 8px",height:30,boxSizing:"border-box"}}/>
+              <div style={{overflowY:"auto",display:"flex",flexDirection:"column",gap:3,paddingRight:2}}>
+                {filteredConnectorTools.slice(0,80).map(tl=>{const on=activeToolIds.includes(tl.id);const label=String(tl.name||"").replace(/^([^:]{1,28}):\s*/,"");return <button key={tl.id} onClick={()=>toggleToolId(tl.id)} title={`${tl.name}\n${tl.description||""}`} style={{display:"grid",gridTemplateColumns:"16px 1fr",gap:6,alignItems:"center",width:"100%",minHeight:29,padding:"5px 7px",borderRadius:7,border:`1px solid ${on?t.acc:t.brd}22`,background:on?`${t.acc}13`:`${t.surface}55`,color:on?t.acc:t.dim,cursor:"pointer",fontFamily:"system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",textAlign:"left",boxSizing:"border-box"}}>
+                  <span style={{display:"flex",color:on?t.acc:t.mut,transform:"scale(.82)"}}>{on?<IC.ToggleOn/>:<IC.ToggleOff/>}</span>
+                  <span style={{minWidth:0,display:"block",fontSize:10,fontWeight:on?750:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",lineHeight:1.2}}>{label}</span>
+                </button>;})}
+                {filteredConnectorTools.length>80&&<div style={{fontSize:9,color:t.mut,textAlign:"center",padding:6}}>Showing first 80. Search to narrow.</div>}
+                {!filteredConnectorTools.length&&<div style={{fontSize:10,color:t.mut,textAlign:"center",padding:14}}>No connector tools match.</div>}
+              </div>
+            </div>}
           </div>
         </div>
         {/* INPUT */}
