@@ -1,4 +1,4 @@
-## Alpha v17.4.0 — June 10, 2026
+## Alpha v17.2.0 — June 10, 2026
 
 ### Core Hardening (chat, research, persistence, search)
 - **Run/research event logs moved to append-only tables.** Agent and research-report event streams previously re-wrote a growing JSON-array column on every event (O(n²) write amplification that held the SQLite write lock against the live chat stream). They now INSERT into `run_events`/`research_events`; existing rows still read from the legacy column, so nothing breaks across the upgrade.
@@ -11,8 +11,6 @@
 - **RAG re-indexing no longer orphans chunks** — re-uploading a shorter file clears its prior chunks first instead of leaving stale ones retrievable.
 - **Settings PATCH is junk-proof** — non-numeric or out-of-range values for max-rounds / chunk-size now clamp or fall back instead of 500-ing.
 - **Frontend:** persisted message metadata is bounded (a long reasoning trace no longer saves ~300KB of overlapping thinking snapshots); finalized-message markdown rendering is memoized so streaming a reply doesn't re-parse every other message in a long chat. Repaired two stale frontend-marker tests and removed the `-x` test-runner footgun.
-
-## Alpha v17.2.0 — June 10, 2026
 
 ### Daedalus — Architecture Upgrades (diff edits, FSM, autopilot verification, git)
 - **Fixer edits are now surgical SEARCH/REPLACE diffs** instead of whole-file regeneration (with an explicit `### REWRITE:` escape hatch for big changes). This also fixes a latent data-loss path: the old format made the model regenerate "complete" files from a truncated prompt view, silently dropping the unseen tail. Search/replace applies against the full on-disk file, with whitespace-tolerant fallback matching; unmatched blocks error instead of corrupting.
