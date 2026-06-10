@@ -3,6 +3,7 @@ Pure-logic tests for the quality-first Deep Research upgrade.
 No live SearXNG, Ollama, or ChromaDB required.
 """
 import asyncio
+import re
 import sys
 from pathlib import Path
 
@@ -217,7 +218,9 @@ $$E = mc^2$$
 def test_pdf_export_uses_react_markdown_renderer_and_pygraph_alias():
     index = (_BACKEND.parent / "frontend" / "dist" / "index.html").read_text()
     assert "ResearchPrintPage" in index
-    assert "<MDWrap>{md(bodyMd)}</MDWrap>" in index
+    # PDF export wraps the report markdown through the React renderer with
+    # print-mode + theme args (repinned after the renderer gained options).
+    assert re.search(r"<MDWrap>\{md\(bodyMd,\{printMode:true", index)
     assert 'lang==="chart"||lang==="pygraph"' in index
     assert 'looksLikeChartConfig(code)' in index
     assert 'function sanitizeMermaidCode' in index

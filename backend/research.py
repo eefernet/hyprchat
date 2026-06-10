@@ -773,7 +773,7 @@ async def _fetch_page(http, url: str) -> dict | None:
         if r.status_code >= 400:
             return None
         final_url = str(getattr(r, "url", "") or url)
-        if not await _url_safe_for_fetch(final_url, resolve_dns=False):
+        if not await _url_safe_for_fetch(final_url, resolve_dns=True):
             return None
         ct = r.headers.get("content-type", "")
         if "text" not in ct and "json" not in ct:
@@ -809,7 +809,7 @@ async def _fetch_gov_doc_index(http, url: str) -> dict | None:
         r = await web_get(http, url, timeout=15, follow_redirects=True,
                           headers={"User-Agent": "Mozilla/5.0 (compatible; research-bot)"})
         final_url = str(getattr(r, "url", "") or url)
-        if not await _url_safe_for_fetch(final_url, resolve_dns=False):
+        if not await _url_safe_for_fetch(final_url, resolve_dns=True):
             return None
         ct = r.headers.get("content-type", "")
         if "text" not in ct and "html" not in ct:
@@ -894,7 +894,7 @@ async def _fetch_wikileaks_page(http, url: str) -> dict | None:
         if r.status_code != 200:
             return None
         final_url = str(getattr(r, "url", "") or url)
-        if not await _url_safe_for_fetch(final_url, resolve_dns=False):
+        if not await _url_safe_for_fetch(final_url, resolve_dns=True):
             return None
         ct = r.headers.get("content-type", "")
         if "text" not in ct and "html" not in ct:

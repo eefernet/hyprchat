@@ -567,7 +567,8 @@ def test_reap_stale_runs_marks_orphans_failed(tmp_path):
 
     stats = _run(db.reap_stale_runs())
 
-    assert stats == {"runs_reaped": 2, "workflows_blocked": 1}
+    assert stats["runs_reaped"] == 2
+    assert stats["workflows_blocked"] == 1
     assert _run(db.get_run("run-stale"))["status"] == "failed"
     assert _run(db.get_run("run-queued"))["status"] == "failed"
     assert _run(db.get_run("run-done"))["status"] == "succeeded"
@@ -1016,3 +1017,80 @@ def test_fixer_delete_section_parse():
     modes = {e["path"]: e["mode"] for e in parsed["edits"]}
     assert modes["/root/projects/p/state.json"] == "delete"
     assert modes["/root/projects/p/app.py"] == "replace"
+
+
+def test_run_events_table_append_and_hydrate(tmp_path):
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import database as db
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_conversation("conv-ev", "Events Test"))
+    _run(db.create_run("run-ev", "conv-ev", role="reviewer", status="running"))
+
+    for i in range(25):
+        _run(db.append_run_event("run-ev", {"type": "step", "action": f"step{i}", "detail": str(i)}))
+
+    run = _run(db.get_run("run-ev"))
+    evs = run["events_log"]
+    assert len(evs) == 25
+    assert [e["action"] for e in evs] == [f"step{i}" for i in range(25)]  # ordered by seq
+    assert all("ts" in e for e in evs)
+
+    # List getter stays lean — does NOT per-row hydrate the events table.
+    listed = _run(db.get_runs_by_conversation("conv-ev"))
+    assert listed[0]["id"] == "run-ev"
+    assert listed[0]["events_log"] == []  # legacy column empty; no N+1 query
+
+
+def test_run_events_legacy_fallback(tmp_path):
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import json as _json
+    import database as db
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_conversation("conv-leg", "Legacy Test"))
+    _run(db.create_run("run-leg", "conv-leg", role="reviewer", status="running"))
+    # Simulate a pre-migration row: events only in the legacy JSON column.
+    async def _seed_legacy():
+        conn = await db.get_db()
+        try:
+            await conn.execute(
+                "UPDATE runs SET events_log=? WHERE id=?",
+                (_json.dumps([{"type": "step", "action": "old"}]), "run-leg"),
+            )
+            await conn.commit()
+        finally:
+            await conn.close()
+    _run(_seed_legacy())
+
+    run = _run(db.get_run("run-leg"))
+    assert [e["action"] for e in run["events_log"]] == ["old"]
+
+
+def test_complete_chat_cloud_error_returns_empty(monkeypatch):
+    import model_providers as mp
+
+    async def _boom(*a, **k):
+        raise mp.ProviderError("simulated provider 500", provider="anthropic")
+        yield  # make it an async generator
+
+    monkeypatch.setattr(mp, "stream_provider_chat", _boom)
+    out = _run(mp.complete_chat(object(), "anthropic:claude-x", "hi", format_json=True))
+    assert out == ""  # unified with the Ollama branch's "" on failure
+
+
+def test_complete_chat_cloud_format_json_nudges_prompt(monkeypatch):
+    import model_providers as mp
+    seen = {}
+
+    async def _capture(http, model_id, messages, options=None):
+        seen["prompt"] = messages[0]["content"]
+        for tok in ('{"ok":', ' true}'):
+            yield {"type": "token", "content": tok}
+
+    monkeypatch.setattr(mp, "stream_provider_chat", _capture)
+    out = _run(mp.complete_chat(object(), "openai:gpt-x", "plan it", format_json=True))
+    assert out == '{"ok": true}'
+    assert "ONLY valid JSON" in seen["prompt"]

@@ -486,14 +486,27 @@ async def complete_chat(http, model_id: str, prompt: str, *,
         options: dict = {"temperature": temperature}
         if num_predict:
             options["num_predict"] = num_predict
+        # Cloud providers don't take Ollama's `format: json`. The v2 agents'
+        # prompts already demand JSON; reinforce it so structured-output calls
+        # behave consistently across providers.
+        cloud_prompt = prompt
+        if format_json:
+            cloud_prompt = prompt + "\n\nRespond with ONLY valid JSON — no prose, no markdown fences."
         parts: list[str] = []
-        async for ev in stream_provider_chat(
-            http, model_id,
-            [{"role": "user", "content": prompt}],
-            options=options,
-        ):
-            if ev.get("type") == "token":
-                parts.append(ev.get("content", ""))
+        try:
+            async for ev in stream_provider_chat(
+                http, model_id,
+                [{"role": "user", "content": cloud_prompt}],
+                options=options,
+            ):
+                if ev.get("type") == "token":
+                    parts.append(ev.get("content", ""))
+        except Exception as e:
+            # Unify the error contract with the Ollama branch (return "" on
+            # failure) so agent callers hit their normal error-envelope path
+            # instead of an unhandled ProviderError.
+            print(f"[complete_chat] cloud provider error for {model_id}: {e}")
+            return ""
         return "".join(parts).strip()
 
     ollama_options: dict = {"temperature": temperature, "num_ctx": num_ctx}

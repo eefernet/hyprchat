@@ -240,6 +240,11 @@ async def index_file(kb_id: str, filename: str, filepath: str) -> dict:
     if not chunks:
         return {"filename": filename, "chunks": 0, "error": "no chunks produced"}
 
+    # Clear any prior chunks for this filename first. Chunk IDs are
+    # md5(kb_id:filename:index); without this, re-indexing a SHORTER version of
+    # a file leaves the old higher-index chunks orphaned and still retrievable.
+    await remove_file(kb_id, filename)
+
     # Generate stable IDs based on kb_id + filename + chunk_index
     ids = []
     texts = []

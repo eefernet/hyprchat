@@ -474,6 +474,28 @@ CREATE TABLE IF NOT EXISTS research_reports (
 CREATE INDEX IF NOT EXISTS idx_research_reports_status  ON research_reports(status);
 CREATE INDEX IF NOT EXISTS idx_research_reports_updated ON research_reports(updated_at);
 
+-- Append-only event logs for runs and research reports. Replaces the old
+-- per-event read-modify-rewrite of a JSON array column (O(n^2) write
+-- amplification). The legacy events_log columns stay as a read-fallback for
+-- rows written before this migration.
+CREATE TABLE IF NOT EXISTS run_events (
+    run_id  TEXT NOT NULL,
+    seq     INTEGER NOT NULL,
+    ts      TEXT,
+    payload TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (run_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, seq);
+
+CREATE TABLE IF NOT EXISTS research_events (
+    report_id TEXT NOT NULL,
+    seq       INTEGER NOT NULL,
+    ts        TEXT,
+    payload   TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (report_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_research_events_report ON research_events(report_id, seq);
+
 CREATE TABLE IF NOT EXISTS workspace_research_reports (
     workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
     report_id TEXT REFERENCES research_reports(id) ON DELETE CASCADE,
@@ -4563,24 +4585,22 @@ async def update_research_report(report_id: str, **kwargs) -> None:
 
 
 async def append_research_event(report_id: str, event: dict) -> None:
-    user_id = _scope_user()
+    """Single INSERT into the append-only research_events table (no JSON-array
+    rewrite). Also bumps updated_at so the report stays fresh in list ordering."""
+    now = datetime.utcnow().isoformat()
+    if "ts" not in event:
+        event = {**event, "ts": now}
     db = await get_db()
     try:
-        rows = await db.execute_fetchall("SELECT events_log FROM research_reports WHERE id=? AND user_id=?", (report_id, user_id))
-        if not rows:
-            return
-        try:
-            log = json.loads(rows[0]["events_log"] or "[]")
-        except (json.JSONDecodeError, TypeError):
-            log = []
-        if "ts" not in event:
-            event = {**event, "ts": datetime.utcnow().isoformat()}
-        log.append(event)
         await db.execute(
-            "UPDATE research_reports SET events_log=?, updated_at=? WHERE id=?",
-            (json.dumps(log), datetime.utcnow().isoformat(), report_id),
+            "INSERT INTO research_events(report_id, seq, ts, payload) VALUES("
+            "?, COALESCE((SELECT MAX(seq)+1 FROM research_events WHERE report_id=?), 0), ?, ?)",
+            (report_id, report_id, event.get("ts"), json.dumps(event)),
         )
+        await db.execute("UPDATE research_reports SET updated_at=? WHERE id=?", (now, report_id))
         await db.commit()
+    except Exception as e:
+        print(f"[DB] append_research_event failed (non-fatal): {e}")
     finally:
         await db.close()
 
@@ -4621,6 +4641,19 @@ async def get_research_report(report_id: str) -> dict | None:
         if not rows:
             return None
         report = _parse_research_report(rows[0])
+        # Hydrate events from the append-only table; fall back to the legacy
+        # JSON column for reports written before the migration.
+        _ev_rows = await db.execute_fetchall(
+            "SELECT payload FROM research_events WHERE report_id=? ORDER BY seq", (report_id,)
+        )
+        if _ev_rows:
+            _evs = []
+            for _r in _ev_rows:
+                try:
+                    _evs.append(json.loads(_r["payload"]))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            report["events_log"] = _evs
         src_rows = await db.execute_fetchall(
             "SELECT * FROM research_sources WHERE report_id=? ORDER BY source_index ASC, id ASC",
             (report_id,),
@@ -4845,37 +4878,45 @@ async def update_run(run_id: str, *, status: str = None, result_envelope: dict =
 
 
 async def append_run_event(run_id: str, event: dict) -> None:
-    """Append a structured event to a run's events_log (JSON array, append-only).
+    """Append a structured event to a run's event log.
 
-    Reads the current events_log, appends, writes back. Concurrent appends to the
-    same run are not expected (one writer per run by design); if that ever changes,
-    move to a separate run_events table.
+    Single INSERT into the append-only run_events table — no read-modify-write
+    of a growing JSON array. seq auto-increments per run_id.
     """
-    user_id = _scope_user()
+    if "ts" not in event:
+        event = {**event, "ts": datetime.utcnow().isoformat()}
     db = await get_db()
     try:
-        rows = await db.execute_fetchall(
-            "SELECT events_log FROM runs WHERE id=? AND conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
-            (run_id, user_id),
-        )
-        if not rows:
-            return
-        try:
-            log = json.loads(rows[0]["events_log"] or "[]")
-        except (json.JSONDecodeError, TypeError):
-            log = []
-        # Stamp the event with a server-side timestamp so order is reliable
-        # even when callers don't pass one.
-        if "ts" not in event:
-            event = {**event, "ts": datetime.utcnow().isoformat()}
-        log.append(event)
         await db.execute(
-            "UPDATE runs SET events_log=? WHERE id=? AND conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
-            (json.dumps(log), run_id, user_id),
+            "INSERT INTO run_events(run_id, seq, ts, payload) VALUES("
+            "?, COALESCE((SELECT MAX(seq)+1 FROM run_events WHERE run_id=?), 0), ?, ?)",
+            (run_id, run_id, event.get("ts"), json.dumps(event)),
         )
         await db.commit()
+    except Exception as e:
+        print(f"[DB] append_run_event failed (non-fatal): {e}")
     finally:
         await db.close()
+
+
+async def _hydrate_run_events(db, run_id: str, legacy_json: str) -> list:
+    """Read a run's events newest-table-first, falling back to the legacy
+    events_log JSON column for rows written before the table migration."""
+    rows = await db.execute_fetchall(
+        "SELECT payload FROM run_events WHERE run_id=? ORDER BY seq", (run_id,)
+    )
+    if rows:
+        out = []
+        for r in rows:
+            try:
+                out.append(json.loads(r["payload"]))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return out
+    try:
+        return json.loads(legacy_json or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return []
 
 
 async def get_run(run_id: str) -> dict | None:
@@ -4889,7 +4930,12 @@ async def get_run(run_id: str) -> dict | None:
         )
         if not rows:
             return None
-        return _row_to_run(rows[0])
+        run = _row_to_run(rows[0])
+        # Single-run reads (RunCard) hydrate the full event stream from the
+        # append-only table; list getters skip this (the gate never reads
+        # events, and the frontend always refetches /api/runs/{id}).
+        run["events_log"] = await _hydrate_run_events(db, run_id, rows[0]["events_log"])
+        return run
     finally:
         await db.close()
 
@@ -4938,8 +4984,21 @@ async def reap_stale_runs() -> dict:
     db = await get_db()
     reaped: list[str] = []
     workflows_blocked = 0
+    reports_reaped = 0
     try:
         now = datetime.utcnow().isoformat()
+        # Research reports run via asyncio.create_task and are in-process only —
+        # a restart strands them 'queued'/'running' forever. Mark them failed.
+        rrows = await db.execute_fetchall(
+            "SELECT id FROM research_reports WHERE status IN ('queued','pending','running')"
+        )
+        for rrow in rrows:
+            await db.execute(
+                "UPDATE research_reports SET status='failed', "
+                "error='Orphaned by backend restart', updated_at=?, completed_at=? WHERE id=?",
+                (now, now, rrow["id"]),
+            )
+            reports_reaped += 1
         rows = await db.execute_fetchall(
             "SELECT id, result_envelope FROM runs WHERE status IN ('queued','pending','running')"
         )
@@ -4973,7 +5032,8 @@ async def reap_stale_runs() -> dict:
         await db.commit()
     finally:
         await db.close()
-    return {"runs_reaped": len(reaped), "workflows_blocked": workflows_blocked}
+    return {"runs_reaped": len(reaped), "workflows_blocked": workflows_blocked,
+            "reports_reaped": reports_reaped}
 
 
 # ============================================================

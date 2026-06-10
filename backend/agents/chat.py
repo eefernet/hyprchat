@@ -21,6 +21,22 @@ from events import inject_text_tool_prompt, parse_tool_params
 from quick_search import run_quick_search_for_chat
 
 
+# Background tasks (best-effort memory suggestion) — held in a set so the
+# event loop doesn't garbage-collect them mid-run; discarded on completion.
+_BG_TASKS: set = set()
+
+
+def _spawn_bg(coro) -> None:
+    try:
+        task = asyncio.create_task(coro)
+    except RuntimeError:
+        # No running loop (shouldn't happen inside the stream) — drop the coro.
+        coro.close()
+        return
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+
+
 _PERSONA_RATING_GUIDANCE = {
     "G": "G: All-ages only. Avoid profanity, sexual content, graphic violence, drugs, and mature themes.",
     "PG": "PG: Mild jokes, tiny scares, and gentle conflict are allowed. Avoid explicit adult content.",
@@ -131,7 +147,11 @@ async def _suggest_workspace_memories(
     ws_id = workspace.get("id")
     if not ws_id or len((user_text or "") + (assistant_text or "")) < 120:
         return
-    model = getattr(config, "WORKSPACE_MODEL", "") or getattr(req, "model", "") or config.DEFAULT_MODEL
+    # reject_cloud: never POST a cloud-prefixed chat model to Ollama /api/generate
+    # (it 404s every turn). Cloud models are honored only via explicit WORKSPACE_MODEL.
+    model = (getattr(config, "WORKSPACE_MODEL", "")
+             or model_providers.reject_cloud(getattr(req, "model", ""))
+             or config.DEFAULT_MODEL)
     prompt = (
         "You extract useful long-term workspace memories from one chat turn.\n"
         "Return ONLY a JSON array with 0-5 objects. Do not include markdown.\n"
@@ -231,7 +251,11 @@ async def _suggest_global_memories(
 ):
     if len((user_text or "") + (assistant_text or "")) < 120:
         return
-    model = getattr(config, "WORKSPACE_MODEL", "") or getattr(req, "model", "") or config.DEFAULT_MODEL
+    # reject_cloud: never POST a cloud-prefixed chat model to Ollama /api/generate
+    # (it 404s every turn). Cloud models are honored only via explicit WORKSPACE_MODEL.
+    model = (getattr(config, "WORKSPACE_MODEL", "")
+             or model_providers.reject_cloud(getattr(req, "model", ""))
+             or config.DEFAULT_MODEL)
     prompt = (
         "You extract useful long-term personal memories for a cross-chat AI assistant.\n"
         "Return ONLY a JSON array with 0-5 objects. Do not include markdown.\n"
@@ -1760,6 +1784,18 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             elif not _is_cloud_provider and ("input stream" in err_lower or "failed to load" in err_lower or "ggml" in err_lower):
                 err_msg = (f"Model '{req.model}' failed mid-stream — it may be corrupt or hit a context-buffer issue. "
                            f"Try `ollama stop {req.model}` and retry, or reduce num_ctx. Original: {err_msg[:200]}")
+            # Persist whatever streamed before the failure and clear the
+            # in_progress flag — otherwise the stub reloads empty/stale and the
+            # user loses the partial answer they were watching.
+            if _assistant_msg_id is not None:
+                try:
+                    _partial = content if content.strip() else ""
+                    _final = (_partial + f"\n\n_[interrupted: {err_msg[:160]}]_") if _partial \
+                        else f"_[no response — {err_msg[:160]}]_"
+                    await db.update_message(_assistant_msg_id, content=_final,
+                                            metadata={"in_progress": False, "stream_error": True})
+                except Exception as _pe:
+                    print(f"[CHAT]   partial-persist failed (non-fatal): {_pe}")
             await events.emit(conv_id, "error", {"status": f"{_provider_label}: {err_msg[:200]}"})
             yield f"data: {json.dumps({'type': 'error', 'error': err_msg})}\n\n"
             return
@@ -2344,26 +2380,21 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 except Exception as _te:
                     print(f"[CHAT] Token recording error: {_te}")
             if not ephemeral:
+                # Memory extraction is best-effort and used to block the turn
+                # for up to 90s (two 45s LLM calls) AFTER the answer was visibly
+                # done. Run it in the background so `done` fires immediately;
+                # the suggesters emit their own SSE events over the persistent
+                # conversation bus.
                 if global_memory_enabled:
-                    await _suggest_global_memories(
-                        req,
-                        http,
-                        events,
-                        conv_id,
-                        last_user_msg,
-                        content,
-                        _assistant_msg_id,
-                    )
-                await _suggest_workspace_memories(
-                    req,
-                    http,
-                    events,
-                    conv_id,
+                    _spawn_bg(_suggest_global_memories(
+                        req, http, events, conv_id,
+                        last_user_msg, content, _assistant_msg_id,
+                    ))
+                _spawn_bg(_suggest_workspace_memories(
+                    req, http, events, conv_id,
                     workspace_memory_info.get("workspace"),
-                    last_user_msg,
-                    content,
-                    _assistant_msg_id,
-                )
+                    last_user_msg, content, _assistant_msg_id,
+                ))
             await events.emit(conv_id, "complete", {"status": "Complete"})
             _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id}
             if _review_round > 0:
@@ -2373,6 +2404,16 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         else:
             # Empty content — try to recover
             if round_num >= 3:
+                # Don't leave an empty in_progress stub behind on reload.
+                if _assistant_msg_id is not None and not (content or "").strip():
+                    try:
+                        await db.update_message(
+                            _assistant_msg_id,
+                            content="_[the model produced no text response]_",
+                            metadata={"in_progress": False, "empty_response": True},
+                        )
+                    except Exception:
+                        pass
                 await events.emit(conv_id, "complete", {"status": "Complete"})
                 _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id}
                 if _review_round > 0:

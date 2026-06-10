@@ -157,6 +157,21 @@ def coerce_num_ctx(value, fallback=16384, minimum=None):
     return fb if fb >= minimum else 16384
 
 
+def coerce_int(value, fallback, *, minimum=None, maximum=None):
+    """Parse an int from untrusted settings input, clamped to [minimum, maximum].
+    Junk / out-of-range values fall back instead of raising (a raw int(...) on
+    a settings PATCH would otherwise 500 or accept negatives)."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    if minimum is not None and n < minimum:
+        return minimum
+    if maximum is not None and n > maximum:
+        return maximum
+    return n
+
+
 DEFAULT_NUM_CTX = coerce_num_ctx(os.getenv("DEFAULT_NUM_CTX", "16384"))
 MAX_AGENT_ROUNDS = int(os.getenv("MAX_AGENT_ROUNDS", "12"))
 MAX_AGENT_ROUNDS_CODER = int(os.getenv("MAX_AGENT_ROUNDS_CODER", "30"))

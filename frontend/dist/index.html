@@ -3208,6 +3208,16 @@ function Collapsible({summary,children,theme,font,defaultOpen}){
 }
 
 // KaTeX post-render wrapper — runs renderMathInElement against mounted children
+// Memoized markdown render for FINALIZED messages. Every streamed token
+// rebuilds the conversation object, which re-runs md() for every message in
+// the list. md(content) is pure, so we skip the re-parse unless content (or
+// render opts) actually changed — `md` itself is excluded from the compare
+// because it's a fresh-but-pure closure each render.
+const MemoMD = React.memo(
+  function MemoMD({content, md, opts}){ return <MDWrap>{md(content, opts)}</MDWrap>; },
+  (prev, next)=> prev.content===next.content && prev.opts===next.opts
+);
+
 function MDWrap({children}){
   const ref=useRef(null);
   useEffect(()=>{
@@ -5360,7 +5370,17 @@ function HyprChat(){
       // Capture relevant events into metadata for persistence (tool status + search results + source links)
       // Prefer the persistent stream-save buffer, which survives chat switches. Fall back to evtsRef for safety.
       const _rawEvts = streamSaveEvtsRef.current.length > 0 ? streamSaveEvtsRef.current : evtsRef.current;
-      const _savedEvts = _rawEvts.filter(e=>["source_links","search_results","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
+      let _savedEvts = _rawEvts.filter(e=>["source_links","search_results","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
+      // Bound the persisted metadata. `thinking` events are cumulative 3KB tail
+      // snapshots emitted every ~100 chars — a long reasoning trace persists
+      // ~100 overlapping copies (~300KB on one message, reloaded every fetch).
+      // Keep only the final thinking snapshot, then cap the whole set.
+      {
+        let _lastThinkIdx=-1;
+        for(let i=_savedEvts.length-1;i>=0;i--){if(_savedEvts[i].type==="thinking"){_lastThinkIdx=i;break;}}
+        if(_lastThinkIdx>=0)_savedEvts=_savedEvts.filter((e,i)=>e.type!=="thinking"||i===_lastThinkIdx);
+        if(_savedEvts.length>150)_savedEvts=_savedEvts.slice(-150);
+      }
       // Pluck run_ids out of the saved events so the RunCard component can find them
       // even after a reload (when live evts are gone).
       const _streamRunIds = _runIdsFromEvents(_savedEvts);
@@ -9780,7 +9800,7 @@ function HyprChat(){
                         <button onClick={()=>setEditingMsg(null)} style={btnS(t.mut)}>Cancel</button>
                       </div>
                     </div>
-                    :msg.isS?mdStream(renderedContent):<MDWrap>{md(renderedContent)}</MDWrap>}
+                    :msg.isS?mdStream(renderedContent):<MemoMD content={renderedContent} md={md}/>}
                     {isU&&msg.metadata?.images?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:msg.content?10:0}}>
                       {msg.metadata.images.map((img,ii)=><div key={ii} title={img.name} style={{display:"inline-flex",flexDirection:"column",gap:4,alignItems:"flex-start",maxWidth:260}}>
                         <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:8,border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:"none"}}/>

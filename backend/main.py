@@ -641,7 +641,7 @@ async def lifespan(app: FastAPI):
         config.OPENHANDS_ENABLED = _settings["openhands_enabled"]
         print(f"[Config] Loaded OpenHands enabled: {config.OPENHANDS_ENABLED}")
     if "openhands_max_rounds" in _settings:
-        config.OPENHANDS_MAX_ROUNDS = int(_settings["openhands_max_rounds"])
+        config.OPENHANDS_MAX_ROUNDS = config.coerce_int(_settings["openhands_max_rounds"], config.OPENHANDS_MAX_ROUNDS, minimum=1, maximum=200)
         print(f"[Config] Loaded OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
     if "openhands_num_ctx" in _settings:
         config.OPENHANDS_NUM_CTX = config.coerce_num_ctx(
@@ -5090,9 +5090,9 @@ async def update_app_settings(body: dict = Body(...)):
         if rag_cfg.get("embed_model"):
             rag.EMBED_MODEL = rag_cfg["embed_model"]
         if rag_cfg.get("chunk_size"):
-            rag.CHUNK_SIZE = int(rag_cfg["chunk_size"])
+            rag.CHUNK_SIZE = config.coerce_int(rag_cfg["chunk_size"], rag.CHUNK_SIZE, minimum=100, maximum=8000)
         if rag_cfg.get("chunk_overlap") is not None:
-            rag.CHUNK_OVERLAP = int(rag_cfg["chunk_overlap"])
+            rag.CHUNK_OVERLAP = config.coerce_int(rag_cfg["chunk_overlap"], rag.CHUNK_OVERLAP, minimum=0, maximum=2000)
         print(f"[Config] Updated RAG settings: model={rag.EMBED_MODEL} chunk={rag.CHUNK_SIZE}/{rag.CHUNK_OVERLAP}")
     if "ollama_url" in body and body["ollama_url"]:
         config.OLLAMA_URL = _coerce_service_url(body["ollama_url"], "OLLAMA_URL", "http://127.0.0.1:11434")
@@ -5147,7 +5147,7 @@ async def update_app_settings(body: dict = Body(...)):
         config.OPENHANDS_ENABLED = bool(body["openhands_enabled"])
         print(f"[Config] OpenHands enabled: {config.OPENHANDS_ENABLED}")
     if "openhands_max_rounds" in body:
-        config.OPENHANDS_MAX_ROUNDS = int(body["openhands_max_rounds"])
+        config.OPENHANDS_MAX_ROUNDS = config.coerce_int(body["openhands_max_rounds"], config.OPENHANDS_MAX_ROUNDS, minimum=1, maximum=200)
         print(f"[Config] OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
     if "openhands_num_ctx" in body:
         config.OPENHANDS_NUM_CTX = config.coerce_num_ctx(

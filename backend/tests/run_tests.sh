@@ -19,18 +19,19 @@ echo "  Server: $HYPRCHAT_URL"
 echo "============================================"
 echo ""
 
-# Check server is up
+# Check server is up. Offline suites (most of them) don't need it, so warn
+# instead of aborting — only the live test_01..test_12 suites require it.
 if ! curl -sf "$HYPRCHAT_URL/api/health" > /dev/null 2>&1; then
-    echo "ERROR: Server at $HYPRCHAT_URL is not responding"
-    echo "Make sure hyprchat is running before running tests."
-    exit 1
+    echo "WARNING: Server at $HYPRCHAT_URL is not responding."
+    echo "Offline suites will still run; live test_01..test_12 will fail/skip."
+else
+    echo "Server is up."
 fi
-echo "Server is up."
 echo ""
 
 # Install test deps if needed
 pip3 install pytest httpx --quiet 2>/dev/null
 
-# Run tests
+# Run tests. No -x: one failing suite must not halt the rest.
 cd "$BACKEND_DIR"
-python3 -m pytest tests/ -v --tb=short -x "$@"
+python3 -m pytest tests/ -v --tb=short "$@"

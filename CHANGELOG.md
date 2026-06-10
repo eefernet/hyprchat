@@ -1,3 +1,17 @@
+## Alpha v17.4.0 — June 10, 2026
+
+### Core Hardening (chat, research, persistence, search)
+- **Run/research event logs moved to append-only tables.** Agent and research-report event streams previously re-wrote a growing JSON-array column on every event (O(n²) write amplification that held the SQLite write lock against the live chat stream). They now INSERT into `run_events`/`research_events`; existing rows still read from the legacy column, so nothing breaks across the upgrade.
+- **Startup reaper now also covers research reports.** A crash/restart used to strand in-flight reports as `running` forever; they're now marked failed on boot like coder runs.
+- **Memory suggestions no longer block the turn or hit a dead model.** The two post-answer memory-extraction LLM calls ran *before* the turn finished (up to ~90s of "still working" after the answer was done) and, with a cloud chat model selected, 404'd against Ollama every turn. They now run in the background after `done`, and never inherit a cloud model. Same cloud-model guard applied to the Quick Search refine call.
+- **Cloud models can now power the judgment agents safely end-to-end** — `complete_chat`'s cloud path reinforces JSON output and returns cleanly on provider errors instead of raising.
+- **Mid-stream failures no longer leave empty/stale messages.** If Ollama drops mid-response, the partial answer is persisted with an "interrupted" note and the in-progress flag cleared, instead of reloading blank.
+- **Council debates can't wedge.** The per-member done-sentinel now always fires (even on cancel/error), so the stream ends instead of spinning when a member aborts.
+- **SSRF: page/OG-image fetchers re-check the final URL after redirects** (and resolve DNS), closing the redirect-to-internal-address gap in Quick Search and Deep Research.
+- **RAG re-indexing no longer orphans chunks** — re-uploading a shorter file clears its prior chunks first instead of leaving stale ones retrievable.
+- **Settings PATCH is junk-proof** — non-numeric or out-of-range values for max-rounds / chunk-size now clamp or fall back instead of 500-ing.
+- **Frontend:** persisted message metadata is bounded (a long reasoning trace no longer saves ~300KB of overlapping thinking snapshots); finalized-message markdown rendering is memoized so streaming a reply doesn't re-parse every other message in a long chat. Repaired two stale frontend-marker tests and removed the `-x` test-runner footgun.
+
 ## Alpha v17.2.0 — June 10, 2026
 
 ### Daedalus — Architecture Upgrades (diff edits, FSM, autopilot verification, git)
