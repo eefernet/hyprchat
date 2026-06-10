@@ -18,8 +18,17 @@ agents.md
 .env
 .env.*
 !.env.example
+connector_secrets.json
+.ssh/
+id_rsa
+id_ed25519
+id_ecdsa
+id_dsa
 *.pem
 *.key
+*.p12
+*.pfx
+*.ppk
 
 # Data directories
 data/

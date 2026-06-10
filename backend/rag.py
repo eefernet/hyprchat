@@ -20,6 +20,7 @@ EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 # Chunking settings
 CHUNK_SIZE = 500       # target tokens per chunk (~2000 chars)
 CHUNK_OVERLAP = 50     # overlap tokens between chunks
+CHROMA_UPSERT_BATCH = 5000  # Chroma rejects single upserts above ~5461 records
 CHARS_PER_TOKEN = 4    # rough estimate
 
 
@@ -100,8 +101,10 @@ def chunk_text(text: str, filename: str = "") -> list[dict]:
     if not text.strip():
         return []
 
-    target_chars = CHUNK_SIZE * CHARS_PER_TOKEN
-    overlap_chars = CHUNK_OVERLAP * CHARS_PER_TOKEN
+    # Floor guards: a junk CHUNK_SIZE (e.g. negative from a bad settings file)
+    # would otherwise make every sentence its own chunk and explode the index.
+    target_chars = max(400, CHUNK_SIZE * CHARS_PER_TOKEN)
+    overlap_chars = max(0, CHUNK_OVERLAP * CHARS_PER_TOKEN)
 
     # Split into sentences (keep delimiters)
     sentences = re.split(r'(?<=[.!?\n])\s+', text)
@@ -193,12 +196,30 @@ def chunk_document(text: str, filename: str) -> list[dict]:
 # ── Embedding via Ollama ──
 
 async def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Embed a batch of texts using Ollama's embedding endpoint."""
+    """Embed a batch of texts using Ollama's embedding endpoint.
+
+    Tries the modern batched /api/embed endpoint (one HTTP call per batch),
+    falling back to per-prompt /api/embeddings for any batch that fails.
+    Return shape is load-bearing: same length/order as input, None per
+    failed item.
+    """
     embeddings = []
     async with httpx.AsyncClient(timeout=120) as client:
-        # Ollama supports batch embedding
-        for i in range(0, len(texts), 10):  # batch of 10
-            batch = texts[i:i+10]
+        for i in range(0, len(texts), 64):
+            batch = texts[i:i+64]
+            try:
+                resp = await client.post(
+                    f"{config.OLLAMA_URL}/api/embed",
+                    json={"model": EMBED_MODEL, "input": batch},
+                )
+                if resp.status_code == 200:
+                    embs = resp.json().get("embeddings")
+                    if isinstance(embs, list) and len(embs) == len(batch):
+                        embeddings.extend(embs)
+                        continue
+                print(f"[RAG] Batch embed failed (HTTP {resp.status_code}), falling back to per-prompt")
+            except Exception as e:
+                print(f"[RAG] Batch embed error, falling back to per-prompt: {e}")
             for text in batch:
                 try:
                     resp = await client.post(
@@ -272,14 +293,16 @@ async def index_file(kb_id: str, filename: str, filepath: str) -> dict:
 
     v_ids, v_texts, v_metas, v_embeds = zip(*valid)
 
-    # Upsert into ChromaDB (idempotent — same IDs overwrite)
+    # Upsert into ChromaDB (idempotent — same IDs overwrite). Sliced because
+    # Chroma hard-caps a single upsert at ~5461 records.
     collection = _get_collection(kb_id)
-    collection.upsert(
-        ids=list(v_ids),
-        documents=list(v_texts),
-        metadatas=list(v_metas),
-        embeddings=list(v_embeds),
-    )
+    for s in range(0, len(v_ids), CHROMA_UPSERT_BATCH):
+        collection.upsert(
+            ids=list(v_ids[s:s + CHROMA_UPSERT_BATCH]),
+            documents=list(v_texts[s:s + CHROMA_UPSERT_BATCH]),
+            metadatas=list(v_metas[s:s + CHROMA_UPSERT_BATCH]),
+            embeddings=list(v_embeds[s:s + CHROMA_UPSERT_BATCH]),
+        )
 
     print(f"[RAG] Indexed {filename} → {len(v_ids)} chunks in {kb_id}")
     return {"filename": filename, "chunks": len(v_ids), "total_chars": sum(len(t) for t in v_texts)}

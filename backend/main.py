@@ -694,6 +694,12 @@ async def lifespan(app: FastAPI):
             fallback=config.DEFAULT_NUM_CTX,
         )
         print(f"[Config] Loaded default num_ctx: {config.DEFAULT_NUM_CTX}")
+    if "research_num_ctx" in _settings:
+        config.RESEARCH_NUM_CTX = config.coerce_num_ctx(
+            _settings["research_num_ctx"],
+            fallback=config.RESEARCH_NUM_CTX,
+        )
+        print(f"[Config] Loaded research num_ctx: {config.RESEARCH_NUM_CTX}")
     if "quick_search_mode" in _settings:
         _qsm = (_settings["quick_search_mode"] or "balanced").strip().lower()
         if _qsm not in ("speed", "balanced", "quality"):
@@ -706,14 +712,16 @@ async def lifespan(app: FastAPI):
     _cleanup_task_ref = asyncio.create_task(_cleanup_loop())
     # Start health check loop (every 5 min)
     _health_task_ref = asyncio.create_task(_health_check_loop())
-    # Load RAG settings from persistent config
+    # Load RAG settings from persistent config — clamped like the PATCH path,
+    # so a legacy settings.json with junk values (e.g. chunk_size -5) can't
+    # poison the runtime chunker after a restart.
     _rag_cfg = _settings.get("rag", {})
     if _rag_cfg.get("embed_model"):
         rag.EMBED_MODEL = _rag_cfg["embed_model"]
     if _rag_cfg.get("chunk_size"):
-        rag.CHUNK_SIZE = int(_rag_cfg["chunk_size"])
+        rag.CHUNK_SIZE = config.coerce_int(_rag_cfg["chunk_size"], rag.CHUNK_SIZE, minimum=100, maximum=8000)
     if _rag_cfg.get("chunk_overlap") is not None:
-        rag.CHUNK_OVERLAP = int(_rag_cfg["chunk_overlap"])
+        rag.CHUNK_OVERLAP = config.coerce_int(_rag_cfg["chunk_overlap"], rag.CHUNK_OVERLAP, minimum=0, maximum=2000)
     # Ensure RAG embedding model is available (non-blocking pull)
     _track_bg(rag.ensure_embed_model())
     yield
@@ -3283,7 +3291,10 @@ async def reindex_kb(kb_id: str):
     files = kb.get("files", [])
     if not files:
         return {"status": "no files to index"}
-    results = await rag.reindex_kb(kb_id, files)
+    try:
+        results = await rag.reindex_kb(kb_id, files)
+    except Exception as e:
+        raise HTTPException(500, f"Reindex failed for {kb.get('name', kb_id)}: {e}")
     return {"status": "reindexed", "results": results}
 
 
@@ -3292,12 +3303,20 @@ async def reindex_all_kbs():
     """Reindex all knowledge bases — one-time migration to RAG."""
     kbs = await db.get_kbs()
     all_results = []
+    errors = []
     for kb in kbs:
         files = kb.get("files", [])
-        if files:
+        if not files:
+            continue
+        try:
             results = await rag.reindex_kb(kb["id"], files)
             all_results.append({"kb_id": kb["id"], "name": kb["name"], "results": results})
-    return {"status": "reindexed", "kbs": all_results}
+        except Exception as e:
+            # One broken KB shouldn't abort the rest of the sweep.
+            errors.append({"kb_id": kb["id"], "name": kb["name"], "error": str(e)[:300]})
+    if errors and not all_results:
+        raise HTTPException(500, f"Reindex failed: {errors[0]['name']}: {errors[0]['error']}")
+    return {"status": "reindexed", "kbs": all_results, "errors": errors}
 
 
 # ============================================================
@@ -5084,6 +5103,7 @@ async def get_app_settings():
         "aider_auto_test": config.AIDER_AUTO_TEST,
         "aider_worker_url": config.AIDER_WORKER_URL,
         "default_num_ctx": config.DEFAULT_NUM_CTX,
+        "research_num_ctx": config.RESEARCH_NUM_CTX,
         "quick_search_mode": config.QUICK_SEARCH_MODE,
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
@@ -5103,19 +5123,35 @@ async def update_app_settings(body: dict = Body(...)):
                "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
                "openhands_reasoning_effort",
                "aider_enabled", "aider_model", "aider_num_ctx", "aider_auto_test", "aider_worker_url",
-               "default_num_ctx", "quick_search_mode"}
+               "default_num_ctx", "research_num_ctx", "quick_search_mode"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
-    # Apply RAG settings to rag module at runtime
+    # Sanitize + apply RAG settings. The clamped values are what get PERSISTED
+    # (settings["rag"]), not the raw body — a junk PATCH (e.g. chunk_size -5)
+    # used to be saved verbatim and re-poison the chunker on every restart.
     if "rag" in body and isinstance(body["rag"], dict):
         rag_cfg = body["rag"]
-        if rag_cfg.get("embed_model"):
-            rag.EMBED_MODEL = rag_cfg["embed_model"]
-        if rag_cfg.get("chunk_size"):
-            rag.CHUNK_SIZE = config.coerce_int(rag_cfg["chunk_size"], rag.CHUNK_SIZE, minimum=100, maximum=8000)
-        if rag_cfg.get("chunk_overlap") is not None:
-            rag.CHUNK_OVERLAP = config.coerce_int(rag_cfg["chunk_overlap"], rag.CHUNK_OVERLAP, minimum=0, maximum=2000)
+        prior = {**config.DEFAULT_SETTINGS.get("rag", {}), **(settings.get("rag") or {})}
+
+        def _rag_int(key, default, lo, hi):
+            fallback = config.coerce_int(prior.get(key), default, minimum=lo, maximum=hi)
+            value = rag_cfg.get(key, fallback)
+            return config.coerce_int(value, fallback, minimum=lo, maximum=hi)
+
+        clean = {
+            "embed_model": str(rag_cfg.get("embed_model") or prior.get("embed_model") or "nomic-embed-text"),
+            "chunk_size": _rag_int("chunk_size", 500, 100, 8000),
+            "chunk_overlap": _rag_int("chunk_overlap", 50, 0, 2000),
+            "top_k": _rag_int("top_k", 6, 1, 20),
+            "max_context_chars": _rag_int("max_context_chars", 6000, 500, 60000),
+            "research_top_k": _rag_int("research_top_k", 4, 1, 20),
+            "research_max_chars": _rag_int("research_max_chars", 3000, 500, 60000),
+        }
+        settings["rag"] = clean
+        rag.EMBED_MODEL = clean["embed_model"]
+        rag.CHUNK_SIZE = clean["chunk_size"]
+        rag.CHUNK_OVERLAP = clean["chunk_overlap"]
         print(f"[Config] Updated RAG settings: model={rag.EMBED_MODEL} chunk={rag.CHUNK_SIZE}/{rag.CHUNK_OVERLAP}")
     if "ollama_url" in body and body["ollama_url"]:
         config.OLLAMA_URL = _coerce_service_url(body["ollama_url"], "OLLAMA_URL", "http://127.0.0.1:11434")
@@ -5214,6 +5250,13 @@ async def update_app_settings(body: dict = Body(...)):
         )
         settings["default_num_ctx"] = config.DEFAULT_NUM_CTX
         print(f"[Config] Default num_ctx: {config.DEFAULT_NUM_CTX}")
+    if "research_num_ctx" in body:
+        config.RESEARCH_NUM_CTX = config.coerce_num_ctx(
+            body["research_num_ctx"],
+            fallback=config.RESEARCH_NUM_CTX,
+        )
+        settings["research_num_ctx"] = config.RESEARCH_NUM_CTX
+        print(f"[Config] Research num_ctx: {config.RESEARCH_NUM_CTX}")
     if "quick_search_mode" in body:
         _qsm = (body["quick_search_mode"] or "balanced").strip().lower()
         if _qsm not in ("speed", "balanced", "quality"):
@@ -5247,6 +5290,7 @@ async def update_app_settings(body: dict = Body(...)):
         "aider_auto_test": config.AIDER_AUTO_TEST,
         "aider_worker_url": config.AIDER_WORKER_URL,
         "default_num_ctx": config.DEFAULT_NUM_CTX,
+        "research_num_ctx": config.RESEARCH_NUM_CTX,
         "quick_search_mode": config.QUICK_SEARCH_MODE,
     }
 

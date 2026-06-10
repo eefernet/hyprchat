@@ -173,6 +173,10 @@ def coerce_int(value, fallback, *, minimum=None, maximum=None):
 
 
 DEFAULT_NUM_CTX = coerce_num_ctx(os.getenv("DEFAULT_NUM_CTX", "16384"))
+# Context window for Deep Research LLM calls (planning, findings, audit,
+# synthesis). Defaults higher than DEFAULT_NUM_CTX because depth 3-5 evidence
+# contexts overflow a 16K window; evidence budgets scale down to fit this.
+RESEARCH_NUM_CTX = coerce_num_ctx(os.getenv("RESEARCH_NUM_CTX", "40960"))
 MAX_AGENT_ROUNDS = int(os.getenv("MAX_AGENT_ROUNDS", "12"))
 MAX_AGENT_ROUNDS_CODER = int(os.getenv("MAX_AGENT_ROUNDS_CODER", "30"))
 DEFAULT_SYSTEM_PROMPT = """You are CodeAgent, an autonomous coding assistant with a sandboxed Linux environment (CodeBox).

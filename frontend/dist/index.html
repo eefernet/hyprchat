@@ -3301,6 +3301,7 @@ function HyprChat(){
   const [qaModel,       setQaModel]       =useState(()=>{try{return localStorage.getItem("hc-qa-model")       ||"";}catch{return "";}});
   const [coderBotModelsOpen,setCoderBotModelsOpen]=useState(()=>{try{return localStorage.getItem("hc-coderbot-models-open")==="1";}catch{return false;}});
   const [coderNumCtx,setCoderNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-coder-num-ctx")||"8192");}catch{return 8192;}});
+  const [researchNumCtx,setResearchNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-research-num-ctx")||"40960");}catch{return 40960;}});
   const [openhandsEnabled,setOpenhandsEnabled]=useState(()=>{try{return localStorage.getItem("hc-openhands-enabled")!=="false";}catch{return true;}});
   const [openhandsMaxRounds,setOpenhandsMaxRounds]=useState(()=>{try{return parseInt(localStorage.getItem("hc-openhands-max-rounds")||"20");}catch{return 20;}});
   const [openhandsReasoningEffort,setOpenhandsReasoningEffort]=useState(()=>{try{return localStorage.getItem("hc-openhands-reasoning-effort")||"medium";}catch{return "medium";}});
@@ -3500,6 +3501,7 @@ function HyprChat(){
   useEffect(()=>{persistServerSetting("hc-qa-model","qa_model",qaModel);},[qaModel]);
   useEffect(()=>{try{localStorage.setItem("hc-coderbot-models-open",coderBotModelsOpen?"1":"0");}catch{}},[coderBotModelsOpen]);
   useEffect(()=>{persistServerSetting("hc-coder-num-ctx","openhands_num_ctx",coderNumCtx,String(coderNumCtx));},[coderNumCtx]);
+  useEffect(()=>{persistServerSetting("hc-research-num-ctx","research_num_ctx",researchNumCtx,String(researchNumCtx));},[researchNumCtx]);
   useEffect(()=>{persistServerSetting("hc-openhands-enabled","openhands_enabled",openhandsEnabled,String(openhandsEnabled));},[openhandsEnabled]);
   useEffect(()=>{persistServerSetting("hc-openhands-max-rounds","openhands_max_rounds",openhandsMaxRounds,String(openhandsMaxRounds));},[openhandsMaxRounds]);
   useEffect(()=>{persistServerSetting("hc-openhands-reasoning-effort","openhands_reasoning_effort",openhandsReasoningEffort);},[openhandsReasoningEffort]);
@@ -4188,6 +4190,7 @@ function HyprChat(){
       if(d.current_qa_model!=null)hydrateServerSetting("qa_model",setQaModel,d.current_qa_model,qaModel);
       if(d.current_workspace_model!=null)hydrateServerSetting("workspace_model",setWsModel,d.current_workspace_model,wsModel);
       if(d.openhands_num_ctx!=null)hydrateServerSetting("openhands_num_ctx",setCoderNumCtx,d.openhands_num_ctx,coderNumCtx);
+      if(d.research_num_ctx!=null)hydrateServerSetting("research_num_ctx",setResearchNumCtx,d.research_num_ctx,researchNumCtx);
       if(d.openhands_enabled!=null)hydrateServerSetting("openhands_enabled",setOpenhandsEnabled,d.openhands_enabled,openhandsEnabled);
       if(d.openhands_max_rounds!=null)hydrateServerSetting("openhands_max_rounds",setOpenhandsMaxRounds,d.openhands_max_rounds,openhandsMaxRounds);
       if(d.openhands_reasoning_effort)hydrateServerSetting("openhands_reasoning_effort",setOpenhandsReasoningEffort,d.openhands_reasoning_effort,openhandsReasoningEffort);
@@ -7452,6 +7455,15 @@ function HyprChat(){
               <ModelPicker value={researchDraft.auditor_model||""} onChange={v=>setResearchDraft(p=>({...p,auditor_model:v}))} models={["",...models]} modelDetails={modelDetails} t={t} font={font}/>
             </div>
           </details>
+          <div style={{border:`1px solid ${t.brd}22`,borderRadius:8,padding:"7px 9px",background:`${t.bgDeep}88`}}>
+            <label style={{fontSize:10,fontWeight:800,color:t.mut,textTransform:"uppercase",letterSpacing:.5,display:"block",marginBottom:5}}>Context Window: <span style={{color:t.acc}}>{researchNumCtx.toLocaleString()}</span></label>
+            <input type="range" min="8192" max="131072" step="2048" value={researchNumCtx} onChange={e=>setResearchNumCtx(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
+            <div style={{fontSize:9,color:t.mut,marginTop:4,lineHeight:1.4}}>
+              {researchNumCtx<=16384?<><b style={{color:t.acc}}>Compact (&le;16K)</b> — evidence is clamped hard; fine for depth 1–2 reports.</>
+              :researchNumCtx<=65536?<><b style={{color:t.acc}}>Recommended (32–64K)</b> — full evidence budgets through depth 4 fit without truncation.</>
+              :<><b style={{color:t.acc}}>Maximum (64–128K)</b> — full depth-5 evidence; uses more VRAM while a report runs.</>}
+            </div>
+          </div>
           <textarea value={researchInputText} onChange={e=>setResearchInputText(e.target.value)} placeholder="Optional pasted notes, constraints, or source excerpts" rows={4} style={{...inputS,resize:"vertical",fontSize:11,lineHeight:1.45}}/>
           <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
             <label style={{...btnS(t.f1),justifyContent:"center",flex:1}}><IC.Upload/> Add Files<input ref={researchFileRef} type="file" multiple accept=".pdf,.txt,.md,.csv,.json,.html,.py,.js,.ts" style={{display:"none"}} onChange={e=>{handleResearchFiles(e.target.files);e.target.value="";}}/></label>

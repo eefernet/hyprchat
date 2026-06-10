@@ -4573,9 +4573,12 @@ async def create_research_report(report_id: str, *, query: str, title: str = "",
         await db.close()
 
 
-async def update_research_report(report_id: str, **kwargs) -> None:
+async def update_research_report(report_id: str, *, unless_status: str | None = None, **kwargs) -> bool:
+    """Update a report row. With unless_status set, the UPDATE is skipped when
+    the row is already in that status (e.g. don't resurrect a cancelled report).
+    Returns True when a row was actually updated."""
     if not kwargs:
-        return
+        return False
     json_fields = {
         "kb_ids": "kb_ids",
         "inputs": "inputs_json",
@@ -4600,14 +4603,19 @@ async def update_research_report(report_id: str, **kwargs) -> None:
         sets.append(f"{col}=?")
         vals.append(json.dumps(value) if key in json_fields else value)
     if not sets:
-        return
+        return False
     sets.append("updated_at=?")
     vals.append(datetime.utcnow().isoformat())
     vals.extend([report_id, _scope_user()])
+    where = "id=? AND user_id=?"
+    if unless_status is not None:
+        where += " AND status != ?"
+        vals.append(unless_status)
     db = await get_db()
     try:
-        await db.execute(f"UPDATE research_reports SET {', '.join(sets)} WHERE id=? AND user_id=?", tuple(vals))
+        cursor = await db.execute(f"UPDATE research_reports SET {', '.join(sets)} WHERE {where}", tuple(vals))
         await db.commit()
+        return (cursor.rowcount or 0) > 0
     finally:
         await db.close()
 
@@ -4682,6 +4690,13 @@ async def get_research_report(report_id: str) -> dict | None:
                 except (json.JSONDecodeError, TypeError):
                     pass
             report["events_log"] = _evs
+        # Token-stream chunks are ephemeral (full text lives in
+        # report_markdown); drop them from hydration — covers legacy rows
+        # that persisted them before the ephemeral-event change.
+        report["events_log"] = [
+            e for e in (report.get("events_log") or [])
+            if not (isinstance(e, dict) and e.get("type") == "research_token")
+        ]
         src_rows = await db.execute_fetchall(
             "SELECT * FROM research_sources WHERE report_id=? ORDER BY source_index ASC, id ASC",
             (report_id,),

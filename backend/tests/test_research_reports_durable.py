@@ -151,6 +151,62 @@ def test_research_report_database_round_trip_sources_events_and_delete_cleanup(t
     assert _run(db.get_workspace("ws-research"))["reports"] == []
 
 
+def test_update_research_report_unless_status_protects_cancelled_rows(tmp_path):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+
+    _run(db.create_research_report("research-race", query="race", status="queued"))
+    _run(db.update_research_report("research-race", status="cancelled", error="Cancelled by user"))
+
+    # A late "complete" from the runner must not resurrect a cancelled report.
+    wrote = _run(db.update_research_report(
+        "research-race", status="complete", report_markdown="# Late",
+        unless_status="cancelled",
+    ))
+    assert wrote is False
+    row = _run(db.get_research_report("research-race"))
+    assert row["status"] == "cancelled"
+    assert not row.get("report_markdown")
+
+    # Unguarded updates still work and report success.
+    assert _run(db.update_research_report("research-race", summary="s")) is True
+    # unless_status on a non-matching status applies normally.
+    assert _run(db.update_research_report(
+        "research-race", status="failed", unless_status="complete",
+    )) is True
+
+
+def test_research_token_events_are_ephemeral(tmp_path):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    import research
+
+    _run(db.create_research_report("research-tokens", query="tokens", status="running"))
+
+    emitted = []
+
+    class _FakeEvents:
+        async def emit(self, channel, ev_type, data):
+            emitted.append((channel, ev_type))
+
+    fake_events = _FakeEvents()
+    _run(research._emit_report_event(fake_events, "research-tokens", "research_phase", {"phase": "planning"}))
+    _run(research._emit_report_event(fake_events, "research-tokens", "research_token", {"content": "chunk"}))
+    _run(research._emit_report_event(fake_events, "research-tokens", "research_done", {"status": "complete"}))
+
+    # Live SSE got all three; persistence skipped the token chunk.
+    assert [e[1] for e in emitted] == ["research_phase", "research_token", "research_done"]
+    report = _run(db.get_research_report("research-tokens"))
+    assert [e["type"] for e in report["events_log"]] == ["research_phase", "research_done"]
+
+    # Legacy rows that already persisted token events get them filtered on read.
+    _run(db.append_research_event("research-tokens", {
+        "type": "research_token", "data": {"content": "legacy"},
+    }))
+    report = _run(db.get_research_report("research-tokens"))
+    assert "research_token" not in [e["type"] for e in report["events_log"]]
+
+
 def test_research_report_routes_cancel_and_rerun_preserve_original_fields(tmp_path, monkeypatch):
     db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
     _run(db.init_db())

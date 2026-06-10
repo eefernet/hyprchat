@@ -61,6 +61,10 @@ def web_stream(http, method: str, url: str, **kwargs):
 
 # ── Search rate-limit tuning ──
 _SEARCH_BATCH_SIZE = 3
+
+# ── Research page-fetch resource caps ──
+_RESEARCH_PAGE_MAX_BYTES = 2 * 1024 * 1024     # body cap for research page reads
+_RESEARCH_PAGE_MAX_CLEAN_CHARS = 400_000       # decoded-text cap before regex cleaning
 _SEARCH_BATCH_DELAY_DEEP = 2.0          # seconds between batches in deep research
 _SEARCH_BATCH_DELAY_CONSPIRACY = 2.5    # seconds between batches in conspiracy research
 
@@ -128,6 +132,22 @@ _RESEARCH_DEPTH_BUDGETS = {
 
 def _research_depth_budget(depth: int) -> dict:
     return _RESEARCH_DEPTH_BUDGETS.get(max(1, min(5, int(depth or 3))), _RESEARCH_DEPTH_BUDGETS[3])
+
+
+def _research_num_ctx() -> int:
+    """Context window for research LLM calls (settings/env: research_num_ctx)."""
+    n = int(getattr(config, "RESEARCH_NUM_CTX", 0) or getattr(config, "DEFAULT_NUM_CTX", 0) or 16384)
+    return n if n > 0 else 16384
+
+
+def _effective_context_chars(budget: dict, *, reserve_tokens: int = 5200, overhead_chars: int = 24000) -> int:
+    """Clamp the depth budget's evidence-context size to what actually fits the
+    configured context window (~3 chars/token), so Ollama doesn't silently
+    truncate the head of the findings/synthesis prompts at depth >= 3.
+    reserve_tokens covers num_predict; overhead_chars covers targeted evidence
+    + instructions/outline scaffolding around the evidence block."""
+    avail = (_research_num_ctx() - reserve_tokens) * 3 - overhead_chars
+    return max(8000, min(int(budget.get("context_chars", 52000)), avail))
 
 
 # ── URL safety, source credibility, and report evidence cache ──
@@ -265,6 +285,27 @@ async def fetch_bytes_safely(
             return r.status_code, dict(r.headers), final_url, b"".join(chunks)
 
     raise ValueError("Too many redirects")
+
+
+async def _fetch_text_safely(
+    http, url: str, *, timeout: float = 15, headers: dict | None = None,
+    max_bytes: int = _RESEARCH_PAGE_MAX_BYTES,
+) -> tuple[int, dict, str, str] | None:
+    """fetch_bytes_safely + charset decode. None on unsafe URL/redirect or oversize body."""
+    try:
+        status, hdrs, final_url, body = await fetch_bytes_safely(
+            http, url, timeout=timeout, headers=headers, max_bytes=max_bytes,
+        )
+    except ValueError:
+        return None
+    ct = hdrs.get("content-type", "") or ""
+    m = re.search(r"charset=([^;\s]+)", ct, re.I)
+    enc = (m.group(1) if m else "utf-8").strip("\"'")
+    try:
+        text = body.decode(enc, errors="replace")
+    except LookupError:
+        text = body.decode("utf-8", errors="replace")
+    return status, hdrs, final_url, text[:_RESEARCH_PAGE_MAX_CLEAN_CHARS]
 
 
 _SUSPICIOUS_TLDS = {
@@ -436,6 +477,7 @@ async def _search_searxng(
     http, searxng_url: str, query: str, count: int = 10,
     categories: str = "general", safesearch: str | None = None,
     time_range: str | None = None, engines: str | None = None,
+    fallback_state: dict | None = None,
 ) -> list:
     """Search SearXNG and return structured results. Falls back to Google scrape if SearXNG returns nothing.
 
@@ -497,10 +539,18 @@ async def _search_searxng(
                 "url": (box.get("urls", [{}])[0].get("url", "") if box.get("urls") else ""),
                 "content": box.get("content", ""), "engine": "infobox", "score": 100,
             })
-    except Exception:
-        pass
-    # Fallback to Google scrape if SearXNG returned nothing
+    except Exception as e:
+        print(f"[SEARCH] SearXNG failed for {query[:60]!r}: {type(e).__name__}: {e}")
+    # Fallback to Google scrape if SearXNG returned nothing. Callers can pass
+    # a shared fallback_state ({"remaining": N}) to cap scrapes per run —
+    # an unhealthy SearXNG at depth 5 would otherwise fire ~24 rapid Google
+    # requests and get captcha'd into silently empty results.
     if not results:
+        if fallback_state is not None:
+            if fallback_state.get("remaining", 0) <= 0:
+                print(f"[SEARCH] Google fallback budget exhausted; skipping for {query[:60]!r}")
+                return results
+            fallback_state["remaining"] -= 1
         results = await _search_google_fallback(http, query, count)
     return results
 
@@ -713,27 +763,33 @@ async def _fetch_github_repo_snapshot(http, url: str) -> dict | None:
             reverse=True,
         )
         selected = [x for x in ranked if _github_file_score(x.get("path", ""), int(x.get("size") or 0)) > 0][:14]
-        file_sections = []
-        total_chars = 0
-        for item in selected:
+        async def _fetch_blob_text(item: dict) -> str | None:
             path = item.get("path", "")
             file_url = f"https://api.github.com/repos/{owner}/{name}/contents/{urllib.parse.quote(path, safe='/')}"
             try:
                 file_headers = {**headers, "Accept": "application/vnd.github.raw"}
                 fr = await web_get(http, file_url, params={"ref": branch}, headers=file_headers, timeout=15)
                 if fr.status_code >= 400:
-                    continue
-                text = fr.text
+                    return None
+                return fr.text
             except Exception:
-                continue
-            if "\x00" in text:
+                return None
+
+        blob_texts: list[str | None] = []
+        for i in range(0, len(selected), 5):
+            blob_texts.extend(await asyncio.gather(*[_fetch_blob_text(x) for x in selected[i:i + 5]]))
+
+        file_sections = []
+        total_chars = 0
+        for item, text in zip(selected, blob_texts):
+            if text is None or "\x00" in text:
                 continue
             remaining = 70000 - total_chars
             if remaining <= 2000:
                 break
             excerpt = text[:min(18000, remaining)]
             total_chars += len(excerpt)
-            file_sections.append(f"## File: {path}\n```text\n{excerpt}\n```")
+            file_sections.append(f"## File: {item.get('path', '')}\n```text\n{excerpt}\n```")
         top_tree = "\n".join(f"- {x.get('path')} ({x.get('size', 0)} bytes)" for x in ranked[:80])
         content = (
             f"# GitHub Repository Snapshot: {owner}/{name}\n"
@@ -765,20 +821,18 @@ async def _fetch_page(http, url: str) -> dict | None:
             "fullfact.org", "mediabiasfactcheck.com"]
     if any(p in url.lower() for p in skip):
         return None
-    if not await _url_safe_for_fetch(url, resolve_dns=False):
-        return None
     try:
-        r = await web_get(http, url, timeout=15, follow_redirects=True,
-                          headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"})
-        if r.status_code >= 400:
+        fetched = await _fetch_text_safely(
+            http, url, timeout=15,
+            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"})
+        if not fetched:
             return None
-        final_url = str(getattr(r, "url", "") or url)
-        if not await _url_safe_for_fetch(final_url, resolve_dns=True):
+        status, hdrs, final_url, text = fetched
+        if status >= 400:
             return None
-        ct = r.headers.get("content-type", "")
+        ct = hdrs.get("content-type", "")
         if "text" not in ct and "json" not in ct:
             return None
-        text = r.text
         for tag in ["script", "style", "nav", "header", "footer", "aside", "noscript"]:
             text = re.sub(rf"<{tag}[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r"<h[1-3][^>]*>(.*?)</h[1-3]>", r"\n## \1\n", text, flags=re.IGNORECASE)
@@ -803,18 +857,18 @@ async def _fetch_page(http, url: str) -> dict | None:
 
 async def _fetch_gov_doc_index(http, url: str) -> dict | None:
     """Fetch government document index pages (including PDF links) for conspiracy research."""
-    if not await _url_safe_for_fetch(url, resolve_dns=False):
-        return None
     try:
-        r = await web_get(http, url, timeout=15, follow_redirects=True,
-                          headers={"User-Agent": "Mozilla/5.0 (compatible; research-bot)"})
-        final_url = str(getattr(r, "url", "") or url)
-        if not await _url_safe_for_fetch(final_url, resolve_dns=True):
+        fetched = await _fetch_text_safely(
+            http, url, timeout=15,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; research-bot)"})
+        if not fetched:
             return None
-        ct = r.headers.get("content-type", "")
+        status, hdrs, final_url, text = fetched
+        if status >= 400:
+            return None
+        ct = hdrs.get("content-type", "")
         if "text" not in ct and "html" not in ct:
             return None
-        text = r.text
         pdf_links = re.findall(r'href=["\']([^"\']*\.pdf[^"\']*)["\']', text, re.IGNORECASE)
         doc_links = re.findall(r'href=["\']([^"\']*(?:document|file|exhibit|report)[^"\']*)["\']', text, re.IGNORECASE)
         for tag in ["script", "style", "nav", "header", "footer"]:
@@ -823,13 +877,10 @@ async def _fetch_gov_doc_index(http, url: str) -> dict | None:
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
         result = {"url": _normalize_url(final_url), "content": text[:5000], "pdf_links": [], "doc_links": []}
-        base = "/".join(final_url.split("/")[:3])
         for lnk in pdf_links[:20]:
-            full = lnk if lnk.startswith("http") else base + lnk
-            result["pdf_links"].append(full)
+            result["pdf_links"].append(urllib.parse.urljoin(final_url, lnk))
         for lnk in doc_links[:10]:
-            full = lnk if lnk.startswith("http") else base + lnk
-            result["doc_links"].append(full)
+            result["doc_links"].append(urllib.parse.urljoin(final_url, lnk))
         return result
     except Exception:
         return None
@@ -882,38 +933,34 @@ def _source_tier_label(tier) -> str:
 async def _fetch_wikileaks_page(http, url: str) -> dict | None:
     """Fetch a WikiLeaks page, extracting article text and document/PDF links."""
     lower = url.lower()
-    if not await _url_safe_for_fetch(url, resolve_dns=False):
-        return None
     if any(lower.endswith(ext) for ext in (".zip", ".tar", ".gz", ".rar", ".7z")):
         return {"url": url, "content": f"[Archive file — direct download: {url}]"}
     if ".pdf" in lower:
         return {"url": url, "content": f"[PDF document — direct download: {url}]"}
     try:
-        r = await web_get(http, url, timeout=15, follow_redirects=True,
-                          headers={"User-Agent": "Mozilla/5.0 (compatible; research-bot)"})
-        if r.status_code != 200:
+        fetched = await _fetch_text_safely(
+            http, url, timeout=15,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; research-bot)"})
+        if not fetched:
             return None
-        final_url = str(getattr(r, "url", "") or url)
-        if not await _url_safe_for_fetch(final_url, resolve_dns=True):
+        status, hdrs, final_url, text = fetched
+        if status != 200:
             return None
-        ct = r.headers.get("content-type", "")
+        ct = hdrs.get("content-type", "")
         if "text" not in ct and "html" not in ct:
             return None
-        text = r.text
-        base = "/".join(final_url.split("/")[:3])
 
         wl_links = re.findall(r'href=["\']((https?://(?:www\.)?wikileaks\.org)?(/[^"\'#?][^"\']*?))["\']', text, re.IGNORECASE)
         pdf_links = re.findall(r'href=["\']([^"\']*\.pdf[^"\']*)["\']', text, re.IGNORECASE)
 
         doc_links = []
         for match in wl_links[:30]:
-            full = match[0] if match[0].startswith("http") else base + match[2]
+            full = match[0] if match[0].startswith("http") else urllib.parse.urljoin(final_url, match[2])
             if full != url and full not in doc_links:
                 doc_links.append(full)
         pdf_full = []
         for lnk in pdf_links[:15]:
-            full = lnk if lnk.startswith("http") else base + "/" + lnk.lstrip("/")
-            pdf_full.append(full)
+            pdf_full.append(urllib.parse.urljoin(final_url, lnk))
 
         for tag in ["script", "style", "nav", "header", "footer", "aside", "noscript"]:
             text = re.sub(rf"<{tag}[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE)
@@ -995,8 +1042,7 @@ def _rank_urls(findings: list, exclude: set = None) -> list:
 
 async def _ask_ollama(http, ollama_url: str, prompt: str, model: str = None, default_model: str = "qwen3.5:27b", max_tokens: int = 4096) -> str:
     """Call Ollama for AI synthesis."""
-    import config as _cfg
-    _num_ctx = _cfg.DEFAULT_NUM_CTX or 16384
+    _num_ctx = _research_num_ctx()
     try:
         r = await http.post(f"{ollama_url}/api/generate", json={
             "model": model or default_model,
@@ -1015,8 +1061,7 @@ async def _ask_ollama_json(
     fallback=None, expected_type=None,
 ):
     """Call Ollama in JSON mode and make one compact repair attempt."""
-    import config as _cfg
-    _num_ctx = _cfg.DEFAULT_NUM_CTX or 16384
+    _num_ctx = _research_num_ctx()
 
     async def call_once(call_prompt: str) -> str:
         r = await http.post(f"{ollama_url}/api/generate", json={
@@ -1081,8 +1126,7 @@ async def _ask_ollama_streamed(
     max_tokens: int = 4096, status_prefix: str = "🧠 Synthesizing",
 ) -> str:
     """Stream from Ollama, emitting periodic status events so the user sees live progress."""
-    import config as _cfg
-    _num_ctx = _cfg.DEFAULT_NUM_CTX or 16384
+    _num_ctx = _research_num_ctx()
     accumulated = ""
     last_emit_len = 0
     try:
@@ -1278,25 +1322,34 @@ async def _index_report_evidence(report_id: str, records: list[dict]) -> dict:
         valid = [(r, e) for r, e in zip(records, embeddings) if e is not None]
         if not valid:
             return {"chunks": len(records), "embedded": 0, "fallback": True}
-        collection = rag.get_chroma().get_or_create_collection(
-            name=_evidence_collection_name(report_id),
-            metadata={"hnsw:space": "cosine", "kind": "research_evidence"},
-        )
-        collection.upsert(
-            ids=[r["id"] for r, _ in valid],
-            documents=[r["text"] for r, _ in valid],
-            metadatas=[{
-                "report_id": report_id,
-                "source_id": str(r.get("source_id") or ""),
-                "source_index": int(r.get("source_index") or 0),
-                "title": str(r.get("title") or "")[:300],
-                "url": str(r.get("url") or "")[:1000],
-                "kind": str(r.get("kind") or ""),
-                "credibility_score": int(r.get("credibility_score") or 0),
-                "tier_label": str(r.get("tier_label") or "")[:120],
-            } for r, _ in valid],
-            embeddings=[e for _, e in valid],
-        )
+
+        def _do_upsert():
+            # Sync chroma client calls; keep them off the event loop.
+            collection = rag.get_chroma().get_or_create_collection(
+                name=_evidence_collection_name(report_id),
+                metadata={"hnsw:space": "cosine", "kind": "research_evidence"},
+            )
+            # Sliced: Chroma hard-caps a single upsert at ~5461 records.
+            batch = rag.CHROMA_UPSERT_BATCH
+            for s in range(0, len(valid), batch):
+                part = valid[s:s + batch]
+                collection.upsert(
+                    ids=[r["id"] for r, _ in part],
+                    documents=[r["text"] for r, _ in part],
+                    metadatas=[{
+                        "report_id": report_id,
+                        "source_id": str(r.get("source_id") or ""),
+                        "source_index": int(r.get("source_index") or 0),
+                        "title": str(r.get("title") or "")[:300],
+                        "url": str(r.get("url") or "")[:1000],
+                        "kind": str(r.get("kind") or ""),
+                        "credibility_score": int(r.get("credibility_score") or 0),
+                        "tier_label": str(r.get("tier_label") or "")[:120],
+                    } for r, _ in part],
+                    embeddings=[e for _, e in part],
+                )
+
+        await asyncio.to_thread(_do_upsert)
         return {"chunks": len(records), "embedded": len(valid), "fallback": False}
     except Exception as e:
         print(f"[RESEARCH REPORT] Evidence index fallback for {report_id}: {e}")
@@ -1346,15 +1399,21 @@ async def _retrieve_report_evidence(report_id: str, queries: list[str], top_k: i
         emb = await rag.embed_single(query_text)
         if emb is None:
             return _lexical_retrieve_report_evidence(report_id, queries, top_k=top_k)
-        collection = rag.get_chroma().get_collection(_evidence_collection_name(report_id))
-        count = collection.count()
-        if count <= 0:
+        def _do_query():
+            # Sync chroma client calls; keep them off the event loop.
+            collection = rag.get_chroma().get_collection(_evidence_collection_name(report_id))
+            count = collection.count()
+            if count <= 0:
+                return None
+            return collection.query(
+                query_embeddings=[emb],
+                n_results=min(max(1, top_k * 2), count),
+                include=["documents", "metadatas", "distances"],
+            )
+
+        results = await asyncio.to_thread(_do_query)
+        if results is None:
             return _lexical_retrieve_report_evidence(report_id, queries, top_k=top_k)
-        results = collection.query(
-            query_embeddings=[emb],
-            n_results=min(max(1, top_k * 2), count),
-            include=["documents", "metadatas", "distances"],
-        )
         out = []
         docs = (results.get("documents") or [[]])[0]
         metas = (results.get("metadatas") or [[]])[0]
@@ -2016,15 +2075,22 @@ Rules:
     return _normalize_adaptive_research_state(obj)
 
 
+# High-volume streaming events that are never read back after the run —
+# the full text lands in report_markdown, so persisting each token chunk
+# only burns a DB write cycle per 240 chars and bloats report GET payloads.
+_EPHEMERAL_REPORT_EVENTS = {"research_token"}
+
+
 async def _emit_report_event(events, report_id: str, event_type: str, data: dict):
     """Emit a live research event and persist it on the report row."""
     import database as db
 
     event = {"type": event_type, "data": data or {}, "timestamp": time.time()}
-    try:
-        await db.append_research_event(report_id, event)
-    except Exception as e:
-        print(f"[RESEARCH REPORT] Event persist failed: {e}")
+    if event_type not in _EPHEMERAL_REPORT_EVENTS:
+        try:
+            await db.append_research_event(report_id, event)
+        except Exception as e:
+            print(f"[RESEARCH REPORT] Event persist failed: {e}")
     try:
         await events.emit(report_id, event_type, data or {})
     except Exception as e:
@@ -2037,10 +2103,9 @@ async def _ask_report_streamed(
     max_tokens: int = 6144,
 ) -> str:
     """Stream final report tokens to the dedicated research workspace."""
-    import config as _cfg
     import cancel_registry
 
-    _num_ctx = _cfg.DEFAULT_NUM_CTX or 16384
+    _num_ctx = _research_num_ctx()
     accumulated = ""
     token_buf = ""
     try:
@@ -2112,13 +2177,23 @@ async def run_research_report(
 
     async def phase(key: str, label: str, detail: str = "", pct: int | None = None):
         await check_cancel()
-        await db.update_research_report(report_id, status="running")
+        await db.update_research_report(report_id, status="running", unless_status="cancelled")
         await _emit_report_event(events, report_id, "research_phase", {
             "phase": key, "label": label, "detail": detail, "pct": pct,
         })
 
     try:
-        await db.update_research_report(report_id, status="running", error="")
+        # A cancel can land between report creation and this runner starting
+        # (registry signal hits before register()); honor the DB row so the
+        # run doesn't resurrect a cancelled report back to running/complete.
+        existing = await db.get_research_report(report_id)
+        if existing and existing.get("status") == "cancelled":
+            await _emit_report_event(events, report_id, "research_error", {
+                "status": "cancelled", "error": "Cancelled by user",
+            })
+            return {"id": report_id, "status": "cancelled"}
+
+        await db.update_research_report(report_id, status="running", error="", unless_status="cancelled")
         await _emit_report_event(events, report_id, "research_started", {
             "query": query, "report_type": report_type, "depth": depth,
         })
@@ -2199,19 +2274,31 @@ Use the current date above as authoritative; do not infer "current real-world kn
         seed_urls = _extract_seed_urls(query, focus, user_context)
         direct_sources = []
         direct_pages = []
+        safe_seeds = []
         for url in seed_urls:
             if not _url_safe_for_direct_fetch(url):
                 await _emit_report_event(events, report_id, "research_audit", {
                     "level": "warning", "message": f"Skipped unsafe direct URL: {url}",
                 })
                 continue
-            page = None
-            source_type = "direct_url"
+            safe_seeds.append(url)
+
+        async def _fetch_seed(url: str) -> tuple[str, dict | None]:
             if _github_repo_from_url(url):
                 page = await _fetch_github_repo_snapshot(http, url)
-                source_type = "github_repo"
-            if not page:
-                page = await _fetch_page(http, url)
+                if page:
+                    return "github_repo", page
+            return "direct_url", await _fetch_page(http, url)
+
+        await check_cancel()
+        seed_results = await asyncio.gather(
+            *[_fetch_seed(u) for u in safe_seeds], return_exceptions=True,
+        ) if safe_seeds else []
+        for url, seed_result in zip(safe_seeds, seed_results):
+            await check_cancel()
+            if isinstance(seed_result, BaseException):
+                seed_result = ("direct_url", None)
+            source_type, page = seed_result
             if not page or not page.get("content"):
                 await _emit_report_event(events, report_id, "research_audit", {
                     "level": "warning", "message": f"Direct URL could not be read: {url}",
@@ -2262,6 +2349,8 @@ Use the current date above as authoritative; do not infer "current real-world kn
         adaptive_learnings: list[str] = []
         adaptive_gaps: list[str] = []
         adaptive_followups: list[str] = []
+        # Shared Google-scrape budget across the whole report run.
+        google_fallback_state = {"remaining": 8}
 
         async def run_search_queries(queries: list[str], pct_base: int, pct_span: int, detail_prefix: str):
             if not queries:
@@ -2275,7 +2364,7 @@ Use the current date above as authoritative; do not infer "current real-world kn
                         continue
                     searched.add(q)
                     time_range = "year" if re.search(r"\b(latest|recent|current|today|202[5-9]|news)\b", q, re.I) else None
-                    tasks.append((q, _search_searxng(http, searxng_url, q, count=budget["results_per_query"], time_range=time_range)))
+                    tasks.append((q, _search_searxng(http, searxng_url, q, count=budget["results_per_query"], time_range=time_range, fallback_state=google_fallback_state)))
                 if not tasks:
                     continue
                 results = await asyncio.gather(*[t[1] for t in tasks], return_exceptions=True)
@@ -2313,16 +2402,21 @@ Use the current date above as authoritative; do not infer "current real-world kn
                 return
             await phase("reading", "Reading high-value sources", "Fetching full text for ranked pages", 42)
             web_results = [r for r in all_results if r.get("url")]
-            top_urls = [u for u in _rank_urls(web_results, fetched_urls) if u not in fetched_urls][:max_new_pages]
+            top_urls = [u for u in _rank_urls(web_results, fetched_urls) if _normalize_url(u) not in fetched_urls][:max_new_pages]
             for i in range(0, len(top_urls), 4):
                 await check_cancel()
                 batch = top_urls[i:i + 4]
                 fetched = await asyncio.gather(*[_fetch_page(http, u) for u in batch], return_exceptions=True)
-                for page in fetched:
+                for u, page in zip(batch, fetched):
+                    # Record the requested URL even on failure so adaptive
+                    # rounds never re-rank/re-fetch it (redirects used to leave
+                    # the original URL eligible forever).
+                    req_norm = _normalize_url(u)
+                    fetched_urls.add(req_norm)
                     if isinstance(page, dict) and page.get("content"):
                         norm = _normalize_url(page.get("url", ""))
                         fetched_urls.add(norm)
-                        src_meta = next((s for s in current_sources if s.get("url") == norm), {})
+                        src_meta = next((s for s in current_sources if s.get("url") in (norm, req_norm)), {})
                         page["source_index"] = src_meta.get("index", 0)
                         pages.append(page)
                         await _emit_report_event(events, report_id, "research_source_read", {
@@ -2455,7 +2549,7 @@ Use the current date above as authoritative; do not infer "current real-world kn
             ("USER/KB CONTEXT\n" + user_context + "\n\n" if user_context else "") +
             "SOURCE BRIEFS\n" + "\n\n".join(source_briefs) +
             "\n\nFULL TEXT EXTRACTS\n" + "\n\n".join(page_context)
-        )[:budget["context_chars"]]
+        )[:_effective_context_chars(budget)]
 
         evidence_records = _build_report_evidence_records(report_id, query, user_context, sources, pages)
         evidence_index = await cancel_registry.await_cancellable(
@@ -2602,6 +2696,8 @@ Return strict JSON:
             "elapsed": time.time() - t_start,
             "coverage_score": audit.get("coverage_score", 0),
             "depth": depth,
+            "context_chars_used": len(evidence_context),
+            "research_num_ctx": _research_num_ctx(),
             "target_queries": budget["queries"],
             "target_sources": budget["target_sources"],
             "target_pages": budget["page_reads"],
@@ -2697,11 +2793,18 @@ Write in Markdown. Requirements:
         metrics["elapsed"] = time.time() - t_start
         metrics["citation_audit"] = citation_audit
         metrics["renderable_audit"] = renderable_audit
-        await db.update_research_report(
+        wrote = await db.update_research_report(
             report_id, status="complete", report_markdown=report, summary=summary,
             sources=sources, findings=findings, metrics={**metrics, "audit": audit},
             completed_at=datetime.utcnow().isoformat(),
+            unless_status="cancelled",
         )
+        if not wrote:
+            # User cancelled while synthesis was finishing — keep the row cancelled.
+            await _emit_report_event(events, report_id, "research_error", {
+                "status": "cancelled", "error": "Cancelled by user",
+            })
+            return {"id": report_id, "status": "cancelled"}
         await db.replace_research_sources(report_id, sources)
         await _emit_report_event(events, report_id, "research_done", {
             "status": "complete", "summary": summary, "metrics": metrics,

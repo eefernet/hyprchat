@@ -5,6 +5,7 @@ No live SearXNG, Ollama, or ChromaDB required.
 import asyncio
 import re
 import sys
+import time
 from pathlib import Path
 
 _BACKEND = Path(__file__).resolve().parent.parent
@@ -18,17 +19,10 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-class _FakeResponse:
-    def __init__(self, *, url, text="<html><body>" + ("public text. " * 80) + "</body></html>"):
-        self.status_code = 200
-        self.headers = {"content-type": "text/html"}
-        self.text = text
-        self.url = url
-
-
-class _RedirectHTTP:
-    async def get(self, url, **kwargs):
-        return _FakeResponse(url="http://127.0.0.1/private")
+def _seed_public_dns(host: str):
+    """Mark a host as publicly-resolving in the SSRF DNS cache so the
+    stream-based fetchers stay offline in tests."""
+    research._DNS_CACHE[host] = (time.time(), True)
 
 
 class _StreamResponse:
@@ -77,7 +71,48 @@ def test_safe_url_filtering_blocks_private_reserved_and_local_hosts():
 
 
 def test_fetch_page_rejects_redirect_to_private_host():
-    assert _run(research._fetch_page(_RedirectHTTP(), "https://example.com/start")) is None
+    _seed_public_dns("example.com")
+    http = _StreamHTTP([
+        _StreamResponse(
+            url="https://example.com/start",
+            status_code=302,
+            headers={"location": "http://127.0.0.1/private"},
+            content=b"",
+        )
+    ])
+    assert _run(research._fetch_page(http, "https://example.com/start")) is None
+    # The private redirect target must never be fetched.
+    assert http.urls == ["https://example.com/start"]
+
+
+def test_fetch_page_rejects_oversized_body():
+    _seed_public_dns("example.com")
+    big = b"x" * (research._RESEARCH_PAGE_MAX_BYTES + 1)
+    http = _StreamHTTP([
+        _StreamResponse(
+            url="https://example.com/huge",
+            headers={"content-type": "text/html"},
+            content=big,
+        )
+    ])
+    assert _run(research._fetch_page(http, "https://example.com/huge")) is None
+
+
+def test_fetch_page_returns_cleaned_content_for_safe_page():
+    _seed_public_dns("example.com")
+    html = ("<html><body><p>" + ("public text. " * 80) + "</p></body></html>").encode()
+    http = _StreamHTTP([
+        _StreamResponse(
+            url="https://example.com/article",
+            headers={"content-type": "text/html; charset=utf-8"},
+            content=html,
+        )
+    ])
+    page = _run(research._fetch_page(http, "https://example.com/article"))
+    assert page is not None
+    assert page["url"].startswith("https://example.com/article")
+    assert "public text." in page["content"]
+    assert "<p>" not in page["content"]
 
 
 def test_safe_fetch_rejects_private_redirect_before_fetching_target():
@@ -108,6 +143,43 @@ def test_safe_fetch_rejects_oversized_response():
         assert "too large" in str(e).lower()
     else:
         raise AssertionError("oversized response was allowed")
+
+
+def test_effective_context_chars_scales_with_research_num_ctx(monkeypatch):
+    import config
+
+    budget5 = research._RESEARCH_DEPTH_BUDGETS[5]
+    # Small window: evidence clamps well below the depth-5 table value.
+    monkeypatch.setattr(config, "RESEARCH_NUM_CTX", 16384)
+    clamped = research._effective_context_chars(budget5)
+    assert 8000 <= clamped < budget5["context_chars"]
+    # Large window: the depth budget table remains the upper bound.
+    monkeypatch.setattr(config, "RESEARCH_NUM_CTX", 131072)
+    assert research._effective_context_chars(budget5) == budget5["context_chars"]
+    # Degenerate window never goes below the floor.
+    monkeypatch.setattr(config, "RESEARCH_NUM_CTX", 1024)
+    assert research._effective_context_chars(budget5) == 8000
+
+
+def test_searxng_google_fallback_budget_caps_scrapes(monkeypatch):
+    calls = []
+
+    async def _fake_google(http, query, count):
+        calls.append(query)
+        return []
+
+    class _FailHTTP:
+        async def get(self, url, **kwargs):
+            raise RuntimeError("searxng down")
+
+    monkeypatch.setattr(research, "_search_google_fallback", _fake_google)
+    state = {"remaining": 2}
+    for i in range(4):
+        _run(research._search_searxng(_FailHTTP(), "http://sx", f"query {i}", fallback_state=state))
+    assert len(calls) == 2
+    # Without a budget the legacy behavior is preserved.
+    _run(research._search_searxng(_FailHTTP(), "http://sx", "query unbudgeted"))
+    assert len(calls) == 3
 
 
 def test_adaptive_followup_queries_respect_budget_and_dedupe():
