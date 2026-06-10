@@ -959,3 +959,60 @@ def test_complete_chat_ollama_path_streams_and_reads_thinking_fallback():
     assert payload["think"] is False
     assert payload["options"]["num_ctx"] == 4096
     assert payload["options"]["num_predict"] == 2048
+
+
+def test_fixer_search_replace_parse_and_apply():
+    from agents import fixer
+    text = (
+        "### EDIT: /root/p/app.py\n```python\n"
+        "<<<<<<< SEARCH\ndef add(a, b):\n    return a - b\n=======\n"
+        "def add(a, b):\n    return a + b\n>>>>>>> REPLACE\n"
+        "```\n\n### SUMMARY: fix add\n"
+    )
+    parsed = fixer._parse_fixer_output(text)
+    assert parsed["parse_errors"] == []
+    edit = parsed["edits"][0]
+    assert edit["mode"] == "replace"
+
+    original = ("import math\n\ndef add(a, b):\n    return a - b\n\n"
+                "def sub(a, b):\n    return a - b\n")
+    new, errs = fixer._apply_search_replace(original, edit["blocks"])
+    assert errs == []
+    assert "def add(a, b):\n    return a + b" in new
+    # sub() untouched — only the matched site changed.
+    assert "def sub(a, b):\n    return a - b" in new
+
+
+def test_fixer_search_replace_fuzzy_and_unmatched():
+    from agents import fixer
+    original = "    if x:\n        do_thing()\n    return x\n"
+    # Indentation drift → fuzzy match still lands.
+    new, errs = fixer._apply_search_replace(original, [("if x:\n    do_thing()", "if x and y:\n    do_thing()")])
+    assert errs == []
+    assert "if x and y:" in new
+    # Nothing matches → None + error, file untouched.
+    new2, errs2 = fixer._apply_search_replace(original, [("not in file", "x")])
+    assert new2 is None
+    assert "not found" in errs2[0]
+
+
+def test_fixer_rewrite_section_still_supported():
+    from agents import fixer
+    text = ("### REWRITE: /root/p/tiny.py\n```python\nprint('all new')\n```\n\n"
+            "### SUMMARY: rewrote\n")
+    parsed = fixer._parse_fixer_output(text)
+    assert parsed["edits"][0]["mode"] == "rewrite"
+    assert parsed["edits"][0]["content"] == "print('all new')"
+
+
+def test_fixer_delete_section_parse():
+    from agents import fixer
+    text = ("### DELETE: /root/projects/p/state.json\n\n"
+            "### EDIT: /root/projects/p/app.py\n```python\n"
+            "<<<<<<< SEARCH\nx = 1\n=======\nx = 2\n>>>>>>> REPLACE\n```\n\n"
+            "### SUMMARY: removed runtime state, fixed x\n")
+    parsed = fixer._parse_fixer_output(text)
+    assert parsed["parse_errors"] == []
+    modes = {e["path"]: e["mode"] for e in parsed["edits"]}
+    assert modes["/root/projects/p/state.json"] == "delete"
+    assert modes["/root/projects/p/app.py"] == "replace"

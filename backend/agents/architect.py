@@ -137,7 +137,8 @@ async def _call_planning_model(http, model: str, prompt: str,
     try:
         coro = model_providers.complete_chat(
             http, model, prompt,
-            temperature=0.2, num_ctx=num_ctx, num_predict=4096, timeout=600,
+            temperature=0.2, num_ctx=num_ctx, num_predict=4096,
+            format_json=True, timeout=600,
             ollama_url=config.OLLAMA_URL,
         )
         return await cancel_registry.await_cancellable(coro, run_id)

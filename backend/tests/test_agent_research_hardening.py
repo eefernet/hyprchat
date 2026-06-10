@@ -344,7 +344,9 @@ def test_cycle_cap_resets_after_new_user_message(tmp_path, monkeypatch):
         conv_id="conv-capr",
     ))
 
-    assert "Hard cap" not in result
+    # The cap BLOCK message says "Hard cap of"; the phrase "Hard cap:" also
+    # appears benignly in chained-review guidance text.
+    assert "Hard cap of" not in result
     assert "BLOCKED" not in result
 
 
@@ -590,3 +592,97 @@ def test_fix_budget_note_counts_per_request(tmp_path):
     assert "2/3" in note
     note_acc = _run(tools._fix_budget_note("conv-budget", "acceptance"))
     assert "0/2" in note_acc
+
+
+def test_fixer_applied_creates_git_checkpoint(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_model_config("mc-git", "Daedalus Coder v2", "test-model",
+                                tool_ids=["run_fixer"]))
+    _run(db.create_conversation("conv-git", "Git Checkpoint", model_config_id="mc-git"))
+    _run(db.create_run("run-rev-git", "conv-git", role="reviewer", status="succeeded"))
+    _run(db.update_run("run-rev-git", status="succeeded", result_envelope={
+        "status": "issues", "summary": "broken",
+        "project_dir": "/root/projects/demo",
+        "issues": [{"file": "app.py", "summary": "boom",
+                    "suggested_fix_scope": ["app.py"]}],
+    }, ended=True))
+    _patch_fixer_config(monkeypatch)
+    http = _FixerHTTP()
+
+    result = _run(tools.exec_tool(
+        http=http, events=_FakeEvents(),
+        name="run_fixer", args={"reviewer_run_id": "run-rev-git"},
+        conv_id="conv-git",
+    ))
+
+    assert "BLOCKED" not in result
+    git_cmds = [p["json"]["command"] for p in http.posts
+                if isinstance(p.get("json"), dict) and "git" in (p["json"].get("command") or "")]
+    assert any("git add -A" in c and "commit" in c for c in git_cmds), git_cmds
+
+
+def test_workflow_fsm_creates_and_transitions(tmp_path):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_conversation("conv-fsm", "FSM Test"))
+
+    # First event creates the row (greenfield builds had none before).
+    wf_id = _run(tools._apply_workflow_event(
+        "conv-fsm", "PLAN_DONE", run_id="run-p1",
+        project_id="proj-fsm", user_task="build a thing",
+    ))
+    assert wf_id
+    wf = _run(db.get_coder_workflow(wf_id))
+    assert wf["state"] == "planning"
+
+    _run(tools._apply_workflow_event("conv-fsm", "BUILD_OK", run_id="run-b1", project_id="proj-fsm"))
+    assert _run(db.get_coder_workflow(wf_id))["state"] == "reviewing"
+    _run(tools._apply_workflow_event("conv-fsm", "REVIEW_ISSUES", run_id="run-r1"))
+    assert _run(db.get_coder_workflow(wf_id))["state"] == "fixing"
+    _run(tools._apply_workflow_event("conv-fsm", "FIX_APPLIED", run_id="run-f1"))
+    assert _run(db.get_coder_workflow(wf_id))["state"] == "reviewing"
+    _run(tools._apply_workflow_event("conv-fsm", "REVIEW_CLEAN", run_id="run-r2"))
+    assert _run(db.get_coder_workflow(wf_id))["state"] == "accepting"
+    _run(tools._apply_workflow_event("conv-fsm", "ACCEPT_OK", run_id="run-a1"))
+    wf = _run(db.get_coder_workflow(wf_id))
+    assert wf["state"] == "accepted"
+    assert wf["artifact_status"] == "accepted"
+
+    # Unknown events are ignored; cancel is never overwritten.
+    assert _run(tools._apply_workflow_event("conv-fsm", "NOT_AN_EVENT")) == ""
+    _run(db.update_coder_workflow(wf_id, state="cancelled", cancel_requested=True))
+    _run(tools._apply_workflow_event("conv-fsm", "BUILD_OK", run_id="run-b2"))
+    assert _run(db.get_coder_workflow(wf_id))["state"] == "cancelled"
+
+
+def test_fixer_applied_chains_automatic_review(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_model_config("mc-chain", "Daedalus Coder v2", "test-model",
+                                tool_ids=["run_fixer"]))
+    _run(db.create_conversation("conv-chain", "Auto Chain", model_config_id="mc-chain"))
+    _run(db.create_run("run-rev-chain", "conv-chain", role="reviewer", status="succeeded"))
+    _run(db.update_run("run-rev-chain", status="succeeded", result_envelope={
+        "status": "issues", "summary": "broken",
+        "project_dir": "/root/projects/demo",
+        "issues": [{"file": "app.py", "summary": "boom",
+                    "suggested_fix_scope": ["app.py"]}],
+    }, ended=True))
+    _patch_fixer_config(monkeypatch)
+
+    result = _run(tools.exec_tool(
+        http=_FixerHTTP(), events=_FakeEvents(),
+        name="run_fixer", args={"reviewer_run_id": "run-rev-chain"},
+        conv_id="conv-chain",
+    ))
+
+    assert "AUTOMATIC VERIFICATION" in result
+    assert "do NOT call it again" in result
+    # The chain persisted a NEW reviewer run on top of the fixer run.
+    runs = _run(db.get_runs_by_conversation("conv-chain", limit=10))
+    roles = [r["role"] for r in runs]
+    assert roles[0] == "reviewer" and "fixer" in roles
+    # And the FSM tracked it: a workflow row now exists.
+    wf = _run(db.get_latest_coder_workflow("conv-chain"))
+    assert wf is not None

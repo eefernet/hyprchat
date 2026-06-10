@@ -306,3 +306,16 @@ def test_console_script_smoke_runs_first_and_catches_runtime_state():
     assert envelope["status"] == "clean"
     assert envelope["smoke_cmds"][0] == "/root/venv/bin/snip --help"
     assert envelope["smoke_new_files"] == ["snip.json"]
+
+
+def test_smoke_cleans_up_its_own_runtime_files():
+    http = _ConsoleScriptSmokeHTTP(_SMOKE_FILES, smoke_exit=0,
+                                   new_files=["snip.json"])
+
+    envelope = _run(reviewer.run_review(
+        http, _NullEvents(), "conv-smoke", "/root/projects/snip",
+    ))
+
+    assert envelope["smoke_new_files"] == ["snip.json"]
+    rm_cmds = [c for c in http.posts if "rm -f --" in c and "snip.json" in c]
+    assert rm_cmds, "smoke must remove the runtime files it created"

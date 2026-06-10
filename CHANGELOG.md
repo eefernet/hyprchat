@@ -1,4 +1,13 @@
-## Alpha v17.2.2 — June 10, 2026
+## Alpha v17.2.0 — June 10, 2026
+
+### Daedalus — Architecture Upgrades (diff edits, FSM, autopilot verification, git)
+- **Fixer edits are now surgical SEARCH/REPLACE diffs** instead of whole-file regeneration (with an explicit `### REWRITE:` escape hatch for big changes). This also fixes a latent data-loss path: the old format made the model regenerate "complete" files from a truncated prompt view, silently dropping the unseen tail. Search/replace applies against the full on-disk file, with whitespace-tolerant fallback matching; unmatched blocks error instead of corrupting.
+- **Every build/fix cycle is a git commit**: the orchestrator checkpoints the project after builder, Fixer, and Aider successes (`git log --oneline` in the project dir is now the authoritative attempt history; a bad fix can be reverted instead of re-fixed).
+- **Workflow state is a real state machine**: a single transition function (`PLAN_DONE`, `BUILD_OK`, `REVIEW_CLEAN/ISSUES`, `FIX_APPLIED`, `ACCEPT_OK/ISSUES`) replaces ad-hoc state writes, and greenfield builds now get a workflow row from the planning step — the WorkflowCard tracks the whole pipeline instead of showing nothing.
+- **Verification runs on autopilot**: after every `generate_code`, `run_fixer`, and `run_aider_fix` success, the Reviewer runs automatically and its result is folded into the tool output — removing the LLM routing rounds (and wrong-run-id flailing) between fix and verify. The persona now instructs the model to act on the automatic result.
+- Architect output is now schema-constrained (`format=json`), eliminating most plan parse-retry rounds.
+- **The Fixer can now delete files** (`### DELETE:` sections) — "this runtime/state file should not exist" issues previously looped forever because editing README/.gitignore never removed the file and the gates blocked manual `delete_file`.
+- The Reviewer's smoke phase cleans up any files the smoke run itself created (still recorded as runtime-state evidence in the envelope), so verification never pollutes the tree it is grading.
 
 ### Daedalus — Stop Actually Stops, and Smarter Loops
 - **Stop now frees the GPU immediately**: agent LLM calls (Architect, Reviewer, Acceptance, Fixer, ProjectQA) previously used non-streaming Ollama requests, so cancelling only dropped the connection while Ollama kept generating until the response finished — the "still active workers after Stop" you could see in nvtop. Agent calls now stream internally, so a cancel aborts the Ollama runner on the spot.
@@ -10,14 +19,10 @@
 - **Reviewer smokes the real CLI**: for pyproject projects the smoke phase now reads `[project.scripts]` and runs the installed console command (`<script> --help`) ahead of the import fallback — catching broken entrypoints and runtime state files the import probe missed.
 - Gate hint fix: the acceptance-needed message no longer suggests a stale/wrong `reviewer_run_id` when the trigger was a docs-only fix.
 
-## Alpha v17.2.1 — June 10, 2026
-
 ### Daedalus — Smarter Agentic Coding
 - **Fix attempts now have memory**: the Fixer and Aider see a compact history of what previous fix attempts in the same request already changed ("touched app.py — renamed handler; tests still failed"), so attempt #2 tries a different approach instead of repeating the same edit.
 - **Cloud models can power the judgment agents (opt-in)**: Architect, Reviewer, and Acceptance now work with OpenAI/Anthropic models — but only when you explicitly pick a cloud model for that agent (or Planning Model) in Settings → Coder Bot. A cloud chat model is never silently inherited by the agents.
 - **Reviewer smoke phase**: after build/tests/lint pass, the Reviewer now actually runs the program the way a user would (the contract's smoke commands, e.g. `python -m <pkg> --help`). A crashing entrypoint becomes a runtime issue even when all tests pass, and any state files the program creates at runtime are recorded (`smoke_new_files`) and surfaced to Acceptance as packaging signals.
-
-## Alpha v17.2.0 — June 10, 2026
 
 ### Daedalus (Coder Bot v2) Hardening
 - Added a startup reaper: runs left `queued/pending/running` by a crash or restart are marked failed ("orphaned by backend restart") and their workflows unblocked, so conversations no longer lock up permanently after a mid-run restart.

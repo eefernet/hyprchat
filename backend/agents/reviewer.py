@@ -1318,6 +1318,14 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                     if smoke_new_files:
                         await _step("smoke_state",
                                     f"{len(smoke_new_files)} new file(s) created at runtime")
+                        # Remove what the smoke itself created: recorded in the
+                        # envelope as runtime-state evidence, but it must not
+                        # pollute the tree (acceptance would flag OUR droppings).
+                        _rm_args = " ".join(shlex.quote(f) for f in smoke_new_files)
+                        await _run_in_sandbox(http, project_dir,
+                                              f"rm -f -- {_rm_args}",
+                                              timeout=15, run_id=run_id)
+                        await _step("smoke_cleanup", f"removed {len(smoke_new_files)} runtime file(s)")
                 except Exception as _sde:
                     print(f"[REVIEWER] smoke tree diff failed (non-fatal): {_sde}")
 

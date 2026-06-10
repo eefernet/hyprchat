@@ -52,14 +52,34 @@ _FIXER_PROMPT = """You are the Fixer — a focused code-editing agent. You MUST 
 {files_section}
 
 ## Output format — STRICT
-For each file you want to change, write ONE section in this exact format:
+For each file you want to change, write ONE section with SEARCH/REPLACE blocks:
 
 ### EDIT: <full file path from allowed_paths>
 ```{lang_tag}
-<COMPLETE new file contents — every line of the file, not a diff>
+<<<<<<< SEARCH
+exact lines copied VERBATIM from the current file contents above
+=======
+the replacement lines
+>>>>>>> REPLACE
 ```
 
-After all your EDIT sections (zero or more), write ONE summary line:
+A section may contain several SEARCH/REPLACE blocks (one per change site).
+The SEARCH text must match the file exactly — copy it, do not retype it.
+Keep each SEARCH small: just the lines being changed plus 1-2 anchor lines.
+
+If an issue says a file should NOT exist (runtime state, generated junk,
+stray artifacts), delete it with a section of its own — no fence, no body:
+
+### DELETE: <full file path from allowed_paths>
+
+ONLY if more than half the file must change, you may instead rewrite it:
+
+### REWRITE: <full file path from allowed_paths>
+```{lang_tag}
+<COMPLETE new file contents — every line of the file>
+```
+
+After all sections (zero or more), write ONE summary line:
 
 ### SUMMARY: <one short line describing what you changed and why>
 
@@ -68,11 +88,12 @@ If you genuinely cannot fix any issue (ambiguous, need info not provided, etc.),
 ### CANNOT_FIX: <one-line reason>
 
 ## Rules
-1. The path after `### EDIT:` MUST exactly match one of allowed_paths. No relative paths.
-2. The contents inside ``` fences MUST be the COMPLETE file (every line). Not a diff. Not a snippet.
-3. NO prose, explanation, or commentary outside the EDIT sections. The first line of your response should be either `### EDIT:`, `### SUMMARY:`, or `### CANNOT_FIX:`.
-4. If a file in allowed_paths needs no change, simply do not include an EDIT section for it.
-5. Address ALL listed issues in a single pass. If two issues touch the same file, emit ONE EDIT section for that file with both fixes applied.
+1. The path after `### EDIT:`/`### REWRITE:` MUST exactly match one of allowed_paths. No relative paths.
+2. Prefer SEARCH/REPLACE. Rewrites of files whose contents were shown truncated WILL LOSE the unseen part — never REWRITE a truncated file.
+3. NO prose, explanation, or commentary outside the sections. The first line of your response should be `### EDIT:`, `### REWRITE:`, `### SUMMARY:`, or `### CANNOT_FIX:`.
+4. If a file in allowed_paths needs no change, simply do not include a section for it.
+5. Address ALL listed issues in a single pass. If two issues touch the same file, put all its SEARCH/REPLACE blocks in ONE EDIT section.
+6. "This file should not be in the project" issues are fixed with `### DELETE:` — editing .gitignore or README does NOT remove the file and the issue will come back.
 
 Output your sections now:"""
 
@@ -133,6 +154,25 @@ async def _write_file_sandbox(http, path: str, content: str) -> tuple[bool, str]
         return (False, f"{type(e).__name__}: {e}")
 
 
+async def _delete_file_sandbox(http, path: str) -> tuple[bool, str]:
+    """Delete a file via Codebox. Returns (ok, error_detail)."""
+    try:
+        qp = shlex.quote(path)
+        r = await http.post(
+            f"{config.CODEBOX_URL}/command",
+            json={"command": f"rm -f -- {qp} && echo OK", "timeout": 15},
+            timeout=20,
+        )
+        if r.status_code != 200:
+            return (False, f"codebox HTTP {r.status_code}")
+        j = r.json()
+        if "OK" in (j.get("stdout") or "") or int(j.get("exit_code", 1) or 1) == 0:
+            return (True, "")
+        return (False, (j.get("stderr") or j.get("stdout") or "")[:200])
+    except Exception as e:
+        return (False, f"{type(e).__name__}: {e}")
+
+
 # Matches:
 #   ### EDIT: <path>
 #   ```[lang]
@@ -143,8 +183,12 @@ async def _write_file_sandbox(http, path: str, content: str) -> tuple[bool, str]
 #   line, with the next ### header (not the first inner fence) bounding the
 #   section — files that themselves contain markdown fences survive intact
 # - tolerates an optional language tag after the opening fence
-_EDIT_HEADER_RE = re.compile(r"^###\s*EDIT\s*:\s*([^\n]+?)\s*$", re.MULTILINE)
-_SECTION_HEADER_RE = re.compile(r"^###\s*(?:EDIT\s*:|SUMMARY|CANNOT[_\s]?FIX)", re.MULTILINE)
+_EDIT_HEADER_RE = re.compile(r"^###\s*(EDIT|REWRITE|DELETE)\s*:\s*([^\n]+?)\s*$", re.MULTILINE)
+_SECTION_HEADER_RE = re.compile(r"^###\s*(?:EDIT\s*:|REWRITE\s*:|DELETE\s*:|SUMMARY|CANNOT[_\s]?FIX)", re.MULTILINE)
+_SR_BLOCK_RE = re.compile(
+    r"<<<<<<<\s*SEARCH\s*\n(.*?)\n?=======\s*\n(.*?)\n?>>>>>>>\s*REPLACE",
+    re.DOTALL,
+)
 _FENCE_OPEN_RE = re.compile(r"^```[A-Za-z0-9_.+#\-]*\s*$", re.MULTILINE)
 _FENCE_CLOSE_RE = re.compile(r"^```\s*$", re.MULTILINE)
 _SUMMARY_RE = re.compile(r"###\s*SUMMARY\s*:?\s*(.+?)(?=\n\s*###|\Z)", re.DOTALL)
@@ -160,11 +204,16 @@ def _extract_edits(text: str) -> tuple[list[dict], list[str]]:
     edits: list[dict] = []
     parse_errors: list[str] = []
     for m in _EDIT_HEADER_RE.finditer(text):
-        path = m.group(1).strip()
+        header_kind = m.group(1).upper()
+        path = m.group(2).strip()
         sec_start = m.end()
         nxt = _SECTION_HEADER_RE.search(text, sec_start)
         sec_end = nxt.start() if nxt else len(text)
         section = text[sec_start:sec_end]
+
+        if header_kind == "DELETE":
+            edits.append({"path": path, "mode": "delete"})
+            continue
 
         open_m = _FENCE_OPEN_RE.search(section)
         if not open_m:
@@ -188,8 +237,69 @@ def _extract_edits(text: str) -> tuple[list[dict], list[str]]:
         # Strip a single extra trailing newline if the model added one inside the fence.
         if content.endswith("\n") and not content.endswith("\n\n"):
             content = content[:-1]
-        edits.append({"path": path, "content": content})
+
+        # SEARCH/REPLACE blocks inside an EDIT section → surgical diff mode.
+        # A fenced body without S/R markers stays a whole-file rewrite (the
+        # legacy format and the explicit ### REWRITE escape hatch).
+        blocks = [(g1, g2) for g1, g2 in _SR_BLOCK_RE.findall(content)]
+        if header_kind == "EDIT" and "<<<<<<<" in content and not blocks:
+            parse_errors.append(
+                f"{path}: malformed SEARCH/REPLACE markers — section skipped"
+            )
+            continue
+        if blocks:
+            edits.append({"path": path, "mode": "replace", "blocks": blocks})
+        else:
+            edits.append({"path": path, "mode": "rewrite", "content": content})
     return edits, parse_errors
+
+
+def _fuzzy_locate(content: str, search: str):
+    """Whitespace-tolerant fallback: match SEARCH lines against content lines
+    comparing stripped text. Returns (char_start, char_end) or None."""
+    c_lines = content.splitlines(keepends=True)
+    s_lines = [l.strip() for l in search.splitlines()]
+    if not s_lines:
+        return None
+    n = len(s_lines)
+    offsets = []
+    pos = 0
+    for line in c_lines:
+        offsets.append(pos)
+        pos += len(line)
+    for i in range(len(c_lines) - n + 1):
+        if all(c_lines[i + j].strip() == s_lines[j] for j in range(n)):
+            start = offsets[i]
+            end = offsets[i + n - 1] + len(c_lines[i + n - 1])
+            # Don't swallow the trailing newline of the last matched line.
+            if c_lines[i + n - 1].endswith("\n"):
+                end -= 1
+            return (start, end)
+    return None
+
+
+def _apply_search_replace(original: str, blocks: list) -> tuple[str | None, list[str]]:
+    """Apply SEARCH/REPLACE blocks to file content. Returns (new_content_or_None,
+    errors). Unmatched blocks error individually; matched ones still apply."""
+    content = original
+    errors: list[str] = []
+    applied = 0
+    for i, (search, replace) in enumerate(blocks, 1):
+        if not (search or "").strip():
+            errors.append(f"block {i}: empty SEARCH text")
+            continue
+        if search in content:
+            content = content.replace(search, replace, 1)
+            applied += 1
+            continue
+        loc = _fuzzy_locate(content, search)
+        if loc is None:
+            errors.append(f"block {i}: SEARCH text not found in current file")
+            continue
+        start, end = loc
+        content = content[:start] + replace + content[end:]
+        applied += 1
+    return (content if applied else None), errors
 
 
 def _paths_are_docs_only(paths: list[str]) -> bool:
@@ -599,13 +709,40 @@ async def run_fixer(http, events, conv_id: str, *,
         else:
             for edit in edits[:20]:  # safety cap
                 path = (edit.get("path") or "").strip()
-                content = edit.get("content")
-                if not path or content is None:
+                if not path:
                     continue
                 if path not in _allowed_set:
                     errors.append(f"Model tried out-of-scope edit on {path} — refused")
                     continue
                 rel = path[len(project_dir) + 1:] if path.startswith(project_dir + "/") else path
+                if edit.get("mode") == "delete":
+                    await _step("deleting", rel)
+                    ok, err_detail = await _delete_file_sandbox(http, path)
+                    if ok:
+                        files_touched.add(path)
+                        diffs.append({"path": path, "summary": f"deleted {rel}"})
+                    else:
+                        errors.append(f"Delete failed for {path} — {err_detail}")
+                    continue
+                if edit.get("mode") == "replace":
+                    # Re-read the FULL file as the apply base — the prompt view
+                    # may have been truncated, and S/R must never lose the rest.
+                    original = await _read_file_sandbox(http, path)
+                    if not original:
+                        errors.append(f"{rel}: could not read file to apply search/replace — skipped")
+                        continue
+                    new_content, sr_errors = _apply_search_replace(original, edit.get("blocks") or [])
+                    errors.extend(f"{rel}: {e}" for e in sr_errors)
+                    if new_content is None:
+                        continue
+                    if new_content == original:
+                        errors.append(f"{rel}: edits produced no change — skipped")
+                        continue
+                    content = new_content
+                else:
+                    content = edit.get("content")
+                    if content is None:
+                        continue
                 await _step("writing", rel)
                 ok, err_detail = await _write_file_sandbox(http, path, content)
                 if ok:

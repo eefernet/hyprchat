@@ -464,6 +464,7 @@ def reject_cloud(model_id: str) -> str:
 async def complete_chat(http, model_id: str, prompt: str, *,
                         temperature: float = 0.2, num_ctx: int = 16384,
                         num_predict: int | None = None,
+                        format_json: bool = False,
                         timeout: int = 600, ollama_url: str = "") -> str:
     """Single-prompt completion for agent (non-chat) calls.
 
@@ -498,18 +499,24 @@ async def complete_chat(http, model_id: str, prompt: str, *,
     ollama_options: dict = {"temperature": temperature, "num_ctx": num_ctx}
     if num_predict:
         ollama_options["num_predict"] = num_predict
+    payload: dict = {
+        "model": model_id,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": True,
+        "think": False,
+        "options": ollama_options,
+    }
+    if format_json:
+        # Constrains Ollama decoding to valid JSON — kills the parse-fallback
+        # cases. think stays disabled AND the thinking fallback below stays:
+        # format=json on a reasoning model can route output to thinking.
+        payload["format"] = "json"
     content_parts: list[str] = []
     thinking_parts: list[str] = []
     async with http.stream(
         "POST",
         f"{ollama_url}/api/chat",
-        json={
-            "model": model_id,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": True,
-            "think": False,
-            "options": ollama_options,
-        },
+        json=payload,
         timeout=timeout,
     ) as resp:
         if resp.status_code != 200:

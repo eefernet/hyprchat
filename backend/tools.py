@@ -215,6 +215,100 @@ async def _fix_budget_note(conv_id: str, source_role: str) -> str:
         return ""
 
 
+async def _git_checkpoint(http, project_dir: str, label: str) -> str:
+    """Commit the project state after a build/fix cycle (best-effort).
+
+    Every cycle becomes a rollback point: `git log` in the project dir is the
+    authoritative attempt history, and a bad fix can be reverted instead of
+    re-fixed. Initializes the repo on first use (greenfield builds have no
+    .git; uploads already get a baseline at upload time)."""
+    if not project_dir:
+        return ""
+    qd = shlex.quote(project_dir)
+    qlabel = shlex.quote((label or "checkpoint")[:120])
+    cmd = (
+        f"cd {qd} && "
+        "(git rev-parse --git-dir >/dev/null 2>&1 || git init -q) && "
+        "git add -A >/dev/null 2>&1; "
+        "(git diff --cached --quiet 2>/dev/null || "
+        f"git -c user.email=daedalus@hyprchat -c user.name=Daedalus commit -qm {qlabel}); "
+        "git log --oneline -1 2>/dev/null"
+    )
+    try:
+        r = await http.post(
+            f"{config.CODEBOX_URL}/command",
+            json={"command": cmd, "timeout": 30},
+            timeout=35,
+        )
+        if r.status_code == 200:
+            out = (r.json().get("stdout") or "").strip().splitlines()
+            return out[-1][:120] if out else ""
+    except Exception as e:
+        print(f"[git-checkpoint] failed (non-fatal): {e}")
+    return ""
+
+
+# Scoped FSM (#1 of the rebuild list): coder_workflows.state becomes
+# authoritative data driven by explicit events, instead of ad-hoc state
+# writes scattered across dispatchers. The exec_tool gate still derives its
+# blocking decisions from run history (battle-tested); this is the substrate
+# that lets it migrate to reading state directly later.
+_WF_EVENT_TRANSITIONS = {
+    "PLAN_DONE":     ("planning",  "not_ready"),
+    "BUILD_OK":      ("reviewing", "not_ready"),
+    "FIX_APPLIED":   ("reviewing", "not_ready"),
+    "REVIEW_CLEAN":  ("accepting", "not_ready"),
+    "REVIEW_ISSUES": ("fixing",    "not_ready"),
+    "ACCEPT_OK":     ("accepted",  "accepted"),
+    "ACCEPT_ISSUES": ("fixing",    "not_ready"),
+    "QA_DONE":       ("answering", "not_applicable"),
+}
+
+
+async def _apply_workflow_event(conv_id: str, event: str, *,
+                                run_id: str = "", project_id: str = "",
+                                mode_hint: str = "build_from_prompt",
+                                user_task: str = "") -> str:
+    """Single transition point for coder_workflows state.
+
+    Ensures a workflow row exists (greenfield builds previously had none, so
+    WorkflowCard showed nothing and state lived only in run-history
+    archaeology). Never overwrites a user cancel. Returns workflow id."""
+    state_artifact = _WF_EVENT_TRANSITIONS.get(event)
+    if not state_artifact or not conv_id:
+        return ""
+    state, artifact = state_artifact
+    try:
+        wf = None
+        if project_id:
+            wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
+        if not wf:
+            wf = await db.get_latest_coder_workflow(conv_id)
+        if not wf:
+            wf_id = f"cw-{uuid.uuid4().hex[:12]}"
+            await db.create_coder_workflow(
+                wf_id, conv_id, project_id=project_id or "",
+                mode=mode_hint, state=state,
+                user_task=(user_task or "")[:500],
+                active_run_id=run_id, artifact_status=artifact,
+            )
+            print(f"[wf-fsm] {event}: created {wf_id} state={state}", flush=True)
+            return wf_id
+        if wf.get("state") == "cancelled":
+            return wf.get("id", "")
+        kwargs = dict(state=state, artifact_status=artifact)
+        if run_id:
+            kwargs["active_run_id"] = run_id
+        if project_id:
+            kwargs["project_id"] = project_id
+        await db.update_coder_workflow(wf["id"], **kwargs)
+        print(f"[wf-fsm] {event}: {wf.get('id')} {wf.get('state')}->{state}", flush=True)
+        return wf.get("id", "")
+    except Exception as e:
+        print(f"[wf-fsm] {event} failed (non-fatal): {e}")
+        return ""
+
+
 # In-process cache of the most recent deep_research result per conversation.
 # The full research report only exists in the orchestrator's in-memory tool
 # history for the current turn — saved_events keeps a summary but not the
@@ -3713,12 +3807,37 @@ async def exec_tool(
             files = envelope.get("files_touched") or []
             status = envelope.get("status", "?")
             if status == "applied":
+                _ckpt = await _git_checkpoint(
+                    http, envelope.get("project_dir", "") or project_dir,
+                    f"aider applied: {(envelope.get('summary') or task or '')[:60]} "
+                    f"({envelope.get('run_id', '')})",
+                )
+                _auto_review_note = ""
+                try:
+                    _arv = await exec_tool(
+                        http, events, "run_review",
+                        {"project_dir": envelope.get("project_dir", "") or project_dir},
+                        conv_id,
+                        custom_tool_map=custom_tool_map,
+                        connector_tool_name_map=connector_tool_name_map,
+                        conv_model=conv_model,
+                        kb_ids=kb_ids,
+                        artifact_message_id=artifact_message_id,
+                    )
+                    _auto_review_note = (
+                        "\n\n=== AUTOMATIC VERIFICATION — run_review already ran; "
+                        "do NOT call it again, act on this result ===\n" + _arv
+                    )
+                except Exception as _are:
+                    _auto_review_note = (f"\n\n(automatic run_review failed: {_are} — "
+                                         f"call run_review manually)")
                 return (
                     f"AIDER APPLIED EDITS to {len(files)} file(s).\n"
                     + "\n".join(f"  - {f}" for f in files[:12])
                     + f"\nworkflow_id: {workflow_id or '(none)'}\n"
-                    "REQUIRED NEXT TOOL CALL: run_review. Aider only edits; Reviewer must verify build/tests before acceptance or delivery."
+                    + (f"Git checkpoint: {_ckpt}\n" if _ckpt else "")
                     + await _fix_budget_note(conv_id, envelope.get("source_role"))
+                    + _auto_review_note
                 )
             if status == "no_changes":
                 return (
@@ -3808,17 +3927,14 @@ async def exec_tool(
                                                   project_dir=project_dir,
                                                   project_id=project_id,
                                                   conv_model=conv_model)
-            try:
-                wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
-                if wf:
-                    await db.update_coder_workflow(
-                        wf["id"],
-                        state="accepting" if (envelope.get("status") == "clean") else "fixing",
-                        active_run_id=envelope.get("run_id", ""),
-                        artifact_status="not_ready",
-                    )
-            except Exception as _wfe:
-                print(f"[WORKFLOW] review state update failed: {_wfe}")
+            _rev_status_wf = (envelope.get("status") or "").lower()
+            if _rev_status_wf not in ("cancelled", ""):
+                await _apply_workflow_event(
+                    conv_id,
+                    "REVIEW_CLEAN" if _rev_status_wf == "clean" else "REVIEW_ISSUES",
+                    run_id=envelope.get("run_id", ""),
+                    project_id=project_id,
+                )
             # Format the envelope as a tool-result string the chat agent can read
             # without needing to know the JSON schema. Keep it compact.
             status = envelope.get("status", "?")
@@ -3967,18 +4083,14 @@ async def exec_tool(
                 conv_model=conv_model,
                 prior_acceptance_context=_prior_acc,
             )
-            try:
-                wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
-                if wf:
-                    _ast = (envelope.get("status") or "").lower()
-                    await db.update_coder_workflow(
-                        wf["id"],
-                        state="accepted" if _ast == "accepted" else "fixing",
-                        active_run_id=envelope.get("run_id", ""),
-                        artifact_status="accepted" if _ast == "accepted" else "not_ready",
-                    )
-            except Exception as _wfe:
-                print(f"[WORKFLOW] acceptance state update failed: {_wfe}")
+            _ast = (envelope.get("status") or "").lower()
+            if _ast not in ("cancelled", ""):
+                await _apply_workflow_event(
+                    conv_id,
+                    "ACCEPT_OK" if _ast == "accepted" else "ACCEPT_ISSUES",
+                    run_id=envelope.get("run_id", ""),
+                    project_id=project_id,
+                )
 
             a_status = envelope.get("status", "?")
             summary = envelope.get("summary", "")
@@ -4107,6 +4219,43 @@ async def exec_tool(
             files = envelope.get("files_touched") or []
             errors = envelope.get("errors") or []
             n_issues = envelope.get("issues_addressed", 0)
+            _ckpt_note = ""
+            _auto_review_note = ""
+            if f_status in ("applied", "partial"):
+                await _apply_workflow_event(
+                    conv_id, "FIX_APPLIED",
+                    run_id=envelope.get("run_id", ""),
+                )
+                _ckpt = await _git_checkpoint(
+                    http, envelope.get("project_dir", ""),
+                    f"fixer {f_status}: {(envelope.get('summary') or '')[:60]} "
+                    f"({envelope.get('run_id', '')})",
+                )
+                if _ckpt:
+                    _ckpt_note = f"\nGit checkpoint: {_ckpt}"
+                # #2 (scoped): code drives the verify step — review runs
+                # automatically after every fix instead of waiting for the
+                # model to route there (and occasionally flail on the way).
+                if not (envelope.get("source_role") == "acceptance"
+                        and envelope.get("docs_only")):
+                    try:
+                        _arv = await exec_tool(
+                            http, events, "run_review",
+                            {"project_dir": envelope.get("project_dir", "")},
+                            conv_id,
+                            custom_tool_map=custom_tool_map,
+                            connector_tool_name_map=connector_tool_name_map,
+                            conv_model=conv_model,
+                            kb_ids=kb_ids,
+                            artifact_message_id=artifact_message_id,
+                        )
+                        _auto_review_note = (
+                            "\n\n=== AUTOMATIC VERIFICATION — run_review already ran; "
+                            "do NOT call it again, act on this result ===\n" + _arv
+                        )
+                    except Exception as _are:
+                        _auto_review_note = (f"\n\n(automatic run_review failed: {_are} — "
+                                             f"call run_review manually)")
 
             if f_status == "applied":
                 lines = [
@@ -4120,11 +4269,13 @@ async def exec_tool(
                 lines.append("")
                 if envelope.get("source_role") == "acceptance" and envelope.get("docs_only"):
                     lines.append("REQUIRED NEXT TOOL CALL: run_acceptance_review (docs-only fix; build review may be skipped).")
-                else:
+                elif not _auto_review_note:
                     lines.append("REQUIRED NEXT TOOL CALL: run_review (no args needed — uses the "
                                  "active project). It will re-run the build/tests and tell you "
                                  "whether the fixes worked before acceptance runs again.")
-                return "\n".join(lines) + await _fix_budget_note(conv_id, envelope.get("source_role"))
+                return ("\n".join(lines) + _ckpt_note
+                        + await _fix_budget_note(conv_id, envelope.get("source_role"))
+                        + _auto_review_note)
             elif f_status == "partial":
                 lines = [
                     f"FIXER PARTIAL: applied {len(files)} edit(s) but {len(errors)} error(s) occurred.",
@@ -4136,9 +4287,11 @@ async def exec_tool(
                 lines.append("")
                 if envelope.get("source_role") == "acceptance" and envelope.get("docs_only"):
                     lines.append("REQUIRED NEXT TOOL CALL: run_acceptance_review to re-check docs-only acceptance fixes.")
-                else:
+                elif not _auto_review_note:
                     lines.append("REQUIRED NEXT TOOL CALL: run_review to see the current state of the project.")
-                return "\n".join(lines) + await _fix_budget_note(conv_id, envelope.get("source_role"))
+                return ("\n".join(lines) + _ckpt_note
+                        + await _fix_budget_note(conv_id, envelope.get("source_role"))
+                        + _auto_review_note)
             elif f_status == "skipped":
                 return f"FIXER SKIPPED: {envelope.get('summary', 'no issues to fix')}."
             else:
@@ -4333,6 +4486,13 @@ async def exec_tool(
                     kb_chunks=_kb_chunks,
                     conv_model=conv_model,
                 )
+                if (plan.get("status") or "") == "ok":
+                    await _apply_workflow_event(
+                        conv_id, "PLAN_DONE",
+                        run_id=plan.get("run_id", ""),
+                        project_id=plan.get("plan", {}).get("project_id", "") if isinstance(plan.get("plan"), dict) else "",
+                        user_task=task,
+                    )
                 return architect.format_plan_for_chat(plan)
 
             # ─── v1 path: existing prose plan_project ─────────────────
@@ -5390,24 +5550,33 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                         "model": coder_model,
                         "language": language,
                     })
+                    _ckpt = await _git_checkpoint(
+                        http, project_dir,
+                        f"builder {_final_status}: {task[:60]} ({_run_id})",
+                    )
+                    if _ckpt:
+                        print(f"[git-checkpoint] {_ckpt}")
+                    await _apply_workflow_event(
+                        conv_id, "BUILD_OK",
+                        run_id=_run_id, project_id=_project_id,
+                        user_task=task,
+                    )
                     try:
-                        wf = await db.get_latest_coder_workflow(conv_id, project_id=_project_id)
-                        if not wf:
-                            # The worker may have dedupe-renamed the project so
-                            # _project_id no longer matches the workflow row;
-                            # fall back to the conversation's latest workflow
-                            # (the update below writes the new project_id back).
-                            wf = await db.get_latest_coder_workflow(conv_id)
-                        if wf:
-                            await db.update_coder_workflow(
-                                wf["id"],
-                                state="reviewing",
-                                active_run_id=_run_id,
-                                artifact_status="not_ready",
-                                project_id=_project_id,
-                            )
-                    except Exception as _wfe:
-                        print(f"[WORKFLOW] builder state update failed: {_wfe}")
+                        _arv = await exec_tool(
+                            http, events, "run_review",
+                            {"project_dir": project_dir},
+                            conv_id,
+                            custom_tool_map=custom_tool_map,
+                            connector_tool_name_map=connector_tool_name_map,
+                            conv_model=conv_model,
+                            kb_ids=kb_ids,
+                            artifact_message_id=artifact_message_id,
+                        )
+                        resp += ("\n\n=== AUTOMATIC VERIFICATION — run_review already ran; "
+                                 "do NOT call it again, act on this result ===\n" + _arv)
+                    except Exception as _are:
+                        resp += (f"\n\n(automatic run_review failed: {_are} — "
+                                 f"call run_review manually)")
                     return resp
                 else:
                     # Agent ran but produced no files — treat as failure
