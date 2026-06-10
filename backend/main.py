@@ -36,7 +36,14 @@ from agents.personas import seed_coder_bot as _seed_coder_bot, seed_coder_bot_v2
 import hf as hf_module
 from hf import parse_ollama_progress
 import rag
-from research import REPORT_TEMPLATES, REPORT_TEMPLATE_MAP, fetch_bytes_safely, run_research_report
+from research import (
+    REPORT_TEMPLATES,
+    REPORT_TEMPLATE_MAP,
+    close_web_fetch_client,
+    fetch_bytes_safely,
+    run_research_report,
+    web_get,
+)
 
 # ============================================================
 # SETTINGS — persistent JSON file
@@ -292,6 +299,7 @@ async def lifespan(app: FastAPI):
         if task:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+    await close_web_fetch_client()
 
 app = FastAPI(title="HyprChat", version="2.0.0", lifespan=lifespan)
 
@@ -307,10 +315,78 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-HyprChat-User", "X-HyprChat-Session"],
 )
 
-HTTP_VERIFY_SSL = os.getenv("HTTP_VERIFY_SSL", "true").lower() == "true"
+_USER_SCOPED_PREFIXES = (
+    "/api/conversations",
+    "/api/chat/stream",
+    "/api/council/chat/stream",
+    "/api/coder",
+    "/api/runs",
+    "/api/knowledge-bases",
+    "/api/tools",
+    "/api/model-configs",
+    "/api/workspaces",
+    "/api/memory",
+    "/api/research/reports",
+    "/api/councils",
+    "/api/analytics",
+    "/api/events",
+)
+
+
+def _request_user_id(request: Request) -> str:
+    raw = (
+        request.headers.get("x-hyprchat-user")
+        or request.query_params.get("user_id")
+        or db.DEFAULT_USER_ID
+    )
+    raw = re.sub(r"[^a-zA-Z0-9_.:-]", "", str(raw or ""))[:80]
+    return raw or db.DEFAULT_USER_ID
+
+
+def _request_session_token(request: Request) -> str:
+    return (
+        request.headers.get("x-hyprchat-session")
+        or request.query_params.get("session")
+        or ""
+    )
+
+
+def _is_user_scoped_path(path: str) -> bool:
+    return any(path.startswith(prefix) for prefix in _USER_SCOPED_PREFIXES)
+
+
+async def _validated_request_user(request: Request) -> dict:
+    user_id = _request_user_id(request)
+    user = await db.get_user_private(user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if user.get("password_hash") and not await db.validate_user_session(user_id, _request_session_token(request)):
+        raise HTTPException(401, "Password required")
+    return user
+
+
+@app.middleware("http")
+async def user_context_middleware(request: Request, call_next):
+    user_id = _request_user_id(request)
+    user = await db.get_user_private(user_id)
+    if not user:
+        user_id = db.DEFAULT_USER_ID
+        user = await db.get_user_private(user_id)
+    valid = True
+    if user and user.get("password_hash"):
+        valid = await db.validate_user_session(user_id, _request_session_token(request))
+    if _is_user_scoped_path(request.url.path) and not valid:
+        return JSONResponse({"detail": "Password required"}, status_code=401)
+    token = db.set_current_user_id(user_id if valid else db.DEFAULT_USER_ID)
+    try:
+        return await call_next(request)
+    finally:
+        db.reset_current_user_id(token)
+
+HTTP_VERIFY_SSL = config.HTTP_VERIFY_SSL
 http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0), verify=HTTP_VERIFY_SSL)
 
 # Workspace helpers only do short classification/title/suggestion work. Keep
@@ -345,6 +421,15 @@ class ChatRequest(BaseModel):
     # Metadata for the latest user message (e.g. {"images":[{name,dataUrl,mime}], "pdfs":[...]})
     # so image previews survive page reload.
     user_metadata: Optional[dict] = None
+    # Optional workspace context. When memory is enabled for this workspace, the
+    # chat agent injects accepted workspace memories and queues new suggestions.
+    workspace_id: Optional[str] = None
+    # Optional global HyprChat memory context. When true, the chat agent injects
+    # accepted user-profile/global memories and queues new suggestions.
+    use_memories: Optional[bool] = None
+    # Ghost/private mode. When true, this stream must not persist messages,
+    # workspace memories, token usage, or RAG/research memory for the turn.
+    ephemeral: bool = False
 
 class ExecuteRequest(BaseModel):
     conversation_id: Optional[str] = None
@@ -380,6 +465,7 @@ class ConversationCreate(BaseModel):
     model: str = config.DEFAULT_MODEL
     system_prompt: str = ""
     model_config_id: Optional[str] = None
+    use_memories: Optional[str] = "0"
 
 class ConversationUpdate(BaseModel):
     title: Optional[str] = None
@@ -392,6 +478,7 @@ class ConversationUpdate(BaseModel):
     council_config_id: Optional[str] = None
     model_config_id: Optional[str] = None
     pinned: Optional[str] = None
+    use_memories: Optional[str] = None
 
 class CouncilCreate(BaseModel):
     name: str = "My Council"
@@ -477,6 +564,82 @@ class ConversationSearchRequest(BaseModel):
 
 class ForkRequest(BaseModel):
     message_id: int
+
+class UserCreate(BaseModel):
+    name: str
+    password: Optional[str] = ""
+
+class UserLogin(BaseModel):
+    user_id: str
+    password: Optional[str] = ""
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    password: Optional[str] = None
+    clear_password: Optional[bool] = False
+
+
+# ============================================================
+# USERS — lightweight local profile switching
+# ============================================================
+@app.get("/api/users")
+async def list_users_ep():
+    return {"users": await db.list_users()}
+
+
+@app.get("/api/users/current")
+async def current_user_ep(request: Request):
+    user = await _validated_request_user(request)
+    return {"user": await db.get_user(user["id"])}
+
+
+@app.post("/api/users")
+async def create_user_ep(req: UserCreate):
+    user = await db.create_user(req.name, req.password or "")
+    return {"user": user}
+
+
+@app.post("/api/users/login")
+async def login_user_ep(req: UserLogin):
+    user, session_token = await db.login_user(req.user_id, req.password or "")
+    if not user:
+        raise HTTPException(401, "Invalid user or password")
+    return {"user": user, "session_token": session_token}
+
+
+@app.post("/api/users/logout")
+async def logout_user_ep(request: Request):
+    user_id = _request_user_id(request)
+    await db.logout_user_session(user_id, _request_session_token(request) or None)
+    return {"ok": True}
+
+
+@app.patch("/api/users/{user_id}")
+async def update_user_ep(user_id: str, req: UserUpdate, request: Request):
+    current = await _validated_request_user(request)
+    user, _ = await db.update_user(
+        user_id,
+        name=req.name,
+        password=req.password,
+        clear_password=bool(req.clear_password),
+    )
+    if not user:
+        raise HTTPException(404, "User not found")
+    session_token = None
+    if user_id == current["id"] and req.password is not None and not req.clear_password and req.password:
+        session_token = await db.create_user_session(user_id)
+    return {"user": user, "session_token": session_token}
+
+
+@app.delete("/api/users/{user_id}")
+async def delete_user_ep(user_id: str, request: Request):
+    await _validated_request_user(request)
+    if user_id == db.DEFAULT_USER_ID:
+        raise HTTPException(400, "The Main user cannot be deleted")
+    ok = await db.delete_user(user_id)
+    if not ok:
+        raise HTTPException(404, "User not found")
+    return {"ok": True}
 
 
 # ============================================================
@@ -678,9 +841,18 @@ async def chat_stream(req: ChatRequest):
     _all_custom = await db.get_tools()
     custom_tool_map: dict = {t["name"]: t for t in _all_custom}
     custom_tool_id_map: dict = {t["id"]: t for t in _all_custom}
+    user_id = db.current_user_id()
+
+    async def _stream():
+        token = db.set_current_user_id(user_id)
+        try:
+            async for chunk in chat_stream_generate(req, http, events, custom_tool_map, custom_tool_id_map):
+                yield chunk
+        finally:
+            db.reset_current_user_id(token)
 
     return StreamingResponse(
-        chat_stream_generate(req, http, events, custom_tool_map, custom_tool_id_map),
+        _stream(),
         media_type="text/event-stream",
     )
 
@@ -1426,8 +1598,10 @@ async def _create_and_start_research_report(req: ResearchReportCreate) -> dict:
         inputs=req.inputs or [],
         status="queued",
     )
+    user_id = db.current_user_id()
 
     async def _runner():
+        token = db.set_current_user_id(user_id)
         try:
             await run_research_report(
                 http, config.OLLAMA_URL, config.DEFAULT_MODEL, events, report_id,
@@ -1455,6 +1629,8 @@ async def _create_and_start_research_report(req: ResearchReportCreate) -> dict:
                 "timestamp": time.time(),
             })
             await events.emit(report_id, "research_error", {"status": "failed", "error": str(e)})
+        finally:
+            db.reset_current_user_id(token)
 
     asyncio.create_task(_runner())
     return await db.get_research_report(report_id)
@@ -1659,7 +1835,7 @@ async def cancel_coder_workflow(workflow_id: str):
 @app.post("/api/conversations")
 async def create_conversation(req: ConversationCreate):
     id = f"conv-{uuid.uuid4().hex[:12]}"
-    await db.create_conversation(id, req.title, req.model, req.system_prompt, req.model_config_id)
+    await db.create_conversation(id, req.title, req.model, req.system_prompt, req.model_config_id, req.use_memories or "0")
     return {"id": id, **req.model_dump()}
 
 
@@ -1691,20 +1867,29 @@ async def delete_conversation(conv_id: str):
 
 @app.delete("/api/conversations")
 async def delete_all_conversations():
-    """Delete ALL conversations, messages, and related data."""
+    """Delete all conversations for the active local user/profile."""
     conn = await db.get_db()
+    user_id = db.current_user_id()
     try:
-        await conn.execute("DELETE FROM messages")
-        await conn.execute("DELETE FROM conversation_files")
-        await conn.execute("DELETE FROM workspace_conversations")
-        await conn.execute("DELETE FROM conversations")
+        row = await conn.execute_fetchall("SELECT COUNT(*) AS n FROM conversations WHERE user_id=?", (user_id,))
+        count = row[0]["n"] if row else 0
+        await conn.execute(
+            "DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
+            (user_id,),
+        )
+        await conn.execute(
+            "DELETE FROM conversation_files WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
+            (user_id,),
+        )
+        await conn.execute(
+            "DELETE FROM workspace_conversations WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
+            (user_id,),
+        )
+        await conn.execute("DELETE FROM conversations WHERE user_id=?", (user_id,))
         await conn.commit()
-        cursor = await conn.execute("SELECT changes()")
-        row = await cursor.fetchone()
-        count = row[0] if row else 0
     finally:
         await conn.close()
-    print(f"[Cleanup] Deleted all conversations and related data")
+    print(f"[Cleanup] Deleted {count} conversations and related data for user {user_id}")
     return {"deleted": count}
 
 
@@ -1783,6 +1968,9 @@ async def update_kb(kb_id: str, req: KBCreate):
 
 @app.delete("/api/knowledge-bases/{kb_id}")
 async def delete_kb(kb_id: str):
+    owned = next((k for k in await db.get_kbs() if k["id"] == kb_id), None)
+    if not owned:
+        raise HTTPException(404, "KB not found")
     kb_dir = os.path.join(config.KB_DIR, kb_id)
     if os.path.exists(kb_dir):
         shutil.rmtree(kb_dir)
@@ -1801,6 +1989,9 @@ _indexing_status: dict[str, dict] = {}  # key: "kb_id:filename" → status dict
 
 @app.post("/api/knowledge-bases/{kb_id}/files")
 async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
+    owned = next((k for k in await db.get_kbs() if k["id"] == kb_id), None)
+    if not owned:
+        raise HTTPException(404, "KB not found")
     kb_dir = os.path.join(config.KB_DIR, kb_id)
     os.makedirs(kb_dir, exist_ok=True)
 
@@ -1840,6 +2031,9 @@ async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
 @app.get("/api/knowledge-bases/{kb_id}/files/{filename}/status")
 async def get_file_index_status(kb_id: str, filename: str):
     """Check background indexing status for a file."""
+    owned = next((k for k in await db.get_kbs() if k["id"] == kb_id), None)
+    if not owned:
+        raise HTTPException(404, "KB not found")
     status_key = f"{kb_id}:{filename}"
     status = _indexing_status.get(status_key)
     if status:
@@ -1853,9 +2047,15 @@ async def get_file_index_status(kb_id: str, filename: str):
 @app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/preview")
 async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200):
     """Preview first N lines of a KB file."""
+    user_id = db.current_user_id()
     _db = await db.get_db()
     try:
-        cursor = await _db.execute("SELECT filename FROM kb_files WHERE id = ? AND kb_id = ?", (file_id, kb_id))
+        cursor = await _db.execute(
+            """SELECT f.filename FROM kb_files f
+               JOIN knowledge_bases kb ON kb.id=f.kb_id
+               WHERE f.id=? AND f.kb_id=? AND kb.user_id=?""",
+            (file_id, kb_id, user_id),
+        )
         row = await cursor.fetchone()
     finally:
         await _db.close()
@@ -1881,9 +2081,15 @@ async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200):
 @app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/pdf-text")
 async def pdf_text_preview(kb_id: str, file_id: int, pages: int = 10):
     """Extract text from first N pages of a PDF for quick preview."""
+    user_id = db.current_user_id()
     _db = await db.get_db()
     try:
-        cursor = await _db.execute("SELECT filename FROM kb_files WHERE id = ? AND kb_id = ?", (file_id, kb_id))
+        cursor = await _db.execute(
+            """SELECT f.filename FROM kb_files f
+               JOIN knowledge_bases kb ON kb.id=f.kb_id
+               WHERE f.id=? AND f.kb_id=? AND kb.user_id=?""",
+            (file_id, kb_id, user_id),
+        )
         row = await cursor.fetchone()
     finally:
         await _db.close()
@@ -1942,9 +2148,15 @@ async def extract_pdf(file: UploadFile = File(...)):
 @app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/raw")
 async def raw_kb_file(kb_id: str, file_id: int):
     """Serve a KB file raw (for PDF/image preview in browser)."""
+    user_id = db.current_user_id()
     _db = await db.get_db()
     try:
-        cursor = await _db.execute("SELECT filename FROM kb_files WHERE id = ? AND kb_id = ?", (file_id, kb_id))
+        cursor = await _db.execute(
+            """SELECT f.filename FROM kb_files f
+               JOIN knowledge_bases kb ON kb.id=f.kb_id
+               WHERE f.id=? AND f.kb_id=? AND kb.user_id=?""",
+            (file_id, kb_id, user_id),
+        )
         row = await cursor.fetchone()
     finally:
         await _db.close()
@@ -1963,12 +2175,20 @@ async def raw_kb_file(kb_id: str, file_id: int):
 @app.delete("/api/knowledge-bases/files/{file_id}")
 async def delete_kb_file(file_id: int):
     # Get file info before deleting so we can remove from RAG index
+    user_id = db.current_user_id()
     _db = await db.get_db()
     try:
-        cursor = await _db.execute("SELECT kb_id, filename FROM kb_files WHERE id = ?", (file_id,))
+        cursor = await _db.execute(
+            """SELECT f.kb_id, f.filename FROM kb_files f
+               JOIN knowledge_bases kb ON kb.id=f.kb_id
+               WHERE f.id=? AND kb.user_id=?""",
+            (file_id, user_id),
+        )
         row = await cursor.fetchone()
     finally:
         await _db.close()
+    if not row:
+        raise HTTPException(404, "File not found")
 
     await db.delete_kb_file(file_id)
 
@@ -2354,6 +2574,9 @@ async def fix_model_template(model_name: str, body: dict = Body(default={})):
 @app.post("/api/model-configs/{mc_id}/avatar")
 async def upload_persona_avatar(mc_id: str, file: UploadFile = File(...)):
     """Upload an avatar image for a persona/model config."""
+    existing = await db.get_model_config(mc_id)
+    if not existing:
+        raise HTTPException(404, "Model config not found")
     avatar_dir = os.path.join(config.UPLOAD_DIR, "avatars")
     os.makedirs(avatar_dir, exist_ok=True)
 
@@ -2368,7 +2591,6 @@ async def upload_persona_avatar(mc_id: str, file: UploadFile = File(...)):
     with open(avatar_path, "wb") as f:
         f.write(content)
 
-    existing = await db.get_model_config(mc_id)
     params = existing.get("parameters", {}) if existing else {}
     await db.update_model_config(mc_id, parameters={**params, "avatar": f"/api/avatars/{mc_id}.{ext}"})
     return {"avatar_url": f"/api/avatars/{mc_id}.{ext}"}
@@ -2452,6 +2674,419 @@ async def add_research_report_to_ws(ws_id: str, body: dict = Body(...)):
 async def remove_research_report_from_ws(ws_id: str, report_id: str):
     await db.remove_research_report_from_workspace(ws_id, report_id)
     return {"ok": True}
+
+
+def _extract_memory_json_array(text: str) -> list:
+    raw = re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL).strip()
+    start, end = raw.find("["), raw.rfind("]")
+    if start == -1 or end <= start:
+        return []
+    try:
+        data = json.loads(raw[start:end + 1])
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _looks_like_secret_memory(text: str) -> bool:
+    return bool(re.search(r"(password|api[_ -]?key|secret|private key|token)\s*[:=]", text or "", re.I))
+
+
+@app.get("/api/memory/profile")
+async def get_memory_profile_ep():
+    return await db.get_user_profile()
+
+
+@app.patch("/api/memory/profile")
+async def update_memory_profile_ep(body: dict = Body(...)):
+    return await db.update_user_profile(**body)
+
+
+@app.get("/api/memory/memories")
+async def list_global_memories_ep(
+    status: str = Query("all"),
+    type: str = Query("all"),
+):
+    memories = await db.list_global_memories(
+        status=status,
+        memory_type=type,
+        include_archived=True,
+    )
+    return {"memories": memories}
+
+
+@app.post("/api/memory/memories")
+async def create_global_memory_ep(body: dict = Body(...)):
+    try:
+        mem = await db.create_global_memory(
+            content=body.get("content", ""),
+            memory_type=body.get("type", "semantic"),
+            status=body.get("status", "suggested"),
+            category=body.get("category", "General"),
+            importance=body.get("importance", 3),
+            pinned=body.get("pinned", 0),
+            source_conv_id=body.get("source_conv_id") or body.get("source_conversation_id"),
+            source_conversation_id=body.get("source_conversation_id") or body.get("source_conv_id"),
+            source_message_id=body.get("source_message_id"),
+            confidence=body.get("confidence", 0),
+            valid_from=body.get("valid_from"),
+            valid_until=body.get("valid_until"),
+            supersedes_id=body.get("supersedes_id"),
+            entities=body.get("entities") or [],
+            metadata=body.get("metadata") or {},
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return mem
+
+
+@app.patch("/api/memory/memories/{memory_id}")
+async def update_global_memory_ep(memory_id: str, body: dict = Body(...)):
+    mem = await db.update_global_memory(memory_id, **body)
+    if not mem:
+        raise HTTPException(404, "Memory not found")
+    return mem
+
+
+@app.delete("/api/memory/memories/{memory_id}")
+async def delete_global_memory_ep(memory_id: str):
+    ok = await db.delete_global_memory(memory_id)
+    if not ok:
+        raise HTTPException(404, "Memory not found")
+    return {"ok": True}
+
+
+@app.post("/api/memory/memories/{memory_id}/accept")
+async def accept_global_memory_ep(memory_id: str, body: dict = Body(default={})):
+    mem = await db.accept_global_memory(memory_id, supersedes_id=body.get("supersedes_id"))
+    if not mem:
+        raise HTTPException(404, "Memory not found")
+    return mem
+
+
+@app.post("/api/memory/memories/{memory_id}/reject")
+async def reject_global_memory_ep(memory_id: str):
+    mem = await db.reject_global_memory(memory_id)
+    if not mem:
+        raise HTTPException(404, "Memory not found")
+    return mem
+
+
+@app.post("/api/memory/suggest")
+async def suggest_global_memories_ep(body: dict = Body(default={})):
+    conv_id = body.get("conversation_id")
+    conv_refs = []
+    if conv_id:
+        conv_refs = [{"id": conv_id}]
+    else:
+        conv_refs = [
+            c for c in await db.get_conversations(limit=20)
+            if str(c.get("use_memories") or "0").lower() in {"1", "true", "yes", "on"}
+        ][:4]
+
+    transcript_parts = []
+    for conv_ref in conv_refs:
+        conv = await db.get_conversation(conv_ref.get("id", ""))
+        if not conv:
+            continue
+        bits = [f"Conversation: {conv.get('title') or conv.get('id')}"]
+        for msg in (conv.get("messages") or [])[-10:]:
+            if msg.get("role") not in {"user", "assistant"}:
+                continue
+            meta = msg.get("metadata") or {}
+            if meta.get("persona_first_message"):
+                continue
+            content = (msg.get("content") or "").strip()
+            if not content:
+                continue
+            role = "User" if msg.get("role") == "user" else "Assistant"
+            bits.append(f"{role}: {content[:2500]}")
+        if len(bits) > 1:
+            transcript_parts.append("\n".join(bits))
+
+    transcript = "\n\n---\n\n".join(transcript_parts)[:18000]
+    if len(transcript) < 80:
+        return {"created": 0, "memories": [], "message": "No recent memory-enabled chat content to scan."}
+
+    profile = await db.get_user_profile()
+    profile_hint = json.dumps({
+        "display_name": profile.get("display_name", ""),
+        "interests": profile.get("interests", []),
+        "bio": profile.get("bio", ""),
+    }, ensure_ascii=False)[:2000]
+    model = body.get("model") or getattr(config, "WORKSPACE_MODEL", "") or config.DEFAULT_MODEL
+    prompt = (
+        "You extract useful long-term personal memories for a cross-chat AI assistant.\n"
+        "Return ONLY a JSON array with 0-8 objects. Do not include markdown.\n"
+        "Each object shape:\n"
+        "{\"type\":\"semantic|episodic|procedural\",\"content\":\"one durable memory\","
+        "\"importance\":1-5,\"confidence\":0-1,\"entities\":[\"short names\"],"
+        "\"reason\":\"why it should be remembered\"}\n\n"
+        "Rules:\n"
+        "- Suggest only durable information useful across many future chats.\n"
+        "- Good semantic memories include user preferences, personal background, important people, birthdays, interests, names, and stable constraints.\n"
+        "- Good episodic memories include dated user-confirmed events, decisions, or outcomes.\n"
+        "- Good procedural memories include reusable workflows or recurring user instructions.\n"
+        "- Do not save secrets, credentials, private keys, passwords, raw tokens, or credential-bearing URLs.\n"
+        "- Do not infer sensitive facts; only save what the user clearly states or confirms.\n"
+        "- Do not save generic assistant claims or one-off trivia.\n"
+        "- Prefer fewer high-value memories over many weak ones.\n\n"
+        f"Existing user profile summary: {profile_hint}\n\n{transcript}"
+    )
+
+    try:
+        r = await http.post(
+            f"{config.OLLAMA_URL}/api/generate",
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "think": False,
+                "options": {"temperature": 0.1, "num_ctx": _WORKSPACE_HELPER_NUM_CTX, "num_predict": 900},
+            },
+            timeout=60,
+        )
+        if r.status_code != 200:
+            detail = r.text[:240] if r.text else f"HTTP {r.status_code}"
+            raise HTTPException(r.status_code, f"Ollama error ({model}): {detail}")
+        suggestions = _extract_memory_json_array(r.json().get("response", ""))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Memory scan failed: {e}")
+
+    existing = await db.list_global_memories(status="all")
+    existing_norm = {re.sub(r"\s+", " ", (m.get("content") or "").strip().lower()) for m in existing}
+    created = []
+    for item in suggestions[:8]:
+        if not isinstance(item, dict):
+            continue
+        content = re.sub(r"\s+", " ", str(item.get("content") or "").strip())
+        if len(content) < 12 or len(content) > 800:
+            continue
+        norm = content.lower()
+        if norm in existing_norm or _looks_like_secret_memory(content):
+            continue
+        mem = await db.create_global_memory(
+            content=content,
+            memory_type=item.get("type", "semantic"),
+            status="suggested",
+            importance=item.get("importance", 3),
+            source_conv_id=conv_id,
+            source_conversation_id=conv_id,
+            confidence=item.get("confidence", 0),
+            entities=item.get("entities") if isinstance(item.get("entities"), list) else [],
+            metadata={"reason": item.get("reason", ""), "suggested_by": "global_scan", "model": model},
+        )
+        existing_norm.add(norm)
+        created.append(mem)
+
+    return {"created": len(created), "memories": created}
+
+
+@app.get("/api/workspaces/{ws_id}/memories")
+async def list_workspace_memories_ep(
+    ws_id: str,
+    status: str = Query("all"),
+    type: str = Query("all"),
+):
+    if not await db.get_workspace_basic(ws_id):
+        raise HTTPException(404, "Workspace not found")
+    memories = await db.list_workspace_memories(
+        ws_id,
+        status=status,
+        memory_type=type,
+        include_archived=True,
+    )
+    return {"memories": memories}
+
+
+@app.post("/api/workspaces/{ws_id}/memories/suggest")
+async def suggest_workspace_memories_ep(ws_id: str, body: dict = Body(default={})):
+    ws = await db.get_workspace(ws_id)
+    if not ws:
+        raise HTTPException(404, "Workspace not found")
+
+    conv_id = body.get("conversation_id")
+    conv_refs = []
+    if conv_id:
+        conv_refs = [{"id": conv_id}]
+    else:
+        conv_refs = sorted(
+            ws.get("conversations", []),
+            key=lambda c: c.get("updated_at") or "",
+            reverse=True,
+        )[:4]
+
+    transcript_parts = []
+    for conv_ref in conv_refs:
+        conv = await db.get_conversation(conv_ref.get("id", ""))
+        if not conv:
+            continue
+        bits = [f"Conversation: {conv.get('title') or conv.get('id')}"]
+        for msg in (conv.get("messages") or [])[-8:]:
+            if msg.get("role") not in {"user", "assistant"}:
+                continue
+            meta = msg.get("metadata") or {}
+            if meta.get("persona_first_message"):
+                continue
+            content = (msg.get("content") or "").strip()
+            if not content:
+                continue
+            role = "User" if msg.get("role") == "user" else "Assistant"
+            bits.append(f"{role}: {content[:2500]}")
+        if len(bits) > 1:
+            transcript_parts.append("\n".join(bits))
+
+    transcript = "\n\n---\n\n".join(transcript_parts)[:18000]
+    if len(transcript) < 80:
+        return {"created": 0, "memories": [], "message": "No recent workspace chat content to scan."}
+
+    model = body.get("model") or getattr(config, "WORKSPACE_MODEL", "") or config.DEFAULT_MODEL
+    prompt = (
+        "You extract useful long-term workspace memories from recent chat transcript.\n"
+        "Return ONLY a JSON array with 0-8 objects. Do not include markdown.\n"
+        "Each object shape:\n"
+        "{\"type\":\"semantic|episodic|procedural\",\"content\":\"one durable memory\","
+        "\"importance\":1-5,\"confidence\":0-1,\"entities\":[\"short names\"],"
+        "\"reason\":\"why it should be remembered\"}\n\n"
+        "Rules:\n"
+        "- Suggest only durable, reusable information for this workspace.\n"
+        "- semantic = stable facts/preferences/constraints.\n"
+        "- episodic = dated decisions, outcomes, blockers, or events.\n"
+        "- procedural = repeatable workflows, commands, deployment steps, lessons learned.\n"
+        "- Do not save secrets, credentials, private keys, passwords, or raw tokens.\n"
+        "- Do not save generic facts that are obvious from the chat app.\n"
+        "- Prefer fewer high-value memories over many weak ones.\n\n"
+        f"Workspace: {ws.get('name') or ws_id}\n\n{transcript}"
+    )
+
+    try:
+        r = await http.post(
+            f"{config.OLLAMA_URL}/api/generate",
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "think": False,
+                "options": {"temperature": 0.1, "num_ctx": _WORKSPACE_HELPER_NUM_CTX, "num_predict": 900},
+            },
+            timeout=60,
+        )
+        if r.status_code != 200:
+            detail = r.text[:240] if r.text else f"HTTP {r.status_code}"
+            raise HTTPException(r.status_code, f"Ollama error ({model}): {detail}")
+        suggestions = _extract_memory_json_array(r.json().get("response", ""))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Memory scan failed: {e}")
+
+    existing = await db.list_workspace_memories(ws_id, status="all")
+    existing_norm = {re.sub(r"\s+", " ", (m.get("content") or "").strip().lower()) for m in existing}
+    created = []
+    for item in suggestions[:8]:
+        if not isinstance(item, dict):
+            continue
+        content = re.sub(r"\s+", " ", str(item.get("content") or "").strip())
+        if len(content) < 12 or len(content) > 800:
+            continue
+        norm = content.lower()
+        if norm in existing_norm:
+            continue
+        if re.search(r"(password|api[_ -]?key|secret|private key|token)\s*[:=]", content, re.I):
+            continue
+        mem = await db.create_workspace_memory(
+            ws_id,
+            content=content,
+            memory_type=item.get("type", "semantic"),
+            status="suggested",
+            importance=item.get("importance", 3),
+            source_conv_id=conv_id,
+            source_conversation_id=conv_id,
+            confidence=item.get("confidence", 0),
+            entities=item.get("entities") if isinstance(item.get("entities"), list) else [],
+            metadata={"reason": item.get("reason", ""), "suggested_by": "workspace_scan", "model": model},
+        )
+        existing_norm.add(norm)
+        created.append(mem)
+
+    return {"created": len(created), "memories": created}
+
+
+@app.post("/api/workspaces/{ws_id}/memories")
+async def create_workspace_memory_ep(ws_id: str, body: dict = Body(...)):
+    if not await db.get_workspace_basic(ws_id):
+        raise HTTPException(404, "Workspace not found")
+    try:
+        mem = await db.create_workspace_memory(
+            ws_id,
+            content=body.get("content", ""),
+            memory_type=body.get("type", "semantic"),
+            status=body.get("status", "suggested"),
+            category=body.get("category", "General"),
+            importance=body.get("importance", 3),
+            pinned=body.get("pinned", 0),
+            source_conv_id=body.get("source_conv_id") or body.get("source_conversation_id"),
+            source_conversation_id=body.get("source_conversation_id") or body.get("source_conv_id"),
+            source_message_id=body.get("source_message_id"),
+            confidence=body.get("confidence", 0),
+            valid_from=body.get("valid_from"),
+            valid_until=body.get("valid_until"),
+            supersedes_id=body.get("supersedes_id"),
+            entities=body.get("entities") or [],
+            metadata=body.get("metadata") or {},
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return mem
+
+
+@app.patch("/api/workspaces/{ws_id}/memories/{memory_id}")
+async def update_workspace_memory_ep(ws_id: str, memory_id: str, body: dict = Body(...)):
+    mem = await db.update_workspace_memory(memory_id, ws_id, **body)
+    if not mem:
+        raise HTTPException(404, "Memory not found")
+    return mem
+
+
+@app.delete("/api/workspaces/{ws_id}/memories/{memory_id}")
+async def delete_workspace_memory_ep(ws_id: str, memory_id: str):
+    ok = await db.delete_workspace_memory(memory_id, ws_id)
+    if not ok:
+        raise HTTPException(404, "Memory not found")
+    return {"ok": True}
+
+
+@app.post("/api/workspaces/{ws_id}/memories/{memory_id}/accept")
+async def accept_workspace_memory_ep(ws_id: str, memory_id: str, body: dict = Body(default={})):
+    mem = await db.accept_workspace_memory(memory_id, ws_id, supersedes_id=body.get("supersedes_id"))
+    if not mem:
+        raise HTTPException(404, "Memory not found")
+    return mem
+
+
+@app.post("/api/workspaces/{ws_id}/memories/{memory_id}/reject")
+async def reject_workspace_memory_ep(ws_id: str, memory_id: str):
+    mem = await db.reject_workspace_memory(memory_id, ws_id)
+    if not mem:
+        raise HTTPException(404, "Memory not found")
+    return mem
+
+
+@app.get("/api/workspaces/{ws_id}/memory-blocks")
+async def get_workspace_memory_blocks_ep(ws_id: str):
+    if not await db.get_workspace_basic(ws_id):
+        raise HTTPException(404, "Workspace not found")
+    return {"blocks": await db.get_workspace_memory_blocks(ws_id)}
+
+
+@app.patch("/api/workspaces/{ws_id}/memory-blocks")
+async def update_workspace_memory_blocks_ep(ws_id: str, body: dict = Body(...)):
+    if not await db.get_workspace_basic(ws_id):
+        raise HTTPException(404, "Workspace not found")
+    blocks = await db.update_workspace_memory_blocks(ws_id, body.get("blocks") or [])
+    return {"blocks": blocks}
 
 
 @app.post("/api/workspaces/{ws_id}/analyze")
@@ -3076,9 +3711,18 @@ async def council_chat_stream_ep(req: CouncilChatRequest):
 
     # Merge kb_ids from council config and request
     kb_ids = list(set((council.get("kb_ids") or []) + (req.kb_ids or [])))
+    user_id = db.current_user_id()
+
+    async def _stream():
+        token = db.set_current_user_id(user_id)
+        try:
+            async for chunk in stream_council_chat(http, events, council, req.messages, req.conversation_id, req.quick_search, kb_ids=kb_ids):
+                yield chunk
+        finally:
+            db.reset_current_user_id(token)
 
     return StreamingResponse(
-        stream_council_chat(http, events, council, req.messages, req.conversation_id, req.quick_search, kb_ids=kb_ids),
+        _stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
@@ -3098,7 +3742,8 @@ async def img_proxy(u: str):
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="bad url")
     try:
-        r = await http.get(
+        r = await web_get(
+            http,
             u, timeout=8, follow_redirects=True,
             headers={
                 "User-Agent": "Mozilla/5.0 (compatible; image-proxy)",

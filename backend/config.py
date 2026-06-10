@@ -14,6 +14,13 @@ SEARXNG_URL = os.getenv("SEARXNG_URL", "http://127.0.0.1:8888")
 N8N_URL = os.getenv("N8N_URL", "http://127.0.0.1:5678")
 N8N_WEBHOOK_PATH = os.getenv("N8N_WEBHOOK_PATH", "/webhook/execute-code")
 N8N_RESEARCH_PATH = os.getenv("N8N_RESEARCH_PATH", "/webhook/deep-research")
+HTTP_VERIFY_SSL = os.getenv("HTTP_VERIFY_SSL", "true").lower() == "true"
+OUTBOUND_PROXY_URL = (
+    os.getenv("HYPRCHAT_OUTBOUND_PROXY")
+    or os.getenv("OUTBOUND_PROXY_URL")
+    or os.getenv("WEB_FETCH_PROXY_URL")
+    or ""
+).strip()
 
 # ============================================================
 # SERVER

@@ -27,6 +27,26 @@ _PERSONA_RATING_GUIDANCE = {
     "Unrated": "Unrated (max XXX): Broadest adult setting. Explicit consenting-adult NSFW is allowed within safety boundaries. Avoid minors, coercion, illegal content, and non-consensual sexual content.",
 }
 
+_PERSONA_PLACEHOLDER_RE = re.compile(
+    r"\{\{\s*(user|char)\s*\}\}|\{\s*(user|char)\s*\}",
+    re.IGNORECASE,
+)
+
+
+def _replace_persona_placeholders(text: str, *, user_name: str, char_name: str) -> str:
+    if not text:
+        return text or ""
+    names = {
+        "user": (user_name or "User").strip() or "User",
+        "char": (char_name or "the character").strip() or "the character",
+    }
+
+    def repl(match: re.Match) -> str:
+        key = (match.group(1) or match.group(2) or "").lower()
+        return names.get(key, match.group(0))
+
+    return _PERSONA_PLACEHOLDER_RE.sub(repl, str(text))
+
 
 def _normalize_persona_rating(value) -> str:
     s = re.sub(r"[\s_]+", "", str(value or "PG-13").strip().lower())
@@ -75,6 +95,221 @@ def _persona_rating_guidance(params: dict) -> str:
     persona = params.get("persona") if isinstance(params.get("persona"), dict) else {}
     rating = _normalize_persona_rating(persona.get("rating", params.get("rating")))
     return _PERSONA_RATING_GUIDANCE.get(rating, _PERSONA_RATING_GUIDANCE["PG-13"])
+
+
+def _extract_json_array(text: str) -> list:
+    raw = re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL).strip()
+    start, end = raw.find("["), raw.rfind("]")
+    if start == -1 or end <= start:
+        return []
+    try:
+        data = json.loads(raw[start:end + 1])
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+async def _suggest_workspace_memories(
+    req,
+    http,
+    events,
+    conv_id: str,
+    workspace: dict | None,
+    user_text: str,
+    assistant_text: str,
+    assistant_msg_id: int | None,
+):
+    if not workspace or not int(workspace.get("memory_enabled") or 0):
+        return
+    ws_id = workspace.get("id")
+    if not ws_id or len((user_text or "") + (assistant_text or "")) < 120:
+        return
+    model = getattr(config, "WORKSPACE_MODEL", "") or getattr(req, "model", "") or config.DEFAULT_MODEL
+    prompt = (
+        "You extract useful long-term workspace memories from one chat turn.\n"
+        "Return ONLY a JSON array with 0-5 objects. Do not include markdown.\n"
+        "Each object shape:\n"
+        "{\"type\":\"semantic|episodic|procedural\",\"content\":\"one durable memory\","
+        "\"importance\":1-5,\"confidence\":0-1,\"entities\":[\"short names\"],"
+        "\"reason\":\"why it should be remembered\"}\n\n"
+        "Rules:\n"
+        "- Suggest only durable, reusable information for this workspace.\n"
+        "- semantic = stable facts/preferences/constraints.\n"
+        "- episodic = dated decisions, outcomes, blockers, or events.\n"
+        "- procedural = repeatable workflows, commands, deployment steps, lessons learned.\n"
+        "- Do not save secrets, credentials, private keys, passwords, or raw tokens.\n"
+        "- Do not save generic facts that are obvious from the chat app.\n"
+        "- Prefer fewer high-value memories over many weak ones.\n\n"
+        f"Workspace: {workspace.get('name') or ws_id}\n"
+        f"User turn:\n{(user_text or '')[:5000]}\n\n"
+        f"Assistant answer:\n{(assistant_text or '')[:7000]}"
+    )
+    try:
+        await events.emit(conv_id, "tool_start", {
+            "tool": "memory", "icon": "brain",
+            "status": "Reviewing turn for workspace memory suggestions...",
+        })
+        r = await http.post(
+            f"{config.OLLAMA_URL}/api/generate",
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "think": False,
+                "options": {"temperature": 0.1, "num_ctx": 4096, "num_predict": 700},
+            },
+            timeout=45,
+        )
+        if r.status_code != 200:
+            await events.emit(conv_id, "tool_done", {
+                "tool": "memory", "icon": "brain",
+                "status": "Workspace memory suggestion skipped (helper model unavailable).",
+            })
+            return
+        suggestions = _extract_json_array(r.json().get("response", ""))
+        if not suggestions:
+            await events.emit(conv_id, "tool_done", {
+                "tool": "memory", "icon": "brain",
+                "status": "No new workspace memories suggested.",
+            })
+            return
+        existing = await db.list_workspace_memories(ws_id, status="all")
+        existing_norm = {re.sub(r"\s+", " ", (m.get("content") or "").strip().lower()) for m in existing}
+        created = 0
+        for item in suggestions[:5]:
+            if not isinstance(item, dict):
+                continue
+            content = re.sub(r"\s+", " ", str(item.get("content") or "").strip())
+            if len(content) < 12 or len(content) > 800:
+                continue
+            norm = content.lower()
+            if norm in existing_norm:
+                continue
+            if re.search(r"(password|api[_ -]?key|secret|private key|token)\s*[:=]", content, re.I):
+                continue
+            try:
+                await db.create_workspace_memory(
+                    ws_id,
+                    content=content,
+                    memory_type=item.get("type", "semantic"),
+                    status="suggested",
+                    importance=item.get("importance", 3),
+                    source_conv_id=conv_id,
+                    source_conversation_id=conv_id,
+                    source_message_id=assistant_msg_id,
+                    confidence=item.get("confidence", 0),
+                    entities=item.get("entities") if isinstance(item.get("entities"), list) else [],
+                    metadata={"reason": item.get("reason", ""), "suggested_by": "workspace_helper"},
+                )
+                existing_norm.add(norm)
+                created += 1
+            except Exception as _ce:
+                print(f"[CHAT] memory suggestion insert failed: {_ce}")
+        await events.emit(conv_id, "tool_done", {
+            "tool": "memory", "icon": "brain",
+            "status": f"Queued {created} workspace memory suggestion{'s' if created != 1 else ''} for review." if created else "No new workspace memories suggested.",
+        })
+    except Exception as e:
+        print(f"[CHAT] workspace memory suggestion failed (non-fatal): {e}")
+
+
+async def _suggest_global_memories(
+    req,
+    http,
+    events,
+    conv_id: str,
+    user_text: str,
+    assistant_text: str,
+    assistant_msg_id: int | None,
+):
+    if len((user_text or "") + (assistant_text or "")) < 120:
+        return
+    model = getattr(config, "WORKSPACE_MODEL", "") or getattr(req, "model", "") or config.DEFAULT_MODEL
+    prompt = (
+        "You extract useful long-term personal memories for a cross-chat AI assistant.\n"
+        "Return ONLY a JSON array with 0-5 objects. Do not include markdown.\n"
+        "Each object shape:\n"
+        "{\"type\":\"semantic|episodic|procedural\",\"content\":\"one durable memory\","
+        "\"importance\":1-5,\"confidence\":0-1,\"entities\":[\"short names\"],"
+        "\"reason\":\"why it should be remembered\"}\n\n"
+        "Rules:\n"
+        "- Suggest only durable information useful across many future chats.\n"
+        "- Good semantic memories include user preferences, personal background, important people, birthdays, interests, names, and stable constraints.\n"
+        "- Good episodic memories include dated user-confirmed events, decisions, or outcomes.\n"
+        "- Good procedural memories include reusable workflows or recurring user instructions.\n"
+        "- Do not save secrets, credentials, private keys, passwords, raw tokens, or credential-bearing URLs.\n"
+        "- Do not infer sensitive facts; only save what the user clearly states or confirms.\n"
+        "- Do not save generic assistant claims or one-off trivia.\n"
+        "- Prefer fewer high-value memories over many weak ones.\n\n"
+        f"User turn:\n{(user_text or '')[:5000]}\n\n"
+        f"Assistant answer:\n{(assistant_text or '')[:7000]}"
+    )
+    try:
+        await events.emit(conv_id, "tool_start", {
+            "tool": "memory", "icon": "brain",
+            "status": "Reviewing turn for HyprChat memory suggestions...",
+        })
+        r = await http.post(
+            f"{config.OLLAMA_URL}/api/generate",
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "think": False,
+                "options": {"temperature": 0.1, "num_ctx": 4096, "num_predict": 700},
+            },
+            timeout=45,
+        )
+        if r.status_code != 200:
+            await events.emit(conv_id, "tool_done", {
+                "tool": "memory", "icon": "brain",
+                "status": "HyprChat memory suggestion skipped (helper model unavailable).",
+            })
+            return
+        suggestions = _extract_json_array(r.json().get("response", ""))
+        if not suggestions:
+            await events.emit(conv_id, "tool_done", {
+                "tool": "memory", "icon": "brain",
+                "status": "No new HyprChat memories suggested.",
+            })
+            return
+        existing = await db.list_global_memories(status="all")
+        existing_norm = {re.sub(r"\s+", " ", (m.get("content") or "").strip().lower()) for m in existing}
+        created = 0
+        for item in suggestions[:5]:
+            if not isinstance(item, dict):
+                continue
+            content = re.sub(r"\s+", " ", str(item.get("content") or "").strip())
+            if len(content) < 12 or len(content) > 800:
+                continue
+            norm = content.lower()
+            if norm in existing_norm:
+                continue
+            if re.search(r"(password|api[_ -]?key|secret|private key|token)\s*[:=]", content, re.I):
+                continue
+            try:
+                await db.create_global_memory(
+                    content=content,
+                    memory_type=item.get("type", "semantic"),
+                    status="suggested",
+                    importance=item.get("importance", 3),
+                    source_conv_id=conv_id,
+                    source_conversation_id=conv_id,
+                    source_message_id=assistant_msg_id,
+                    confidence=item.get("confidence", 0),
+                    entities=item.get("entities") if isinstance(item.get("entities"), list) else [],
+                    metadata={"reason": item.get("reason", ""), "suggested_by": "global_helper"},
+                )
+                existing_norm.add(norm)
+                created += 1
+            except Exception as _ce:
+                print(f"[CHAT] global memory suggestion insert failed: {_ce}")
+        await events.emit(conv_id, "tool_done", {
+            "tool": "memory", "icon": "brain",
+            "status": f"Queued {created} HyprChat memory suggestion{'s' if created != 1 else ''} for review." if created else "No new HyprChat memories suggested.",
+        })
+    except Exception as e:
+        print(f"[CHAT] global memory suggestion failed (non-fatal): {e}")
 
 
 # ── Tool-calling templates keyed by model family ──
@@ -376,6 +611,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         custom_tool_id_map: dict of custom tools keyed by id
     """
     conv_id = req.conversation_id
+    ephemeral = bool(getattr(req, "ephemeral", False))
 
     last_user_msg = ""
     for m in reversed(req.messages):
@@ -388,7 +624,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     # (flaky network, etc.) the message would be lost while the assistant
     # reply still saves below. Upsert if the most recent user message in
     # the DB doesn't match the incoming one.
-    if conv_id and last_user_msg:
+    if conv_id and last_user_msg and not ephemeral:
         # Prefer the explicit display_content sent by the frontend (user's typed text,
         # without the `[Attached N image: ...]` hint that goes to the model). Fall back
         # to last_user_msg for older clients.
@@ -410,7 +646,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
     await events.emit(conv_id, "tool_start", {"tool": "processing", "status": "🔮 Connecting to neural oracle...", "icon": "activity"})
 
-    print(f"[CHAT] conv={conv_id} model={req.model} tool_ids={req.tool_ids} msgs={len(req.messages)} persona={req.persona_id}")
+    print(f"[CHAT] conv={conv_id} model={req.model} tool_ids={req.tool_ids} msgs={len(req.messages)} persona={req.persona_id} ephemeral={ephemeral}")
 
     # ── Validate model exists in Ollama before streaming ──
     try:
@@ -433,6 +669,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     persona_system_prompt = None
     persona_kb_ids = []
     persona_think_budget = None
+    persona_placeholder_ctx = None
     _is_v2_persona = False
     if req.persona_id:
         all_configs = await db.get_model_configs()
@@ -443,7 +680,17 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             if "v2" in _persona_name_l or "daedalus" in _persona_name_l:
                 _is_v2_persona = True
             params = mc.get("parameters", {})
-            if _model_config_profile_type(mc, params) == "persona":
+            profile_type = _model_config_profile_type(mc, params)
+            if profile_type == "persona":
+                try:
+                    current_user = await db.get_user()
+                    user_name = (current_user or {}).get("name") or "User"
+                except Exception:
+                    user_name = "User"
+                persona_placeholder_ctx = {
+                    "user_name": user_name,
+                    "char_name": mc.get("name") or "the character",
+                }
                 persona_fields = params.get("persona") if isinstance(params.get("persona"), dict) else {}
                 thinking_mode = _normalize_persona_thinking_mode(persona_fields.get("thinking_mode", params.get("thinking_mode")))
                 if thinking_mode != "auto":
@@ -455,6 +702,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         persona_system_prompt += rating_block
                 else:
                     persona_system_prompt = rating_block.strip()
+                persona_system_prompt = _replace_persona_placeholders(
+                    persona_system_prompt or "",
+                    **persona_placeholder_ctx,
+                )
             for key in ("temperature", "num_ctx", "top_p", "top_k"):
                 if params.get(key) is not None:
                     if key == "num_ctx":
@@ -472,14 +723,14 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     break
 
             kb_ids = mc.get("kb_ids", [])
-            persona_kb_ids = kb_ids
+            persona_kb_ids = [] if ephemeral else kb_ids
 
             # ── RAG config defaults (used by both KB and research memory queries) ──
             _rag_research_top_k = 4
             _rag_research_max_chars = 3000
 
             # ── RAG: Query attached knowledge bases ──
-            if kb_ids and user_query:
+            if kb_ids and user_query and not ephemeral:
                 await events.emit(conv_id, "tool_start", {
                     "tool": "kb", "icon": "database",
                     "status": f"Searching {len(kb_ids)} knowledge base(s)...",
@@ -530,7 +781,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         kb_context = "\n\n".join(parts)
 
             # ── RAG: Query persona's past research memory ──
-            if user_query:
+            if user_query and not ephemeral:
                 try:
                     research_chunks = await rag.query_research(req.persona_id, user_query, top_k=_rag_research_top_k)
                     if research_chunks:
@@ -573,6 +824,59 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     if "num_ctx" not in model_options:
         model_options["num_ctx"] = config.coerce_num_ctx(config.DEFAULT_NUM_CTX)
 
+    global_memory_enabled = False
+    if not ephemeral:
+        raw_use_memories = getattr(req, "use_memories", None)
+        if raw_use_memories is None:
+            try:
+                global_memory_enabled = await db.get_conversation_use_memories(conv_id)
+            except Exception as _gme:
+                print(f"[CHAT] Conversation memory flag lookup failed (non-fatal): {_gme}")
+                global_memory_enabled = False
+        else:
+            global_memory_enabled = str(raw_use_memories).lower() in {"1", "true", "yes", "on"}
+
+    global_memory_info = {"profile": None, "context": "", "memory_ids": []}
+    if global_memory_enabled and not ephemeral:
+        try:
+            global_memory_info = await db.build_global_memory_context(
+                query=last_user_msg,
+                max_chars=4200,
+            )
+            if global_memory_info.get("context"):
+                mem_count = len(global_memory_info.get("memory_ids") or [])
+                await events.emit(conv_id, "tool_done", {
+                    "tool": "memory", "icon": "brain",
+                    "status": (
+                        f"Recalled {mem_count} HyprChat memor{'y' if mem_count == 1 else 'ies'}"
+                        if mem_count else "Recalled HyprChat profile"
+                    ),
+                })
+        except Exception as _gme:
+            print(f"[CHAT] HyprChat memory context failed (non-fatal): {_gme}")
+            global_memory_info = {"profile": None, "context": "", "memory_ids": []}
+
+    workspace_memory_info = {"workspace": None, "context": "", "memory_ids": [], "block_ids": []}
+    if not ephemeral:
+        try:
+            workspace_memory_info = await db.build_workspace_memory_context(
+                workspace_id=getattr(req, "workspace_id", None),
+                conversation_id=conv_id,
+                query=last_user_msg,
+                max_chars=5200,
+            )
+            if workspace_memory_info.get("context"):
+                await events.emit(conv_id, "tool_done", {
+                    "tool": "memory", "icon": "brain",
+                    "status": (
+                        f"Recalled {len(workspace_memory_info.get('memory_ids') or [])} workspace "
+                        f"memories from {workspace_memory_info.get('workspace', {}).get('name', 'workspace')}"
+                    ),
+                })
+        except Exception as _wme:
+            print(f"[CHAT] Workspace memory context failed (non-fatal): {_wme}")
+            workspace_memory_info = {"workspace": None, "context": "", "memory_ids": [], "block_ids": []}
+
     messages = []
     effective_system = persona_system_prompt if persona_system_prompt is not None else req.system_prompt
     if kb_context:
@@ -582,6 +886,23 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             "the user's query. Use them to accurately answer questions. "
             "Each excerpt shows its source file and relevance score.\n\n"
             + kb_context
+        )
+    if global_memory_info.get("context"):
+        effective_system += (
+            "\n\n=== HYPRCHAT MEMORY ===\n"
+            "The following user profile and cross-chat memories were explicitly entered "
+            "or accepted by the user. Use them as persistent context when relevant. "
+            "If this context conflicts with the latest user message, ask or follow the "
+            "latest explicit user instruction.\n\n"
+            + global_memory_info["context"]
+        )
+    if workspace_memory_info.get("context"):
+        effective_system += (
+            "\n\n=== WORKSPACE MEMORY ===\n"
+            "The following workspace memory was explicitly accepted or configured by the user. "
+            "Use it as persistent context for this workspace. If it conflicts with the latest "
+            "user message, ask or follow the latest explicit user instruction.\n\n"
+            + workspace_memory_info["context"]
         )
     if effective_system:
         messages.append({"role": "system", "content": effective_system})
@@ -725,7 +1046,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         print(f"[CHAT] Injected active project context: {_active_project.get('name', '?')} ({len(_ap_files)} files)")
 
     for m in req.messages:
-        _msg = {"role": m["role"], "content": m["content"]}
+        _content = m["content"]
+        if persona_placeholder_ctx and m.get("role") in {"assistant", "system"}:
+            _content = _replace_persona_placeholders(_content, **persona_placeholder_ctx)
+        _msg = {"role": m["role"], "content": _content}
         # Pass image attachments through to vision-capable Ollama models.
         # Non-vision models silently ignore the field.
         if m.get("images"):
@@ -735,8 +1059,9 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     # ── Build Ollama-native tool definitions ──
     available_tool_names = set()
     ollama_tools = []
+    requested_tool_ids = list(req.tool_ids or [])
 
-    for tid in req.tool_ids:
+    for tid in requested_tool_ids:
         if tid == "codeagent":
             for tname, tdef in CODEAGENT_TOOLS.items():
                 if tname not in ("deep_research", "conspiracy_research"):
@@ -764,13 +1089,13 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     available_tool_names.add(tname)
 
     # Include deep_research for all codeagent sessions; conspiracy_research only when explicitly listed
-    if "codeagent" in req.tool_ids:
+    if "codeagent" in requested_tool_ids:
         if "deep_research" in CODEAGENT_TOOLS and "deep_research" not in available_tool_names:
             ollama_tools.append(CODEAGENT_TOOLS["deep_research"])
             available_tool_names.add("deep_research")
     # Also include special tools if explicitly listed by name
     for tname in ("deep_research", "conspiracy_research"):
-        if tname in req.tool_ids:
+        if tname in requested_tool_ids:
             if tname in CODEAGENT_TOOLS and tname not in available_tool_names:
                 ollama_tools.append(CODEAGENT_TOOLS[tname])
                 available_tool_names.add(tname)
@@ -785,7 +1110,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     print(f"[CHAT]   Tools: {sorted(available_tool_names)}")
 
     # ── Quick Search: gate → rewrite → search → rank → fetch → inject ──
-    if "quick_search" in req.tool_ids:
+    if "quick_search" in requested_tool_ids:
         try:
             qs = await run_quick_search_for_chat(
                 http,
@@ -930,16 +1255,17 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     # the frontend sees on reload.
     _assistant_msg_id = None
     _stream_started_at = datetime.utcnow().isoformat()
-    try:
-        _assistant_msg_id = await db.add_message(conv_id, "assistant", "", metadata={
-            "stream_started_at": _stream_started_at,
-            "in_progress": True,
-        })
-        # Tell the frontend the message_id so it can PATCH the final state on
-        # stream-complete instead of POSTing a duplicate.
-        yield f"data: {json.dumps({'type': 'init', 'message_id': _assistant_msg_id})}\n\n"
-    except Exception as _ase:
-        print(f"[CHAT] Failed to create assistant message stub: {_ase}")
+    if not ephemeral:
+        try:
+            _assistant_msg_id = await db.add_message(conv_id, "assistant", "", metadata={
+                "stream_started_at": _stream_started_at,
+                "in_progress": True,
+            })
+            # Tell the frontend the message_id so it can PATCH the final state on
+            # stream-complete instead of POSTing a duplicate.
+            yield f"data: {json.dumps({'type': 'init', 'message_id': _assistant_msg_id})}\n\n"
+        except Exception as _ase:
+            print(f"[CHAT] Failed to create assistant message stub: {_ase}")
     _text_fallback_done = False
     _prev_tool_key = None  # Track previous tool call to detect loops
     _tool_history = []     # Last N tool keys for near-duplicate detection
@@ -963,6 +1289,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         gen_tokens = 0
         prompt_tokens = 0
         _gen_pill_started = False  # First "generating" pill uses tool_start; subsequent ones use tool_progress so the frontend collapses them into one updating pill
+        _streamed_content = False
+        _has_tools = bool(available_tool_names)
 
         # ── Context window management: prune old tool results to stay under budget ──
         _ctx_size = sum(len(m.get("content", "")) for m in messages)
@@ -1065,9 +1393,9 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     _chunk_buf = ""
                     _repeat_window = ""  # Rolling window for repetition detection
                     _live_gen_tokens = 0  # Live token counter for streaming updates
-                    # Buffer mode: when tools are active, don't stream content immediately
-                    # so code blocks don't flash in chat before tool calls are detected
-                    _has_tools = bool(available_tool_names)
+                    # Tool-enabled rounds stream draft content live. If the
+                    # completed round resolves to a tool call, the existing
+                    # clear event removes that draft before tool execution.
 
                     # Pipe aiter_lines into a queue so we can read with timeout
                     # without corrupting the httpx stream (asyncio.wait_for cancels)
@@ -1210,29 +1538,33 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                         break
 
                                 if _has_tools:
-                                    # Buffer mode: emit a progress pill instead of streaming tokens
-                                    # Show what the model is working on via SSE event
+                                    # Keep the activity pill in token units so
+                                    # it matches the header context meter.
                                     if len(content) % 200 < len(token):
                                         _evt_type = "tool_start" if not _gen_pill_started else "tool_progress"
                                         _gen_pill_started = True
+                                        _shown_tokens = max(_live_gen_tokens, (len(content) + 3) // 4)
                                         await events.emit(conv_id, _evt_type, {
                                             "tool": "generating",
-                                            "status": f"✍️ Generating... ({len(content)} chars)",
+                                            "status": f"✍️ Generating... (~{_shown_tokens} tokens)",
                                             "icon": "edit",
                                         })
+
+                                # Stream assistant text live even when tools
+                                # are enabled. Tool-call rounds clear this
+                                # provisional text after parsing completes.
+                                _chunk_buf += token
+                                if len(_chunk_buf) >= 8 or chunk.get("done"):
+                                    yield f"data: {json.dumps({'type': 'token', 'content': _chunk_buf})}\n\n"
+                                    _streamed_content = True
+                                    _chunk_buf = ""
                                     await asyncio.sleep(0)
-                                else:
-                                    # No tools — stream content directly to chat
-                                    _chunk_buf += token
-                                    if len(_chunk_buf) >= 8 or chunk.get("done"):
-                                        yield f"data: {json.dumps({'type': 'token', 'content': _chunk_buf})}\n\n"
-                                        _chunk_buf = ""
-                                        await asyncio.sleep(0)
 
                         # Track token counts from Ollama
                         if chunk.get("done"):
                             if _chunk_buf:
                                 yield f"data: {json.dumps({'type': 'token', 'content': _chunk_buf})}\n\n"
+                                _streamed_content = True
                                 _chunk_buf = ""
                             # Finalize thinking if we were in native thinking mode
                             if _in_thinking and _thinking_buf:
@@ -1285,9 +1617,11 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             msg["tool_calls"] = tool_calls
 
         # ── Text-based tool call fallback ──
+        _text_tool_call_round = False
         if not tool_calls and content and available_tool_names:
             tool_calls = parse_text_tool_calls(content, available_tool_names)
             if tool_calls:
+                _text_tool_call_round = True
                 content = strip_tool_calls(content)
                 # Clean up residual garbage (backticks, braces, etc.) left after stripping
                 cleaned_residue = re.sub(r'[`{}\[\]\s"\']', '', content).strip()
@@ -1365,11 +1699,11 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     msg["content"] = ""
 
         print(f"[CHAT] Round {round_num}: content={len(content)} thinking={len(thinking)} tool_calls={len(tool_calls)} gen_tokens={gen_tokens} prompt_tokens={prompt_tokens}")
-        if thinking:
+        if thinking and not ephemeral:
             print(f"[CHAT]   thinking: {thinking[:200]!r}")
-        if content:
+        if content and not ephemeral:
             print(f"[CHAT]   content: {content[:200]!r}")
-        if tool_calls:
+        if tool_calls and not ephemeral:
             print(f"[CHAT]   tool_calls: {json.dumps(tool_calls)[:300]}")
 
         # Phase 0.6: snapshot the assistant message at every round boundary.
@@ -1484,16 +1818,11 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 if len(_tool_history) > 5:
                     _tool_history.pop(0)
 
+            if _streamed_content and _text_tool_call_round:
+                yield f"data: {json.dumps({'type': 'clear'})}\n\n"
             if content:
-                if _has_tools:
-                    # Content was buffered (not streamed) — strip code, keep prose for history
-                    cleaned = re.sub(r'```\w*\n.*?```', '', content, flags=re.DOTALL).strip()
-                    msg["content"] = cleaned
-                else:
-                    # Content was streamed — tell frontend to discard it
-                    yield f"data: {json.dumps({'type': 'clear'})}\n\n"
-                    cleaned = re.sub(r'```\w*\n.*?```', '', content, flags=re.DOTALL).strip()
-                    msg["content"] = cleaned
+                cleaned = re.sub(r'```\w*\n.*?```', '', content, flags=re.DOTALL).strip()
+                msg["content"] = cleaned
 
             messages.append(msg)
             yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
@@ -1508,7 +1837,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     try:
                         tool_args = json.loads(tool_args)
                     except (json.JSONDecodeError, ValueError):
-                        print(f"[CHAT] Warning: failed to parse tool args JSON for {tool_name}: {tool_args[:200]!r}")
+                        if not ephemeral:
+                            print(f"[CHAT] Warning: failed to parse tool args JSON for {tool_name}: {tool_args[:200]!r}")
                         tool_args = {}
                 _parsed_calls.append((tool_name, tool_args))
 
@@ -1541,7 +1871,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         messages.append({"role": "tool", "content": f"Error: tool '{tool_name}' is not available in this session."})
                         continue
 
-                    print(f"[CHAT]   Executing tool: {tool_name}({json.dumps(tool_args)[:200]})")
+                    if ephemeral:
+                        print(f"[CHAT]   Executing tool: {tool_name}(args redacted for ghost mode)")
+                    else:
+                        print(f"[CHAT]   Executing tool: {tool_name}({json.dumps(tool_args)[:200]})")
 
                     _tool_icon, _tool_label = _TOOL_ICONS.get(tool_name, ("tool", f"🔧 Running {tool_name}"))
                     _tool_detail = ""
@@ -1717,7 +2050,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': _est_prompt, 'live': True})}\n\n"
 
                 # Auto-index research results into persona's RAG memory
-                if req.persona_id and tool_name in rag.RESEARCH_TOOLS and len(tool_result) > 100:
+                if (not ephemeral
+                        and req.persona_id
+                        and tool_name in rag.RESEARCH_TOOLS
+                        and len(tool_result) > 100):
                     try:
                         _query_for_index = ""
                         if isinstance(tool_args, dict):
@@ -1786,7 +2122,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         # No tool calls — we have a final response
         if content:
             # If content was buffered (tool mode), flush it now as the final answer
-            if _has_tools:
+            if _has_tools and not _streamed_content:
                 for i in range(0, len(content), 8):
                     yield f"data: {json.dumps({'type': 'token', 'content': content[i:i+8]})}\n\n"
                     await asyncio.sleep(0)
@@ -1850,11 +2186,32 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
             messages.append(msg)
             # Record token usage for analytics
-            if gen_tokens or prompt_tokens:
+            if (gen_tokens or prompt_tokens) and not ephemeral:
                 try:
                     await db.record_token_usage(conv_id, req.model, getattr(req, 'persona_id', '') or '', prompt_tokens, gen_tokens)
                 except Exception as _te:
                     print(f"[CHAT] Token recording error: {_te}")
+            if not ephemeral:
+                if global_memory_enabled:
+                    await _suggest_global_memories(
+                        req,
+                        http,
+                        events,
+                        conv_id,
+                        last_user_msg,
+                        content,
+                        _assistant_msg_id,
+                    )
+                await _suggest_workspace_memories(
+                    req,
+                    http,
+                    events,
+                    conv_id,
+                    workspace_memory_info.get("workspace"),
+                    last_user_msg,
+                    content,
+                    _assistant_msg_id,
+                )
             await events.emit(conv_id, "complete", {"status": "Complete"})
             _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id}
             if _review_round > 0:

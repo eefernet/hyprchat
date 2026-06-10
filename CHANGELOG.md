@@ -1,3 +1,38 @@
+## Alpha v17.1.2 — June 10, 2026
+
+### HyprChat Memory & Navigation
+- Added global HyprChat memory that can persist across chats when memory is enabled for a conversation.
+- Added a user profile and memory management panel for profile details, interests, links, manual memories, and reviewed memory suggestions.
+- Added a per-chat memory toggle, including support for enabling memory on an empty chat before the first message creates the saved conversation.
+- Reorganized the left rail so Search, Chat, Research, Council, Memory, Agents, and Prompt Library are always visible.
+- Moved Knowledge Bases, Tools, Model Manager, and Analytics behind an inline expandable More section that opens inside the rail instead of a separate popout.
+
+### Workspace Memory & Ghost Mode
+- Added workspace-scoped memory with reviewed suggestions, accepted memories, and manual memory blocks that can be injected into workspace chats.
+- Added memory review controls for accepting, rejecting, editing, deleting, and manually creating semantic, episodic, and procedural memories.
+- Added Ghost Mode for local-only chats that are not saved, indexed, added to history, or used for workspace memory suggestions.
+
+### Quick Search
+- Improved same-day event queries so prompts like "WWDC that just took place today" search cleaner event/year/date variants instead of dragging filler words into SearXNG.
+- Added a general-web fallback for strict same-day searches so fresh official pages, live blogs, and tech coverage can surface when the news/day filter misses them.
+- Made same-day evidence handling smarter by accepting exact dates, "today", recent-hour snippets, and current-year live-update text before warning that sources are stale.
+
+### Chat Streaming & Context Meter
+- Tool-enabled chat rounds now stream assistant text live while it is generated instead of waiting for the full model output to finish.
+- If streamed draft text turns into a native or text-parsed tool call, the chat clears that draft before showing the tool execution cards/results.
+- Replaced the misleading live "Generating ... chars" status with token-based wording that matches the top-right context meter.
+- Clarified the header context meter tooltip as prompt plus generated tokens against the active `num_ctx`.
+
+### Multi-User support (Not for concurrent usage, only for splitting up your chats)
+- Now you have the option to have different users for different things. Keep all your chats, workspaces and configurations separate from each other by signing into the appropriate user.
+- Each user has the option to have a password or not.
+- Manage users in the settings panel. You can set passwords, reset passwords, add users and remove users.
+
+
+### Bug Fixes
+- Fixed a fresh empty-chat race where selecting a model in the top-left picker and immediately sending could create the chat with the selected model but stream the first response through a stale/default model before React state caught up.
+
+
 ## Alpha v17.1.1 — June 8, 2026
 
 >Deep Research overhaul update. This update focued on making sure deep research got the love it deserved. Daedalus will still use deep research but for the user front end it has been renamed to Agent Research (the togglable tool above the composer). A backend code rename could break a lot of things and that is something ill do at a later date.
