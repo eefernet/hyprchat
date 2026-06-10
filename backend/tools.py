@@ -4444,7 +4444,7 @@ async def exec_tool(
             # consume directly, instead of the v1 prose plan that every
             # downstream agent has to re-parse from markdown. v1 personas
             # keep the existing prose path below.
-            _is_v2_for_plan = bool(conv_id) and await _is_v2_persona(conv_id)
+            _is_v2_for_plan = bool(conv_id) and await _check_v2()
 
             if _is_v2_for_plan:
                 from agents import architect

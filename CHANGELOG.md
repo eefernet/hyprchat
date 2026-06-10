@@ -1,4 +1,4 @@
-## Alpha v17.2.0 — June 10, 2026
+## Alpha v17.2.0 — June 12, 2026
 
 ### Core Hardening (chat, research, persistence, search)
 - **Run/research event logs moved to append-only tables.** Agent and research-report event streams previously re-wrote a growing JSON-array column on every event (O(n²) write amplification that held the SQLite write lock against the live chat stream). They now INSERT into `run_events`/`research_events`; existing rows still read from the legacy column, so nothing breaks across the upgrade.

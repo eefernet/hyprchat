@@ -2092,7 +2092,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         except Exception as _e:
                             if not _f.done(): _f.set_exception(_e)
 
-                    asyncio.create_task(_run_tool_bg())
+                    _spawn_bg(_run_tool_bg())
                     _futures.append((_tf, _tool_chars, tool_name, _tool_icon, _tool_label, _tool_detail))
 
                 # Wait for all futures in this batch
@@ -2247,7 +2247,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         _query_for_index = ""
                         if isinstance(tool_args, dict):
                             _query_for_index = tool_args.get("query", "") or tool_args.get("url", "") or tool_args.get("topic", "")
-                        asyncio.create_task(
+                        _spawn_bg(
                             rag.index_research(req.persona_id, tool_name, _query_for_index, tool_result, conv_id)
                         )
                     except Exception as _rag_e:

@@ -577,6 +577,18 @@ events = EventBus()
 # ============================================================
 _cleanup_task_ref = None
 
+# Strong refs for fire-and-forget background jobs (indexing, research runners).
+# Without this, the event loop only weakly references a bare create_task() result,
+# so an in-flight job can be garbage-collected and silently cancelled mid-run.
+_BG_TASKS: set = set()
+
+
+def _track_bg(coro):
+    t = asyncio.create_task(coro)
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+    return t
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -703,7 +715,7 @@ async def lifespan(app: FastAPI):
     if _rag_cfg.get("chunk_overlap") is not None:
         rag.CHUNK_OVERLAP = int(_rag_cfg["chunk_overlap"])
     # Ensure RAG embedding model is available (non-blocking pull)
-    asyncio.create_task(rag.ensure_embed_model())
+    _track_bg(rag.ensure_embed_model())
     yield
     for task in [_cleanup_task_ref, _health_task_ref]:
         if task:
@@ -1528,8 +1540,10 @@ async def preview_artifact_ep(artifact_id: str, max_chars: int = Query(200000, g
             "message": "Binary preview is not available for this artifact type.",
         }
     try:
-        with open(filepath, "rb") as f:
-            raw = f.read(min(max_chars * 4, 4 * 1024 * 1024))
+        def _read_preview_bytes():
+            with open(filepath, "rb") as f:
+                return f.read(min(max_chars * 4, 4 * 1024 * 1024))
+        raw = await asyncio.to_thread(_read_preview_bytes)
         content = _decode_preview_bytes(raw, {"content-type": artifact.get("mime_type") or ""})[:max_chars]
         truncated = os.path.getsize(filepath) > len(raw) or len(content) >= max_chars
         if lower_name.endswith((".csv", ".tsv")):
@@ -1672,7 +1686,7 @@ async def add_artifact_to_kb_ep(artifact_id: str, req: ArtifactAddToKBRequest):
     artifact = await db.get_artifact(artifact_id)
     if not artifact:
         raise HTTPException(404, "Artifact not found")
-    owned = next((k for k in await db.get_kbs() if k["id"] == req.kb_id), None)
+    owned = await db.get_kb(req.kb_id)
     if not owned:
         raise HTTPException(404, "KB not found")
     filepath, _safe_name = _artifact_path_for_row(artifact)
@@ -1702,7 +1716,7 @@ async def add_artifact_to_kb_ep(artifact_id: str, req: ArtifactAddToKBRequest):
         except Exception as e:
             print(f"[RAG] Artifact KB import indexing failed for {safe_name}: {e}")
 
-    asyncio.create_task(_bg_index_artifact_import())
+    _track_bg(_bg_index_artifact_import())
     await db.add_artifact_event(
         artifact_id,
         "added_to_kb",
@@ -1761,8 +1775,10 @@ async def fork_artifact_to_codebox_ep(artifact_id: str):
     size = os.path.getsize(filepath)
     if size > config.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
         raise HTTPException(413, f"Artifact exceeds {config.MAX_UPLOAD_SIZE_MB}MB Codebox copy limit")
-    with open(filepath, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode()
+    def _read_b64():
+        with open(filepath, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    b64 = await asyncio.to_thread(_read_b64)
     remote_dir = f"/root/artifacts/{shlex.quote(artifact_id)}"
     remote_path = f"/root/artifacts/{artifact_id}/{safe_name}"
     cmd = f"mkdir -p {remote_dir} && printf '%s' {shlex.quote(b64)} | base64 -d > {shlex.quote(remote_path)} && ls -lah {shlex.quote(remote_path)}"
@@ -2680,7 +2696,7 @@ async def _create_and_start_research_report(req: ResearchReportCreate) -> dict:
         finally:
             db.reset_current_user_id(token)
 
-    asyncio.create_task(_runner())
+    _track_bg(_runner())
     return await db.get_research_report(report_id)
 
 
@@ -3016,7 +3032,7 @@ async def update_kb(kb_id: str, req: KBCreate):
 
 @app.delete("/api/knowledge-bases/{kb_id}")
 async def delete_kb(kb_id: str):
-    owned = next((k for k in await db.get_kbs() if k["id"] == kb_id), None)
+    owned = await db.get_kb(kb_id)
     if not owned:
         raise HTTPException(404, "KB not found")
     kb_dir = os.path.join(config.KB_DIR, kb_id)
@@ -3037,7 +3053,7 @@ _indexing_status: dict[str, dict] = {}  # key: "kb_id:filename" → status dict
 
 @app.post("/api/knowledge-bases/{kb_id}/files")
 async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
-    owned = next((k for k in await db.get_kbs() if k["id"] == kb_id), None)
+    owned = await db.get_kb(kb_id)
     if not owned:
         raise HTTPException(404, "KB not found")
     kb_dir = os.path.join(config.KB_DIR, kb_id)
@@ -3054,8 +3070,10 @@ async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
     if len(content) > config.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
         raise HTTPException(413, f"File too large (max {config.MAX_UPLOAD_SIZE_MB}MB)")
 
-    with open(filepath, "wb") as f:
-        f.write(content)
+    def _write_upload():
+        with open(filepath, "wb") as f:
+            f.write(content)
+    await asyncio.to_thread(_write_upload)
 
     file_id = await db.add_kb_file(kb_id, safe_name, filepath, len(content), file.content_type or "")
 
@@ -3071,7 +3089,7 @@ async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
             print(f"[RAG] Indexing failed for {safe_name}: {e}")
             _indexing_status[status_key] = {"status": "error", "filename": safe_name, "error": str(e)}
 
-    asyncio.create_task(_bg_index())
+    _track_bg(_bg_index())
 
     return {"id": file_id, "filename": safe_name, "file_size": len(content), "indexing": True}
 
@@ -3079,7 +3097,7 @@ async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
 @app.get("/api/knowledge-bases/{kb_id}/files/{filename}/status")
 async def get_file_index_status(kb_id: str, filename: str):
     """Check background indexing status for a file."""
-    owned = next((k for k in await db.get_kbs() if k["id"] == kb_id), None)
+    owned = await db.get_kb(kb_id)
     if not owned:
         raise HTTPException(404, "KB not found")
     status_key = f"{kb_id}:{filename}"
@@ -3117,8 +3135,10 @@ async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200):
     if not os.path.exists(file_path):
         raise HTTPException(404, "File not found on disk")
     try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            all_lines = f.readlines()
+        def _read_lines():
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                return f.readlines()
+        all_lines = await asyncio.to_thread(_read_lines)
         total = len(all_lines)
         content = "".join(all_lines[:lines])
         return {"filename": filename, "content": content, "truncated": total > lines, "total_lines": total}
@@ -3151,15 +3171,18 @@ async def pdf_text_preview(kb_id: str, file_id: int, pages: int = 10):
     if not os.path.exists(file_path):
         raise HTTPException(404, "File not found on disk")
     try:
-        from pypdf import PdfReader
-        reader = PdfReader(file_path)
-        total_pages = len(reader.pages)
-        extracted = []
-        for i, page in enumerate(reader.pages[:pages]):
-            text = page.extract_text() or ""
-            if text.strip():
-                extracted.append(f"[Page {i+1}]\n{text}")
-        content = "\n\n".join(extracted) if extracted else "No extractable text found in this PDF."
+        def _extract_pdf_text():
+            from pypdf import PdfReader
+            reader = PdfReader(file_path)
+            total_pages = len(reader.pages)
+            extracted = []
+            for i, page in enumerate(reader.pages[:pages]):
+                text = page.extract_text() or ""
+                if text.strip():
+                    extracted.append(f"[Page {i+1}]\n{text}")
+            content = "\n\n".join(extracted) if extracted else "No extractable text found in this PDF."
+            return content, total_pages
+        content, total_pages = await asyncio.to_thread(_extract_pdf_text)
         return {"filename": filename, "content": content, "total_pages": total_pages, "previewed_pages": min(pages, total_pages), "truncated": total_pages > pages}
     except ImportError:
         return {"filename": filename, "content": "pypdf not installed — text extraction unavailable.", "total_pages": 0, "previewed_pages": 0, "truncated": False}

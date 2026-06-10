@@ -1686,10 +1686,38 @@ async def get_kbs():
     try:
         cursor = await db.execute("SELECT * FROM knowledge_bases WHERE user_id=? ORDER BY updated_at DESC", (user_id,))
         kbs = [dict(r) for r in await cursor.fetchall()]
-        for kb in kbs:
-            cursor = await db.execute("SELECT * FROM kb_files WHERE kb_id = ?", (kb["id"],))
-            kb["files"] = [dict(f) for f in await cursor.fetchall()]
+        if kbs:
+            ids = [kb["id"] for kb in kbs]
+            placeholders = ",".join("?" * len(ids))
+            cursor = await db.execute(f"SELECT * FROM kb_files WHERE kb_id IN ({placeholders})", ids)
+            files_by_kb = {}
+            for f in await cursor.fetchall():
+                fd = dict(f)
+                files_by_kb.setdefault(fd["kb_id"], []).append(fd)
+            for kb in kbs:
+                kb["files"] = files_by_kb.get(kb["id"], [])
         return kbs
+    finally:
+        await db.close()
+
+
+async def get_kb(kb_id: str):
+    """Single-row KB lookup (user-scoped) with its files in one query.
+
+    Avoids loading every KB + every KB file (the get_kbs N+1) just to find one
+    row by id on hot upload/preview/add paths.
+    """
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT * FROM knowledge_bases WHERE id=? AND user_id=?", (kb_id, user_id))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        kb = dict(row)
+        cursor = await db.execute("SELECT * FROM kb_files WHERE kb_id = ?", (kb_id,))
+        kb["files"] = [dict(f) for f in await cursor.fetchall()]
+        return kb
     finally:
         await db.close()
 
