@@ -26,6 +26,7 @@ import uuid
 import config
 import database as db
 import cancel_registry
+import model_providers
 
 
 # Pin the venv python that Codebox provisions — same binary `run_tests` uses
@@ -355,6 +356,23 @@ async def _detect_project(http, project_dir: str) -> dict:
             "marker": "(empty)", "build_cmd": "", "test_cmd": "", "lint_cmd": "",
             "language": "", "files": [], "verification_level": "none",
             "confidence": "none", "profile": "empty"}
+
+
+_PYPROJECT_SCRIPTS_RE = re.compile(
+    r"^\[project\.scripts\]\s*$(.*?)(?=^\[|\Z)", re.MULTILINE | re.DOTALL)
+_SCRIPT_ENTRY_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)\s*=", re.MULTILINE)
+
+
+def _extract_console_scripts(pyproject_text: str) -> list[str]:
+    """Console-script names from a pyproject [project.scripts] table.
+
+    The build phase pip-installs the project into the Codebox venv, so these
+    are runnable from /root/venv/bin — smoking the real CLI is a far stronger
+    signal than the import fallback."""
+    m = _PYPROJECT_SCRIPTS_RE.search(pyproject_text or "")
+    if not m:
+        return []
+    return [name for name in _SCRIPT_ENTRY_RE.findall(m.group(1)) if name][:3]
 
 
 class _SandboxTransportError(Exception):
@@ -1220,6 +1238,8 @@ async def run_review(http, events, conv_id: str, project_dir: str,
     _cancel_phase = "build"
     _ticker = None
     _phase_exc = ""
+    smoke_results: list[dict] = []
+    smoke_new_files: list[str] = []
 
     try:
         if build_cmd:
@@ -1248,6 +1268,105 @@ async def run_review(http, events, conv_id: str, project_dir: str,
             _tf = _transport_failure_detail(lint_result)
             if _tf:
                 raise _SandboxTransportError(_tf)
+
+        # 2b. Smoke phase — run the program the way a user would. Build/tests
+        # passing doesn't prove the entrypoint works (or what state it leaves
+        # behind); smoke only runs when build/test/lint are all clean because
+        # smoking a broken build is noise.
+        if (build_result["exit_code"] == 0 and test_result["exit_code"] == 0
+                and lint_result["exit_code"] == 0):
+            _files_before_smoke: list[str] = []
+            _smoke_cmds: list[str] = []
+            try:
+                from agents import language_adapters as _la
+                _files_before_smoke = await _list_project_files(http, project_dir)
+                if _files_before_smoke:
+                    _smoke_contract = _la.detect_contract(_files_before_smoke, language)
+                    _smoke_cmds = [c for c in (_smoke_contract.get("smoke_cmds") or []) if c]
+                # Real console scripts beat the import fallback: pip install -e .
+                # already ran in the build phase, so [project.scripts] entries
+                # are live in the venv. Running them is what caught nothing
+                # when only `import pkg` was smoked.
+                if marker == "pyproject.toml":
+                    _pyp = await _run_in_sandbox(http, project_dir,
+                                                 "cat pyproject.toml", timeout=10,
+                                                 run_id=run_id)
+                    for _script in reversed(_extract_console_scripts(_pyp.get("stdout", ""))):
+                        _scmd_new = f"/root/venv/bin/{_script} --help"
+                        if _scmd_new not in _smoke_cmds:
+                            _smoke_cmds.insert(0, _scmd_new)
+                _smoke_cmds = _smoke_cmds[:2]
+            except Exception as _sce:
+                print(f"[REVIEWER] smoke contract detection failed (non-fatal): {_sce}")
+            for _scmd in _smoke_cmds:
+                _cancel_phase = "smoke"
+                await _step("smoke", _scmd)
+                _sres = await _run_in_sandbox(http, project_dir, _scmd, timeout=60, run_id=run_id)
+                await _step("smoke_done", f"exit={_sres['exit_code']}")
+                _tf = _transport_failure_detail(_sres)
+                if _tf:
+                    raise _SandboxTransportError(_tf)
+                smoke_results.append({
+                    "cmd": _scmd,
+                    "exit": _sres["exit_code"],
+                    "output_tail": (_sres.get("stdout", "") or "")[-1500:],
+                })
+            if _smoke_cmds and _files_before_smoke:
+                try:
+                    _files_after_smoke = await _list_project_files(http, project_dir)
+                    smoke_new_files = sorted(set(_files_after_smoke) - set(_files_before_smoke))[:20]
+                    if smoke_new_files:
+                        await _step("smoke_state",
+                                    f"{len(smoke_new_files)} new file(s) created at runtime")
+                except Exception as _sde:
+                    print(f"[REVIEWER] smoke tree diff failed (non-fatal): {_sde}")
+
+            _smoke_fails = [sr for sr in smoke_results if sr["exit"] != 0]
+            if _smoke_fails:
+                _sf_issues = []
+                for _sf in _smoke_fails:
+                    _sf_refs = _extract_file_refs(_sf["output_tail"])
+                    _sf_issues.append({
+                        "severity": "runtime",
+                        "file": _sf_refs[0]["file"] if _sf_refs else "",
+                        "lines": [_sf_refs[0]["line"]] if _sf_refs and _sf_refs[0]["line"] else [],
+                        "summary": (f"Smoke command failed (exit {_sf['exit']}): `{_sf['cmd']}` — "
+                                    + (_sf["output_tail"][-300:].strip()[:200] or "no output")),
+                        "suggested_fix_scope": [r["file"] for r in _sf_refs[:3]],
+                    })
+                envelope = {
+                    "status": "issues",
+                    "summary": (f"Build/tests/lint pass but the program fails at runtime: "
+                                f"{len(_smoke_fails)} of {len(smoke_results)} smoke command(s) failed."),
+                    "issues": _sf_issues,
+                    "build_cmd": build_cmd, "test_cmd": test_cmd, "lint_cmd": lint_cmd,
+                    "build_exit": 0, "test_exit": 0, "lint_exit": 0,
+                    "smoke_cmds": [sr["cmd"] for sr in smoke_results],
+                    "smoke_exit": max(sr["exit"] for sr in smoke_results),
+                    "smoke_output_tail": "\n".join(sr["output_tail"] for sr in _smoke_fails)[-3000:],
+                    "smoke_new_files": smoke_new_files,
+                    "language": language, "marker": marker,
+                    "verification_level": verification_level,
+                    "verification_profile": profile,
+                    "verification_confidence": confidence,
+                    "review_model": "(deterministic smoke classifier)",
+                    "raw_review_chars": 0,
+                    "project_dir": project_dir,
+                    "run_id": run_id,
+                }
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "run_review", "icon": "search-check",
+                    "status": f"⚠ Review found {len(_sf_issues)} runtime issue{'s' if len(_sf_issues) != 1 else ''}",
+                    "run_id": run_id,
+                })
+                if run_id:
+                    try:
+                        await db.update_run(run_id, status="succeeded",
+                                            result_envelope=envelope, ended=True)
+                    except Exception:
+                        pass
+                    cancel_registry.cleanup(run_id)
+                return envelope
 
         # 3. Pull file snippets for any failures. Include stderr — transport
         # and runner errors land there, not in the merged stdout.
@@ -1425,6 +1544,9 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                 "summary": f"{verification_level} verification passed for {marker} project",
                 "issues": [],
                 "build_exit": 0, "test_exit": 0, "lint_exit": 0,
+                "smoke_cmds": [sr["cmd"] for sr in smoke_results],
+                "smoke_exit": max((sr["exit"] for sr in smoke_results), default=None),
+                "smoke_new_files": smoke_new_files,
                 "build_cmd": build_cmd, "test_cmd": test_cmd, "lint_cmd": lint_cmd,
                 "build_stdout_tail": (build_result.get("stdout", "") or "")[-3000:],
                 "test_stdout_tail": (test_result.get("stdout", "") or "")[-5000:],
@@ -1451,7 +1573,12 @@ async def run_review(http, events, conv_id: str, project_dir: str,
             return envelope
 
         # 5. Slow path: feed everything to the planning-model LLM and parse JSON.
-        review_model = config.REVIEWER_MODEL or config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL
+        # Cloud-prefixed models are honored only from explicit Settings values
+        # (per-agent override / Planning Model) — never inherited from the
+        # chat model.
+        review_model = (config.REVIEWER_MODEL or config.PLANNING_MODEL
+                        or model_providers.reject_cloud(conv_model)
+                        or model_providers.reject_cloud(config.DEFAULT_MODEL))
         prompt = _REVIEW_PROMPT.format(
             verification_profile=profile,
             verification_level=verification_level,
@@ -1482,20 +1609,12 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                     pass
 
         _ticker = asyncio.create_task(_progress_ticker())
-        coro = http.post(
-            f"{config.OLLAMA_URL}/api/chat",
-            json={
-                "model": review_model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-                "think": False,
-                "options": {"temperature": 0.2, "num_ctx": config.DEFAULT_NUM_CTX},
-            },
-            timeout=600,
+        coro = model_providers.complete_chat(
+            http, review_model, prompt,
+            temperature=0.2, num_ctx=config.DEFAULT_NUM_CTX, num_predict=4096,
+            timeout=600, ollama_url=config.OLLAMA_URL,
         )
-        r = await cancel_registry.await_cancellable(coro, run_id)
-        if r.status_code == 200:
-            review_text = (r.json().get("message", {}).get("content") or "").strip()
+        review_text = await cancel_registry.await_cancellable(coro, run_id)
 
     except cancel_registry.RunCancelled:
         cancelled_env = {
@@ -1663,6 +1782,9 @@ async def run_review(http, events, conv_id: str, project_dir: str,
         "build_stdout_tail": (build_result.get("stdout", "") or "")[-3000:],
         "test_stdout_tail": (test_result.get("stdout", "") or "")[-5000:],
         "lint_stdout_tail": (lint_result.get("stdout", "") or "")[-2000:],
+        "smoke_cmds": [sr["cmd"] for sr in smoke_results],
+        "smoke_exit": max((sr["exit"] for sr in smoke_results), default=None),
+        "smoke_new_files": smoke_new_files,
         "language": language, "marker": marker,
         "verification_level": verification_level,
         "verification_profile": profile,

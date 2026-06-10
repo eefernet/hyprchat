@@ -19,6 +19,7 @@ import uuid
 import config
 import database as db
 import cancel_registry
+import model_providers
 
 
 _ARTIFACT_DIRS = {
@@ -401,7 +402,7 @@ Use only the static project evidence below. Do not invent runtime results.
 
 ## Clean build/test/lint review
 {review_summary}
-
+{prior_acceptance_section}
 ## File manifest ({file_count} files shown)
 {manifest}
 
@@ -440,7 +441,7 @@ Return ONLY a JSON object with this exact shape:
 Acceptance criteria:
 - spec: implemented behavior must match the user's request and plan.
 - docs: README and usage claims must be accurate for files/manifests present.
-- packaging: package metadata, entrypoints, generated artifacts, and archive hygiene must be sane.
+- packaging: package metadata, entrypoints, generated artifacts, and archive hygiene must be sane. If the review summary lists smoke_new_files (state files the program created when run), flag any that sit in the project tree as a packaging issue — runtime state must not ship in the deliverable.
 - tests: tests must be meaningful and isolated; they must not write to a real home directory or depend on host state.
 - runtime: flag likely user-visible behavior bugs that static inspection reveals, but do not speculate.
 - verification: accept static-only projects when the user's requested app type has no build step, but flag docs or delivery claims that imply stronger verification than the Reviewer actually performed.
@@ -461,7 +462,8 @@ async def run_acceptance_review(http, events, conv_id: str, *,
                                 reviewer_run_id: str = "",
                                 project_id: str = "",
                                 parent_run_id: str = "",
-                                conv_model: str = "") -> dict:
+                                conv_model: str = "",
+                                prior_acceptance_context: str = "") -> dict:
     """Run the final acceptance gate after a clean Reviewer run."""
     run_id = f"run-{uuid.uuid4().hex[:12]}"
 
@@ -610,7 +612,22 @@ async def run_acceptance_review(http, events, conv_id: str, *,
             "verification_level": review_env.get("verification_level", ""),
             "verification_profile": review_env.get("verification_profile", ""),
             "verification_confidence": review_env.get("verification_confidence", ""),
+            "smoke_cmds": review_env.get("smoke_cmds", []),
+            "smoke_new_files": review_env.get("smoke_new_files", []),
         }, indent=2)
+
+        if prior_acceptance_context:
+            prior_acceptance_section = (
+                "\n## Your previous acceptance verdict for this request\n"
+                "You already reviewed this project and flagged the issues below; "
+                "the fix loop then addressed them. FIRST verify each one is "
+                "resolved. Do NOT flag new minor nitpicks you did not previously "
+                "raise — only report a NEW issue if it is a genuine defect that "
+                "blocks the user's request.\n\n"
+                + prior_acceptance_context.strip()[:2000] + "\n"
+            )
+        else:
+            prior_acceptance_section = ""
 
         artifact_block = "\n".join(artifacts[:80]) if artifacts else "(none)"
         if console_scripts:
@@ -621,6 +638,7 @@ async def run_acceptance_review(http, events, conv_id: str, *,
             latest_task=latest_task or "(not available)",
             plan=plan or "(not available)",
             review_summary=review_summary,
+            prior_acceptance_section=prior_acceptance_section,
             file_count=len(files),
             manifest="\n".join(files[:300]) or "(no files found)",
             artifact_block=artifact_block,
@@ -630,8 +648,13 @@ async def run_acceptance_review(http, events, conv_id: str, *,
             source_sections=_sections(source, cap=_budgets["source"], per_file_cap=_SOURCE_CONTEXT_BYTES),
         )
 
+        # Cloud-prefixed models are honored only from explicit Settings values
+        # (per-agent override / Planning Model) — never inherited from the
+        # chat model.
         model = (getattr(config, "ACCEPTANCE_MODEL", "")
-                 or config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL or "")
+                 or config.PLANNING_MODEL
+                 or model_providers.reject_cloud(conv_model)
+                 or model_providers.reject_cloud(config.DEFAULT_MODEL) or "")
         if not model:
             envelope = {
                 "status": "error",
@@ -646,21 +669,31 @@ async def run_acceptance_review(http, events, conv_id: str, *,
             return envelope
 
         await _step("analyze", f"calling {model}")
-        coro = http.post(
-            f"{config.OLLAMA_URL}/api/chat",
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-                "think": False,
-                "options": {"temperature": 0.2, "num_ctx": num_ctx},
-            },
-            timeout=600,
-        )
-        r = await cancel_registry.await_cancellable(coro, run_id)
-        text = ""
-        if r.status_code == 200:
-            text = _ollama_response_text(r.json())
+
+        async def _progress_ticker():
+            elapsed = 0
+            while True:
+                await asyncio.sleep(15)
+                elapsed += 15
+                try:
+                    await _step("analyzing", f"{elapsed}s elapsed…")
+                except Exception:
+                    pass
+
+        _ticker = asyncio.create_task(_progress_ticker())
+        try:
+            coro = model_providers.complete_chat(
+                http, model, prompt,
+                temperature=0.2, num_ctx=num_ctx, num_predict=4096,
+                timeout=600, ollama_url=config.OLLAMA_URL,
+            )
+            text = await cancel_registry.await_cancellable(coro, run_id)
+        finally:
+            _ticker.cancel()
+            try:
+                await _ticker
+            except asyncio.CancelledError:
+                pass
         parsed = _try_parse_json(text)
         if not parsed or "status" not in parsed:
             parsed = {

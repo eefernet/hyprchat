@@ -450,6 +450,93 @@ def _max_output_tokens(options: dict | None, default: int = 4096) -> int:
     return default
 
 
+def reject_cloud(model_id: str) -> str:
+    """Return model_id unless it is cloud-prefixed, else "".
+
+    Used in agent model fallback chains: cloud models are honored only when
+    the user explicitly selected them in Settings (per-agent override or
+    Planning Model). Inherited fallbacks like the conversation's chat model
+    must not silently route agent calls to a paid API.
+    """
+    return "" if is_cloud_model(model_id or "") else (model_id or "")
+
+
+async def complete_chat(http, model_id: str, prompt: str, *,
+                        temperature: float = 0.2, num_ctx: int = 16384,
+                        num_predict: int | None = None,
+                        timeout: int = 600, ollama_url: str = "") -> str:
+    """Single-prompt completion for agent (non-chat) calls.
+
+    Works for both Ollama model names and cloud-prefixed IDs
+    (openai:*/anthropic:*). Returns the full text content; "" on HTTP failure.
+
+    The Ollama path STREAMS internally even though callers get one string:
+    with `stream: false` Ollama only notices a client disconnect after the
+    generation finishes, so a cancelled agent run kept burning GPU for the
+    whole response. Streaming makes Ollama abort the runner the moment
+    cancel_registry.await_cancellable drops the connection.
+
+    `num_predict` bounds generation length — structured-output agents
+    (plan/review/acceptance JSON) should cap it so a rambling model can't
+    hold the inference slot indefinitely.
+    """
+    provider, _ = split_model_id(model_id)
+    if provider in CLOUD_PROVIDERS:
+        options: dict = {"temperature": temperature}
+        if num_predict:
+            options["num_predict"] = num_predict
+        parts: list[str] = []
+        async for ev in stream_provider_chat(
+            http, model_id,
+            [{"role": "user", "content": prompt}],
+            options=options,
+        ):
+            if ev.get("type") == "token":
+                parts.append(ev.get("content", ""))
+        return "".join(parts).strip()
+
+    ollama_options: dict = {"temperature": temperature, "num_ctx": num_ctx}
+    if num_predict:
+        ollama_options["num_predict"] = num_predict
+    content_parts: list[str] = []
+    thinking_parts: list[str] = []
+    async with http.stream(
+        "POST",
+        f"{ollama_url}/api/chat",
+        json={
+            "model": model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": True,
+            "think": False,
+            "options": ollama_options,
+        },
+        timeout=timeout,
+    ) as resp:
+        if resp.status_code != 200:
+            return ""
+        async for line in resp.aiter_lines():
+            line = (line or "").strip()
+            if not line:
+                continue
+            try:
+                chunk = json.loads(line)
+            except Exception:
+                continue
+            msg = chunk.get("message") if isinstance(chunk.get("message"), dict) else {}
+            if isinstance(msg.get("content"), str):
+                content_parts.append(msg["content"])
+            # Reasoning models can route output to thinking even with think
+            # disabled — collect it as a fallback.
+            if isinstance(msg.get("thinking"), str):
+                thinking_parts.append(msg["thinking"])
+            if isinstance(chunk.get("thinking"), str):
+                thinking_parts.append(chunk["thinking"])
+            if chunk.get("done"):
+                break
+    text = "".join(content_parts).strip()
+    return text or "".join(thinking_parts).strip()
+
+
 async def stream_provider_chat(
     http: httpx.AsyncClient,
     model_id: str,

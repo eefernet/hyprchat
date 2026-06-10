@@ -27,6 +27,7 @@ import uuid
 import config
 import database as db
 import cancel_registry
+import model_providers
 
 from agents.acceptance import _configured_num_ctx, _ollama_response_text
 
@@ -607,24 +608,16 @@ async def run_project_qa(http, events, conv_id: str, *,
         await _step("compose", f"calling {qa_model}")
         answer = ""
         try:
-            coro = http.post(
-                f"{config.OLLAMA_URL}/api/chat",
-                json={
-                    "model": qa_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False,
-                    "think": False,
-                    "options": {"temperature": 0.3, "num_ctx": _configured_num_ctx()},
-                },
-                timeout=600,
+            # Streams internally so Stop aborts the Ollama runner immediately.
+            coro = model_providers.complete_chat(
+                http, qa_model, prompt,
+                temperature=0.3, num_ctx=_configured_num_ctx(),
+                num_predict=4096, timeout=600,
+                ollama_url=config.OLLAMA_URL,
             )
-            r = await cancel_registry.await_cancellable(coro, run_id)
-            if r.status_code == 200:
-                # Reasoning models can route the answer to the thinking field
-                # even with think disabled — read both.
-                answer = _ollama_response_text(r.json())
-            else:
-                answer = f"(LLM call failed: HTTP {r.status_code})"
+            answer = await cancel_registry.await_cancellable(coro, run_id)
+            if not answer:
+                answer = "(LLM call returned no output)"
         except cancel_registry.RunCancelled:
             cancelled_env = {
                 "status": "cancelled",

@@ -910,3 +910,52 @@ def test_qa_short_circuit_skips_stale_run(monkeypatch):
     assert chat._qa_run_qualifies(stale, "2026-01-01T00:05:00") is False
     assert chat._qa_run_qualifies(fresh, "2026-01-01T00:05:00") is True
     sys.modules.pop("agents.chat", None)
+
+
+def test_reject_cloud_filters_only_cloud_ids():
+    import model_providers as mp
+    assert mp.reject_cloud("qwen3.5:27b") == "qwen3.5:27b"
+    assert mp.reject_cloud("hf.co/foo/bar:Q4") == "hf.co/foo/bar:Q4"
+    assert mp.reject_cloud("anthropic:claude-x") == ""
+    assert mp.reject_cloud("openai:gpt-5") == ""
+    assert mp.reject_cloud("") == ""
+
+
+def test_complete_chat_ollama_path_streams_and_reads_thinking_fallback():
+    import json as _json
+    import model_providers as mp
+
+    class _SResp:
+        status_code = 200
+
+        async def aiter_lines(self):
+            yield _json.dumps({"message": {"content": "", "thinking": "the "}, "done": False})
+            yield _json.dumps({"message": {"content": "", "thinking": "answer"}, "done": True})
+
+    class _Ctx:
+        async def __aenter__(self):
+            return _SResp()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _HTTP:
+        def __init__(self):
+            self.calls = []
+
+        def stream(self, method, url, json=None, timeout=None):
+            self.calls.append((url, json))
+            return _Ctx()
+
+    http = _HTTP()
+    out = _run(mp.complete_chat(http, "qwen3.5:27b", "hi",
+                                num_ctx=4096, num_predict=2048,
+                                ollama_url="http://ollama"))
+
+    assert out == "the answer"
+    url, payload = http.calls[0]
+    assert url == "http://ollama/api/chat"
+    assert payload["stream"] is True
+    assert payload["think"] is False
+    assert payload["options"]["num_ctx"] == 4096
+    assert payload["options"]["num_predict"] == 2048

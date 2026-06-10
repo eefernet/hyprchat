@@ -875,21 +875,31 @@ async def run_aider_stream(req: AiderRunRequest):
 
     async def generate():
         fut = loop.run_in_executor(None, _run_sync)
-        while True:
-            try:
-                item = await asyncio.wait_for(queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                # Keepalive during silent Aider phases so proxies/read
-                # timeouts don't drop the stream (same as /run-stream).
-                yield ": keepalive\n\n"
-                continue
-            if item is None:
-                break
-            yield f"data: {json.dumps(item)}\n\n"
-        await fut
-        if result_holder[0]:
-            payload = {"type": "done", **result_holder[0]}
-            yield f"data: {json.dumps(payload)}\n\n"
+        finished = False
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    # Keepalive during silent Aider phases so proxies/read
+                    # timeouts don't drop the stream (same as /run-stream).
+                    yield ": keepalive\n\n"
+                    continue
+                if item is None:
+                    finished = True
+                    break
+                yield f"data: {json.dumps(item)}\n\n"
+            await fut
+            if result_holder[0]:
+                payload = {"type": "done", **result_holder[0]}
+                yield f"data: {json.dumps(payload)}\n\n"
+        finally:
+            # Client disconnected mid-run (Stop, orchestrator crash/kill):
+            # nobody is consuming, so cancel — the blocking runner's poll
+            # loop sees the event and kills the aider process group.
+            if not finished and not cancel_event.is_set():
+                print(f"[Aider-Worker] stream consumer vanished for {req.run_id} — cancelling run")
+                cancel_event.set()
 
     return StreamingResponse(
         generate(),
@@ -1430,23 +1440,39 @@ async def run_task_stream(req: RunRequest):
         # Start the blocking run in a background thread
         run_future = loop.run_in_executor(None, _run_sync)
 
-        # Stream events as they arrive
-        while True:
-            try:
-                item = await asyncio.wait_for(queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                yield ": keepalive\n\n"
-                continue
+        finished = False
+        try:
+            # Stream events as they arrive
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
 
-            if item is None:
-                break
+                if item is None:
+                    finished = True
+                    break
 
-            yield f"data: {json.dumps(item)}\n\n"
+                yield f"data: {json.dumps(item)}\n\n"
 
-        await run_future
+            await run_future
 
-        if result_holder[0]:
-            yield f"data: {json.dumps(result_holder[0])}\n\n"
+            if result_holder[0]:
+                yield f"data: {json.dumps(result_holder[0])}\n\n"
+        finally:
+            # Client disconnected mid-run (Stop, orchestrator crash/kill):
+            # cancel so the SDK loop exits at its next iteration instead of
+            # running the build to completion for nobody.
+            if not finished and not cancel_event.is_set():
+                print(f"[OH-Worker] stream consumer vanished for {req.run_id} — cancelling run")
+                cancel_event.set()
+                conv = conversation_holder[0]
+                if conv is not None:
+                    try:
+                        conv.pause()
+                    except Exception as e:
+                        print(f"[OH-Worker] pause() on disconnect failed (non-fatal): {e}")
 
     return StreamingResponse(
         generate(),

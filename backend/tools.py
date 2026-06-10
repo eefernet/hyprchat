@@ -129,6 +129,92 @@ def _v2_name_match(name: str) -> bool:
     return "daedalus" in n or re.search(r"\bv2\b", n) is not None
 
 
+async def _prior_fix_attempts_context(conv_id: str, *, max_attempts: int = 3) -> str:
+    """Compact history of fix attempts since the latest user message.
+
+    Injected into Fixer/Aider prompts so attempt #2 knows what attempt #1
+    already changed — without it every fix call is stateless and the model's
+    most common failure is re-making the same edit that already didn't work."""
+    if not conv_id:
+        return ""
+    try:
+        runs = await db.get_runs_by_conversation(conv_id, limit=50)
+        uts = await _latest_user_msg_ts(conv_id)
+        attempts = [
+            r for r in _runs_since(runs, uts)
+            if (r.get("role") in {"fixer", "aider.fix"}
+                and r.get("status") in {"succeeded", "partial", "failed"})
+        ]
+        if not attempts:
+            return ""
+        lines = []
+        # runs come newest-first; show oldest attempt first.
+        for r in reversed(attempts[:max_attempts]):
+            env = r.get("result_envelope") or {}
+            files = ", ".join(
+                os.path.basename(f) or f for f in (env.get("files_touched") or [])[:6]
+            ) or "(no files written)"
+            summary = (env.get("summary") or "")[:160]
+            errs = "; ".join(str(e) for e in (env.get("errors") or [])[:2])[:200]
+            lines.append(
+                f"- {r.get('role')} [{env.get('status') or r.get('status')}] "
+                f"touched: {files}. {summary}"
+                + (f" Errors: {errs}" if errs else "")
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[v2-gate] prior-attempt context failed (non-fatal): {e}")
+        return ""
+
+
+async def _prior_acceptance_issues_context(conv_id: str) -> str:
+    """Most recent acceptance verdict (issues/error) for this user request —
+    fed back into the next acceptance run so it verifies its own prior
+    findings instead of moving the goalposts with brand-new nitpicks."""
+    if not conv_id:
+        return ""
+    try:
+        runs = await db.get_runs_by_conversation(conv_id, limit=50)
+        uts = await _latest_user_msg_ts(conv_id)
+        for r in _runs_since(runs, uts):
+            if r.get("role") != "acceptance":
+                continue
+            env = r.get("result_envelope") or {}
+            if (env.get("status") or "").lower() not in {"issues", "error"}:
+                return ""
+            lines = []
+            for i in (env.get("issues") or [])[:6]:
+                lines.append(
+                    f"- [{i.get('category', i.get('severity', '?'))}] "
+                    f"{i.get('file', '')}: {(i.get('summary') or '')[:140]}"
+                )
+            return "\n".join(lines)
+        return ""
+    except Exception as e:
+        print(f"[v2-gate] prior-acceptance context failed (non-fatal): {e}")
+        return ""
+
+
+async def _fix_budget_note(conv_id: str, source_role: str) -> str:
+    """One-line budget readout appended to fix results so the model can plan
+    its remaining cycles instead of discovering the cap by hitting it."""
+    try:
+        runs = await db.get_runs_by_conversation(conv_id, limit=50)
+        uts = await _latest_user_msg_ts(conv_id)
+        source_role = source_role or "reviewer"
+        succ = sum(
+            1 for r in _runs_since(runs, uts)
+            if (r.get("role") in {"fixer", "aider.fix"}
+                and r.get("status") == "succeeded"
+                and ((r.get("result_envelope") or {}).get("source_role") or "reviewer") == source_role)
+        )
+        cap = 2 if source_role == "acceptance" else 3
+        return (f"\n\nFix-cycle budget: {min(succ, cap)}/{cap} successful "
+                f"{source_role}-driven fix(es) used for this request.")
+    except Exception:
+        return ""
+
+
 # In-process cache of the most recent deep_research result per conversation.
 # The full research report only exists in the orchestrator's in-memory tool
 # history for the current turn — saved_events keeps a summary but not the
@@ -2232,12 +2318,22 @@ async def exec_tool(
                         print(f"[v2-gate] ship-anyway: allowing {name} before "
                               f"acceptance because latest user requested delivery", flush=True)
                     else:
+                        # A docs-only fixer trigger's envelope reviewer_run_id
+                        # points at the ACCEPTANCE run it fixed from — suggesting
+                        # it teaches the model a wrong id. Only name the id when
+                        # the trigger is the clean reviewer itself; the dispatcher
+                        # auto-resolves the latest clean reviewer otherwise.
+                        _call_hint = (
+                            f"  run_acceptance_review(project_dir='{_pd}', reviewer_run_id='{_rid}')"
+                            if _source_role == "reviewer"
+                            else f"  run_acceptance_review(project_dir='{_pd}')"
+                        )
                         _gate_msg = (
                             "state", "acceptance-needed",
                             f"BLOCKED — run_review is clean, but final acceptance has not "
                             f"passed yet.\n\n"
                             f"Your VERY NEXT tool call MUST be:\n"
-                            f"  run_acceptance_review(project_dir='{_pd}', reviewer_run_id='{_reviewer_id}')\n\n"
+                            f"{_call_hint}\n\n"
                             f"Acceptance verifies the generated project satisfies the user's "
                             f"request, has accurate docs, sane tests, and clean packaging. "
                             f"Do not call {name} or download_project until acceptance returns accepted "
@@ -3589,6 +3685,19 @@ async def exec_tool(
                 if workflow_id:
                     await db.update_coder_workflow(workflow_id, state="fixing", artifact_status="not_ready")
 
+            # Prior fix attempts this turn — folded into the task text so the
+            # Aider prompt (built worker-side) sees them without a worker change.
+            _attempts_for_aider = await _prior_fix_attempts_context(conv_id)
+            if _attempts_for_aider:
+                task = (
+                    f"{task}\n\n"
+                    f"Previous fix attempts already made for this request — do NOT "
+                    f"repeat an approach that already failed; try something different:\n"
+                    f"{_attempts_for_aider}"
+                )
+                print(f"[run_aider_fix] injecting attempt history "
+                      f"({len(_attempts_for_aider)} chars)")
+
             envelope = await aider_fixer.run_aider_fix(
                 http, events, conv_id,
                 project_dir=project_dir, task=task,
@@ -3609,6 +3718,7 @@ async def exec_tool(
                     + "\n".join(f"  - {f}" for f in files[:12])
                     + f"\nworkflow_id: {workflow_id or '(none)'}\n"
                     "REQUIRED NEXT TOOL CALL: run_review. Aider only edits; Reviewer must verify build/tests before acceptance or delivery."
+                    + await _fix_budget_note(conv_id, envelope.get("source_role"))
                 )
             if status == "no_changes":
                 return (
@@ -3845,12 +3955,17 @@ async def exec_tool(
             if not project_dir:
                 return "ERROR: run_acceptance_review needs project_dir or a clean reviewer envelope with project_dir."
 
+            _prior_acc = await _prior_acceptance_issues_context(conv_id)
+            if _prior_acc:
+                print(f"[run_acceptance_review] injecting prior verdict "
+                      f"({len(_prior_acc)} chars)")
             envelope = await acceptance.run_acceptance_review(
                 http, events, conv_id,
                 project_dir=project_dir,
                 reviewer_run_id=reviewer_run_id,
                 project_id=project_id,
                 conv_model=conv_model,
+                prior_acceptance_context=_prior_acc,
             )
             try:
                 wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
@@ -3975,9 +4090,18 @@ async def exec_tool(
             except Exception as _re:
                 print(f"[run_fixer] research lookup failed (non-fatal): {_re}")
 
+            # Prior fix attempts this turn — so the Fixer doesn't repeat an
+            # edit that already failed. Gathered orchestrator-side; fixer.py
+            # stays network-free and reads no conversation state itself.
+            _attempts_for_fixer = await _prior_fix_attempts_context(conv_id)
+            if _attempts_for_fixer:
+                print(f"[run_fixer] injecting attempt history "
+                      f"({len(_attempts_for_fixer)} chars)")
+
             envelope = await fixer.run_fixer(http, events, conv_id,
                                               reviewer_run_id=reviewer_run_id,
-                                              research_context=_research_for_fixer)
+                                              research_context=_research_for_fixer,
+                                              attempt_history=_attempts_for_fixer)
 
             f_status = envelope.get("status", "?")
             files = envelope.get("files_touched") or []
@@ -4000,7 +4124,7 @@ async def exec_tool(
                     lines.append("REQUIRED NEXT TOOL CALL: run_review (no args needed — uses the "
                                  "active project). It will re-run the build/tests and tell you "
                                  "whether the fixes worked before acceptance runs again.")
-                return "\n".join(lines)
+                return "\n".join(lines) + await _fix_budget_note(conv_id, envelope.get("source_role"))
             elif f_status == "partial":
                 lines = [
                     f"FIXER PARTIAL: applied {len(files)} edit(s) but {len(errors)} error(s) occurred.",
@@ -4014,7 +4138,7 @@ async def exec_tool(
                     lines.append("REQUIRED NEXT TOOL CALL: run_acceptance_review to re-check docs-only acceptance fixes.")
                 else:
                     lines.append("REQUIRED NEXT TOOL CALL: run_review to see the current state of the project.")
-                return "\n".join(lines)
+                return "\n".join(lines) + await _fix_budget_note(conv_id, envelope.get("source_role"))
             elif f_status == "skipped":
                 return f"FIXER SKIPPED: {envelope.get('summary', 'no issues to fix')}."
             else:

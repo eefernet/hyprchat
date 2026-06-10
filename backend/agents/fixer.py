@@ -30,6 +30,7 @@ import uuid
 import config
 import database as db
 import cancel_registry
+import model_providers
 
 
 _FIXER_PROMPT = """You are the Fixer — a focused code-editing agent. You MUST only edit the files listed in 'allowed_paths' to address the issues described below. Do not touch any other files. Do not add new files. Do not refactor unrelated code.
@@ -40,7 +41,7 @@ _FIXER_PROMPT = """You are the Fixer — a focused code-editing agent. You MUST 
 - Build command: {build_cmd}
 - Test command: {test_cmd}
 - Issue source: {source_role}
-{research_section}
+{research_section}{attempts_section}
 ## Issues to fix
 {issue_block}
 
@@ -232,7 +233,8 @@ def _parse_fixer_output(text: str) -> dict:
 async def run_fixer(http, events, conv_id: str, *,
                     reviewer_run_id: str = "",
                     parent_run_id: str = "",
-                    research_context: str = "") -> dict:
+                    research_context: str = "",
+                    attempt_history: str = "") -> dict:
     """Execute a Fixer run that addresses every issue in a prior Reviewer/Acceptance envelope.
 
     Returns a structured envelope. Creates a `runs` row with role='fixer' and
@@ -385,6 +387,19 @@ async def run_fixer(http, events, conv_id: str, *,
     else:
         research_section = ""
 
+    if attempt_history:
+        _attempts_excerpt = attempt_history.strip()[:1500]
+        attempts_section = (
+            "\n## Previous fix attempts for this request\n"
+            "These edits were ALREADY made and the issues below still remain. "
+            "Do NOT repeat the same change — diagnose why the prior approach "
+            "didn't work and try something different.\n\n"
+            f"{_attempts_excerpt}\n"
+        )
+        await _step("attempt-history-injected", f"{len(_attempts_excerpt)} chars")
+    else:
+        attempts_section = ""
+
     def _normalize_path(p: str) -> str:
         if not p:
             return ""
@@ -482,7 +497,7 @@ async def run_fixer(http, events, conv_id: str, *,
     # Compute per-file character budget so the prompt fits the context window.
     _fixer_ctx = config.DEFAULT_NUM_CTX or 16384
     _char_budget = _fixer_ctx * 3
-    _overhead = len(issue_block) + len(research_section) + 2000
+    _overhead = len(issue_block) + len(research_section) + len(attempts_section) + 2000
     _file_budget = max(_char_budget - _overhead, 8000)
     _per_file_cap = min(max(_file_budget // max(len(capped_scope), 1), 1000), 8000)
     print(f"[FIXER] budget: num_ctx={_fixer_ctx}, files={len(capped_scope)}, "
@@ -510,6 +525,7 @@ async def run_fixer(http, events, conv_id: str, *,
         test_cmd=test_cmd or "(none)",
         source_role=source_role,
         research_section=research_section,
+        attempts_section=attempts_section,
         issue_block=issue_block,
         allowed_paths_list="\n".join(f"  - {p}" for p in capped_scope),
         files_section="\n\n".join(files_section_lines),
@@ -520,23 +536,16 @@ async def run_fixer(http, events, conv_id: str, *,
     await _step(f"calling {fixer_model}", f"{len(issue_blocks)} issue(s) batched")
     text = ""
     try:
-        coro = http.post(
-            f"{config.OLLAMA_URL}/api/chat",
-            json={
-                "model": fixer_model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-                "think": False,
-                "options": {"temperature": 0.2,
-                            "num_ctx": config.DEFAULT_NUM_CTX},
-            },
-            timeout=600,
+        # Streams internally so Stop aborts the Ollama runner immediately.
+        # No num_predict cap: the Fixer emits complete files.
+        coro = model_providers.complete_chat(
+            http, fixer_model, prompt,
+            temperature=0.2, num_ctx=config.DEFAULT_NUM_CTX, timeout=600,
+            ollama_url=config.OLLAMA_URL,
         )
-        r = await cancel_registry.await_cancellable(coro, run_id)
-        if r.status_code == 200:
-            text = (r.json().get("message", {}).get("content") or "").strip()
-        else:
-            errors.append(f"Model HTTP {r.status_code}")
+        text = await cancel_registry.await_cancellable(coro, run_id)
+        if not text:
+            errors.append("Model returned no output")
     except cancel_registry.RunCancelled:
         cancelled_env = {
             "status": "cancelled",
@@ -551,6 +560,7 @@ async def run_fixer(http, events, conv_id: str, *,
             "language": language,
             "reviewer_run_id": reviewer_run_id,
             "research_used": bool(research_context),
+        "attempt_history_used": bool(attempt_history),
         }
         try:
             await events.emit(conv_id, "tool_end", {
@@ -641,6 +651,7 @@ async def run_fixer(http, events, conv_id: str, *,
         "source_role": source_role,
         "docs_only": _paths_are_docs_only(sorted(files_touched)),
         "research_used": bool(research_context),
+        "attempt_history_used": bool(attempt_history),
     }
 
     await events.emit(conv_id, "tool_end", {

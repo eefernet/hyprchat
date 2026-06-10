@@ -42,9 +42,41 @@ class _FakeEvents:
         self.events.append((conv_id, event_type, data))
 
 
+
+
+class _OllamaStreamShim:
+    """Adapts a post()-style fake to complete_chat's streaming Ollama path:
+    wraps the fake's JSON body into a single NDJSON chunk."""
+
+    def __init__(self, fake, url, json_payload, timeout):
+        self.fake = fake
+        self.url = url
+        self.json_payload = json_payload
+        self.timeout = timeout
+
+    async def __aenter__(self):
+        import json as _json
+        resp = await self.fake.post(self.url, json=self.json_payload, timeout=self.timeout)
+        body = resp.json() if resp.status_code == 200 else {}
+
+        class _SResp:
+            status_code = resp.status_code
+
+            async def aiter_lines(_s):
+                msg = body.get("message") if isinstance(body.get("message"), dict) else {}
+                yield _json.dumps({"message": msg, "thinking": body.get("thinking"), "done": True})
+
+        return _SResp()
+
+    async def __aexit__(self, *a):
+        return False
+
 class _FixerHTTP:
     def __init__(self):
         self.posts = []
+
+    def stream(self, method, url, json=None, timeout=None):
+        return _OllamaStreamShim(self, url, json, timeout)
 
     async def post(self, url, json=None, timeout=None):
         self.posts.append({"url": url, "json": json, "timeout": timeout})
@@ -447,3 +479,114 @@ def test_research_release_uses_reviewer_started_at(tmp_path, monkeypatch):
     ))
     assert "Agent Research first" not in res_fx
     assert "BLOCKED" not in res_fx
+
+
+def test_fixer_receives_prior_attempt_history(tmp_path, monkeypatch):
+    """Attempt #2 must see what attempt #1 already changed."""
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_model_config("mc-hist", "Daedalus Coder v2", "test-model",
+                                tool_ids=["run_fixer"]))
+    _run(db.create_conversation("conv-hist", "Attempt History", model_config_id="mc-hist"))
+    _run(db.add_message("conv-hist", "user", "fix my app"))
+    _run(_set_message_times("conv-hist", "2025-12-31 00:00:00"))
+
+    # Attempt #1: a fixer run that already touched app.py but didn't stick.
+    _run(db.create_run("run-fx-hist", "conv-hist", role="fixer", status="succeeded"))
+    _run(db.update_run("run-fx-hist", status="succeeded", result_envelope={
+        "status": "applied", "source_role": "reviewer",
+        "files_touched": ["/root/projects/demo/app.py"],
+        "summary": "Renamed handler to fix import",
+    }, ended=True))
+    _run(_set_run_times("run-fx-hist", "2026-01-01T00:00:01", "2026-01-01T00:00:02"))
+
+    _run(db.create_run("run-rev-hist", "conv-hist", role="reviewer", status="succeeded"))
+    _run(db.update_run("run-rev-hist", status="succeeded", result_envelope={
+        "status": "issues", "summary": "still broken",
+        "project_dir": "/root/projects/demo",
+        "issues": [{"file": "app.py", "summary": "boom",
+                    "suggested_fix_scope": ["app.py"]}],
+    }, ended=True))
+    _run(_set_run_times("run-rev-hist", "2026-01-01T00:00:03", "2026-01-01T00:00:04"))
+
+    _patch_fixer_config(monkeypatch)
+    http = _FixerHTTP()
+
+    result = _run(tools.exec_tool(
+        http=http, events=_FakeEvents(),
+        name="run_fixer", args={"reviewer_run_id": "run-rev-hist"},
+        conv_id="conv-hist",
+    ))
+
+    assert "BLOCKED" not in result
+    prompt = [p for p in http.posts if p["url"].endswith("/api/chat")][0]["json"]["messages"][0]["content"]
+    assert "Previous fix attempts" in prompt
+    assert "app.py" in prompt
+    assert "Renamed handler to fix import" in prompt
+
+    runs = _run(db.get_runs_by_conversation("conv-hist", limit=10))
+    new_fixer = next(r for r in runs if r["role"] == "fixer" and r["id"] != "run-fx-hist")
+    assert new_fixer["result_envelope"]["attempt_history_used"] is True
+
+
+def test_prior_attempt_context_excludes_older_turns(tmp_path):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_conversation("conv-hist2", "Attempt History 2"))
+    _run(db.create_run("run-fx-old", "conv-hist2", role="fixer", status="succeeded"))
+    _run(db.update_run("run-fx-old", status="succeeded", result_envelope={
+        "status": "applied", "files_touched": ["/root/projects/demo/old.py"],
+        "summary": "old turn fix",
+    }, ended=True))
+    _run(_set_run_times("run-fx-old", "2026-01-01T00:00:00", "2026-01-01T00:00:01"))
+    # New user message AFTER the old attempt — history resets.
+    _run(db.add_message("conv-hist2", "user", "now do something else"))
+    _run(_set_message_times("conv-hist2", "2026-01-01 00:10:00"))
+
+    ctx = _run(tools._prior_fix_attempts_context("conv-hist2"))
+
+    assert ctx == ""
+
+
+def test_prior_acceptance_context_returns_latest_issue_verdict(tmp_path):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_conversation("conv-pacc", "Prior Acceptance"))
+    _run(db.create_run("run-acc-1", "conv-pacc", role="acceptance", status="succeeded"))
+    _run(db.update_run("run-acc-1", status="succeeded", result_envelope={
+        "status": "issues",
+        "issues": [{"category": "packaging", "file": "pyproject.toml",
+                    "summary": "missing console_scripts entry"}],
+    }, ended=True))
+    _run(_set_run_times("run-acc-1", "2026-01-01T00:00:01", "2026-01-01T00:00:02"))
+
+    ctx = _run(tools._prior_acceptance_issues_context("conv-pacc"))
+    assert "packaging" in ctx and "console_scripts" in ctx
+
+    # An accepted verdict on top clears the constraint.
+    _run(db.create_run("run-acc-2", "conv-pacc", role="acceptance", status="succeeded"))
+    _run(db.update_run("run-acc-2", status="succeeded", result_envelope={
+        "status": "accepted", "issues": [],
+    }, ended=True))
+    _run(_set_run_times("run-acc-2", "2026-01-01T00:00:03", "2026-01-01T00:00:04"))
+    assert _run(tools._prior_acceptance_issues_context("conv-pacc")) == ""
+
+
+def test_fix_budget_note_counts_per_request(tmp_path):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_conversation("conv-budget", "Budget"))
+    _run(db.add_message("conv-budget", "user", "fix it"))
+    _run(_set_message_times("conv-budget", "2025-12-31 00:00:00"))
+    for i, role in enumerate(["fixer", "aider.fix"]):
+        rid = f"run-bgt-{i}"
+        _run(db.create_run(rid, "conv-budget", role=role, status="succeeded"))
+        _run(db.update_run(rid, status="succeeded", result_envelope={
+            "status": "applied", "source_role": "reviewer",
+        }, ended=True))
+        _run(_set_run_times(rid, f"2026-01-01T00:00:0{i}", f"2026-01-01T00:00:0{i}"))
+
+    note = _run(tools._fix_budget_note("conv-budget", "reviewer"))
+    assert "2/3" in note
+    note_acc = _run(tools._fix_budget_note("conv-budget", "acceptance"))
+    assert "0/2" in note_acc

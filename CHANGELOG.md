@@ -1,3 +1,22 @@
+## Alpha v17.2.2 — June 10, 2026
+
+### Daedalus — Stop Actually Stops, and Smarter Loops
+- **Stop now frees the GPU immediately**: agent LLM calls (Architect, Reviewer, Acceptance, Fixer, ProjectQA) previously used non-streaming Ollama requests, so cancelling only dropped the connection while Ollama kept generating until the response finished — the "still active workers after Stop" you could see in nvtop. Agent calls now stream internally, so a cancel aborts the Ollama runner on the spot.
+- **Workers self-cancel on disconnect**: if the OpenHands/Aider SSE stream consumer vanishes (Stop, orchestrator restart, crash), the Codebox worker now cancels the run itself — pauses the OpenHands conversation or kills the Aider process group — instead of building to completion for nobody.
+- **Bounded generation**: structured-output agents (plan/review/acceptance JSON, QA answers) cap generation at 4096 tokens so a rambling model can't hold the inference slot indefinitely.
+- **Acceptance shows progress**: a "analyzing… Ns elapsed" ticker during the model call, so a slow acceptance no longer looks frozen.
+- **Acceptance verdict memory**: re-runs see their own previous verdict ("you flagged these; verify they're fixed; don't invent new nitpicks"), reducing goalpost-moving across fix cycles.
+- **Fix-budget feedback**: every fixer/Aider result now reports "Fix-cycle budget: N/3 used for this request" so the model plans its remaining attempts instead of discovering the cap by hitting it.
+- **Reviewer smokes the real CLI**: for pyproject projects the smoke phase now reads `[project.scripts]` and runs the installed console command (`<script> --help`) ahead of the import fallback — catching broken entrypoints and runtime state files the import probe missed.
+- Gate hint fix: the acceptance-needed message no longer suggests a stale/wrong `reviewer_run_id` when the trigger was a docs-only fix.
+
+## Alpha v17.2.1 — June 10, 2026
+
+### Daedalus — Smarter Agentic Coding
+- **Fix attempts now have memory**: the Fixer and Aider see a compact history of what previous fix attempts in the same request already changed ("touched app.py — renamed handler; tests still failed"), so attempt #2 tries a different approach instead of repeating the same edit.
+- **Cloud models can power the judgment agents (opt-in)**: Architect, Reviewer, and Acceptance now work with OpenAI/Anthropic models — but only when you explicitly pick a cloud model for that agent (or Planning Model) in Settings → Coder Bot. A cloud chat model is never silently inherited by the agents.
+- **Reviewer smoke phase**: after build/tests/lint pass, the Reviewer now actually runs the program the way a user would (the contract's smoke commands, e.g. `python -m <pkg> --help`). A crashing entrypoint becomes a runtime issue even when all tests pass, and any state files the program creates at runtime are recorded (`smoke_new_files`) and surfaced to Acceptance as packaging signals.
+
 ## Alpha v17.2.0 — June 10, 2026
 
 ### Daedalus (Coder Bot v2) Hardening
