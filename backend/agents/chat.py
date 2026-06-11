@@ -473,6 +473,32 @@ _TOOL_ICONS = {
 
 
 _BLOCKED_RUN_RE = re.compile(r"\b(run-[0-9a-fA-F]{8,16})\b")
+
+# Phantom-completion guard: detects a v2 coder persona asserting it DID work
+# (added/built/implemented a feature) when it actually called no tools that turn.
+# Kept tight on purpose — clarifying questions, refusals, and plain explanations
+# must NOT match. The ✅ feature-list marker is a strong signal in practice.
+_PHANTOM_CLAIM_RE = re.compile(
+    r"(?:\bI(?:'ve|\s+have)\s+(?:added|created|built|implemented|updated|made|fixed|wired|set\s+up|finished|completed|integrated)\b"
+    r"|here'?s\s+what(?:'s|\s+(?:was|i))?\s+(?:new|created|added|changed|implemented|built|done)\b"
+    r"|\b(?:successfully|now)\s+(?:added|created|implemented|built|updated|integrated)\b"
+    r"|✅)",
+    re.IGNORECASE,
+)
+_PHANTOM_CORRECTION = (
+    "SYSTEM: You told the user you made changes (e.g. 'added', 'implemented', "
+    "'created'), but you called NO tools this turn — so NOTHING was actually changed "
+    "on disk. A real change to this project REQUIRES a tool call. Do ONE of these NOW:\n"
+    "  (a) call run_aider_fix(task='...') for the existing/uploaded project, or "
+    "generate_code/write_file for genuinely new files, to ACTUALLY make the change; or\n"
+    "  (b) if you cannot or should not change anything, tell the user plainly that you "
+    "have NOT made any changes yet, and why.\n"
+    "Do not claim work you did not perform."
+)
+_PHANTOM_NOTICE = (
+    "> ⚠️ Heads-up: I did not run any build or edit tools this turn, so no project "
+    "files were actually changed.\n\n"
+)
 _UPLOAD_MANUAL_TOOLS = {
     "read_file", "write_file", "run_shell", "execute_code", "list_files",
     "search_files", "diff_files", "download_project", "download_file",
@@ -1341,6 +1367,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     _generate_code_done = False    # Guard: stop tool calls after successful generate_code
     _rescue_count = 0              # How many times we rescued code blocks
     _oom_retries = 0               # OOM context halving retries
+    _tools_ran_this_turn = 0       # Real exec_tool runs this turn (phantom-completion guard)
+    _phantom_nudges = 0            # How many times we re-prompted a tool-less completion claim
     # Effort-level self-review rounds: 0=off, capped at 3
     _review_round = 0
     _review_budget = max(0, min(3, int(getattr(req, "effort_rounds", 0) or 0)))
@@ -2130,6 +2158,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         tool_result = head + f"\n\n[... {orig_len - 12000} chars omitted ...]\n\n" + tail
 
                     messages.append({"role": "tool", "content": tool_result})
+                    _tools_ran_this_turn += 1
                     print(f"[CHAT]   Tool result ({tool_name}): {len(tool_result)} chars")
 
                     if _record_blocked_tool_result(_blocked_tool_state, tool_name, tool_result):
@@ -2309,6 +2338,35 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
         # No tool calls — we have a final response
         if content:
+            # ── Phantom-completion guard (v2 coder personas) ──
+            # The model claimed it did work (added/built/implemented) but called
+            # zero tools this turn, so nothing actually changed on disk. Re-prompt
+            # it to make the change via a tool or admit it didn't; if it still
+            # refuses after the nudges, prepend an honesty notice so the user is
+            # never handed a false success. Q&A turns run ask_project (a tool), so
+            # _tools_ran_this_turn>0 keeps them exempt.
+            _phantom_hit = (
+                _is_v2_persona and bool(_active_project)
+                and _tools_ran_this_turn == 0
+                and bool(_PHANTOM_CLAIM_RE.search(content))
+            )
+            if _phantom_hit and _phantom_nudges < 2:
+                _phantom_nudges += 1
+                print(f"[CHAT]   Phantom-completion claim with 0 tools — nudge #{_phantom_nudges}")
+                yield f"data: {json.dumps({'type': 'clear'})}\n\n"
+                messages.append(msg)  # let the model see what it claimed
+                messages.append({"role": "tool", "content": _PHANTOM_CORRECTION})
+                continue
+            if _phantom_hit and _phantom_nudges >= 2 and not content.startswith(_PHANTOM_NOTICE):
+                print(f"[CHAT]   Phantom-completion persisted after {_phantom_nudges} nudges — prepending honesty notice")
+                content = _PHANTOM_NOTICE + content
+                msg["content"] = content
+                yield f"data: {json.dumps({'type': 'clear'})}\n\n"
+                for i in range(0, len(content), 8):
+                    yield f"data: {json.dumps({'type': 'token', 'content': content[i:i+8]})}\n\n"
+                    await asyncio.sleep(0)
+                _streamed_content = True  # skip the buffered flush below (already streamed)
+
             # If content was buffered (tool mode), flush it now as the final answer
             if _has_tools and not _streamed_content:
                 for i in range(0, len(content), 8):

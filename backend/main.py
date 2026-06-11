@@ -1407,6 +1407,43 @@ async def chat_stream(req: ChatRequest):
 # ============================================================
 # ARTIFACTS
 # ============================================================
+async def _annotate_artifact_staleness(artifacts: list[dict]) -> list[dict]:
+    """For archive artifacts: set `stale` when the project changed (a successful
+    edit run started) after the artifact was packaged, and `latest_for_project`
+    for the newest archive of each project within the given set. Edit-run lookups
+    are cached per project_id so a list page costs one query per distinct project."""
+    if not artifacts:
+        return artifacts
+    edit_ts_cache: dict[str, str | None] = {}
+    newest_by_project: dict[str, str] = {}
+    for a in artifacts:
+        if (a.get("kind") or "") != "archive":
+            continue
+        pid = str(((a.get("metadata") or {}).get("project_id") or "")).strip()
+        if not pid:
+            continue
+        ca = a.get("created_at") or ""
+        if ca > newest_by_project.get(pid, ""):
+            newest_by_project[pid] = ca
+    for a in artifacts:
+        if (a.get("kind") or "") != "archive":
+            continue
+        pid = str(((a.get("metadata") or {}).get("project_id") or "")).strip()
+        if not pid:
+            continue
+        if pid not in edit_ts_cache:
+            try:
+                edit_ts_cache[pid] = await db.latest_edit_run_after(pid)
+            except Exception as e:
+                print(f"[artifacts] stale lookup failed for {pid}: {e}")
+                edit_ts_cache[pid] = None
+        edit_ts = edit_ts_cache[pid]
+        ca = a.get("created_at") or ""
+        a["stale"] = bool(edit_ts and ca and edit_ts > ca)
+        a["latest_for_project"] = bool(ca and ca == newest_by_project.get(pid))
+    return artifacts
+
+
 @app.get("/api/artifacts")
 async def list_artifacts_ep(
     conversation_id: Optional[str] = Query(None),
@@ -1424,7 +1461,7 @@ async def list_artifacts_ep(
     limit: int = Query(80, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    return await db.list_artifacts(
+    artifacts = await db.list_artifacts(
         conversation_id=conversation_id,
         workspace_id=workspace_id,
         run_id=run_id,
@@ -1440,6 +1477,7 @@ async def list_artifacts_ep(
         limit=limit,
         offset=offset,
     )
+    return await _annotate_artifact_staleness(artifacts)
 
 
 @app.get("/api/artifacts/{artifact_id}")
@@ -1447,7 +1485,25 @@ async def get_artifact_ep(artifact_id: str):
     artifact = await db.get_artifact(artifact_id)
     if not artifact:
         raise HTTPException(404, "Artifact not found")
+    # Annotate across the full lineage so `latest_for_project` reflects the whole
+    # version set, not just this single row. Mutates `versions` in place too.
+    await _annotate_artifact_staleness([artifact] + (artifact.get("versions") or []))
     return artifact
+
+
+@app.get("/api/artifacts/{artifact_id}/download")
+async def download_artifact_ep(artifact_id: str):
+    """Serve THIS artifact's exact bytes (immutable), keyed on artifact id rather
+    than a shared basename — so an old pill always downloads what it packaged even
+    after a newer delivery overwrote the friendly /api/downloads/{name} file."""
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    filepath, safe_name = _artifact_path_for_row(artifact)
+    if not filepath:
+        raise HTTPException(404, "Artifact file is missing")
+    download_name = os.path.basename(artifact.get("filename") or "") or safe_name
+    return FileResponse(filepath, filename=download_name)
 
 
 @app.get("/api/artifacts/{artifact_id}/duplicates")

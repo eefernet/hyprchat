@@ -4998,6 +4998,30 @@ async def get_runs_by_conversation(conversation_id: str, limit: int = 100) -> li
         await db.close()
 
 
+async def latest_edit_run_after(project_id: str) -> str | None:
+    """Most recent started_at among successful/partial file-EDITING runs
+    (builder.* / fixer / aider.fix) for a project. Reviewer/acceptance/qa/architect
+    don't write files, so they're excluded. Used to flag stale archive artifacts:
+    if this timestamp is newer than an archive's created_at, the project changed
+    after it was packaged. Returns a 'YYYY-MM-DD HH:MM:SS' string (UTC) or None."""
+    if not project_id:
+        return None
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT MAX(started_at) AS ts FROM runs "
+            "WHERE project_id=? "
+            "AND conversation_id IN (SELECT id FROM conversations WHERE user_id=?) "
+            "AND (role IN ('fixer','aider.fix') OR role LIKE 'builder.%') "
+            "AND status NOT IN ('failed','cancelled','skipped','queued','pending','running')",
+            (project_id, user_id),
+        )
+        return (rows[0]["ts"] if rows and rows[0] else None) or None
+    finally:
+        await db.close()
+
+
 async def get_runs_by_project(project_id: str, limit: int = 50) -> list[dict]:
     """All runs that touched a given project, newest first."""
     user_id = _scope_user()

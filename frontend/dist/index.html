@@ -1322,7 +1322,7 @@ const WorkflowCard = ({workflow, t, font, onOpenArtifact})=>{
       <span style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>· {modeLabel}</span>
       <span style={{fontSize:10,color:colour}}>· {state}</span>
       <span style={{fontSize:10,color:t.mut}}>· artifact: {artifact}</span>
-      {artifacts.length>0&&<a href={`${API}${artifacts[0].url}`} download={artifacts[0].filename} onClick={e=>e.stopPropagation()} style={{marginLeft:"auto",fontSize:10,color:t.ok,textDecoration:"none",border:`1px solid ${t.ok}35`,borderRadius:6,padding:"2px 7px",fontWeight:700}}>download</a>}
+      {artifacts.length>0&&<a href={artifacts[0].id?`${API}/api/artifacts/${artifacts[0].id}/download`:`${API}${artifacts[0].url}`} download={artifacts[0].filename} onClick={e=>e.stopPropagation()} style={{marginLeft:"auto",fontSize:10,color:t.ok,textDecoration:"none",border:`1px solid ${t.ok}35`,borderRadius:6,padding:"2px 7px",fontWeight:700}}>download</a>}
       {artifacts.length>0&&onOpenArtifact&&<button onClick={e=>{e.stopPropagation();onOpenArtifact(artifacts[0].id);}} style={{fontSize:10,color:t.acc,background:`${t.acc}10`,border:`1px solid ${t.acc}35`,borderRadius:6,padding:"2px 7px",fontWeight:800,cursor:"pointer",fontFamily:font}}>details</button>}
     </div>
     <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:5,fontSize:10,color:t.mut}}>
@@ -1456,6 +1456,7 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
   const [kbId,setKbId]=useState(kbs?.[0]?.id||"");
   const a=artifact||{};
   const btnS=(c,bg)=>({background:bg||`${c}14`,border:`1px solid ${c}35`,color:c,padding:"6px 9px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:10,fontWeight:800,display:"inline-flex",alignItems:"center",gap:5,textDecoration:"none"});
+  const gridBtn=(c)=>({...btnS(c),justifyContent:"center",padding:"7px 6px",minWidth:0,whiteSpace:"nowrap"});
   useEffect(()=>{if(!kbId&&kbs?.[0]?.id)setKbId(kbs[0].id);},[kbs,kbId]);
   useEffect(()=>{let stop=false;setPreview(null);if(!a.id)return;fetch(`${API}/api/artifacts/${encodeURIComponent(a.id)}/preview`).then(r=>r.json()).then(d=>{if(!stop)setPreview(d);}).catch(e=>{if(!stop)setPreview({preview_type:"metadata",message:e.message||String(e)});});return()=>{stop=true;};},[a.id,a.updated_at,a.exists_status]);
   useEffect(()=>{let stop=false;setTimeline([]);if(!a.id)return;fetch(`${API}/api/artifacts/${encodeURIComponent(a.id)}/timeline`).then(r=>r.ok?r.json():{events:[]}).then(d=>{if(!stop)setTimeline(d.events||[]);}).catch(()=>{if(!stop)setTimeline([]);});return()=>{stop=true;};},[a.id,a.updated_at,a.status,a.exists_status]);
@@ -1503,15 +1504,17 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
         <div><span style={{color:t.mut}}>Created</span><div style={{marginTop:4}}>{a.created_at?new Date(a.created_at).toLocaleString():""}</div></div>
       </section>
       <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Actions</div>
-        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-          <button onClick={async()=>{const d=await action("use-in-chat");onUseInChat?.(d.attachment);}} style={btnS(t.acc)}>Use in chat</button>
-          {kbs?.length>0&&<select value={kbId} onChange={e=>setKbId(e.target.value)} style={{background:t.bg,border:`1px solid ${t.brd}35`,color:t.text,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:10}}>{kbs.map(k=><option key={k.id} value={k.id}>{k.name}</option>)}</select>}
-          {kbs?.length>0&&<button onClick={async()=>{await action("add-to-kb",{kb_id:kbId});notify&&notify({type:"success",text:"Artifact imported to KB",duration:1800});}} style={btnS(t.ok)}>Add to KB</button>}
-          <button onClick={async()=>{const d=await action("send-to-research");notify&&notify({type:"success",text:"Research started",detail:d.report_id||d.id||"",duration:2500});}} style={btnS(t.pink)}>Research</button>
-          <button onClick={async()=>{const d=await action("fork-to-codebox");notify&&notify({type:"success",text:"Copied to Codebox",detail:d.path,duration:3000});}} style={btnS(t.warm)}>Codebox</button>
-          <button onClick={async()=>{await action("revise",{title:`${a.title||a.filename} revision`});onRefreshList?.();}} style={btnS(t.f1)}>Revise</button>
-          <button onClick={async()=>{const d=await action("check-file");await onPatch?.(a.id,{});notify&&notify({type:"success",text:"File health checked",detail:d.exists_status||"",duration:1800});}} style={btnS(t.mut)}>Check file</button>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
+          <button onClick={async()=>{const d=await action("use-in-chat");onUseInChat?.(d.attachment);}} style={gridBtn(t.acc)}>Use in chat</button>
+          <button onClick={async()=>{const d=await action("send-to-research");notify&&notify({type:"success",text:"Research started",detail:d.report_id||d.id||"",duration:2500});}} style={gridBtn(t.pink)}>Research</button>
+          <button onClick={async()=>{const d=await action("fork-to-codebox");notify&&notify({type:"success",text:"Copied to Codebox",detail:d.path,duration:3000});}} style={gridBtn(t.warm)}>Codebox</button>
+          <button onClick={async()=>{await action("revise",{title:`${a.title||a.filename} revision`});onRefreshList?.();}} style={gridBtn(t.f1)}>Revise</button>
+          <button onClick={async()=>{const d=await action("check-file");await onPatch?.(a.id,{});notify&&notify({type:"success",text:"File health checked",detail:d.exists_status||"",duration:1800});}} style={gridBtn(t.mut)}>Check file</button>
         </div>
+        {kbs?.length>0&&<div style={{display:"flex",gap:6,marginTop:6}}>
+          <select value={kbId} onChange={e=>setKbId(e.target.value)} style={{flex:1,minWidth:0,background:t.bg,border:`1px solid ${t.brd}35`,color:t.text,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:10,outline:"none",cursor:"pointer"}}>{kbs.map(k=><option key={k.id} value={k.id}>{k.name}</option>)}</select>
+          <button onClick={async()=>{await action("add-to-kb",{kb_id:kbId});notify&&notify({type:"success",text:"Artifact imported to KB",duration:1800});}} style={{...btnS(t.ok),flexShrink:0}}>Add to KB</button>
+        </div>}
       </section>
       {duplicateRows.length>0&&<section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Duplicates</div>
         <div style={{display:"flex",flexDirection:"column",gap:7}}>
@@ -1549,7 +1552,7 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
         <div style={{display:"flex",flexDirection:"column",gap:5}}>{workspaces.map(w=>{const checked=(a.workspace_ids||[]).includes(w.id);return <label key={w.id} style={{display:"flex",alignItems:"center",gap:7,fontSize:11,color:checked?t.text:t.mut}}><input type="checkbox" checked={checked} onChange={e=>{const cur=new Set(a.workspace_ids||[]);if(e.target.checked)cur.add(w.id);else cur.delete(w.id);patch({workspace_ids:Array.from(cur)});}}/> {w.name}</label>;})}</div>
       </section>
       <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Lineage</div>
-        <div style={{display:"flex",flexDirection:"column",gap:5}}>{(a.versions||[]).map(v=><div key={v.id} style={{fontSize:11,color:v.id===a.id?t.acc:t.dim,display:"flex",justifyContent:"space-between",gap:6}}><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.title||v.filename}</span><span>{v.status}</span></div>)}</div>
+        <div style={{display:"flex",flexDirection:"column",gap:5}}>{(a.versions||[]).map(v=><div key={v.id} style={{fontSize:11,color:v.id===a.id?t.acc:t.dim,display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.title||v.filename}{v.latest_for_project&&!v.stale&&<span style={{color:t.ok,fontWeight:800,marginLeft:5}}>latest</span>}{v.stale&&<span title="Project changed after this was packaged" style={{color:t.warm,fontWeight:800,marginLeft:5}}>⚠ stale</span>}</span><span style={{display:"inline-flex",alignItems:"center",gap:6,flexShrink:0}}>{v.status}<a href={`${API}/api/artifacts/${v.id}/download`} download={v.filename} title="Download this version" style={{color:t.ok,textDecoration:"none"}}>⬇</a></span></div>)}</div>
       </section>
       <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Provenance</div>
         <div style={{fontSize:11,color:t.dim,lineHeight:1.7,wordBreak:"break-word"}}>
@@ -1582,36 +1585,52 @@ const ArtifactCard=({artifact,t,font,workspaces,onPreview,onOpenConv,onPatch,onD
     const wsId=e.target.value||null;
     await onPatch?.(a.id,{workspace_id:wsId});
   };
-  return <div style={{border:`1px solid ${km.color}32`,background:`${t.surface}72`,borderRadius:8,padding:compact?10:12,display:"flex",flexDirection:"column",gap:8,minWidth:0,animation:"fadeIn .18s",boxShadow:"none"}}>
-    <div style={{display:"flex",alignItems:"flex-start",gap:9,minWidth:0}}>
-      {!compact&&onSelect&&<input type="checkbox" checked={!!selected} onChange={e=>onSelect(a.id,e.target.checked)} style={{marginTop:10,flexShrink:0}}/>}
-      <div style={{width:34,height:34,borderRadius:7,display:"flex",alignItems:"center",justifyContent:"center",background:`${km.color}12`,border:`1px solid ${km.color}36`,color:km.color,fontSize:18,flexShrink:0}}>{KindIcon?<KindIcon/>:null}</div>
+  const primaryBtn=(c)=>({display:"flex",alignItems:"center",justifyContent:"center",background:`${c}14`,border:`1px solid ${c}38`,color:c,cursor:"pointer",padding:"7px 0",borderRadius:6,fontFamily:font,fontSize:11,fontWeight:800,textDecoration:"none",minWidth:0});
+  const utilBtn=(c,active)=>({flex:1,display:"flex",alignItems:"center",justifyContent:"center",background:"transparent",border:`1px solid ${t.brd}33`,color:active?c:t.mut,cursor:"pointer",padding:"5px 0",borderRadius:6,fontFamily:font,fontSize:10,fontWeight:700,minWidth:0,whiteSpace:"nowrap"});
+  const selS={width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}36`,color:t.dim,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:10,outline:"none",cursor:"pointer"};
+  const primaryCount=1+(onDetails?1:0)+1;
+  return <div style={{border:`1px solid ${km.color}30`,background:`${t.surface}66`,borderRadius:10,padding:compact?11:13,display:"flex",flexDirection:"column",gap:10,minWidth:0,animation:"fadeIn .18s"}}>
+    <div style={{display:"flex",alignItems:"center",gap:9,minWidth:0}}>
+      {!compact&&onSelect&&<input type="checkbox" checked={!!selected} onChange={e=>onSelect(a.id,e.target.checked)} style={{flexShrink:0,cursor:"pointer"}}/>}
+      <div style={{width:34,height:34,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${km.color}14`,border:`1px solid ${km.color}38`,color:km.color,fontSize:17,flexShrink:0}}>{KindIcon?<KindIcon/>:null}</div>
       <div style={{minWidth:0,flex:1}}>
-        <div title={title} style={{fontSize:12,fontWeight:800,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{title}</div>
-        <div title={a.filename} style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:2}}>{a.filename}</div>
+        <div title={title} style={{fontSize:12.5,fontWeight:800,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{title}</div>
+        <div title={a.filename} style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:1}}>{a.filename}</div>
       </div>
-      <span style={{fontSize:9,color:km.color,background:`${km.color}12`,border:`1px solid ${km.color}30`,borderRadius:6,padding:"2px 6px",fontWeight:800,flexShrink:0}}>{km.label}</span>
+      <span style={{fontSize:9,color:km.color,background:`${km.color}14`,border:`1px solid ${km.color}34`,borderRadius:6,padding:"2px 7px",fontWeight:800,flexShrink:0,letterSpacing:.3}}>{km.label}</span>
     </div>
-    <div style={{display:"grid",gap:3,fontSize:10,color:t.mut,lineHeight:1.35}}>
-      {a.conversation_title&&<button onClick={()=>a.conversation_id&&onOpenConv?.(a.conversation_id)} style={{background:"none",border:"none",padding:0,color:t.acc,cursor:a.conversation_id?"pointer":"default",fontFamily:font,fontSize:10,textAlign:"left",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.conversation_title}</button>}
-      {(a.workspace_name||meta.project_id)&&<div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.workspace_name||meta.project_id}</div>}
-      {created&&<div>{created}</div>}
-      <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{a.pinned? <span style={{color:t.warm}}>pinned</span>:null}{a.status&&<span>{a.status}</span>}{a.exists_status==="missing"&&<span style={{color:t.err}}>missing</span>}</div>
+    <div style={{display:"flex",flexDirection:"column",gap:5,fontSize:10,color:t.mut,minWidth:0,paddingBottom:2,borderBottom:`1px solid ${t.brd}1c`}}>
+      {a.conversation_title&&<button onClick={()=>a.conversation_id&&onOpenConv?.(a.conversation_id)} title={a.conversation_title} style={{background:"none",border:"none",padding:0,color:t.acc,cursor:a.conversation_id?"pointer":"default",fontFamily:font,fontSize:10,textAlign:"left",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.conversation_title}</button>}
+      <div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap"}}>
+        {created&&<span>{created}</span>}
+        {(a.workspace_name||meta.project_id)&&<span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:"100%"}}>· {a.workspace_name||meta.project_id}</span>}
+      </div>
+      {((compact&&a.status)||a.pinned||a.exists_status==="missing"||a.stale||a.latest_for_project)&&<div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
+        {compact&&a.status&&<span style={{textTransform:"capitalize"}}>{a.status}</span>}
+        {a.pinned&&<span style={{color:t.warm,fontWeight:700}}>pinned</span>}
+        {a.exists_status==="missing"&&<span style={{color:t.err,fontWeight:700}}>missing</span>}
+        {a.stale&&<span title="The project changed after this artifact was packaged — repackage for the latest" style={{color:t.warm,fontWeight:800}}>⚠ stale</span>}
+        {a.latest_for_project&&!a.stale&&<span title="Newest delivery for this project" style={{color:t.ok,fontWeight:800}}>latest</span>}
+      </div>}
     </div>
-    <div style={{display:"flex",alignItems:"center",gap:5,marginTop:"auto",flexWrap:"wrap"}}>
-      {onPreview&&<button onClick={()=>onPreview(a.filename,a.url)} style={{background:`${t.acc}14`,border:`1px solid ${t.acc}35`,color:t.acc,cursor:"pointer",padding:"5px 8px",borderRadius:6,fontFamily:font,fontSize:10,fontWeight:800}}>Preview</button>}
-      {onDetails&&<button onClick={()=>onDetails(a.id)} style={{background:`${t.f1}12`,border:`1px solid ${t.f1}35`,color:t.f1,cursor:"pointer",padding:"5px 8px",borderRadius:6,fontFamily:font,fontSize:10,fontWeight:800}}>Details</button>}
-      <a href={`${API}${a.url}`} download={a.filename} style={{background:`${t.ok}12`,border:`1px solid ${t.ok}35`,color:t.ok,cursor:"pointer",padding:"5px 8px",borderRadius:6,fontFamily:font,fontSize:10,fontWeight:800,textDecoration:"none"}}>Download</a>
-      {a.conversation_id&&<button onClick={()=>onOpenConv?.(a.conversation_id)} style={{background:`${t.surface}66`,border:`1px solid ${t.brd}35`,color:t.mut,cursor:"pointer",padding:"5px 8px",borderRadius:6,fontFamily:font,fontSize:10,fontWeight:700}}>Chat</button>}
-      <button onClick={()=>onPatch?.(a.id,{pinned:!a.pinned})} style={{background:`${t.warm}10`,border:`1px solid ${t.warm}30`,color:a.pinned?t.warm:t.mut,cursor:"pointer",padding:"5px 8px",borderRadius:6,fontFamily:font,fontSize:10,fontWeight:700}}>{a.pinned?"Unpin":"Pin"}</button>
-      <button onClick={rename} style={{background:`${t.surface}66`,border:`1px solid ${t.brd}35`,color:t.mut,cursor:"pointer",padding:"5px 8px",borderRadius:6,fontFamily:font,fontSize:10,fontWeight:700}}>Rename</button>
-      {onDelete&&<button onClick={()=>onDelete(a.id)} style={{background:`${t.err}10`,border:`1px solid ${t.err}30`,color:t.err,cursor:"pointer",padding:"5px 8px",borderRadius:6,fontFamily:font,fontSize:10,fontWeight:700}}>Delete</button>}
+    <div style={{display:"grid",gridTemplateColumns:`repeat(${primaryCount},1fr)`,gap:6}}>
+      {onPreview&&<button onClick={()=>onPreview(a.filename,a.url)} style={primaryBtn(t.acc)}>Preview</button>}
+      {onDetails&&<button onClick={()=>onDetails(a.id)} style={primaryBtn(t.f1)}>Details</button>}
+      <a href={a.id?`${API}/api/artifacts/${a.id}/download`:`${API}${a.url}`} download={a.filename} style={primaryBtn(t.ok)}>Download</a>
     </div>
-    {!compact&&<select value={a.status||"draft"} onChange={e=>onPatch?.(a.id,{status:e.target.value})} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}36`,color:t.dim,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:10,outline:"none"}}>{["draft","accepted","archived"].map(s=><option key={s} value={s}>{s}</option>)}</select>}
-    {!compact&&workspaces?.length>0&&<select value={a.workspace_id||""} onChange={assign} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}36`,color:t.dim,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:10,outline:"none"}}>
-      <option value="">No workspace</option>
-      {workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
-    </select>}
+    <div style={{display:"flex",gap:6}}>
+      {a.conversation_id?<button onClick={()=>onOpenConv?.(a.conversation_id)} style={utilBtn(t.acc,false)}>Chat</button>:<div style={{flex:1}}/>}
+      <button onClick={()=>onPatch?.(a.id,{pinned:!a.pinned})} style={utilBtn(t.warm,a.pinned)}>{a.pinned?"Unpin":"Pin"}</button>
+      <button onClick={rename} style={utilBtn(t.acc,false)}>Rename</button>
+      {onDelete&&<button onClick={()=>onDelete(a.id)} style={utilBtn(t.err,false)}>Delete</button>}
+    </div>
+    {!compact&&<div style={{display:"flex",flexDirection:"column",gap:6,marginTop:2}}>
+      <select value={a.status||"draft"} onChange={e=>onPatch?.(a.id,{status:e.target.value})} style={selS}>{["draft","accepted","archived"].map(s=><option key={s} value={s}>{s}</option>)}</select>
+      {workspaces?.length>0&&<select value={a.workspace_id||""} onChange={assign} style={selS}>
+        <option value="">No workspace</option>
+        {workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
+      </select>}
+    </div>}
   </div>;
 };
 
@@ -1707,7 +1726,7 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       {loading&&<div style={{fontSize:12,color:t.mut,padding:18}}>Loading artifacts...</div>}
       {!loading&&!items.length&&<div style={{textAlign:"center",padding:44,color:t.mut,fontSize:12}}>No artifacts found.</div>}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:10}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:12}}>
         {items.map(a=><ArtifactCard key={a.id} artifact={a} t={t} font={font} workspaces={workspaces} onPreview={onPreview} onOpenConv={onOpenConv} onPatch={patchArtifact} onDelete={deleteArtifact} onDetails={openDetail} onSelect={toggleSelected} selected={selected.has(a.id)}/>)}
       </div>
     </div>
@@ -1957,7 +1976,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
     return <div key={i} style={{marginTop:5}}>
       {isImg&&<img src={`${API}${d.url}`} alt={d.filename} style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`,cursor:"pointer"}} onClick={()=>onPreview&&onPreview(d.filename,d.url)} onError={e=>e.target.style.display="none"}/>}
       <div style={{display:"inline-flex",alignItems:"center",gap:4,marginTop:isImg?2:0}}>
-      <a href={`${API}${d.url}`} download={d.filename}
+      <a href={d.artifact_id?`${API}/api/artifacts/${d.artifact_id}/download`:`${API}${d.url}`} download={d.filename}
         style={{display:"inline-flex",alignItems:"center",gap:7,padding:"7px 14px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontSize:12,fontWeight:700,cursor:"pointer"}}>
         <span style={{fontSize:16}}>{_fileIcon(d.filename)}</span><span>{d.filename}</span>{count>1&&<span style={{fontSize:9,background:t.acc,color:t.bg,borderRadius:8,padding:"1px 5px",fontWeight:700,marginLeft:2}}>v{count}</span>}<span style={{fontSize:10,opacity:.6}}>⬇</span>
       </a>

@@ -1799,6 +1799,54 @@ def _get_run_cmd(language: str, filepath: str) -> str:
     return filepath
 
 
+async def _maybe_auto_redeliver(
+    http, events, conv_id, project_dir,
+    *, custom_tool_map=None, connector_tool_name_map=None,
+    conv_model="", kb_ids=None, artifact_message_id=None,
+) -> str:
+    """After a successful edit cycle whose automatic review came back CLEAN,
+    refresh the delivered artifact IF this project was already delivered before.
+
+    This is what makes an "add a feature" turn produce a fresh latest pill
+    without the user having to ask for the download again. First builds (no prior
+    delivery) are intentionally left to the normal accept-then-download flow, so
+    this never auto-ships something that was never accepted. Returns a note to
+    append to the fix tool's output, or '' when nothing was re-delivered."""
+    try:
+        if not (conv_id and project_dir and project_dir.startswith("/root/projects/")):
+            return ""
+        proj = project_dir.rstrip("/").rsplit("/", 1)[-1]
+        _wf = await db.get_latest_coder_workflow(conv_id, project_id=proj)
+        if not (_wf or {}).get("id"):
+            return ""
+        prior = await db.list_artifacts(workflow_id=_wf["id"], kind="archive", limit=1)
+        if not prior:
+            return ""  # never delivered → respect normal acceptance gate
+        _runs = await db.get_runs_by_conversation(conv_id, limit=20)
+        _latest_reviewer = next((r for r in _runs if r.get("role") == "reviewer"), None)
+        _rstatus = ((_latest_reviewer or {}).get("result_envelope") or {}).get("status", "")
+        if str(_rstatus).lower() != "clean":
+            return ""  # don't repackage a project the reviewer just flagged
+        res = await exec_tool(
+            http, events, "download_project",
+            {"directory": project_dir, "_auto_redeliver": True},
+            conv_id,
+            custom_tool_map=custom_tool_map,
+            connector_tool_name_map=connector_tool_name_map,
+            conv_model=conv_model,
+            kb_ids=kb_ids,
+            artifact_message_id=artifact_message_id,
+        )
+        return (
+            "\n\n=== AUTO-REPACKAGE — this project was already delivered, so a fresh "
+            "artifact was packaged from the updated sources. Reference the new download "
+            "below; do NOT call download_project again for this cycle ===\n" + res
+        )
+    except Exception as e:
+        print(f"[download_project] auto-redeliver skipped: {e}")
+        return ""
+
+
 # ── Tool execution dispatcher ──
 
 async def exec_tool(
@@ -3083,6 +3131,29 @@ async def exec_tool(
                                 print(f"[CHAT] download_project blocked: latest reviewer={_latest_reviewer.get('id')} status={_rstatus} issues={n}")
                                 return "\n".join(lines)
                         if _rstatus == "clean":
+                            # Auto-repackage of an already-delivered project: when a
+                            # prior delivered archive artifact exists for this
+                            # workflow and the orchestrator flagged this as an
+                            # automatic re-delivery, a clean review is enough to
+                            # refresh the SAME deliverable without re-running the
+                            # full acceptance gate. Authorized by the DB fact (prior
+                            # delivery), not just the arg, so it can't ship a project
+                            # that was never accepted in the first place.
+                            _auto_redeliver_ok = False
+                            if args.get("_auto_redeliver"):
+                                try:
+                                    _rd_proj = (
+                                        directory.rstrip("/").rsplit("/", 1)[-1]
+                                        if directory.startswith("/root/projects/") else ""
+                                    )
+                                    _rd_wf = await db.get_latest_coder_workflow(conv_id, project_id=_rd_proj)
+                                    if (_rd_wf or {}).get("id"):
+                                        _rd_prior = await db.list_artifacts(
+                                            workflow_id=_rd_wf["id"], kind="archive", limit=1)
+                                        _auto_redeliver_ok = bool(_rd_prior)
+                                except Exception as _rde:
+                                    print(f"[CHAT] auto-redeliver authorization check failed: {_rde}")
+                                    _auto_redeliver_ok = False
                             if _ship_anyway_requested:
                                 _download_warning_lines = [
                                     "WARNING: Shipped before final acceptance review.",
@@ -3090,6 +3161,9 @@ async def exec_tool(
                                 ]
                                 print(f"[CHAT] download_project allowing ship-anyway "
                                       f"before acceptance after clean reviewer={_latest_reviewer.get('id')}")
+                            elif _auto_redeliver_ok:
+                                print(f"[CHAT] download_project auto-redeliver after clean "
+                                      f"reviewer={_latest_reviewer.get('id')} (project previously delivered)")
                             else:
                                 await events.emit(conv_id, "tool_end", {
                                     "tool": "download_project", "icon": "code",
@@ -3188,10 +3262,37 @@ async def exec_tool(
                         "status": f"Archive too large ({estimated_size // (1024*1024)}MB > {config.MAX_UPLOAD_SIZE_MB}MB limit)"})
                     return f"ERROR: Project archive too large (exceeds {config.MAX_UPLOAD_SIZE_MB}MB limit)"
                 os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
-                filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, tarname)
+                # Immutable per-artifact storage: each delivery gets a unique
+                # on-disk path so a later repackage never overwrites a prior
+                # artifact's bytes. We ALSO (re)write the friendly {tarname} copy
+                # as the "latest" file so back-compat /api/downloads/{tarname}
+                # markdown links in chat keep resolving to the newest package.
+                cf_id = f"cf-{uuid.uuid4().hex[:8]}"
+                unique_name = f"{dirname}-{cf_id[3:]}.tar.gz"
+                filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, unique_name)
+                _decoded = base64.b64decode(b64_data)
                 with open(filepath, "wb") as f:
-                    f.write(base64.b64decode(b64_data))
+                    f.write(_decoded)
+                latest_path = os.path.join(config.SANDBOX_OUTPUTS_DIR, tarname)
+                try:
+                    with open(latest_path, "wb") as f:
+                        f.write(_decoded)
+                except Exception as _le:
+                    print(f"[download_project] latest-copy write failed: {_le}")
                 file_meta = _artifact_file_metadata(filepath)
+                # Staleness anchor: record the project's current git commit so a
+                # later edit cycle (which advances HEAD via _git_checkpoint) marks
+                # this artifact stale. Best-effort; DB-time detection works without it.
+                _source_commit = ""
+                try:
+                    _gc = await http.post(f"{config.CODEBOX_URL}/command", json={
+                        "command": f"cd {qdir} && git rev-parse HEAD 2>/dev/null",
+                        "timeout": 10,
+                    }, timeout=15)
+                    if _gc.status_code == 200:
+                        _source_commit = (_gc.json().get("stdout", "") or "").strip().split("\n")[0][:40]
+                except Exception as _gce:
+                    print(f"[download_project] source commit lookup failed: {_gce}")
                 download_url = f"/api/downloads/{tarname}"
                 await events.emit(conv_id, "tool_end", {"tool": "download_project", "icon": "code",
                     "status": f"{tarname} ready",
@@ -3215,7 +3316,6 @@ async def exec_tool(
                     print(f"[WORKFLOW] latest workflow lookup failed: {_wfe}")
                 artifact = None
                 try:
-                    cf_id = f"cf-{uuid.uuid4().hex[:8]}"
                     _mime = db.artifact_mime_type_for_filename(tarname)
                     _previous_artifact = None
                     if (_wf or {}).get("id"):
@@ -3257,6 +3357,7 @@ async def exec_tool(
                             "partial": _partial,
                             "size_bytes": file_meta["size_bytes"],
                             "sha256": file_meta["sha256"],
+                            "source_commit": _source_commit,
                         },
                     )
                 except Exception as e:
@@ -3831,6 +3932,14 @@ async def exec_tool(
                 except Exception as _are:
                     _auto_review_note = (f"\n\n(automatic run_review failed: {_are} — "
                                          f"call run_review manually)")
+                _auto_redeliver_note = await _maybe_auto_redeliver(
+                    http, events, conv_id,
+                    envelope.get("project_dir", "") or project_dir,
+                    custom_tool_map=custom_tool_map,
+                    connector_tool_name_map=connector_tool_name_map,
+                    conv_model=conv_model, kb_ids=kb_ids,
+                    artifact_message_id=artifact_message_id,
+                )
                 return (
                     f"AIDER APPLIED EDITS to {len(files)} file(s).\n"
                     + "\n".join(f"  - {f}" for f in files[:12])
@@ -3838,6 +3947,7 @@ async def exec_tool(
                     + (f"Git checkpoint: {_ckpt}\n" if _ckpt else "")
                     + await _fix_budget_note(conv_id, envelope.get("source_role"))
                     + _auto_review_note
+                    + _auto_redeliver_note
                 )
             if status == "no_changes":
                 return (
@@ -4257,6 +4367,16 @@ async def exec_tool(
                         _auto_review_note = (f"\n\n(automatic run_review failed: {_are} — "
                                              f"call run_review manually)")
 
+            _auto_redeliver_note = ""
+            if f_status == "applied":
+                _auto_redeliver_note = await _maybe_auto_redeliver(
+                    http, events, conv_id, envelope.get("project_dir", ""),
+                    custom_tool_map=custom_tool_map,
+                    connector_tool_name_map=connector_tool_name_map,
+                    conv_model=conv_model, kb_ids=kb_ids,
+                    artifact_message_id=artifact_message_id,
+                )
+
             if f_status == "applied":
                 lines = [
                     f"FIXER APPLIED EDITS to {len(files)} file(s) across {n_issues} issue(s).",
@@ -4275,7 +4395,7 @@ async def exec_tool(
                                  "whether the fixes worked before acceptance runs again.")
                 return ("\n".join(lines) + _ckpt_note
                         + await _fix_budget_note(conv_id, envelope.get("source_role"))
-                        + _auto_review_note)
+                        + _auto_review_note + _auto_redeliver_note)
             elif f_status == "partial":
                 lines = [
                     f"FIXER PARTIAL: applied {len(files)} edit(s) but {len(errors)} error(s) occurred.",
@@ -5577,6 +5697,13 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                     except Exception as _are:
                         resp += (f"\n\n(automatic run_review failed: {_are} — "
                                  f"call run_review manually)")
+                    resp += await _maybe_auto_redeliver(
+                        http, events, conv_id, project_dir,
+                        custom_tool_map=custom_tool_map,
+                        connector_tool_name_map=connector_tool_name_map,
+                        conv_model=conv_model, kb_ids=kb_ids,
+                        artifact_message_id=artifact_message_id,
+                    )
                     return resp
                 else:
                     # Agent ran but produced no files — treat as failure
