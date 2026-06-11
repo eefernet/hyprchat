@@ -1,0 +1,6 @@
+node_modules/
+.vite/
+*.local
+
+# dist/ is intentionally NOT ignored — the built artifact is committed and
+# shipped to the server (the backend serves frontend/dist/ as static files).

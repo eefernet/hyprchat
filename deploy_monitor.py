@@ -74,9 +74,28 @@ WATCHED = {
     "backend/agents/__init__.py":       ("Agents Init",        REMOTE_AGENTS, True),
     "backend/requirements.txt":     ("Requirements",     REMOTE_BACKEND,            True),
     "backend/hyprchat.service":     ("Systemd Service",  "/etc/systemd/system/",    True),
-    "frontend/dist/index.html":     ("Frontend",         REMOTE_FRONTEND,           False),
+    # Frontend has a Vite build step now. Watch the SOURCE — a change here runs
+    # `npm run build` locally and ships the whole dist/ (see FRONTEND_SRC_FILES
+    # and _build_and_deploy_frontend). The built dist/index.html is no longer
+    # hand-edited or watched directly.
+    "frontend/src/main.jsx":        ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/vendor.js":       ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/prism-setup.js":  ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/index.html":          ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/vite.config.js":      ("Frontend (build)", REMOTE_FRONTEND,           False),
     "CHANGELOG.md":                 ("Changelog",        "/opt/hyprchat/",          False),
     "README.md":                    ("README",           "/opt/hyprchat/",          False),
+}
+
+# Frontend source files: a change to any of these triggers ONE `npm run build`
+# + full dist/ sync (not a per-file scp). Keep in sync with the WATCHED entries
+# labelled "Frontend (build)".
+FRONTEND_SRC_FILES = {
+    "frontend/src/main.jsx",
+    "frontend/src/vendor.js",
+    "frontend/src/prism-setup.js",
+    "frontend/index.html",
+    "frontend/vite.config.js",
 }
 
 CHECK_INTERVAL = 1
@@ -245,6 +264,30 @@ def scp(local, remote_host, remote_path, user, password):
         # sshpass not installed, fall back to plain scp
         cmd2 = ["scp", "-o", "StrictHostKeyChecking=no", "-q", local, dest]
         r = subprocess.run(cmd2, capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            return True, ""
+        return False, r.stderr.strip()
+    except Exception as e:
+        return False, str(e)
+
+
+def scp_recursive(local, remote_host, remote_path, user, password, timeout=120):
+    """Recursively copy a directory's contents to remote via `scp -r`.
+
+    `local` should be a directory (use a trailing '/.' to copy its contents
+    into remote_path). Returns (ok, msg). Used to ship the built frontend
+    dist/ tree (index.html + hashed assets/) in one shot.
+    """
+    dest = f"{user}@{remote_host}:{remote_path}"
+    base = ["scp", "-o", "StrictHostKeyChecking=no", "-q", "-r", local, dest]
+    try:
+        cmd = (["sshpass", "-p", password] + base) if password else base
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if r.returncode == 0:
+            return True, ""
+        return False, r.stderr.strip()
+    except FileNotFoundError:
+        r = subprocess.run(base, capture_output=True, text=True, timeout=timeout)
         if r.returncode == 0:
             return True, ""
         return False, r.stderr.strip()
@@ -564,6 +607,44 @@ def _aider_worker_ready(cb):
     return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=20)
 
 
+def _build_and_deploy_frontend(target):
+    """Build the Vite frontend locally, then sync the whole dist/ to the server.
+
+    The frontend now has a build step: editing files under frontend/src/ (or the
+    Vite config/entry) requires `npm run build`, which emits index.html plus
+    content-hashed assets/. The hashes change every build, so stale remote assets
+    are wiped first to avoid accumulation. The HyprChat host stays dumb — it just
+    serves frontend/dist/ as static files; no Node is installed there.
+    """
+    fe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
+    npm = shutil.which("npm")
+    if not npm:
+        return False, "npm not found on the dev machine — cannot build frontend"
+    try:
+        build = subprocess.run(
+            [npm, "run", "build"], cwd=fe,
+            capture_output=True, text=True, timeout=600,
+        )
+    except Exception as e:
+        return False, f"npm run build failed to launch: {e}"
+    if build.returncode != 0:
+        return False, "npm run build failed:\n" + (build.stderr or build.stdout or "")[-1000:]
+
+    dist = os.path.join(fe, "dist")
+    if not os.path.isdir(dist):
+        return False, "build produced no dist/ directory"
+
+    # Remove stale hashed assets, then ensure the dir exists before copying.
+    ssh_cmd(
+        target["ip"], target["user"], target["pass"],
+        f"rm -rf {shlex.quote(REMOTE_FRONTEND + 'assets')} && mkdir -p {shlex.quote(REMOTE_FRONTEND)}",
+        timeout=30,
+    )
+    # Copy everything under dist/ into the remote dist dir.
+    return scp_recursive(dist + "/.", target["ip"], REMOTE_FRONTEND,
+                         target["user"], target["pass"])
+
+
 def deploy_changes(changed, cfg):
     """Deploy changed files and restart service only if needed."""
     hypr = cfg["hyprchat"]
@@ -597,7 +678,18 @@ def deploy_changes(changed, cfg):
     else:
         print(f"  {G}\u2713{RST} Codebox host ready")
 
+    frontend_built = False
     for filepath, (label, remote_dir, restart_flag) in changed:
+        # Frontend source changes are handled by a single build + dist/ sync,
+        # regardless of how many src files changed in this batch.
+        if filepath in FRONTEND_SRC_FILES:
+            if frontend_built:
+                continue
+            frontend_built = True
+            ok, err = _build_and_deploy_frontend(hypr)
+            results.append(("Frontend (build)", filepath, ok, err, hypr))
+            continue
+
         target, remote_dir = _deploy_target(filepath, remote_dir, hypr, cb)
 
         dir_key = (target["ip"], remote_dir)
