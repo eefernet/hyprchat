@@ -9,11 +9,11 @@
 </p>
 
 <p align="center">
-  Built with FastAPI + a single-file React SPA. No build step, no cloud dependencies.
+  Built with FastAPI + a single-file React SPA compiled with Vite. No cloud dependencies.
 </p>
 
 <p align="center">
-  <code>FastAPI</code> · <code>React 18</code> · <code>Ollama</code> · <code>SQLite</code> · <code>SearXNG</code> · <code>Codebox</code>
+  <code>FastAPI</code> · <code>React 18</code> · <code>Vite</code> · <code>Ollama</code> · <code>SQLite</code> · <code>SearXNG</code> · <code>Codebox</code>
 </p>
 
 > ⚠️ Alpha software — actively developed, expect rough edges. Check [releases](https://github.com/eefernet/hyprchat/releases) for stable builds.
@@ -28,7 +28,7 @@ HyprChat can execute code, upload files, call local services, and drive coding a
 
 ## What It Is
 
-HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-style dashboards. It combines normal chat, model management, web research, RAG, agent profiles, project workspaces, and a coding-agent workflow into one FastAPI service and one browser-loaded React file.
+HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-style dashboards. It combines normal chat, model management, web research, RAG, agent profiles, project workspaces, and a coding-agent workflow into one FastAPI service and one Vite-built React component file.
 
 <p align="center">
   <img src="docs/images/mainScreen.png" alt="HyprChat main chat screen" width="900">
