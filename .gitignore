@@ -39,9 +39,6 @@ chroma_db/
 # Python
 *.egg-info/
 dist/
-# ...but the frontend's Vite build output IS committed and served (see
-# frontend/.gitignore). Re-include it despite the blanket dist/ rule above.
-!/frontend/dist/
 build/
 venv/
 .venv/

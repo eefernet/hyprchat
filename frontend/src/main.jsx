@@ -2438,9 +2438,22 @@ function initMermaidTheme(theme,font){
       textColor:text,
       mainBkg:surface,
       nodeBorder:acc,
+      nodeTextColor:text,
       clusterBkg:bg,
       clusterBorder:brd,
-      edgeLabelBackground:bg,
+      titleColor:text,
+      // Edge labels (e.g. flowchart link text) sit on a solid panel-colored chip so
+      // they stay legible over any theme background.
+      edgeLabelBackground:surface,
+      // Class-diagram text — not covered by the default base-theme vars, which is why
+      // class diagrams previously rendered with empty/invisible boxes.
+      classText:text,
+      relationLabelColor:text,
+      relationLabelBackground:surface,
+      // State / pie diagram text
+      stateLabelColor:text,
+      pieTitleTextColor:text,
+      pieSectionTextColor:text,
       noteBkgColor:`${warm}22`,
       noteTextColor:text,
       noteBorderColor:warm,
@@ -2483,7 +2496,11 @@ function MermaidBlock({code,theme,font,epoch,printMode=false,streaming=false}){
     setRepaired(false);
     setPending(true);
     try{
-      if(printMode)initMermaidTheme(t,font);
+      // Apply the current theme before rendering. Mermaid is lazy-loaded now, so the
+      // app-level init effect may have run (and bailed) before mermaid existed — this
+      // guarantees the user's theme colors are set for the block that triggered the load
+      // and on every theme change (effect deps include t/font).
+      initMermaidTheme(t,font);
       const repairedCode=sanitizeMermaidCode(code);
       const renderOne=(src,suffix)=>window.mermaid.render(`${id}-${suffix}`,src);
       renderOne(code,"raw").then(({svg})=>{
@@ -3002,7 +3019,9 @@ function HyprChat(){
   // Mermaid init — re-runs when theme/font changes; bumps epoch to force diagram re-render
   const [mermaidEpoch,setMermaidEpoch]=useState(0);
   useEffect(()=>{
-    if(!window.mermaid)return;
+    // Mermaid is lazy-loaded; if it isn't in yet, kick the load and re-run once it
+    // resolves so every existing diagram re-themes/re-renders (epoch bump).
+    if(!window.mermaid){window.ensureMermaid&&window.ensureMermaid().then(()=>setMermaidEpoch(e=>e+1));return;}
     try{
       initMermaidTheme(t,font);
       setMermaidEpoch(e=>e+1);
