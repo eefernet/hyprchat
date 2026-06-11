@@ -2423,6 +2423,14 @@ function initMermaidTheme(theme,font){
     securityLevel:"strict",
     theme:"base",
     fontFamily:font,
+    // SVG <text> labels everywhere. The default htmlLabels mode puts flowchart/class/
+    // state labels in <foreignObject> HTML, which browsers (notably WebKit with a
+    // CSS-scaled svg) can fail to paint — boxes render but text is invisible — and
+    // html2canvas can't rasterize for PDF export. Sequence diagrams already use SVG
+    // text, which is why they were unaffected.
+    htmlLabels:false,
+    flowchart:{htmlLabels:false},
+    class:{htmlLabels:false},
     themeVariables:{
       background:bg,
       primaryColor:surface,

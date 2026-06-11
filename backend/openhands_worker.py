@@ -925,12 +925,24 @@ def _check_tool_support(ollama_base: str, model: str) -> bool:
         print(f"[OH-Worker] {model}: native_tool_calling={cached} (cached)")
         return cached
 
-    # Quick template check first — skip the live test if no .Tools at all
+    # Quick capability/template check first — skip the live test if the model
+    # clearly has no tool support. Ollama 0.30+ publishes a `capabilities`
+    # list on /api/show; prefer it, because llama.cpp-backend models return a
+    # degenerate "{{ .Prompt }}" template with no .Tools even when they fully
+    # support native tool calling (e.g. gemma4).
     try:
         r = requests.post(f"{ollama_base}/api/show", json={"name": model}, timeout=5)
         if r.ok:
-            template = r.json().get("template", "")
-            if ".Tools" not in template:
+            body = r.json()
+            caps = body.get("capabilities") or []
+            if caps:
+                if "tools" not in caps:
+                    print(f"[OH-Worker] {model}: capabilities={caps} → prompt-based")
+                    _tool_support_cache[cache_key] = False
+                    _persist_tool_cache()
+                    return False
+                # capabilities advertise tools — confirm with the live test below
+            elif ".Tools" not in body.get("template", ""):
                 print(f"[OH-Worker] {model}: no .Tools in template → prompt-based")
                 _tool_support_cache[cache_key] = False
                 _persist_tool_cache()
