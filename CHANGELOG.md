@@ -2,6 +2,11 @@
 
 > This update focuses on existing system hardening and and improving existing features.
 
+## Frontend Build System (Vite migration)
+- **The frontend now has a build step.** Source moved to `frontend/src/main.jsx` (same single component file); `frontend/dist/` is Vite build output and is **no longer committed** — fresh clones must run `cd frontend && npm install && npm run build` before the backend can serve the UI.
+- Third-party libs (React, Prism, KaTeX, Mermaid, Chart.js, html2pdf, svg-pan-zoom) are npm-bundled locally — no runtime CDN. Mermaid/Chart/html2pdf lazy-load on demand.
+- Deploys ship the whole `dist/` (hashed assets change every build). `deploy_monitor.py` watches `frontend/src/**` and builds + ships automatically. The server stays Node-free.
+
 ## Cloud Model Support (optional)
 - Added API key entry for openAI
 - Added API key entry for Anthropic

@@ -441,7 +441,7 @@ const TIC = {code:IC.Code,search:IC.Search,terminal:IC.Terminal,globe:IC.Globe,w
 const Pill = ({ev,t,expanded,onToggle})=>{
   const scrollRef = useRef(null);
   const stickRef = useRef(true);  // sticky-bottom: auto-scroll to new steps unless user scrolled up
-  const isS = ev.type==="tool_start"||ev.type==="tool_progress"||ev.type==="thinking"||ev.type==="streaming";
+  const isS = ev.type==="tool_start"||ev.type==="tool_progress"||ev.type==="thinking";
   const isE = ev.type==="tool_error"||ev.type==="error";
   const isD = ev.type==="tool_end"||ev.type==="tool_done"||ev.type==="complete"||ev.type==="thought_done";
   const isThink = ev.type==="thinking"||ev.type==="thought_done";
@@ -489,7 +489,6 @@ const Pill = ({ev,t,expanded,onToggle})=>{
     "run_shell": isD ? ["⚡", "Exited"] : ["🖥️", "Shell"],
     "fetch_url": isD ? ["🌐", "Fetched"] : ["🕸️", "Spidering"],
     "install_package": isD ? ["📦", "Installed"] : ["📥", "Installing"],
-    "streaming": ["✍️", "Transmitting"],
     "complete": ["✅", "Done"],
     "download_file": isD ? ["📎", "Ready"] : ["📤", "Packaging"],
     "delete_file": isD ? ["🗑️", "Deleted"] : ["🗑️", "Deleting"],
@@ -525,7 +524,7 @@ const Pill = ({ev,t,expanded,onToggle})=>{
     if(name==="write_file"||name==="download_file"||name==="download_project") return "bounce 1s ease-in-out infinite";
     if(name==="memory") return "memoryPulse 1.8s ease-in-out infinite";
     if(name==="generating") return "writing 0.8s ease-in-out infinite";
-    if(name==="thinking"||name==="streaming") return "bop 2s ease-in-out infinite";
+    if(name==="thinking") return "bop 2s ease-in-out infinite";
     return "bop 1.5s ease-in-out infinite";
   };
   const marqueeKey = Math.floor(displayStatus.length / 30);
@@ -1325,7 +1324,6 @@ const _phaseFromEvent = (ev)=>{
   if(ev.type==="tool_error"||ev.type==="error")return{phase:"failed",label:"Failed",detail:status||tool,pct:d.pct};
   if(ev.type==="tool_end"||ev.type==="tool_done")return{phase:"complete",label:"Tool complete",detail:status||tool,pct:d.pct||100};
   if(ev.type==="tool_start"||ev.type==="tool_progress"||ev.type==="tool_status")return{phase:"tool",label:(tool||"tool").replaceAll("_"," "),detail:status,pct:d.pct};
-  if(ev.type==="streaming")return{phase:"streaming",label:"Streaming",detail:status,pct:d.pct};
   return null;
 };
 
@@ -1388,10 +1386,10 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
   if(!evts.length) return null;
 
   // Stable string key for expandedPill — avoids collapse when new events arrive
-  // Guard: if evts only has source_links/search_results (no tool/thinking/streaming), merged will be empty
+  // Guard: if evts only has source_links/search_results (no tool/thinking), merged will be empty
   const getPillKey = (ev, idx) => {
     if(ev.type==="thinking"||ev.type==="thought_done") return "thinking";
-    if(ev.type==="streaming"||ev.type==="complete") return "streaming";
+    if(ev.type==="complete") return "streaming";
     if(idx!==undefined) return `${ev.data?.tool||ev.type}_${idx}`;
     return ev.data?.tool || ev.type;
   };
@@ -1402,8 +1400,8 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
   // First pass: group by category
   const thinkingEvts = evts.filter(e=>e.type==="thinking"||e.type==="thought_done");
   const toolEvts = evts.filter(e=>e.type==="tool_start"||e.type==="tool_progress"||e.type==="tool_end"||e.type==="tool_done"||e.type==="tool_error");
-  const streamEvts = evts.filter(e=>e.type==="streaming"||e.type==="complete");
-  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_progress","tool_end","tool_done","tool_error","streaming","complete","code_output","file_ready","search_results","source_links"].includes(e.type));
+  const streamEvts = evts.filter(e=>e.type==="complete");
+  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_progress","tool_end","tool_done","tool_error","complete","code_output","file_ready","search_results","source_links"].includes(e.type));
 
   // Thinking: collapse to just the final state
   if(thinkingEvts.length){
@@ -3282,6 +3280,7 @@ function HyprChat(){
   const [councilVotes,setCouncilVotes]=useState([]); // live votes during current stream
   const [councilVoting,setCouncilVoting]=useState(false); // voting phase active
   const [councilRound,setCouncilRound]=useState(null); // {round, total_rounds, label}
+  const [councilKbStatus,setCouncilKbStatus]=useState(""); // KB retrieval status line
   // Ref to track active council stream — survives conversation switches
   const councilStreamRef=useRef(null); // {cid, running, responses, hostContent, votes, voting, round}
   const [expandedRounds,setExpandedRounds]=useState({}); // {"turnIdx-roundNum": true/false}
@@ -4740,20 +4739,18 @@ function HyprChat(){
     const cid=actId;const cv=convs.find(c=>c.id===cid);
     if(!cv?.council_config_id)return;
     const userMsg=inp.trim();setInp("");setCouncilSuggestions([]);if(inpRef.current){inpRef.current.style.height="auto";}
-    // Quick search fires in parallel — don't block council
+    // Quick search runs server-side in council.py (one SearXNG hit shared by
+    // members + carousel). Its search_results / tool_done events arrive on the
+    // conversation EventBus, which populates quickResults and clears loading.
     if(quickSearch&&userMsg){
       setSearchLoading(true);setQuickResults([]);setQuickSearchError(null);
-      fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:userMsg,count:6})})
-        .then(async r=>{if(!r.ok)throw new Error(`HTTP ${r.status}`);return r.json();})
-        .then(d=>{setQuickResults(d.results||[]);setQuickSearchError(null);setSearchLoading(false);})
-        .catch(e=>{setQuickResults([]);setQuickSearchError(e.message||"Search failed");setSearchLoading(false);});
     }else{setQuickResults([]);setQuickSearchError(null);}
     // Add user message to UI (backend council.py also saves it, so don't POST here)
     uConv(cid,c=>({...c,messages:[...(c.messages||[]),{role:"user",content:userMsg,metadata:{},created_at:new Date().toISOString()}]}));
     // Title generation
     if(!(cv.messages||[]).length){const title=userMsg.slice(0,40)+(userMsg.length>40?"...":"");uConv(cid,{title});fetch(`${API}/api/conversations/${cid}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({title})}).catch(()=>{});}
     // Start council streaming
-    setCouncilRunning(true);setCouncilResponses({});setCouncilHostContent("");setCouncilVotes([]);setCouncilVoting(false);setCouncilRound(null);
+    setCouncilRunning(true);setCouncilResponses({});setCouncilHostContent("");setCouncilVotes([]);setCouncilVoting(false);setCouncilRound(null);setCouncilKbStatus("");
     // Initialize stream ref for cross-navigation persistence
     const sRef={cid,running:true,responses:{},hostContent:"",votes:[],voting:false,round:null};
     councilStreamRef.current=sRef;
@@ -4769,7 +4766,9 @@ function HyprChat(){
         for(const ln of lines){
           if(!ln.startsWith("data: "))continue;
           try{const d=JSON.parse(ln.slice(6));
-            if(d.type==="council_round"){
+            if(d.type==="council_kb"){
+              setCouncilKbStatus(d.status||"");
+            }else if(d.type==="council_round"){
               const rnd={round:d.round,total_rounds:d.total_rounds,label:d.label};
               setCouncilRound(rnd);sRef.round=rnd;
               // On new debate round, reload messages from backend to get previous rounds persisted
@@ -4804,7 +4803,7 @@ function HyprChat(){
               setCouncilHostContent(p=>{const n=p+d.content;sRef.hostContent=n;return n;});
             }else if(d.type==="council_complete"){
               sRef.running=false;
-              setCouncilResponses({});setCouncilHostContent("");setCouncilVotes([]);setCouncilVoting(false);
+              setCouncilResponses({});setCouncilHostContent("");setCouncilVotes([]);setCouncilVoting(false);setCouncilKbStatus("");
               // Reload conversation from backend to get all rounds with correct metadata
               try{
                 const fullR=await fetch(`${API}/api/conversations/${cid}`);
@@ -6247,7 +6246,7 @@ function HyprChat(){
     return()=>clearTimeout(id);
   },[isEmptyChatSurface]);
   const latestLivePhase=(()=>{
-    const useful=evts.filter(e=>["thinking","thought_done","tool_start","tool_progress","tool_status","tool_end","tool_done","tool_error","error","streaming","search_results"].includes(e.type));
+    const useful=evts.filter(e=>["thinking","thought_done","tool_start","tool_progress","tool_status","tool_end","tool_done","tool_error","error","search_results"].includes(e.type));
     for(let i=useful.length-1;i>=0;i--){
       const phase=_phaseFromEvent(useful[i]);
       if(phase)return phase;
@@ -9291,6 +9290,7 @@ function HyprChat(){
                       </span>
                       <div style={{flex:1,height:1,background:`${t.pink}33`}}/>
                     </div>
+                    {councilKbStatus&&<div style={{fontSize:10,color:t.dim,textAlign:"center",marginBottom:6}}>📚 {councilKbStatus}</div>}
                     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:10}}>
                       {Object.entries(councilResponses).map(([mid,resp])=>{
                         const member=councilCfg?.members?.find(m=>m.id===mid)||{};

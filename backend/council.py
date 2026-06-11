@@ -8,6 +8,7 @@ import urllib.parse
 
 import config
 import database as db
+from model_providers import strip_leaked_cot
 
 
 def _is_gibberish(text: str, threshold: float = 0.3) -> bool:
@@ -90,11 +91,16 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             except Exception as e:
                 print(f"[COUNCIL RAG] KB query failed: {e}")
 
-    # Quick search augmentation
+    # Quick search augmentation. The same fetch also feeds the frontend's
+    # QUICK SEARCH carousel via the conversation EventBus (search_results,
+    # source=quick_search) — the frontend no longer fires a parallel
+    # /api/quick-search POST for council sends, so members and carousel see
+    # one SearXNG hit per message.
     search_context = ""
     if quick_search and messages:
         last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
         if last_user:
+            carousel = []
             try:
                 params = urllib.parse.urlencode({"q": last_user[:200], "format": "json", "language": "en"})
                 sr = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=8)
@@ -106,8 +112,25 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                     url = item.get("url", "")
                     if title or snippet:
                         snippets.append(f"- {title}: {snippet} ({url})")
+                        carousel.append({"title": title, "url": url,
+                                         "snippet": snippet, "type": "web"})
                 if snippets:
                     search_context = "\n\n[Current web context:\n" + "\n".join(snippets) + "\n]"
+            except Exception:
+                pass
+            try:
+                if carousel:
+                    await events.emit(conv_id, "search_results", {
+                        "query": last_user[:200], "results": carousel,
+                        "source": "quick_search",
+                    })
+                else:
+                    # Clears the carousel loading state even when search
+                    # failed or returned nothing.
+                    await events.emit(conv_id, "tool_done", {
+                        "tool": "quick_search", "icon": "search",
+                        "status": "Search returned no results",
+                    })
             except Exception:
                 pass
 
@@ -167,6 +190,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                 "model": model,
                 "messages": [{"role": "system", "content": sys_p}] + msgs,
                 "stream": True,
+                "think": False,
                 "options": {"num_ctx": 16384},
                 "keep_alive": "30m",
             }
@@ -205,6 +229,14 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                 elif attempt < max_attempts - 1:
                     print(f"[COUNCIL] Member {member.get('persona_name', model)} empty response, retrying...")
                     await asyncio.sleep(2)
+            # Strip leaked CoT (Ollama 0.30 + gemma4) before the response
+            # enters debate context, votes, synthesis, and DB persistence.
+            # Live-streamed tokens may transiently show it; the stored and
+            # cascaded text stays clean.
+            _clean, _leaked = strip_leaked_cot(full)
+            if _leaked:
+                print(f"[COUNCIL] Member {member.get('persona_name', model)}: stripped {len(_leaked)} chars of leaked CoT")
+                full = _clean or full
             round_responses[mid] = full
 
         tasks = [asyncio.create_task(query_member(m)) for m in members]
@@ -331,10 +363,11 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                     "model": member["model"],
                     "messages": [{"role": "user", "content": vote_prompt}],
                     "stream": False,
+                    "think": False,
                     "options": {"temperature": 0.1, "num_ctx": 8192, "num_predict": 120},
                     "keep_alive": "30m",
                 }, timeout=30)
-                text = r.json()["message"]["content"].strip()
+                text = strip_leaked_cot(r.json()["message"]["content"].strip())[0]
                 vote_m = re.search(r'VOTE:\s*["\']?([^"\'\n\r]+)["\']?', text, re.IGNORECASE)
                 reason_m = re.search(r'REASON:\s*(.+)', text, re.IGNORECASE | re.DOTALL)
                 voted_name = vote_m.group(1).strip() if vote_m else ""
@@ -425,7 +458,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             {"role": "system", "content": host_system},
             {"role": "user", "content": f"Question: {last_user_msg}\n\n{debate_note}Council responses:\n{all_resp}{vote_summary}\n\nProvide a synthesis and final verdict in English. Reference the peer votes and how positions evolved during the debate if relevant."}
         ]
-        payload = {"model": host_model, "messages": host_msgs, "stream": True, "options": {"num_ctx": 16384}, "keep_alive": "30m"}
+        payload = {"model": host_model, "messages": host_msgs, "stream": True, "think": False, "options": {"num_ctx": 16384}, "keep_alive": "30m"}
         host_full = ""
         try:
             async with http.stream("POST", f"{config.OLLAMA_URL}/api/chat",
@@ -446,6 +479,10 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
         except Exception as e:
             yield f"data: {json.dumps({'type': 'council_host_token', 'content': f'[Host error: {e}]'})}\n\n"
         if host_full:
+            _host_clean, _host_leaked = strip_leaked_cot(host_full)
+            if _host_leaked:
+                print(f"[COUNCIL] Host: stripped {len(_host_leaked)} chars of leaked CoT")
+                host_full = _host_clean or host_full
             council_id = council.get("id", "")
             await db.add_message(conv_id, "assistant", host_full,
                                  metadata={"council_host": True, "council_id": council_id,

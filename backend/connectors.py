@@ -86,11 +86,6 @@ def _load_secret_file() -> dict:
     return _CONNECTOR_SECRET_CACHE
 
 
-def reload_connector_secrets() -> None:
-    global _CONNECTOR_SECRET_CACHE
-    _CONNECTOR_SECRET_CACHE = None
-
-
 def resolve_placeholder(name: str, required: bool = True) -> str:
     key = (name or "").strip()
     if not key:
@@ -126,16 +121,24 @@ def expand_placeholders(value: Any, required: bool = True, plain_names: bool = F
     return value
 
 
-def _url_private(host: str) -> bool:
+def _ip_blocked(ip) -> bool:
+    return (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_multicast or ip.is_reserved or ip.is_unspecified)
+
+
+async def _url_private(host: str) -> bool:
     if not host:
         return True
     try:
         ip = ipaddress.ip_address(host.strip("[]"))
-        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved
+        return _ip_blocked(ip)
     except ValueError:
         pass
     try:
-        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        # Thread off the resolution — sync getaddrinfo on a slow DNS server
+        # stalls the whole single-worker event loop.
+        infos = await asyncio.to_thread(
+            socket.getaddrinfo, host, None, type=socket.SOCK_STREAM)
     except Exception:
         # Fail closed like quick_search._url_safe and research._resolve_host_public:
         # an unresolvable host is blocked, not allowed through.
@@ -143,19 +146,18 @@ def _url_private(host: str) -> bool:
     for info in infos:
         addr = info[4][0]
         try:
-            ip = ipaddress.ip_address(addr)
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+            if _ip_blocked(ipaddress.ip_address(addr)):
                 return True
         except ValueError:
             continue
     return False
 
 
-def assert_url_allowed(url: str, allow_private: bool = False) -> None:
+async def assert_url_allowed(url: str, allow_private: bool = False) -> None:
     parsed = urllib.parse.urlparse(url or "")
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ConnectorError("Connector URL must be http(s)")
-    if not allow_private and _url_private(parsed.hostname or ""):
+    if not allow_private and await _url_private(parsed.hostname or ""):
         raise ConnectorError("Private, loopback, or link-local URL blocked. Enable allow_private for trusted local connectors.")
 
 
@@ -176,7 +178,7 @@ def _parse_spec_text(text: str) -> dict:
 
 
 async def _fetch_spec(http: httpx.AsyncClient, url: str, allow_private: bool) -> dict:
-    assert_url_allowed(url, allow_private=allow_private)
+    await assert_url_allowed(url, allow_private=allow_private)
     r = await http.get(url, timeout=20)
     r.raise_for_status()
     return _parse_spec_text(r.text)
@@ -310,7 +312,7 @@ async def _mcp_http_exchange(http: httpx.AsyncClient, server: dict, method: str,
     url = (server.get("url") or "").strip()
     if not url:
         raise ConnectorError("MCP HTTP server requires URL")
-    assert_url_allowed(url, allow_private=bool(server.get("allow_private")))
+    await assert_url_allowed(url, allow_private=bool(server.get("allow_private")))
     headers = {
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
@@ -647,7 +649,7 @@ async def execute_openapi_tool(http: httpx.AsyncClient, tool: dict, args: dict) 
         url = url.replace("{" + name + "}", urllib.parse.quote(str(value), safe=""))
     headers.update(expand_placeholders(connector.get("headers") or {}, required=True))
     _apply_auth(headers, query, connector.get("auth") or {})
-    assert_url_allowed(url, allow_private=bool(connector.get("allow_private")))
+    await assert_url_allowed(url, allow_private=bool(connector.get("allow_private")))
 
     r = await http.request(method, url, params=query, headers=headers, json=body, timeout=45)
     content_type = r.headers.get("content-type", "")

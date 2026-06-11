@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CHAT = ROOT / "backend" / "agents" / "chat.py"
-FRONTEND = ROOT / "frontend" / "dist" / "index.html"
+FRONTEND = ROOT / "frontend" / "src" / "main.jsx"
 
 
 def test_tool_enabled_generation_streams_live_and_clears_tool_drafts():

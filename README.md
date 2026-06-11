@@ -140,7 +140,8 @@ Manage installed Ollama models, browse HuggingFace GGUF files, watch active down
 
 ```text
 User → HyprChat (:8000)
-         ├── Frontend: single-file React SPA, inline Babel, no build step
+         ├── Frontend: single-component React SPA, Vite build
+         │    (source frontend/src/main.jsx → built frontend/dist/)
          ├── Backend: FastAPI + SSE streaming + SQLite
          │    ├── Chat/tool loop
          │    ├── Daedalus workflow router
@@ -165,7 +166,7 @@ User → HyprChat (:8000)
 | `backend/database.py` | SQLite schema, migrations, conversations, runs, workflows, reports |
 | `backend/research.py` | Deep research and safe URL fetch pipeline |
 | `backend/quick_search.py` / `backend/search_agent.py` | Per-turn SearXNG search planning, ranking, page fetch, result cards |
-| `frontend/dist/index.html` | The entire React frontend |
+| `frontend/src/main.jsx` | The entire React frontend (Vite-built to `frontend/dist/`, which the backend serves) |
 | `deploy_monitor.py` | File watcher that deploys local changes to the homelab host |
 
 ## Quick Start
@@ -175,6 +176,12 @@ HyprChat expects Python 3.11+, Ollama, and at least one pulled model. Codebox, O
 ### Local Run
 
 ```bash
+# Build the frontend first (requires Node.js + npm; dist/ is not committed)
+cd frontend
+npm install
+npm run build
+cd ..
+
 cd backend
 python3 -m pip install -r requirements.txt
 HOST=127.0.0.1 PORT=8000 python3 main.py
@@ -256,7 +263,13 @@ Manual deploy:
 ```bash
 scp backend/*.py root@<SERVER_IP>:/opt/hyprchat/backend/
 scp backend/agents/*.py root@<SERVER_IP>:/opt/hyprchat/backend/agents/
-scp frontend/dist/index.html root@<SERVER_IP>:/opt/hyprchat/frontend/dist/
+
+# Frontend: build on the dev machine, then ship the WHOLE dist/ (the hashed
+# asset names change every build, so clear the old ones first).
+( cd frontend && npm run build )
+ssh root@<SERVER_IP> "rm -rf /opt/hyprchat/frontend/dist/assets"
+scp -r frontend/dist/. root@<SERVER_IP>:/opt/hyprchat/frontend/dist/
+
 ssh root@<SERVER_IP> "systemctl restart hyprchat"
 ```
 
@@ -292,7 +305,7 @@ HYPRCHAT_URL=http://127.0.0.1:8000 python3 -m pytest tests/ -v
 | Layer | Tech |
 |---|---|
 | Backend | Python 3.11+, FastAPI, httpx, aiosqlite |
-| Frontend | React 18 via CDN, in-browser Babel, one HTML file |
+| Frontend | React 18, single component file (`frontend/src/main.jsx`), Vite build with npm-bundled libs |
 | Database | SQLite + ChromaDB |
 | LLM Runtime | Ollama with native tool calling plus text fallback |
 | Search | SearXNG |
@@ -301,7 +314,7 @@ HYPRCHAT_URL=http://127.0.0.1:8000 python3 -m pytest tests/ -v
 
 ## Project Notes
 
-- The frontend intentionally has no build step.
+- The frontend is one large component file built with Vite. Build on the dev machine (`cd frontend && npm run build`); the server just serves `frontend/dist/` and stays Node-free.
 - SQLite is the default database.
 - Tool-call fallback stays because not every Ollama model supports native tools.
 - Keep secrets out of Git: `.deploy_config.json`, `.env*`, keys, tokens, databases, and uploaded data.

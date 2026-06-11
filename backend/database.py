@@ -2128,45 +2128,6 @@ async def get_connector_tools(connector_type: str | None = None, connector_id: s
         await db.close()
 
 
-async def get_connector_tool_by_id(tool_id: str) -> dict | None:
-    user_id = _scope_user()
-    db = await get_db()
-    try:
-        rows = await db.execute_fetchall("SELECT * FROM connector_tools WHERE id=? AND user_id=?", (tool_id, user_id))
-        return _normalize_connector_tool(dict(rows[0])) if rows else None
-    finally:
-        await db.close()
-
-
-async def get_connector_tool_by_name(tool_name: str) -> dict | None:
-    user_id = _scope_user()
-    db = await get_db()
-    try:
-        rows = await db.execute_fetchall(
-            """SELECT * FROM connector_tools
-               WHERE tool_name=? AND user_id=? AND enabled=1
-                 AND (
-                    (connector_type='mcp' AND EXISTS (
-                        SELECT 1 FROM mcp_servers ms
-                        WHERE ms.id=connector_tools.connector_id
-                          AND ms.user_id=connector_tools.user_id
-                          AND ms.enabled=1
-                    ))
-                    OR
-                    (connector_type='openapi' AND EXISTS (
-                        SELECT 1 FROM openapi_connectors oc
-                        WHERE oc.id=connector_tools.connector_id
-                          AND oc.user_id=connector_tools.user_id
-                          AND oc.enabled=1
-                    ))
-                 )""",
-            (tool_name, user_id),
-        )
-        return _normalize_connector_tool(dict(rows[0])) if rows else None
-    finally:
-        await db.close()
-
-
 async def replace_connector_tools(connector_type: str, connector_id: str, tools: list[dict]):
     user_id = _scope_user()
     now = datetime.utcnow().isoformat()

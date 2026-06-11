@@ -83,6 +83,8 @@ WATCHED = {
     "frontend/src/prism-setup.js":  ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/index.html":          ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/vite.config.js":      ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/package.json":        ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/package-lock.json":   ("Frontend (build)", REMOTE_FRONTEND,           False),
     "CHANGELOG.md":                 ("Changelog",        "/opt/hyprchat/",          False),
     "README.md":                    ("README",           "/opt/hyprchat/",          False),
 }
@@ -96,6 +98,8 @@ FRONTEND_SRC_FILES = {
     "frontend/src/prism-setup.js",
     "frontend/index.html",
     "frontend/vite.config.js",
+    "frontend/package.json",
+    "frontend/package-lock.json",
 }
 
 CHECK_INTERVAL = 1
@@ -634,15 +638,26 @@ def _build_and_deploy_frontend(target):
     if not os.path.isdir(dist):
         return False, "build produced no dist/ directory"
 
-    # Remove stale hashed assets, then ensure the dir exists before copying.
+    # Upload to a staging dir, then swap. Wiping the live assets/ BEFORE the
+    # copy meant a failed scp left the server with no frontend at all (and the
+    # wipe→copy window served index.html with missing chunks).
+    remote_dist = REMOTE_FRONTEND.rstrip("/")
+    staging = remote_dist + ".new"
     ssh_cmd(
         target["ip"], target["user"], target["pass"],
-        f"rm -rf {shlex.quote(REMOTE_FRONTEND + 'assets')} && mkdir -p {shlex.quote(REMOTE_FRONTEND)}",
+        f"rm -rf {shlex.quote(staging)} && mkdir -p {shlex.quote(staging)}",
         timeout=30,
     )
-    # Copy everything under dist/ into the remote dist dir.
-    return scp_recursive(dist + "/.", target["ip"], REMOTE_FRONTEND,
-                         target["user"], target["pass"])
+    ok, err = scp_recursive(dist + "/.", target["ip"], staging + "/",
+                            target["user"], target["pass"])
+    if not ok:
+        return False, err
+    swap_ok, _out, swap_err = ssh_cmd(
+        target["ip"], target["user"], target["pass"],
+        f"rm -rf {shlex.quote(remote_dist)} && mv {shlex.quote(staging)} {shlex.quote(remote_dist)}",
+        timeout=30,
+    )
+    return swap_ok, swap_err
 
 
 def deploy_changes(changed, cfg):

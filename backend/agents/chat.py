@@ -7,7 +7,6 @@ import json
 import os
 import re
 import traceback
-import urllib.parse
 from datetime import datetime
 
 import config
@@ -31,7 +30,7 @@ _BG_TASKS: set = set()
 #   "thought\n<CoT...><channel|><real answer>"
 # with message.thinking empty. The marker line opens the leak; one of the
 # transition markers (when present) separates CoT from the real answer.
-_LEAK_OPEN_RE = re.compile(r"\s*thought[ \t]*\n")
+_LEAK_OPEN_RE = re.compile(r"\s*[Tt]hought[ \t]*\n")
 _LEAK_TRANSITION_MARKERS = ("<|channel|>", "<channel|>", "<|message|>")
 # Line-anchored fence counter: CoT prose often *mentions* ``` mid-line
 # ("followed by a ```chart block"), which must not count as a real fence.
@@ -519,7 +518,10 @@ _UPLOAD_MANUAL_TOOLS = {
     "read_file", "write_file", "run_shell", "execute_code", "list_files",
     "search_files", "diff_files", "download_project", "download_file",
 }
-_TERMINAL_WORKFLOW_STATES = {"accepted", "completed", "cancelled", "blocked"}
+# Keep in sync with database._REAPER_TERMINAL_WORKFLOW_STATES. "answering"
+# is terminal for ask_uploaded_project; "partial_delivered" is the
+# delivered-with-warnings exit set by tools.py download_project.
+_TERMINAL_WORKFLOW_STATES = {"accepted", "partial_delivered", "cancelled", "blocked", "answering"}
 
 
 def _blocked_tool_signature(tool_name: str, tool_result: str) -> str:
@@ -1719,7 +1721,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                 _thinking_buf = _LEAK_OPEN_RE.sub("", _lead_buf, count=1)
                                 _lead_buf = ""
                                 await events.emit(conv_id, "thinking", {"status": "💭 thinking...", "detail": json.dumps({"thinking": _thinking_buf[-3000:]})})
-                            elif (_lead_stripped and not "thought\n".startswith(_lead_stripped[:8])) or len(_lead_buf) > 40:
+                            elif (_lead_stripped and not "thought\n".startswith(_lead_stripped[:8].lower())) or len(_lead_buf) > 40:
                                 # Definitely not the leak marker — release held tokens
                                 _lead_checked = True
                                 token = _lead_buf
@@ -1752,7 +1754,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                         for _mk in _LEAK_TRANSITION_MARKERS:
                                             _mi = _thinking_buf.find(_mk)
                                             if _mi != -1:
-                                                token = _thinking_buf[_mi + len(_mk):]
+                                                token = _thinking_buf[_mi + len(_mk):].lstrip()
                                                 _thinking_buf = _thinking_buf[:_mi]
                                                 thinking = _thinking_buf
                                                 _in_thinking = False
@@ -1787,7 +1789,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                             continue
                                         if _in_open_fence(content[:_mi]):
                                             print(f"[CHAT]   leak-guard DEBUG: marker {_mk!r} at {_mi} vetoed by open fence (fences={len(_FENCE_LINE_RE.findall(content[:_mi]))})")
-                                            break  # inside a real code fence — leave it alone
+                                            continue  # inside a real code fence — try the next marker
                                         _cot = content[:_mi].strip()
                                         content = content[_mi + len(_mk):]
                                         thinking = (thinking + "\n\n" + _cot).strip() if (thinking and _cot) else (thinking or _cot)
@@ -1943,6 +1945,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         # with a plain-text "thought\n" CoT dump (slipped past the stream guard,
         # e.g. via a non-streamed path), split it into thinking. The end-of-round
         # thought_done emit below surfaces it in the UI thought panel.
+        _finalize_net_fired = False
         if content:
             _leak_m = _LEAK_OPEN_RE.match(content) if not thinking else None
             if _leak_m:
@@ -1956,6 +1959,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 else:
                     thinking = _leak_rest.strip()
                     content = ""
+                _finalize_net_fired = True
                 print(f"[CHAT]   leaked-reasoning net: routed {len(thinking)} chars from content to thinking")
             else:
                 # Second leak shape: no opener, but a transition marker divides
@@ -1967,8 +1971,19 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         _cot = content[:_mi].strip()
                         content = content[_mi + len(_mk):].lstrip()
                         thinking = (thinking + "\n\n" + _cot).strip() if (thinking and _cot) else (thinking or _cot)
+                        _finalize_net_fired = True
                         print(f"[CHAT]   leaked-reasoning net (marker): routed {len(_cot)} chars from content to thinking")
                         break
+        # The frontend persists ITS accumulated stream over the backend's
+        # snapshot (PATCH on done), so a finalize-net catch must retract the
+        # dirty streamed text and re-emit the cleaned content — otherwise the
+        # leak survives in the displayed + persisted message.
+        if _finalize_net_fired and _streamed_content:
+            yield f"data: {json.dumps({'type': 'clear'})}\n\n"
+            if content:
+                yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+            else:
+                _streamed_content = False
 
         # Build the full message object for conversation history
         msg = {"role": "assistant", "content": content}

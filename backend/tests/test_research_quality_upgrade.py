@@ -288,7 +288,7 @@ $$E = mc^2$$
 
 
 def test_pdf_export_uses_react_markdown_renderer_and_pygraph_alias():
-    index = (_BACKEND.parent / "frontend" / "dist" / "index.html").read_text()
+    index = (_BACKEND.parent / "frontend" / "src" / "main.jsx").read_text()
     assert "ResearchPrintPage" in index
     # PDF export wraps the report markdown through the React renderer with
     # print-mode + theme args (repinned after the renderer gained options).
@@ -301,7 +301,7 @@ def test_pdf_export_uses_react_markdown_renderer_and_pygraph_alias():
 
 
 def test_deep_research_panel_state_contracts_are_guarded_in_frontend():
-    index = (_BACKEND.parent / "frontend" / "dist" / "index.html").read_text()
+    index = (_BACKEND.parent / "frontend" / "src" / "main.jsx").read_text()
 
     # Live SSE appends token chunks, while polling replaces from durable
     # report_markdown. That keeps the two paths from duplicating the body.
