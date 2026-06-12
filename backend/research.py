@@ -17,6 +17,15 @@ import httpx
 
 import config
 
+# model_providers transitively imports database (aiosqlite). research is
+# imported by quick_search/search_agent, whose tests run without aiosqlite —
+# keep this module importable there with a pass-through fallback.
+try:
+    from model_providers import strip_leaked_cot
+except ModuleNotFoundError:  # test envs without aiosqlite
+    def strip_leaked_cot(text):
+        return text, ""
+
 
 _WEB_FETCH_CLIENT = None
 _WEB_FETCH_CLIENT_PROXY = None
@@ -33,6 +42,13 @@ def _web_fetch_client(http):
         return http
     global _WEB_FETCH_CLIENT, _WEB_FETCH_CLIENT_PROXY
     if _WEB_FETCH_CLIENT is None or _WEB_FETCH_CLIENT_PROXY != proxy:
+        if _WEB_FETCH_CLIENT is not None:
+            # Proxy setting changed — close the old client instead of leaking
+            # its connection pool.
+            try:
+                asyncio.get_running_loop().create_task(_WEB_FETCH_CLIENT.aclose())
+            except RuntimeError:
+                pass
         _WEB_FETCH_CLIENT = httpx.AsyncClient(
             timeout=httpx.Timeout(300.0, connect=10.0),
             verify=getattr(config, "HTTP_VERIFY_SSL", True),
@@ -716,7 +732,7 @@ def _github_file_score(path: str, size: int) -> int:
         score += 105
     if name in {"vite.config.js", "vite.config.ts", "tsconfig.json", "webpack.config.js"}:
         score += 95
-    if p in {"frontend/dist/index.html", "backend/main.py", "backend/research.py", "backend/database.py", "deploy_monitor.py"}:
+    if p in {"frontend/src/main.jsx", "backend/main.py", "backend/research.py", "backend/database.py", "deploy_monitor.py"}:
         score += 90
     if p.startswith(("frontend/", "backend/", "src/", "app/", "components/")):
         score += 35
@@ -1047,10 +1063,13 @@ async def _ask_ollama(http, ollama_url: str, prompt: str, model: str = None, def
         r = await http.post(f"{ollama_url}/api/generate", json={
             "model": model or default_model,
             "prompt": prompt, "stream": False,
+            "think": False,
             "options": {"temperature": 0.3, "num_predict": max_tokens, "num_ctx": _num_ctx},
         }, timeout=180)
         data = r.json()
-        return (data.get("response", "") or "").strip()
+        text = (data.get("response", "") or "").strip()
+        clean, leaked = strip_leaked_cot(text)
+        return (clean or text) if leaked else text
     except Exception as e:
         return f"[AI synthesis failed: {e}]"
 
@@ -1133,6 +1152,7 @@ async def _ask_ollama_streamed(
         async with http.stream("POST", f"{ollama_url}/api/generate", json={
             "model": model or default_model,
             "prompt": prompt, "stream": True,
+            "think": False,
             "options": {"temperature": 0.3, "num_predict": max_tokens, "num_ctx": _num_ctx},
         }, timeout=300) as stream:
             async for line in stream.aiter_lines():
@@ -1152,7 +1172,9 @@ async def _ask_ollama_streamed(
                     })
                 if chunk.get("done"):
                     break
-        return accumulated.strip()
+        text = accumulated.strip()
+        clean, leaked = strip_leaked_cot(text)
+        return (clean or text) if leaked else text
     except Exception as e:
         return f"[AI synthesis failed: {e}]"
 
@@ -2113,6 +2135,7 @@ async def _ask_report_streamed(
             "model": model or default_model,
             "prompt": prompt,
             "stream": True,
+            "think": False,
             "options": {"temperature": 0.25, "num_predict": max_tokens, "num_ctx": _num_ctx},
         }, timeout=420) as stream:
             async for line in stream.aiter_lines():
@@ -2135,7 +2158,9 @@ async def _ask_report_streamed(
                     break
         if token_buf:
             await _emit_report_event(events, report_id, "research_token", {"content": token_buf})
-        return accumulated.strip()
+        text = accumulated.strip()
+        clean, leaked = strip_leaked_cot(text)
+        return (clean or text) if leaked else text
     except cancel_registry.RunCancelled:
         raise
     except Exception as e:

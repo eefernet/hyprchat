@@ -58,7 +58,11 @@ pass "Python deps installed (incl. pypdf, chromadb)"
 step "Checking frontend..."
 if [ ! -f /opt/hyprchat/frontend/dist/index.html ]; then
     fail "Frontend not found at /opt/hyprchat/frontend/dist/index.html"
-    echo "     Make sure the project was extracted correctly."
+    echo "     frontend/dist/ is BUILD OUTPUT and is not committed to git."
+    echo "     Build it on your dev machine before packaging/deploying:"
+    echo "         cd frontend && npm install && npm run build"
+    echo "     then include frontend/dist/ in what you copy to this host."
+    echo "     (The server stays Node-free by design — do not install npm here.)"
     exit 1
 fi
 pass "Frontend found"

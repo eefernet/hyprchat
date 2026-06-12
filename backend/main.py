@@ -34,9 +34,8 @@ from pydantic import BaseModel
 
 import config
 import database as db
-from tools import CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls, strip_tool_calls
 from council import stream_council_chat
-from events import EventBus, parse_tool_params
+from events import EventBus
 import quick_search as qs_module
 from agents.chat import chat_stream_generate, TOOL_TEMPLATES, detect_template_family
 from agents.personas import seed_coder_bot as _seed_coder_bot, seed_coder_bot_v2 as _seed_coder_bot_v2, seed_conspiracy_bot as _seed_conspiracy_bot, seed_based_bot as _seed_based_bot, seed_all_defaults as _seed_all_defaults
@@ -1407,6 +1406,43 @@ async def chat_stream(req: ChatRequest):
 # ============================================================
 # ARTIFACTS
 # ============================================================
+async def _annotate_artifact_staleness(artifacts: list[dict]) -> list[dict]:
+    """For archive artifacts: set `stale` when the project changed (a successful
+    edit run started) after the artifact was packaged, and `latest_for_project`
+    for the newest archive of each project within the given set. Edit-run lookups
+    are cached per project_id so a list page costs one query per distinct project."""
+    if not artifacts:
+        return artifacts
+    edit_ts_cache: dict[str, str | None] = {}
+    newest_by_project: dict[str, str] = {}
+    for a in artifacts:
+        if (a.get("kind") or "") != "archive":
+            continue
+        pid = str(((a.get("metadata") or {}).get("project_id") or "")).strip()
+        if not pid:
+            continue
+        ca = a.get("created_at") or ""
+        if ca > newest_by_project.get(pid, ""):
+            newest_by_project[pid] = ca
+    for a in artifacts:
+        if (a.get("kind") or "") != "archive":
+            continue
+        pid = str(((a.get("metadata") or {}).get("project_id") or "")).strip()
+        if not pid:
+            continue
+        if pid not in edit_ts_cache:
+            try:
+                edit_ts_cache[pid] = await db.latest_edit_run_after(pid)
+            except Exception as e:
+                print(f"[artifacts] stale lookup failed for {pid}: {e}")
+                edit_ts_cache[pid] = None
+        edit_ts = edit_ts_cache[pid]
+        ca = a.get("created_at") or ""
+        a["stale"] = bool(edit_ts and ca and edit_ts > ca)
+        a["latest_for_project"] = bool(ca and ca == newest_by_project.get(pid))
+    return artifacts
+
+
 @app.get("/api/artifacts")
 async def list_artifacts_ep(
     conversation_id: Optional[str] = Query(None),
@@ -1424,7 +1460,7 @@ async def list_artifacts_ep(
     limit: int = Query(80, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    return await db.list_artifacts(
+    artifacts = await db.list_artifacts(
         conversation_id=conversation_id,
         workspace_id=workspace_id,
         run_id=run_id,
@@ -1440,6 +1476,7 @@ async def list_artifacts_ep(
         limit=limit,
         offset=offset,
     )
+    return await _annotate_artifact_staleness(artifacts)
 
 
 @app.get("/api/artifacts/{artifact_id}")
@@ -1447,7 +1484,25 @@ async def get_artifact_ep(artifact_id: str):
     artifact = await db.get_artifact(artifact_id)
     if not artifact:
         raise HTTPException(404, "Artifact not found")
+    # Annotate across the full lineage so `latest_for_project` reflects the whole
+    # version set, not just this single row. Mutates `versions` in place too.
+    await _annotate_artifact_staleness([artifact] + (artifact.get("versions") or []))
     return artifact
+
+
+@app.get("/api/artifacts/{artifact_id}/download")
+async def download_artifact_ep(artifact_id: str):
+    """Serve THIS artifact's exact bytes (immutable), keyed on artifact id rather
+    than a shared basename — so an old pill always downloads what it packaged even
+    after a newer delivery overwrote the friendly /api/downloads/{name} file."""
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    filepath, safe_name = _artifact_path_for_row(artifact)
+    if not filepath:
+        raise HTTPException(404, "Artifact file is missing")
+    download_name = os.path.basename(artifact.get("filename") or "") or safe_name
+    return FileResponse(filepath, filename=download_name)
 
 
 @app.get("/api/artifacts/{artifact_id}/duplicates")
@@ -5537,9 +5592,32 @@ async def hf_download_ep(request: Request):
 # ============================================================
 # SERVE FRONTEND (production)
 # ============================================================
+class _FrontendStaticFiles(StaticFiles):
+    """StaticFiles with deploy-safe cache headers.
+
+    Vite assets are content-hashed, so they can be cached forever — but
+    index.html must NOT be cached: deploys delete the old hashed assets, and a
+    browser holding a stale cached index.html would request chunks that no
+    longer exist (blank app until hard refresh).
+    """
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        path = str(getattr(resp, "path", "") or "")
+        if "/assets/" in path.replace(os.sep, "/"):
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
 frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
-if os.path.exists(frontend_dir):
-    app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
+if os.path.isfile(os.path.join(frontend_dir, "index.html")):
+    app.mount("/", _FrontendStaticFiles(directory=frontend_dir, html=True), name="frontend")
+else:
+    print("[STARTUP] WARNING: frontend/dist/index.html not found — the UI will not be served.")
+    print("[STARTUP]          frontend/dist/ is build output (not committed). Build it with:")
+    print("[STARTUP]              cd frontend && npm install && npm run build")
 
 
 if __name__ == "__main__":

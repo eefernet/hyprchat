@@ -7,7 +7,6 @@ import json
 import os
 import re
 import traceback
-import urllib.parse
 from datetime import datetime
 
 import config
@@ -24,6 +23,22 @@ from quick_search import run_quick_search_for_chat
 # Background tasks (best-effort memory suggestion) — held in a set so the
 # event loop doesn't garbage-collect them mid-run; discarded on completion.
 _BG_TASKS: set = set()
+
+
+# Leaked-reasoning guard (Ollama 0.30.x + gemma4 post-tool rounds): the model's
+# thought section can arrive detokenized as plain content —
+#   "thought\n<CoT...><channel|><real answer>"
+# with message.thinking empty. The marker line opens the leak; one of the
+# transition markers (when present) separates CoT from the real answer.
+_LEAK_OPEN_RE = re.compile(r"\s*[Tt]hought[ \t]*\n")
+_LEAK_TRANSITION_MARKERS = ("<|channel|>", "<channel|>", "<|message|>")
+# Line-anchored fence counter: CoT prose often *mentions* ``` mid-line
+# ("followed by a ```chart block"), which must not count as a real fence.
+_FENCE_LINE_RE = re.compile(r"(?m)^[ \t]*```")
+
+
+def _in_open_fence(text: str) -> bool:
+    return len(_FENCE_LINE_RE.findall(text)) % 2 == 1
 
 
 def _spawn_bg(coro) -> None:
@@ -473,11 +488,40 @@ _TOOL_ICONS = {
 
 
 _BLOCKED_RUN_RE = re.compile(r"\b(run-[0-9a-fA-F]{8,16})\b")
+
+# Phantom-completion guard: detects a v2 coder persona asserting it DID work
+# (added/built/implemented a feature) when it actually called no tools that turn.
+# Kept tight on purpose — clarifying questions, refusals, and plain explanations
+# must NOT match. The ✅ feature-list marker is a strong signal in practice.
+_PHANTOM_CLAIM_RE = re.compile(
+    r"(?:\bI(?:'ve|\s+have)\s+(?:added|created|built|implemented|updated|made|fixed|wired|set\s+up|finished|completed|integrated)\b"
+    r"|here'?s\s+what(?:'s|\s+(?:was|i))?\s+(?:new|created|added|changed|implemented|built|done)\b"
+    r"|\b(?:successfully|now)\s+(?:added|created|implemented|built|updated|integrated)\b"
+    r"|✅)",
+    re.IGNORECASE,
+)
+_PHANTOM_CORRECTION = (
+    "SYSTEM: You told the user you made changes (e.g. 'added', 'implemented', "
+    "'created'), but you called NO tools this turn — so NOTHING was actually changed "
+    "on disk. A real change to this project REQUIRES a tool call. Do ONE of these NOW:\n"
+    "  (a) call run_aider_fix(task='...') for the existing/uploaded project, or "
+    "generate_code/write_file for genuinely new files, to ACTUALLY make the change; or\n"
+    "  (b) if you cannot or should not change anything, tell the user plainly that you "
+    "have NOT made any changes yet, and why.\n"
+    "Do not claim work you did not perform."
+)
+_PHANTOM_NOTICE = (
+    "> ⚠️ Heads-up: I did not run any build or edit tools this turn, so no project "
+    "files were actually changed.\n\n"
+)
 _UPLOAD_MANUAL_TOOLS = {
     "read_file", "write_file", "run_shell", "execute_code", "list_files",
     "search_files", "diff_files", "download_project", "download_file",
 }
-_TERMINAL_WORKFLOW_STATES = {"accepted", "completed", "cancelled", "blocked"}
+# Keep in sync with database._REAPER_TERMINAL_WORKFLOW_STATES. "answering"
+# is terminal for ask_uploaded_project; "partial_delivered" is the
+# delivered-with-warnings exit set by tools.py download_project.
+_TERMINAL_WORKFLOW_STATES = {"accepted", "partial_delivered", "cancelled", "blocked", "answering"}
 
 
 def _blocked_tool_signature(tool_name: str, tool_result: str) -> str:
@@ -1341,6 +1385,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     _generate_code_done = False    # Guard: stop tool calls after successful generate_code
     _rescue_count = 0              # How many times we rescued code blocks
     _oom_retries = 0               # OOM context halving retries
+    _tools_ran_this_turn = 0       # Real exec_tool runs this turn (phantom-completion guard)
+    _phantom_nudges = 0            # How many times we re-prompted a tool-less completion claim
     # Effort-level self-review rounds: 0=off, capped at 3
     _review_round = 0
     _review_budget = max(0, min(3, int(getattr(req, "effort_rounds", 0) or 0)))
@@ -1567,6 +1613,9 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     _chunk_buf = ""
                     _repeat_window = ""  # Rolling window for repetition detection
                     _live_gen_tokens = 0  # Live token counter for streaming updates
+                    _lead_buf = ""        # Holds first content tokens until leak check resolves
+                    _lead_checked = False # True once round-start content is known clean (or leaked)
+                    _leak_mode = False    # True while routing leaked plain-text CoT to thinking
                     # Tool-enabled rounds stream draft content live. If the
                     # completed round resolves to a tool call, the existing
                     # clear event removes that draft before tool execution.
@@ -1644,16 +1693,40 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                             if not token:
                                 continue  # No content yet, just thinking
 
-                        # If we were in native thinking mode and now have content, thinking is done
-                        if _in_thinking and token and not _thinking_token:
+                        # If we were in native thinking mode and now have content, thinking is done.
+                        # NOT in leak mode: there the "thinking" is plain content tokens, and this
+                        # transition would dump the rest of the leaked CoT into content.
+                        if _in_thinking and token and not _thinking_token and not _leak_mode:
                             thinking = _thinking_buf
                             _in_thinking = False
+                            _lead_checked = True  # content after native thinking is real
                             if thinking:
                                 snip = thinking[-60:].replace("\n", " ")
                                 await events.emit(conv_id, "thought_done", {
                                     "status": f"💭 {snip}...",
                                     "detail": json.dumps({"thinking": thinking[-2000:]}),
                                 })
+
+                        # ── Leaked-reasoning guard: hold the first content tokens of the
+                        # round until we know they aren't a plain-text "thought\n" CoT dump
+                        # (gemma4 on Ollama 0.30.x post-tool rounds; thinking field empty).
+                        if token and not _lead_checked and not _in_thinking and not _thinking_buf:
+                            _lead_buf += token
+                            token = ""
+                            _lead_stripped = _lead_buf.lstrip()
+                            if _LEAK_OPEN_RE.match(_lead_buf):
+                                _lead_checked = True
+                                _leak_mode = True
+                                _in_thinking = True
+                                _thinking_buf = _LEAK_OPEN_RE.sub("", _lead_buf, count=1)
+                                _lead_buf = ""
+                                await events.emit(conv_id, "thinking", {"status": "💭 thinking...", "detail": json.dumps({"thinking": _thinking_buf[-3000:]})})
+                            elif (_lead_stripped and not "thought\n".startswith(_lead_stripped[:8].lower())) or len(_lead_buf) > 40:
+                                # Definitely not the leak marker — release held tokens
+                                _lead_checked = True
+                                token = _lead_buf
+                                _lead_buf = ""
+                            # else: still an ambiguous prefix of "thought\n" — keep holding
 
                         if token:
                             # Handle thinking tokens (inline <think> tags — deepseek, etc.)
@@ -1672,15 +1745,70 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                         snip = thinking[-60:].replace("\n", " ")
                                         await events.emit(conv_id, "thinking", {"status": f"💭 {snip}...", "detail": json.dumps({"thinking": thinking[-3000:]})})
                                 else:
+                                    _tk_len = len(token)
                                     _thinking_buf += token
-                                    if len(_thinking_buf) % 100 < len(token):
-                                        snip = _thinking_buf[-60:].replace("\n", " ")
-                                        await events.emit(conv_id, "thinking", {"status": f"💭 {snip}...", "detail": json.dumps({"thinking": _thinking_buf[-3000:]})})
-                                    continue
+                                    token = ""
+                                    if _leak_mode:
+                                        # Leaked CoT ends at a transition marker; the real
+                                        # answer (if any) follows it.
+                                        for _mk in _LEAK_TRANSITION_MARKERS:
+                                            _mi = _thinking_buf.find(_mk)
+                                            if _mi != -1:
+                                                token = _thinking_buf[_mi + len(_mk):].lstrip()
+                                                _thinking_buf = _thinking_buf[:_mi]
+                                                thinking = _thinking_buf
+                                                _in_thinking = False
+                                                _leak_mode = False
+                                                if thinking:
+                                                    snip = thinking[-60:].replace("\n", " ")
+                                                    await events.emit(conv_id, "thought_done", {"status": f"💭 {snip}...", "detail": json.dumps({"thinking": thinking[-2000:]})})
+                                                break
+                                    if _in_thinking:
+                                        if len(_thinking_buf) % 100 < _tk_len:
+                                            snip = _thinking_buf[-60:].replace("\n", " ")
+                                            await events.emit(conv_id, "thinking", {"status": f"💭 {snip}...", "detail": json.dumps({"thinking": _thinking_buf[-3000:]})})
+                                        continue
 
                             if token:
                                 content += token
                                 _live_gen_tokens += 1
+
+                                # ── Leaked-CoT transition marker (gemma4, second shape) ──
+                                # CoT can leak into content with NO "thought" opener; only
+                                # the transition marker reveals it. This happens EVEN when a
+                                # first thought block streamed via the native thinking field
+                                # (the model opens a second one Ollama doesn't parse), so do
+                                # not gate on empty thinking. Everything this round before
+                                # the marker is reasoning: route it to the thought panel,
+                                # retract the streamed text (clear), re-emit the answer.
+                                if not _leak_mode:
+                                    _mwin_start = max(0, len(content) - len(token) - 12)
+                                    for _mk in _LEAK_TRANSITION_MARKERS:
+                                        _mi = content.find(_mk, _mwin_start)
+                                        if _mi == -1:
+                                            continue
+                                        if _in_open_fence(content[:_mi]):
+                                            print(f"[CHAT]   leak-guard DEBUG: marker {_mk!r} at {_mi} vetoed by open fence (fences={len(_FENCE_LINE_RE.findall(content[:_mi]))})")
+                                            continue  # inside a real code fence — try the next marker
+                                        _cot = content[:_mi].strip()
+                                        content = content[_mi + len(_mk):]
+                                        thinking = (thinking + "\n\n" + _cot).strip() if (thinking and _cot) else (thinking or _cot)
+                                        _chunk_buf = ""
+                                        _repeat_window = ""
+                                        if thinking:
+                                            snip = thinking[-60:].replace("\n", " ")
+                                            await events.emit(conv_id, "thought_done", {"status": f"💭 {snip}...", "detail": json.dumps({"thinking": thinking[-2000:]})})
+                                        yield f"data: {json.dumps({'type': 'clear'})}\n\n"
+                                        if content:
+                                            yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+                                            _streamed_content = True
+                                        # Neutralize the current token: its text is already
+                                        # accounted for (sliced into content / re-emitted).
+                                        # Without this the marker itself flows into _chunk_buf
+                                        # below and streams to the frontend after the clear.
+                                        token = ""
+                                        print(f"[CHAT]   leaked-CoT marker mid-stream: routed {len(_cot)} chars to thinking")
+                                        break
 
                                 # Emit live token count every 10 tokens
                                 if _live_gen_tokens % 10 == 0:
@@ -1736,6 +1864,19 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
                         # Track token counts from Ollama
                         if chunk.get("done"):
+                            for _dmk in _LEAK_TRANSITION_MARKERS:
+                                if _dmk in content:
+                                    print(f"[CHAT]   leak-guard DEBUG: round ended with {_dmk!r} STILL in content "
+                                          f"(idx={content.find(_dmk)}, len={len(content)}, leak_mode={_leak_mode}, "
+                                          f"lead_checked={_lead_checked}, in_thinking={_in_thinking}, "
+                                          f"fences_before={len(_FENCE_LINE_RE.findall(content[:content.find(_dmk)]))})")
+                                    break
+                            # Release any held round-start tokens (round ended before
+                            # the leak check could resolve — e.g. a very short reply)
+                            if _lead_buf:
+                                content += _lead_buf
+                                _chunk_buf += _lead_buf
+                                _lead_buf = ""
                             if _chunk_buf:
                                 yield f"data: {json.dumps({'type': 'token', 'content': _chunk_buf})}\n\n"
                                 _streamed_content = True
@@ -1799,6 +1940,50 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             await events.emit(conv_id, "error", {"status": f"{_provider_label}: {err_msg[:200]}"})
             yield f"data: {json.dumps({'type': 'error', 'error': err_msg})}\n\n"
             return
+
+        # ── Leaked-reasoning finalize net: if the round's content still starts
+        # with a plain-text "thought\n" CoT dump (slipped past the stream guard,
+        # e.g. via a non-streamed path), split it into thinking. The end-of-round
+        # thought_done emit below surfaces it in the UI thought panel.
+        _finalize_net_fired = False
+        if content:
+            _leak_m = _LEAK_OPEN_RE.match(content) if not thinking else None
+            if _leak_m:
+                _leak_rest = content[_leak_m.end():]
+                for _mk in _LEAK_TRANSITION_MARKERS:
+                    _mi = _leak_rest.find(_mk)
+                    if _mi != -1:
+                        thinking = _leak_rest[:_mi].strip()
+                        content = _leak_rest[_mi + len(_mk):].lstrip()
+                        break
+                else:
+                    thinking = _leak_rest.strip()
+                    content = ""
+                _finalize_net_fired = True
+                print(f"[CHAT]   leaked-reasoning net: routed {len(thinking)} chars from content to thinking")
+            else:
+                # Second leak shape: no opener, but a transition marker divides
+                # leaked CoT from the real answer (fence-parity guarded). Fires
+                # even when a first thought block came via the native field.
+                for _mk in _LEAK_TRANSITION_MARKERS:
+                    _mi = content.find(_mk)
+                    if _mi != -1 and not _in_open_fence(content[:_mi]):
+                        _cot = content[:_mi].strip()
+                        content = content[_mi + len(_mk):].lstrip()
+                        thinking = (thinking + "\n\n" + _cot).strip() if (thinking and _cot) else (thinking or _cot)
+                        _finalize_net_fired = True
+                        print(f"[CHAT]   leaked-reasoning net (marker): routed {len(_cot)} chars from content to thinking")
+                        break
+        # The frontend persists ITS accumulated stream over the backend's
+        # snapshot (PATCH on done), so a finalize-net catch must retract the
+        # dirty streamed text and re-emit the cleaned content — otherwise the
+        # leak survives in the displayed + persisted message.
+        if _finalize_net_fired and _streamed_content:
+            yield f"data: {json.dumps({'type': 'clear'})}\n\n"
+            if content:
+                yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+            else:
+                _streamed_content = False
 
         # Build the full message object for conversation history
         msg = {"role": "assistant", "content": content}
@@ -2130,6 +2315,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         tool_result = head + f"\n\n[... {orig_len - 12000} chars omitted ...]\n\n" + tail
 
                     messages.append({"role": "tool", "content": tool_result})
+                    _tools_ran_this_turn += 1
                     print(f"[CHAT]   Tool result ({tool_name}): {len(tool_result)} chars")
 
                     if _record_blocked_tool_result(_blocked_tool_state, tool_name, tool_result):
@@ -2309,6 +2495,35 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
         # No tool calls — we have a final response
         if content:
+            # ── Phantom-completion guard (v2 coder personas) ──
+            # The model claimed it did work (added/built/implemented) but called
+            # zero tools this turn, so nothing actually changed on disk. Re-prompt
+            # it to make the change via a tool or admit it didn't; if it still
+            # refuses after the nudges, prepend an honesty notice so the user is
+            # never handed a false success. Q&A turns run ask_project (a tool), so
+            # _tools_ran_this_turn>0 keeps them exempt.
+            _phantom_hit = (
+                _is_v2_persona and bool(_active_project)
+                and _tools_ran_this_turn == 0
+                and bool(_PHANTOM_CLAIM_RE.search(content))
+            )
+            if _phantom_hit and _phantom_nudges < 2:
+                _phantom_nudges += 1
+                print(f"[CHAT]   Phantom-completion claim with 0 tools — nudge #{_phantom_nudges}")
+                yield f"data: {json.dumps({'type': 'clear'})}\n\n"
+                messages.append(msg)  # let the model see what it claimed
+                messages.append({"role": "tool", "content": _PHANTOM_CORRECTION})
+                continue
+            if _phantom_hit and _phantom_nudges >= 2 and not content.startswith(_PHANTOM_NOTICE):
+                print(f"[CHAT]   Phantom-completion persisted after {_phantom_nudges} nudges — prepending honesty notice")
+                content = _PHANTOM_NOTICE + content
+                msg["content"] = content
+                yield f"data: {json.dumps({'type': 'clear'})}\n\n"
+                for i in range(0, len(content), 8):
+                    yield f"data: {json.dumps({'type': 'token', 'content': content[i:i+8]})}\n\n"
+                    await asyncio.sleep(0)
+                _streamed_content = True  # skip the buffered flush below (already streamed)
+
             # If content was buffered (tool mode), flush it now as the final answer
             if _has_tools and not _streamed_content:
                 for i in range(0, len(content), 8):
