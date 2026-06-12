@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Built with FastAPI + a single-file React SPA compiled with Vite. No cloud dependencies.
+  Built with FastAPI + a single-file React SPA compiled with Vite. Local-first with no required cloud dependencies — optional OpenAI/Anthropic models via your own API keys.
 </p>
 
 <p align="center">
@@ -42,9 +42,12 @@ HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-styl
 | 🏛️ Daedalus | Architect → Builder → Reviewer → Acceptance workflow for building and fixing projects |
 | 🔎 Research | Quick Search, deep research reports, source cards, page reading, durable report history |
 | 🧰 Tools | Code execution, shell/file tools, URL fetch, custom Python tools, uploaded project awareness |
+| 🔌 Connectors | MCP servers and OpenAPI specs discovered into chat-usable tools, with credential placeholders and private-URL guards |
 | 📚 Knowledge | RAG knowledge bases, ChromaDB retrieval, workspace memory, project indexing |
+| 🧠 Memory | Global user memory plus workspace memory with reviewed suggestions, pinned blocks, and Ghost Mode for unsaved chats |
+| 📁 Artifacts | Artifact Studio tracks delivered files/projects with previews, versions, revisions, bundles, and timelines |
 | 🗳️ Councils | Run multiple models in parallel, debate answers, vote, and synthesize the result |
-| 📦 Models | Ollama model browser, HuggingFace GGUF search/downloads, capability badges |
+| 📦 Models | Ollama model browser, HuggingFace GGUF search/downloads, capability badges, optional OpenAI/Anthropic cloud models |
 | 🧩 Profiles | Agents for tasks, Personas for style/roleplay, per-profile tools and knowledge bases |
 
 ## Feature Tour
@@ -125,7 +128,7 @@ Agents are task profiles for coding, research, automation, and tool-heavy work. 
 
 ### 📦 Models, Activity, Settings
 
-Manage installed Ollama models, browse HuggingFace GGUF files, watch active downloads and long jobs, and tune appearance, generation, RAG, Daedalus, and service connections from the Settings overlay.
+Manage installed Ollama models, browse HuggingFace GGUF files, watch active downloads and long jobs, and tune appearance, generation, RAG, Daedalus, and service connections from the Settings overlay. Optional OpenAI and Anthropic API keys (Settings → Connections) add cloud models alongside local Ollama models in the picker.
 
 <p align="center">
   <img src="docs/images/modelManager.png" alt="HyprChat model manager" width="440">
@@ -147,8 +150,11 @@ User → HyprChat (:8000)
          │    ├── Daedalus workflow router
          │    ├── Research + Quick Search
          │    ├── RAG + ChromaDB
+         │    ├── MCP/OpenAPI connector tools
+         │    ├── Artifact Studio + global/workspace memory
          │    └── Model, profile, workspace, council APIs
          ├── Ollama (:11434) - local LLM inference
+         ├── OpenAI / Anthropic (optional) - cloud models via API keys
          ├── Codebox (:8585) - sandboxed execution
          ├── OpenHands Worker (:8586) - OpenHands + Aider bridge
          ├── SearXNG (:8888) - private web search
@@ -164,6 +170,8 @@ User → HyprChat (:8000)
 | `backend/tools.py` | Tool execution, Daedalus routing/gates, OpenHands/Aider dispatch |
 | `backend/agents/*.py` | Daedalus agents, personas, reviewer, acceptance, project QA, indexer |
 | `backend/database.py` | SQLite schema, migrations, conversations, runs, workflows, reports |
+| `backend/model_providers.py` | Optional OpenAI/Anthropic cloud model adapters, key storage, streaming bridges |
+| `backend/connectors.py` | MCP/OpenAPI connector discovery, credential placeholders, execution guardrails |
 | `backend/research.py` | Deep research and safe URL fetch pipeline |
 | `backend/quick_search.py` / `backend/search_agent.py` | Per-turn SearXNG search planning, ranking, page fetch, result cards |
 | `frontend/src/main.jsx` | The entire React frontend (Vite-built to `frontend/dist/`, which the backend serves) |
@@ -216,6 +224,10 @@ HYPRCHAT_OUTBOUND_PROXY=
 DEFAULT_MODEL=qwen3.5:27b
 PLANNING_MODEL=qwen3.5:27b
 CODER_MODEL=qwen2.5-coder:14b
+
+# Optional cloud model providers (or save keys per user in Settings → Connections)
+OPENAI_API_KEY=
+ANTHROPIC_API_KEY=
 ```
 
 `HYPRCHAT_OUTBOUND_PROXY` is optional. The first-time deploy monitor can set it
@@ -307,7 +319,7 @@ HYPRCHAT_URL=http://127.0.0.1:8000 python3 -m pytest tests/ -v
 | Backend | Python 3.11+, FastAPI, httpx, aiosqlite |
 | Frontend | React 18, single component file (`frontend/src/main.jsx`), Vite build with npm-bundled libs |
 | Database | SQLite + ChromaDB |
-| LLM Runtime | Ollama with native tool calling plus text fallback |
+| LLM Runtime | Ollama with native tool calling plus text fallback; optional OpenAI/Anthropic cloud models |
 | Search | SearXNG |
 | Coding Sandbox | Codebox LXC + OpenHands + Aider |
 | Automation | External n8n integration |
