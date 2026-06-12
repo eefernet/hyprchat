@@ -3374,6 +3374,24 @@ async def update_artifact_file_metadata(
         await db.close()
 
 
+async def count_artifacts_with_storage_path(storage_path: str, exclude_id: str = "") -> int:
+    """How many artifact rows (any user) still reference this file on disk.
+    Cross-user on purpose: the file must not be unlinked while anyone's row
+    points at it (duplicate-merge can leave several rows sharing one path)."""
+    if not storage_path:
+        return 0
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT COUNT(*) AS n FROM artifacts WHERE storage_path=? AND id != ?",
+            (storage_path, exclude_id or ""),
+        )
+        row = await cursor.fetchone()
+        return row["n"] if row else 0
+    finally:
+        await db.close()
+
+
 async def delete_artifact(artifact_id: str) -> bool:
     user_id = _scope_user()
     db = await get_db()

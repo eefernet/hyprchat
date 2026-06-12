@@ -84,6 +84,215 @@ def _find_by_class(workflow: dict, class_type: str) -> str | None:
     return None
 
 
+# ── Per-checkpoint generation settings ──
+# Resolved settings = built-in pattern defaults overridden by the user's saved
+# defaults (data/comfy_model_settings.json). Keys: model_sampling ("", "vpred",
+# "flow"), sampler, scheduler, cfg, steps.
+
+_SETTING_KEYS = ("model_sampling", "sampler", "scheduler", "cfg", "steps")
+
+
+def _model_settings_path() -> str:
+    return os.path.join(os.path.dirname(config.SETTINGS_PATH), "comfy_model_settings.json")
+
+
+def load_model_settings() -> dict:
+    try:
+        with open(_model_settings_path(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_model_settings(settings: dict):
+    with open(_model_settings_path(), "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=1)
+
+
+def builtin_defaults_for(checkpoint: str) -> dict:
+    """Pattern-matched defaults for known model families."""
+    n = (checkpoint or "").lower()
+    if "bigasp" in n and any(v in n for v in ("25", "2.5", "2_5")):
+        # Flow Matching (per the author): ModelSamplingSD3, euler/beta, CFG 4-6
+        return {"model_sampling": "flow", "sampler": "euler", "scheduler": "beta", "cfg": 5, "steps": 32}
+    if "vpred" in n or "v-pred" in n or "v_pred" in n:
+        return {"model_sampling": "vpred", "sampler": "euler", "scheduler": "normal", "cfg": 4, "steps": 28}
+    if "pony" in n or "illustrious" in n or "noob" in n:
+        return {"model_sampling": "", "sampler": "euler_ancestral", "scheduler": "normal", "cfg": 6, "steps": 28}
+    if "lightning" in n or "turbo" in n or "lcm" in n:
+        return {"model_sampling": "", "sampler": "euler", "scheduler": "sgm_uniform", "cfg": 1.5, "steps": 8}
+    # Standard SDXL / unknown
+    return {"model_sampling": "", "sampler": "euler", "scheduler": "normal", "cfg": 7, "steps": 25}
+
+
+def settings_for_checkpoint(checkpoint: str) -> dict:
+    """Built-in defaults merged with the user's saved override (user wins)."""
+    resolved = dict(builtin_defaults_for(checkpoint))
+    override = load_model_settings().get(checkpoint)
+    if isinstance(override, dict):
+        for k in _SETTING_KEYS:
+            if k in override and override[k] is not None:
+                resolved[k] = override[k]
+        resolved["user_override"] = True
+    else:
+        resolved["user_override"] = False
+    return resolved
+
+
+# ── Saved workflow library (API-format JSONs uploaded via Image Studio) ──
+
+def workflows_dir() -> str:
+    d = os.path.join(os.path.dirname(config.SETTINGS_PATH), "comfy_workflows")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _safe_workflow_path(name: str) -> str | None:
+    base = os.path.basename(str(name or "").strip())
+    if not base:
+        return None
+    if not base.endswith(".json"):
+        base += ".json"
+    path = os.path.join(workflows_dir(), base)
+    if not os.path.abspath(path).startswith(os.path.abspath(workflows_dir()) + os.sep):
+        return None
+    return path
+
+
+def list_workflows() -> list[str]:
+    try:
+        return sorted(f[:-5] for f in os.listdir(workflows_dir()) if f.endswith(".json"))
+    except Exception:
+        return []
+
+
+def load_workflow(name: str) -> dict | None:
+    path = _safe_workflow_path(name)
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            wf = json.load(f)
+        return wf if isinstance(wf, dict) and wf else None
+    except Exception as e:
+        print(f"[COMFYUI] workflow load error for {name}: {e}")
+        return None
+
+
+def save_workflow(name: str, workflow: dict) -> str:
+    """Validate (must patch cleanly) and persist an API-format workflow."""
+    build_workflow(workflow, prompt="validation test")  # raises ValueError if unusable
+    path = _safe_workflow_path(name)
+    if not path:
+        raise ValueError("Invalid workflow name")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(workflow, f, indent=1)
+    return os.path.basename(path)[:-5]
+
+
+def delete_workflow(name: str) -> bool:
+    path = _safe_workflow_path(name)
+    if path and os.path.exists(path):
+        os.remove(path)
+        return True
+    return False
+
+
+def workflow_from_png(data: bytes) -> dict | None:
+    """Extract the API-format workflow ComfyUI embeds in its PNGs.
+
+    ComfyUI writes two text chunks: 'prompt' (API-format graph — what we want)
+    and 'workflow' (UI-format — not executable via the API). Returns None when
+    no usable chunk exists (e.g. metadata stripped by an image host).
+    """
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    texts = {}
+    pos = 8
+    while pos + 12 <= len(data):
+        length = int.from_bytes(data[pos:pos + 4], "big")
+        ctype = data[pos + 4:pos + 8]
+        chunk = data[pos + 8:pos + 8 + length]
+        if ctype == b"tEXt":
+            key, _, val = chunk.partition(b"\x00")
+            try:
+                texts[key.decode("latin-1")] = val.decode("latin-1")
+            except Exception:
+                pass
+        elif ctype == b"iTXt":
+            key, _, rest = chunk.partition(b"\x00")
+            # iTXt: compression flag+method (2 bytes), then lang\0 translated\0 text
+            if len(rest) >= 2 and rest[0] == 0:  # uncompressed only
+                rest = rest[2:]
+                _, _, rest = rest.partition(b"\x00")
+                _, _, text = rest.partition(b"\x00")
+                try:
+                    texts[key.decode("latin-1")] = text.decode("utf-8")
+                except Exception:
+                    pass
+        if ctype == b"IEND":
+            break
+        pos += 12 + length
+    raw = texts.get("prompt")
+    if not raw:
+        return None
+    try:
+        wf = json.loads(raw)
+        return wf if isinstance(wf, dict) and wf else None
+    except Exception:
+        return None
+
+
+def describe_workflow(wf: dict) -> dict:
+    """Extract the form-relevant base settings so the UI can prefill controls."""
+    out = {}
+    sampler_id = _find_by_class(wf, "KSampler")
+    if sampler_id:
+        s = wf[sampler_id].get("inputs", {})
+        out.update(steps=s.get("steps"), cfg=s.get("cfg"),
+                   sampler=s.get("sampler_name"), scheduler=s.get("scheduler"))
+    elif _find_by_class(wf, "SamplerCustomAdvanced"):
+        # Flux-style graph: settings live in separate nodes
+        bs_id = _find_by_class(wf, "BasicScheduler")
+        if bs_id:
+            out.update(steps=wf[bs_id]["inputs"].get("steps"),
+                       scheduler=wf[bs_id]["inputs"].get("scheduler"))
+        ks_id = _find_by_class(wf, "KSamplerSelect")
+        if ks_id:
+            out["sampler"] = wf[ks_id]["inputs"].get("sampler_name")
+        fg_id = _find_by_class(wf, "FluxGuidance")
+        if fg_id:
+            out["cfg"] = wf[fg_id]["inputs"].get("guidance")
+    latent_id = _find_by_class(wf, "EmptyLatentImage") or _find_by_class(wf, "EmptySD3LatentImage")
+    if latent_id:
+        li = wf[latent_id].get("inputs", {})
+        out.update(width=li.get("width"), height=li.get("height"))
+    ckpt_id = _find_by_class(wf, "CheckpointLoaderSimple")
+    if ckpt_id:
+        out["checkpoint"] = wf[ckpt_id].get("inputs", {}).get("ckpt_name")
+    else:
+        unet_id = _find_by_class(wf, "UNETLoader")
+        if unet_id:
+            out["checkpoint"] = wf[unet_id].get("inputs", {}).get("unet_name")
+    ms_id = _find_by_class(wf, "ModelSamplingDiscrete")
+    out["v_prediction_builtin"] = bool(
+        ms_id and wf[ms_id].get("inputs", {}).get("sampling") == "v_prediction"
+    )
+    if _find_by_class(wf, "SamplerCustomAdvanced"):
+        out["model_sampling_builtin"] = "flux-graph"
+    elif _find_by_class(wf, "ModelSamplingSD3"):
+        out["model_sampling_builtin"] = "flow"
+    elif out["v_prediction_builtin"]:
+        out["model_sampling_builtin"] = "vpred"
+    else:
+        out["model_sampling_builtin"] = ""
+    out["has_lora"] = any(
+        isinstance(n, dict) and "Lora" in str(n.get("class_type", "")) for n in wf.values()
+    )
+    return out
+
+
 def _clamp_dim(v, default: int) -> int:
     try:
         v = int(v)
@@ -101,12 +310,56 @@ ALLOWED_SAMPLERS = {
 ALLOWED_SCHEDULERS = {"normal", "karras", "exponential", "sgm_uniform", "simple", "ddim_uniform", "beta"}
 
 
+def _patch_flux_graph(wf: dict, *, prompt: str, width: int, height: int,
+                      steps: int, cfg, seed: int, sampler_name: str,
+                      scheduler: str, batch_size: int):
+    """Patch a Flux-style graph (SamplerCustomAdvanced family — no KSampler).
+
+    Maps the Image Studio controls onto Flux nodes: seed → RandomNoise,
+    steps/scheduler → BasicScheduler, sampler → KSamplerSelect,
+    CFG → FluxGuidance (Flux has no negative prompt, all text encoders get
+    the positive prompt).
+    """
+    for node in wf.values():
+        if not isinstance(node, dict):
+            continue
+        ct = node.get("class_type")
+        ins = node.setdefault("inputs", {})
+        if ct == "RandomNoise":
+            ins["noise_seed"] = seed
+        elif ct == "BasicScheduler":
+            ins["steps"] = steps
+            if scheduler and scheduler in ALLOWED_SCHEDULERS:
+                ins["scheduler"] = scheduler
+        elif ct == "KSamplerSelect":
+            if sampler_name and sampler_name in ALLOWED_SAMPLERS:
+                ins["sampler_name"] = sampler_name
+        elif ct == "FluxGuidance":
+            try:
+                ins["guidance"] = float(cfg)
+            except (TypeError, ValueError):
+                pass
+        elif ct == "CLIPTextEncode":
+            ins["text"] = prompt or ""
+        elif ct == "CLIPTextEncodeFlux":
+            ins["clip_l"] = prompt or ""
+            ins["t5xxl"] = prompt or ""
+        elif ct in ("EmptyLatentImage", "EmptySD3LatentImage"):
+            ins["width"] = _clamp_dim(width, 1024)
+            ins["height"] = _clamp_dim(height, 1024)
+            ins["batch_size"] = batch_size
+        elif ct == "ModelSamplingFlux":
+            ins["width"] = _clamp_dim(width, 1024)
+            ins["height"] = _clamp_dim(height, 1024)
+
+
 def build_workflow(template: dict, *, prompt: str, negative_prompt: str = "",
                    width: int = 1024, height: int = 1024, steps: int = 25,
                    cfg: float = 7.0, seed: int | None = None,
                    checkpoint: str = "", batch_size: int = 1,
                    sampler_name: str = "", scheduler: str = "",
-                   v_prediction: bool = False) -> tuple[dict, int]:
+                   v_prediction: bool = False,
+                   model_sampling: str = "") -> tuple[dict, int]:
     """Patch a copy of an API-format workflow with the requested parameters.
 
     Locates nodes by class_type and follows the KSampler's positive/negative
@@ -115,19 +368,34 @@ def build_workflow(template: dict, *, prompt: str, negative_prompt: str = "",
     """
     wf = copy.deepcopy(template)
 
-    sampler_id = _find_by_class(wf, "KSampler")
-    if not sampler_id:
-        raise ValueError("Workflow has no KSampler node")
-    sampler = wf[sampler_id]["inputs"]
-
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
-    sampler["seed"] = int(seed)
     try:
         steps = int(steps)
     except (TypeError, ValueError):
         steps = 25
-    sampler["steps"] = max(1, min(60, steps))
+    steps = max(1, min(60, steps))
+    try:
+        batch_size = max(1, min(4, int(batch_size)))
+    except (TypeError, ValueError):
+        batch_size = 1
+
+    sampler_id = _find_by_class(wf, "KSampler")
+    if not sampler_id:
+        if _find_by_class(wf, "SamplerCustomAdvanced"):
+            _patch_flux_graph(wf, prompt=prompt, width=width, height=height,
+                              steps=steps, cfg=cfg, seed=int(seed),
+                              sampler_name=sampler_name, scheduler=scheduler,
+                              batch_size=batch_size)
+            save_id = _find_by_class(wf, "SaveImage")
+            if save_id:
+                wf[save_id]["inputs"]["filename_prefix"] = "hyprchat"
+            return wf, int(seed)
+        raise ValueError("Workflow has no KSampler or SamplerCustomAdvanced node")
+    sampler = wf[sampler_id]["inputs"]
+
+    sampler["seed"] = int(seed)
+    sampler["steps"] = steps
     try:
         sampler["cfg"] = float(cfg)
     except (TypeError, ValueError):
@@ -137,22 +405,35 @@ def build_workflow(template: dict, *, prompt: str, negative_prompt: str = "",
     if scheduler and scheduler in ALLOWED_SCHEDULERS:
         sampler["scheduler"] = scheduler
 
-    # v-prediction checkpoints (BigASP v2.5, NoobAI vpred, ...) produce solid-color
-    # garbage when sampled as epsilon. Splice ModelSamplingDiscrete(v_prediction,
-    # zsnr) + RescaleCFG between the sampler's existing model source and the
-    # sampler, preserving any LoRA chain a custom workflow may have.
-    if v_prediction:
+    # Non-epsilon checkpoints produce garbage when sampled as standard SDXL:
+    # v-prediction models (NoobAI vpred, ...) need ModelSamplingDiscrete +
+    # RescaleCFG; Flow Matching models (BigASP v2.5) need ModelSamplingSD3.
+    # Splice the node between the sampler's existing model source and the
+    # sampler, preserving any LoRA chain — and skip when the workflow already
+    # carries its own sampling node.
+    if not model_sampling and v_prediction:
+        model_sampling = "vpred"
+    _has_sampling_node = bool(_find_by_class(wf, "ModelSamplingDiscrete")
+                              or _find_by_class(wf, "ModelSamplingSD3"))
+    if model_sampling in ("vpred", "flow") and not _has_sampling_node:
         model_src = sampler.get("model")
         if isinstance(model_src, list) and model_src:
-            wf["vpred_ms"] = {
-                "class_type": "ModelSamplingDiscrete",
-                "inputs": {"sampling": "v_prediction", "zsnr": True, "model": model_src},
-            }
-            wf["vpred_rc"] = {
-                "class_type": "RescaleCFG",
-                "inputs": {"multiplier": 0.7, "model": ["vpred_ms", 0]},
-            }
-            sampler["model"] = ["vpred_rc", 0]
+            if model_sampling == "flow":
+                wf["ms_flow"] = {
+                    "class_type": "ModelSamplingSD3",
+                    "inputs": {"shift": 3.0, "model": model_src},
+                }
+                sampler["model"] = ["ms_flow", 0]
+            else:
+                wf["vpred_ms"] = {
+                    "class_type": "ModelSamplingDiscrete",
+                    "inputs": {"sampling": "v_prediction", "zsnr": True, "model": model_src},
+                }
+                wf["vpred_rc"] = {
+                    "class_type": "RescaleCFG",
+                    "inputs": {"multiplier": 0.7, "model": ["vpred_ms", 0]},
+                }
+                sampler["model"] = ["vpred_rc", 0]
 
     # Follow graph links to the prompt encoders
     for link_key, text in (("positive", prompt), ("negative", negative_prompt)):
@@ -171,11 +452,7 @@ def build_workflow(template: dict, *, prompt: str, negative_prompt: str = "",
     latent = wf[latent_id]["inputs"]
     latent["width"] = _clamp_dim(width, 1024)
     latent["height"] = _clamp_dim(height, 1024)
-    try:
-        batch_size = int(batch_size)
-    except (TypeError, ValueError):
-        batch_size = 1
-    latent["batch_size"] = max(1, min(4, batch_size))
+    latent["batch_size"] = batch_size
 
     if checkpoint:
         ckpt_id = _find_by_class(wf, "CheckpointLoaderSimple")

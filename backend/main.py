@@ -1568,10 +1568,28 @@ async def update_artifact_ep(artifact_id: str, req: ArtifactUpdate):
 
 @app.delete("/api/artifacts/{artifact_id}")
 async def delete_artifact_ep(artifact_id: str):
+    # Resolve the on-disk file BEFORE the row disappears
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    filepath, _ = _artifact_path_for_row(artifact)
     ok = await db.delete_artifact(artifact_id)
     if not ok:
         raise HTTPException(404, "Artifact not found")
-    return {"status": "deleted", "deleted_file": False}
+    # Delete the file too — but only sandbox-output files (never KB/upload
+    # paths), and only when no other artifact row still references it.
+    deleted_file = False
+    if filepath:
+        outputs_root = os.path.abspath(config.SANDBOX_OUTPUTS_DIR) + os.sep
+        in_outputs = os.path.abspath(filepath).startswith(outputs_root)
+        refs = await db.count_artifacts_with_storage_path(artifact.get("storage_path") or "", exclude_id=artifact_id)
+        if in_outputs and refs == 0:
+            try:
+                os.remove(filepath)
+                deleted_file = True
+            except OSError as e:
+                print(f"[ARTIFACT] file delete failed for {filepath}: {e}")
+    return {"status": "deleted", "deleted_file": deleted_file}
 
 
 @app.get("/api/artifacts/{artifact_id}/preview")
@@ -3438,9 +3456,15 @@ async def generate_image_job(body: dict = Body(...)):
         if valid and checkpoint not in valid:
             raise HTTPException(400, f"Unknown checkpoint: {checkpoint}")
     count = config.coerce_int(body.get("count"), 1, minimum=1, maximum=4)
+    wf_name = (body.get("workflow") or "").strip()
+    template = None
+    if wf_name:
+        template = comfyui.load_workflow(wf_name)
+        if template is None:
+            raise HTTPException(404, f"Workflow not found: {wf_name}")
     try:
         workflow, seed = comfyui.build_workflow(
-            comfyui.load_template(),
+            template or comfyui.load_template(),
             prompt=prompt,
             negative_prompt=(body.get("negative_prompt") or ""),
             width=body.get("width") or 1024,
@@ -3453,6 +3477,7 @@ async def generate_image_job(body: dict = Body(...)):
             sampler_name=(body.get("sampler") or "").strip(),
             scheduler=(body.get("scheduler") or "").strip(),
             v_prediction=bool(body.get("v_prediction")),
+            model_sampling=(body.get("model_sampling") or "").strip(),
         )
         prompt_id = await comfyui.submit(workflow)
     except ValueError as e:
@@ -3467,6 +3492,8 @@ async def generate_image_job(body: dict = Body(...)):
         "sampler": (body.get("sampler") or "").strip(),
         "scheduler": (body.get("scheduler") or "").strip(),
         "v_prediction": bool(body.get("v_prediction")),
+        "model_sampling": (body.get("model_sampling") or "").strip(),
+        "workflow": wf_name,
     }
     _image_jobs[prompt_id] = {"status": "queued", "params": params, "created": time.time()}
     return {"job_id": prompt_id, "seed": seed, "params": params}
@@ -3553,6 +3580,58 @@ async def cancel_image_job(job_id: str):
     return {"status": "cancelled"}
 
 
+@app.get("/api/images/workflows")
+async def list_image_workflows():
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured")
+    out = []
+    for name in comfyui.list_workflows():
+        wf = comfyui.load_workflow(name)
+        if wf:
+            out.append({"name": name, **comfyui.describe_workflow(wf)})
+    return {"workflows": out}
+
+
+@app.post("/api/images/workflows")
+async def upload_image_workflow(body: dict = Body(...)):
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured")
+    name = (body.get("name") or "").strip()
+    wf = body.get("workflow")
+    if not name:
+        raise HTTPException(400, "name is required")
+    # PNG path: a ComfyUI-generated image carries its API workflow in metadata
+    if body.get("png_base64"):
+        try:
+            png_bytes = base64.b64decode(body["png_base64"], validate=True)
+        except Exception:
+            raise HTTPException(400, "Invalid PNG upload")
+        if len(png_bytes) > 50 * 1024 * 1024:
+            raise HTTPException(413, "PNG too large (50MB max)")
+        wf = comfyui.workflow_from_png(png_bytes)
+        if not wf:
+            raise HTTPException(400, "No workflow metadata in this image. The host may have "
+                                     "stripped it — download the original file, or get the .json.")
+    if not isinstance(wf, dict) or not wf:
+        raise HTTPException(400, "workflow must be a JSON object")
+    # UI-format saves have a top-level "nodes" array; only API exports run via the API.
+    if isinstance(wf.get("nodes"), list):
+        raise HTTPException(400, "This is a UI-format workflow. In ComfyUI enable Dev mode "
+                                 "(Settings) and use 'Export (API)' — that file works here.")
+    try:
+        saved = comfyui.save_workflow(name, wf)
+    except ValueError as e:
+        raise HTTPException(400, f"Workflow not usable for text-to-image: {e}")
+    return {"status": "saved", "name": saved, **comfyui.describe_workflow(wf)}
+
+
+@app.delete("/api/images/workflows/{name}")
+async def delete_image_workflow(name: str):
+    if not comfyui.delete_workflow(name):
+        raise HTTPException(404, "Workflow not found")
+    return {"status": "deleted"}
+
+
 @app.get("/api/images/checkpoints")
 async def list_image_checkpoints():
     if not config.COMFYUI_URL:
@@ -3561,7 +3640,48 @@ async def list_image_checkpoints():
         _image_checkpoints_cache["checkpoints"] = await comfyui.list_checkpoints()
         _image_checkpoints_cache["ts"] = time.time()
     cks = _image_checkpoints_cache["checkpoints"]
-    return {"checkpoints": cks, "default": cks[0] if cks else ""}
+    return {
+        "checkpoints": cks,
+        "default": cks[0] if cks else "",
+        # Resolved per-model generation settings (built-in family defaults
+        # merged with user-saved overrides) so the UI can auto-configure.
+        "settings": {c: comfyui.settings_for_checkpoint(c) for c in cks},
+    }
+
+
+@app.put("/api/images/model-settings/{checkpoint}")
+async def save_model_settings_ep(checkpoint: str, body: dict = Body(...)):
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured")
+    clean = {}
+    ms = (body.get("model_sampling") or "").strip()
+    if ms in ("", "vpred", "flow"):
+        clean["model_sampling"] = ms
+    if (body.get("sampler") or "") in comfyui.ALLOWED_SAMPLERS:
+        clean["sampler"] = body["sampler"]
+    if (body.get("scheduler") or "") in comfyui.ALLOWED_SCHEDULERS:
+        clean["scheduler"] = body["scheduler"]
+    try:
+        if body.get("cfg") is not None:
+            clean["cfg"] = max(1.0, min(20.0, float(body["cfg"])))
+        if body.get("steps") is not None:
+            clean["steps"] = config.coerce_int(body["steps"], 25, minimum=1, maximum=60)
+    except (TypeError, ValueError):
+        pass
+    settings = comfyui.load_model_settings()
+    settings[checkpoint] = clean
+    comfyui.save_model_settings(settings)
+    return {"status": "saved", "checkpoint": checkpoint, "settings": comfyui.settings_for_checkpoint(checkpoint)}
+
+
+@app.delete("/api/images/model-settings/{checkpoint}")
+async def clear_model_settings_ep(checkpoint: str):
+    settings = comfyui.load_model_settings()
+    if checkpoint not in settings:
+        raise HTTPException(404, "No saved defaults for this model")
+    settings.pop(checkpoint)
+    comfyui.save_model_settings(settings)
+    return {"status": "cleared", "settings": comfyui.settings_for_checkpoint(checkpoint)}
 
 
 # ============================================================

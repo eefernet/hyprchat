@@ -995,19 +995,96 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
   const [count,setCount]=useState(1);
   const [sampler,setSampler]=useState("euler");
   const [scheduler,setScheduler]=useState("normal");
-  const [vPred,setVPred]=useState(false);
+  const [modelSampling,setModelSampling]=useState("");
   const [checkpoints,setCheckpoints]=useState([]);
   const [checkpoint,setCheckpoint]=useState("");
+  const [ckptSettings,setCkptSettings]=useState({});
+  const [workflows,setWorkflows]=useState([]);
+  const [workflow,setWorkflow]=useState("");
   const [job,setJob]=useState(null); // {id, started, status, queuePos}
   const [results,setResults]=useState([]);
   const [error,setError]=useState("");
   const pollRef=useRef(null);
+  const wfUploadRef=useRef(null);
   const stopPoll=()=>{if(pollRef.current){clearInterval(pollRef.current);pollRef.current=null;}};
+  const loadWorkflows=()=>fetch(`${API}/api/images/workflows`).then(r=>r.ok?r.json():{workflows:[]}).then(d=>setWorkflows(d.workflows||[])).catch(()=>{});
+  const applySettings=(s)=>{
+    if(!s)return;
+    if(s.steps)setSteps(s.steps);
+    if(s.cfg!=null)setCfg(s.cfg);
+    if(s.sampler)setSampler(s.sampler);
+    if(s.scheduler)setScheduler(s.scheduler);
+    setModelSampling(s.model_sampling||"");
+  };
+  const applyCheckpoint=(name,settingsMap)=>{
+    setCheckpoint(name);
+    applySettings((settingsMap||ckptSettings)[name]);
+  };
   useEffect(()=>{
     if(!configured)return;
-    fetch(`${API}/api/images/checkpoints`).then(r=>r.ok?r.json():{checkpoints:[]}).then(d=>{setCheckpoints(d.checkpoints||[]);setCheckpoint(c=>c||d.default||"");}).catch(()=>{});
+    fetch(`${API}/api/images/checkpoints`).then(r=>r.ok?r.json():{checkpoints:[]}).then(d=>{
+      setCheckpoints(d.checkpoints||[]);
+      setCkptSettings(d.settings||{});
+      setCheckpoint(c=>{
+        const initial=c||d.default||"";
+        // Auto-configure for the initially selected model too
+        if(!c&&initial)applySettings((d.settings||{})[initial]);
+        return initial;
+      });
+    }).catch(()=>{});
+    loadWorkflows();
     return stopPoll;
   },[configured]);
+  const saveModelDefaults=async()=>{
+    if(!checkpoint)return;
+    try{
+      const r=await fetch(`${API}/api/images/model-settings/${encodeURIComponent(checkpoint)}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({model_sampling:modelSampling,sampler,scheduler,cfg:Number(cfg)||7,steps:Number(steps)||25})});
+      const d=await r.json();
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      setCkptSettings(p=>({...p,[checkpoint]:d.settings}));
+      notify&&notify({type:"success",text:`Defaults saved for ${checkpoint}`,duration:2200});
+    }catch(e){notify&&notify({type:"error",text:"Save failed",detail:String(e.message||e)});}
+  };
+  const activeWf=workflows.find(w=>w.name===workflow)||null;
+  const applyWorkflow=(name)=>{
+    setWorkflow(name);
+    const meta=workflows.find(w=>w.name===name);
+    if(!meta)return;
+    // Prefill the controls from the workflow's own base settings
+    if(meta.steps)setSteps(meta.steps);
+    if(meta.cfg!=null)setCfg(meta.cfg);
+    if(meta.sampler)setSampler(meta.sampler);
+    if(meta.scheduler)setScheduler(meta.scheduler);
+    if(meta.checkpoint&&checkpoints.includes(meta.checkpoint))setCheckpoint(meta.checkpoint);
+    if(meta.width&&meta.height){
+      const preset=`${meta.width}x${meta.height}`;
+      if(["1024x1024","1216x832","832x1216"].includes(preset))setSize(preset);
+      else{setSize("custom");setCustomW(meta.width);setCustomH(meta.height);}
+    }
+    setModelSampling(""); // built-in sampling nodes (if any) come with the workflow itself
+  };
+  const uploadWorkflow=async(file)=>{
+    if(!file)return;
+    const isPng=/\.png$/i.test(file.name)||file.type==="image/png";
+    const payload={name:file.name.replace(/\.(json|png)$/i,"")};
+    if(isPng){
+      // ComfyUI embeds the API workflow in PNG metadata — send the image, backend extracts it
+      const buf=new Uint8Array(await file.arrayBuffer());
+      let bin="";const CH=0x8000;
+      for(let i=0;i<buf.length;i+=CH)bin+=String.fromCharCode.apply(null,buf.subarray(i,i+CH));
+      payload.png_base64=btoa(bin);
+    }else{
+      try{payload.workflow=JSON.parse(await file.text());}
+      catch{notify&&notify({type:"error",text:"Not valid JSON"});return;}
+    }
+    try{
+      const r=await fetch(`${API}/api/images/workflows`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+      const d=await r.json();
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      await loadWorkflows();
+      notify&&notify({type:"success",text:`Workflow "${d.name}" saved${isPng?" (extracted from image)":""}`,duration:2500});
+    }catch(e){notify&&notify({type:"error",text:"Workflow rejected",detail:String(e.message||e)});}
+  };
   const dims=()=>{
     if(size==="custom")return[parseInt(customW)||1024,parseInt(customH)||1024];
     const [w,h]=size.split("x").map(Number);return[w,h];
@@ -1016,7 +1093,7 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
     if(!prompt.trim()||job)return;
     setError("");
     const [w,h]=dims();
-    const body={prompt:prompt.trim(),negative_prompt:negPrompt.trim(),width:w,height:h,steps:Number(steps)||25,cfg:Number(cfg)||7,count:Number(count)||1,checkpoint,sampler,scheduler,v_prediction:vPred};
+    const body={prompt:prompt.trim(),negative_prompt:negPrompt.trim(),width:w,height:h,steps:Number(steps)||25,cfg:Number(cfg)||7,count:Number(count)||1,checkpoint,sampler,scheduler,model_sampling:modelSampling,workflow};
     if(seed!=="")body.seed=parseInt(seed)||0;
     let d;
     try{
@@ -1075,6 +1152,18 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
       <div style={{maxWidth:860,margin:"0 auto"}}>
         <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Describe the image — subject, style, lighting, mood…" rows={3} style={{...inputS,resize:"vertical",lineHeight:1.5}}/>
         <textarea value={negPrompt} onChange={e=>setNegPrompt(e.target.value)} placeholder="Negative prompt (optional) — things to avoid" rows={1} style={{...inputS,resize:"vertical",marginTop:8,fontSize:12}}/>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",marginTop:12}}>
+          <label style={{fontSize:10,color:t.mut}}>Workflow&nbsp;
+            <select value={workflow} onChange={e=>applyWorkflow(e.target.value)} style={{...inputS,width:"auto",maxWidth:260,padding:"6px 8px",fontSize:12}}>
+              <option value="">Default (built-in SDXL)</option>
+              {workflows.map(w=><option key={w.name} value={w.name}>{w.name}{w.has_lora?" ⚡":""}</option>)}
+            </select>
+          </label>
+          <button onClick={()=>wfUploadRef.current?.click()} title="Upload a workflow: API-format JSON (ComfyUI → Dev mode → Export (API)) OR any PNG generated by ComfyUI — the workflow is read from the image metadata" style={{fontSize:10,padding:"6px 10px",borderRadius:6,background:`${t.acc}12`,border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",fontFamily:font,fontWeight:600}}>+ Upload workflow / image</button>
+          <input ref={wfUploadRef} type="file" accept=".json,.png,application/json,image/png" style={{display:"none"}} onChange={e=>{uploadWorkflow(e.target.files?.[0]);e.target.value="";}}/>
+          {workflow&&<button onClick={async()=>{if(!confirm(`Delete workflow "${workflow}"?`))return;await fetch(`${API}/api/images/workflows/${encodeURIComponent(workflow)}`,{method:"DELETE"}).catch(()=>{});setWorkflow("");loadWorkflows();}} title="Delete this saved workflow" style={{fontSize:10,padding:"6px 8px",borderRadius:6,background:`${t.err}10`,border:`1px solid ${t.err}30`,color:t.err,cursor:"pointer",fontFamily:font}}>✕</button>}
+          {activeWf?.model_sampling_builtin&&<span style={{fontSize:9,color:t.warm}}>{activeWf.model_sampling_builtin==="flow"?"flow-matching":activeWf.model_sampling_builtin==="flux-graph"?"Flux architecture":"v-pred"} — sampling built into workflow{activeWf.model_sampling_builtin==="flux-graph"?" (Model dropdown not used)":""}</span>}
+        </div>
         <div style={{display:"flex",gap:14,flexWrap:"wrap",alignItems:"flex-end",marginTop:12}}>
           <label style={{fontSize:10,color:t.mut}}>Size<br/>
             <select value={size} onChange={e=>setSize(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>
@@ -1092,11 +1181,12 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
           <label style={{fontSize:10,color:t.mut}}>Count<br/>
             <select value={count} onChange={e=>setCount(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>{[1,2,3,4].map(n=><option key={n} value={n}>{n}</option>)}</select>
           </label>
-          {checkpoints.length>0&&<label style={{fontSize:10,color:t.mut}}>Model<br/>
-            <select value={checkpoint} onChange={e=>setCheckpoint(e.target.value)} style={{...inputS,width:"auto",maxWidth:240,padding:"6px 8px",fontSize:12,marginTop:3}}>
+          {checkpoints.length>0&&<label style={{fontSize:10,color:t.mut}}>Model{ckptSettings[checkpoint]?.user_override&&<span title="Using your saved defaults for this model" style={{color:t.acc}}> ★</span>}<br/>
+            <select value={checkpoint} onChange={e=>applyCheckpoint(e.target.value)} title="Selecting a model auto-applies its correct settings (type, sampler, CFG, steps)" style={{...inputS,width:"auto",maxWidth:240,padding:"6px 8px",fontSize:12,marginTop:3}}>
               {checkpoints.map(c=><option key={c} value={c}>{c}</option>)}
             </select>
           </label>}
+          {checkpoint&&<button onClick={saveModelDefaults} title={`Save the current Model type / Sampler / Scheduler / CFG / Steps as the automatic defaults for ${checkpoint}`} style={{fontSize:10,padding:"6px 9px",borderRadius:6,background:`${t.warm}10`,border:`1px solid ${t.warm}33`,color:t.warm,cursor:"pointer",fontFamily:font,fontWeight:600,marginBottom:8}}>★ Save defaults</button>}
           <label style={{fontSize:10,color:t.mut}}>Sampler<br/>
             <select value={sampler} onChange={e=>setSampler(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>
               {["euler","euler_ancestral","dpmpp_2m","dpmpp_2m_sde","dpmpp_3m_sde","dpmpp_sde","heun","ddim","uni_pc","lcm"].map(s2=><option key={s2} value={s2}>{s2}</option>)}
@@ -1107,9 +1197,12 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
               {["normal","karras","sgm_uniform","exponential","simple","beta"].map(s2=><option key={s2} value={s2}>{s2}</option>)}
             </select>
           </label>
-          <label title="Required for v-prediction checkpoints (BigASP v2.5, NoobAI vpred). Fixes solid-color/red output. Adds ModelSamplingDiscrete(v_pred, zsnr) + RescaleCFG 0.7." style={{fontSize:10,color:vPred?t.acc:t.mut,display:"flex",alignItems:"center",gap:5,cursor:"pointer",paddingBottom:8}}>
-            <input type="checkbox" checked={vPred} onChange={e=>setVPred(e.target.checked)}/>
-            v-prediction
+          <label title="How the checkpoint was trained. Standard = normal SDXL (sd_xl_base, most merges). Flow = Flow Matching models like BigASP v2.5 (adds ModelSamplingSD3). v-pred = v-prediction models like NoobAI vpred (adds ModelSamplingDiscrete + RescaleCFG). Wrong choice → solid-color or deep-fried output." style={{fontSize:10,color:modelSampling?t.acc:t.mut}}>Model type<br/>
+            <select value={modelSampling} onChange={e=>setModelSampling(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>
+              <option value="">Standard (eps)</option>
+              <option value="flow">Flow — BigASP v2.5</option>
+              <option value="vpred">v-pred — NoobAI etc.</option>
+            </select>
           </label>
           <div style={{flex:1}}/>
           {!job
