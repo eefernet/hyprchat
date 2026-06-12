@@ -87,9 +87,11 @@ def _find_by_class(workflow: dict, class_type: str) -> str | None:
 # ── Per-checkpoint generation settings ──
 # Resolved settings = built-in pattern defaults overridden by the user's saved
 # defaults (data/comfy_model_settings.json). Keys: model_sampling ("", "vpred",
-# "flow"), sampler, scheduler, cfg, steps.
+# "flow"), sampler, scheduler, cfg, steps, plus per-model prompt_prefix /
+# negative_prefix strings used by the chat generate_image tool.
 
-_SETTING_KEYS = ("model_sampling", "sampler", "scheduler", "cfg", "steps")
+_SETTING_KEYS = ("model_sampling", "sampler", "scheduler", "cfg", "steps",
+                 "prompt_prefix", "negative_prefix")
 
 
 def _model_settings_path() -> str:
@@ -113,17 +115,21 @@ def save_model_settings(settings: dict):
 def builtin_defaults_for(checkpoint: str) -> dict:
     """Pattern-matched defaults for known model families."""
     n = (checkpoint or "").lower()
+    _no_prefix = {"prompt_prefix": "", "negative_prefix": ""}
     if "bigasp" in n and any(v in n for v in ("25", "2.5", "2_5")):
         # Flow Matching (per the author): ModelSamplingSD3, euler/beta, CFG 4-6
-        return {"model_sampling": "flow", "sampler": "euler", "scheduler": "beta", "cfg": 5, "steps": 32}
+        return {"model_sampling": "flow", "sampler": "euler", "scheduler": "beta", "cfg": 5, "steps": 32, **_no_prefix}
     if "vpred" in n or "v-pred" in n or "v_pred" in n:
-        return {"model_sampling": "vpred", "sampler": "euler", "scheduler": "normal", "cfg": 4, "steps": 28}
+        return {"model_sampling": "vpred", "sampler": "euler", "scheduler": "normal", "cfg": 4, "steps": 28, **_no_prefix}
     if "pony" in n or "illustrious" in n or "noob" in n:
-        return {"model_sampling": "", "sampler": "euler_ancestral", "scheduler": "normal", "cfg": 6, "steps": 28}
+        # Pony-family models are trained on quality score tags
+        return {"model_sampling": "", "sampler": "euler_ancestral", "scheduler": "normal", "cfg": 6, "steps": 28,
+                "prompt_prefix": "score_9, score_8_up, score_7_up",
+                "negative_prefix": "score_4, score_3, score_2, score_1"}
     if "lightning" in n or "turbo" in n or "lcm" in n:
-        return {"model_sampling": "", "sampler": "euler", "scheduler": "sgm_uniform", "cfg": 1.5, "steps": 8}
+        return {"model_sampling": "", "sampler": "euler", "scheduler": "sgm_uniform", "cfg": 1.5, "steps": 8, **_no_prefix}
     # Standard SDXL / unknown
-    return {"model_sampling": "", "sampler": "euler", "scheduler": "normal", "cfg": 7, "steps": 25}
+    return {"model_sampling": "", "sampler": "euler", "scheduler": "normal", "cfg": 7, "steps": 25, **_no_prefix}
 
 
 def settings_for_checkpoint(checkpoint: str) -> dict:
@@ -359,7 +365,7 @@ def build_workflow(template: dict, *, prompt: str, negative_prompt: str = "",
                    checkpoint: str = "", batch_size: int = 1,
                    sampler_name: str = "", scheduler: str = "",
                    v_prediction: bool = False,
-                   model_sampling: str = "") -> tuple[dict, int]:
+                   model_sampling: str = "", vae: str = "") -> tuple[dict, int]:
     """Patch a copy of an API-format workflow with the requested parameters.
 
     Locates nodes by class_type and follows the KSampler's positive/negative
@@ -459,6 +465,16 @@ def build_workflow(template: dict, *, prompt: str, negative_prompt: str = "",
         if ckpt_id:
             wf[ckpt_id]["inputs"]["ckpt_name"] = checkpoint
 
+    # Custom VAE: load it explicitly and rewire every decode/encode node away
+    # from the checkpoint's baked VAE. Empty = keep the baked one. (Flux
+    # graphs return early above and keep their own VAELoader — an SDXL VAE
+    # would corrupt Flux output anyway.)
+    if vae:
+        wf["vae_loader"] = {"class_type": "VAELoader", "inputs": {"vae_name": vae}}
+        for node in wf.values():
+            if isinstance(node, dict) and node.get("class_type") in ("VAEDecode", "VAEDecodeTiled", "VAEEncode"):
+                node.setdefault("inputs", {})["vae"] = ["vae_loader", 0]
+
     save_id = _find_by_class(wf, "SaveImage")
     if save_id:
         wf[save_id]["inputs"]["filename_prefix"] = "hyprchat"
@@ -472,6 +488,18 @@ def _base() -> str:
     return (config.COMFYUI_URL or "").rstrip("/")
 
 
+# In-flight HyprChat generations (prompt_ids). Guards cleanup_outputs against
+# a cross-job race: it deletes ALL hyprchat-prefixed files on ComfyUI, which
+# would destroy another job's output before HyprChat downloads it. In-process
+# only — a restart clears it (and reaped jobs error out anyway).
+_ACTIVE_JOBS: set[str] = set()
+
+
+def finish_job(prompt_id: str):
+    """Unregister an in-flight generation (done, errored, or cancelled)."""
+    _ACTIVE_JOBS.discard(prompt_id)
+
+
 async def submit(workflow: dict) -> str:
     """Queue a workflow; returns the prompt_id."""
     async with httpx.AsyncClient(timeout=30) as client:
@@ -481,6 +509,7 @@ async def submit(workflow: dict) -> str:
     pid = data.get("prompt_id")
     if not pid:
         raise RuntimeError(f"ComfyUI rejected the workflow: {json.dumps(data)[:300]}")
+    _ACTIVE_JOBS.add(pid)
     return pid
 
 
@@ -554,6 +583,59 @@ async def free_memory():
         print(f"[COMFYUI] free_memory error: {e}")
 
 
+async def clear_history():
+    """Best-effort wipe of ComfyUI's in-RAM job history (POST /history with
+    {"clear": true}). Output-dir PNG copies on the LXC have no deletion API —
+    the existing daily cron there handles those."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(f"{_base()}/history", json={"clear": True})
+            return True
+    except Exception as e:
+        print(f"[COMFYUI] clear_history error: {e}")
+        return False
+
+
+async def delete_history(prompt_id: str):
+    """Best-effort: remove one job's entry from ComfyUI's in-RAM history."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(f"{_base()}/history", json={"delete": [prompt_id]})
+    except Exception as e:
+        print(f"[COMFYUI] delete_history error: {e}")
+
+
+async def cleanup_outputs() -> dict | None:
+    """Delete HyprChat-prefixed images from ComfyUI's output/temp dirs via the
+    optional cleanup custom node (scripts/comfyui_hyprchat_cleanup.py).
+    Returns the node's {"deleted": n, "errors": m} response, or None when the
+    node isn't installed (404) or ComfyUI is unreachable."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(f"{_base()}/hyprchat/cleanup")
+            # 404/405 = node not installed (405: ComfyUI's static GET handler
+            # owns unknown paths, so POST gets Method Not Allowed)
+            if r.status_code in (404, 405):
+                return None
+            r.raise_for_status()
+            return r.json()
+    except Exception as e:
+        print(f"[COMFYUI] cleanup_outputs error: {e}")
+        return None
+
+
+async def forget_job(prompt_id: str):
+    """Erase a finished job's traces on ComfyUI — history entry + saved file
+    copies. Called after HyprChat has downloaded the images, so HyprChat holds
+    the only remaining copy. File cleanup is skipped while ANY other job is in
+    flight (the cleanup node deletes all hyprchat-prefixed files, which would
+    destroy a not-yet-downloaded sibling job's output)."""
+    finish_job(prompt_id)
+    await delete_history(prompt_id)
+    if not _ACTIVE_JOBS:
+        await cleanup_outputs()
+
+
 async def list_checkpoints() -> list[str]:
     """Available checkpoint names from /object_info."""
     try:
@@ -567,6 +649,22 @@ async def list_checkpoints() -> list[str]:
             return [str(c) for c in opts[0]]
     except Exception as e:
         print(f"[COMFYUI] list_checkpoints error: {e}")
+    return []
+
+
+async def list_vaes() -> list[str]:
+    """Available standalone VAE names from /object_info (models/vae dir)."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(f"{_base()}/object_info/VAELoader")
+            r.raise_for_status()
+            info = r.json()
+        opts = (info.get("VAELoader", {})
+                    .get("input", {}).get("required", {}).get("vae_name", []))
+        if opts and isinstance(opts[0], list):
+            return [str(v) for v in opts[0]]
+    except Exception as e:
+        print(f"[COMFYUI] list_vaes error: {e}")
     return []
 
 

@@ -14,6 +14,18 @@ SEARXNG_URL = os.getenv("SEARXNG_URL", "http://127.0.0.1:8888")
 N8N_URL = os.getenv("N8N_URL", "http://127.0.0.1:5678")
 COMFYUI_URL = os.getenv("COMFYUI_URL", "")  # empty = image generation disabled
 COMFYUI_WORKFLOW_PATH = os.getenv("COMFYUI_WORKFLOW_PATH", "")  # optional API-format workflow override
+# Chat generate_image defaults (runtime-editable in Settings → Model & Generation).
+# Empty checkpoint = use the built-in SDXL template as-is. When set, the chat
+# tool loads the checkpoint's saved per-model preset (sampler/scheduler/cfg/
+# steps/model type) and prepends the prompt prefix to the model's request.
+IMAGE_CHAT_CHECKPOINT = os.getenv("IMAGE_CHAT_CHECKPOINT", "")
+IMAGE_CHAT_RESOLUTION = os.getenv("IMAGE_CHAT_RESOLUTION", "1024x1024")
+IMAGE_CHAT_VAE = os.getenv("IMAGE_CHAT_VAE", "")  # empty = checkpoint's baked VAE
+IMAGE_CHAT_PROMPT_PREFIX = os.getenv("IMAGE_CHAT_PROMPT_PREFIX", "")
+IMAGE_CHAT_NEGATIVE = os.getenv("IMAGE_CHAT_NEGATIVE", "")
+# Model that writes persona photo prompts (selfie-rescue compose tier) and
+# Image Studio enhancements. Empty = the conversation's own chat model.
+IMAGE_CHAT_COMPOSE_MODEL = os.getenv("IMAGE_CHAT_COMPOSE_MODEL", "")
 STT_URL = os.getenv("STT_URL", "")  # empty = voice transcription disabled (OpenAI-compatible, e.g. Speaches)
 TTS_URL = os.getenv("TTS_URL", "")  # empty = speech synthesis disabled (OpenAI-compatible, e.g. kokoro-fastapi)
 STT_MODEL = os.getenv("STT_MODEL", "Systran/faster-distil-whisper-large-v3")
@@ -68,6 +80,12 @@ DEFAULT_SETTINGS = {
     "searxng_url": "",  # empty = use SEARXNG_URL from env/default
     "n8n_url": "",  # empty = use N8N_URL from env/default
     "comfyui_url": "",  # empty = use COMFYUI_URL from env (image generation disabled when both empty)
+    "image_chat_checkpoint": "",  # empty = built-in SDXL template for chat image gen
+    "image_chat_resolution": "1024x1024",
+    "image_chat_vae": "",  # empty = checkpoint's baked VAE
+    "image_chat_prompt_prefix": "",
+    "image_chat_negative": "",
+    "image_chat_compose_model": "",  # empty = the conversation's chat model
     "stt_url": "",  # empty = use STT_URL from env (voice input disabled when both empty)
     "tts_url": "",  # empty = use TTS_URL from env (voice output disabled when both empty)
     "tts_voice": "af_heart",

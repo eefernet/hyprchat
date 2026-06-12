@@ -718,6 +718,21 @@ async def lifespan(app: FastAPI):
             _qsm = "balanced"
         config.QUICK_SEARCH_MODE = _qsm
         print(f"[Config] Loaded Quick Search mode: {config.QUICK_SEARCH_MODE}")
+    if "image_chat_checkpoint" in _settings:
+        config.IMAGE_CHAT_CHECKPOINT = str(_settings["image_chat_checkpoint"] or "").strip()[:200]
+        if config.IMAGE_CHAT_CHECKPOINT:
+            print(f"[Config] Loaded chat image checkpoint: {config.IMAGE_CHAT_CHECKPOINT}")
+    if "image_chat_resolution" in _settings:
+        _res = str(_settings["image_chat_resolution"] or "").strip()
+        config.IMAGE_CHAT_RESOLUTION = _res if re.fullmatch(r"\d{3,4}x\d{3,4}", _res) else "1024x1024"
+    if "image_chat_vae" in _settings:
+        config.IMAGE_CHAT_VAE = str(_settings["image_chat_vae"] or "").strip()[:200]
+    if "image_chat_prompt_prefix" in _settings:
+        config.IMAGE_CHAT_PROMPT_PREFIX = str(_settings["image_chat_prompt_prefix"] or "").strip()[:500]
+    if "image_chat_negative" in _settings:
+        config.IMAGE_CHAT_NEGATIVE = str(_settings["image_chat_negative"] or "").strip()[:500]
+    if "image_chat_compose_model" in _settings:
+        config.IMAGE_CHAT_COMPOSE_MODEL = str(_settings["image_chat_compose_model"] or "").strip()[:200]
     # Run cleanup once on startup to clear any stale files
     _run_cleanup_sync()
     # Start background cleanup loop
@@ -1566,18 +1581,19 @@ async def update_artifact_ep(artifact_id: str, req: ArtifactUpdate):
     return artifact
 
 
-@app.delete("/api/artifacts/{artifact_id}")
-async def delete_artifact_ep(artifact_id: str):
+async def _delete_artifact_row_and_file(artifact: dict) -> dict:
+    """Delete an artifact row and (when safe) its on-disk file.
+
+    File removal only happens for sandbox-output files (never KB/upload
+    paths) and only when no other artifact row still references the path.
+    Returns {"deleted": bool, "deleted_file": bool}.
+    """
+    artifact_id = artifact.get("id") or ""
     # Resolve the on-disk file BEFORE the row disappears
-    artifact = await db.get_artifact(artifact_id)
-    if not artifact:
-        raise HTTPException(404, "Artifact not found")
     filepath, _ = _artifact_path_for_row(artifact)
     ok = await db.delete_artifact(artifact_id)
     if not ok:
-        raise HTTPException(404, "Artifact not found")
-    # Delete the file too — but only sandbox-output files (never KB/upload
-    # paths), and only when no other artifact row still references it.
+        return {"deleted": False, "deleted_file": False}
     deleted_file = False
     if filepath:
         outputs_root = os.path.abspath(config.SANDBOX_OUTPUTS_DIR) + os.sep
@@ -1589,7 +1605,18 @@ async def delete_artifact_ep(artifact_id: str):
                 deleted_file = True
             except OSError as e:
                 print(f"[ARTIFACT] file delete failed for {filepath}: {e}")
-    return {"status": "deleted", "deleted_file": deleted_file}
+    return {"deleted": True, "deleted_file": deleted_file}
+
+
+@app.delete("/api/artifacts/{artifact_id}")
+async def delete_artifact_ep(artifact_id: str):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    result = await _delete_artifact_row_and_file(artifact)
+    if not result["deleted"]:
+        raise HTTPException(404, "Artifact not found")
+    return {"status": "deleted", "deleted_file": result["deleted_file"]}
 
 
 @app.get("/api/artifacts/{artifact_id}/preview")
@@ -3455,6 +3482,11 @@ async def generate_image_job(body: dict = Body(...)):
         valid = await comfyui.list_checkpoints()
         if valid and checkpoint not in valid:
             raise HTTPException(400, f"Unknown checkpoint: {checkpoint}")
+    vae = (body.get("vae") or "").strip()
+    if vae:
+        valid_vaes = await comfyui.list_vaes()
+        if valid_vaes and vae not in valid_vaes:
+            raise HTTPException(400, f"Unknown VAE: {vae}")
     count = config.coerce_int(body.get("count"), 1, minimum=1, maximum=4)
     wf_name = (body.get("workflow") or "").strip()
     template = None
@@ -3478,6 +3510,7 @@ async def generate_image_job(body: dict = Body(...)):
             scheduler=(body.get("scheduler") or "").strip(),
             v_prediction=bool(body.get("v_prediction")),
             model_sampling=(body.get("model_sampling") or "").strip(),
+            vae=vae,
         )
         prompt_id = await comfyui.submit(workflow)
     except ValueError as e:
@@ -3493,6 +3526,7 @@ async def generate_image_job(body: dict = Body(...)):
         "scheduler": (body.get("scheduler") or "").strip(),
         "v_prediction": bool(body.get("v_prediction")),
         "model_sampling": (body.get("model_sampling") or "").strip(),
+        "vae": vae,
         "workflow": wf_name,
     }
     _image_jobs[prompt_id] = {"status": "queued", "params": params, "created": time.time()}
@@ -3523,6 +3557,7 @@ async def get_image_job(job_id: str):
     if history.get("status", {}).get("status_str") == "error":
         job.update(status="error", error="ComfyUI workflow error (check checkpoint and VRAM)")
         _image_jobs[job_id] = job
+        comfyui.finish_job(job_id)
         return {"status": "error", "error": job["error"], "params": job.get("params", {})}
     outputs = comfyui.outputs_from_history(history)
     if not outputs:
@@ -3566,6 +3601,10 @@ async def get_image_job(job_id: str):
     _image_jobs[job_id] = job
     # First completed poll only (cached afterwards): release VRAM back to Ollama
     _track_bg(comfyui.free_memory())
+    # HyprChat now holds the only needed copy — erase ComfyUI's traces of this
+    # job (history entry + hyprchat-prefixed file copies, when the cleanup
+    # node is installed).
+    _track_bg(comfyui.forget_job(job_id))
     return {"status": "done", "images": images, "params": params}
 
 
@@ -3574,6 +3613,7 @@ async def cancel_image_job(job_id: str):
     if not config.COMFYUI_URL:
         raise HTTPException(503, "ComfyUI is not configured")
     await comfyui.cancel(job_id)
+    comfyui.finish_job(job_id)
     if job_id in _image_jobs:
         _image_jobs[job_id]["status"] = "error"
         _image_jobs[job_id]["error"] = "cancelled"
@@ -3638,11 +3678,13 @@ async def list_image_checkpoints():
         raise HTTPException(503, "ComfyUI is not configured. Set the URL in Settings → Connections.")
     if time.time() - _image_checkpoints_cache["ts"] > 60:
         _image_checkpoints_cache["checkpoints"] = await comfyui.list_checkpoints()
+        _image_checkpoints_cache["vaes"] = await comfyui.list_vaes()
         _image_checkpoints_cache["ts"] = time.time()
     cks = _image_checkpoints_cache["checkpoints"]
     return {
         "checkpoints": cks,
         "default": cks[0] if cks else "",
+        "vaes": _image_checkpoints_cache.get("vaes", []),
         # Resolved per-model generation settings (built-in family defaults
         # merged with user-saved overrides) so the UI can auto-configure.
         "settings": {c: comfyui.settings_for_checkpoint(c) for c in cks},
@@ -3668,8 +3710,16 @@ async def save_model_settings_ep(checkpoint: str, body: dict = Body(...)):
             clean["steps"] = config.coerce_int(body["steps"], 25, minimum=1, maximum=60)
     except (TypeError, ValueError):
         pass
+    # Per-model chat prompt prefixes. Key-present-with-"" is an intentional
+    # clear (overrides any builtin family prefix like pony score tags).
+    for _pk in ("prompt_prefix", "negative_prefix"):
+        if _pk in body:
+            clean[_pk] = str(body[_pk] or "").strip()[:500]
     settings = comfyui.load_model_settings()
-    settings[checkpoint] = clean
+    # Merge, don't replace: Image Studio's Save defaults sends only sampling
+    # keys and the Settings prompt fields send only prefix keys — each must
+    # not wipe the other's saved values.
+    settings[checkpoint] = {**(settings.get(checkpoint) or {}), **clean}
     comfyui.save_model_settings(settings)
     return {"status": "saved", "checkpoint": checkpoint, "settings": comfyui.settings_for_checkpoint(checkpoint)}
 
@@ -3682,6 +3732,199 @@ async def clear_model_settings_ep(checkpoint: str):
     settings.pop(checkpoint)
     comfyui.save_model_settings(settings)
     return {"status": "cleared", "settings": comfyui.settings_for_checkpoint(checkpoint)}
+
+
+# NOTE: uses <IDEA> token replacement, not str.format — the JSON example's
+# braces would otherwise need escaping and a stray { breaks .format at runtime.
+_ENHANCE_PROMPT_TEMPLATE = """You are an expert Stable Diffusion XL prompt writer. Expand the user's idea into a high-quality SDXL generation prompt.
+
+Rules:
+- Keep the user's subject and intent exactly — never replace or reinterpret the subject, and do not add people unless the user asked for them.
+- Write the positive prompt as comma-separated descriptive tags/phrases (roughly 40-90 words): subject details, medium, art style, lighting, color palette, composition/camera, then quality tags.
+- Write a negative prompt of 5-15 short comma-separated tags: standard SDXL negatives plus anything that contradicts the user's idea. Never more than 15 tags, never prose.
+- Both fields must be non-empty. No prose, no explanations. No Midjourney-style parameters (--ar, --v, --style) — SDXL does not understand them.
+
+Example:
+Idea: a fox in snow
+{"prompt": "a red fox standing in deep fresh snow, winter forest clearing, fluffy orange fur with frost details, soft overcast daylight, gentle falling snowflakes, shallow depth of field, photorealistic wildlife photography, muted cool palette with warm orange accent, masterpiece, best quality, highly detailed, sharp focus", "negative_prompt": "lowres, bad anatomy, blurry, watermark, text, jpeg artifacts, worst quality, deformed, oversaturated"}
+
+Now expand this idea. Respond with ONLY the JSON object, nothing else.
+Idea: <IDEA>"""
+
+
+@app.post("/api/images/enhance-prompt")
+async def enhance_image_prompt(body: dict = Body(...)):
+    """Expand a short user prompt into a detailed SDXL-style prompt via the
+    local LLM. Pure LLM call — works even when ComfyUI is unconfigured."""
+    idea = (body.get("prompt") or "").strip()[:600]
+    if not idea:
+        raise HTTPException(400, "prompt is required")
+    model = (model_providers.reject_cloud((body.get("model") or "").strip())
+             or model_providers.reject_cloud(config.IMAGE_CHAT_COMPOSE_MODEL or "")
+             or model_providers.reject_cloud(config.WORKSPACE_MODEL or "")
+             or config.DEFAULT_MODEL)
+    raw = await model_providers.complete_chat(
+        http, model, _ENHANCE_PROMPT_TEMPLATE.replace("<IDEA>", idea),
+        temperature=0.7, num_ctx=2048, num_predict=400,
+        format_json=True, timeout=45, ollama_url=config.OLLAMA_URL,
+    )
+    raw = (raw or "").strip()
+    if not raw:
+        raise HTTPException(502, "Prompt enhancer unavailable — check that Ollama is reachable")
+    parsed = None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    if isinstance(parsed, dict):
+        enhanced = str(parsed.get("prompt") or "").strip()
+        negative = str(parsed.get("negative_prompt") or "").strip()
+        # Small models sometimes echo the schema with empty/placeholder values.
+        # Valid JSON with no usable prompt is a failure — NEVER fall back to the
+        # raw JSON text here, that puts literal {"prompt": ""} in the user's box.
+        if enhanced in ("", "...", "…"):
+            raise HTTPException(502, "Prompt enhancer returned an empty result — try again")
+    else:
+        # Non-JSON output: treat the text as the prompt
+        enhanced, negative = raw, ""
+    # Small models love appending Midjourney params (--ar 16:9 etc.) no matter
+    # what the prompt says — SDXL treats them as literal tokens, so strip them.
+    mj_param = re.compile(r"\s*--\w+(?:\s+[\w:.]+)?")
+    enhanced = mj_param.sub("", enhanced).strip().rstrip(",").strip()
+    negative = mj_param.sub("", negative).strip().rstrip(",").strip()
+    # Enforce 5-15 negative tags deterministically — the template asks for
+    # 5-15 but small models ramble past it or skip the negative entirely.
+    neg_tags = [tag.strip() for tag in negative.split(",") if tag.strip()][:15]
+    if len(neg_tags) < 5:
+        _existing = {x.lower() for x in neg_tags}
+        for tag in ("lowres", "bad anatomy", "bad hands", "extra fingers", "blurry",
+                    "watermark", "text", "jpeg artifacts", "worst quality", "deformed"):
+            if len(neg_tags) >= 10:
+                break
+            if tag not in _existing:
+                neg_tags.append(tag)
+    negative = ", ".join(neg_tags[:15])
+    return {"prompt": enhanced[:1500], "negative_prompt": negative[:1500], "model": model}
+
+
+@app.post("/api/images/purge")
+async def purge_image_studio():
+    """Delete ALL traces of the current user's generated images — Image Studio
+    AND chat-tool generations: artifact rows, on-disk PNGs, chat file
+    references, ComfyUI's job history and file copies (via the optional
+    cleanup node), and the server's journald logs (which contain prompts)."""
+    deleted_artifacts = 0
+    deleted_files = 0
+    purged_filenames: list[str] = []
+    # Two-pass: gather every target first (offset pagination — the LIKE-based
+    # `source` filter can fill a page with non-exact matches, so breaking on
+    # an empty-target page would silently skip rows past it), then delete.
+    targets: list[dict] = []
+    for _src in ("image_studio", "generate_image"):
+        offset = 0
+        while True:
+            page = await db.list_artifacts(kind="image", source=_src, limit=200, offset=offset)
+            # The `source` filter is a metadata LIKE — re-check the exact tag.
+            targets.extend(a for a in page if (a.get("metadata") or {}).get("source_tool") == _src)
+            if len(page) < 200:
+                break
+            offset += 200
+    for a in targets:
+        result = await _delete_artifact_row_and_file(a)
+        if result["deleted"]:
+            deleted_artifacts += 1
+            if a.get("filename"):
+                purged_filenames.append(a["filename"])
+        if result["deleted_file"]:
+            deleted_files += 1
+        # Chat-tool images also leave a conversation_files attachment row —
+        # keyed by its own cf- id (in metadata), NOT the artifact id
+        try:
+            _cf_id = (a.get("metadata") or {}).get("conversation_file_id") or ""
+            if _cf_id:
+                await db.delete_conversation_file(_cf_id)
+        except Exception:
+            pass
+    # Rewrite chat messages that embedded the deleted images (inline markdown,
+    # download links, seed footers, saved generate_image tool events).
+    scrubbed_messages = 0
+    try:
+        scrubbed_messages = await db.scrub_image_traces(purged_filenames)
+    except Exception as e:
+        print(f"[IMAGE PURGE] message scrub failed: {e}")
+    # Compact the DB so deleted rows leave no residual bytes in the file/WAL.
+    if deleted_artifacts or scrubbed_messages:
+        try:
+            await db.vacuum_database()
+        except Exception as e:
+            print(f"[IMAGE PURGE] vacuum failed: {e}")
+    # Drop finished jobs from the in-process registry so a stale poll can't
+    # resurrect deleted image URLs. In-flight jobs stay.
+    active = False
+    for jid in list(_image_jobs.keys()):
+        status = _image_jobs[jid].get("status")
+        if status in ("done", "error"):
+            _image_jobs.pop(jid, None)
+        else:
+            active = True
+    # Chat-tool generations aren't in _image_jobs — comfyui._ACTIVE_JOBS
+    # tracks every in-flight submit regardless of caller.
+    if comfyui._ACTIVE_JOBS:
+        active = True
+    history_cleared = False
+    comfyui_files = None
+    cleanup_skipped = ""
+    if not config.COMFYUI_URL:
+        cleanup_skipped = "ComfyUI not configured"
+    elif active:
+        cleanup_skipped = "a generation is in flight"
+    else:
+        # Skip while a job is queued/running — clearing history mid-job would
+        # lose the result before HyprChat's done-poll picks it up.
+        history_cleared = bool(await comfyui.clear_history())
+        comfyui_files = await comfyui.cleanup_outputs()
+    # Scrub journald — historical backend log lines include generation
+    # prompts. The service is unprivileged (User=hyprchat, NoNewPrivileges),
+    # so the actual rotate+vacuum is done by a root path-unit helper
+    # (scripts/install-journal-scrub.sh) watching for this trigger file.
+    journal_cleared = False
+    try:
+        _trigger = os.path.join(os.path.dirname(config.SETTINGS_PATH), ".journal-scrub-request")
+        with open(_trigger, "w") as f:
+            f.write(datetime.utcnow().isoformat())
+        for _ in range(20):  # helper consumes the trigger when done (~3s)
+            await asyncio.sleep(0.5)
+            if not os.path.exists(_trigger):
+                journal_cleared = True
+                break
+        if not journal_cleared:
+            # Helper not installed — don't leave a stale trigger behind
+            try:
+                os.remove(_trigger)
+            except OSError:
+                pass
+    except Exception as e:
+        print(f"[IMAGE PURGE] journal scrub request failed: {e}")
+    notes = []
+    if cleanup_skipped:
+        notes.append(f"ComfyUI cleanup skipped ({cleanup_skipped}) — run Delete all again to clear its history/copies.")
+    elif comfyui_files is None:
+        notes.append("ComfyUI cleanup node not installed — its file copies remain "
+                     "until the daily cron (install scripts/comfyui_hyprchat_cleanup.py).")
+    if not journal_cleared:
+        notes.append("Journal scrub helper not installed — old server log lines remain "
+                     "(run scripts/install-journal-scrub.sh on the server once).")
+    note = " ".join(notes) or "All traces removed."
+    return {
+        "status": "purged",
+        "deleted_artifacts": deleted_artifacts,
+        "deleted_files": deleted_files,
+        "scrubbed_messages": scrubbed_messages,
+        "comfyui_history_cleared": history_cleared,
+        "comfyui_files_deleted": (comfyui_files or {}).get("deleted") if comfyui_files is not None else None,
+        "journal_cleared": journal_cleared,
+        "note": note,
+    }
 
 
 # ============================================================
@@ -5512,6 +5755,12 @@ async def get_app_settings():
         "default_num_ctx": config.DEFAULT_NUM_CTX,
         "research_num_ctx": config.RESEARCH_NUM_CTX,
         "quick_search_mode": config.QUICK_SEARCH_MODE,
+        "image_chat_checkpoint": config.IMAGE_CHAT_CHECKPOINT,
+        "image_chat_resolution": config.IMAGE_CHAT_RESOLUTION,
+        "image_chat_vae": config.IMAGE_CHAT_VAE,
+        "image_chat_prompt_prefix": config.IMAGE_CHAT_PROMPT_PREFIX,
+        "image_chat_negative": config.IMAGE_CHAT_NEGATIVE,
+        "image_chat_compose_model": config.IMAGE_CHAT_COMPOSE_MODEL,
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
         "sandbox_size_bytes": size,
@@ -5531,7 +5780,9 @@ async def update_app_settings(body: dict = Body(...)):
                "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
                "openhands_reasoning_effort",
                "aider_enabled", "aider_model", "aider_num_ctx", "aider_auto_test", "aider_worker_url",
-               "default_num_ctx", "research_num_ctx", "quick_search_mode"}
+               "default_num_ctx", "research_num_ctx", "quick_search_mode",
+               "image_chat_checkpoint", "image_chat_resolution", "image_chat_vae",
+               "image_chat_prompt_prefix", "image_chat_negative", "image_chat_compose_model"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
@@ -5696,6 +5947,32 @@ async def update_app_settings(body: dict = Body(...)):
         config.QUICK_SEARCH_MODE = _qsm
         settings["quick_search_mode"] = _qsm
         print(f"[Config] Quick Search mode: {config.QUICK_SEARCH_MODE}")
+    # Chat image generation defaults. Checkpoint/VAE values come from the live
+    # ComfyUI dropdowns in the UI; stored as-is (a stale name surfaces as a
+    # tool_error at generation time, never a crash here).
+    if "image_chat_checkpoint" in body:
+        config.IMAGE_CHAT_CHECKPOINT = str(body["image_chat_checkpoint"] or "").strip()[:200]
+        settings["image_chat_checkpoint"] = config.IMAGE_CHAT_CHECKPOINT
+        print(f"[Config] Chat image checkpoint: {config.IMAGE_CHAT_CHECKPOINT or '(built-in template)'}")
+    if "image_chat_resolution" in body:
+        _res = str(body["image_chat_resolution"] or "").strip()
+        if not re.fullmatch(r"\d{3,4}x\d{3,4}", _res):
+            _res = "1024x1024"
+        config.IMAGE_CHAT_RESOLUTION = _res
+        settings["image_chat_resolution"] = _res
+    if "image_chat_vae" in body:
+        config.IMAGE_CHAT_VAE = str(body["image_chat_vae"] or "").strip()[:200]
+        settings["image_chat_vae"] = config.IMAGE_CHAT_VAE
+    if "image_chat_prompt_prefix" in body:
+        config.IMAGE_CHAT_PROMPT_PREFIX = str(body["image_chat_prompt_prefix"] or "").strip()[:500]
+        settings["image_chat_prompt_prefix"] = config.IMAGE_CHAT_PROMPT_PREFIX
+    if "image_chat_negative" in body:
+        config.IMAGE_CHAT_NEGATIVE = str(body["image_chat_negative"] or "").strip()[:500]
+        settings["image_chat_negative"] = config.IMAGE_CHAT_NEGATIVE
+    if "image_chat_compose_model" in body:
+        config.IMAGE_CHAT_COMPOSE_MODEL = str(body["image_chat_compose_model"] or "").strip()[:200]
+        settings["image_chat_compose_model"] = config.IMAGE_CHAT_COMPOSE_MODEL
+        print(f"[Config] Photo prompt model: {config.IMAGE_CHAT_COMPOSE_MODEL or '(conversation chat model)'}")
     save_settings(settings)
     return {
         **settings,

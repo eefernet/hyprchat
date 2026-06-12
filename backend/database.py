@@ -3392,6 +3392,112 @@ async def count_artifacts_with_storage_path(storage_path: str, exclude_id: str =
         await db.close()
 
 
+async def scrub_image_traces(filenames: list[str]) -> int:
+    """Rewrite chat messages so purged generated images leave no trace.
+
+    For every user-scoped message that references one of the deleted image
+    files: strips the inline image markdown / download-link lines, the
+    generation seed footer, and any image-tool entries (file refs, saved
+    generate_image events) from persisted metadata. Returns the number of
+    messages rewritten.
+
+    NOTE: metadata scrubbing is all-or-nothing by design — in a matched
+    message it drops EVERY generate_image-related list entry, not just those
+    naming the given files. Correct for the full purge (which deletes all
+    generated images); do NOT reuse for single-image deletion without
+    narrowing that clause.
+    """
+    user_id = _scope_user()
+    filenames = [f for f in (filenames or []) if f]
+    if not filenames:
+        return 0
+    db = await get_db()
+    scrubbed = 0
+    try:
+        rows_all, seen = [], set()
+        for i in range(0, len(filenames), 20):
+            batch = filenames[i:i + 20]
+            conds = " OR ".join(["m.content LIKE ? OR m.metadata LIKE ?"] * len(batch))
+            params: list = [user_id]
+            for fn in batch:
+                like = f"%{fn}%"
+                params.extend([like, like])
+            rows = await db.execute_fetchall(
+                f"SELECT m.id, m.content, m.metadata FROM messages m "
+                f"JOIN conversations c ON c.id = m.conversation_id "
+                f"WHERE c.user_id=? AND ({conds})", params)
+            for r in rows:
+                if r[0] not in seen:
+                    seen.add(r[0])
+                    rows_all.append(r)
+
+        def _mentions(obj) -> bool:
+            s = json.dumps(obj, default=str)
+            return any(fn in s for fn in filenames) or '"generate_image"' in s
+
+        for mid, content, meta_raw in rows_all:
+            new_content = content or ""
+            for fn in filenames:
+                if fn not in new_content:
+                    continue
+                esc = re.escape(fn)
+                new_content = re.sub(rf"!\[[^\]\n]*\]\([^)\n]*{esc}[^)\n]*\)", "", new_content)
+                # Any remaining line still naming the file (download links, bare URLs)
+                new_content = re.sub(rf"^.*{esc}.*$", "", new_content, flags=re.M)
+            if new_content != (content or ""):
+                new_content = re.sub(r"^Seed: `?\d+`?\s*·[^\n]*$", "", new_content, flags=re.M)
+                new_content = re.sub(r"\n{3,}", "\n\n", new_content).strip()
+            try:
+                meta = json.loads(meta_raw or "{}")
+                if not isinstance(meta, dict):
+                    meta = {}
+            except Exception:
+                meta = {}
+            changed_meta = False
+            for key, val in list(meta.items()):
+                if isinstance(val, list):
+                    kept = [x for x in val if not (isinstance(x, (dict, list)) and _mentions(x))]
+                    if len(kept) != len(val):
+                        meta[key] = kept
+                        changed_meta = True
+            if new_content != (content or "") or changed_meta:
+                await db.execute("UPDATE messages SET content=?, metadata=? WHERE id=?",
+                                 (new_content, json.dumps(meta), mid))
+                scrubbed += 1
+        await db.commit()
+        return scrubbed
+    finally:
+        await db.close()
+
+
+async def vacuum_database():
+    """WAL-checkpoint and VACUUM the DB so deleted rows leave no residual
+    bytes in the database or WAL file. Used by the image purge."""
+    db = await get_db()
+    try:
+        await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        await db.commit()
+        await db.execute("VACUUM")
+    finally:
+        await db.close()
+
+
+async def delete_conversation_file(file_id: str) -> bool:
+    """Remove a conversation_files row (chat attachment reference). Used by the
+    image purge so chat-generated images leave no dangling file reference."""
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "DELETE FROM conversation_files WHERE id=? AND conversation_id IN "
+            "(SELECT id FROM conversations WHERE user_id=?)",
+            (file_id, user_id))
+        await db.commit()
+        return cur.rowcount > 0
+    finally:
+        await db.close()
+
+
 async def delete_artifact(artifact_id: str) -> bool:
     user_id = _scope_user()
     db = await get_db()

@@ -998,16 +998,91 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
   const [modelSampling,setModelSampling]=useState("");
   const [checkpoints,setCheckpoints]=useState([]);
   const [checkpoint,setCheckpoint]=useState("");
+  const [vaes,setVaes]=useState([]);
+  const [vae,setVae]=useState("");
   const [ckptSettings,setCkptSettings]=useState({});
   const [workflows,setWorkflows]=useState([]);
   const [workflow,setWorkflow]=useState("");
   const [job,setJob]=useState(null); // {id, started, status, queuePos}
-  const [results,setResults]=useState([]);
+  const [gallery,setGallery]=useState([]);
+  const [galleryLoading,setGalleryLoading]=useState(false);
+  const [viewIdx,setViewIdx]=useState(0);     // index into gallery shown in the main viewer (0 = newest)
+  const [lightbox,setLightbox]=useState(false);
+  const [enhancing,setEnhancing]=useState(false);
+  const [showAdvanced,setShowAdvanced]=useState(()=>{try{return localStorage.getItem("hc-img-adv")==="1";}catch{return false;}});
   const [error,setError]=useState("");
   const pollRef=useRef(null);
   const wfUploadRef=useRef(null);
+  const thumbsRef=useRef(null);
+  const toggleAdvanced=()=>setShowAdvanced(p=>{const v=!p;try{localStorage.setItem("hc-img-adv",v?"1":"0");}catch{}return v;});
   const stopPoll=()=>{if(pollRef.current){clearInterval(pollRef.current);pollRef.current=null;}};
   const loadWorkflows=()=>fetch(`${API}/api/images/workflows`).then(r=>r.ok?r.json():{workflows:[]}).then(d=>setWorkflows(d.workflows||[])).catch(()=>{});
+  const loadGallery=()=>{
+    setGalleryLoading(true);
+    fetch(`${API}/api/artifacts?kind=image&source=image_studio&limit=100`)
+      .then(r=>r.ok?r.json():[])
+      .then(d=>{
+        const rows=Array.isArray(d)?d:(d.artifacts||[]);
+        setGallery(rows.filter(a=>(a.metadata||{}).source_tool==="image_studio"));
+      }).catch(()=>{}).finally(()=>setGalleryLoading(false));
+  };
+  const enhance=async()=>{
+    if(!prompt.trim()||enhancing||job)return;
+    setEnhancing(true);
+    try{
+      const r=await fetch(`${API}/api/images/enhance-prompt`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({prompt:prompt.trim()})});
+      const d=await r.json();
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      if(d.prompt)setPrompt(d.prompt);
+      if(d.negative_prompt)setNegPrompt(d.negative_prompt);
+      notify&&notify({type:"success",text:"Prompt enhanced",duration:2000});
+    }catch(e){notify&&notify({type:"error",text:"Enhance failed",detail:String(e.message||e)});}
+    finally{setEnhancing(false);}
+  };
+  const reuseParams=(meta)=>{
+    if(!meta)return;
+    if(meta.prompt)setPrompt(meta.prompt);
+    setNegPrompt(meta.negative_prompt||"");
+    if(meta.steps)setSteps(meta.steps);
+    if(meta.cfg!=null)setCfg(meta.cfg);
+    if(meta.sampler)setSampler(meta.sampler);
+    if(meta.scheduler)setScheduler(meta.scheduler);
+    setModelSampling(meta.model_sampling||"");
+    setVae(meta.vae&&vaes.includes(meta.vae)?meta.vae:"");
+    if(meta.checkpoint&&checkpoints.includes(meta.checkpoint))setCheckpoint(meta.checkpoint);
+    if(meta.workflow&&workflows.some(w=>w.name===meta.workflow))setWorkflow(meta.workflow);else setWorkflow("");
+    if(meta.width&&meta.height){
+      const preset=`${meta.width}x${meta.height}`;
+      if(["1024x1024","1216x832","832x1216"].includes(preset))setSize(preset);
+      else{setSize("custom");setCustomW(meta.width);setCustomH(meta.height);}
+    }
+    if(meta.seed!=null)setSeed(String(meta.seed));
+  };
+  const deleteOne=async(a)=>{
+    if(!confirm("Delete this image? Removes the file and its record from HyprChat."))return;
+    try{
+      const r=await fetch(`${API}/api/artifacts/${a.id}`,{method:"DELETE"});
+      if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${r.status}`);}
+      const next=gallery.filter(x=>x.id!==a.id);
+      setGallery(next);
+      setViewIdx(v=>Math.min(v,Math.max(0,next.length-1)));
+      if(!next.length)setLightbox(false);
+    }catch(e){notify&&notify({type:"error",text:"Delete failed",detail:String(e.message||e)});}
+  };
+  const purgeAll=async()=>{
+    if(!confirm("Delete ALL generated images — everywhere?\n\nThis removes every trace: Image Studio AND chat-generated images, their files and records on HyprChat, references inside chat messages (replies that included a photo are edited to remove it), ComfyUI's job history and file copies, and the server logs. This cannot be undone."))return;
+    try{
+      const r=await fetch(`${API}/api/images/purge`,{method:"POST"});
+      const d=await r.json();
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      setGallery([]);setViewIdx(0);setLightbox(false);
+      const bits=[`${d.deleted_artifacts} image(s)`];
+      if(d.scrubbed_messages)bits.push(`${d.scrubbed_messages} chat message(s) scrubbed`);
+      if(d.comfyui_files_deleted!=null)bits.push(`${d.comfyui_files_deleted} ComfyUI file(s)`);
+      if(d.journal_cleared)bits.push("server logs cleared");
+      notify&&notify({type:"success",text:"All image traces deleted",detail:bits.join(" · ")+(d.comfyui_files_deleted==null?" — install the ComfyUI cleanup node for instant remote file removal":""),duration:5000});
+    }catch(e){notify&&notify({type:"error",text:"Purge failed",detail:String(e.message||e)});}
+  };
   const applySettings=(s)=>{
     if(!s)return;
     if(s.steps)setSteps(s.steps);
@@ -1024,6 +1099,7 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
     if(!configured)return;
     fetch(`${API}/api/images/checkpoints`).then(r=>r.ok?r.json():{checkpoints:[]}).then(d=>{
       setCheckpoints(d.checkpoints||[]);
+      setVaes(d.vaes||[]);
       setCkptSettings(d.settings||{});
       setCheckpoint(c=>{
         const initial=c||d.default||"";
@@ -1033,8 +1109,26 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
       });
     }).catch(()=>{});
     loadWorkflows();
+    loadGallery();
     return stopPoll;
   },[configured]);
+  // Lightbox keyboard nav (mermaid-fullscreen pattern): Escape closes,
+  // arrows step through the gallery with functional updates (no stale closures)
+  useEffect(()=>{
+    if(!lightbox)return;
+    const h=(e)=>{
+      if(e.key==="Escape")setLightbox(false);
+      else if(e.key==="ArrowLeft")setViewIdx(i=>Math.max(0,i-1));
+      else if(e.key==="ArrowRight")setViewIdx(i=>Math.min(gallery.length-1,i+1));
+    };
+    window.addEventListener("keydown",h);
+    return ()=>window.removeEventListener("keydown",h);
+  },[lightbox,gallery.length]);
+  // Keep the selected thumbnail visible in the carousel strip
+  useEffect(()=>{
+    const el=thumbsRef.current?.querySelector(`[data-idx="${viewIdx}"]`);
+    if(el&&el.scrollIntoView)el.scrollIntoView({inline:"nearest",block:"nearest",behavior:"smooth"});
+  },[viewIdx,gallery.length]);
   const saveModelDefaults=async()=>{
     if(!checkpoint)return;
     try{
@@ -1093,7 +1187,7 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
     if(!prompt.trim()||job)return;
     setError("");
     const [w,h]=dims();
-    const body={prompt:prompt.trim(),negative_prompt:negPrompt.trim(),width:w,height:h,steps:Number(steps)||25,cfg:Number(cfg)||7,count:Number(count)||1,checkpoint,sampler,scheduler,model_sampling:modelSampling,workflow};
+    const body={prompt:prompt.trim(),negative_prompt:negPrompt.trim(),width:w,height:h,steps:Number(steps)||25,cfg:Number(cfg)||7,count:Number(count)||1,checkpoint,sampler,scheduler,model_sampling:modelSampling,vae,workflow};
     if(seed!=="")body.seed=parseInt(seed)||0;
     let d;
     try{
@@ -1110,8 +1204,9 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
         if(!r.ok)throw new Error(s.detail||`HTTP ${r.status}`);
         if(s.status==="done"){
           stopPoll();
-          setResults(prev=>[...(s.images||[]).map(img=>({...img,params:d.params})),...prev]);
           setJob(null);
+          loadGallery();
+          setViewIdx(0); // newest lands in the main viewer
           notify&&notify({type:"success",text:`Image ready (seed ${d.params?.seed})`,duration:2500});
         }else if(s.status==="error"){
           stopPoll();setJob(null);setError(s.error||"Generation failed");
@@ -1143,95 +1238,159 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
     <div style={{fontSize:12,maxWidth:380,textAlign:"center"}}>ComfyUI is not configured. Set the ComfyUI URL in Settings → Connections to enable local Stable Diffusion image generation.</div>
   </div>;
   const elapsed=job?Math.round((Date.now()-job.started)/1000):0;
+  const smallBtn=(c)=>({fontSize:10,padding:"4px 9px",borderRadius:5,background:`${c}15`,border:`1px solid ${c}33`,color:c,cursor:"pointer",fontFamily:font,fontWeight:600});
+  const cur=gallery[viewIdx]||null;
+  const curMeta=(cur&&cur.metadata)||{};
+  const metaLine=(m)=>`seed ${m.seed} · ${m.steps} steps · ${m.width}×${m.height}${m.checkpoint?` · ${String(m.checkpoint).replace(/\.(safetensors|ckpt)$/i,"")}`:""}`;
+  const actionChips=(a,m)=>(<div style={{display:"flex",gap:5,flexWrap:"wrap",justifyContent:"center"}}>
+    <a href={`${API}/api/artifacts/${a.id}/download`} download={a.filename} style={{...smallBtn(t.ok),textDecoration:"none"}}>Download</a>
+    <button onClick={()=>useInChat({artifact_id:a.id})} style={smallBtn(t.acc)}>Use in chat</button>
+    <button onClick={()=>reuseParams(m)} title="Load this image's prompt and settings back into the form" style={smallBtn(t.acc2)}>Reuse</button>
+    {m.seed!=null&&<button onClick={()=>setSeed(String(m.seed))} title="Reuse this seed only" style={smallBtn(t.warm)}>Seed</button>}
+    <button onClick={()=>deleteOne(a)} title="Delete this image" style={smallBtn(t.err)}>✕</button>
+  </div>);
+  const navBtn=(dir,disabled,onClick,big)=>(<button onClick={onClick} disabled={disabled} style={{width:big?46:30,height:big?46:58,flexShrink:0,borderRadius:big?23:8,border:`1px solid ${t.brd}40`,background:big?"rgba(0,0,0,.45)":`${t.surface}cc`,color:disabled?t.mut:t.text,fontSize:big?20:14,cursor:disabled?"default":"pointer",opacity:disabled?.35:1,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:font}}>{dir}</button>);
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",alignItems:"center",gap:8}}>
       <IC.Image/><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Image Studio</span>
       <span style={{fontSize:10,color:t.mut,marginLeft:8}}>Local Stable Diffusion via ComfyUI</span>
+      <div style={{flex:1}}/>
+      {gallery.length>0&&<span style={{fontSize:10,color:t.mut,marginRight:6}}>{gallery.length} image{gallery.length===1?"":"s"}</span>}
+      {gallery.length>0&&<button onClick={purgeAll} title="Delete every trace of generated images everywhere: Image Studio + chat images, files, records, chat-message references, ComfyUI history/copies, and server logs." style={{fontSize:10,padding:"6px 11px",borderRadius:6,background:`${t.err}10`,border:`1px solid ${t.err}30`,color:t.err,cursor:"pointer",fontFamily:font,fontWeight:600}}>Delete all</button>}
     </div>
-    <div style={{flex:1,overflowY:"auto",padding:20}}>
-      <div style={{maxWidth:860,margin:"0 auto"}}>
-        <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Describe the image — subject, style, lighting, mood…" rows={3} style={{...inputS,resize:"vertical",lineHeight:1.5}}/>
-        <textarea value={negPrompt} onChange={e=>setNegPrompt(e.target.value)} placeholder="Negative prompt (optional) — things to avoid" rows={1} style={{...inputS,resize:"vertical",marginTop:8,fontSize:12}}/>
-        <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",marginTop:12}}>
-          <label style={{fontSize:10,color:t.mut}}>Workflow&nbsp;
-            <select value={workflow} onChange={e=>applyWorkflow(e.target.value)} style={{...inputS,width:"auto",maxWidth:260,padding:"6px 8px",fontSize:12}}>
-              <option value="">Default (built-in SDXL)</option>
-              {workflows.map(w=><option key={w.name} value={w.name}>{w.name}{w.has_lora?" ⚡":""}</option>)}
-            </select>
-          </label>
-          <button onClick={()=>wfUploadRef.current?.click()} title="Upload a workflow: API-format JSON (ComfyUI → Dev mode → Export (API)) OR any PNG generated by ComfyUI — the workflow is read from the image metadata" style={{fontSize:10,padding:"6px 10px",borderRadius:6,background:`${t.acc}12`,border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",fontFamily:font,fontWeight:600}}>+ Upload workflow / image</button>
-          <input ref={wfUploadRef} type="file" accept=".json,.png,application/json,image/png" style={{display:"none"}} onChange={e=>{uploadWorkflow(e.target.files?.[0]);e.target.value="";}}/>
-          {workflow&&<button onClick={async()=>{if(!confirm(`Delete workflow "${workflow}"?`))return;await fetch(`${API}/api/images/workflows/${encodeURIComponent(workflow)}`,{method:"DELETE"}).catch(()=>{});setWorkflow("");loadWorkflows();}} title="Delete this saved workflow" style={{fontSize:10,padding:"6px 8px",borderRadius:6,background:`${t.err}10`,border:`1px solid ${t.err}30`,color:t.err,cursor:"pointer",fontFamily:font}}>✕</button>}
-          {activeWf?.model_sampling_builtin&&<span style={{fontSize:9,color:t.warm}}>{activeWf.model_sampling_builtin==="flow"?"flow-matching":activeWf.model_sampling_builtin==="flux-graph"?"Flux architecture":"v-pred"} — sampling built into workflow{activeWf.model_sampling_builtin==="flux-graph"?" (Model dropdown not used)":""}</span>}
-        </div>
-        <div style={{display:"flex",gap:14,flexWrap:"wrap",alignItems:"flex-end",marginTop:12}}>
-          <label style={{fontSize:10,color:t.mut}}>Size<br/>
-            <select value={size} onChange={e=>setSize(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>
-              <option value="1024x1024">1024 × 1024 (square)</option>
-              <option value="1216x832">1216 × 832 (landscape)</option>
-              <option value="832x1216">832 × 1216 (portrait)</option>
-              <option value="custom">Custom…</option>
-            </select>
-          </label>
-          {size==="custom"&&<><label style={{fontSize:10,color:t.mut}}>W<br/><input type="number" min={256} max={2048} step={8} value={customW} onChange={e=>setCustomW(e.target.value)} style={{...smallNum,marginTop:3}}/></label>
-          <label style={{fontSize:10,color:t.mut}}>H<br/><input type="number" min={256} max={2048} step={8} value={customH} onChange={e=>setCustomH(e.target.value)} style={{...smallNum,marginTop:3}}/></label></>}
-          <label style={{fontSize:10,color:t.mut}}>Steps<br/><input type="number" min={1} max={60} value={steps} onChange={e=>setSteps(e.target.value)} style={{...smallNum,marginTop:3}}/></label>
-          <label style={{fontSize:10,color:t.mut}}>CFG<br/><input type="number" min={1} max={20} step={0.5} value={cfg} onChange={e=>setCfg(e.target.value)} style={{...smallNum,marginTop:3}}/></label>
-          <label style={{fontSize:10,color:t.mut}}>Seed<br/><input type="text" placeholder="random" value={seed} onChange={e=>setSeed(e.target.value.replace(/[^\d]/g,""))} style={{...smallNum,width:104,marginTop:3}}/></label>
-          <label style={{fontSize:10,color:t.mut}}>Count<br/>
-            <select value={count} onChange={e=>setCount(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>{[1,2,3,4].map(n=><option key={n} value={n}>{n}</option>)}</select>
-          </label>
-          {checkpoints.length>0&&<label style={{fontSize:10,color:t.mut}}>Model{ckptSettings[checkpoint]?.user_override&&<span title="Using your saved defaults for this model" style={{color:t.acc}}> ★</span>}<br/>
-            <select value={checkpoint} onChange={e=>applyCheckpoint(e.target.value)} title="Selecting a model auto-applies its correct settings (type, sampler, CFG, steps)" style={{...inputS,width:"auto",maxWidth:240,padding:"6px 8px",fontSize:12,marginTop:3}}>
-              {checkpoints.map(c=><option key={c} value={c}>{c}</option>)}
+    <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+      {/* LEFT RAIL — prompt + all generation inputs */}
+      <div style={{width:"clamp(330px,30vw,420px)",flexShrink:0,borderRight:`1px solid ${t.brd}28`,overflowY:"auto",padding:16,display:"flex",flexDirection:"column",gap:12}}>
+          <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&(e.metaKey||e.ctrlKey)){e.preventDefault();generate();}}} placeholder="Describe the image — subject, style, lighting, mood…" rows={5} style={{...inputS,resize:"vertical",lineHeight:1.55,fontSize:13.5,padding:"11px 13px"}}/>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={enhance} disabled={!prompt.trim()||enhancing||!!job} title="Use the local LLM to expand your idea into a detailed SDXL prompt (subject, style, lighting, quality tags) plus a negative prompt" style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"10px 0",borderRadius:8,background:`${t.acc2}14`,border:`1px solid ${t.acc2}40`,color:prompt.trim()&&!enhancing&&!job?t.acc2:`${t.acc2}88`,cursor:prompt.trim()&&!enhancing&&!job?"pointer":"default",fontFamily:font,fontWeight:700,fontSize:12}}>
+              {enhancing?<><div style={{width:11,height:11,border:`2px solid ${t.acc2}44`,borderTopColor:t.acc2,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>Enhancing…</>:<>✨ Enhance</>}
+            </button>
+            {!job
+              ?<button onClick={generate} disabled={!prompt.trim()} style={{flex:1.4,padding:"10px 0",borderRadius:8,border:"none",background:prompt.trim()?t.acc:`${t.acc}44`,color:t.bgDeep,fontFamily:font,fontWeight:800,fontSize:13,cursor:prompt.trim()?"pointer":"default"}}>Generate</button>
+              :<button onClick={cancelJob} style={{flex:1.4,padding:"10px 0",borderRadius:8,border:`1px solid ${t.err}66`,background:`${t.err}18`,color:t.err,fontFamily:font,fontWeight:700,fontSize:13,cursor:"pointer"}}>Stop</button>}
+          </div>
+          {checkpoints.length>0&&<label style={{fontSize:10,color:t.mut}}>Model{ckptSettings[checkpoint]?.user_override&&<span title="Using your saved defaults for this model" style={{color:t.acc}}> ★</span>}
+            <select value={checkpoint} onChange={e=>applyCheckpoint(e.target.value)} title="Selecting a model auto-applies its correct settings (type, sampler, CFG, steps)" style={{...inputS,padding:"8px 10px",fontSize:12,marginTop:3}}>
+              {checkpoints.map(c=><option key={c} value={c}>{c.replace(/\.(safetensors|ckpt)$/i,"")}</option>)}
             </select>
           </label>}
-          {checkpoint&&<button onClick={saveModelDefaults} title={`Save the current Model type / Sampler / Scheduler / CFG / Steps as the automatic defaults for ${checkpoint}`} style={{fontSize:10,padding:"6px 9px",borderRadius:6,background:`${t.warm}10`,border:`1px solid ${t.warm}33`,color:t.warm,cursor:"pointer",fontFamily:font,fontWeight:600,marginBottom:8}}>★ Save defaults</button>}
-          <label style={{fontSize:10,color:t.mut}}>Sampler<br/>
-            <select value={sampler} onChange={e=>setSampler(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>
-              {["euler","euler_ancestral","dpmpp_2m","dpmpp_2m_sde","dpmpp_3m_sde","dpmpp_sde","heun","ddim","uni_pc","lcm"].map(s2=><option key={s2} value={s2}>{s2}</option>)}
-            </select>
-          </label>
-          <label style={{fontSize:10,color:t.mut}}>Scheduler<br/>
-            <select value={scheduler} onChange={e=>setScheduler(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>
-              {["normal","karras","sgm_uniform","exponential","simple","beta"].map(s2=><option key={s2} value={s2}>{s2}</option>)}
-            </select>
-          </label>
-          <label title="How the checkpoint was trained. Standard = normal SDXL (sd_xl_base, most merges). Flow = Flow Matching models like BigASP v2.5 (adds ModelSamplingSD3). v-pred = v-prediction models like NoobAI vpred (adds ModelSamplingDiscrete + RescaleCFG). Wrong choice → solid-color or deep-fried output." style={{fontSize:10,color:modelSampling?t.acc:t.mut}}>Model type<br/>
-            <select value={modelSampling} onChange={e=>setModelSampling(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>
-              <option value="">Standard (eps)</option>
-              <option value="flow">Flow — BigASP v2.5</option>
-              <option value="vpred">v-pred — NoobAI etc.</option>
-            </select>
-          </label>
-          <div style={{flex:1}}/>
-          {!job
-            ?<button onClick={generate} disabled={!prompt.trim()} style={{padding:"10px 22px",borderRadius:8,border:"none",background:prompt.trim()?t.acc:`${t.acc}44`,color:t.bgDeep,fontFamily:font,fontWeight:800,fontSize:13,cursor:prompt.trim()?"pointer":"default"}}>Generate</button>
-            :<button onClick={cancelJob} style={{padding:"10px 22px",borderRadius:8,border:`1px solid ${t.err}66`,background:`${t.err}18`,color:t.err,fontFamily:font,fontWeight:700,fontSize:13,cursor:"pointer"}}>Stop</button>}
-        </div>
-        {job&&<div style={{marginTop:14,display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:`${t.acc}0d`,border:`1px solid ${t.acc}28`,borderRadius:8,fontSize:12,color:t.dim}}>
-          <div style={{width:14,height:14,border:`2px solid ${t.acc}44`,borderTopColor:t.acc,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
-          {job.status==="queued"&&job.queuePos>0?`Queued behind ${job.queuePos} job(s)…`:elapsed<8?"Generating…":elapsed<60?`Generating… ${elapsed}s`:`Generating… ${elapsed}s (model may be cold-loading)`}
-        </div>}
-        {error&&<div style={{marginTop:14,padding:"10px 14px",background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:8,fontSize:12,color:t.err}}>{error}</div>}
-        {results.length>0&&<div style={{marginTop:22}}>
-          <div style={{fontSize:11,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.8,marginBottom:10}}>Results</div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:14}}>
-            {results.map((r,i)=><div key={`${r.filename}-${i}`} style={{border:`1px solid ${t.brd}40`,borderRadius:10,overflow:"hidden",background:t.bgDeep}}>
-              <img src={`${API}${r.url}`} alt={r.filename} onClick={()=>onPreview&&onPreview(r.filename,r.url)} style={{width:"100%",aspectRatio:`${r.params?.width||1}/${r.params?.height||1}`,objectFit:"cover",cursor:"pointer",display:"block"}}/>
-              <div style={{padding:"8px 10px"}}>
-                <div style={{fontSize:9,color:t.mut,marginBottom:6,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={r.params?.prompt}>seed {r.params?.seed} · {r.params?.steps} steps · {r.params?.width}×{r.params?.height}</div>
-                <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-                  <a href={`${API}${r.url}`} download={r.filename} style={{fontSize:10,padding:"4px 9px",borderRadius:5,background:`${t.ok}15`,border:`1px solid ${t.ok}33`,color:t.ok,textDecoration:"none",fontWeight:600}}>Download</a>
-                  <button onClick={()=>useInChat(r)} style={{fontSize:10,padding:"4px 9px",borderRadius:5,background:`${t.acc}15`,border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",fontFamily:font,fontWeight:600}}>Use in chat</button>
-                  {r.params?.seed!=null&&<button onClick={()=>setSeed(String(r.params.seed))} title="Reuse this seed" style={{fontSize:10,padding:"4px 9px",borderRadius:5,background:`${t.warm}12`,border:`1px solid ${t.warm}33`,color:t.warm,cursor:"pointer",fontFamily:font,fontWeight:600}}>Reuse seed</button>}
-                </div>
-              </div>
-            </div>)}
+          <div style={{display:"flex",gap:8}}>
+            <label style={{fontSize:10,color:t.mut,flex:1}}>Aspect ratio
+              <select value={size} onChange={e=>setSize(e.target.value)} style={{...inputS,padding:"8px 10px",fontSize:12,marginTop:3}}>
+                <option value="1024x1024">Square — 1024 × 1024</option>
+                <option value="1216x832">Landscape — 1216 × 832</option>
+                <option value="832x1216">Portrait — 832 × 1216</option>
+                <option value="custom">Custom…</option>
+              </select>
+            </label>
+            <label style={{fontSize:10,color:t.mut,width:64,flexShrink:0}}>Count
+              <select value={count} onChange={e=>setCount(e.target.value)} style={{...inputS,padding:"8px 10px",fontSize:12,marginTop:3}}>{[1,2,3,4].map(n=><option key={n} value={n}>{n}</option>)}</select>
+            </label>
           </div>
-        </div>}
+          {size==="custom"&&<div style={{display:"flex",gap:8}}>
+            <label style={{fontSize:10,color:t.mut}}>W<br/><input type="number" min={256} max={2048} step={8} value={customW} onChange={e=>setCustomW(e.target.value)} style={{...smallNum,marginTop:3}}/></label>
+            <label style={{fontSize:10,color:t.mut}}>H<br/><input type="number" min={256} max={2048} step={8} value={customH} onChange={e=>setCustomH(e.target.value)} style={{...smallNum,marginTop:3}}/></label>
+          </div>}
+          {job&&<div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:`${t.acc}0d`,border:`1px solid ${t.acc}28`,borderRadius:8,fontSize:12,color:t.dim}}>
+            <div style={{width:14,height:14,border:`2px solid ${t.acc}44`,borderTopColor:t.acc,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
+            {job.status==="queued"&&job.queuePos>0?`Queued behind ${job.queuePos} job(s)…`:elapsed<8?"Generating…":elapsed<60?`Generating… ${elapsed}s`:`Generating… ${elapsed}s (model may be cold-loading)`}
+          </div>}
+          {error&&<div style={{padding:"10px 14px",background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:8,fontSize:12,color:t.err}}>{error}</div>}
+          <button onClick={toggleAdvanced} style={{marginTop:14,fontSize:11,padding:0,background:"none",border:"none",color:t.mut,cursor:"pointer",fontFamily:font,fontWeight:600,letterSpacing:.4}}>{showAdvanced?"▾":"▸"} Advanced</button>
+          {showAdvanced&&<div style={{marginTop:10,paddingTop:12,borderTop:`1px solid ${t.brd}28`}}>
+            <textarea value={negPrompt} onChange={e=>setNegPrompt(e.target.value)} placeholder="Negative prompt (optional) — things to avoid" rows={1} style={{...inputS,resize:"vertical",fontSize:12}}/>
+            <div style={{display:"flex",gap:14,flexWrap:"wrap",alignItems:"flex-end",marginTop:12}}>
+              <label style={{fontSize:10,color:t.mut}}>Steps<br/><input type="number" min={1} max={60} value={steps} onChange={e=>setSteps(e.target.value)} style={{...smallNum,marginTop:3}}/></label>
+              <label style={{fontSize:10,color:t.mut}}>CFG<br/><input type="number" min={1} max={20} step={0.5} value={cfg} onChange={e=>setCfg(e.target.value)} style={{...smallNum,marginTop:3}}/></label>
+              <label style={{fontSize:10,color:t.mut}}>Seed<br/><input type="text" placeholder="random" value={seed} onChange={e=>setSeed(e.target.value.replace(/[^\d]/g,""))} style={{...smallNum,width:104,marginTop:3}}/></label>
+              <label style={{fontSize:10,color:t.mut}}>Sampler<br/>
+                <select value={sampler} onChange={e=>setSampler(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>
+                  {["euler","euler_ancestral","dpmpp_2m","dpmpp_2m_sde","dpmpp_3m_sde","dpmpp_sde","heun","ddim","uni_pc","lcm"].map(s2=><option key={s2} value={s2}>{s2}</option>)}
+                </select>
+              </label>
+              <label style={{fontSize:10,color:t.mut}}>Scheduler<br/>
+                <select value={scheduler} onChange={e=>setScheduler(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>
+                  {["normal","karras","sgm_uniform","exponential","simple","beta"].map(s2=><option key={s2} value={s2}>{s2}</option>)}
+                </select>
+              </label>
+              <label title="How the checkpoint was trained. Standard = normal SDXL (sd_xl_base, most merges). Flow = Flow Matching models like BigASP v2.5 (adds ModelSamplingSD3). v-pred = v-prediction models like NoobAI vpred (adds ModelSamplingDiscrete + RescaleCFG). Wrong choice → solid-color or deep-fried output." style={{fontSize:10,color:modelSampling?t.acc:t.mut}}>Model type<br/>
+                <select value={modelSampling} onChange={e=>setModelSampling(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>
+                  <option value="">Standard (eps)</option>
+                  <option value="flow">Flow — BigASP v2.5</option>
+                  <option value="vpred">v-pred — NoobAI etc.</option>
+                </select>
+              </label>
+              {vaes.length>0&&<label title="Override the checkpoint's baked-in VAE. Baked is usually fine; fp16-fix cures black/NaN images, contrast VAEs punch up colors. Ignored by Flux workflows." style={{fontSize:10,color:vae?t.acc:t.mut}}>VAE<br/>
+                <select value={vae} onChange={e=>setVae(e.target.value)} style={{...inputS,width:"auto",maxWidth:200,padding:"6px 8px",fontSize:12,marginTop:3}}>
+                  <option value="">Baked (checkpoint)</option>
+                  {vaes.map(v=><option key={v} value={v}>{v.replace(/\.(safetensors|pt|ckpt)$/i,"")}</option>)}
+                </select>
+              </label>}
+              {checkpoint&&<button onClick={saveModelDefaults} title={`Save the current Model type / Sampler / Scheduler / CFG / Steps as the automatic defaults for ${checkpoint}`} style={{fontSize:10,padding:"6px 9px",borderRadius:6,background:`${t.warm}10`,border:`1px solid ${t.warm}33`,color:t.warm,cursor:"pointer",fontFamily:font,fontWeight:600}}>★ Save defaults</button>}
+            </div>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",marginTop:12}}>
+              <label style={{fontSize:10,color:t.mut}}>Workflow&nbsp;
+                <select value={workflow} onChange={e=>applyWorkflow(e.target.value)} style={{...inputS,width:"auto",maxWidth:260,padding:"6px 8px",fontSize:12}}>
+                  <option value="">Default (built-in SDXL)</option>
+                  {workflows.map(w=><option key={w.name} value={w.name}>{w.name}{w.has_lora?" ⚡":""}</option>)}
+                </select>
+              </label>
+              <button onClick={()=>wfUploadRef.current?.click()} title="Upload a workflow: API-format JSON (ComfyUI → Dev mode → Export (API)) OR any PNG generated by ComfyUI — the workflow is read from the image metadata" style={{fontSize:10,padding:"6px 10px",borderRadius:6,background:`${t.acc}12`,border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",fontFamily:font,fontWeight:600}}>+ Upload workflow / image</button>
+              <input ref={wfUploadRef} type="file" accept=".json,.png,application/json,image/png" style={{display:"none"}} onChange={e=>{uploadWorkflow(e.target.files?.[0]);e.target.value="";}}/>
+              {workflow&&<button onClick={async()=>{if(!confirm(`Delete workflow "${workflow}"?`))return;await fetch(`${API}/api/images/workflows/${encodeURIComponent(workflow)}`,{method:"DELETE"}).catch(()=>{});setWorkflow("");loadWorkflows();}} title="Delete this saved workflow" style={{fontSize:10,padding:"6px 8px",borderRadius:6,background:`${t.err}10`,border:`1px solid ${t.err}30`,color:t.err,cursor:"pointer",fontFamily:font}}>✕</button>}
+              {activeWf?.model_sampling_builtin&&<span style={{fontSize:9,color:t.warm}}>{activeWf.model_sampling_builtin==="flow"?"flow-matching":activeWf.model_sampling_builtin==="flux-graph"?"Flux architecture":"v-pred"} — sampling built into workflow{activeWf.model_sampling_builtin==="flux-graph"?" (Model dropdown not used)":""}</span>}
+            </div>
+          </div>}
+        </div>
+      {/* RIGHT VIEWER — newest/selected image large, carousel of the rest below */}
+      <div style={{flex:1,minWidth:0,display:"flex",flexDirection:"column",padding:16,gap:10,overflow:"hidden"}}>
+        {gallery.length===0
+          ?<div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,color:t.mut}}>
+            <span style={{fontSize:40,opacity:.4}}>🖼️</span>
+            <div style={{fontSize:12}}>{galleryLoading?"Loading gallery…":"No generations yet — describe an image on the left and hit Generate."}</div>
+          </div>
+          :<>
+            <div onClick={()=>cur&&cur.exists_status!=="missing"&&setLightbox(true)} title="Click to open the full-screen viewer" style={{flex:1,minHeight:0,position:"relative",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.bgDeep}99`,border:`1px solid ${t.brd}30`,borderRadius:12,overflow:"hidden",cursor:cur&&cur.exists_status!=="missing"?"zoom-in":"default"}}>
+              {cur&&(cur.exists_status==="missing"
+                ?<div style={{fontSize:12,color:t.mut}}>file missing on disk</div>
+                :<img src={`${API}${cur.url}`} alt={cur.filename} style={{maxWidth:"100%",maxHeight:"100%",objectFit:"contain",display:"block"}}/>)}
+              {job&&<div style={{position:"absolute",top:10,left:10,display:"flex",alignItems:"center",gap:8,padding:"6px 12px",background:"rgba(0,0,0,.55)",border:`1px solid ${t.acc}40`,borderRadius:20,fontSize:11,color:t.text,backdropFilter:"blur(4px)"}}>
+                <div style={{width:11,height:11,border:`2px solid ${t.acc}44`,borderTopColor:t.acc,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>Generating…
+              </div>}
+            </div>
+            {cur&&<div style={{textAlign:"center",fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={curMeta.prompt}>{metaLine(curMeta)}</div>}
+            {cur&&actionChips(cur,curMeta)}
+            {gallery.length>1&&<div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
+              {navBtn("◀",viewIdx<=0,()=>setViewIdx(i=>Math.max(0,i-1)))}
+              <div ref={thumbsRef} style={{display:"flex",gap:8,overflowX:"auto",flex:1,padding:"4px 2px"}}>
+                {gallery.map((a,i)=><div key={a.id} data-idx={i} onClick={()=>setViewIdx(i)} title={(a.metadata||{}).prompt} style={{width:74,height:74,flexShrink:0,borderRadius:8,overflow:"hidden",cursor:"pointer",border:`2px solid ${i===viewIdx?t.acc:`${t.brd}40`}`,opacity:i===viewIdx?1:.6,transition:"opacity .15s, border-color .15s",background:t.bgDeep}}>
+                  {a.exists_status==="missing"
+                    ?<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,color:t.mut}}>missing</div>
+                    :<img src={`${API}${a.url}`} loading="lazy" alt="" style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>}
+                </div>)}
+              </div>
+              {navBtn("▶",viewIdx>=gallery.length-1,()=>setViewIdx(i=>Math.min(gallery.length-1,i+1)))}
+            </div>}
+          </>}
       </div>
     </div>
+    {/* LIGHTBOX — front-and-center full preview with arrow navigation */}
+    {lightbox&&cur&&ReactDOM.createPortal(
+      <div onClick={e=>{if(e.target===e.currentTarget)setLightbox(false);}} style={{position:"fixed",inset:0,zIndex:200,background:"rgba(0,0,0,.85)",backdropFilter:"blur(8px)",display:"flex",alignItems:"center",justifyContent:"center",gap:14,animation:"fadeIn .2s"}}>
+        <button onClick={()=>setLightbox(false)} title="Close (Esc)" style={{position:"absolute",top:16,right:18,width:36,height:36,borderRadius:18,border:`1px solid ${t.brd}55`,background:"rgba(0,0,0,.5)",color:t.text,fontSize:15,cursor:"pointer",fontFamily:font}}>✕</button>
+        {navBtn("◀",viewIdx<=0,()=>setViewIdx(i=>Math.max(0,i-1)),true)}
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10,maxWidth:"86vw",minWidth:0}}>
+          {cur.exists_status==="missing"
+            ?<div style={{padding:60,fontSize:13,color:t.mut}}>file missing on disk</div>
+            :<img src={`${API}${cur.url}`} alt={cur.filename} style={{maxWidth:"86vw",maxHeight:"78vh",objectFit:"contain",borderRadius:10,boxShadow:"0 8px 48px #000a"}}/>}
+          <div style={{fontSize:11,color:t.dim,maxWidth:"80vw",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={curMeta.prompt}>{cur.filename} · {metaLine(curMeta)} · {viewIdx+1}/{gallery.length}</div>
+          {actionChips(cur,curMeta)}
+        </div>
+        {navBtn("▶",viewIdx>=gallery.length-1,()=>setViewIdx(i=>Math.min(gallery.length-1,i+1)),true)}
+      </div>,
+      document.body
+    )}
   </div>;
 }
 
@@ -3233,6 +3392,19 @@ function HyprChat(){
   const [searxngUrl,setSearxngUrl]=useState("");
   const [n8nUrl,setN8nUrl]=useState("");
   const [comfyuiUrl,setComfyuiUrl]=useState("");
+  // Chat image generation defaults (Settings → Model & Generation).
+  // Init from localStorage like sibling settings so the mount-time persist
+  // effect doesn't clobber the stored value with "" before server hydration.
+  const lsGet=(k,fb)=>{try{return localStorage.getItem(k)??fb;}catch{return fb;}};
+  const [imgChatCkpt,setImgChatCkpt]=useState(()=>lsGet("hc-img-chat-ckpt",""));
+  const [imgChatRes,setImgChatRes]=useState(()=>lsGet("hc-img-chat-res","1024x1024")||"1024x1024");
+  const [imgChatVae,setImgChatVae]=useState(()=>lsGet("hc-img-chat-vae",""));
+  const [imgChatPrefix,setImgChatPrefix]=useState("");
+  const [imgChatNeg,setImgChatNeg]=useState("");
+  const [imgChatComposeModel,setImgChatComposeModel]=useState(()=>lsGet("hc-img-chat-compose",""));
+  const [imgChatLists,setImgChatLists]=useState(null); // {checkpoints,vaes,settings} lazy-fetched for the dropdowns
+  const [mdlPrefix,setMdlPrefix]=useState(""); // per-model prompt prefix being edited for imgChatCkpt
+  const [mdlNeg,setMdlNeg]=useState("");
   const [sttUrl,setSttUrl]=useState("");
   const [ttsUrl,setTtsUrl]=useState("");
   const [ttsVoice,setTtsVoice]=useState("");
@@ -3389,6 +3561,23 @@ function HyprChat(){
   useEffect(()=>{persistServerSetting("hc-aider-model","aider_model",aiderModel);},[aiderModel]);
   useEffect(()=>{persistServerSetting("hc-aider-auto-test","aider_auto_test",aiderAutoTest,String(aiderAutoTest));},[aiderAutoTest]);
   useEffect(()=>{persistServerSetting("hc-quick-search-mode","quick_search_mode",quickSearchMode);},[quickSearchMode]);
+  useEffect(()=>{persistServerSetting("hc-img-chat-ckpt","image_chat_checkpoint",imgChatCkpt);},[imgChatCkpt]);
+  useEffect(()=>{persistServerSetting("hc-img-chat-res","image_chat_resolution",imgChatRes);},[imgChatRes]);
+  useEffect(()=>{persistServerSetting("hc-img-chat-vae","image_chat_vae",imgChatVae);},[imgChatVae]);
+  useEffect(()=>{persistServerSetting("hc-img-chat-compose","image_chat_compose_model",imgChatComposeModel);},[imgChatComposeModel]);
+  // Per-model prompt fields track the selected default image model
+  useEffect(()=>{
+    const s=(imgChatCkpt&&imgChatLists?.settings?.[imgChatCkpt])||{};
+    setMdlPrefix(s.prompt_prefix||"");
+    setMdlNeg(s.negative_prefix||"");
+  },[imgChatCkpt,imgChatLists]);
+  const saveModelPrefix=()=>{
+    if(!imgChatCkpt)return;
+    fetch(`${API}/api/images/model-settings/${encodeURIComponent(imgChatCkpt)}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({prompt_prefix:mdlPrefix,negative_prefix:mdlNeg})})
+      .then(r=>r.ok?r.json():Promise.reject(new Error("save failed")))
+      .then(d=>{setImgChatLists(p=>p?{...p,settings:{...p.settings,[imgChatCkpt]:d.settings}}:p);flashSettingsPulse("Saved");})
+      .catch(()=>flashSettingsPulse("Failed","error"));
+  };
   useEffect(()=>{try{localStorage.setItem("hc-model-params",JSON.stringify(modelParams));}catch{}if(modelParamsSeenRef.current)flashSettingsPulse("Saved locally","success");else modelParamsSeenRef.current=true;},[modelParams]);
   useEffect(()=>{try{localStorage.setItem("hc-prompts",JSON.stringify(prompts));}catch{}},[prompts]);
   useEffect(()=>{try{localStorage.setItem("hc-conv-tags",JSON.stringify(convTags));}catch{}},[convTags]);
@@ -3432,6 +3621,13 @@ function HyprChat(){
   const [artifactFocusId,setArtifactFocusId]=useState(null);
   const previousPanelRef=useRef("chat");
   const [settingsTab,setSettingsTab]=useState("connections");
+  // Lazy-load the checkpoint/VAE dropdown data the first time the Model &
+  // Generation tab is opened with ComfyUI configured. (Must stay below the
+  // panel/settingsTab declarations — hooks read them at render time.)
+  useEffect(()=>{
+    if(panel!=="settings"||settingsTab!=="generation"||!comfyuiUrl||imgChatLists)return;
+    fetch(`${API}/api/images/checkpoints`).then(r=>r.ok?r.json():null).then(d=>{if(d)setImgChatLists(d);}).catch(()=>{});
+  },[panel,settingsTab,comfyuiUrl,imgChatLists]);
   const [users,setUsers]=useState([]);
   const [currentUser,setCurrentUser]=useState(null);
   const [currentUserId,setCurrentUserId]=useState(()=>hcStoredUserId());
@@ -3728,6 +3924,7 @@ function HyprChat(){
       params.persona={
         description:p.description??params.description??"",
         personality:p.personality??params.personality??"",
+        appearance:p.appearance??params.appearance??"",
         scenario:p.scenario??params.scenario??"",
         first_message:p.first_message??params.first_message??"",
         example_dialogue:p.example_dialogue??params.example_dialogue??"",
@@ -4151,6 +4348,12 @@ function HyprChat(){
       if(d.aider_model!=null)hydrateServerSetting("aider_model",setAiderModel,d.aider_model,aiderModel);
       if(d.aider_auto_test!=null)hydrateServerSetting("aider_auto_test",setAiderAutoTest,d.aider_auto_test,aiderAutoTest);
       if(d.quick_search_mode)hydrateServerSetting("quick_search_mode",setQuickSearchMode,d.quick_search_mode,quickSearchMode);
+      if(d.image_chat_checkpoint!=null)hydrateServerSetting("image_chat_checkpoint",setImgChatCkpt,d.image_chat_checkpoint,imgChatCkpt);
+      if(d.image_chat_resolution)hydrateServerSetting("image_chat_resolution",setImgChatRes,d.image_chat_resolution,imgChatRes);
+      if(d.image_chat_vae!=null)hydrateServerSetting("image_chat_vae",setImgChatVae,d.image_chat_vae,imgChatVae);
+      if(d.image_chat_prompt_prefix!=null)setImgChatPrefix(d.image_chat_prompt_prefix);
+      if(d.image_chat_negative!=null)setImgChatNeg(d.image_chat_negative);
+      if(d.image_chat_compose_model!=null)hydrateServerSetting("image_chat_compose_model",setImgChatComposeModel,d.image_chat_compose_model,imgChatComposeModel);
       settingsLoadedRef.current=true;
     }).catch(()=>{settingsLoadedRef.current=true;});
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
@@ -5809,11 +6012,12 @@ function HyprChat(){
     if(["firstmessage","firstmes","firstmesg","greeting","initialmessage","openingmessage"].includes(k))return "first_message";
     if(["exampledialogue","exampledialogues","examplemessages","mesexample","sampledialogue","dialogueexample"].includes(k))return "example_dialogue";
     if(["systemprompt","posthistoryinstructions","posthistoryinstruction","advancedprompt","jailbreak"].includes(k))return "advanced_prompt";
-    if(["details","character","char","appearance","looks","clothing","outfit","age","gender","height","occupation","species","race","likes","dislikes","relationship","relationships","backstory","background","history","lore","worldnotes","worldscenario","creatornotes","notes","forkcleanup","rules","instructions"].includes(k))return "lore";
+    if(["appearance","looks","body","physicalappearance","physicaldescription"].includes(k))return "appearance";
+    if(["details","character","char","clothing","outfit","age","gender","height","occupation","species","race","likes","dislikes","relationship","relationships","backstory","background","history","lore","worldnotes","worldscenario","creatornotes","notes","forkcleanup","rules","instructions"].includes(k))return "lore";
     return null;
   };
   const splitChubDefinition=(text)=>{
-    const out={description:"",personality:"",scenario:"",first_message:"",example_dialogue:"",lore:"",advanced_prompt:"",structured:false};
+    const out={description:"",personality:"",appearance:"",scenario:"",first_message:"",example_dialogue:"",lore:"",advanced_prompt:"",structured:false};
     const add=(key,value)=>{
       const v=cleanCardText(value);
       if(!v)return;
@@ -5887,6 +6091,7 @@ function HyprChat(){
     const persona={
       description:importedCardDescription(rawDescription||d.creatorcomment||d.creator_comment||"",name),
       personality,
+      appearance:joinCardParts(d.appearance,d.looks,split.appearance),
       scenario,
       first_message:firstMessage,
       example_dialogue:examples,
@@ -7771,7 +7976,7 @@ function HyprChat(){
           try{const r=await fetch(`${API}/api/model-configs/${mc.id}/avatar`,{method:"POST",body:fd});const d=await r.json();const parameters={...normalizeProfileParams(mc),avatar:d.avatar_url};setMcs(p=>p.map(x=>x.id===mc.id?{...x,parameters}:x));}
           catch{const url=URL.createObjectURL(f);const parameters={...normalizeProfileParams(mc),avatar:url};setMcs(p=>p.map(x=>x.id===mc.id?{...x,parameters}:x));}
         }}/>}
-      </label>;};const createAgent=async()=>{const mc={name:"New Agent",base_model:models[0]||"",system_prompt:"You are a focused assistant for specialized work. Use your available tools when they help complete the task.",tool_ids:[],kb_ids:[],parameters:{profile_type:"agent",description:"Custom agent for coding, research, automation, or specialized work."}};try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});const d=await r.json();const norm={...d,parameters:normalizeProfileParams(d)};setMcs(p=>[norm,...p]);setProfileTab("agents");setEditMc(norm.id);}catch{const id=`mc-${Date.now()}`;setMcs(p=>[{id,...mc},...p]);setProfileTab("agents");setEditMc(id);}};const createPersona=async()=>{const persona={description:"",personality:"",scenario:"",first_message:"",example_dialogue:"",lore:"",tags:[],rating:"PG-13",thinking_mode:"auto",advanced_prompt:""};const mc={name:"New Persona",base_model:models[0]||"",system_prompt:buildPersonaPrompt({name:"New Persona",...persona}),tool_ids:[],kb_ids:[],parameters:{profile_type:"persona",persona,description:""}};try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});const d=await r.json();const norm={...d,parameters:normalizeProfileParams(d)};setMcs(p=>[norm,...p]);setProfileTab("personas");setEditMc(norm.id);}catch{const id=`mc-${Date.now()}`;setMcs(p=>[{id,...mc},...p]);setProfileTab("personas");setEditMc(id);}};const deleteProfile=(mc)=>{fetch(`${API}/api/model-configs/${mc.id}`,{method:"DELETE"}).catch(()=>{});setMcs(p=>p.filter(x=>x.id!==mc.id));if(editMc===mc.id)setEditMc(null);};const renderAgent=(mc)=>{const isE=editMc===mc.id;const params=normalizeProfileParams(mc);const tools=mc.tool_ids||[];const kbIds=mc.kb_ids||[];const hasCoding=tools.includes("codeagent")||isCoderPersonaName(mc.name);const hasResearch=tools.some(x=>x.includes("research"));return <div key={mc.id} style={{...cardS,borderColor:isE?`${t.acc}55`:`${t.brd}44`}}>
+      </label>;};const createAgent=async()=>{const mc={name:"New Agent",base_model:models[0]||"",system_prompt:"You are a focused assistant for specialized work. Use your available tools when they help complete the task.",tool_ids:[],kb_ids:[],parameters:{profile_type:"agent",description:"Custom agent for coding, research, automation, or specialized work."}};try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});const d=await r.json();const norm={...d,parameters:normalizeProfileParams(d)};setMcs(p=>[norm,...p]);setProfileTab("agents");setEditMc(norm.id);}catch{const id=`mc-${Date.now()}`;setMcs(p=>[{id,...mc},...p]);setProfileTab("agents");setEditMc(id);}};const createPersona=async()=>{const persona={description:"",personality:"",appearance:"",scenario:"",first_message:"",example_dialogue:"",lore:"",tags:[],rating:"PG-13",thinking_mode:"auto",advanced_prompt:""};const mc={name:"New Persona",base_model:models[0]||"",system_prompt:buildPersonaPrompt({name:"New Persona",...persona}),tool_ids:[],kb_ids:[],parameters:{profile_type:"persona",persona,description:""}};try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});const d=await r.json();const norm={...d,parameters:normalizeProfileParams(d)};setMcs(p=>[norm,...p]);setProfileTab("personas");setEditMc(norm.id);}catch{const id=`mc-${Date.now()}`;setMcs(p=>[{id,...mc},...p]);setProfileTab("personas");setEditMc(id);}};const deleteProfile=(mc)=>{fetch(`${API}/api/model-configs/${mc.id}`,{method:"DELETE"}).catch(()=>{});setMcs(p=>p.filter(x=>x.id!==mc.id));if(editMc===mc.id)setEditMc(null);};const renderAgent=(mc)=>{const isE=editMc===mc.id;const params=normalizeProfileParams(mc);const tools=mc.tool_ids||[];const kbIds=mc.kb_ids||[];const hasCoding=tools.includes("codeagent")||isCoderPersonaName(mc.name);const hasResearch=tools.some(x=>x.includes("research"));return <div key={mc.id} style={{...cardS,borderColor:isE?`${t.acc}55`:`${t.brd}44`}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,marginBottom:10}}>
           <div style={{display:"flex",alignItems:"flex-start",gap:10,minWidth:0,flex:1}}>
             {avatarBox(mc,isE,t.acc,"agent")}
@@ -7880,6 +8085,7 @@ function HyprChat(){
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:10,marginBottom:12}}>
             <div><label style={labelS}>Short Description</label><textarea value={p.description||""} onChange={e=>setPersonaField(mc.id,"description",e.target.value)} rows={2} style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:58}}/></div>
             <div><label style={labelS}>Personality</label><textarea value={p.personality||""} onChange={e=>setPersonaField(mc.id,"personality",e.target.value)} rows={2} style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:58}}/></div>
+            <div><label style={labelS}>Appearance <span style={{color:t.mut,fontWeight:400}}>(used for selfies / photos of this persona)</span></label><textarea value={p.appearance||""} onChange={e=>setPersonaField(mc.id,"appearance",e.target.value)} rows={2} placeholder="Physical appearance: hair, eyes, build, style, typical outfit… The persona uses this to generate photos of itself when asked." style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:58}}/></div>
           </div>
           <div style={{marginBottom:12}}>
             <label style={labelS}>Scenario</label>
@@ -8963,6 +9169,76 @@ function HyprChat(){
           <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Workspace Analysis Model</div>
           <ModelPicker value={wsModel} onChange={setWsModel} models={models} modelDetails={modelDetails} t={t} font={font}/>
           <div style={{fontSize:10,color:t.mut,marginTop:6}}>Small, fast model for workspace topic auto-detection.</div>
+        </div>
+
+        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:6}}>
+          <div style={{fontSize:12,color:t.dim,marginBottom:4,fontWeight:600}}>🎨 Chat Image Generation (ComfyUI)</div>
+          <div style={{fontSize:10,color:t.mut,marginBottom:10}}>Defaults for the in-chat <code>generate_image</code> tool. The selected model's ★ presets from Image Studio (sampler, scheduler, CFG, steps, model type) apply automatically; the prompt prefix is prepended to whatever the chat asks for.</div>
+          {!comfyuiUrl
+            ?<div style={{fontSize:11,color:t.mut}}>ComfyUI is not configured — set its URL in Settings → Connections first.</div>
+            :(()=>{
+              const sel={background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"7px 9px",borderRadius:7,fontFamily:font,fontSize:12,outline:"none"};
+              const inp={...sel,width:"100%",boxSizing:"border-box"};
+              const cks=imgChatLists?.checkpoints||[];
+              const vaeList=imgChatLists?.vaes||[];
+              const hasPreset=!!(imgChatLists?.settings?.[imgChatCkpt]?.user_override);
+              return <>
+                <div style={{display:"flex",gap:14,flexWrap:"wrap",alignItems:"flex-end",marginBottom:10}}>
+                  <label style={{fontSize:10,color:t.mut}}>Image model{hasPreset&&<span title="Has saved Image Studio defaults" style={{color:t.acc}}> ★</span>}<br/>
+                    <select value={imgChatCkpt} onChange={e=>setImgChatCkpt(e.target.value)} style={{...sel,maxWidth:280,marginTop:3}}>
+                      <option value="">(none — built-in SDXL template)</option>
+                      {cks.map(c=><option key={c} value={c}>{c.replace(/\.(safetensors|ckpt)$/i,"")}</option>)}
+                      {imgChatCkpt&&imgChatLists&&!cks.includes(imgChatCkpt)&&<option value={imgChatCkpt}>{imgChatCkpt} (missing!)</option>}
+                    </select>
+                  </label>
+                  <label style={{fontSize:10,color:t.mut}}>Resolution<br/>
+                    <select value={imgChatRes} onChange={e=>setImgChatRes(e.target.value)} style={{...sel,marginTop:3}}>
+                      <option value="1024x1024">Square — 1024 × 1024</option>
+                      <option value="1216x832">Landscape — 1216 × 832</option>
+                      <option value="832x1216">Portrait — 832 × 1216</option>
+                    </select>
+                  </label>
+                  <label style={{fontSize:10,color:t.mut}}>VAE<br/>
+                    <select value={imgChatVae} onChange={e=>setImgChatVae(e.target.value)} style={{...sel,maxWidth:200,marginTop:3}}>
+                      <option value="">Baked (checkpoint)</option>
+                      {vaeList.map(v=><option key={v} value={v}>{v.replace(/\.(safetensors|pt|ckpt)$/i,"")}</option>)}
+                    </select>
+                  </label>
+                </div>
+                {imgChatCkpt?<>
+                  <div style={{marginBottom:8}}>
+                    <div style={{fontSize:10,color:t.mut,marginBottom:3}}>Default prompt for <span style={{color:t.acc,fontWeight:600}}>{imgChatCkpt.replace(/\.(safetensors|ckpt)$/i,"")}</span> — saved with this model, switches when you change models</div>
+                    <input value={mdlPrefix} onChange={e=>setMdlPrefix(e.target.value)} onBlur={saveModelPrefix} placeholder="e.g. score_9, score_8_up, realistic, 35mm photo — or anime style tags for anime models" style={inp}/>
+                  </div>
+                  <div>
+                    <div style={{fontSize:10,color:t.mut,marginBottom:3}}>Default negative prompt for this model</div>
+                    <input value={mdlNeg} onChange={e=>setMdlNeg(e.target.value)} onBlur={saveModelPrefix} placeholder="e.g. score_4, score_3, score_2, score_1, lowres, watermark" style={inp}/>
+                  </div>
+                </>:<>
+                  <div style={{marginBottom:8}}>
+                    <div style={{fontSize:10,color:t.mut,marginBottom:3}}>Default prompt (global fallback — used only when the selected model has no saved prompt)</div>
+                    <input value={imgChatPrefix} onChange={e=>setImgChatPrefix(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-prefix","image_chat_prompt_prefix",imgChatPrefix)} placeholder="style/quality tags prepended to every chat image" style={inp}/>
+                  </div>
+                  <div>
+                    <div style={{fontSize:10,color:t.mut,marginBottom:3}}>Default negative prompt (global fallback)</div>
+                    <input value={imgChatNeg} onChange={e=>setImgChatNeg(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-neg","image_chat_negative",imgChatNeg)} placeholder="things to avoid in every chat image" style={inp}/>
+                  </div>
+                </>}
+                <div style={{fontSize:10,color:t.mut,marginTop:6}}>Text fields save when you click away. Pony-family models get score-tag prompts automatically unless you override them here.</div>
+                <div style={{marginTop:12,paddingTop:10,borderTop:`1px solid ${t.brd}22`}}>
+                  <div style={{fontSize:10,color:t.mut,marginBottom:4,fontWeight:600}}>Photo prompt model</div>
+                  {imgChatComposeModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+                    <div style={{flex:1}}><ModelPicker value={imgChatComposeModel} onChange={setImgChatComposeModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
+                    <button onClick={()=>setImgChatComposeModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
+                  </div>:<div onClick={()=>setImgChatComposeModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer"}}>
+                    <span style={{fontSize:14}}>📷</span>
+                    <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Same as the conversation's chat model</div><div style={{fontSize:9,color:t.dim}}>Click to pick a dedicated model</div></div>
+                    <span style={{fontSize:9,color:t.mut}}>▾</span>
+                  </div>}
+                  <div style={{fontSize:10,color:t.mut,marginTop:5}}>Writes persona photo prompts and ✨ Enhance results. Empty = the chat's own model (recommended — for uncensored roleplay the chat model already matches the content rating). Pick a dedicated model only if your chat models write poor image prompts.</div>
+                </div>
+              </>;
+            })()}
         </div>
       </div>
 

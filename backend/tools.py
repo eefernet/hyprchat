@@ -1009,7 +1009,7 @@ CODEAGENT_TOOLS = {
                 "negative_prompt": {"type": "string", "description": "Optional: things to avoid in the image"},
                 "width": {"type": "integer", "description": "Image width in px (256-2048, default 1024)"},
                 "height": {"type": "integer", "description": "Image height in px (256-2048, default 1024)"},
-                "steps": {"type": "integer", "description": "Sampling steps (1-60, default 25)"},
+                "steps": {"type": "integer", "description": "Sampling steps (1-60; ignored when a default image model with saved presets is configured)"},
                 "seed": {"type": "integer", "description": "Optional seed for reproducible results"},
             }, "required": ["prompt"]},
         },
@@ -1454,6 +1454,10 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
     if not calls:
         calls = _parse_python_tool_calls(content, available_names)
 
+    # 6. Loose roleplay-model syntax: <tools> "generate_image" (prompt: ...)
+    if not calls:
+        calls = _parse_loose_tool_calls(content, available_names)
+
     return calls
 
 
@@ -1613,37 +1617,6 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
     if not args_list:
         return None
 
-    # Map positional args to known tool parameter names
-    TOOL_PARAMS = {
-        "execute_code": ["code", "language"],
-        "run_shell": ["command"],
-        "write_file": ["path", "content"],
-        "read_file": ["path"],
-        "list_files": ["path"],
-        "download_file": ["filename"],
-        "generate_image": ["prompt", "negative_prompt"],
-        "download_project": ["filenames", "project_name"],
-        "delete_file": ["path"],
-        "plan_project": ["task", "language", "constraints"],
-        "run_review": ["project_dir", "project_id"],
-        "run_acceptance_review": ["project_dir", "reviewer_run_id", "project_id"],
-        "search_files": ["pattern", "path", "file_pattern"],
-        "diff_files": ["path_a", "path_b"],
-        "git_init": ["path", "language"],
-        "git_diff": ["path"],
-        "git_commit": ["message", "path"],
-        "run_tests": ["path", "framework"],
-        "lint_code": ["path", "language"],
-        "resume_project": ["project_id"],
-        "research": ["query"],
-        "fetch_url": ["url"],
-        "generate_code": ["task", "language", "context"],
-        "start_coder_workflow": ["mode", "task", "project_id"],
-        "run_aider_fix": ["project_dir", "task", "issue_run_id"],
-        "get_coder_workflow": ["workflow_id"],
-        "cancel_coder_workflow": ["workflow_id"],
-    }
-
     param_names = TOOL_PARAMS.get(tool_name)
     if not param_names:
         # Unknown tool — use first arg as "input"
@@ -1654,6 +1627,97 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
         if idx < len(param_names):
             result[param_names[idx]] = val
     return result if result else None
+
+
+# Map positional args to known tool parameter names (used by the python-call
+# and loose-call text parsers)
+TOOL_PARAMS = {
+    "execute_code": ["code", "language"],
+    "run_shell": ["command"],
+    "write_file": ["path", "content"],
+    "read_file": ["path"],
+    "list_files": ["path"],
+    "download_file": ["filename"],
+    "generate_image": ["prompt", "negative_prompt"],
+    "download_project": ["filenames", "project_name"],
+    "delete_file": ["path"],
+    "plan_project": ["task", "language", "constraints"],
+    "run_review": ["project_dir", "project_id"],
+    "run_acceptance_review": ["project_dir", "reviewer_run_id", "project_id"],
+    "search_files": ["pattern", "path", "file_pattern"],
+    "diff_files": ["path_a", "path_b"],
+    "git_init": ["path", "language"],
+    "git_diff": ["path"],
+    "git_commit": ["message", "path"],
+    "run_tests": ["path", "framework"],
+    "lint_code": ["path", "language"],
+    "resume_project": ["project_id"],
+    "research": ["query"],
+    "fetch_url": ["url"],
+    "generate_code": ["task", "language", "context"],
+    "start_coder_workflow": ["mode", "task", "project_id"],
+    "run_aider_fix": ["project_dir", "task", "issue_run_id"],
+    "get_coder_workflow": ["workflow_id"],
+    "cancel_coder_workflow": ["workflow_id"],
+}
+
+
+def _parse_loose_args(name: str, raw: str) -> dict | None:
+    """Parse the loose `key: value` / `key=value` arg style some roleplay
+    models invent (unquoted values, prose commas). Commas split a new arg only
+    when followed by a `key:`/`key=` token, so commas inside a prompt survive."""
+    raw = raw.strip()
+    if not raw:
+        return {}
+    parts = re.split(r',\s*(?=[A-Za-z_]\w*\s*[:=])', raw)
+    args: dict = {}
+    for part in parts:
+        pm = re.match(r'\s*([A-Za-z_]\w*)\s*[:=]\s*(.+?)\s*$', part, re.DOTALL)
+        if not pm:
+            args = {}
+            break
+        args[pm.group(1)] = pm.group(2).strip().strip('"\'').strip()
+    if args:
+        return args
+    # Bare single positional: the whole body is the first known param
+    params = TOOL_PARAMS.get(name)
+    if params:
+        val = raw.strip().strip('"\'').strip()
+        if val:
+            return {params[0]: val}
+    return None
+
+
+# Loose parsing is restricted to content-safe tools: a shredded key:value
+# body fed to execute_code/run_shell would EXECUTE garbage. These tools take
+# a single descriptive string, so a slightly-mangled arg is harmless.
+_LOOSE_PARSE_SAFE_TOOLS = {"generate_image", "research", "fetch_url"}
+
+
+def _parse_loose_tool_calls(content: str, available_names: set) -> list[dict]:
+    """Last-resort parser for mangled tool-call text — e.g. the roleplay-model
+    shape `<tools> "generate_image" (prompt: selfie of ...)`: quoted name,
+    space before the paren, unquoted key: value args. Only fires when the text
+    shows tool-call INTENT (quoted/backticked name, or a <tool...> tag in the
+    content) so plain prose mentioning a tool name can't trigger it."""
+    calls = []
+    has_tag = bool(re.search(r'<tools?\b|<tool[_\-]?call', content, re.IGNORECASE))
+    for name in available_names & _LOOSE_PARSE_SAFE_TOOLS:
+        for m in re.finditer(rf'(?<![\w.])(["\'`]?){re.escape(name)}(["\'`]?)\s*\(', content):
+            quoted = bool(m.group(1) or m.group(2))
+            if not (quoted or has_tag):
+                continue
+            raw = _extract_balanced_parens(content, m.end())
+            if raw is None:
+                continue
+            # Loose key:value style first — _parse_python_args mangles it
+            # (treats "prompt: text, more text" as comma-split positionals).
+            args = _parse_loose_args(name, raw)
+            if not args:
+                args = _parse_python_args(name, raw)
+            if args:
+                calls.append({"function": {"name": name, "arguments": args}})
+    return calls
 
 
 def strip_tool_calls(content: str) -> str:
@@ -1678,6 +1742,36 @@ def strip_tool_calls(content: str) -> str:
         r'\{\s*"name"\s*:\s*"[^"]*"\s*,\s*"arguments"\s*:\s*\{.*?\}\s*\}',
         '', content, flags=re.DOTALL
     )
+    # Remove loose roleplay-style calls: "tool_name" (args...) — only when the
+    # name is quote-wrapped (NOT backtick: `tool` (...) is normal prose) or a
+    # <tool...> tag is present, so 'you can use read_file (with a path)' and
+    # backtick-quoted explanations survive.
+    has_tag = bool(re.search(r'<tools?\b|<tool[_\-]?call', content, re.IGNORECASE))
+    spans = []
+    for name in CODEAGENT_TOOLS:
+        for m in re.finditer(rf'(?<![\w.])(["\']?){re.escape(name)}(["\']?)\s*\(', content):
+            if not (m.group(1) or m.group(2) or has_tag):
+                continue
+            inner = _extract_balanced_parens(content, m.end())
+            if inner is None:
+                # Unterminated call (model truncated mid-args) — junk runs to
+                # the end of the line; keep any following lines.
+                nl = content.find("\n", m.end())
+                spans.append((m.start(), nl if nl != -1 else len(content)))
+            else:
+                spans.append((m.start(), m.end() + len(inner) + 1))
+    # Merge overlapping/nested spans BEFORE splicing — removing an inner span
+    # first would leave the outer span's indices pointing at shifted text.
+    merged: list[list[int]] = []
+    for s, e in sorted(spans):
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    for s, e in reversed(merged):
+        content = content[:s] + content[e:]
+    # Stray <tools>/<tool> wrapper tags (often unpaired)
+    content = re.sub(r'</?tools?>', '', content, flags=re.IGNORECASE)
     return content.strip()
 
 
@@ -2992,15 +3086,43 @@ async def exec_tool(
                 "tool": "generate_image", "icon": "image",
                 "status": f"Generating image: {gi_prompt[:80]}",
             })
+            # Settings-driven defaults (Settings → Model & Generation → Chat
+            # Image Generation). When a default checkpoint is configured, its
+            # saved per-model preset (sampler/scheduler/cfg/steps/model type)
+            # wins over the LLM's args; the LLM's prompt describes content and
+            # the global style prefix is prepended. Unset = legacy template.
+            gi_ckpt = (config.IMAGE_CHAT_CHECKPOINT or "").strip()
+            gi_preset = comfyui.settings_for_checkpoint(gi_ckpt) if gi_ckpt else {}
+            try:
+                _dw, _dh = (int(x) for x in (config.IMAGE_CHAT_RESOLUTION or "1024x1024").split("x"))
+            except ValueError:
+                _dw, _dh = 1024, 1024
+            gi_width = args.get("width") or _dw
+            gi_height = args.get("height") or _dh
+            gi_steps = gi_preset.get("steps") or args.get("steps") or 25
+            # Per-model prompt prefix/negative (saved with the checkpoint's ★
+            # preset) wins; the global Settings value is only a fallback.
+            gi_prefix = (gi_preset.get("prompt_prefix") or config.IMAGE_CHAT_PROMPT_PREFIX or "").strip()
+            gi_full_prompt = f"{gi_prefix}, {gi_prompt}" if gi_prefix else gi_prompt
+            gi_negative = ", ".join(p for p in (
+                (gi_preset.get("negative_prefix") or config.IMAGE_CHAT_NEGATIVE or "").strip(),
+                (args.get("negative_prompt") or "").strip(),
+            ) if p)
             try:
                 workflow, gi_seed = comfyui.build_workflow(
                     comfyui.load_template(),
-                    prompt=gi_prompt,
-                    negative_prompt=(args.get("negative_prompt") or ""),
-                    width=args.get("width") or 1024,
-                    height=args.get("height") or 1024,
-                    steps=args.get("steps") or 25,
+                    prompt=gi_full_prompt,
+                    negative_prompt=gi_negative,
+                    width=gi_width,
+                    height=gi_height,
+                    steps=gi_steps,
+                    cfg=gi_preset.get("cfg") or 7.0,
                     seed=args.get("seed"),
+                    checkpoint=gi_ckpt,
+                    sampler_name=gi_preset.get("sampler") or "",
+                    scheduler=gi_preset.get("scheduler") or "",
+                    model_sampling=gi_preset.get("model_sampling") or "",
+                    vae=(config.IMAGE_CHAT_VAE or "").strip(),
                 )
                 prompt_id = await comfyui.submit(workflow)
             except Exception as e:
@@ -3020,6 +3142,7 @@ async def exec_tool(
                     break
                 if history and history.get("status", {}).get("status_str") == "error":
                     await events.emit(conv_id, "tool_error", {"tool": "generate_image", "icon": "image", "status": "ComfyUI reported a workflow error"})
+                    comfyui.finish_job(prompt_id)
                     return "ERROR: ComfyUI failed to execute the workflow (check checkpoint name and VRAM)."
                 history = None
                 if time.time() - _last_progress >= 6:
@@ -3033,11 +3156,13 @@ async def exec_tool(
                     })
             if not history:
                 await comfyui.cancel(prompt_id)
+                comfyui.finish_job(prompt_id)
                 await events.emit(conv_id, "tool_error", {"tool": "generate_image", "icon": "image", "status": "Timed out after 300s"})
                 return "ERROR: Image generation timed out after 300 seconds."
             images = comfyui.outputs_from_history(history)
             if not images:
                 await events.emit(conv_id, "tool_error", {"tool": "generate_image", "icon": "image", "status": "No image produced"})
+                comfyui.finish_job(prompt_id)
                 return "ERROR: ComfyUI finished but produced no output images."
             os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
             md_lines = []
@@ -3071,12 +3196,18 @@ async def exec_tool(
                         status="draft",
                         metadata={
                             "source_tool": "generate_image",
-                            "prompt": gi_prompt[:500],
-                            "negative_prompt": (args.get("negative_prompt") or "")[:300],
+                            "prompt": gi_full_prompt[:500],
+                            "negative_prompt": gi_negative[:300],
                             "seed": gi_seed,
-                            "steps": args.get("steps") or 25,
-                            "width": args.get("width") or 1024,
-                            "height": args.get("height") or 1024,
+                            "steps": gi_steps,
+                            "cfg": gi_preset.get("cfg") or 7.0,
+                            "width": gi_width,
+                            "height": gi_height,
+                            "checkpoint": gi_ckpt,
+                            "sampler": gi_preset.get("sampler") or "",
+                            "scheduler": gi_preset.get("scheduler") or "",
+                            "model_sampling": gi_preset.get("model_sampling") or "",
+                            "vae": (config.IMAGE_CHAT_VAE or "").strip(),
                             "size_bytes": file_meta["size_bytes"],
                             "sha256": file_meta["sha256"],
                         },
@@ -3094,6 +3225,7 @@ async def exec_tool(
                 md_lines.append(f"**[Download {filename}]({download_url})**")
             if not md_lines:
                 await events.emit(conv_id, "tool_error", {"tool": "generate_image", "icon": "image", "status": "Image fetch failed"})
+                comfyui.finish_job(prompt_id)
                 return "ERROR: Generated image could not be fetched from ComfyUI."
             await events.emit(conv_id, "tool_end", {
                 "tool": "generate_image", "icon": "image",
@@ -3101,8 +3233,11 @@ async def exec_tool(
             })
             # Hand GPU 1 back to Ollama between generations
             await comfyui.free_memory()
-            md_lines.append(f"Seed: `{gi_seed}` · steps {args.get('steps') or 25} · "
-                            f"{args.get('width') or 1024}×{args.get('height') or 1024} "
+            # HyprChat downloaded the images above — erase ComfyUI's traces
+            # (history entry + file copies when the cleanup node is installed)
+            await comfyui.forget_job(prompt_id)
+            md_lines.append(f"Seed: `{gi_seed}` · steps {gi_steps} · "
+                            f"{gi_width}×{gi_height} "
                             f"(reuse the seed for reproducible variations)")
             return "\n\n".join(md_lines)
 
