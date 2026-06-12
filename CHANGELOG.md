@@ -1,72 +1,45 @@
+# Alpha v17.2.1 - June 14, 2026
+> This update focuses on the first series to migrate a single file react **no build step** app into a built app versus having all built at runtime on the users browser. Load times should be faster and it should be easier to maintain the code base in the future.
+
+## Vite Migration
+- **The frontend now has a build step.** Source moved to `frontend/src/main.jsx` (same single component file); `frontend/dist/` is Vite build output and is **no longer committed** — fresh clones must run `cd frontend && npm install && npm run build` before the backend can serve the UI.
+- **No more in-browser Babel** — JSX is pre-compiled, so pages load faster and a bad edit fails loudly at `npm run build` instead of white-screening the app.
+- Third-party libs (React, Prism, KaTeX, Mermaid, Chart.js, html2pdf, svg-pan-zoom) are npm-bundled locally — no runtime CDN. Mermaid/Chart/html2pdf lazy-load on demand.
+- **Deploy-safe caching:** hashed `assets/` are served immutable (1-year cache); `index.html` is always `no-cache`, so a deploy can never leave browsers requesting deleted chunks.
+- **Atomic frontend deploys:** `deploy_monitor.py` watches `frontend/src/**`, builds, uploads to a staging dir, and swaps it in — a failed upload no longer leaves the server with no frontend. The server stays Node-free.
+- Backend prints clear startup instructions if `frontend/dist/` is missing instead of serving nothing silently.
+
+## Ollama 0.30 Compatibility
+- **Leaked-reasoning guard:** some models (e.g. gemma4 on Ollama 0.30.x) emit chain-of-thought as plain content after tool rounds; the chat stream now detects this and routes it to the thinking pane instead of the reply.
+- The same strip (`strip_leaked_cot`) protects non-streamed agent calls, council member responses, and research synthesis, so leaked CoT never enters debate context, votes, or the database.
+
+## Artifact Delivery & Versioning
+- **Auto-redelivery:** a feature-addition turn on an already-delivered project repackages it automatically and posts a fresh download pill (skipped if the reviewer flagged issues).
+- **Per-version downloads:** new `/api/artifacts/{id}/download` endpoint serves each artifact's exact bytes — old pills always download what they originally packaged.
+- **`latest` / `⚠ stale` badges** on artifacts and version lists when the project changed after packaging, with per-version download links.
+
+## UI Updates
+- **Cleaner chat list:** icon-based pin/tag/delete actions that appear on hover, row hover highlight, tighter spacing, and proper title truncation.
+- Artifact cards: Add to KB always available, version rows show status badges inline.
+
+## Bug fixes
+- **Phantom-completion guard:** a coder persona claiming it built something while calling zero tools is re-prompted to actually do the work (or admit it didn't) — users are never handed a false success.
+- Council sends no longer fire a duplicate quick-search request; one SearXNG fetch feeds both the members and the results carousel.
+- Connector URL safety checks (`assert_url_allowed`) are now async with DNS resolution off the event loop.
+
+## Cleanup
+- Removed the deprecated Quick Search LLM triage path and its tests (deterministic planner is the only path).
+- Removed dead code across `database.py`, `cancel_registry.py`, `acceptance.py`, and `connectors.py`.
+- `create-lxc.sh` and `deploy.sh` updated for the built-`dist/` layout.
+
 # Alpha v17.2.0 — June 12, 2026
 
 > This update focuses on existing system hardening and and improving existing features.
-
-## Frontend Build System (Vite migration)
-- **The frontend now has a build step.** Source moved to `frontend/src/main.jsx` (same single component file); `frontend/dist/` is Vite build output and is **no longer committed** — fresh clones must run `cd frontend && npm install && npm run build` before the backend can serve the UI.
-- Third-party libs (React, Prism, KaTeX, Mermaid, Chart.js, html2pdf, svg-pan-zoom) are npm-bundled locally — no runtime CDN. Mermaid/Chart/html2pdf lazy-load on demand.
-- Deploys ship the whole `dist/` (hashed assets change every build). `deploy_monitor.py` watches `frontend/src/**` and builds + ships automatically. The server stays Node-free.
 
 ## Cloud Model Support (optional)
 - Added API key entry for openAI
 - Added API key entry for Anthropic
 - Cloud models can be used for regular chat, research and agents.
-
-## Deep Research & SearXNG
-- **SSRF-safe page fetchers** with 2 MB body cap and per-hop DNS checks
-- **Redirect URLs tracked** for proper attribution (no more "S?" sources)
-- **Research tokens via SSE only** (no DB writes per chunk)
-- **Cancel can't be resurrected** — pre-cancelled rows honored at start
-- **Embeddings batched** (64-text per Ollama request)
-- **ChromaDB off event loop** — large upserts don't freeze the server
-- **Parallel seed/GitHub fetches** with cancellable loop
-- **Context window setting** (`research_num_ctx`, default 40960) prevents prompt truncation
-- **SearXNG failures logged**, Google fallback capped at 8/report
-- **RAG reindex fixed** — chunk size clamped, upserts batched ≤5000 records
-- **SearXNG hourly rotation** (was 10-min) — engines no longer suspended
-
-## Core System
-- **Event logs append-only** — O(n²) write amplification eliminated
-- **Startup reaper** covers both runs and research reports
-- **Memory suggestions run post-turn** in background (no more 90s delays)
-- **Cloud models safe for judgment agents** — JSON output enforced
-- **Mid-stream failures persist partial messages** with "interrupted" note
-- **Council debates can't wedge** — done-sentinel always fires
-- **RAG reindex clears orphan chunks**
-- **Settings PATCH clamps junk values**
-- **Frontend:** bounded message metadata, memoized markdown rendering
-
-## Daedalus (Coder Bot v2)
-
-### Architecture & Workflow
-- **SEARCH/REPLACE diffs** instead of whole-file regeneration; `### REWRITE:` escape for full rewrites. Fixes data-loss from truncated prompts.
-- **Git commits after every build/fix cycle** — `git log --oneline` is now the authoritative attempt history for easy reverts
-- **Real FSM workflow state** with single transition function (`PLAN_DONE`, `BUILD_OK`, `REVIEW_CLEAN/ISSUES`, `FIX_APPLIED`, `ACCEPT_OK/ISSUES`)
-- **Auto-verification** after `generate_code`, `run_fixer`, and `run_aider_fix` — Reviewer runs automatically, removing LLM routing rounds
-- **Schema-constrained Architect output** (`format=json`) eliminates most plan parse-retry rounds
-- **Fixer can delete files** (`# DELETE:` sections) — fixes infinite loops on runtime/state files that should be removed
-- **Reviewer smoke phase cleans up** its own artifacts — verification doesn't pollute the tree it grades
-
-### Cancellation & Control
-- **Stop frees GPU immediately** — agent LLM calls now stream internally instead of non-streaming, aborting Ollama on cancel
-- **Workers self-cancel on disconnect** — OpenHands/Aider SSE consumer vanishes triggers worker cancellation
-- **4096 token cap** on structured-output agents (plan/review/acceptance JSON, QA answers)
-- **Acceptance progress ticker** — "analyzing… Ns elapsed" during model calls
-- **Fix-budget feedback** — "Fix-cycle budget: N/3 used" in every fixer/Aider result
-- **Reviewer smokes real CLI** — reads `[project.scripts]` and runs `<script> --help` for pyproject projects
-
-### Agentic Improvements
-- **Fix attempts have memory** — Fixer/Aider see compact history of prior changes ("touched app.py — renamed handler")
-- **Cloud models opt-in** for Architect/Reviewer/Acceptance via Settings → Coder Bot (never silently inherited)
-- **Fix-cycle caps per request** (3 reviewer-driven, 2 acceptance-driven), reset by new user message
-- **Uploaded-project indexer** prioritizes entrypoints/larger source files (was 100 smallest), cancellable via Stop
-- **Context window respected** — Architect uses configured `research_num_ctx` instead of hardcoded 16384
-- **Duplicate-BLOCKED detection** keys on blocking trigger, not tool name
-- **Frontend polling** stops on terminal states (`cancelled`, `skipped`, `blocked`)
-
----
-
-**Migration:** Run `POST /api/seed/coder-bot-v2` after deploy for updated persona prompts.
 
 ## Deep Research & SearXNG
 - **SSRF-safe page fetchers** with 2 MB body cap and per-hop DNS checks
