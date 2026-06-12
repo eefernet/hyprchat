@@ -1412,6 +1412,22 @@ async def init_db():
             # Rebuild index from existing messages
             await db.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
             print("[DB MIGRATION] Created FTS5 search index for messages")
+        # FTS5 keyword index for KB chunks (hybrid RAG). Standalone table —
+        # rag.py writes rows explicitly alongside ChromaDB, no triggers.
+        try:
+            await db.execute("SELECT * FROM kb_chunks_fts LIMIT 1")
+        except Exception:
+            await db.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS kb_chunks_fts USING fts5(
+                    text,
+                    filename,
+                    kb_id UNINDEXED,
+                    chunk_id UNINDEXED,
+                    chunk_index UNINDEXED,
+                    tokenize='porter unicode61'
+                )
+            """)
+            print("[DB MIGRATION] Created FTS5 keyword index for KB chunks")
         # The legacy Deep Researcher agent duplicates the first-class Deep
         # Research workspace and the Agent Research tool. Remove only the fixed
         # preset row; user-created research agents use their own IDs.
@@ -4376,6 +4392,116 @@ async def search_messages(query: str, limit: int = 20):
         return [dict(r) for r in await cursor.fetchall()]
     except Exception as e:
         print(f"[SEARCH] Error: {e}")
+        return []
+    finally:
+        await db.close()
+
+
+# ============================================================
+# KB CHUNK KEYWORD INDEX (hybrid RAG — kb_chunks_fts)
+# ============================================================
+# No user scoping here: callers pass kb_ids already scoped by the persona /
+# route layer, same trust level as rag.query() over ChromaDB collections.
+
+def _fts_match_expr(query: str, max_terms: int = 12) -> str:
+    """Build a safe FTS5 MATCH expression from free-form text.
+
+    RAG queries are full sentences; raw MATCH treats them as implicit AND and
+    throws syntax errors on '?', quotes, hyphens, etc. Emit quoted OR-terms so
+    any token match ranks (bm25 still orders by how many/which terms hit).
+    """
+    tokens = re.findall(r"[A-Za-z0-9_]+", query)
+    # Drop single-char noise tokens but keep short alphanumerics (part numbers).
+    tokens = [t for t in tokens if len(t) > 1][:max_terms]
+    if not tokens:
+        return ""
+    return " OR ".join(f'"{t}"' for t in tokens)
+
+
+async def kb_fts_replace_file(kb_id: str, filename: str, chunks: list[dict]):
+    """Replace all FTS rows for one file. chunks: [{chunk_id, text, chunk_index}]."""
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM kb_chunks_fts WHERE kb_id=? AND filename=?", (kb_id, filename))
+        await db.executemany(
+            "INSERT INTO kb_chunks_fts (text, filename, kb_id, chunk_id, chunk_index) VALUES (?, ?, ?, ?, ?)",
+            [(c["text"], filename, kb_id, c["chunk_id"], c["chunk_index"]) for c in chunks]
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def kb_fts_remove_file(kb_id: str, filename: str):
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM kb_chunks_fts WHERE kb_id=? AND filename=?", (kb_id, filename))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def kb_fts_delete_kb(kb_id: str):
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM kb_chunks_fts WHERE kb_id=?", (kb_id,))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def list_all_kb_ids() -> list[str]:
+    """All KB ids across users — startup FTS backfill only (cross-user raw SQL,
+    same posture as reap_stale_runs)."""
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT id FROM knowledge_bases")
+        return [r["id"] for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+
+async def kb_fts_count(kb_id: str) -> int:
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT COUNT(*) AS n FROM kb_chunks_fts WHERE kb_id=?", (kb_id,))
+        row = await cursor.fetchone()
+        return row["n"] if row else 0
+    finally:
+        await db.close()
+
+
+async def kb_fts_search(kb_ids: list[str], query: str, limit: int = 18) -> list[dict]:
+    """BM25 keyword search over KB chunks. Returns best-first."""
+    if not kb_ids:
+        return []
+    match = _fts_match_expr(query)
+    if not match:
+        return []
+    db = await get_db()
+    try:
+        placeholders = ",".join("?" * len(kb_ids))
+        cursor = await db.execute(
+            f"""SELECT text, filename, kb_id, chunk_id, chunk_index, rank
+                FROM kb_chunks_fts
+                WHERE kb_chunks_fts MATCH ? AND kb_id IN ({placeholders})
+                ORDER BY rank LIMIT ?""",
+            (match, *kb_ids, limit)
+        )
+        out = []
+        for r in await cursor.fetchall():
+            d = dict(r)
+            out.append({
+                "text": d["text"],
+                "filename": d["filename"],
+                "kb_id": d["kb_id"],
+                "chunk_id": d["chunk_id"],
+                "chunk_index": int(d["chunk_index"] or 0),
+                "bm25": -float(d["rank"] or 0),  # fts5 rank is negative-better
+            })
+        return out
+    except Exception as e:
+        print(f"[KB FTS] Search error: {e}")
         return []
     finally:
         await db.close()

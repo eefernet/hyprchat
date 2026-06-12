@@ -421,6 +421,8 @@ const IC={
   Refresh:()=>sv(<><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></>,14),
   Paperclip:()=>sv(<><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></>,14),
   Image:()=>sv(<><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></>),
+  Mic:()=>sv(<><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></>,14),
+  Volume:()=>sv(<><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></>,14),
   Layers:()=>sv(<><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></>),
   ToggleOn:()=>sv(<><rect x="1" y="5" width="22" height="14" rx="7" ry="7"/><circle cx="16" cy="12" r="3"/></>),
   ToggleOff:()=>sv(<><rect x="1" y="5" width="22" height="14" rx="7" ry="7"/><circle cx="8" cy="12" r="3"/></>),
@@ -979,6 +981,165 @@ function ArtifactPreviewBlock({preview,t,font}){
   </div>;
   if(type==="html")return <iframe sandbox="" srcDoc={preview.content||""} title={preview.filename} style={{width:"100%",height:520,border:`1px solid ${t.brd}22`,borderRadius:8,background:"#fff"}}/>;
   return <pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:11,color:t.dim,fontFamily:font,lineHeight:1.55}}>{preview.content||preview.message||"No preview available."}</pre>;
+}
+
+function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
+  const [prompt,setPrompt]=useState("");
+  const [negPrompt,setNegPrompt]=useState("");
+  const [size,setSize]=useState("1024x1024");
+  const [customW,setCustomW]=useState(1024);
+  const [customH,setCustomH]=useState(1024);
+  const [steps,setSteps]=useState(25);
+  const [cfg,setCfg]=useState(7);
+  const [seed,setSeed]=useState("");
+  const [count,setCount]=useState(1);
+  const [sampler,setSampler]=useState("euler");
+  const [scheduler,setScheduler]=useState("normal");
+  const [vPred,setVPred]=useState(false);
+  const [checkpoints,setCheckpoints]=useState([]);
+  const [checkpoint,setCheckpoint]=useState("");
+  const [job,setJob]=useState(null); // {id, started, status, queuePos}
+  const [results,setResults]=useState([]);
+  const [error,setError]=useState("");
+  const pollRef=useRef(null);
+  const stopPoll=()=>{if(pollRef.current){clearInterval(pollRef.current);pollRef.current=null;}};
+  useEffect(()=>{
+    if(!configured)return;
+    fetch(`${API}/api/images/checkpoints`).then(r=>r.ok?r.json():{checkpoints:[]}).then(d=>{setCheckpoints(d.checkpoints||[]);setCheckpoint(c=>c||d.default||"");}).catch(()=>{});
+    return stopPoll;
+  },[configured]);
+  const dims=()=>{
+    if(size==="custom")return[parseInt(customW)||1024,parseInt(customH)||1024];
+    const [w,h]=size.split("x").map(Number);return[w,h];
+  };
+  const generate=async()=>{
+    if(!prompt.trim()||job)return;
+    setError("");
+    const [w,h]=dims();
+    const body={prompt:prompt.trim(),negative_prompt:negPrompt.trim(),width:w,height:h,steps:Number(steps)||25,cfg:Number(cfg)||7,count:Number(count)||1,checkpoint,sampler,scheduler,v_prediction:vPred};
+    if(seed!=="")body.seed=parseInt(seed)||0;
+    let d;
+    try{
+      const r=await fetch(`${API}/api/images/generate`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      d=await r.json();
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+    }catch(e){setError(String(e.message||e));return;}
+    const jid=d.job_id;
+    setJob({id:jid,started:Date.now(),status:"queued",params:d.params});
+    pollRef.current=setInterval(async()=>{
+      try{
+        const r=await fetch(`${API}/api/images/jobs/${jid}`);
+        const s=await r.json();
+        if(!r.ok)throw new Error(s.detail||`HTTP ${r.status}`);
+        if(s.status==="done"){
+          stopPoll();
+          setResults(prev=>[...(s.images||[]).map(img=>({...img,params:d.params})),...prev]);
+          setJob(null);
+          notify&&notify({type:"success",text:`Image ready (seed ${d.params?.seed})`,duration:2500});
+        }else if(s.status==="error"){
+          stopPoll();setJob(null);setError(s.error||"Generation failed");
+        }else{
+          setJob(p=>p?{...p,status:s.status,queuePos:s.queue_position}:p);
+        }
+      }catch(e){stopPoll();setJob(null);setError(String(e.message||e));}
+    },1000);
+  };
+  const cancelJob=async()=>{
+    if(!job)return;
+    stopPoll();
+    try{await fetch(`${API}/api/images/jobs/${job.id}/cancel`,{method:"POST"});}catch{}
+    setJob(null);
+  };
+  const useInChat=async(r)=>{
+    if(!r.artifact_id)return;
+    try{
+      const resp=await fetch(`${API}/api/artifacts/${r.artifact_id}/use-in-chat`,{method:"POST"});
+      const d=await resp.json();
+      if(d.attachment)onUseInChat&&onUseInChat(d.attachment);
+    }catch(e){notify&&notify({type:"error",text:"Use in chat failed",detail:String(e.message||e)});}
+  };
+  const inputS={width:"100%",background:`${t.bgDeep}E6`,border:`1px solid ${t.brd}55`,color:t.text,padding:"9px 12px",borderRadius:7,fontFamily:font,fontSize:13,outline:"none",boxSizing:"border-box"};
+  const smallNum={...inputS,width:74,padding:"6px 8px",fontSize:12};
+  if(!configured)return <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:10,color:t.mut}}>
+    <span style={{fontSize:42,opacity:.5}}>🎨</span>
+    <div style={{fontSize:14,fontWeight:700,color:t.dim}}>Image Studio</div>
+    <div style={{fontSize:12,maxWidth:380,textAlign:"center"}}>ComfyUI is not configured. Set the ComfyUI URL in Settings → Connections to enable local Stable Diffusion image generation.</div>
+  </div>;
+  const elapsed=job?Math.round((Date.now()-job.started)/1000):0;
+  return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",alignItems:"center",gap:8}}>
+      <IC.Image/><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Image Studio</span>
+      <span style={{fontSize:10,color:t.mut,marginLeft:8}}>Local Stable Diffusion via ComfyUI</span>
+    </div>
+    <div style={{flex:1,overflowY:"auto",padding:20}}>
+      <div style={{maxWidth:860,margin:"0 auto"}}>
+        <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Describe the image — subject, style, lighting, mood…" rows={3} style={{...inputS,resize:"vertical",lineHeight:1.5}}/>
+        <textarea value={negPrompt} onChange={e=>setNegPrompt(e.target.value)} placeholder="Negative prompt (optional) — things to avoid" rows={1} style={{...inputS,resize:"vertical",marginTop:8,fontSize:12}}/>
+        <div style={{display:"flex",gap:14,flexWrap:"wrap",alignItems:"flex-end",marginTop:12}}>
+          <label style={{fontSize:10,color:t.mut}}>Size<br/>
+            <select value={size} onChange={e=>setSize(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>
+              <option value="1024x1024">1024 × 1024 (square)</option>
+              <option value="1216x832">1216 × 832 (landscape)</option>
+              <option value="832x1216">832 × 1216 (portrait)</option>
+              <option value="custom">Custom…</option>
+            </select>
+          </label>
+          {size==="custom"&&<><label style={{fontSize:10,color:t.mut}}>W<br/><input type="number" min={256} max={2048} step={8} value={customW} onChange={e=>setCustomW(e.target.value)} style={{...smallNum,marginTop:3}}/></label>
+          <label style={{fontSize:10,color:t.mut}}>H<br/><input type="number" min={256} max={2048} step={8} value={customH} onChange={e=>setCustomH(e.target.value)} style={{...smallNum,marginTop:3}}/></label></>}
+          <label style={{fontSize:10,color:t.mut}}>Steps<br/><input type="number" min={1} max={60} value={steps} onChange={e=>setSteps(e.target.value)} style={{...smallNum,marginTop:3}}/></label>
+          <label style={{fontSize:10,color:t.mut}}>CFG<br/><input type="number" min={1} max={20} step={0.5} value={cfg} onChange={e=>setCfg(e.target.value)} style={{...smallNum,marginTop:3}}/></label>
+          <label style={{fontSize:10,color:t.mut}}>Seed<br/><input type="text" placeholder="random" value={seed} onChange={e=>setSeed(e.target.value.replace(/[^\d]/g,""))} style={{...smallNum,width:104,marginTop:3}}/></label>
+          <label style={{fontSize:10,color:t.mut}}>Count<br/>
+            <select value={count} onChange={e=>setCount(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>{[1,2,3,4].map(n=><option key={n} value={n}>{n}</option>)}</select>
+          </label>
+          {checkpoints.length>0&&<label style={{fontSize:10,color:t.mut}}>Model<br/>
+            <select value={checkpoint} onChange={e=>setCheckpoint(e.target.value)} style={{...inputS,width:"auto",maxWidth:240,padding:"6px 8px",fontSize:12,marginTop:3}}>
+              {checkpoints.map(c=><option key={c} value={c}>{c}</option>)}
+            </select>
+          </label>}
+          <label style={{fontSize:10,color:t.mut}}>Sampler<br/>
+            <select value={sampler} onChange={e=>setSampler(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>
+              {["euler","euler_ancestral","dpmpp_2m","dpmpp_2m_sde","dpmpp_3m_sde","dpmpp_sde","heun","ddim","uni_pc","lcm"].map(s2=><option key={s2} value={s2}>{s2}</option>)}
+            </select>
+          </label>
+          <label style={{fontSize:10,color:t.mut}}>Scheduler<br/>
+            <select value={scheduler} onChange={e=>setScheduler(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>
+              {["normal","karras","sgm_uniform","exponential","simple","beta"].map(s2=><option key={s2} value={s2}>{s2}</option>)}
+            </select>
+          </label>
+          <label title="Required for v-prediction checkpoints (BigASP v2.5, NoobAI vpred). Fixes solid-color/red output. Adds ModelSamplingDiscrete(v_pred, zsnr) + RescaleCFG 0.7." style={{fontSize:10,color:vPred?t.acc:t.mut,display:"flex",alignItems:"center",gap:5,cursor:"pointer",paddingBottom:8}}>
+            <input type="checkbox" checked={vPred} onChange={e=>setVPred(e.target.checked)}/>
+            v-prediction
+          </label>
+          <div style={{flex:1}}/>
+          {!job
+            ?<button onClick={generate} disabled={!prompt.trim()} style={{padding:"10px 22px",borderRadius:8,border:"none",background:prompt.trim()?t.acc:`${t.acc}44`,color:t.bgDeep,fontFamily:font,fontWeight:800,fontSize:13,cursor:prompt.trim()?"pointer":"default"}}>Generate</button>
+            :<button onClick={cancelJob} style={{padding:"10px 22px",borderRadius:8,border:`1px solid ${t.err}66`,background:`${t.err}18`,color:t.err,fontFamily:font,fontWeight:700,fontSize:13,cursor:"pointer"}}>Stop</button>}
+        </div>
+        {job&&<div style={{marginTop:14,display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:`${t.acc}0d`,border:`1px solid ${t.acc}28`,borderRadius:8,fontSize:12,color:t.dim}}>
+          <div style={{width:14,height:14,border:`2px solid ${t.acc}44`,borderTopColor:t.acc,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
+          {job.status==="queued"&&job.queuePos>0?`Queued behind ${job.queuePos} job(s)…`:elapsed<8?"Generating…":elapsed<60?`Generating… ${elapsed}s`:`Generating… ${elapsed}s (model may be cold-loading)`}
+        </div>}
+        {error&&<div style={{marginTop:14,padding:"10px 14px",background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:8,fontSize:12,color:t.err}}>{error}</div>}
+        {results.length>0&&<div style={{marginTop:22}}>
+          <div style={{fontSize:11,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.8,marginBottom:10}}>Results</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:14}}>
+            {results.map((r,i)=><div key={`${r.filename}-${i}`} style={{border:`1px solid ${t.brd}40`,borderRadius:10,overflow:"hidden",background:t.bgDeep}}>
+              <img src={`${API}${r.url}`} alt={r.filename} onClick={()=>onPreview&&onPreview(r.filename,r.url)} style={{width:"100%",aspectRatio:`${r.params?.width||1}/${r.params?.height||1}`,objectFit:"cover",cursor:"pointer",display:"block"}}/>
+              <div style={{padding:"8px 10px"}}>
+                <div style={{fontSize:9,color:t.mut,marginBottom:6,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={r.params?.prompt}>seed {r.params?.seed} · {r.params?.steps} steps · {r.params?.width}×{r.params?.height}</div>
+                <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                  <a href={`${API}${r.url}`} download={r.filename} style={{fontSize:10,padding:"4px 9px",borderRadius:5,background:`${t.ok}15`,border:`1px solid ${t.ok}33`,color:t.ok,textDecoration:"none",fontWeight:600}}>Download</a>
+                  <button onClick={()=>useInChat(r)} style={{fontSize:10,padding:"4px 9px",borderRadius:5,background:`${t.acc}15`,border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",fontFamily:font,fontWeight:600}}>Use in chat</button>
+                  {r.params?.seed!=null&&<button onClick={()=>setSeed(String(r.params.seed))} title="Reuse this seed" style={{fontSize:10,padding:"4px 9px",borderRadius:5,background:`${t.warm}12`,border:`1px solid ${t.warm}33`,color:t.warm,cursor:"pointer",fontFamily:font,fontWeight:600}}>Reuse seed</button>}
+                </div>
+              </div>
+            </div>)}
+          </div>
+        </div>}
+      </div>
+    </div>
+  </div>;
 }
 
 function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onDelete,onUseInChat,notify,onRefreshList,onOpenArtifact}){
@@ -2797,6 +2958,45 @@ const MemoMD = React.memo(
   (prev, next)=> prev.content===next.content && prev.opts===next.opts
 );
 
+// Stable per-message citation opts. MemoMD compares opts by REFERENCE — a fresh
+// object each render would re-parse every message on every token. Cache keyed on
+// the metadata object (or the msg itself when metadata is a serialized string).
+const _citeOptsCache=new WeakMap();
+function citeOptsFor(msg){
+  if(!msg||typeof msg!=="object")return undefined;
+  const key=(msg.metadata&&typeof msg.metadata==="object")?msg.metadata:msg;
+  if(_citeOptsCache.has(key))return _citeOptsCache.get(key);
+  let meta=msg.metadata;
+  if(typeof meta==="string"){try{meta=JSON.parse(meta);}catch{meta=null;}}
+  const ev=(meta?.saved_events||[]).filter(e=>e.type==="kb_sources").pop();
+  const v=(ev?.data?.sources?.length)?{citations:ev.data.sources}:undefined;
+  _citeOptsCache.set(key,v);
+  return v;
+}
+
+// Inline KB citation chip [n] — click opens a small source popover.
+function CitationChip({n, src, theme, font}){
+  const [open,setOpen]=useState(false);
+  const ref=useRef(null);
+  useEffect(()=>{
+    if(!open)return;
+    const close=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};
+    document.addEventListener("mousedown",close);
+    return ()=>document.removeEventListener("mousedown",close);
+  },[open]);
+  if(!src)return <sup style={{fontSize:"0.75em",margin:"0 1px",color:theme.mut}}>[{n}]</sup>;
+  return <sup ref={ref} style={{fontSize:"0.72em",lineHeight:0,margin:"0 1px",position:"relative",display:"inline-block"}}>
+    <button onClick={()=>setOpen(o=>!o)} title={`${src.filename} (chunk ${src.chunk_index})`} style={{background:`${theme.acc}18`,border:"none",color:theme.acc,padding:"0 4px",borderRadius:3,fontWeight:700,cursor:"pointer",fontFamily:font,fontSize:"inherit",lineHeight:1.5}}>{n}</button>
+    {open&&<span style={{position:"absolute",bottom:"calc(100% + 6px)",left:"50%",transform:"translateX(-50%)",zIndex:30,width:300,maxWidth:"72vw",background:theme.bgDeep,border:`1px solid ${theme.brd}66`,borderRadius:8,padding:"9px 11px",boxShadow:"0 8px 24px rgba(0,0,0,.45)",textAlign:"left",fontSize:11,lineHeight:1.5,fontWeight:400,display:"block",whiteSpace:"normal"}}>
+      <span style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+        <span style={{fontWeight:700,color:theme.acc,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>📄 {src.filename}</span>
+        <span style={{marginLeft:"auto",fontSize:9,color:theme.mut,flexShrink:0}}>chunk {src.chunk_index}{typeof src.score==="number"?` · ${Math.round(src.score*100)}%`:""}</span>
+      </span>
+      <span style={{display:"block",color:theme.dim,maxHeight:120,overflow:"auto"}}>{src.snippet||""}{src.snippet&&src.snippet.length>=300?"…":""}</span>
+    </span>}
+  </sup>;
+}
+
 function MDWrap({children}){
   const ref=useRef(null);
   useEffect(()=>{
@@ -2939,6 +3139,12 @@ function HyprChat(){
   const [codeboxUrl,setCodeboxUrl]=useState("");
   const [searxngUrl,setSearxngUrl]=useState("");
   const [n8nUrl,setN8nUrl]=useState("");
+  const [comfyuiUrl,setComfyuiUrl]=useState("");
+  const [sttUrl,setSttUrl]=useState("");
+  const [ttsUrl,setTtsUrl]=useState("");
+  const [ttsVoice,setTtsVoice]=useState("");
+  const [ttsVoices,setTtsVoices]=useState([]);
+  const [ttsAutoplay,setTtsAutoplay]=useState(()=>localStorage.getItem("hc-tts-autoplay")==="1");
   const [modelProviders,setModelProviders]=useState({});
   const [providerKeys,setProviderKeys]=useState({openai:"",anthropic:""});
   const [providerBusy,setProviderBusy]=useState({});
@@ -3297,6 +3503,73 @@ function HyprChat(){
 
   const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0),chatScrollRef=useRef(null),dlPanelRef=useRef(null),quickMenuRef=useRef(null),promptPickerRef=useRef(null),connectorPickerRef=useRef(null),actIdRef=useRef(actId),titleSearchRef=useRef(null),ftsRef=useRef(null),importRef=useRef(null),charCardImportRef=useRef(null);
   actIdRef.current=actId;
+  // ── Voice: mic recording (STT) + speech playback (TTS) ──
+  const [recording,setRecording]=useState(false);
+  const [transcribing,setTranscribing]=useState(false);
+  const [speakingMid,setSpeakingMid]=useState(null);
+  const [ttsLoadingMid,setTtsLoadingMid]=useState(null);
+  const mediaRecRef=useRef(null),recChunksRef=useRef([]),audioRef=useRef(null),ttsAbortRef=useRef(null);
+  const stopSpeaking=()=>{
+    if(ttsAbortRef.current){ttsAbortRef.current.abort();ttsAbortRef.current=null;}
+    if(audioRef.current){try{audioRef.current.pause();}catch{}if(audioRef.current._url)URL.revokeObjectURL(audioRef.current._url);audioRef.current=null;}
+    setSpeakingMid(null);setTtsLoadingMid(null);
+  };
+  const speak=async(text,mid)=>{
+    if(!ttsUrl||!text)return;
+    if(speakingMid===mid||ttsLoadingMid===mid){stopSpeaking();return;}
+    stopSpeaking();
+    setTtsLoadingMid(mid);
+    const ctrl=new AbortController();ttsAbortRef.current=ctrl;
+    try{
+      const r=await fetch(`${API}/api/audio/speech`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text,voice:ttsVoice}),signal:ctrl.signal});
+      if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${r.status}`);}
+      const blob=await r.blob();
+      if(ttsAbortRef.current!==ctrl)return; // superseded by another speak/stop
+      const url=URL.createObjectURL(blob);
+      const audio=new Audio(url);audio._url=url;
+      audioRef.current=audio;
+      audio.onended=()=>{URL.revokeObjectURL(url);if(audioRef.current===audio)audioRef.current=null;setSpeakingMid(p=>p===mid?null:p);};
+      setTtsLoadingMid(null);setSpeakingMid(mid);
+      await audio.play();
+    }catch(e){
+      if(e.name!=="AbortError")notify({type:"error",text:"Speech failed",detail:String(e.message||e)});
+      setTtsLoadingMid(null);setSpeakingMid(null);
+    }
+  };
+  const toggleRecording=async()=>{
+    if(recording){try{mediaRecRef.current?.stop();}catch{}return;}
+    if(!navigator.mediaDevices?.getUserMedia){notify({type:"warning",text:"Microphone unavailable",detail:"getUserMedia needs a secure context — use HTTPS or allow this origin in chrome://flags/#unsafely-treat-insecure-origin-as-secure"});return;}
+    let stream;
+    try{stream=await navigator.mediaDevices.getUserMedia({audio:true});}
+    catch(e){notify({type:"warning",text:"Microphone unavailable",detail:e.name==="NotAllowedError"?"Permission denied":e.name==="NotFoundError"?"No microphone found":String(e.message||e)});return;}
+    const mime=window.MediaRecorder&&MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported("audio/webm;codecs=opus")?"audio/webm;codecs=opus":"";
+    let rec;
+    try{rec=new MediaRecorder(stream,mime?{mimeType:mime}:undefined);}
+    catch(e){stream.getTracks().forEach(tr=>tr.stop());notify({type:"error",text:"Recording not supported",detail:String(e.message||e)});return;}
+    recChunksRef.current=[];
+    rec.ondataavailable=e=>{if(e.data&&e.data.size)recChunksRef.current.push(e.data);};
+    rec.onstop=async()=>{
+      stream.getTracks().forEach(tr=>tr.stop());
+      setRecording(false);
+      const blob=new Blob(recChunksRef.current,{type:rec.mimeType||"audio/webm"});
+      recChunksRef.current=[];
+      if(blob.size<800)return; // accidental tap — nothing recorded
+      setTranscribing(true);
+      try{
+        const bt=blob.type||"";
+        const ext=bt.includes("mp4")?"m4a":bt.includes("ogg")?"ogg":"webm";
+        const fd=new FormData();fd.append("file",blob,`recording.${ext}`);
+        const r=await fetch(`${API}/api/audio/transcribe`,{method:"POST",body:fd});
+        const d=await r.json().catch(()=>({}));
+        if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+        if(d.text){setInp(p=>p?`${p} ${d.text}`:d.text);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},0);}
+      }catch(e){notify({type:"error",text:"Transcription failed",detail:String(e.message||e)});}
+      setTranscribing(false);
+    };
+    mediaRecRef.current=rec;
+    rec.start();
+    setRecording(true);
+  };
   const act = convs.find(c=>c.id===actId);
   const isGhostConv=(c)=>!!c?.ephemeral||String(c?.id||"").startsWith("ghost-");
   const ghostActive=ghostMode||isGhostConv(act);
@@ -3760,6 +4033,11 @@ function HyprChat(){
       if(d.current_codebox_url)setCodeboxUrl(d.current_codebox_url);
       if(d.current_searxng_url)setSearxngUrl(d.current_searxng_url);
       if(d.current_n8n_url)setN8nUrl(d.current_n8n_url);
+      if(d.current_comfyui_url!==undefined)setComfyuiUrl(d.current_comfyui_url||"");
+      if(d.current_stt_url!==undefined)setSttUrl(d.current_stt_url||"");
+      if(d.current_tts_url!==undefined)setTtsUrl(d.current_tts_url||"");
+      if(d.current_tts_voice)setTtsVoice(d.current_tts_voice);
+      if(d.current_tts_url)fetch(`${API}/api/audio/voices`).then(r=>r.json()).then(v=>setTtsVoices(v.voices||[])).catch(()=>{});
       if(d.rag)setRagSettings(p=>({...p,...d.rag}));
       if(d.default_num_ctx!=null)hydrateServerSetting("default_num_ctx",setNumCtx,d.default_num_ctx,numCtx);
       if(d.current_planning_model!=null)hydrateServerSetting("planning_model",setPlanningModel,d.current_planning_model,planningModel);
@@ -4956,7 +5234,7 @@ function HyprChat(){
       // Capture relevant events into metadata for persistence (tool status + search results + source links)
       // Prefer the persistent stream-save buffer, which survives chat switches. Fall back to evtsRef for safety.
       const _rawEvts = streamSaveEvtsRef.current.length > 0 ? streamSaveEvtsRef.current : evtsRef.current;
-      let _savedEvts = _rawEvts.filter(e=>["source_links","search_results","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
+      let _savedEvts = _rawEvts.filter(e=>["source_links","search_results","kb_sources","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
       // Bound the persisted metadata. `thinking` events are cumulative 3KB tail
       // snapshots emitted every ~100 chars — a long reasoning trace persists
       // ~100 overlapping copies (~300KB on one message, reloaded every fetch).
@@ -4977,6 +5255,8 @@ function HyprChat(){
         in_progress: false,
       } : {in_progress: false};
       const finalFull=replacePersonaPlaceholdersForConversation(full,cv);
+      // Auto-play the reply when the Voice "Auto-play replies" toggle is on
+      if(ttsAutoplay&&ttsUrl&&finalFull&&!isGhostSend){setTimeout(()=>{try{speak(finalFull,_streamMsgId!=null?_streamMsgId:`auto-${Date.now()}`);}catch{}},80);}
       uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:finalFull,isS:false,metadata:_msgMeta};return{...c,messages:m};});
       // Save final assistant message state to DB. PATCH the row the backend already
       // created at stream start (preferred — exactly one row per turn). Fall back to
@@ -5878,6 +6158,7 @@ function HyprChat(){
         if(s.charCodeAt(0)===0xE010){
           const inner=s.slice(1,-1);const ci=inner.indexOf(":");
           const pref=inner.slice(0,ci),num=inner.slice(ci+1);
+          if(pref==="cite")return <sup key={k} style={{fontSize:"0.75em",lineHeight:0,margin:"0 1px"}}>[{num}]</sup>;
           return <sup key={k} style={{fontSize:"0.75em",lineHeight:0,margin:"0 1px"}}><a href={`#fn-${pref}-${num}`} style={{...linkStyle,fontWeight:700}}>{num}</a></sup>;
         }
         const boldLinkMatch=s.match(/^\*\*\[([^\]]+)\]\(([^)]+)\)\*\*$/);
@@ -5914,6 +6195,7 @@ function HyprChat(){
       if(s.charCodeAt(0)===0xE010){
         const inner=s.slice(1,-1);const ci=inner.indexOf(":");
         const pref=inner.slice(0,ci),num=inner.slice(ci+1);
+        if(pref==="cite")return <CitationChip key={k} n={num} src={(opts.citations||[])[parseInt(num,10)-1]} theme={t} font={font}/>;
         return <sup key={k} style={{fontSize:"0.75em",lineHeight:0,margin:"0 1px"}}><a href={`#fn-${pref}-${num}`} onClick={e=>{e.preventDefault();const el=document.getElementById(`fn-${pref}-${num}`);if(el)el.scrollIntoView({behavior:"smooth",block:"center"});}} style={{color:t.acc,textDecoration:"none",padding:"0 3px",borderRadius:3,background:`${t.acc}18`,fontWeight:700}}>{num}</a></sup>;
       }
       const boldLinkMatch=s.match(/^\*\*\[([^\]]+)\]\(([^)]+)\)\*\*$/);
@@ -6026,6 +6308,16 @@ function HyprChat(){
       if(!(lbl in _fnIdx)){_fnOrder.push(lbl);_fnIdx[lbl]=_fnOrder.length;}
       return ""+_fnPrefix+":"+_fnIdx[lbl]+"";
     });
+    // KB citations: numbered [n] markers from RAG excerpts → CitationChip placeholders
+    // (same private-use masking as footnotes; "cite" can't collide with the 6-char
+    // random footnote prefix). Lookbehind keeps `arr[1]`-style indexing intact.
+    if(opts.citations?.length){
+      const _nc=opts.citations.length;
+      text = text.replace(/(?<![\w`\]])\[(\d{1,2})\](?!\()/g,(m,nstr)=>{
+        const cn=parseInt(nstr,10);
+        return (cn>=1&&cn<=_nc)?"cite:"+cn+"":m;
+      });
+    }
     // Auto-close unclosed fences so a model that opens ```chart and gets interrupted
     // by a tool call (or just forgets) still renders as a block instead of raw text.
     // Count only line-start ``` (allowing up to 3 spaces of CommonMark indent) so inline
@@ -6214,6 +6506,7 @@ function HyprChat(){
   const closeSettings=()=>{setShowHealthMonitor(false);setPanel(previousPanelRef.current||"chat");};
   const nb=(p,ico,lab)=><button onClick={()=>setPanel(p)} title={lab} style={{width:52,height:showNavLabels?48:46,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:8,cursor:"pointer",border:`1px solid ${panel===p?`${t.acc}55`:"transparent"}`,background:panel===p?`${t.acc}14`:"transparent",color:panel===p?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:"none",padding:showNavLabels?"3px 0 1px":0}}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{panel===p&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}</button>;
   const moreNavItems=[
+    ["images",<IC.Image/>,"Image Studio",t.pink],
     ["kb",<IC.Database/>,"Knowledge Bases",t.ok],
     ["tools",<IC.Tool/>,"Tools",t.warm],
     ["models",<IC.Layers/>,"Model Manager",t.f1],
@@ -6474,7 +6767,7 @@ function HyprChat(){
         })}
       </div>}
       <div style={{padding:"7px 11px",borderTop:`1px solid ${t.brd}22`,fontSize:10,color:t.mut,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
-        {svc("ollama")}Ollama {svc("codebox")}CB {svc("searxng")}SX {svc("n8n")}n8n
+        {svc("ollama")}Ollama {svc("codebox")}CB {svc("searxng")}SX {svc("n8n")}n8n{health.comfyui!==undefined&&<> {svc("comfyui")}SD</>}{health.stt!==undefined&&<> {svc("stt")}STT</>}{health.tts!==undefined&&<> {svc("tts")}TTS</>}
       </div>
     </div>
 
@@ -6683,6 +6976,7 @@ function HyprChat(){
             notify={notify}
             onPersonaCreated={mc=>{const norm={...mc,parameters:normalizeProfileParams(mc)};setMcs(p=>[...p,norm]);setProfileTab(getProfileType(norm)==="persona"?"personas":"agents");setPanel("personas");setEditMc(mc.id);}}/>
       :panel==="artifacts"?<ArtifactStudioPanel t={t} font={font} workspaces={workspaces} kbs={kbs} onPreview={openPreview} onOpenConv={id=>loadConversation(id)} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Artifact added to composer",duration:1800});}}} focusId={artifactFocusId} onFocusConsumed={()=>setArtifactFocusId(null)} notify={notify}/>
+      :panel==="images"?<ImageStudioPanel t={t} font={font} configured={!!comfyuiUrl} onPreview={openPreview} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Image added to composer",duration:1800});}}} notify={notify}/>
       :panel==="memory"?<MemoryProfilePanel t={t} API={API} font={font} notify={notify} onOpenConv={id=>loadConversation(id)} models={models} wsModel={wsModel}/>
       :panel==="kb"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -8422,7 +8716,7 @@ function HyprChat(){
         </div>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:14}}>
           <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-            {["ollama","codebox","n8n","searxng"].map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?"#f0a030":s?.status?t.err:t.mut;const label={ollama:"Ollama",codebox:"Codebox",n8n:"N8N",searxng:"SearXNG"}[n];return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:7,border:`1px solid ${rl?`#f0a030`:t.brd}24`,fontSize:12}}>
+            {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?"#f0a030":s?.status?t.err:t.mut;const label={ollama:"Ollama",codebox:"Codebox",n8n:"N8N",searxng:"SearXNG",comfyui:"ComfyUI",stt:"Voice STT",tts:"Voice TTS"}[n];return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:7,border:`1px solid ${rl?`#f0a030`:t.brd}24`,fontSize:12}}>
               <div style={{width:8,height:8,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}66`}}/>
               <span style={{fontWeight:700,color:t.dim}}>{label}</span>
               {s?.response_ms!=null&&<span style={{fontSize:10,color:t.mut}}>{s.response_ms}ms</span>}
@@ -8479,6 +8773,9 @@ function HyprChat(){
               ["Codebox",codeboxUrl,setCodeboxUrl,"http://192.168.1.201:8585","Tool execution and project upload bridge"],
               ["N8N",n8nUrl,setN8nUrl,"http://192.168.1.114:5678","External workflow automation"],
               ["SearXNG",searxngUrl,setSearxngUrl,"http://192.168.1.141:8888","Search and research backend"],
+              ["ComfyUI",comfyuiUrl,setComfyuiUrl,"http://192.168.1.115:8188","Stable Diffusion image generation (optional)"],
+              ["Voice STT",sttUrl,setSttUrl,"http://192.168.1.115:8001","Speech-to-text — Speaches/Whisper (optional)"],
+              ["Voice TTS",ttsUrl,setTtsUrl,"http://192.168.1.115:8880","Text-to-speech — Kokoro (optional)"],
             ].map(([label,value,setter,placeholder,hint])=><label key={label} style={{display:"grid",gridTemplateColumns:"120px minmax(0,1fr)",gap:12,alignItems:"center"}}>
               <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:8,marginBottom:5}}>
                 <span style={{fontSize:12,color:t.dim,fontWeight:700}}>{label}</span>
@@ -8490,18 +8787,37 @@ function HyprChat(){
               </div>
             </label>)}
           </div>
+          {(ttsUrl||sttUrl)&&<div style={{marginTop:12,padding:"10px 12px",background:`${t.surface}44`,border:`1px solid ${t.brd}33`,borderRadius:8,display:"flex",gap:16,alignItems:"center",flexWrap:"wrap"}}>
+            <span style={{fontSize:11,fontWeight:700,color:t.dim}}>🎙 Voice</span>
+            {ttsUrl&&<label style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:t.dim}}>
+              Voice:
+              <select value={ttsVoice} onChange={e=>setTtsVoice(e.target.value)} style={{...inputS,width:"auto",fontSize:11,padding:"4px 8px"}}>
+                {ttsVoice&&!ttsVoices.includes(ttsVoice)&&<option value={ttsVoice}>{ttsVoice}</option>}
+                {ttsVoices.map(v=><option key={v} value={v}>{v}</option>)}
+              </select>
+            </label>}
+            {ttsUrl&&<label style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:t.dim,cursor:"pointer"}}>
+              <input type="checkbox" checked={ttsAutoplay} onChange={e=>{setTtsAutoplay(e.target.checked);localStorage.setItem("hc-tts-autoplay",e.target.checked?"1":"0");}}/>
+              Auto-play replies
+            </label>}
+            <span style={{fontSize:9,color:t.mut}}>Mic capture needs a secure context — over plain HTTP, allow this origin in chrome://flags/#unsafely-treat-insecure-origin-as-secure</span>
+          </div>}
           <div style={{display:"flex",justifyContent:"space-between",gap:10,alignItems:"center",marginTop:12}}>
             <div style={settingsKickerS}>Bare <code>IP:port</code> is accepted; HyprChat stores it as an HTTP URL.</div>
             <button disabled={connectionsSaving} onClick={async()=>{
               setConnectionsSaving(true);setConnectionsSaveState("saving");
               try{
-                const r=await fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({ollama_url:ollamaUrl,codebox_url:codeboxUrl,searxng_url:searxngUrl,n8n_url:n8nUrl})});
+                const r=await fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({ollama_url:ollamaUrl,codebox_url:codeboxUrl,searxng_url:searxngUrl,n8n_url:n8nUrl,comfyui_url:comfyuiUrl,stt_url:sttUrl,tts_url:ttsUrl,tts_voice:ttsVoice})});
                 if(!r.ok)throw new Error(`HTTP ${r.status}`);
                 const d=await r.json().catch(()=>({}));
                 if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);
                 if(d.current_codebox_url)setCodeboxUrl(d.current_codebox_url);
                 if(d.current_searxng_url)setSearxngUrl(d.current_searxng_url);
                 if(d.current_n8n_url)setN8nUrl(d.current_n8n_url);
+                if(d.current_comfyui_url!==undefined)setComfyuiUrl(d.current_comfyui_url||"");
+                if(d.current_stt_url!==undefined)setSttUrl(d.current_stt_url||"");
+                if(d.current_tts_url!==undefined)setTtsUrl(d.current_tts_url||"");
+                if(d.current_tts_url)fetch(`${API}/api/audio/voices`).then(rv=>rv.json()).then(v=>setTtsVoices(v.voices||[])).catch(()=>{});
                 await refreshModels();
                 try{const h=await fetch(`${API}/api/health`);const hd=await h.json();setHealth(hd.services||{});}catch{}
                 setConnectionsSaveState("saved");notify({type:"success",text:"Connections saved"});
@@ -9423,7 +9739,7 @@ function HyprChat(){
                         <button onClick={()=>setEditingMsg(null)} style={btnS(t.mut)}>Cancel</button>
                       </div>
                     </div>
-                    :msg.isS?mdStream(renderedContent):<MemoMD content={renderedContent} md={md}/>}
+                    :msg.isS?mdStream(renderedContent):<MemoMD content={renderedContent} md={md} opts={citeOptsFor(msg)}/>}
                     {isU&&msg.metadata?.images?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:msg.content?10:0}}>
                       {msg.metadata.images.map((img,ii)=><div key={ii} title={img.name} style={{display:"inline-flex",flexDirection:"column",gap:4,alignItems:"flex-start",maxWidth:260}}>
                         <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:8,border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:"none"}}/>
@@ -9477,9 +9793,29 @@ function HyprChat(){
                     {!collapsed&&d.stdout&&<pre style={{margin:0,padding:"8px 12px",whiteSpace:"pre-wrap",color:t.dim,fontSize:12,lineHeight:1.5,borderBottom:d.stderr?`1px solid ${t.brd}22`:"none",fontFamily:font}}>{d.stdout}</pre>}
                     {!collapsed&&d.stderr&&<pre style={{margin:0,padding:"8px 12px",whiteSpace:"pre-wrap",color:t.err,fontSize:11,lineHeight:1.5,background:`${t.err}08`,fontFamily:font}}>{d.stderr}</pre>}
                   </div>;});})()}
+                  {/* KB sources strip — numbered citation sources for this reply */}
+                  {(()=>{
+                    if(isU||msg.isS)return null;
+                    const co=citeOptsFor(msg);
+                    if(!co?.citations?.length)return null;
+                    return <Collapsible theme={t} font={font} summary={`Sources (${co.citations.length})`}>
+                      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                        {co.citations.map(s2=><div key={s2.n} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"6px 8px",background:`${t.surface}44`,border:`1px solid ${t.brd}33`,borderRadius:6}}>
+                          <span style={{fontWeight:700,color:t.acc,fontSize:11,flexShrink:0}}>[{s2.n}]</span>
+                          <div style={{minWidth:0}}>
+                            <div style={{fontSize:11,fontWeight:600,color:t.text}}>📄 {s2.filename} <span style={{color:t.mut,fontWeight:400,fontSize:9}}>chunk {s2.chunk_index}{typeof s2.score==="number"?` · ${Math.round(s2.score*100)}% relevance`:""}</span></div>
+                            {s2.snippet&&<div style={{fontSize:10,color:t.dim,marginTop:2,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{s2.snippet}</div>}
+                          </div>
+                        </div>)}
+                      </div>
+                    </Collapsible>;
+                  })()}
                   {!msg.isS&&!isEditing&&<div style={msgToolbarS}>
                     {!isU&&msg.content&&<button onClick={()=>cp(renderedContent,mid)} style={msgActionS(copied===mid?t.ok:t.mut)}>
                       {copied===mid?<><IC.Check/> copied</>:<><IC.Copy/> copy</>}
+                    </button>}
+                    {!isU&&msg.content&&ttsUrl&&<button onClick={()=>speak(renderedContent,mid)} title={speakingMid===mid?"Stop playback":"Read aloud"} style={msgActionS(speakingMid===mid?t.acc:ttsLoadingMid===mid?t.warm:t.mut)}>
+                      {ttsLoadingMid===mid?<><span style={{width:10,height:10,border:`2px solid ${t.warm}44`,borderTopColor:t.warm,borderRadius:"50%",display:"inline-block",animation:"spin 1s linear infinite"}}/> loading</>:speakingMid===mid?<><IC.Stop/> stop</>:<><IC.Volume/> speak</>}
                     </button>}
                     {!isU&&msg.content&&!streaming&&<div style={{position:"relative",display:"inline-flex"}}>
                       <button onClick={()=>regenerate(i)} style={{...msgActionS(t.mut),borderRadius:"5px 0 0 5px"}}>
@@ -9693,6 +10029,9 @@ function HyprChat(){
                 </div>}
               </div>}
             </div>;})()}
+            {sttUrl&&!streaming&&!councilRunning&&<button onClick={toggleRecording} disabled={transcribing} title={recording?"Stop recording":transcribing?"Transcribing…":"Voice input (speech-to-text)"} style={{background:recording?`${t.err}22`:"none",border:recording?`1px solid ${t.err}66`:"1px solid transparent",color:recording?t.err:transcribing?t.warm:t.mut,cursor:transcribing?"default":"pointer",padding:"6px 8px",borderRadius:8,display:"flex",alignItems:"center",flexShrink:0,animation:recording?"pGlow 1.5s ease-in-out infinite":"none"}}>
+              {transcribing?<span style={{width:13,height:13,border:`2px solid ${t.warm}44`,borderTopColor:t.warm,borderRadius:"50%",display:"inline-block",animation:"spin 1s linear infinite"}}/>:<IC.Mic/>}
+            </button>}
             {councilRunning?<button onClick={()=>setCouncilRunning(false)} style={{background:t.pink,border:"none",color:"#fff",padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
             :streaming?<button onClick={stop} style={{background:t.err,border:"none",color:"#fff",padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
             :<button onClick={send} disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?"#fff":t.mut,padding:"10px 14px",borderRadius:8,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all .2s",boxShadow:"none",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}

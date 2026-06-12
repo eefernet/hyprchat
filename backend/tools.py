@@ -13,6 +13,7 @@ import time
 import uuid
 from datetime import datetime
 
+import comfyui
 import config
 import database as db
 import cancel_registry
@@ -998,6 +999,21 @@ CODEAGENT_TOOLS = {
             }, "required": ["path"]},
         },
     },
+    "generate_image": {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": "Generate an image from a text description using local Stable Diffusion (SDXL). For pictures/art/photos — NOT charts or diagrams.",
+            "parameters": {"type": "object", "properties": {
+                "prompt": {"type": "string", "description": "What the image should show, descriptive and specific"},
+                "negative_prompt": {"type": "string", "description": "Optional: things to avoid in the image"},
+                "width": {"type": "integer", "description": "Image width in px (256-2048, default 1024)"},
+                "height": {"type": "integer", "description": "Image height in px (256-2048, default 1024)"},
+                "steps": {"type": "integer", "description": "Sampling steps (1-60, default 25)"},
+                "seed": {"type": "integer", "description": "Optional seed for reproducible results"},
+            }, "required": ["prompt"]},
+        },
+    },
     "download_project": {
         "type": "function",
         "function": {
@@ -1605,6 +1621,7 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
         "read_file": ["path"],
         "list_files": ["path"],
         "download_file": ["filename"],
+        "generate_image": ["prompt", "negative_prompt"],
         "download_project": ["filenames", "project_name"],
         "delete_file": ["path"],
         "plan_project": ["task", "language", "constraints"],
@@ -2964,6 +2981,130 @@ async def exec_tool(
             else:
                 await events.emit(conv_id, "tool_end", {"tool": "download_file", "icon": "code", "status": f"File not found: {path}"})
                 return f"ERROR: File not found or could not read: {path}"
+
+        elif name == "generate_image":
+            if not config.COMFYUI_URL:
+                return "ERROR: Image generation is not configured. Set the ComfyUI URL in Settings → Connections."
+            gi_prompt = (args.get("prompt") or "").strip()
+            if not gi_prompt:
+                return "ERROR: generate_image requires a prompt describing the image."
+            await events.emit(conv_id, "tool_start", {
+                "tool": "generate_image", "icon": "image",
+                "status": f"Generating image: {gi_prompt[:80]}",
+            })
+            try:
+                workflow, gi_seed = comfyui.build_workflow(
+                    comfyui.load_template(),
+                    prompt=gi_prompt,
+                    negative_prompt=(args.get("negative_prompt") or ""),
+                    width=args.get("width") or 1024,
+                    height=args.get("height") or 1024,
+                    steps=args.get("steps") or 25,
+                    seed=args.get("seed"),
+                )
+                prompt_id = await comfyui.submit(workflow)
+            except Exception as e:
+                await events.emit(conv_id, "tool_error", {"tool": "generate_image", "icon": "image", "status": f"Submit failed: {str(e)[:160]}"})
+                return f"ERROR: Could not start image generation: {str(e)[:300]}"
+            # Poll: 300s budget covers a 30-60s cold checkpoint load
+            _gi_t0 = time.time()
+            history = None
+            _last_progress = 0.0
+            while time.time() - _gi_t0 < 300:
+                await asyncio.sleep(1.5)
+                try:
+                    history = await comfyui.get_history(prompt_id)
+                except Exception:
+                    history = None
+                if history and (history.get("outputs") or {}):
+                    break
+                if history and history.get("status", {}).get("status_str") == "error":
+                    await events.emit(conv_id, "tool_error", {"tool": "generate_image", "icon": "image", "status": "ComfyUI reported a workflow error"})
+                    return "ERROR: ComfyUI failed to execute the workflow (check checkpoint name and VRAM)."
+                history = None
+                if time.time() - _last_progress >= 6:
+                    _last_progress = time.time()
+                    elapsed = int(time.time() - _gi_t0)
+                    qpos = await comfyui.queue_position(prompt_id)
+                    hint = f"queued behind {qpos}" if qpos else ("rendering" if qpos == 0 else "loading model")
+                    await events.emit(conv_id, "tool_progress", {
+                        "tool": "generate_image", "icon": "image",
+                        "status": f"Generating image… {elapsed}s ({hint})",
+                    })
+            if not history:
+                await comfyui.cancel(prompt_id)
+                await events.emit(conv_id, "tool_error", {"tool": "generate_image", "icon": "image", "status": "Timed out after 300s"})
+                return "ERROR: Image generation timed out after 300 seconds."
+            images = comfyui.outputs_from_history(history)
+            if not images:
+                await events.emit(conv_id, "tool_error", {"tool": "generate_image", "icon": "image", "status": "No image produced"})
+                return "ERROR: ComfyUI finished but produced no output images."
+            os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
+            md_lines = []
+            for gi_i, img in enumerate(images):
+                try:
+                    img_bytes = await comfyui.fetch_image(img)
+                except Exception as e:
+                    print(f"[IMAGE] fetch failed: {e}")
+                    continue
+                filename = f"comfy_{prompt_id[:8]}_{gi_i}.png"
+                filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, filename)
+                with open(filepath, "wb") as f:
+                    f.write(img_bytes)
+                file_meta = _artifact_file_metadata(filepath)
+                download_url = f"/api/downloads/{filename}"
+                artifact = None
+                try:
+                    cf_id = f"cf-{uuid.uuid4().hex[:8]}"
+                    artifact = await db.add_conversation_file(
+                        cf_id,
+                        conv_id,
+                        filename,
+                        download_url,
+                        message_id=artifact_message_id,
+                        kind="image",
+                        mime_type="image/png",
+                        storage_path=filepath,
+                        size_bytes=file_meta["size_bytes"],
+                        sha256=file_meta["sha256"],
+                        exists_status="present",
+                        status="draft",
+                        metadata={
+                            "source_tool": "generate_image",
+                            "prompt": gi_prompt[:500],
+                            "negative_prompt": (args.get("negative_prompt") or "")[:300],
+                            "seed": gi_seed,
+                            "steps": args.get("steps") or 25,
+                            "width": args.get("width") or 1024,
+                            "height": args.get("height") or 1024,
+                            "size_bytes": file_meta["size_bytes"],
+                            "sha256": file_meta["sha256"],
+                        },
+                    )
+                except Exception as e:
+                    print(f"[FileTrack] {e}")
+                await events.emit(conv_id, "file_ready", {
+                    "filename": filename, "url": download_url,
+                    "is_image": True,
+                    "artifact_id": (artifact or {}).get("id"),
+                    "kind": "image",
+                    "mime_type": "image/png",
+                })
+                md_lines.append(f"![{filename}]({download_url})")
+                md_lines.append(f"**[Download {filename}]({download_url})**")
+            if not md_lines:
+                await events.emit(conv_id, "tool_error", {"tool": "generate_image", "icon": "image", "status": "Image fetch failed"})
+                return "ERROR: Generated image could not be fetched from ComfyUI."
+            await events.emit(conv_id, "tool_end", {
+                "tool": "generate_image", "icon": "image",
+                "status": f"Image ready ({int(time.time() - _gi_t0)}s, seed {gi_seed})",
+            })
+            # Hand GPU 1 back to Ollama between generations
+            await comfyui.free_memory()
+            md_lines.append(f"Seed: `{gi_seed}` · steps {args.get('steps') or 25} · "
+                            f"{args.get('width') or 1024}×{args.get('height') or 1024} "
+                            f"(reuse the seed for reproducible variations)")
+            return "\n\n".join(md_lines)
 
         elif name == "download_project":
             directory = args.get("directory", "/root")

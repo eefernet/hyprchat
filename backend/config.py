@@ -12,6 +12,12 @@ CODEBOX_URL = os.getenv("CODEBOX_URL", "http://127.0.0.1:8585")
 OPENHANDS_URL = os.getenv("OPENHANDS_URL", "http://127.0.0.1:8586")
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://127.0.0.1:8888")
 N8N_URL = os.getenv("N8N_URL", "http://127.0.0.1:5678")
+COMFYUI_URL = os.getenv("COMFYUI_URL", "")  # empty = image generation disabled
+COMFYUI_WORKFLOW_PATH = os.getenv("COMFYUI_WORKFLOW_PATH", "")  # optional API-format workflow override
+STT_URL = os.getenv("STT_URL", "")  # empty = voice transcription disabled (OpenAI-compatible, e.g. Speaches)
+TTS_URL = os.getenv("TTS_URL", "")  # empty = speech synthesis disabled (OpenAI-compatible, e.g. kokoro-fastapi)
+STT_MODEL = os.getenv("STT_MODEL", "Systran/faster-distil-whisper-large-v3")
+TTS_VOICE = os.getenv("TTS_VOICE", "af_heart")
 N8N_WEBHOOK_PATH = os.getenv("N8N_WEBHOOK_PATH", "/webhook/execute-code")
 N8N_RESEARCH_PATH = os.getenv("N8N_RESEARCH_PATH", "/webhook/deep-research")
 HTTP_VERIFY_SSL = os.getenv("HTTP_VERIFY_SSL", "true").lower() == "true"
@@ -61,6 +67,10 @@ DEFAULT_SETTINGS = {
     "codebox_url": "",  # empty = use CODEBOX_URL from env/default
     "searxng_url": "",  # empty = use SEARXNG_URL from env/default
     "n8n_url": "",  # empty = use N8N_URL from env/default
+    "comfyui_url": "",  # empty = use COMFYUI_URL from env (image generation disabled when both empty)
+    "stt_url": "",  # empty = use STT_URL from env (voice input disabled when both empty)
+    "tts_url": "",  # empty = use TTS_URL from env (voice output disabled when both empty)
+    "tts_voice": "af_heart",
     "rag": {
         "embed_model": "nomic-embed-text",
         "chunk_size": 500,

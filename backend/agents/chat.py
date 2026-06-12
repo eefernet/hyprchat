@@ -758,6 +758,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     # Resolve persona (model config) if provided — apply parameters and KB
     model_options = {}
     kb_context = ""
+    kb_sources = []
     persona_system_prompt = None
     persona_kb_ids = []
     persona_think_budget = None
@@ -842,15 +843,24 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     _rag_research_top_k = int(_rag_cfg.get("research_top_k", 4))
                     _rag_research_max_chars = int(_rag_cfg.get("research_max_chars", 3000))
 
-                    chunks = await rag.query(kb_ids, user_query, top_k=_rag_top_k)
+                    chunks = await rag.hybrid_query(kb_ids, user_query, top_k=_rag_top_k)
                     if chunks:
-                        kb_context = rag.format_context(chunks, max_chars=_rag_max_chars)
+                        kb_context = rag.format_context(chunks, max_chars=_rag_max_chars, numbered=True)
+                        kb_sources = [{
+                            "n": i + 1,
+                            "filename": c["filename"],
+                            "kb_id": c["kb_id"],
+                            "chunk_index": c.get("chunk_index", 0),
+                            "score": round(c.get("score", 0), 4),
+                            "snippet": (c.get("text") or "")[:300],
+                        } for i, c in enumerate(chunks)]
                         filenames = list(set(c["filename"] for c in chunks))
                         avg_score = sum(c["score"] for c in chunks) / len(chunks)
                         await events.emit(conv_id, "tool_done", {
                             "tool": "kb", "icon": "database",
                             "status": f"Found {len(chunks)} relevant chunks from {', '.join(filenames[:3])} ({avg_score:.0%} avg relevance)",
                         })
+                        await events.emit(conv_id, "kb_sources", {"sources": kb_sources})
                         print(f"[RAG] KB retrieved {len(chunks)} chunks (avg {avg_score:.2f}) for: {user_query[:80]!r}")
                     else:
                         print(f"[RAG] No KB chunks found for: {user_query[:80]!r}")
@@ -974,10 +984,16 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     messages = []
     effective_system = persona_system_prompt if persona_system_prompt is not None else req.system_prompt
     if kb_context:
+        _cite_note = (
+            "Excerpts are numbered [1]..[n]. When you use information from an "
+            "excerpt, cite it inline as [n] immediately after the claim. Only "
+            "cite numbers that exist. "
+        ) if kb_sources else ""
         effective_system += (
             "\n\n=== RELEVANT KNOWLEDGE BASE CONTEXT ===\n"
             "The following excerpts were retrieved from your knowledge base based on "
             "the user's query. Use them to accurately answer questions. "
+            + _cite_note +
             "Each excerpt shows its source file and relevance score.\n\n"
             + kb_context
         )
@@ -1036,6 +1052,15 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             "theme-matched, with zero latency — a saved image cannot match that. If your first instinct is "
             "`import matplotlib`, stop and emit a ```chart fence instead.\n"
             "\n"
+            + (
+                "### Pictures — `generate_image`\n"
+                "For PICTURES (photos, art, illustrations, concept renders, wallpapers, characters, "
+                "scenes), call `generate_image` with a descriptive prompt — it runs local Stable "
+                "Diffusion and the result displays inline automatically. Use it ONLY for pictures: "
+                "charts stay in ```chart fences and diagrams stay in ```mermaid fences.\n"
+                "\n"
+                if config.COMFYUI_URL else ""
+            ) +
             "### Computation — `execute_code` IS the right tool\n"
             "Use `execute_code` freely for actual arithmetic, aggregation, statistics, parsing, scraping, "
             "growth-rate/CAGR/variance/weighted-average calculations — anything you'd get wrong by doing it "
@@ -1204,7 +1229,9 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 available_tool_names.add(tname)
 
     # ── Always include execute_code + download_file so any chat can generate visuals ──
-    _visual_tools = ("execute_code", "download_file")
+    _visual_tools = ["execute_code", "download_file"]
+    if config.COMFYUI_URL:
+        _visual_tools.append("generate_image")
     for _vt in _visual_tools:
         if _vt not in available_tool_names and _vt in CODEAGENT_TOOLS:
             ollama_tools.append(CODEAGENT_TOOLS[_vt])

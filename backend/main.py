@@ -43,6 +43,8 @@ import hf as hf_module
 from hf import parse_ollama_progress
 import rag
 import connectors
+import comfyui
+import voice
 import model_providers
 from research import (
     REPORT_TEMPLATES,
@@ -619,6 +621,17 @@ async def lifespan(app: FastAPI):
     if _settings.get("n8n_url"):
         config.N8N_URL = _coerce_service_url(_settings["n8n_url"], "N8N_URL", "http://127.0.0.1:5678")
         print(f"[Config] Loaded N8N URL from settings: {config.N8N_URL}")
+    if _settings.get("comfyui_url"):
+        config.COMFYUI_URL = _coerce_service_url(_settings["comfyui_url"], "COMFYUI_URL", "")
+        print(f"[Config] Loaded ComfyUI URL from settings: {config.COMFYUI_URL}")
+    if _settings.get("stt_url"):
+        config.STT_URL = _coerce_service_url(_settings["stt_url"], "STT_URL", "")
+        print(f"[Config] Loaded STT URL from settings: {config.STT_URL}")
+    if _settings.get("tts_url"):
+        config.TTS_URL = _coerce_service_url(_settings["tts_url"], "TTS_URL", "")
+        print(f"[Config] Loaded TTS URL from settings: {config.TTS_URL}")
+    if _settings.get("tts_voice"):
+        config.TTS_VOICE = str(_settings["tts_voice"])
     # Use `in _settings` (not `.get(...)` truthy check) so an explicitly-saved
     # empty string — meaning "inherit from chat model" in the UI — is honored
     # on startup. Otherwise the env default (e.g. PLANNING_MODEL=qwen3.5:27b
@@ -723,6 +736,9 @@ async def lifespan(app: FastAPI):
         rag.CHUNK_OVERLAP = config.coerce_int(_rag_cfg["chunk_overlap"], rag.CHUNK_OVERLAP, minimum=0, maximum=2000)
     # Ensure RAG embedding model is available (non-blocking pull)
     _track_bg(rag.ensure_embed_model())
+    # Backfill the kb_chunks_fts keyword index from existing Chroma documents
+    # (no-op once populated; non-blocking)
+    _track_bg(rag.backfill_fts())
     yield
     for task in [_cleanup_task_ref, _health_task_ref]:
         if task:
@@ -1240,6 +1256,13 @@ async def _run_health_checks() -> dict:
         checks[name] = result
     # SearXNG gets its own special check (rate-limit detection)
     checks["searxng"] = await _check_searxng()
+    # Optional services — only checked (and reported) when configured
+    if config.COMFYUI_URL:
+        checks["comfyui"] = await comfyui.check_health(http)
+    if config.STT_URL:
+        checks["stt"] = await _check_service("stt", f"{config.STT_URL}/v1/models")
+    if config.TTS_URL:
+        checks["tts"] = await _check_service("tts", f"{config.TTS_URL}/v1/models")
     # Log to DB (non-blocking)
     try:
         conn = await db.get_db()
@@ -3374,6 +3397,211 @@ async def reindex_all_kbs():
     return {"status": "reindexed", "kbs": all_results, "errors": errors}
 
 
+@app.post("/api/knowledge-bases/query")
+async def query_knowledge_bases(body: dict):
+    """Hybrid retrieval probe (vector + keyword, RRF-fused). Used by tests/UI."""
+    kb_ids = body.get("kb_ids") or []
+    query = (body.get("query") or "").strip()
+    if not kb_ids or not isinstance(kb_ids, list):
+        raise HTTPException(400, "kb_ids list is required")
+    if not query:
+        raise HTTPException(400, "query is required")
+    top_k = config.coerce_int(body.get("top_k"), 6, minimum=1, maximum=30)
+    # Restrict to KBs the current user owns
+    owned = {k["id"] for k in await db.get_kbs()}
+    kb_ids = [k for k in kb_ids if k in owned]
+    if not kb_ids:
+        raise HTTPException(404, "No accessible KBs in kb_ids")
+    chunks = await rag.hybrid_query(kb_ids, query, top_k=top_k)
+    return {"chunks": chunks, "count": len(chunks)}
+
+
+# ============================================================
+# IMAGE STUDIO — ComfyUI job proxy
+# ============================================================
+# In-process job registry (restart-lossy, same posture as cancel_registry).
+# On a cache miss after restart, GET falls back to ComfyUI history directly.
+_image_jobs: dict[str, dict] = {}
+_image_checkpoints_cache: dict = {"ts": 0.0, "checkpoints": []}
+
+
+@app.post("/api/images/generate")
+async def generate_image_job(body: dict = Body(...)):
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured. Set the URL in Settings → Connections.")
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(400, "prompt is required")
+    checkpoint = (body.get("checkpoint") or "").strip()
+    if checkpoint:
+        valid = await comfyui.list_checkpoints()
+        if valid and checkpoint not in valid:
+            raise HTTPException(400, f"Unknown checkpoint: {checkpoint}")
+    count = config.coerce_int(body.get("count"), 1, minimum=1, maximum=4)
+    try:
+        workflow, seed = comfyui.build_workflow(
+            comfyui.load_template(),
+            prompt=prompt,
+            negative_prompt=(body.get("negative_prompt") or ""),
+            width=body.get("width") or 1024,
+            height=body.get("height") or 1024,
+            steps=body.get("steps") or 25,
+            cfg=body.get("cfg") or 7.0,
+            seed=body.get("seed"),
+            checkpoint=checkpoint,
+            batch_size=count,
+            sampler_name=(body.get("sampler") or "").strip(),
+            scheduler=(body.get("scheduler") or "").strip(),
+            v_prediction=bool(body.get("v_prediction")),
+        )
+        prompt_id = await comfyui.submit(workflow)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"ComfyUI submit failed: {str(e)[:300]}")
+    params = {
+        "prompt": prompt, "negative_prompt": (body.get("negative_prompt") or ""),
+        "width": body.get("width") or 1024, "height": body.get("height") or 1024,
+        "steps": body.get("steps") or 25, "cfg": body.get("cfg") or 7.0,
+        "seed": seed, "checkpoint": checkpoint, "count": count,
+        "sampler": (body.get("sampler") or "").strip(),
+        "scheduler": (body.get("scheduler") or "").strip(),
+        "v_prediction": bool(body.get("v_prediction")),
+    }
+    _image_jobs[prompt_id] = {"status": "queued", "params": params, "created": time.time()}
+    return {"job_id": prompt_id, "seed": seed, "params": params}
+
+
+@app.get("/api/images/jobs/{job_id}")
+async def get_image_job(job_id: str):
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured")
+    job = _image_jobs.get(job_id) or {"status": "queued", "params": {}, "created": time.time()}
+    if job.get("status") == "done":
+        return {"status": "done", "images": job.get("images", []), "params": job.get("params", {})}
+    if job.get("status") == "error":
+        return {"status": "error", "error": job.get("error", ""), "params": job.get("params", {})}
+    try:
+        history = await comfyui.get_history(job_id)
+    except Exception as e:
+        raise HTTPException(502, f"ComfyUI unreachable: {str(e)[:200]}")
+    if not history:
+        qpos = await comfyui.queue_position(job_id)
+        status = "running" if qpos == 0 else "queued"
+        out = {"status": status, "params": job.get("params", {})}
+        if qpos and qpos > 0:
+            out["queue_position"] = qpos
+        _image_jobs[job_id] = {**job, "status": status}
+        return out
+    if history.get("status", {}).get("status_str") == "error":
+        job.update(status="error", error="ComfyUI workflow error (check checkpoint and VRAM)")
+        _image_jobs[job_id] = job
+        return {"status": "error", "error": job["error"], "params": job.get("params", {})}
+    outputs = comfyui.outputs_from_history(history)
+    if not outputs:
+        return {"status": "running", "params": job.get("params", {})}
+    # First completed poll: persist files + artifacts, cache so repeats are idempotent
+    os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
+    images = []
+    params = job.get("params", {})
+    for i, img in enumerate(outputs):
+        filename = f"comfy_{job_id[:8]}_{i}.png"
+        filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, filename)
+        try:
+            if not os.path.exists(filepath):
+                data = await comfyui.fetch_image(img)
+                with open(filepath, "wb") as f:
+                    f.write(data)
+        except Exception as e:
+            print(f"[IMAGE STUDIO] fetch failed: {e}")
+            continue
+        url = f"/api/downloads/{filename}"
+        artifact_id = None
+        try:
+            sha = hashlib.sha256(open(filepath, "rb").read()).hexdigest()
+            artifact = await db.add_artifact(
+                filename=filename,
+                url=url,
+                kind="image",
+                mime_type="image/png",
+                storage_path=filepath,
+                size_bytes=os.path.getsize(filepath),
+                sha256=sha,
+                exists_status="present",
+                status="draft",
+                metadata={"source_tool": "image_studio", **params},
+            )
+            artifact_id = (artifact or {}).get("id")
+        except Exception as e:
+            print(f"[IMAGE STUDIO] artifact create failed: {e}")
+        images.append({"filename": filename, "url": url, "artifact_id": artifact_id})
+    job.update(status="done", images=images)
+    _image_jobs[job_id] = job
+    # First completed poll only (cached afterwards): release VRAM back to Ollama
+    _track_bg(comfyui.free_memory())
+    return {"status": "done", "images": images, "params": params}
+
+
+@app.post("/api/images/jobs/{job_id}/cancel")
+async def cancel_image_job(job_id: str):
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured")
+    await comfyui.cancel(job_id)
+    if job_id in _image_jobs:
+        _image_jobs[job_id]["status"] = "error"
+        _image_jobs[job_id]["error"] = "cancelled"
+    return {"status": "cancelled"}
+
+
+@app.get("/api/images/checkpoints")
+async def list_image_checkpoints():
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured. Set the URL in Settings → Connections.")
+    if time.time() - _image_checkpoints_cache["ts"] > 60:
+        _image_checkpoints_cache["checkpoints"] = await comfyui.list_checkpoints()
+        _image_checkpoints_cache["ts"] = time.time()
+    cks = _image_checkpoints_cache["checkpoints"]
+    return {"checkpoints": cks, "default": cks[0] if cks else ""}
+
+
+# ============================================================
+# AUDIO — voice STT/TTS proxy
+# ============================================================
+@app.post("/api/audio/transcribe")
+async def transcribe_audio(file: UploadFile = File(...)):
+    if not config.STT_URL:
+        raise HTTPException(503, "Speech-to-text is not configured. Set the STT URL in Settings → Connections.")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Empty audio upload")
+    if len(data) > 25 * 1024 * 1024:
+        raise HTTPException(413, "Audio upload too large (25MB max)")
+    try:
+        return await voice.transcribe(data, file.filename or "recording.webm", file.content_type or "")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, f"STT service error: HTTP {e.response.status_code}")
+    except Exception as e:
+        raise HTTPException(502, f"STT service unreachable: {str(e)[:200]}")
+
+
+@app.post("/api/audio/speech")
+async def synthesize_speech(body: dict = Body(...)):
+    if not config.TTS_URL:
+        raise HTTPException(503, "Text-to-speech is not configured. Set the TTS URL in Settings → Connections.")
+    text = voice.strip_for_tts(body.get("text") or "")
+    if not text:
+        raise HTTPException(400, "Nothing speakable in the provided text")
+    voice_name = (body.get("voice") or "").strip()
+    return StreamingResponse(voice.speech_stream(text, voice_name), media_type="audio/mpeg")
+
+
+@app.get("/api/audio/voices")
+async def list_tts_voices():
+    if not config.TTS_URL:
+        return {"voices": [], "default": config.TTS_VOICE}
+    return {"voices": await voice.list_voices(), "default": config.TTS_VOICE}
+
+
 # ============================================================
 # TOOLS
 # ============================================================
@@ -5138,6 +5366,10 @@ async def get_app_settings():
         "current_codebox_url": config.CODEBOX_URL,
         "current_searxng_url": config.SEARXNG_URL,
         "current_n8n_url": config.N8N_URL,
+        "current_comfyui_url": config.COMFYUI_URL,
+        "current_stt_url": config.STT_URL,
+        "current_tts_url": config.TTS_URL,
+        "current_tts_voice": config.TTS_VOICE,
         "current_planning_model": config.PLANNING_MODEL,
         "current_coder_model": config.CODER_MODEL,
         "current_workspace_model": config.WORKSPACE_MODEL,
@@ -5172,6 +5404,7 @@ async def get_app_settings():
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
     allowed = {"file_cleanup_days", "ollama_url", "codebox_url", "searxng_url", "n8n_url",
+               "comfyui_url", "stt_url", "tts_url", "tts_voice",
                "rag", "planning_model", "coder_model",
                "workspace_model",
                "architect_model", "reviewer_model", "acceptance_model", "builder_model", "fixer_model", "qa_model",
@@ -5236,6 +5469,30 @@ async def update_app_settings(body: dict = Body(...)):
     elif "n8n_url" in body and not body["n8n_url"]:
         settings["n8n_url"] = ""
         config.N8N_URL = os.getenv("N8N_URL", "http://127.0.0.1:5678")
+    if "comfyui_url" in body and body["comfyui_url"]:
+        config.COMFYUI_URL = _coerce_service_url(body["comfyui_url"], "COMFYUI_URL", "")
+        settings["comfyui_url"] = config.COMFYUI_URL
+        print(f"[Config] Updated ComfyUI URL to: {config.COMFYUI_URL}")
+    elif "comfyui_url" in body and not body["comfyui_url"]:
+        settings["comfyui_url"] = ""
+        config.COMFYUI_URL = os.getenv("COMFYUI_URL", "")
+    if "stt_url" in body and body["stt_url"]:
+        config.STT_URL = _coerce_service_url(body["stt_url"], "STT_URL", "")
+        settings["stt_url"] = config.STT_URL
+        print(f"[Config] Updated STT URL to: {config.STT_URL}")
+    elif "stt_url" in body and not body["stt_url"]:
+        settings["stt_url"] = ""
+        config.STT_URL = os.getenv("STT_URL", "")
+    if "tts_url" in body and body["tts_url"]:
+        config.TTS_URL = _coerce_service_url(body["tts_url"], "TTS_URL", "")
+        settings["tts_url"] = config.TTS_URL
+        print(f"[Config] Updated TTS URL to: {config.TTS_URL}")
+    elif "tts_url" in body and not body["tts_url"]:
+        settings["tts_url"] = ""
+        config.TTS_URL = os.getenv("TTS_URL", "")
+    if "tts_voice" in body:
+        config.TTS_VOICE = str(body["tts_voice"] or os.getenv("TTS_VOICE", "af_heart"))
+        settings["tts_voice"] = config.TTS_VOICE
     if "planning_model" in body:
         config.PLANNING_MODEL = body["planning_model"] or ""
         print(f"[Config] Updated Planning Model to: {config.PLANNING_MODEL or '(use chat model)'}")
@@ -5326,6 +5583,10 @@ async def update_app_settings(body: dict = Body(...)):
         "current_codebox_url": config.CODEBOX_URL,
         "current_searxng_url": config.SEARXNG_URL,
         "current_n8n_url": config.N8N_URL,
+        "current_comfyui_url": config.COMFYUI_URL,
+        "current_stt_url": config.STT_URL,
+        "current_tts_url": config.TTS_URL,
+        "current_tts_voice": config.TTS_VOICE,
         "current_planning_model": config.PLANNING_MODEL,
         "current_coder_model": config.CODER_MODEL,
         "current_workspace_model": config.WORKSPACE_MODEL,

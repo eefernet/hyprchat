@@ -54,6 +54,8 @@ WATCHED = {
     "backend/model_providers.py":   ("Model Providers",  REMOTE_BACKEND,            True),
     "backend/cancel_registry.py":   ("Cancel Registry",  REMOTE_BACKEND,            True),
     "backend/rag.py":               ("RAG Pipeline",     REMOTE_BACKEND,            True),
+    "backend/comfyui.py":           ("ComfyUI Client",   REMOTE_BACKEND,            True),
+    "backend/voice.py":             ("Voice",            REMOTE_BACKEND,            True),
     "backend/research.py":          ("Research",         REMOTE_BACKEND,            True),
     "backend/quick_search.py":      ("Quick Search",     REMOTE_BACKEND,            True),
     "backend/search_agent.py":      ("Search Agent",     REMOTE_BACKEND,            True),

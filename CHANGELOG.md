@@ -1,3 +1,33 @@
+# Alpha v18.0.0 — June 11, 2026
+
+> Three new feature pillars: local image generation (ComfyUI), voice input/output (Whisper + Kokoro), and hybrid RAG retrieval with inline source citations.
+
+## Image Generation (ComfyUI)
+- **New `generate_image` chat tool** — ask any chat for a picture and local Stable Diffusion (SDXL via ComfyUI) renders it inline, with seed/steps/dimensions reported for reproducible variations. Charts and diagrams still use ```chart/```mermaid fences; the tool is pictures-only.
+- **New Image Studio panel** (nav → More) — prompt/negative-prompt boxes, size presets, steps/CFG/seed/count, checkpoint picker, live progress with queue position, Stop, and a results grid with Download / Use in chat / Reuse seed.
+- Generated images are tracked artifacts (`kind=image`) with prompt/seed metadata, visible in Artifact Studio.
+- New backend module `backend/comfyui.py` patches any API-format ComfyUI workflow by node class (custom workflows via `COMFYUI_WORKFLOW_PATH`); routes under `/api/images/*`.
+- Settings → Connections gains a **ComfyUI** URL field (empty = feature hidden/disabled) and a health pill.
+- **VRAM note:** run ComfyUI pinned to one GPU (e.g. `--cuda-device 1`) so SDXL (~7 GB) doesn't fight Ollama's multi-model spread; drop `OLLAMA_MAX_LOADED_MODELS` if OOMs appear.
+
+## Voice — Speech-to-Text and Text-to-Speech
+- **Mic button in the composer** records audio and transcribes it into the input box via a self-hosted OpenAI-compatible STT server (Speaches / faster-whisper recommended).
+- **Speak button on assistant replies** synthesizes audio via a self-hosted TTS server (kokoro-fastapi recommended); markdown, code fences, links, and citations are stripped server-side before synthesis. Optional **Auto-play replies** toggle.
+- New backend module `backend/voice.py` and routes `/api/audio/transcribe`, `/api/audio/speech`, `/api/audio/voices` — the browser only ever talks to HyprChat; the LAN voice services stay unexposed.
+- Settings → Connections gains **Voice STT** / **Voice TTS** URL fields, a voice picker, and health pills.
+- **Mic gotcha:** `getUserMedia` requires a secure context. Over plain HTTP (e.g. `http://100.122.119.50:8000`), allow the origin in `chrome://flags/#unsafely-treat-insecure-origin-as-secure` or serve via HTTPS, or the mic button will report "Microphone unavailable".
+
+## Hybrid RAG + Inline Citations
+- **Hybrid retrieval:** KB queries now fuse ChromaDB vector search with a new SQLite FTS5 keyword index (`kb_chunks_fts`) via Reciprocal Rank Fusion — exact tokens like part numbers, error strings, and IDs now rank reliably. If embeddings fail (Ollama down), retrieval degrades to keyword-only instead of returning nothing.
+- **Inline citations:** RAG excerpts are numbered and the model cites `[n]` inline; citations render as clickable chips opening a source popover (file, chunk, relevance, snippet), plus a collapsible **Sources (n)** strip under the reply. Citations persist across reloads via saved events.
+- Existing KBs are backfilled into the keyword index automatically at startup; `Reindex` rebuilds both stores.
+- New probe endpoint `POST /api/knowledge-bases/query` for retrieval testing.
+
+## Tests
+- New suites: `test_rag_hybrid.py` (keyword vs vector legs, FTS metachar safety, delete/reindex sync), `test_audio.py` (transcribe/speech/strip, skips when unconfigured), `test_image_generation.py` (workflow patching units + live job lifecycle, skips when ComfyUI is down).
+
+---
+
 # Alpha v17.2.1 - June 14, 2026
 > This update focuses on the first series to migrate a single file react **no build step** app into a built app versus having all built at runtime on the users browser. Load times should be faster and it should be easier to maintain the code base in the future.
 
