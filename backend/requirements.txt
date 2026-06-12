@@ -6,3 +6,4 @@ python-multipart==0.0.12
 pypdf>=4.0.0
 chromadb>=0.4.0
 trafilatura>=1.10.0
+PyYAML>=6.0

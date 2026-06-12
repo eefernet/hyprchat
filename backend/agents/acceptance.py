@@ -19,6 +19,7 @@ import uuid
 import config
 import database as db
 import cancel_registry
+import model_providers
 
 
 _ARTIFACT_DIRS = {
@@ -53,7 +54,6 @@ _README_CONTEXT_BYTES = 12000
 _MANIFEST_CONTEXT_BYTES = 12000
 _TEST_CONTEXT_BYTES = 12000
 _SOURCE_CONTEXT_BYTES = 128000
-_SOURCE_SECTION_CAP_MIN = 90000
 _SOURCE_SECTION_CAP_MAX = 220000
 
 
@@ -292,15 +292,28 @@ def _configured_num_ctx() -> int:
     return n if n > 0 else 16384
 
 
-def _source_section_cap(num_ctx: int) -> int:
-    """Approximate a source-character budget from the configured token context."""
+def _section_budgets(num_ctx: int) -> dict:
+    """Derive per-section character caps from the configured token context.
+
+    Whole-prompt budget ≈ num_ctx × 3 chars; the remainder after these
+    sections covers the task/plan/file-list/prompt scaffold. The old fixed
+    caps (90K-char source floor plus 84K for the other sections) overflowed
+    a 16K-token window several times over and Ollama silently truncated the
+    prompt — usually dropping the instructions at one end.
+    """
     try:
         n = int(num_ctx)
     except Exception:
         n = 16384
     if n <= 0:
         n = 16384
-    return max(_SOURCE_SECTION_CAP_MIN, min(_SOURCE_SECTION_CAP_MAX, n * 4))
+    budget = n * 3
+    return {
+        "readme": max(4000, int(budget * 0.10)),
+        "manifest": max(4000, int(budget * 0.10)),
+        "tests": max(4000, int(budget * 0.15)),
+        "source": max(4000, min(_SOURCE_SECTION_CAP_MAX, int(budget * 0.50))),
+    }
 
 
 def _normalize_issue(issue: dict, project_dir: str) -> dict:
@@ -389,7 +402,7 @@ Use only the static project evidence below. Do not invent runtime results.
 
 ## Clean build/test/lint review
 {review_summary}
-
+{prior_acceptance_section}
 ## File manifest ({file_count} files shown)
 {manifest}
 
@@ -428,7 +441,7 @@ Return ONLY a JSON object with this exact shape:
 Acceptance criteria:
 - spec: implemented behavior must match the user's request and plan.
 - docs: README and usage claims must be accurate for files/manifests present.
-- packaging: package metadata, entrypoints, generated artifacts, and archive hygiene must be sane.
+- packaging: package metadata, entrypoints, generated artifacts, and archive hygiene must be sane. If the review summary lists smoke_new_files (state files the program created when run), flag any that sit in the project tree as a packaging issue — runtime state must not ship in the deliverable.
 - tests: tests must be meaningful and isolated; they must not write to a real home directory or depend on host state.
 - runtime: flag likely user-visible behavior bugs that static inspection reveals, but do not speculate.
 - verification: accept static-only projects when the user's requested app type has no build step, but flag docs or delivery claims that imply stronger verification than the Reviewer actually performed.
@@ -449,7 +462,8 @@ async def run_acceptance_review(http, events, conv_id: str, *,
                                 reviewer_run_id: str = "",
                                 project_id: str = "",
                                 parent_run_id: str = "",
-                                conv_model: str = "") -> dict:
+                                conv_model: str = "",
+                                prior_acceptance_context: str = "") -> dict:
     """Run the final acceptance gate after a clean Reviewer run."""
     run_id = f"run-{uuid.uuid4().hex[:12]}"
 
@@ -585,6 +599,7 @@ async def run_acceptance_review(http, events, conv_id: str, *,
         original_task, latest_task = _latest_user_task(conv)
         plan = await _project_plan(conv_id, project_id=project_id)
         num_ctx = _configured_num_ctx()
+        _budgets = _section_budgets(num_ctx)
 
         review_summary = json.dumps({
             "reviewer_run_id": reviewer_run_id,
@@ -597,7 +612,22 @@ async def run_acceptance_review(http, events, conv_id: str, *,
             "verification_level": review_env.get("verification_level", ""),
             "verification_profile": review_env.get("verification_profile", ""),
             "verification_confidence": review_env.get("verification_confidence", ""),
+            "smoke_cmds": review_env.get("smoke_cmds", []),
+            "smoke_new_files": review_env.get("smoke_new_files", []),
         }, indent=2)
+
+        if prior_acceptance_context:
+            prior_acceptance_section = (
+                "\n## Your previous acceptance verdict for this request\n"
+                "You already reviewed this project and flagged the issues below; "
+                "the fix loop then addressed them. FIRST verify each one is "
+                "resolved. Do NOT flag new minor nitpicks you did not previously "
+                "raise — only report a NEW issue if it is a genuine defect that "
+                "blocks the user's request.\n\n"
+                + prior_acceptance_context.strip()[:2000] + "\n"
+            )
+        else:
+            prior_acceptance_section = ""
 
         artifact_block = "\n".join(artifacts[:80]) if artifacts else "(none)"
         if console_scripts:
@@ -608,17 +638,23 @@ async def run_acceptance_review(http, events, conv_id: str, *,
             latest_task=latest_task or "(not available)",
             plan=plan or "(not available)",
             review_summary=review_summary,
+            prior_acceptance_section=prior_acceptance_section,
             file_count=len(files),
             manifest="\n".join(files[:300]) or "(no files found)",
             artifact_block=artifact_block,
-            readme_sections=_sections(readmes, cap=24000, per_file_cap=_README_CONTEXT_BYTES),
-            manifest_sections=_sections(manifests, cap=24000, per_file_cap=_MANIFEST_CONTEXT_BYTES),
-            test_sections=_sections(tests, cap=36000, per_file_cap=_TEST_CONTEXT_BYTES),
-            source_sections=_sections(source, cap=_source_section_cap(num_ctx), per_file_cap=_SOURCE_CONTEXT_BYTES),
+            readme_sections=_sections(readmes, cap=_budgets["readme"], per_file_cap=_README_CONTEXT_BYTES),
+            manifest_sections=_sections(manifests, cap=_budgets["manifest"], per_file_cap=_MANIFEST_CONTEXT_BYTES),
+            test_sections=_sections(tests, cap=_budgets["tests"], per_file_cap=_TEST_CONTEXT_BYTES),
+            source_sections=_sections(source, cap=_budgets["source"], per_file_cap=_SOURCE_CONTEXT_BYTES),
         )
 
+        # Cloud-prefixed models are honored only from explicit Settings values
+        # (per-agent override / Planning Model) — never inherited from the
+        # chat model.
         model = (getattr(config, "ACCEPTANCE_MODEL", "")
-                 or config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL or "")
+                 or config.PLANNING_MODEL
+                 or model_providers.reject_cloud(conv_model)
+                 or model_providers.reject_cloud(config.DEFAULT_MODEL) or "")
         if not model:
             envelope = {
                 "status": "error",
@@ -633,21 +669,31 @@ async def run_acceptance_review(http, events, conv_id: str, *,
             return envelope
 
         await _step("analyze", f"calling {model}")
-        coro = http.post(
-            f"{config.OLLAMA_URL}/api/chat",
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-                "think": False,
-                "options": {"temperature": 0.2, "num_ctx": num_ctx},
-            },
-            timeout=600,
-        )
-        r = await cancel_registry.await_cancellable(coro, run_id)
-        text = ""
-        if r.status_code == 200:
-            text = _ollama_response_text(r.json())
+
+        async def _progress_ticker():
+            elapsed = 0
+            while True:
+                await asyncio.sleep(15)
+                elapsed += 15
+                try:
+                    await _step("analyzing", f"{elapsed}s elapsed…")
+                except Exception:
+                    pass
+
+        _ticker = asyncio.create_task(_progress_ticker())
+        try:
+            coro = model_providers.complete_chat(
+                http, model, prompt,
+                temperature=0.2, num_ctx=num_ctx, num_predict=4096,
+                timeout=600, ollama_url=config.OLLAMA_URL,
+            )
+            text = await cancel_registry.await_cancellable(coro, run_id)
+        finally:
+            _ticker.cancel()
+            try:
+                await _ticker
+            except asyncio.CancelledError:
+                pass
         parsed = _try_parse_json(text)
         if not parsed or "status" not in parsed:
             parsed = {
@@ -714,6 +760,30 @@ async def run_acceptance_review(http, events, conv_id: str, *,
             })
             if run_id:
                 await db.update_run(run_id, status="cancelled", result_envelope=envelope, ended=True)
+        except Exception:
+            pass
+        return envelope
+    except Exception as e:
+        # Ollama timeouts / transport errors must not strand the run at 'running' —
+        # the v2 gate treats an in-flight active_run_id as blocking forever.
+        envelope = {
+            "status": "error",
+            "summary": f"Acceptance review failed: {type(e).__name__}: {e}",
+            "issues": [],
+            "project_dir": project_dir,
+            "reviewer_run_id": reviewer_run_id,
+            "run_id": run_id,
+        }
+        print(f"[ACCEPTANCE] run failed: {type(e).__name__}: {e}")
+        try:
+            await events.emit(conv_id, "tool_end", {
+                "tool": "run_acceptance_review",
+                "icon": "clipboard-check",
+                "status": f"⚠ Acceptance failed: {type(e).__name__}",
+                "run_id": run_id,
+            })
+            if run_id:
+                await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
         except Exception:
             pass
         return envelope

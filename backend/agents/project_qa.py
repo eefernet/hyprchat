@@ -27,6 +27,9 @@ import uuid
 import config
 import database as db
 import cancel_registry
+import model_providers
+
+from agents.acceptance import _configured_num_ctx, _ollama_response_text
 
 
 # Common English "stopwords" that aren't useful as grep targets. Keep small —
@@ -292,7 +295,7 @@ async def _read_file_full(http, project_dir: str, path: str,
     """Read a file's full contents (capped at max_bytes). Used for filename-
     targeted reads where the user explicitly asked to see/break down a file."""
     rel = path
-    full = (f"{project_dir.rstrip('/')}/{rel.lstrip('./')}"
+    full = (f"{project_dir.rstrip('/')}/{rel.removeprefix('./')}"
             if not rel.startswith("/") else rel)
     cmd = f"head -c {max_bytes} {shlex.quote(full)}"
     try:
@@ -312,7 +315,7 @@ async def _read_snippet(http, project_dir: str, path: str, line: int = 0,
                          radius: int = 18) -> str:
     """Read a chunk of a file centered on `line`. If line is 0, read the head."""
     rel = path
-    full = f"{project_dir.rstrip('/')}/{rel.lstrip('./')}" if not rel.startswith("/") else rel
+    full = f"{project_dir.rstrip('/')}/{rel.removeprefix('./')}" if not rel.startswith("/") else rel
     if line and line > radius:
         start = line - radius
         n = radius * 2 + 1
@@ -605,21 +608,16 @@ async def run_project_qa(http, events, conv_id: str, *,
         await _step("compose", f"calling {qa_model}")
         answer = ""
         try:
-            coro = http.post(
-                f"{config.OLLAMA_URL}/api/chat",
-                json={
-                    "model": qa_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False,
-                    "options": {"temperature": 0.3, "num_ctx": config.DEFAULT_NUM_CTX},
-                },
-                timeout=600,
+            # Streams internally so Stop aborts the Ollama runner immediately.
+            coro = model_providers.complete_chat(
+                http, qa_model, prompt,
+                temperature=0.3, num_ctx=_configured_num_ctx(),
+                num_predict=4096, timeout=600,
+                ollama_url=config.OLLAMA_URL,
             )
-            r = await cancel_registry.await_cancellable(coro, run_id)
-            if r.status_code == 200:
-                answer = (r.json().get("message", {}).get("content") or "").strip()
-            else:
-                answer = f"(LLM call failed: HTTP {r.status_code})"
+            answer = await cancel_registry.await_cancellable(coro, run_id)
+            if not answer:
+                answer = "(LLM call returned no output)"
         except cancel_registry.RunCancelled:
             cancelled_env = {
                 "status": "cancelled",

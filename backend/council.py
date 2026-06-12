@@ -125,8 +125,21 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
         round_responses = {}
 
         async def query_member(member: dict):
-            mid = member["id"]
-            model = member["model"]
+            mid = member.get("id")
+            model = member.get("model", "")
+            # The council_done sentinel MUST fire for every member or the
+            # consumer loop spins forever (done_count never reaches total).
+            # Wrap the whole body so even a CancelledError / payload error
+            # still emits it. `except Exception` below misses BaseException.
+            try:
+                await _query_member_inner(member, mid, model)
+            except BaseException as e:  # incl. CancelledError
+                print(f"[COUNCIL] Member {model} aborted: {type(e).__name__}: {e}")
+            finally:
+                await output_q.put({"type": "council_done", "member_id": mid,
+                                    "model": model, "round": round_num})
+
+        async def _query_member_inner(member: dict, mid, model):
             sys_p = member.get("system_prompt", "")
             if kb_context:
                 kb_section = (
@@ -193,7 +206,6 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                     print(f"[COUNCIL] Member {member.get('persona_name', model)} empty response, retrying...")
                     await asyncio.sleep(2)
             round_responses[mid] = full
-            await output_q.put({"type": "council_done", "member_id": mid, "model": model, "round": round_num})
 
         tasks = [asyncio.create_task(query_member(m)) for m in members]
 

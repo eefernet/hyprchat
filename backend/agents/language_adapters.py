@@ -169,10 +169,16 @@ def node_adapter(manifest: list[str], language: str) -> LanguageAdapter:
     build_cmd = "npm install --silent && npm run build --if-present" if has_pkg else ""
     test_cmd = "npm test --if-present" if has_pkg else ""
     lint_cmd = "npm run lint --if-present" if has_pkg else ""
+    # `find -exec node --check {} \;` always exits 0 even on syntax errors —
+    # accumulate failures explicitly like html_adapter's js_lint does.
+    plain_node_check = (
+        "fail=0; for f in $(find . -name '*.js' -not -path '*/node_modules/*'); do "
+        "node --check \"$f\" || fail=1; done; exit $fail"
+    )
     return LanguageAdapter(
         language="typescript" if is_ts else "javascript",
         build_system="package.json" if has_pkg else "plain-node",
-        build_cmd=build_cmd or "find . -name '*.js' -not -path '*/node_modules/*' -exec node --check {} \\;",
+        build_cmd=build_cmd or plain_node_check,
         test_cmd=test_cmd,
         smoke_cmds=["npm start -- --help"] if has_pkg else [],
         package_rules=["Do not package node_modules, dist, build, .next, or cache directories."],

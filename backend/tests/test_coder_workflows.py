@@ -320,7 +320,9 @@ def test_chat_repeated_blocked_tool_state_stops_on_second_duplicate(monkeypatch)
     assert state["count"] == 2
     assert chat._next_action_from_blocked_result(blocked).startswith("run_aider_fix")
     assert chat._record_blocked_tool_result(state, "read_file", "OK") is False
-    assert state["count"] == 0
+    # A successful result no longer resets the counter — an OK sibling tool in
+    # the same batch must not defeat the duplicate-BLOCKED detection.
+    assert state["count"] == 2
     sys.modules.pop("agents.chat", None)
 
 
@@ -532,3 +534,563 @@ def test_new_coder_tools_are_registered():
 
     assert "uploaded-project fixes" in CODEAGENT_TOOLS["run_aider_fix"]["function"]["description"]
     assert "project_id" in CODEAGENT_TOOLS["run_aider_fix"]["function"]["parameters"]["properties"]
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle hardening — stale-run reaper + Aider finalize/fallback semantics
+# ---------------------------------------------------------------------------
+
+import json as _json
+
+
+def test_reap_stale_runs_marks_orphans_failed(tmp_path):
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import database as db
+
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_conversation("conv-reap", "Reaper Test"))
+    _run(db.create_run("run-stale", "conv-reap", role="aider.fix", status="running"))
+    _run(db.create_run("run-queued", "conv-reap", role="fixer", status="queued"))
+    _run(db.create_run("run-done", "conv-reap", role="reviewer", status="succeeded"))
+    _run(db.create_coder_workflow(
+        "cw-stale", "conv-reap", project_id="proj-r1",
+        mode="fix_uploaded_project", state="fixing",
+        user_task="x", active_run_id="run-stale",
+    ))
+    _run(db.create_coder_workflow(
+        "cw-fine", "conv-reap", project_id="proj-r2",
+        mode="fix_uploaded_project", state="fixing",
+        user_task="x", active_run_id="run-done",
+    ))
+
+    stats = _run(db.reap_stale_runs())
+
+    assert stats["runs_reaped"] == 2
+    assert stats["workflows_blocked"] == 1
+    assert _run(db.get_run("run-stale"))["status"] == "failed"
+    assert _run(db.get_run("run-queued"))["status"] == "failed"
+    assert _run(db.get_run("run-done"))["status"] == "succeeded"
+    env = _run(db.get_run("run-stale"))["result_envelope"]
+    assert env["summary"] == "orphaned by backend restart"
+    assert _run(db.get_coder_workflow("cw-stale"))["state"] == "blocked"
+    assert _run(db.get_coder_workflow("cw-fine"))["state"] == "fixing"
+
+
+class _AiderResp:
+    def __init__(self, code, payload):
+        self.status_code = code
+        self._payload = payload
+        self.text = _json.dumps(payload)
+
+    def json(self):
+        return self._payload
+
+
+class _AiderFakeHTTP:
+    """Injected client covering /aider/health, /aider/cancel, and the blocking
+    /aider/run fallback. The SSE stream path uses aider_fixer's own
+    httpx.AsyncClient, which each test controls separately."""
+
+    def __init__(self, run_result, on_run=None):
+        self.run_result = run_result
+        self.on_run = on_run
+        self.posts = []
+
+    async def get(self, url, **kw):
+        return _AiderResp(200, {"installed": True})
+
+    async def post(self, url, **kw):
+        self.posts.append(url)
+        if url.endswith("/aider/run"):
+            if self.on_run is not None:
+                await self.on_run()
+            return _AiderResp(200, self.run_result)
+        return _AiderResp(200, {})
+
+
+class _NullEvents:
+    async def emit(self, *a, **k):
+        pass
+
+
+def _prep_aider_db(tmp_path, db):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_conversation("conv-aider", "Aider Test"))
+    _run(db.create_coder_workflow(
+        "cw-aider", "conv-aider", project_id="proj-a",
+        mode="fix_uploaded_project", state="fixing", user_task="fix it",
+    ))
+
+
+def test_aider_finalize_maps_cancelled_state(tmp_path, monkeypatch):
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import config
+    import database as db
+    _prep_aider_db(tmp_path, db)
+    # Stream endpoint unreachable (closed port) → step_n stays 0 → blocking
+    # fallback runs through the fake client below.
+    monkeypatch.setattr(config, "AIDER_WORKER_URL", "http://127.0.0.1:9")
+    fake = _AiderFakeHTTP({"status": "cancelled", "summary": "stopped", "files_touched": []})
+
+    env = _run(aider_fixer.run_aider_fix(
+        fake, _NullEvents(), "conv-aider",
+        project_dir="/root/projects/proj-a", task="fix it",
+        project_id="proj-a", workflow_id="cw-aider",
+    ))
+
+    assert env["status"] == "cancelled"
+    wf = _run(db.get_coder_workflow("cw-aider"))
+    assert wf["state"] == "cancelled"
+    assert wf["artifact_status"] == "cancelled"
+
+
+def test_aider_finalize_respects_cancelled_workflow(tmp_path, monkeypatch):
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import config
+    import database as db
+    _prep_aider_db(tmp_path, db)
+    monkeypatch.setattr(config, "AIDER_WORKER_URL", "http://127.0.0.1:9")
+
+    async def _cancel_route_fires_mid_run():
+        await db.update_coder_workflow(
+            "cw-aider", state="cancelled",
+            artifact_status="cancelled", cancel_requested=True,
+        )
+
+    fake = _AiderFakeHTTP(
+        {"status": "error", "summary": "boom", "files_touched": []},
+        on_run=_cancel_route_fires_mid_run,
+    )
+
+    env = _run(aider_fixer.run_aider_fix(
+        fake, _NullEvents(), "conv-aider",
+        project_dir="/root/projects/proj-a", task="fix it",
+        project_id="proj-a", workflow_id="cw-aider",
+    ))
+
+    assert env["status"] == "error"
+    wf = _run(db.get_coder_workflow("cw-aider"))
+    # A failed run must NOT overwrite the user's cancel with 'blocked'.
+    assert wf["state"] == "cancelled"
+
+
+def test_aider_no_fallback_after_partial_stream(tmp_path, monkeypatch):
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import database as db
+    _prep_aider_db(tmp_path, db)
+
+    class _StreamResp:
+        status_code = 200
+
+        async def aiter_lines(self):
+            yield 'data: {"type": "step", "action": "edit", "detail": "x"}'
+            raise ConnectionError("link dropped")
+
+        async def aread(self):
+            return b""
+
+    class _StreamCtx:
+        async def __aenter__(self):
+            return _StreamResp()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _FakeAsyncClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, *a, **k):
+            return _StreamCtx()
+
+    monkeypatch.setattr(aider_fixer.httpx, "AsyncClient", _FakeAsyncClient)
+    fake = _AiderFakeHTTP({"status": "ok", "summary": "should not run", "files_touched": []})
+
+    env = _run(aider_fixer.run_aider_fix(
+        fake, _NullEvents(), "conv-aider",
+        project_dir="/root/projects/proj-a", task="fix it",
+        project_id="proj-a", workflow_id="cw-aider",
+    ))
+
+    assert env["status"] == "error"
+    assert "not restarting" in env["summary"]
+    assert not any(u.endswith("/aider/run") for u in fake.posts)
+    assert any("/aider/cancel/" in u for u in fake.posts)
+
+
+# ---------------------------------------------------------------------------
+# Fixer parser / status, node adapter, synthesizer gating
+# ---------------------------------------------------------------------------
+
+def test_fixer_edit_parser_survives_inner_fences():
+    from agents import fixer
+    inner = "# Readme\n\nUsage:\n\n```python\nprint('hi')\n```\n\nDone."
+    text = (
+        f"### EDIT: /root/projects/p/README.md\n```markdown\n{inner}\n```\n\n"
+        f"### EDIT: /root/projects/p/app.py\n```python\nprint('app')\n```\n\n"
+        f"### SUMMARY: updated docs\n"
+    )
+
+    parsed = fixer._parse_fixer_output(text)
+
+    assert parsed["parse_errors"] == []
+    assert len(parsed["edits"]) == 2
+    assert parsed["edits"][0]["path"] == "/root/projects/p/README.md"
+    assert parsed["edits"][0]["content"] == inner
+    assert parsed["edits"][1]["content"] == "print('app')"
+    assert parsed["summary"] == "updated docs"
+
+
+def test_fixer_edit_parser_skips_unterminated_fence():
+    from agents import fixer
+    text = "### EDIT: /root/projects/p/a.py\n```python\nprint('truncated"
+
+    parsed = fixer._parse_fixer_output(text)
+
+    assert parsed["edits"] == []
+    assert any("unterminated" in e for e in parsed["parse_errors"])
+
+
+def test_node_fallback_build_cmd_propagates_failure():
+    contract = language_adapters.detect_contract(["script.js"], "javascript")
+    assert "fail=1" in contract["build_cmd"]
+    assert "exit $fail" in contract["build_cmd"]
+    assert "-exec node --check {}" not in contract["build_cmd"]
+
+
+def _seed_reviewer_run(db, conv_id, run_id, envelope):
+    _run(db.create_run(run_id, conv_id, role="reviewer", status="running"))
+    _run(db.update_run(run_id, status="succeeded", result_envelope=envelope, ended=True))
+
+
+def test_synthesizer_skips_when_reviewer_reported_issues(tmp_path):
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import database as db
+    import tools
+
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_conversation("conv-synth", "Synth Test"))
+    _seed_reviewer_run(db, "conv-synth", "run-rev-issues", {
+        "status": "issues", "test_exit": 0,
+        "summary": "lint issues", "issues": [{"file": "a.py", "summary": "x"}],
+    })
+
+    rid = _run(tools._synthesize_reviewer_from_test_failure(
+        "conv-synth", "FAILED tests/test_a.py::test_x - AssertionError: boom",
+        "/root/projects/p", "pytest", 1.0,
+    ))
+
+    # Reviewer already reported issues — must NOT stack a synthetic envelope.
+    assert rid == ""
+
+
+def test_synthesizer_fires_for_clean_reviewer(tmp_path):
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import database as db
+    import tools
+
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_conversation("conv-synth2", "Synth Test 2"))
+    _seed_reviewer_run(db, "conv-synth2", "run-rev-clean", {
+        "status": "clean", "test_exit": 0, "summary": "all good", "issues": [],
+    })
+
+    rid = _run(tools._synthesize_reviewer_from_test_failure(
+        "conv-synth2", "FAILED tests/test_a.py::test_x - AssertionError: boom",
+        "/root/projects/p", "pytest", 1.0,
+    ))
+
+    assert rid
+    env = _run(db.get_run(rid))["result_envelope"]
+    assert env["status"] == "issues"
+    assert env.get("synthetic") is True
+
+
+# ---------------------------------------------------------------------------
+# Path plumbing: dotfile preservation + indexer file prioritization
+# ---------------------------------------------------------------------------
+
+class _CmdCaptureHTTP:
+    def __init__(self, stdout=""):
+        self.stdout = stdout
+        self.commands = []
+
+    async def post(self, url, json=None, timeout=None):
+        self.commands.append((json or {}).get("command", ""))
+
+        class _R:
+            status_code = 200
+
+            def __init__(self, payload):
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        return _R({"exit_code": 0, "stdout": self.stdout, "stderr": ""})
+
+
+def test_indexer_path_join_preserves_dotfiles():
+    from agents import project_indexer
+    http = _CmdCaptureHTTP(stdout="X=1")
+
+    _run(project_indexer._read_file(http, "/root/projects/p", "./.env.example"))
+
+    assert any("/root/projects/p/.env.example" in c for c in http.commands), http.commands
+
+
+def test_qa_path_join_preserves_dotfiles():
+    from agents import project_qa
+    http = _CmdCaptureHTTP(stdout="X=1")
+
+    _run(project_qa._read_file_full(http, "/root/projects/p", "./.env.example"))
+
+    assert any("/root/projects/p/.env.example" in c for c in http.commands), http.commands
+
+
+def test_indexer_prioritizes_entrypoints_over_small_files():
+    from agents import project_indexer
+    lines = ["20 ./tiny1.cfg", "30 ./tiny2.cfg", "120000 ./src/core/engine.py",
+             "500 ./src/main.py", "90000 ./src/big_module.py"]
+    http = _CmdCaptureHTTP(stdout="\n".join(lines))
+
+    paths = _run(project_indexer._list_source_files(http, "/root/projects/p", cap=3))
+
+    # Entrypoint first despite being small; then largest files. The old
+    # `sort -n | head` would have returned the three smallest files.
+    assert paths == ["./src/main.py", "./src/core/engine.py", "./src/big_module.py"]
+
+
+def test_v2_name_match_word_boundary():
+    import tools
+    assert tools._v2_name_match("🏛️ Daedalus")
+    assert tools._v2_name_match("Coder Bot v2")
+    assert tools._v2_name_match("V2 Builder")
+    assert not tools._v2_name_match("v2ray helper")
+    assert not tools._v2_name_match("levi2000")
+    assert not tools._v2_name_match("")
+
+
+def test_blocked_counter_ignores_tool_name_and_interleaved_success(monkeypatch):
+    chat = _import_chat_with_optional_stubs(monkeypatch)
+    state = {"key": "", "count": 0}
+    blocked = "BLOCKED — reviewer (run-aabbccdd1122) returned issues. Call run_fixer."
+
+    assert chat._record_blocked_tool_result(state, "read_file", blocked) is False
+    # An interleaved successful sibling result must not reset the counter.
+    assert chat._record_blocked_tool_result(state, "search_files", "ok result") is False
+    # A different tool hitting the same blocking trigger trips the stop.
+    assert chat._record_blocked_tool_result(state, "list_files", blocked) is True
+    sys.modules.pop("agents.chat", None)
+
+
+def test_qa_short_circuit_skips_stale_run(monkeypatch):
+    chat = _import_chat_with_optional_stubs(monkeypatch)
+    stale = {
+        "role": "qa", "status": "succeeded", "started_at": "2026-01-01T00:00:00",
+        "result_envelope": {"answer": "old answer", "looks_like_change_request": False},
+    }
+    fresh = dict(stale, started_at="2026-01-01T00:10:00")
+
+    assert chat._qa_run_qualifies(stale, "2026-01-01T00:05:00") is False
+    assert chat._qa_run_qualifies(fresh, "2026-01-01T00:05:00") is True
+    sys.modules.pop("agents.chat", None)
+
+
+def test_reject_cloud_filters_only_cloud_ids():
+    import model_providers as mp
+    assert mp.reject_cloud("qwen3.5:27b") == "qwen3.5:27b"
+    assert mp.reject_cloud("hf.co/foo/bar:Q4") == "hf.co/foo/bar:Q4"
+    assert mp.reject_cloud("anthropic:claude-x") == ""
+    assert mp.reject_cloud("openai:gpt-5") == ""
+    assert mp.reject_cloud("") == ""
+
+
+def test_complete_chat_ollama_path_streams_and_reads_thinking_fallback():
+    import json as _json
+    import model_providers as mp
+
+    class _SResp:
+        status_code = 200
+
+        async def aiter_lines(self):
+            yield _json.dumps({"message": {"content": "", "thinking": "the "}, "done": False})
+            yield _json.dumps({"message": {"content": "", "thinking": "answer"}, "done": True})
+
+    class _Ctx:
+        async def __aenter__(self):
+            return _SResp()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _HTTP:
+        def __init__(self):
+            self.calls = []
+
+        def stream(self, method, url, json=None, timeout=None):
+            self.calls.append((url, json))
+            return _Ctx()
+
+    http = _HTTP()
+    out = _run(mp.complete_chat(http, "qwen3.5:27b", "hi",
+                                num_ctx=4096, num_predict=2048,
+                                ollama_url="http://ollama"))
+
+    assert out == "the answer"
+    url, payload = http.calls[0]
+    assert url == "http://ollama/api/chat"
+    assert payload["stream"] is True
+    assert payload["think"] is False
+    assert payload["options"]["num_ctx"] == 4096
+    assert payload["options"]["num_predict"] == 2048
+
+
+def test_fixer_search_replace_parse_and_apply():
+    from agents import fixer
+    text = (
+        "### EDIT: /root/p/app.py\n```python\n"
+        "<<<<<<< SEARCH\ndef add(a, b):\n    return a - b\n=======\n"
+        "def add(a, b):\n    return a + b\n>>>>>>> REPLACE\n"
+        "```\n\n### SUMMARY: fix add\n"
+    )
+    parsed = fixer._parse_fixer_output(text)
+    assert parsed["parse_errors"] == []
+    edit = parsed["edits"][0]
+    assert edit["mode"] == "replace"
+
+    original = ("import math\n\ndef add(a, b):\n    return a - b\n\n"
+                "def sub(a, b):\n    return a - b\n")
+    new, errs = fixer._apply_search_replace(original, edit["blocks"])
+    assert errs == []
+    assert "def add(a, b):\n    return a + b" in new
+    # sub() untouched — only the matched site changed.
+    assert "def sub(a, b):\n    return a - b" in new
+
+
+def test_fixer_search_replace_fuzzy_and_unmatched():
+    from agents import fixer
+    original = "    if x:\n        do_thing()\n    return x\n"
+    # Indentation drift → fuzzy match still lands.
+    new, errs = fixer._apply_search_replace(original, [("if x:\n    do_thing()", "if x and y:\n    do_thing()")])
+    assert errs == []
+    assert "if x and y:" in new
+    # Nothing matches → None + error, file untouched.
+    new2, errs2 = fixer._apply_search_replace(original, [("not in file", "x")])
+    assert new2 is None
+    assert "not found" in errs2[0]
+
+
+def test_fixer_rewrite_section_still_supported():
+    from agents import fixer
+    text = ("### REWRITE: /root/p/tiny.py\n```python\nprint('all new')\n```\n\n"
+            "### SUMMARY: rewrote\n")
+    parsed = fixer._parse_fixer_output(text)
+    assert parsed["edits"][0]["mode"] == "rewrite"
+    assert parsed["edits"][0]["content"] == "print('all new')"
+
+
+def test_fixer_delete_section_parse():
+    from agents import fixer
+    text = ("### DELETE: /root/projects/p/state.json\n\n"
+            "### EDIT: /root/projects/p/app.py\n```python\n"
+            "<<<<<<< SEARCH\nx = 1\n=======\nx = 2\n>>>>>>> REPLACE\n```\n\n"
+            "### SUMMARY: removed runtime state, fixed x\n")
+    parsed = fixer._parse_fixer_output(text)
+    assert parsed["parse_errors"] == []
+    modes = {e["path"]: e["mode"] for e in parsed["edits"]}
+    assert modes["/root/projects/p/state.json"] == "delete"
+    assert modes["/root/projects/p/app.py"] == "replace"
+
+
+def test_run_events_table_append_and_hydrate(tmp_path):
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import database as db
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_conversation("conv-ev", "Events Test"))
+    _run(db.create_run("run-ev", "conv-ev", role="reviewer", status="running"))
+
+    for i in range(25):
+        _run(db.append_run_event("run-ev", {"type": "step", "action": f"step{i}", "detail": str(i)}))
+
+    run = _run(db.get_run("run-ev"))
+    evs = run["events_log"]
+    assert len(evs) == 25
+    assert [e["action"] for e in evs] == [f"step{i}" for i in range(25)]  # ordered by seq
+    assert all("ts" in e for e in evs)
+
+    # List getter stays lean — does NOT per-row hydrate the events table.
+    listed = _run(db.get_runs_by_conversation("conv-ev"))
+    assert listed[0]["id"] == "run-ev"
+    assert listed[0]["events_log"] == []  # legacy column empty; no N+1 query
+
+
+def test_run_events_legacy_fallback(tmp_path):
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import json as _json
+    import database as db
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_conversation("conv-leg", "Legacy Test"))
+    _run(db.create_run("run-leg", "conv-leg", role="reviewer", status="running"))
+    # Simulate a pre-migration row: events only in the legacy JSON column.
+    async def _seed_legacy():
+        conn = await db.get_db()
+        try:
+            await conn.execute(
+                "UPDATE runs SET events_log=? WHERE id=?",
+                (_json.dumps([{"type": "step", "action": "old"}]), "run-leg"),
+            )
+            await conn.commit()
+        finally:
+            await conn.close()
+    _run(_seed_legacy())
+
+    run = _run(db.get_run("run-leg"))
+    assert [e["action"] for e in run["events_log"]] == ["old"]
+
+
+def test_complete_chat_cloud_error_returns_empty(monkeypatch):
+    import model_providers as mp
+
+    async def _boom(*a, **k):
+        raise mp.ProviderError("simulated provider 500", provider="anthropic")
+        yield  # make it an async generator
+
+    monkeypatch.setattr(mp, "stream_provider_chat", _boom)
+    out = _run(mp.complete_chat(object(), "anthropic:claude-x", "hi", format_json=True))
+    assert out == ""  # unified with the Ollama branch's "" on failure
+
+
+def test_complete_chat_cloud_format_json_nudges_prompt(monkeypatch):
+    import model_providers as mp
+    seen = {}
+
+    async def _capture(http, model_id, messages, options=None):
+        seen["prompt"] = messages[0]["content"]
+        for tok in ('{"ok":', ' true}'):
+            yield {"type": "token", "content": tok}
+
+    monkeypatch.setattr(mp, "stream_provider_chat", _capture)
+    out = _run(mp.complete_chat(object(), "openai:gpt-x", "plan it", format_json=True))
+    assert out == '{"ok": true}'
+    assert "ONLY valid JSON" in seen["prompt"]

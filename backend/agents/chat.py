@@ -12,10 +12,29 @@ from datetime import datetime
 
 import config
 import database as db
+import model_providers
 import rag
-from tools import CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls, strip_tool_calls
+from tools import (CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls,
+                   strip_tool_calls, _v2_name_match)
+from connectors import tool_def_from_connector_tool
 from events import inject_text_tool_prompt, parse_tool_params
 from quick_search import run_quick_search_for_chat
+
+
+# Background tasks (best-effort memory suggestion) — held in a set so the
+# event loop doesn't garbage-collect them mid-run; discarded on completion.
+_BG_TASKS: set = set()
+
+
+def _spawn_bg(coro) -> None:
+    try:
+        task = asyncio.create_task(coro)
+    except RuntimeError:
+        # No running loop (shouldn't happen inside the stream) — drop the coro.
+        coro.close()
+        return
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
 
 
 _PERSONA_RATING_GUIDANCE = {
@@ -31,6 +50,10 @@ _PERSONA_PLACEHOLDER_RE = re.compile(
     r"\{\{\s*(user|char)\s*\}\}|\{\s*(user|char)\s*\}",
     re.IGNORECASE,
 )
+
+
+class _ProviderStreamComplete(Exception):
+    pass
 
 
 def _replace_persona_placeholders(text: str, *, user_name: str, char_name: str) -> str:
@@ -124,7 +147,11 @@ async def _suggest_workspace_memories(
     ws_id = workspace.get("id")
     if not ws_id or len((user_text or "") + (assistant_text or "")) < 120:
         return
-    model = getattr(config, "WORKSPACE_MODEL", "") or getattr(req, "model", "") or config.DEFAULT_MODEL
+    # reject_cloud: never POST a cloud-prefixed chat model to Ollama /api/generate
+    # (it 404s every turn). Cloud models are honored only via explicit WORKSPACE_MODEL.
+    model = (getattr(config, "WORKSPACE_MODEL", "")
+             or model_providers.reject_cloud(getattr(req, "model", ""))
+             or config.DEFAULT_MODEL)
     prompt = (
         "You extract useful long-term workspace memories from one chat turn.\n"
         "Return ONLY a JSON array with 0-5 objects. Do not include markdown.\n"
@@ -224,7 +251,11 @@ async def _suggest_global_memories(
 ):
     if len((user_text or "") + (assistant_text or "")) < 120:
         return
-    model = getattr(config, "WORKSPACE_MODEL", "") or getattr(req, "model", "") or config.DEFAULT_MODEL
+    # reject_cloud: never POST a cloud-prefixed chat model to Ollama /api/generate
+    # (it 404s every turn). Cloud models are honored only via explicit WORKSPACE_MODEL.
+    model = (getattr(config, "WORKSPACE_MODEL", "")
+             or model_providers.reject_cloud(getattr(req, "model", ""))
+             or config.DEFAULT_MODEL)
     prompt = (
         "You extract useful long-term personal memories for a cross-chat AI assistant.\n"
         "Return ONLY a JSON array with 0-5 objects. Do not include markdown.\n"
@@ -442,6 +473,32 @@ _TOOL_ICONS = {
 
 
 _BLOCKED_RUN_RE = re.compile(r"\b(run-[0-9a-fA-F]{8,16})\b")
+
+# Phantom-completion guard: detects a v2 coder persona asserting it DID work
+# (added/built/implemented a feature) when it actually called no tools that turn.
+# Kept tight on purpose — clarifying questions, refusals, and plain explanations
+# must NOT match. The ✅ feature-list marker is a strong signal in practice.
+_PHANTOM_CLAIM_RE = re.compile(
+    r"(?:\bI(?:'ve|\s+have)\s+(?:added|created|built|implemented|updated|made|fixed|wired|set\s+up|finished|completed|integrated)\b"
+    r"|here'?s\s+what(?:'s|\s+(?:was|i))?\s+(?:new|created|added|changed|implemented|built|done)\b"
+    r"|\b(?:successfully|now)\s+(?:added|created|implemented|built|updated|integrated)\b"
+    r"|✅)",
+    re.IGNORECASE,
+)
+_PHANTOM_CORRECTION = (
+    "SYSTEM: You told the user you made changes (e.g. 'added', 'implemented', "
+    "'created'), but you called NO tools this turn — so NOTHING was actually changed "
+    "on disk. A real change to this project REQUIRES a tool call. Do ONE of these NOW:\n"
+    "  (a) call run_aider_fix(task='...') for the existing/uploaded project, or "
+    "generate_code/write_file for genuinely new files, to ACTUALLY make the change; or\n"
+    "  (b) if you cannot or should not change anything, tell the user plainly that you "
+    "have NOT made any changes yet, and why.\n"
+    "Do not claim work you did not perform."
+)
+_PHANTOM_NOTICE = (
+    "> ⚠️ Heads-up: I did not run any build or edit tools this turn, so no project "
+    "files were actually changed.\n\n"
+)
 _UPLOAD_MANUAL_TOOLS = {
     "read_file", "write_file", "run_shell", "execute_code", "list_files",
     "search_files", "diff_files", "download_project", "download_file",
@@ -450,19 +507,21 @@ _TERMINAL_WORKFLOW_STATES = {"accepted", "completed", "cancelled", "blocked"}
 
 
 def _blocked_tool_signature(tool_name: str, tool_result: str) -> str:
+    # Keyed on the blocking trigger only (run-id or first line), NOT the tool
+    # name — a model alternating read_file → list_files → run_shell against
+    # the same blocking run must still trip the duplicate-BLOCKED stop.
     if not (tool_result or "").lstrip().startswith("BLOCKED"):
         return ""
     first_line = next((line.strip() for line in tool_result.splitlines() if line.strip()), "")
     trigger = _BLOCKED_RUN_RE.search(tool_result or "")
-    trigger_key = trigger.group(1) if trigger else first_line[:140]
-    return f"{tool_name}:{trigger_key}"
+    return trigger.group(1) if trigger else first_line[:140]
 
 
 def _record_blocked_tool_result(state: dict, tool_name: str, tool_result: str) -> bool:
     sig = _blocked_tool_signature(tool_name, tool_result)
     if not sig:
-        state["key"] = ""
-        state["count"] = 0
+        # A non-blocked sibling result (e.g. one OK tool in the same batch)
+        # must not reset the counter mid-detection.
         return False
     if state.get("key") == sig:
         state["count"] = int(state.get("count") or 0) + 1
@@ -470,6 +529,18 @@ def _record_blocked_tool_result(state: dict, tool_name: str, tool_result: str) -
         state["key"] = sig
         state["count"] = 1
     return state["count"] >= 2
+
+
+def _qa_run_qualifies(run: dict, stream_started_at: str) -> bool:
+    """True when a qa run can be streamed verbatim as this turn's answer:
+    succeeded, not a change request, has an answer, and was created by THIS
+    stream — a stale qa run from a previous turn must never be replayed."""
+    if (run.get("started_at") or "") < (stream_started_at or ""):
+        return False
+    env = run.get("result_envelope") or {}
+    return (run.get("status") == "succeeded"
+            and not env.get("looks_like_change_request")
+            and bool((env.get("answer") or "").strip()))
 
 
 def _next_action_from_blocked_result(tool_result: str) -> str:
@@ -600,7 +671,7 @@ async def _blocked_tool_summary(conv_id: str, tool_name: str, tool_result: str) 
     return "\n".join(lines)
 
 
-async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_id_map):
+async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_id_map, connector_tool_id_map=None, connector_tool_name_map=None):
     """Async generator that yields SSE events for a streaming chat with tool-calling.
 
     Args:
@@ -647,21 +718,24 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     await events.emit(conv_id, "tool_start", {"tool": "processing", "status": "🔮 Connecting to neural oracle...", "icon": "activity"})
 
     print(f"[CHAT] conv={conv_id} model={req.model} tool_ids={req.tool_ids} msgs={len(req.messages)} persona={req.persona_id} ephemeral={ephemeral}")
+    _model_provider, _provider_model_name = model_providers.split_model_id(req.model)
+    _is_cloud_provider = _model_provider in model_providers.CLOUD_PROVIDERS
 
     # ── Validate model exists in Ollama before streaming ──
-    try:
-        _tags_r = await http.get(f"{config.OLLAMA_URL}/api/tags", timeout=10)
-        if _tags_r.status_code == 200:
-            _available = [m["name"] for m in _tags_r.json().get("models", [])]
-            if req.model and req.model not in _available:
-                _suggestion = _available[0] if _available else "unknown"
-                _err_msg = f"Model '{req.model}' is not available. It may have been deleted. Available models: {', '.join(_available[:5])}"
-                print(f"[CHAT] Model not found: {req.model}")
-                await events.emit(conv_id, "error", {"status": f"Model not found: {req.model}"})
-                yield f"data: {json.dumps({'type': 'error', 'error': _err_msg})}\n\n"
-                return
-    except Exception as _e:
-        print(f"[CHAT] Could not validate model (continuing anyway): {_e}")
+    if not _is_cloud_provider:
+        try:
+            _tags_r = await http.get(f"{config.OLLAMA_URL}/api/tags", timeout=10)
+            if _tags_r.status_code == 200:
+                _available = [m["name"] for m in _tags_r.json().get("models", [])]
+                _ollama_model_name = _provider_model_name if _model_provider == "ollama" else req.model
+                if _ollama_model_name and _ollama_model_name not in _available:
+                    _err_msg = f"Model '{req.model}' is not available. It may have been deleted. Available models: {', '.join(_available[:5])}"
+                    print(f"[CHAT] Model not found: {req.model}")
+                    await events.emit(conv_id, "error", {"status": f"Model not found: {req.model}"})
+                    yield f"data: {json.dumps({'type': 'error', 'error': _err_msg})}\n\n"
+                    return
+        except Exception as _e:
+            print(f"[CHAT] Could not validate model (continuing anyway): {_e}")
 
     # Resolve persona (model config) if provided — apply parameters and KB
     model_options = {}
@@ -676,8 +750,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         mc = next((c for c in all_configs if c["id"] == req.persona_id), None)
         if mc:
             persona_system_prompt = mc.get("system_prompt") or None
-            _persona_name_l = (mc.get("name") or "").lower()
-            if "v2" in _persona_name_l or "daedalus" in _persona_name_l:
+            # Same matching rules as the tools.py gate (_is_v2_persona); the
+            # two still differ on source — req.persona_id here vs the
+            # conversation's model_config_id there.
+            if _v2_name_match(mc.get("name") or ""):
                 _is_v2_persona = True
             params = mc.get("parameters", {})
             profile_type = _model_config_profile_type(mc, params)
@@ -978,7 +1054,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
     if _active_project:
         _ap_files = _active_project.get("file_manifest") or []
-        _ap_id = _active_project.get("id", "") or ""
+        # On-disk dir is openhands_project_id when present (worker may have
+        # dedupe-renamed); every tools.py consumer resolves the same way.
+        _ap_id = (_active_project.get("openhands_project_id")
+                  or _active_project.get("id", "") or "")
         _ap_path = f"/root/projects/{_ap_id}" if _ap_id else ""
         _ap_lines = [
             "## ACTIVE PROJECT (this conversation already has a built project)",
@@ -1060,6 +1139,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     available_tool_names = set()
     ollama_tools = []
     requested_tool_ids = list(req.tool_ids or [])
+    connector_tool_id_map = connector_tool_id_map or {}
+    connector_tool_name_map = connector_tool_name_map or {}
 
     for tid in requested_tool_ids:
         if tid == "codeagent":
@@ -1082,6 +1163,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 }
             })
             available_tool_names.add(ct["name"])
+        elif tid in connector_tool_id_map:
+            ct = connector_tool_id_map[tid]
+            ollama_tools.append(tool_def_from_connector_tool(ct))
+            available_tool_names.add(ct["tool_name"])
         else:
             for tname, tdef in CODEAGENT_TOOLS.items():
                 if tname == tid:
@@ -1267,6 +1352,11 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         except Exception as _ase:
             print(f"[CHAT] Failed to create assistant message stub: {_ase}")
     _text_fallback_done = False
+    if _is_cloud_provider and available_tool_names:
+        print(f"[CHAT] Cloud model {req.model} using text tool-call fallback")
+        ollama_tools = []
+        inject_text_tool_prompt(messages, available_tool_names)
+        _text_fallback_done = True
     _prev_tool_key = None  # Track previous tool call to detect loops
     _tool_history = []     # Last N tool keys for near-duplicate detection
     _dup_break_count = 0   # How many times we broke out of duplicate loops
@@ -1277,6 +1367,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     _generate_code_done = False    # Guard: stop tool calls after successful generate_code
     _rescue_count = 0              # How many times we rescued code blocks
     _oom_retries = 0               # OOM context halving retries
+    _tools_ran_this_turn = 0       # Real exec_tool runs this turn (phantom-completion guard)
+    _phantom_nudges = 0            # How many times we re-prompted a tool-less completion claim
     # Effort-level self-review rounds: 0=off, capped at 3
     _review_round = 0
     _review_budget = max(0, min(3, int(getattr(req, "effort_rounds", 0) or 0)))
@@ -1309,7 +1401,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             await events.emit(conv_id, "tool_start", {"tool": "processing", "status": "🔄 Processing tool results...", "icon": "activity"})
 
         payload = {
-            "model": req.model,
+            "model": _provider_model_name if _model_provider == "ollama" else req.model,
             "messages": messages,
             "stream": True,
             "options": model_options,
@@ -1336,6 +1428,116 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': _est_prompt_pre, 'live': True})}\n\n"
 
         try:
+            if _is_cloud_provider:
+                print(f"[CHAT] Sending to {model_providers.provider_label(_model_provider)}: model={req.model} options={model_options}")
+                _in_thinking = False
+                _thinking_buf = ""
+                _chunk_buf = ""
+                _repeat_window = ""
+                _live_gen_tokens = 0
+                async for event in model_providers.stream_provider_chat(
+                    http,
+                    req.model,
+                    messages,
+                    options=model_options,
+                ):
+                    etype = event.get("type")
+                    if etype == "usage":
+                        gen_tokens = int(event.get("gen_tokens") or 0)
+                        prompt_tokens = int(event.get("prompt_tokens") or 0)
+                        if gen_tokens or prompt_tokens:
+                            yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': gen_tokens, 'prompt_tokens': prompt_tokens})}\n\n"
+                        continue
+                    if etype == "thinking":
+                        _thinking_token = event.get("content", "")
+                        if not _thinking_token:
+                            continue
+                        _thinking_buf += _thinking_token
+                        _in_thinking = True
+                        _live_gen_tokens += 1
+                        if _live_gen_tokens % 10 == 0:
+                            yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': _live_gen_tokens, 'prompt_tokens': prompt_tokens, 'live': True})}\n\n"
+                        if len(_thinking_buf) % 100 < len(_thinking_token):
+                            snip = _thinking_buf[-60:].replace("\n", " ")
+                            await events.emit(conv_id, "thinking", {"status": f"💭 {snip}...", "detail": json.dumps({"thinking": _thinking_buf[-3000:]})})
+                        continue
+                    if etype != "token":
+                        continue
+                    token = event.get("content", "")
+                    if not token:
+                        continue
+
+                    if "<think>" in token:
+                        _in_thinking = True
+                        token = token.split("<think>", 1)[1]
+                    if _in_thinking:
+                        if "</think>" in token:
+                            before_end = token.split("</think>", 1)[0]
+                            after_end = token.split("</think>", 1)[1]
+                            _thinking_buf += before_end
+                            thinking = _thinking_buf
+                            _in_thinking = False
+                            token = after_end
+                            if thinking:
+                                snip = thinking[-60:].replace("\n", " ")
+                                await events.emit(conv_id, "thinking", {"status": f"💭 {snip}...", "detail": json.dumps({"thinking": thinking[-3000:]})})
+                        else:
+                            _thinking_buf += token
+                            if len(_thinking_buf) % 100 < len(token):
+                                snip = _thinking_buf[-60:].replace("\n", " ")
+                                await events.emit(conv_id, "thinking", {"status": f"💭 {snip}...", "detail": json.dumps({"thinking": _thinking_buf[-3000:]})})
+                            continue
+
+                    if not token:
+                        continue
+                    content += token
+                    _live_gen_tokens += 1
+                    if _live_gen_tokens % 10 == 0:
+                        yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': _live_gen_tokens, 'prompt_tokens': prompt_tokens, 'live': True})}\n\n"
+
+                    _repeat_window = (_repeat_window + token)[-200:]
+                    _in_fence = (content.count("```") % 2) == 1
+                    if not _in_fence and len(_repeat_window) >= 120:
+                        for plen in range(2, 25):
+                            pat = _repeat_window[-plen:]
+                            if not pat.strip():
+                                continue
+                            count = _repeat_window.count(pat)
+                            min_count = 20 if plen <= 4 else 8
+                            if count >= min_count and count * plen > len(_repeat_window) * 0.85:
+                                print(f"[CHAT]   Repetition detected: {pat!r} x{count} — stopping generation")
+                                content = content[:content.rfind(pat)]
+                                break
+                        else:
+                            pat = None
+                        if pat:
+                            break
+
+                    if _has_tools and len(content) % 200 < len(token):
+                        _evt_type = "tool_start" if not _gen_pill_started else "tool_progress"
+                        _gen_pill_started = True
+                        _shown_tokens = max(_live_gen_tokens, (len(content) + 3) // 4)
+                        await events.emit(conv_id, _evt_type, {
+                            "tool": "generating",
+                            "status": f"✍️ Generating... (~{_shown_tokens} tokens)",
+                            "icon": "edit",
+                        })
+
+                    _chunk_buf += token
+                    if len(_chunk_buf) >= 8:
+                        yield f"data: {json.dumps({'type': 'token', 'content': _chunk_buf})}\n\n"
+                        _streamed_content = True
+                        _chunk_buf = ""
+                        await asyncio.sleep(0)
+
+                if _chunk_buf:
+                    yield f"data: {json.dumps({'type': 'token', 'content': _chunk_buf})}\n\n"
+                    _streamed_content = True
+                if _in_thinking and _thinking_buf:
+                    thinking = _thinking_buf
+                    _in_thinking = False
+                raise _ProviderStreamComplete()
+
             async with http.stream("POST", f"{config.OLLAMA_URL}/api/chat",
                                    json=payload, timeout=300) as resp:
                 if resp.status_code != 200:
@@ -1590,6 +1792,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         except (asyncio.CancelledError, Exception):
                             pass
 
+        except _ProviderStreamComplete:
+            pass
         except Exception as e:
             # Log the actual cause — previously this catch silently emitted str(e) to the
             # client, leaving the journal blank when Ollama streams died in unexpected ways.
@@ -1597,17 +1801,30 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             traceback.print_exc()
             err_msg = str(e) or f"{type(e).__name__} (no message)"
             err_lower = err_msg.lower()
+            _provider_label = model_providers.provider_label(_model_provider) if _is_cloud_provider else "Ollama"
             # Provide clearer error messages for common failures
-            if "peer closed" in err_lower or "incomplete chunked" in err_lower:
+            if not _is_cloud_provider and ("peer closed" in err_lower or "incomplete chunked" in err_lower):
                 err_msg = (f"Ollama connection dropped while streaming model '{req.model}'. "
                            f"This usually means the model is too large for available GPU memory (VRAM). "
                            f"Try a smaller model or reduce num_ctx. Original: {err_msg[:200]}")
             elif "timeout" in err_lower or "timed out" in err_lower:
-                err_msg = f"Ollama request timed out for model '{req.model}'. The model may be too slow or overloaded. {err_msg[:200]}"
-            elif "input stream" in err_lower or "failed to load" in err_lower or "ggml" in err_lower:
+                err_msg = f"{_provider_label} request timed out for model '{req.model}'. The model may be too slow or overloaded. {err_msg[:200]}"
+            elif not _is_cloud_provider and ("input stream" in err_lower or "failed to load" in err_lower or "ggml" in err_lower):
                 err_msg = (f"Model '{req.model}' failed mid-stream — it may be corrupt or hit a context-buffer issue. "
                            f"Try `ollama stop {req.model}` and retry, or reduce num_ctx. Original: {err_msg[:200]}")
-            await events.emit(conv_id, "error", {"status": f"Ollama: {err_msg[:200]}"})
+            # Persist whatever streamed before the failure and clear the
+            # in_progress flag — otherwise the stub reloads empty/stale and the
+            # user loses the partial answer they were watching.
+            if _assistant_msg_id is not None:
+                try:
+                    _partial = content if content.strip() else ""
+                    _final = (_partial + f"\n\n_[interrupted: {err_msg[:160]}]_") if _partial \
+                        else f"_[no response — {err_msg[:160]}]_"
+                    await db.update_message(_assistant_msg_id, content=_final,
+                                            metadata={"in_progress": False, "stream_error": True})
+                except Exception as _pe:
+                    print(f"[CHAT]   partial-persist failed (non-fatal): {_pe}")
+            await events.emit(conv_id, "error", {"status": f"{_provider_label}: {err_msg[:200]}"})
             yield f"data: {json.dumps({'type': 'error', 'error': err_msg})}\n\n"
             return
 
@@ -1897,13 +2114,13 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     _tool_chars = [0]
                     async def _run_tool_bg(_n=tool_name, _a=tool_args, _c=conv_id, _f=_tf, _tc=_tool_chars, _kb=persona_kb_ids):
                         try:
-                            r = await exec_tool(http, events, _n, _a, _c, custom_tool_map, conv_model=req.model, kb_ids=_kb)
+                            r = await exec_tool(http, events, _n, _a, _c, custom_tool_map, connector_tool_name_map=connector_tool_name_map, conv_model=req.model, kb_ids=_kb, artifact_message_id=_assistant_msg_id)
                             _tc[0] = len(r) if r else 0
                             if not _f.done(): _f.set_result(r)
                         except Exception as _e:
                             if not _f.done(): _f.set_exception(_e)
 
-                    asyncio.create_task(_run_tool_bg())
+                    _spawn_bg(_run_tool_bg())
                     _futures.append((_tf, _tool_chars, tool_name, _tool_icon, _tool_label, _tool_detail))
 
                 # Wait for all futures in this batch
@@ -1941,6 +2158,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         tool_result = head + f"\n\n[... {orig_len - 12000} chars omitted ...]\n\n" + tail
 
                     messages.append({"role": "tool", "content": tool_result})
+                    _tools_ran_this_turn += 1
                     print(f"[CHAT]   Tool result ({tool_name}): {len(tool_result)} chars")
 
                     if _record_blocked_tool_result(_blocked_tool_state, tool_name, tool_result):
@@ -2058,7 +2276,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         _query_for_index = ""
                         if isinstance(tool_args, dict):
                             _query_for_index = tool_args.get("query", "") or tool_args.get("url", "") or tool_args.get("topic", "")
-                        asyncio.create_task(
+                        _spawn_bg(
                             rag.index_research(req.persona_id, tool_name, _query_for_index, tool_result, conv_id)
                         )
                     except Exception as _rag_e:
@@ -2078,13 +2296,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     for _qr in _qa_runs:
                         if _qr.get("role") != "qa":
                             continue
-                        _qa_env = _qr.get("result_envelope") or {}
                         # Only short-circuit when the QA succeeded AND wasn't a
-                        # change request. Change requests should fall through to
-                        # the LLM round so it can route to generate_code/etc.
-                        if (_qr.get("status") == "succeeded"
-                                and not _qa_env.get("looks_like_change_request")
-                                and (_qa_env.get("answer") or "").strip()):
+                        # change request AND belongs to this stream — without
+                        # the stream-start filter, a failed ask_project this
+                        # turn would replay the previous turn's stale answer.
+                        if _qa_run_qualifies(_qr, _stream_started_at):
+                            _qa_env = _qr.get("result_envelope") or {}
                             _qa_answer = _qa_env["answer"]
                             print(f"[CHAT]   QA short-circuit: streaming "
                                   f"{len(_qa_answer)} chars from {_qr.get('id')}")
@@ -2121,6 +2338,35 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
         # No tool calls — we have a final response
         if content:
+            # ── Phantom-completion guard (v2 coder personas) ──
+            # The model claimed it did work (added/built/implemented) but called
+            # zero tools this turn, so nothing actually changed on disk. Re-prompt
+            # it to make the change via a tool or admit it didn't; if it still
+            # refuses after the nudges, prepend an honesty notice so the user is
+            # never handed a false success. Q&A turns run ask_project (a tool), so
+            # _tools_ran_this_turn>0 keeps them exempt.
+            _phantom_hit = (
+                _is_v2_persona and bool(_active_project)
+                and _tools_ran_this_turn == 0
+                and bool(_PHANTOM_CLAIM_RE.search(content))
+            )
+            if _phantom_hit and _phantom_nudges < 2:
+                _phantom_nudges += 1
+                print(f"[CHAT]   Phantom-completion claim with 0 tools — nudge #{_phantom_nudges}")
+                yield f"data: {json.dumps({'type': 'clear'})}\n\n"
+                messages.append(msg)  # let the model see what it claimed
+                messages.append({"role": "tool", "content": _PHANTOM_CORRECTION})
+                continue
+            if _phantom_hit and _phantom_nudges >= 2 and not content.startswith(_PHANTOM_NOTICE):
+                print(f"[CHAT]   Phantom-completion persisted after {_phantom_nudges} nudges — prepending honesty notice")
+                content = _PHANTOM_NOTICE + content
+                msg["content"] = content
+                yield f"data: {json.dumps({'type': 'clear'})}\n\n"
+                for i in range(0, len(content), 8):
+                    yield f"data: {json.dumps({'type': 'token', 'content': content[i:i+8]})}\n\n"
+                    await asyncio.sleep(0)
+                _streamed_content = True  # skip the buffered flush below (already streamed)
+
             # If content was buffered (tool mode), flush it now as the final answer
             if _has_tools and not _streamed_content:
                 for i in range(0, len(content), 8):
@@ -2192,26 +2438,21 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 except Exception as _te:
                     print(f"[CHAT] Token recording error: {_te}")
             if not ephemeral:
+                # Memory extraction is best-effort and used to block the turn
+                # for up to 90s (two 45s LLM calls) AFTER the answer was visibly
+                # done. Run it in the background so `done` fires immediately;
+                # the suggesters emit their own SSE events over the persistent
+                # conversation bus.
                 if global_memory_enabled:
-                    await _suggest_global_memories(
-                        req,
-                        http,
-                        events,
-                        conv_id,
-                        last_user_msg,
-                        content,
-                        _assistant_msg_id,
-                    )
-                await _suggest_workspace_memories(
-                    req,
-                    http,
-                    events,
-                    conv_id,
+                    _spawn_bg(_suggest_global_memories(
+                        req, http, events, conv_id,
+                        last_user_msg, content, _assistant_msg_id,
+                    ))
+                _spawn_bg(_suggest_workspace_memories(
+                    req, http, events, conv_id,
                     workspace_memory_info.get("workspace"),
-                    last_user_msg,
-                    content,
-                    _assistant_msg_id,
-                )
+                    last_user_msg, content, _assistant_msg_id,
+                ))
             await events.emit(conv_id, "complete", {"status": "Complete"})
             _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id}
             if _review_round > 0:
@@ -2221,6 +2462,16 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         else:
             # Empty content — try to recover
             if round_num >= 3:
+                # Don't leave an empty in_progress stub behind on reload.
+                if _assistant_msg_id is not None and not (content or "").strip():
+                    try:
+                        await db.update_message(
+                            _assistant_msg_id,
+                            content="_[the model produced no text response]_",
+                            metadata={"in_progress": False, "empty_response": True},
+                        )
+                    except Exception:
+                        pass
                 await events.emit(conv_id, "complete", {"status": "Complete"})
                 _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id}
                 if _review_round > 0:

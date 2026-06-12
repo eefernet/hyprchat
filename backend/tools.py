@@ -4,6 +4,7 @@ Tool definitions and execution dispatch for HyprChat's integrated CodeAgent.
 import asyncio
 import base64
 import calendar
+import hashlib
 import json
 import os
 import re
@@ -15,12 +16,62 @@ from datetime import datetime
 import config
 import database as db
 import cancel_registry
+from connectors import execute_connector_tool
 from research import fetch_bytes_safely, run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
 
 # Strip ANSI escape codes from terminal output before feeding back to the model
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub('', text)
+
+
+def _artifact_file_metadata(path: str) -> dict:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return {"size_bytes": os.path.getsize(path), "sha256": h.hexdigest()}
+
+
+def _artifact_index_text(path: str, filename: str, kind: str, mime_type: str = "", max_chars: int = 500000) -> str:
+    kind = (kind or db.artifact_kind_for_filename(filename, mime_type)).lower()
+    lower = (filename or "").lower()
+    try:
+        if kind in {"image", "pdf"}:
+            meta = _artifact_file_metadata(path)
+            return f"{filename}\n{kind.upper()} artifact\nsize_bytes={meta['size_bytes']}\nsha256={meta['sha256']}"
+        if kind == "archive":
+            import tarfile
+            import zipfile
+            lines = [f"Archive: {filename}"]
+            if tarfile.is_tarfile(path):
+                with tarfile.open(path, "r:*") as tf:
+                    for member in tf.getmembers()[:500]:
+                        lines.append(f"{member.name}{'/' if member.isdir() else ''} {member.size} bytes")
+            elif zipfile.is_zipfile(path):
+                with zipfile.ZipFile(path) as zf:
+                    for info in zf.infolist()[:500]:
+                        lines.append(f"{info.filename}{'/' if info.is_dir() else ''} {info.file_size} bytes")
+            return "\n".join(lines)[:max_chars]
+        text_exts = (
+            ".txt", ".log", ".md", ".markdown", ".html", ".htm", ".py", ".js", ".jsx",
+            ".ts", ".tsx", ".json", ".jsonl", ".csv", ".tsv", ".css", ".sh", ".rs",
+            ".go", ".java", ".c", ".cpp", ".yaml", ".yml", ".toml", ".xml", ".ini",
+            ".conf", ".cfg",
+        )
+        if kind in {"html", "markdown", "code", "data", "text"} or lower.endswith(text_exts):
+            with open(path, "rb") as f:
+                raw = f.read(min(max_chars * 4, 4 * 1024 * 1024))
+            text = raw.decode("utf-8", errors="replace")
+            if kind == "html" or lower.endswith((".html", ".htm")):
+                text = re.sub(r"<script[^>]*>.*?</script>", " ", text, flags=re.I | re.S)
+                text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.I | re.S)
+                text = re.sub(r"<[^>]+>", " ", text)
+                text = re.sub(r"\s+", " ", text).strip()
+            return text[:max_chars]
+    except Exception as e:
+        print(f"[ArtifactIndex] {e}")
+    return ""
 
 
 def _parse_ts_loose(s) -> "datetime | None":
@@ -39,6 +90,223 @@ def _parse_ts_loose(s) -> "datetime | None":
         except ValueError:
             continue
     return None
+
+
+async def _latest_user_msg_ts(conv_id: str, conv_row: dict | None = None):
+    """Timestamp of the newest persisted user message, or None.
+
+    The cycle-cap / Q&A-terminal gates scope their counters to runs newer than
+    this so a new user request resets the budget instead of inheriting an
+    exhausted cap from earlier work on the same conversation."""
+    try:
+        conv = conv_row or await db.get_conversation(conv_id)
+        for m in reversed((conv or {}).get("messages") or []):
+            if m.get("role") == "user":
+                return _parse_ts_loose(m.get("created_at"))
+    except Exception as _e:
+        print(f"[v2-gate] latest-user-msg lookup failed (non-fatal): {_e}")
+    return None
+
+
+def _runs_since(runs: list, ts) -> list:
+    """Runs whose started_at >= ts. ts=None keeps all runs (fail-safe: gates
+    fall back to the old whole-conversation behavior, never crash open)."""
+    if ts is None:
+        return runs
+    out = []
+    for r in runs:
+        rts = _parse_ts_loose(r.get("started_at"))
+        if rts is None or rts >= ts:
+            out.append(r)
+    return out
+
+
+def _v2_name_match(name: str) -> bool:
+    """Match v2/Daedalus persona names. Word-boundary 'v2' so unrelated names
+    that merely contain the substring (e.g. 'v2ray helper') don't enable the
+    workflow gate."""
+    n = (name or "").lower()
+    return "daedalus" in n or re.search(r"\bv2\b", n) is not None
+
+
+async def _prior_fix_attempts_context(conv_id: str, *, max_attempts: int = 3) -> str:
+    """Compact history of fix attempts since the latest user message.
+
+    Injected into Fixer/Aider prompts so attempt #2 knows what attempt #1
+    already changed — without it every fix call is stateless and the model's
+    most common failure is re-making the same edit that already didn't work."""
+    if not conv_id:
+        return ""
+    try:
+        runs = await db.get_runs_by_conversation(conv_id, limit=50)
+        uts = await _latest_user_msg_ts(conv_id)
+        attempts = [
+            r for r in _runs_since(runs, uts)
+            if (r.get("role") in {"fixer", "aider.fix"}
+                and r.get("status") in {"succeeded", "partial", "failed"})
+        ]
+        if not attempts:
+            return ""
+        lines = []
+        # runs come newest-first; show oldest attempt first.
+        for r in reversed(attempts[:max_attempts]):
+            env = r.get("result_envelope") or {}
+            files = ", ".join(
+                os.path.basename(f) or f for f in (env.get("files_touched") or [])[:6]
+            ) or "(no files written)"
+            summary = (env.get("summary") or "")[:160]
+            errs = "; ".join(str(e) for e in (env.get("errors") or [])[:2])[:200]
+            lines.append(
+                f"- {r.get('role')} [{env.get('status') or r.get('status')}] "
+                f"touched: {files}. {summary}"
+                + (f" Errors: {errs}" if errs else "")
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[v2-gate] prior-attempt context failed (non-fatal): {e}")
+        return ""
+
+
+async def _prior_acceptance_issues_context(conv_id: str) -> str:
+    """Most recent acceptance verdict (issues/error) for this user request —
+    fed back into the next acceptance run so it verifies its own prior
+    findings instead of moving the goalposts with brand-new nitpicks."""
+    if not conv_id:
+        return ""
+    try:
+        runs = await db.get_runs_by_conversation(conv_id, limit=50)
+        uts = await _latest_user_msg_ts(conv_id)
+        for r in _runs_since(runs, uts):
+            if r.get("role") != "acceptance":
+                continue
+            env = r.get("result_envelope") or {}
+            if (env.get("status") or "").lower() not in {"issues", "error"}:
+                return ""
+            lines = []
+            for i in (env.get("issues") or [])[:6]:
+                lines.append(
+                    f"- [{i.get('category', i.get('severity', '?'))}] "
+                    f"{i.get('file', '')}: {(i.get('summary') or '')[:140]}"
+                )
+            return "\n".join(lines)
+        return ""
+    except Exception as e:
+        print(f"[v2-gate] prior-acceptance context failed (non-fatal): {e}")
+        return ""
+
+
+async def _fix_budget_note(conv_id: str, source_role: str) -> str:
+    """One-line budget readout appended to fix results so the model can plan
+    its remaining cycles instead of discovering the cap by hitting it."""
+    try:
+        runs = await db.get_runs_by_conversation(conv_id, limit=50)
+        uts = await _latest_user_msg_ts(conv_id)
+        source_role = source_role or "reviewer"
+        succ = sum(
+            1 for r in _runs_since(runs, uts)
+            if (r.get("role") in {"fixer", "aider.fix"}
+                and r.get("status") == "succeeded"
+                and ((r.get("result_envelope") or {}).get("source_role") or "reviewer") == source_role)
+        )
+        cap = 2 if source_role == "acceptance" else 3
+        return (f"\n\nFix-cycle budget: {min(succ, cap)}/{cap} successful "
+                f"{source_role}-driven fix(es) used for this request.")
+    except Exception:
+        return ""
+
+
+async def _git_checkpoint(http, project_dir: str, label: str) -> str:
+    """Commit the project state after a build/fix cycle (best-effort).
+
+    Every cycle becomes a rollback point: `git log` in the project dir is the
+    authoritative attempt history, and a bad fix can be reverted instead of
+    re-fixed. Initializes the repo on first use (greenfield builds have no
+    .git; uploads already get a baseline at upload time)."""
+    if not project_dir:
+        return ""
+    qd = shlex.quote(project_dir)
+    qlabel = shlex.quote((label or "checkpoint")[:120])
+    cmd = (
+        f"cd {qd} && "
+        "(git rev-parse --git-dir >/dev/null 2>&1 || git init -q) && "
+        "git add -A >/dev/null 2>&1; "
+        "(git diff --cached --quiet 2>/dev/null || "
+        f"git -c user.email=daedalus@hyprchat -c user.name=Daedalus commit -qm {qlabel}); "
+        "git log --oneline -1 2>/dev/null"
+    )
+    try:
+        r = await http.post(
+            f"{config.CODEBOX_URL}/command",
+            json={"command": cmd, "timeout": 30},
+            timeout=35,
+        )
+        if r.status_code == 200:
+            out = (r.json().get("stdout") or "").strip().splitlines()
+            return out[-1][:120] if out else ""
+    except Exception as e:
+        print(f"[git-checkpoint] failed (non-fatal): {e}")
+    return ""
+
+
+# Scoped FSM (#1 of the rebuild list): coder_workflows.state becomes
+# authoritative data driven by explicit events, instead of ad-hoc state
+# writes scattered across dispatchers. The exec_tool gate still derives its
+# blocking decisions from run history (battle-tested); this is the substrate
+# that lets it migrate to reading state directly later.
+_WF_EVENT_TRANSITIONS = {
+    "PLAN_DONE":     ("planning",  "not_ready"),
+    "BUILD_OK":      ("reviewing", "not_ready"),
+    "FIX_APPLIED":   ("reviewing", "not_ready"),
+    "REVIEW_CLEAN":  ("accepting", "not_ready"),
+    "REVIEW_ISSUES": ("fixing",    "not_ready"),
+    "ACCEPT_OK":     ("accepted",  "accepted"),
+    "ACCEPT_ISSUES": ("fixing",    "not_ready"),
+    "QA_DONE":       ("answering", "not_applicable"),
+}
+
+
+async def _apply_workflow_event(conv_id: str, event: str, *,
+                                run_id: str = "", project_id: str = "",
+                                mode_hint: str = "build_from_prompt",
+                                user_task: str = "") -> str:
+    """Single transition point for coder_workflows state.
+
+    Ensures a workflow row exists (greenfield builds previously had none, so
+    WorkflowCard showed nothing and state lived only in run-history
+    archaeology). Never overwrites a user cancel. Returns workflow id."""
+    state_artifact = _WF_EVENT_TRANSITIONS.get(event)
+    if not state_artifact or not conv_id:
+        return ""
+    state, artifact = state_artifact
+    try:
+        wf = None
+        if project_id:
+            wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
+        if not wf:
+            wf = await db.get_latest_coder_workflow(conv_id)
+        if not wf:
+            wf_id = f"cw-{uuid.uuid4().hex[:12]}"
+            await db.create_coder_workflow(
+                wf_id, conv_id, project_id=project_id or "",
+                mode=mode_hint, state=state,
+                user_task=(user_task or "")[:500],
+                active_run_id=run_id, artifact_status=artifact,
+            )
+            print(f"[wf-fsm] {event}: created {wf_id} state={state}", flush=True)
+            return wf_id
+        if wf.get("state") == "cancelled":
+            return wf.get("id", "")
+        kwargs = dict(state=state, artifact_status=artifact)
+        if run_id:
+            kwargs["active_run_id"] = run_id
+        if project_id:
+            kwargs["project_id"] = project_id
+        await db.update_coder_workflow(wf["id"], **kwargs)
+        print(f"[wf-fsm] {event}: {wf.get('id')} {wf.get('state')}->{state}", flush=True)
+        return wf.get("id", "")
+    except Exception as e:
+        print(f"[wf-fsm] {event} failed (non-fatal): {e}")
+        return ""
 
 
 # In-process cache of the most recent deep_research result per conversation.
@@ -466,9 +734,11 @@ async def _synthesize_reviewer_from_test_failure(
     rev_env = last_review.get("result_envelope") or {}
     rev_test_exit = rev_env.get("test_exit", -1)
     rev_status = (rev_env.get("status") or "").lower()
-    # Only synthesize if reviewer claimed clean. If reviewer already reported
-    # issues, the model has a real envelope to fix against.
-    if rev_status != "clean" and rev_test_exit != 0:
+    # Only synthesize if reviewer claimed clean (or a legacy envelope with no
+    # status whose tests passed). If reviewer already reported issues, the
+    # model has a real envelope to fix against — stacking a synthetic one on
+    # top would shift the gate's "latest reviewer" baseline.
+    if not (rev_status == "clean" or (not rev_status and rev_test_exit == 0)):
         return ""
 
     # Parse test output into structured issues. Group by file so multiple
@@ -633,8 +903,11 @@ async def _is_v2_persona(conv_id: str, conv_row: dict | None = None) -> bool:
         if not _mc_id:
             return False
         _mc = await db.get_model_config(_mc_id)
-        _name = (_mc.get("name") or "").lower() if _mc else ""
-        return bool(_mc and ("v2" in _name or "daedalus" in _name))
+        # NOTE: chat.py detects v2 from req.persona_id's config name; this
+        # gate detects it from conversation.model_config_id. The matching
+        # rules are shared via _v2_name_match so the two can only diverge on
+        # *which* config they look at, not on how the name is interpreted.
+        return bool(_mc and _v2_name_match(_mc.get("name") or ""))
     except Exception as _e:
         print(f"[v2-gate] persona lookup failed (non-fatal): {_e}")
         return False
@@ -822,7 +1095,7 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "run_fixer",
-            "description": "Fallback targeted editor for issues identified by run_review or run_acceptance_review. For uploaded-project fixes, prefer run_aider_fix; run_fixer is mainly for greenfield/OpenHands projects or when Aider is disabled/unavailable. After reviewer-driven fixes, call run_review again. After docs-only acceptance fixes, call run_acceptance_review again; otherwise call run_review. Hard caps: 3 reviewer-driven fix cycles, 2 acceptance-driven fix cycles.",
+            "description": "Fallback targeted editor for issues identified by run_review or run_acceptance_review. For uploaded-project fixes, prefer run_aider_fix; run_fixer is mainly for greenfield/OpenHands projects or when Aider is disabled/unavailable. After reviewer-driven fixes, call run_review again. After docs-only acceptance fixes, call run_acceptance_review again; otherwise call run_review. Hard caps per user request: 3 reviewer-driven and 2 acceptance-driven successful fix cycles (run_aider_fix counts toward the same budget); a new user message resets the budget.",
             "parameters": {"type": "object", "properties": {
                 "reviewer_run_id": {"type": "string", "description": "The run_id of the run_review or run_acceptance_review call whose issues you want to fix (e.g. 'run-bd6f9dc7b4e3'). If omitted, the most recent actionable review/acceptance run is used."},
             }, "required": []},
@@ -845,7 +1118,7 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "run_aider_fix",
-            "description": "Apply surgical edits to an existing uploaded project using Aider in the Codebox worker. Use this for uploaded-project fixes instead of generate_code/OpenHands. After it returns, call run_review to verify.",
+            "description": "Apply surgical edits to an existing uploaded project using Aider in the Codebox worker. Use this for uploaded-project fixes instead of generate_code/OpenHands. After it returns, call run_review to verify. Counts toward the same per-user-request fix-cycle caps as run_fixer (3 reviewer-driven, 2 acceptance-driven).",
             "parameters": {"type": "object", "properties": {
                 "project_dir": {"type": "string", "description": "Absolute project root in Codebox, e.g. /root/projects/proj-... . If omitted, uses the active uploaded project."},
                 "task": {"type": "string", "description": "The user's requested fix/change, verbatim when possible."},
@@ -1526,11 +1799,71 @@ def _get_run_cmd(language: str, filepath: str) -> str:
     return filepath
 
 
+async def _maybe_auto_redeliver(
+    http, events, conv_id, project_dir,
+    *, custom_tool_map=None, connector_tool_name_map=None,
+    conv_model="", kb_ids=None, artifact_message_id=None,
+) -> str:
+    """After a successful edit cycle whose automatic review came back CLEAN,
+    refresh the delivered artifact IF this project was already delivered before.
+
+    This is what makes an "add a feature" turn produce a fresh latest pill
+    without the user having to ask for the download again. First builds (no prior
+    delivery) are intentionally left to the normal accept-then-download flow, so
+    this never auto-ships something that was never accepted. Returns a note to
+    append to the fix tool's output, or '' when nothing was re-delivered."""
+    try:
+        if not (conv_id and project_dir and project_dir.startswith("/root/projects/")):
+            return ""
+        proj = project_dir.rstrip("/").rsplit("/", 1)[-1]
+        _wf = await db.get_latest_coder_workflow(conv_id, project_id=proj)
+        if not (_wf or {}).get("id"):
+            return ""
+        prior = await db.list_artifacts(workflow_id=_wf["id"], kind="archive", limit=1)
+        if not prior:
+            return ""  # never delivered → respect normal acceptance gate
+        _runs = await db.get_runs_by_conversation(conv_id, limit=20)
+        _latest_reviewer = next((r for r in _runs if r.get("role") == "reviewer"), None)
+        _rstatus = ((_latest_reviewer or {}).get("result_envelope") or {}).get("status", "")
+        if str(_rstatus).lower() != "clean":
+            return ""  # don't repackage a project the reviewer just flagged
+        res = await exec_tool(
+            http, events, "download_project",
+            {"directory": project_dir, "_auto_redeliver": True},
+            conv_id,
+            custom_tool_map=custom_tool_map,
+            connector_tool_name_map=connector_tool_name_map,
+            conv_model=conv_model,
+            kb_ids=kb_ids,
+            artifact_message_id=artifact_message_id,
+        )
+        return (
+            "\n\n=== AUTO-REPACKAGE — this project was already delivered, so a fresh "
+            "artifact was packaged from the updated sources. Reference the new download "
+            "below; do NOT call download_project again for this cycle ===\n" + res
+        )
+    except Exception as e:
+        print(f"[download_project] auto-redeliver skipped: {e}")
+        return ""
+
+
 # ── Tool execution dispatcher ──
 
-async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_tool_map: dict = None, conv_model: str = "", kb_ids: list = None) -> str:
+async def exec_tool(
+    http,
+    events,
+    name: str,
+    args: dict,
+    conv_id: str,
+    custom_tool_map: dict = None,
+    connector_tool_name_map: dict = None,
+    conv_model: str = "",
+    kb_ids: list = None,
+    artifact_message_id: int | None = None,
+) -> str:
     """Execute a built-in or custom tool and return the result string."""
     custom_tool_map = custom_tool_map or {}
+    connector_tool_name_map = connector_tool_name_map or {}
     try:
         # ─── v2 workflow gate (deterministic over persuasion) ───────────────
         # Two interlocking states gate every non-meta tool call. Both fire
@@ -1591,6 +1924,15 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     if (_role_qt in {"reviewer", "acceptance", "fixer", "aider.fix"}
                             or _role_qt.startswith("builder")):
                         break
+                if _terminal_qa_run is not None:
+                    # Turn-scoped: a QA answer is terminal only for the turn it
+                    # answered. A newer user message ("now run the tests")
+                    # releases the gate instead of blocking forever.
+                    _uts_qt = await _latest_user_msg_ts(conv_id)
+                    _qa_ts = _parse_ts_loose(_terminal_qa_run.get("started_at"))
+                    if (_uts_qt is not None and _qa_ts is not None
+                            and _qa_ts < _uts_qt):
+                        _terminal_qa_run = None
                 if _terminal_qa_run is not None and await _check_v2():
                     _qid = _terminal_qa_run.get("id", "?")
                     await events.emit(conv_id, "tool_end", {
@@ -1647,10 +1989,15 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 print(f"[v2-gate] uploaded-project bootstrap check failed (non-fatal): {_upe}")
 
         _runs_for_cap = None
-        if conv_id and name == "run_fixer":
+        _uts_cap = None
+        if conv_id and name in {"run_fixer", "run_aider_fix"}:
             _parent_role_for_cap = "reviewer"
             try:
-                _runs_for_cap = await db.get_runs_by_conversation(conv_id, limit=20)
+                # limit=50 so the cap window isn't silently truncated by run
+                # scroll; counters below are additionally scoped to the
+                # current user request via _runs_since.
+                _runs_for_cap = await db.get_runs_by_conversation(conv_id, limit=50)
+                _uts_cap = await _latest_user_msg_ts(conv_id)
                 _run_role_by_id_cap = {r.get("id"): r.get("role") for r in _runs_for_cap}
                 _requested_parent_id = (args.get("reviewer_run_id") or "").strip()
                 _parent_role_for_cap = ""
@@ -1670,8 +2017,11 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 # Uploaded-project fixes are owned by Aider. This redirect is
                 # deliberately before cycle/research gates so stale personas
                 # that still call run_fixer do not get stuck in the old scoped
-                # Fixer loop.
-                if _parent_role_for_cap == "reviewer" and getattr(config, "AIDER_ENABLED", True):
+                # Fixer loop. v2-only: a v1 persona's run_fixer must not be
+                # silently rerouted.
+                if (name == "run_fixer" and _parent_role_for_cap == "reviewer"
+                        and getattr(config, "AIDER_ENABLED", True)
+                        and await _check_v2()):
                     _requested_parent_id = (args.get("reviewer_run_id") or "").strip()
                     _issue_run_for_aider = await _latest_actionable_issue_run(conv_id, _requested_parent_id)
                     _aider_ctx = await _uploaded_project_aider_context(
@@ -1697,7 +2047,12 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                 "project_dir": _project_dir,
                                 "issue_run_id": _issue_run_id,
                             },
-                            conv_id, custom_tool_map, conv_model, kb_ids,
+                            conv_id,
+                            custom_tool_map=custom_tool_map,
+                            connector_tool_name_map=connector_tool_name_map,
+                            conv_model=conv_model,
+                            kb_ids=kb_ids,
+                            artifact_message_id=artifact_message_id,
                         )
 
                 def _fixer_source_role_cap(_fr):
@@ -1706,9 +2061,13 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             or _run_role_by_id_cap.get(_fr.get("parent_run_id"))
                             or "reviewer")
 
+                # Turn-scoped (G1) and Aider-inclusive (G2): only successful
+                # fix runs since the latest user message count, and aider.fix
+                # consumes the same budget as the scoped Fixer.
                 _fixer_succ = sum(
-                    1 for r in _runs_for_cap
-                    if (r.get("role") == "fixer" and r.get("status") == "succeeded"
+                    1 for r in _runs_since(_runs_for_cap, _uts_cap)
+                    if (r.get("role") in {"fixer", "aider.fix"}
+                        and r.get("status") == "succeeded"
                         and _fixer_source_role_cap(r) == _parent_role_for_cap)
                 )
                 _cap_limit = 2 if _parent_role_for_cap == "acceptance" else 3
@@ -1736,16 +2095,16 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                 + f" — {(_iss.get('summary','') or '')[:160]}"
                             )
                         await events.emit(conv_id, "tool_end", {
-                            "tool": "run_fixer", "icon": "wrench",
+                            "tool": name, "icon": "wrench",
                             "status": f"⛔ Cycle cap reached ({_fixer_succ}/{_cap_limit}) — summarize and stop",
                         })
-                        print(f"[v2-gate] CYCLE CAP: blocking run_fixer (already "
-                              f"{_fixer_succ} succeeded {_parent_role_for_cap}-driven fixer runs "
-                              f"on this conv)", flush=True)
+                        print(f"[v2-gate] CYCLE CAP: blocking {name} (already "
+                              f"{_fixer_succ} succeeded {_parent_role_for_cap}-driven fix runs "
+                              f"since the latest user message)", flush=True)
                         return (
                             f"BLOCKED — Hard cap of {_cap_limit} {_parent_role_for_cap}/fix "
-                            f"cycles already attempted on this conversation "
-                            f"({_fixer_succ} successful fixer runs).\n\n"
+                            f"cycles already attempted for this user request "
+                            f"({_fixer_succ} successful fix runs).\n\n"
                             f"The same class of issue is persisting and another fixer call "
                             f"will not help. Your VERY NEXT output MUST be plain text to the "
                             f"user that:\n"
@@ -1755,8 +2114,8 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             + (("\n" + "\n".join(_issue_lines)) if _issue_lines else "")
                             + "\n  3. Asks the user for guidance — what behavior they actually "
                             f"want, or whether to skip this issue and ship anyway.\n\n"
-                            f"Do NOT call run_fixer, run_review, generate_code, write_file, "
-                            f"run_shell, or plan_project. You MAY call download_project / "
+                            f"Do NOT call run_fixer, run_aider_fix, run_review, generate_code, "
+                            f"write_file, run_shell, or plan_project. You MAY call download_project / "
                             f"download_file to deliver what was built so far if the user wants "
                             f"to ship as-is. Otherwise, respond to the user with text."
                         )
@@ -1777,18 +2136,23 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             try:
                 _runs_sf = _runs_for_cap
                 if _runs_sf is None:
-                    _runs_sf = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _runs_sf = await db.get_runs_by_conversation(conv_id, limit=50)
                 if _parent_role_for_cap == "acceptance":
                     raise StopAsyncIteration("acceptance fixes do not use research nudge")
+                # Same turn-scoped window as the cycle cap, counting both fix
+                # paths — the gates must agree on how many cycles happened.
                 _fsucc_sf = sum(
-                    1 for r in _runs_sf
-                    if (r.get("role") == "fixer" and r.get("status") == "succeeded"
+                    1 for r in _runs_since(_runs_sf, _uts_cap)
+                    if (r.get("role") in {"fixer", "aider.fix"}
+                        and r.get("status") == "succeeded"
                         and ((r.get("result_envelope") or {}).get("source_role")
                              or "reviewer") != "acceptance")
                 )
                 # 1 ≤ fixer_succ ≤ 2: between first failure and final cycle.
                 # 0 = first attempt, no gate. ≥3 = cap (handled above).
-                if 1 <= _fsucc_sf <= 2 and await _check_v2():
+                # Research nudge text is fixer-specific; Aider already requires
+                # a follow-up run_review, so only run_fixer is gated here.
+                if name == "run_fixer" and 1 <= _fsucc_sf <= 2 and await _check_v2():
                     _latest_rev_sf = next(
                         (r for r in _runs_sf if r.get("role") == "reviewer"),
                         None,
@@ -1952,13 +2316,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             try:
                 _conv_full = await db.get_conversation(conv_id)
                 if await _check_v2(cr=_conv_full):
-                    # Find the most recent user message timestamp.
-                    _msgs_rb = (_conv_full or {}).get("messages") or []
-                    _latest_user_ts = None
-                    for _m in reversed(_msgs_rb):
-                        if _m.get("role") == "user":
-                            _latest_user_ts = _parse_ts_loose(_m.get("created_at"))
-                            break
+                    _latest_user_ts = await _latest_user_msg_ts(conv_id, conv_row=_conv_full)
 
                     if _latest_user_ts is not None:
                         _runs_rb = await db.get_runs_by_conversation(conv_id, limit=20)
@@ -2019,7 +2377,6 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 _pending_kind = ""
                 _pending_review = None  # state 2 trigger
                 _pending_acceptance_needed = None  # clean review must be accepted before delivery
-                _terminal_qa = None    # state 3 trigger
 
                 # Walk newest-first.
                 # Builder/fixer runs in ANY non-trivial state require verification.
@@ -2033,11 +2390,8 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 for _r in _runs_for_v2_gate:
                     _role = _r.get("role", "")
                     if _role == "qa":
-                        # Most recent qa: state 3 if it succeeded and isn't a change request.
-                        _env_q = _r.get("result_envelope") or {}
-                        if (_r.get("status") == "succeeded"
-                                and not _env_q.get("looks_like_change_request", False)):
-                            _terminal_qa = _r
+                        # Q&A-terminal handling lives in the pre-gate at the
+                        # top of exec_tool; here a qa run just ends the walk.
                         break
                     if _role == "reviewer":
                         # Most recent reviewer: issues need fixer; clean needs acceptance.
@@ -2106,12 +2460,22 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         print(f"[v2-gate] ship-anyway: allowing {name} before "
                               f"acceptance because latest user requested delivery", flush=True)
                     else:
+                        # A docs-only fixer trigger's envelope reviewer_run_id
+                        # points at the ACCEPTANCE run it fixed from — suggesting
+                        # it teaches the model a wrong id. Only name the id when
+                        # the trigger is the clean reviewer itself; the dispatcher
+                        # auto-resolves the latest clean reviewer otherwise.
+                        _call_hint = (
+                            f"  run_acceptance_review(project_dir='{_pd}', reviewer_run_id='{_rid}')"
+                            if _source_role == "reviewer"
+                            else f"  run_acceptance_review(project_dir='{_pd}')"
+                        )
                         _gate_msg = (
                             "state", "acceptance-needed",
                             f"BLOCKED — run_review is clean, but final acceptance has not "
                             f"passed yet.\n\n"
                             f"Your VERY NEXT tool call MUST be:\n"
-                            f"  run_acceptance_review(project_dir='{_pd}', reviewer_run_id='{_reviewer_id}')\n\n"
+                            f"{_call_hint}\n\n"
                             f"Acceptance verifies the generated project satisfies the user's "
                             f"request, has accurate docs, sane tests, and clean packaging. "
                             f"Do not call {name} or download_project until acceptance returns accepted "
@@ -2141,13 +2505,17 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         return (_fenv.get("source_role")
                                 or _run_role_by_id.get(_fr.get("parent_run_id"))
                                 or "reviewer")
+                    # Same turn-scoped window as the cycle cap, so cap and
+                    # cap-release agree on how many attempts happened.
+                    _uts_gate = await _latest_user_msg_ts(conv_id)
+                    _runs_gate_window = _runs_since(_runs_for_v2_gate, _uts_gate)
                     _fixer_attempts_gate = sum(
-                        1 for _r in _runs_for_v2_gate
+                        1 for _r in _runs_gate_window
                         if (_r.get("role") in {"fixer", "aider.fix"} and _r.get("status") in _FIXER_TERMINAL
                             and _fixer_source_role(_r) == _pending_role)
                     )
                     _fixer_succ_gate = sum(
-                        1 for _r in _runs_for_v2_gate
+                        1 for _r in _runs_gate_window
                         if (_r.get("role") in {"fixer", "aider.fix"} and _r.get("status") == "succeeded"
                             and _fixer_source_role(_r) == _pending_role)
                     )
@@ -2176,11 +2544,14 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     # the next round. Below 1 fixer attempt the model should
                     # actually try fixing before researching.
                     _cap_limit_gate = 2 if _pending_role == "acceptance" else 3
+                    # Anchor on started_at to match the STUCK/FINAL gates —
+                    # research stashed while the review was still running must
+                    # satisfy both, or the gates disagree and loop.
                     if (name == "deep_research"
                             and _pending_role != "acceptance"
                             and _fixer_attempts_gate >= 1
                             and not await _deep_research_called_since(
-                                conv_id, _pending_review.get("ended_at"))):
+                                conv_id, _pending_review.get("started_at"))):
                         print(f"[v2-gate] research-release: allowing deep_research "
                               f"despite fix-needed (fixer_attempts={_fixer_attempts_gate}, "
                               f"required by FINAL_CYCLE/STUCK_FIX)", flush=True)
@@ -2228,25 +2599,6 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                             f"⛔ Blocked — call run_fixer first ({_pending_role} {_rid[:14]}… has issues)",
                             _rid,
                         )
-                elif _terminal_qa is not None:
-                    _qid = _terminal_qa.get("id", "?")
-                    _gate_msg = (
-                        "state", "qa-terminal",
-                        f"BLOCKED — ask_project ({_qid}) just answered the user's question. "
-                        f"The user asked something; you have the answer. Your VERY NEXT output "
-                        f"MUST be plain text relaying that answer to the user.\n\n"
-                        f"Do NOT call run_review, run_fixer, generate_code, read_file, "
-                        f"write_file, run_shell, download_project, or any other tool. The "
-                        f"build is already done; the user is asking ABOUT it, not asking you "
-                        f"to redo it.\n\n"
-                        f"If they follow up with another question, call ask_project again. "
-                        f"If they explicitly request a change ('add X', 'fix Y', 'refactor Z'), "
-                        f"call generate_code or write_file then. But for THIS turn, just "
-                        f"answer the user.",
-                        f"⛔ Blocked — answer the user (ask_project {_qid[:14]}… is terminal)",
-                        _qid,
-                    )
-
                 if _gate_msg is not None:
                     # v1 has no run_review or run_fixer in its workflow, so
                     # the gate only blocks v2 personas.
@@ -2582,6 +2934,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, filename)
                 with open(filepath, "wb") as f:
                     f.write(base64.b64decode(b64_data))
+                file_meta = _artifact_file_metadata(filepath)
                 download_url = f"/api/downloads/{filename}"
                 await events.emit(conv_id, "tool_end", {"tool": "download_file", "icon": "code",
                     "status": f"{filename} ready",
@@ -2589,15 +2942,41 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 })
                 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
                 _ext = os.path.splitext(filename)[1].lower()
+                artifact = None
+                try:
+                    cf_id = f"cf-{uuid.uuid4().hex[:8]}"
+                    _mime = db.artifact_mime_type_for_filename(filename)
+                    _kind = db.artifact_kind_for_filename(filename, _mime)
+                    artifact = await db.add_conversation_file(
+                        cf_id,
+                        conv_id,
+                        filename,
+                        download_url,
+                        message_id=artifact_message_id,
+                        kind=_kind,
+                        mime_type=_mime,
+                        storage_path=filepath,
+                        size_bytes=file_meta["size_bytes"],
+                        sha256=file_meta["sha256"],
+                        exists_status="present",
+                        status="draft",
+                        content_text=_artifact_index_text(filepath, filename, _kind, _mime),
+                        metadata={
+                            "source_tool": "download_file",
+                            "source_path": path,
+                            "size_bytes": file_meta["size_bytes"],
+                            "sha256": file_meta["sha256"],
+                        },
+                    )
+                except Exception as e:
+                    print(f"[FileTrack] {e}")
                 await events.emit(conv_id, "file_ready", {
                     "filename": filename, "url": download_url,
                     "is_image": _ext in _IMAGE_EXTS,
+                    "artifact_id": (artifact or {}).get("id"),
+                    "kind": (artifact or {}).get("kind") or db.artifact_kind_for_filename(filename),
+                    "mime_type": (artifact or {}).get("mime_type") or db.artifact_mime_type_for_filename(filename),
                 })
-                try:
-                    cf_id = f"cf-{uuid.uuid4().hex[:8]}"
-                    await db.add_conversation_file(cf_id, conv_id, filename, download_url)
-                except Exception as e:
-                    print(f"[FileTrack] {e}")
                 if _ext in _IMAGE_EXTS:
                     return f"![{filename}]({download_url})\n\n**[Download {filename}]({download_url})**"
                 return f"**[Download {filename}]({download_url})**"
@@ -2752,6 +3131,29 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                 print(f"[CHAT] download_project blocked: latest reviewer={_latest_reviewer.get('id')} status={_rstatus} issues={n}")
                                 return "\n".join(lines)
                         if _rstatus == "clean":
+                            # Auto-repackage of an already-delivered project: when a
+                            # prior delivered archive artifact exists for this
+                            # workflow and the orchestrator flagged this as an
+                            # automatic re-delivery, a clean review is enough to
+                            # refresh the SAME deliverable without re-running the
+                            # full acceptance gate. Authorized by the DB fact (prior
+                            # delivery), not just the arg, so it can't ship a project
+                            # that was never accepted in the first place.
+                            _auto_redeliver_ok = False
+                            if args.get("_auto_redeliver"):
+                                try:
+                                    _rd_proj = (
+                                        directory.rstrip("/").rsplit("/", 1)[-1]
+                                        if directory.startswith("/root/projects/") else ""
+                                    )
+                                    _rd_wf = await db.get_latest_coder_workflow(conv_id, project_id=_rd_proj)
+                                    if (_rd_wf or {}).get("id"):
+                                        _rd_prior = await db.list_artifacts(
+                                            workflow_id=_rd_wf["id"], kind="archive", limit=1)
+                                        _auto_redeliver_ok = bool(_rd_prior)
+                                except Exception as _rde:
+                                    print(f"[CHAT] auto-redeliver authorization check failed: {_rde}")
+                                    _auto_redeliver_ok = False
                             if _ship_anyway_requested:
                                 _download_warning_lines = [
                                     "WARNING: Shipped before final acceptance review.",
@@ -2759,6 +3161,9 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                 ]
                                 print(f"[CHAT] download_project allowing ship-anyway "
                                       f"before acceptance after clean reviewer={_latest_reviewer.get('id')}")
+                            elif _auto_redeliver_ok:
+                                print(f"[CHAT] download_project auto-redeliver after clean "
+                                      f"reviewer={_latest_reviewer.get('id')} (project previously delivered)")
                             else:
                                 await events.emit(conv_id, "tool_end", {
                                     "tool": "download_project", "icon": "code",
@@ -2857,9 +3262,37 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         "status": f"Archive too large ({estimated_size // (1024*1024)}MB > {config.MAX_UPLOAD_SIZE_MB}MB limit)"})
                     return f"ERROR: Project archive too large (exceeds {config.MAX_UPLOAD_SIZE_MB}MB limit)"
                 os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
-                filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, tarname)
+                # Immutable per-artifact storage: each delivery gets a unique
+                # on-disk path so a later repackage never overwrites a prior
+                # artifact's bytes. We ALSO (re)write the friendly {tarname} copy
+                # as the "latest" file so back-compat /api/downloads/{tarname}
+                # markdown links in chat keep resolving to the newest package.
+                cf_id = f"cf-{uuid.uuid4().hex[:8]}"
+                unique_name = f"{dirname}-{cf_id[3:]}.tar.gz"
+                filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, unique_name)
+                _decoded = base64.b64decode(b64_data)
                 with open(filepath, "wb") as f:
-                    f.write(base64.b64decode(b64_data))
+                    f.write(_decoded)
+                latest_path = os.path.join(config.SANDBOX_OUTPUTS_DIR, tarname)
+                try:
+                    with open(latest_path, "wb") as f:
+                        f.write(_decoded)
+                except Exception as _le:
+                    print(f"[download_project] latest-copy write failed: {_le}")
+                file_meta = _artifact_file_metadata(filepath)
+                # Staleness anchor: record the project's current git commit so a
+                # later edit cycle (which advances HEAD via _git_checkpoint) marks
+                # this artifact stale. Best-effort; DB-time detection works without it.
+                _source_commit = ""
+                try:
+                    _gc = await http.post(f"{config.CODEBOX_URL}/command", json={
+                        "command": f"cd {qdir} && git rev-parse HEAD 2>/dev/null",
+                        "timeout": 10,
+                    }, timeout=15)
+                    if _gc.status_code == 200:
+                        _source_commit = (_gc.json().get("stdout", "") or "").strip().split("\n")[0][:40]
+                except Exception as _gce:
+                    print(f"[download_project] source commit lookup failed: {_gce}")
                 download_url = f"/api/downloads/{tarname}"
                 await events.emit(conv_id, "tool_end", {"tool": "download_project", "icon": "code",
                     "status": f"{tarname} ready",
@@ -2872,21 +3305,75 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                         "excluded_examples": excluded_examples[:10],
                     }),
                 })
-                await events.emit(conv_id, "file_ready", {
-                    "filename": tarname, "url": download_url,
-                })
+                _wf = None
+                _proj_for_wf = ""
+                _partial = bool(_download_warning_lines)
                 try:
-                    cf_id = f"cf-{uuid.uuid4().hex[:8]}"
-                    await db.add_conversation_file(cf_id, conv_id, tarname, download_url)
-                except Exception as e:
-                    print(f"[FileTrack] {e}")
-                try:
-                    _proj_for_wf = ""
                     if directory.startswith("/root/projects/"):
                         _proj_for_wf = directory.rstrip("/").rsplit("/", 1)[-1]
                     _wf = await db.get_latest_coder_workflow(conv_id, project_id=_proj_for_wf)
+                except Exception as _wfe:
+                    print(f"[WORKFLOW] latest workflow lookup failed: {_wfe}")
+                artifact = None
+                try:
+                    _mime = db.artifact_mime_type_for_filename(tarname)
+                    _previous_artifact = None
+                    if (_wf or {}).get("id"):
+                        try:
+                            _prior = await db.list_artifacts(workflow_id=_wf["id"], kind="archive", limit=1)
+                            _previous_artifact = _prior[0] if _prior else None
+                        except Exception as _pae:
+                            print(f"[FileTrack] previous artifact lookup failed: {_pae}")
+                    artifact = await db.add_conversation_file(
+                        cf_id,
+                        conv_id,
+                        tarname,
+                        download_url,
+                        message_id=artifact_message_id,
+                        run_id=(_wf or {}).get("active_run_id"),
+                        workflow_id=(_wf or {}).get("id"),
+                        kind="archive",
+                        mime_type=_mime,
+                        storage_path=filepath,
+                        size_bytes=file_meta["size_bytes"],
+                        sha256=file_meta["sha256"],
+                        exists_status="present",
+                        status="draft" if _partial else "accepted",
+                        parent_artifact_id=(
+                            (_previous_artifact or {}).get("parent_artifact_id")
+                            or ((_previous_artifact or {}).get("id") if _previous_artifact else None)
+                        ),
+                        supersedes_artifact_id=(_previous_artifact or {}).get("id"),
+                        content_text=_artifact_index_text(filepath, tarname, "archive", _mime),
+                        tags=["project"] if _proj_for_wf else [],
+                        metadata={
+                            "source_tool": "download_project",
+                            "directory": directory,
+                            "project_id": _proj_for_wf,
+                            "included_count": included_count,
+                            "excluded_count": excluded_count,
+                            "excluded_examples": excluded_examples[:10],
+                            "artifact_status": "partial_delivered" if _partial else "delivered",
+                            "partial": _partial,
+                            "size_bytes": file_meta["size_bytes"],
+                            "sha256": file_meta["sha256"],
+                            "source_commit": _source_commit,
+                        },
+                    )
+                except Exception as e:
+                    print(f"[FileTrack] {e}")
+                await events.emit(conv_id, "file_ready", {
+                    "filename": tarname,
+                    "url": download_url,
+                    "artifact_id": (artifact or {}).get("id"),
+                    "kind": "archive",
+                    "mime_type": (artifact or {}).get("mime_type") or db.artifact_mime_type_for_filename(tarname),
+                    "workflow_id": (_wf or {}).get("id"),
+                    "project_id": _proj_for_wf,
+                    "artifact_status": "partial_delivered" if _partial else "delivered",
+                })
+                try:
                     if _wf:
-                        _partial = bool(_download_warning_lines)
                         await db.update_coder_workflow(
                             _wf["id"],
                             state="partial_delivered" if _partial else "accepted",
@@ -3267,7 +3754,12 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 answer = await exec_tool(
                     http, events, "ask_project",
                     {"question": task, "project_dir": f"/root/projects/{project_id}" if project_id else ""},
-                    conv_id, custom_tool_map, conv_model, kb_ids,
+                    conv_id,
+                    custom_tool_map=custom_tool_map,
+                    connector_tool_name_map=connector_tool_name_map,
+                    conv_model=conv_model,
+                    kb_ids=kb_ids,
+                    artifact_message_id=artifact_message_id,
                 )
                 await db.update_coder_workflow(workflow_id, state="answering", artifact_status="not_applicable")
                 return f"workflow_id: {workflow_id}\n\n{answer}"
@@ -3276,14 +3768,24 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 result = await exec_tool(
                     http, events, "run_aider_fix",
                     {"task": task, "project_dir": f"/root/projects/{project_id}" if project_id else ""},
-                    conv_id, custom_tool_map, conv_model, kb_ids,
+                    conv_id,
+                    custom_tool_map=custom_tool_map,
+                    connector_tool_name_map=connector_tool_name_map,
+                    conv_model=conv_model,
+                    kb_ids=kb_ids,
+                    artifact_message_id=artifact_message_id,
                 )
                 return f"workflow_id: {workflow_id}\n\n{result}"
 
             plan = await exec_tool(
                 http, events, "plan_project",
                 {"task": task, "language": language, "constraints": "Return a machine-checkable project contract for OpenHands before build."},
-                conv_id, custom_tool_map, conv_model, kb_ids,
+                conv_id,
+                custom_tool_map=custom_tool_map,
+                connector_tool_name_map=connector_tool_name_map,
+                conv_model=conv_model,
+                kb_ids=kb_ids,
+                artifact_message_id=artifact_message_id,
             )
             await db.update_coder_workflow(workflow_id, state="planning", artifact_status="not_ready")
             return (
@@ -3302,7 +3804,12 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 return await exec_tool(
                     http, events, "run_fixer",
                     {"reviewer_run_id": issue_run_id} if issue_run_id else {},
-                    conv_id, custom_tool_map, conv_model, kb_ids,
+                    conv_id,
+                    custom_tool_map=custom_tool_map,
+                    connector_tool_name_map=connector_tool_name_map,
+                    conv_model=conv_model,
+                    kb_ids=kb_ids,
+                    artifact_message_id=artifact_message_id,
                 )
 
             task = (args.get("task") or args.get("description") or "").strip()
@@ -3373,6 +3880,19 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 if workflow_id:
                     await db.update_coder_workflow(workflow_id, state="fixing", artifact_status="not_ready")
 
+            # Prior fix attempts this turn — folded into the task text so the
+            # Aider prompt (built worker-side) sees them without a worker change.
+            _attempts_for_aider = await _prior_fix_attempts_context(conv_id)
+            if _attempts_for_aider:
+                task = (
+                    f"{task}\n\n"
+                    f"Previous fix attempts already made for this request — do NOT "
+                    f"repeat an approach that already failed; try something different:\n"
+                    f"{_attempts_for_aider}"
+                )
+                print(f"[run_aider_fix] injecting attempt history "
+                      f"({len(_attempts_for_aider)} chars)")
+
             envelope = await aider_fixer.run_aider_fix(
                 http, events, conv_id,
                 project_dir=project_dir, task=task,
@@ -3388,11 +3908,46 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             files = envelope.get("files_touched") or []
             status = envelope.get("status", "?")
             if status == "applied":
+                _ckpt = await _git_checkpoint(
+                    http, envelope.get("project_dir", "") or project_dir,
+                    f"aider applied: {(envelope.get('summary') or task or '')[:60]} "
+                    f"({envelope.get('run_id', '')})",
+                )
+                _auto_review_note = ""
+                try:
+                    _arv = await exec_tool(
+                        http, events, "run_review",
+                        {"project_dir": envelope.get("project_dir", "") or project_dir},
+                        conv_id,
+                        custom_tool_map=custom_tool_map,
+                        connector_tool_name_map=connector_tool_name_map,
+                        conv_model=conv_model,
+                        kb_ids=kb_ids,
+                        artifact_message_id=artifact_message_id,
+                    )
+                    _auto_review_note = (
+                        "\n\n=== AUTOMATIC VERIFICATION — run_review already ran; "
+                        "do NOT call it again, act on this result ===\n" + _arv
+                    )
+                except Exception as _are:
+                    _auto_review_note = (f"\n\n(automatic run_review failed: {_are} — "
+                                         f"call run_review manually)")
+                _auto_redeliver_note = await _maybe_auto_redeliver(
+                    http, events, conv_id,
+                    envelope.get("project_dir", "") or project_dir,
+                    custom_tool_map=custom_tool_map,
+                    connector_tool_name_map=connector_tool_name_map,
+                    conv_model=conv_model, kb_ids=kb_ids,
+                    artifact_message_id=artifact_message_id,
+                )
                 return (
                     f"AIDER APPLIED EDITS to {len(files)} file(s).\n"
                     + "\n".join(f"  - {f}" for f in files[:12])
                     + f"\nworkflow_id: {workflow_id or '(none)'}\n"
-                    "REQUIRED NEXT TOOL CALL: run_review. Aider only edits; Reviewer must verify build/tests before acceptance or delivery."
+                    + (f"Git checkpoint: {_ckpt}\n" if _ckpt else "")
+                    + await _fix_budget_note(conv_id, envelope.get("source_role"))
+                    + _auto_review_note
+                    + _auto_redeliver_note
                 )
             if status == "no_changes":
                 return (
@@ -3482,17 +4037,14 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                                                   project_dir=project_dir,
                                                   project_id=project_id,
                                                   conv_model=conv_model)
-            try:
-                wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
-                if wf:
-                    await db.update_coder_workflow(
-                        wf["id"],
-                        state="accepting" if (envelope.get("status") == "clean") else "fixing",
-                        active_run_id=envelope.get("run_id", ""),
-                        artifact_status="not_ready",
-                    )
-            except Exception as _wfe:
-                print(f"[WORKFLOW] review state update failed: {_wfe}")
+            _rev_status_wf = (envelope.get("status") or "").lower()
+            if _rev_status_wf not in ("cancelled", ""):
+                await _apply_workflow_event(
+                    conv_id,
+                    "REVIEW_CLEAN" if _rev_status_wf == "clean" else "REVIEW_ISSUES",
+                    run_id=envelope.get("run_id", ""),
+                    project_id=project_id,
+                )
             # Format the envelope as a tool-result string the chat agent can read
             # without needing to know the JSON schema. Keep it compact.
             status = envelope.get("status", "?")
@@ -3545,7 +4097,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     f"targeted edits, and writes them back. AFTER run_fixer returns, call "
                     f"run_review again to verify the project is now CLEAN. Do NOT manually "
                     f"read_file / write_file for these issues — that's the v1 antipattern that "
-                    f"burns rounds. Hard cap: 3 review/fix cycles."
+                    f"burns rounds. Hard cap: 3 review/fix cycles per user request."
                 )
             return "\n".join(lines)
 
@@ -3586,10 +4138,13 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     for _r in _runs:
                         if _r.get("role") != "reviewer":
                             continue
+                        # Only the MOST RECENT reviewer counts — an older clean
+                        # review may predate later fixes, so don't scan past
+                        # the newest one looking for a clean status.
                         _env = _r.get("result_envelope") or {}
                         if (_env.get("status") or "").lower() == "clean":
                             return _r
-                        return _r
+                        return None
                 except Exception as _re:
                     print(f"[run_acceptance_review] reviewer lookup failed: {_re}")
                 return None
@@ -3626,25 +4181,26 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             if not project_dir:
                 return "ERROR: run_acceptance_review needs project_dir or a clean reviewer envelope with project_dir."
 
+            _prior_acc = await _prior_acceptance_issues_context(conv_id)
+            if _prior_acc:
+                print(f"[run_acceptance_review] injecting prior verdict "
+                      f"({len(_prior_acc)} chars)")
             envelope = await acceptance.run_acceptance_review(
                 http, events, conv_id,
                 project_dir=project_dir,
                 reviewer_run_id=reviewer_run_id,
                 project_id=project_id,
                 conv_model=conv_model,
+                prior_acceptance_context=_prior_acc,
             )
-            try:
-                wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
-                if wf:
-                    _ast = (envelope.get("status") or "").lower()
-                    await db.update_coder_workflow(
-                        wf["id"],
-                        state="accepted" if _ast == "accepted" else "fixing",
-                        active_run_id=envelope.get("run_id", ""),
-                        artifact_status="accepted" if _ast == "accepted" else "not_ready",
-                    )
-            except Exception as _wfe:
-                print(f"[WORKFLOW] acceptance state update failed: {_wfe}")
+            _ast = (envelope.get("status") or "").lower()
+            if _ast not in ("cancelled", ""):
+                await _apply_workflow_event(
+                    conv_id,
+                    "ACCEPT_OK" if _ast == "accepted" else "ACCEPT_ISSUES",
+                    run_id=envelope.get("run_id", ""),
+                    project_id=project_id,
+                )
 
             a_status = envelope.get("status", "?")
             summary = envelope.get("summary", "")
@@ -3756,14 +4312,70 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             except Exception as _re:
                 print(f"[run_fixer] research lookup failed (non-fatal): {_re}")
 
+            # Prior fix attempts this turn — so the Fixer doesn't repeat an
+            # edit that already failed. Gathered orchestrator-side; fixer.py
+            # stays network-free and reads no conversation state itself.
+            _attempts_for_fixer = await _prior_fix_attempts_context(conv_id)
+            if _attempts_for_fixer:
+                print(f"[run_fixer] injecting attempt history "
+                      f"({len(_attempts_for_fixer)} chars)")
+
             envelope = await fixer.run_fixer(http, events, conv_id,
                                               reviewer_run_id=reviewer_run_id,
-                                              research_context=_research_for_fixer)
+                                              research_context=_research_for_fixer,
+                                              attempt_history=_attempts_for_fixer)
 
             f_status = envelope.get("status", "?")
             files = envelope.get("files_touched") or []
             errors = envelope.get("errors") or []
             n_issues = envelope.get("issues_addressed", 0)
+            _ckpt_note = ""
+            _auto_review_note = ""
+            if f_status in ("applied", "partial"):
+                await _apply_workflow_event(
+                    conv_id, "FIX_APPLIED",
+                    run_id=envelope.get("run_id", ""),
+                )
+                _ckpt = await _git_checkpoint(
+                    http, envelope.get("project_dir", ""),
+                    f"fixer {f_status}: {(envelope.get('summary') or '')[:60]} "
+                    f"({envelope.get('run_id', '')})",
+                )
+                if _ckpt:
+                    _ckpt_note = f"\nGit checkpoint: {_ckpt}"
+                # #2 (scoped): code drives the verify step — review runs
+                # automatically after every fix instead of waiting for the
+                # model to route there (and occasionally flail on the way).
+                if not (envelope.get("source_role") == "acceptance"
+                        and envelope.get("docs_only")):
+                    try:
+                        _arv = await exec_tool(
+                            http, events, "run_review",
+                            {"project_dir": envelope.get("project_dir", "")},
+                            conv_id,
+                            custom_tool_map=custom_tool_map,
+                            connector_tool_name_map=connector_tool_name_map,
+                            conv_model=conv_model,
+                            kb_ids=kb_ids,
+                            artifact_message_id=artifact_message_id,
+                        )
+                        _auto_review_note = (
+                            "\n\n=== AUTOMATIC VERIFICATION — run_review already ran; "
+                            "do NOT call it again, act on this result ===\n" + _arv
+                        )
+                    except Exception as _are:
+                        _auto_review_note = (f"\n\n(automatic run_review failed: {_are} — "
+                                             f"call run_review manually)")
+
+            _auto_redeliver_note = ""
+            if f_status == "applied":
+                _auto_redeliver_note = await _maybe_auto_redeliver(
+                    http, events, conv_id, envelope.get("project_dir", ""),
+                    custom_tool_map=custom_tool_map,
+                    connector_tool_name_map=connector_tool_name_map,
+                    conv_model=conv_model, kb_ids=kb_ids,
+                    artifact_message_id=artifact_message_id,
+                )
 
             if f_status == "applied":
                 lines = [
@@ -3777,11 +4389,13 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 lines.append("")
                 if envelope.get("source_role") == "acceptance" and envelope.get("docs_only"):
                     lines.append("REQUIRED NEXT TOOL CALL: run_acceptance_review (docs-only fix; build review may be skipped).")
-                else:
+                elif not _auto_review_note:
                     lines.append("REQUIRED NEXT TOOL CALL: run_review (no args needed — uses the "
                                  "active project). It will re-run the build/tests and tell you "
                                  "whether the fixes worked before acceptance runs again.")
-                return "\n".join(lines)
+                return ("\n".join(lines) + _ckpt_note
+                        + await _fix_budget_note(conv_id, envelope.get("source_role"))
+                        + _auto_review_note + _auto_redeliver_note)
             elif f_status == "partial":
                 lines = [
                     f"FIXER PARTIAL: applied {len(files)} edit(s) but {len(errors)} error(s) occurred.",
@@ -3793,9 +4407,11 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                 lines.append("")
                 if envelope.get("source_role") == "acceptance" and envelope.get("docs_only"):
                     lines.append("REQUIRED NEXT TOOL CALL: run_acceptance_review to re-check docs-only acceptance fixes.")
-                else:
+                elif not _auto_review_note:
                     lines.append("REQUIRED NEXT TOOL CALL: run_review to see the current state of the project.")
-                return "\n".join(lines)
+                return ("\n".join(lines) + _ckpt_note
+                        + await _fix_budget_note(conv_id, envelope.get("source_role"))
+                        + _auto_review_note)
             elif f_status == "skipped":
                 return f"FIXER SKIPPED: {envelope.get('summary', 'no issues to fix')}."
             else:
@@ -3948,7 +4564,7 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
             # consume directly, instead of the v1 prose plan that every
             # downstream agent has to re-parse from markdown. v1 personas
             # keep the existing prose path below.
-            _is_v2_for_plan = bool(conv_id) and await _is_v2_persona(conv_id)
+            _is_v2_for_plan = bool(conv_id) and await _check_v2()
 
             if _is_v2_for_plan:
                 from agents import architect
@@ -3990,6 +4606,13 @@ async def exec_tool(http, events, name: str, args: dict, conv_id: str, custom_to
                     kb_chunks=_kb_chunks,
                     conv_model=conv_model,
                 )
+                if (plan.get("status") or "") == "ok":
+                    await _apply_workflow_event(
+                        conv_id, "PLAN_DONE",
+                        run_id=plan.get("run_id", ""),
+                        project_id=plan.get("plan", {}).get("project_id", "") if isinstance(plan.get("plan"), dict) else "",
+                        user_task=task,
+                    )
                 return architect.format_plan_for_chat(plan)
 
             # ─── v1 path: existing prose plan_project ─────────────────
@@ -5047,18 +5670,40 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                         "model": coder_model,
                         "language": language,
                     })
+                    _ckpt = await _git_checkpoint(
+                        http, project_dir,
+                        f"builder {_final_status}: {task[:60]} ({_run_id})",
+                    )
+                    if _ckpt:
+                        print(f"[git-checkpoint] {_ckpt}")
+                    await _apply_workflow_event(
+                        conv_id, "BUILD_OK",
+                        run_id=_run_id, project_id=_project_id,
+                        user_task=task,
+                    )
                     try:
-                        wf = await db.get_latest_coder_workflow(conv_id, project_id=_project_id)
-                        if wf:
-                            await db.update_coder_workflow(
-                                wf["id"],
-                                state="reviewing",
-                                active_run_id=_run_id,
-                                artifact_status="not_ready",
-                                project_id=_project_id,
-                            )
-                    except Exception as _wfe:
-                        print(f"[WORKFLOW] builder state update failed: {_wfe}")
+                        _arv = await exec_tool(
+                            http, events, "run_review",
+                            {"project_dir": project_dir},
+                            conv_id,
+                            custom_tool_map=custom_tool_map,
+                            connector_tool_name_map=connector_tool_name_map,
+                            conv_model=conv_model,
+                            kb_ids=kb_ids,
+                            artifact_message_id=artifact_message_id,
+                        )
+                        resp += ("\n\n=== AUTOMATIC VERIFICATION — run_review already ran; "
+                                 "do NOT call it again, act on this result ===\n" + _arv)
+                    except Exception as _are:
+                        resp += (f"\n\n(automatic run_review failed: {_are} — "
+                                 f"call run_review manually)")
+                    resp += await _maybe_auto_redeliver(
+                        http, events, conv_id, project_dir,
+                        custom_tool_map=custom_tool_map,
+                        connector_tool_name_map=connector_tool_name_map,
+                        conv_model=conv_model, kb_ids=kb_ids,
+                        artifact_message_id=artifact_message_id,
+                    )
                     return resp
                 else:
                     # Agent ran but produced no files — treat as failure
@@ -5212,6 +5857,29 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                                     for s in (steps[-5:] if steps else [])],
                 })
                 return err_resp
+
+        elif name in connector_tool_name_map:
+            ct = connector_tool_name_map[name]
+            await events.emit(conv_id, "tool_start", {
+                "tool": name,
+                "icon": "plug",
+                "status": f"Calling {ct.get('display_name') or name}...",
+            })
+            try:
+                result = await execute_connector_tool(http, ct, args or {})
+                await events.emit(conv_id, "tool_end", {
+                    "tool": name,
+                    "icon": "plug",
+                    "status": f"OK {ct.get('display_name') or name}",
+                })
+                return result or "No output"
+            except Exception as exec_e:
+                await events.emit(conv_id, "tool_error", {
+                    "tool": name,
+                    "icon": "plug",
+                    "status": f"Error: {str(exec_e)}",
+                })
+                return f"**Connector tool error ({name}):** {str(exec_e)}"
 
         elif name in custom_tool_map:
             ct = custom_tool_map[name]

@@ -4,6 +4,10 @@ Full-stack backend with Ollama streaming, Codebox execution,
 SearXNG research, n8n webhook proxy, and SSE status events.
 """
 import asyncio
+import csv
+import hashlib
+import html
+import io
 import json
 import os
 import uuid
@@ -13,9 +17,12 @@ import re
 import base64
 import shlex
 import urllib.parse
+import posixpath
+import stat
 import venv as _venv
+import zipfile
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 from contextlib import asynccontextmanager
 
 import httpx
@@ -36,6 +43,8 @@ from agents.personas import seed_coder_bot as _seed_coder_bot, seed_coder_bot_v2
 import hf as hf_module
 from hf import parse_ollama_progress
 import rag
+import connectors
+import model_providers
 from research import (
     REPORT_TEMPLATES,
     REPORT_TEMPLATE_MAP,
@@ -95,6 +104,401 @@ def _sanitize_preview_html(html: str, base_url: str) -> str:
     if "<head" in html.lower():
         return re.sub(r"(<head[^>]*>)", r"\1" + base_tag, html, count=1, flags=re.IGNORECASE)
     return base_tag + html
+
+
+def _resolve_download_path(filename: str) -> tuple[str, str] | tuple[None, str]:
+    safe_name = os.path.basename(filename or "")
+    if not safe_name or safe_name != filename:
+        raise HTTPException(400, "Invalid filename")
+    for search_dir in [config.SANDBOX_OUTPUTS_DIR, config.UPLOAD_DIR]:
+        filepath = os.path.join(search_dir, safe_name)
+        if not os.path.abspath(filepath).startswith(os.path.abspath(search_dir)):
+            continue
+        if os.path.exists(filepath):
+            return filepath, safe_name
+    return None, safe_name
+
+
+_ARCHIVE_PREVIEW_EXTS = {
+    ".txt", ".md", ".csv", ".tsv", ".json", ".jsonl", ".html", ".htm", ".py",
+    ".js", ".ts", ".css", ".sh", ".yaml", ".yml", ".toml", ".xml", ".log",
+    ".ini", ".conf",
+}
+_ARCHIVE_ENTRY_MAX_BYTES = 512 * 1024
+_ARCHIVE_ENTRY_MAX_CHARS = 200000
+
+
+def _normalize_archive_path(path: str) -> str:
+    raw = str(path or "").replace("\\", "/").strip()
+    while raw.startswith("./"):
+        raw = raw[2:]
+    if not raw or raw.startswith("/") or re.match(r"^[A-Za-z]:/", raw):
+        raise HTTPException(400, "Invalid archive path")
+    norm = posixpath.normpath(raw)
+    if norm in {"", "."} or norm.startswith("../") or norm == ".." or "/../" in f"/{norm}/":
+        raise HTTPException(400, "Invalid archive path")
+    return norm
+
+
+def _archive_path_is_safe(path: str) -> bool:
+    try:
+        _normalize_archive_path(path)
+        return True
+    except HTTPException:
+        return False
+
+
+def _zipinfo_is_symlink(info: zipfile.ZipInfo) -> bool:
+    mode = (info.external_attr >> 16) & 0o170000
+    return stat.S_ISLNK(mode)
+
+
+def _archive_entry_previewable(path: str, size: int, is_dir: bool, unsafe: bool = False, encrypted: bool = False, symlink: bool = False) -> bool:
+    if is_dir or unsafe or encrypted or symlink or int(size or 0) > _ARCHIVE_ENTRY_MAX_BYTES:
+        return False
+    return os.path.splitext(path.lower())[1] in _ARCHIVE_PREVIEW_EXTS
+
+
+def _archive_entry_record(
+    path: str,
+    *,
+    size: int = 0,
+    is_dir: bool = False,
+    compressed_size: int | None = None,
+    modified_at: str | None = None,
+    encrypted: bool = False,
+    symlink: bool = False,
+) -> dict:
+    display_path = str(path or "").replace("\\", "/")
+    unsafe = not _archive_path_is_safe(display_path.rstrip("/") or display_path)
+    clean = display_path.strip("/")
+    if not unsafe:
+        clean = _normalize_archive_path(display_path.rstrip("/") or display_path)
+    clean = clean.rstrip("/") if is_dir else clean
+    parent = posixpath.dirname(clean) if "/" in clean else ""
+    name = posixpath.basename(clean) + ("/" if is_dir else "")
+    ext = os.path.splitext(clean.lower())[1]
+    depth = 0 if not parent else len(parent.split("/"))
+    previewable = _archive_entry_previewable(clean, size, is_dir, unsafe, encrypted, symlink)
+    reason = ""
+    if unsafe:
+        reason = "unsafe path"
+    elif symlink:
+        reason = "symlink"
+    elif encrypted:
+        reason = "encrypted"
+    elif is_dir:
+        reason = "directory"
+    elif int(size or 0) > _ARCHIVE_ENTRY_MAX_BYTES:
+        reason = "oversized"
+    elif ext not in _ARCHIVE_PREVIEW_EXTS:
+        reason = "unsupported type"
+    return {
+        "name": clean + ("/" if is_dir and not clean.endswith("/") else ""),
+        "path": clean,
+        "display_name": name,
+        "parent": parent,
+        "depth": depth,
+        "size": int(size or 0),
+        "compressed_size": compressed_size,
+        "is_dir": bool(is_dir),
+        "modified_at": modified_at,
+        "ext": ext,
+        "previewable": previewable,
+        "unsafe": unsafe,
+        "encrypted": encrypted,
+        "symlink": symlink,
+        "preview_blocked_reason": "" if previewable else reason,
+    }
+
+
+def _archive_contents_for_path(filepath: str, safe_name: str) -> dict:
+    import tarfile
+
+    entries = []
+    archive_type = ""
+    dirs = set()
+    if tarfile.is_tarfile(filepath):
+        archive_type = "tar"
+        with tarfile.open(filepath, "r:*") as tf:
+            for m in tf.getmembers():
+                entries.append(_archive_entry_record(
+                    m.name,
+                    size=m.size,
+                    is_dir=m.isdir(),
+                    modified_at=datetime.utcfromtimestamp(m.mtime).isoformat() if m.mtime else None,
+                    symlink=m.issym() or m.islnk(),
+                ))
+    elif zipfile.is_zipfile(filepath):
+        archive_type = "zip"
+        with zipfile.ZipFile(filepath) as zf:
+            for info in zf.infolist():
+                modified_at = None
+                try:
+                    modified_at = datetime(*info.date_time).isoformat()
+                except Exception:
+                    modified_at = None
+                entries.append(_archive_entry_record(
+                    info.filename,
+                    size=info.file_size,
+                    compressed_size=info.compress_size,
+                    is_dir=info.is_dir(),
+                    modified_at=modified_at,
+                    encrypted=bool(info.flag_bits & 0x1),
+                    symlink=_zipinfo_is_symlink(info),
+                ))
+    else:
+        raise HTTPException(400, "Not a supported archive")
+
+    for entry in list(entries):
+        path = entry.get("path") or ""
+        if entry.get("unsafe"):
+            continue
+        parts = path.split("/")[:-1] if not entry.get("is_dir") else path.split("/")
+        accum = []
+        for part in parts:
+            if not part:
+                continue
+            accum.append(part)
+            dirs.add("/".join(accum))
+    existing_paths = {e["path"] for e in entries if not e.get("unsafe")}
+    for directory in sorted(dirs):
+        if directory and directory not in existing_paths:
+            entries.append(_archive_entry_record(directory, is_dir=True))
+
+    def _sort_key(e):
+        parts = (e.get("path") or "").rstrip("/").split("/")
+        key = []
+        for i, p in enumerate(parts):
+            is_last = i == len(parts) - 1
+            key.append((0 if (e.get("is_dir") or not is_last) else 1, p.lower()))
+        return key
+
+    entries.sort(key=_sort_key)
+    file_count = len([e for e in entries if not e["is_dir"] and not e.get("unsafe")])
+    folder_count = len([e for e in entries if e["is_dir"] and not e.get("unsafe")])
+    return {
+        "filename": safe_name,
+        "archive_type": archive_type,
+        "file_count": file_count,
+        "folder_count": folder_count,
+        "entries": entries,
+        "preview_entry_max_bytes": _ARCHIVE_ENTRY_MAX_BYTES,
+        "preview_max_chars": _ARCHIVE_ENTRY_MAX_CHARS,
+    }
+
+
+def _looks_binary(raw: bytes) -> bool:
+    if b"\x00" in raw:
+        return True
+    if not raw:
+        return False
+    sample = raw[:4096]
+    control = sum(1 for b in sample if b < 32 and b not in {9, 10, 12, 13})
+    return control / max(1, len(sample)) > 0.08
+
+
+def _archive_entry_preview_for_path(filepath: str, safe_name: str, entry_path: str) -> dict:
+    import tarfile
+
+    wanted = _normalize_archive_path(entry_path)
+    if not zipfile.is_zipfile(filepath) and not tarfile.is_tarfile(filepath):
+        raise HTTPException(400, "Artifact is not a supported archive")
+    ext = os.path.splitext(wanted.lower())[1]
+    if ext not in _ARCHIVE_PREVIEW_EXTS:
+        raise HTTPException(415, "Archive entry type is not safe to preview")
+
+    raw = b""
+    meta = {"path": wanted, "filename": safe_name}
+    if zipfile.is_zipfile(filepath):
+        with zipfile.ZipFile(filepath) as zf:
+            matches = [info for info in zf.infolist() if _archive_path_is_safe(info.filename.rstrip("/")) and _normalize_archive_path(info.filename.rstrip("/")) == wanted]
+            if not matches:
+                raise HTTPException(404, "Archive entry not found")
+            info = matches[0]
+            record = _archive_entry_record(
+                info.filename,
+                size=info.file_size,
+                compressed_size=info.compress_size,
+                is_dir=info.is_dir(),
+                encrypted=bool(info.flag_bits & 0x1),
+                symlink=_zipinfo_is_symlink(info),
+            )
+            if record["is_dir"]:
+                raise HTTPException(400, "Archive entry is a directory")
+            if record["symlink"]:
+                raise HTTPException(400, "Archive entry is a symlink")
+            if record["encrypted"]:
+                raise HTTPException(400, "Archive entry is encrypted")
+            if record["size"] > _ARCHIVE_ENTRY_MAX_BYTES:
+                raise HTTPException(413, "Archive entry is too large to preview")
+            raw = zf.read(info)
+            meta.update(record)
+    else:
+        with tarfile.open(filepath, "r:*") as tf:
+            members = [m for m in tf.getmembers() if _archive_path_is_safe(m.name.rstrip("/")) and _normalize_archive_path(m.name.rstrip("/")) == wanted]
+            if not members:
+                raise HTTPException(404, "Archive entry not found")
+            member = members[0]
+            record = _archive_entry_record(
+                member.name,
+                size=member.size,
+                is_dir=member.isdir(),
+                symlink=member.issym() or member.islnk(),
+            )
+            if record["is_dir"]:
+                raise HTTPException(400, "Archive entry is a directory")
+            if record["symlink"]:
+                raise HTTPException(400, "Archive entry is a symlink")
+            if record["size"] > _ARCHIVE_ENTRY_MAX_BYTES:
+                raise HTTPException(413, "Archive entry is too large to preview")
+            extracted = tf.extractfile(member)
+            if not extracted:
+                raise HTTPException(400, "Archive entry cannot be read")
+            raw = extracted.read(_ARCHIVE_ENTRY_MAX_BYTES + 1)
+            meta.update(record)
+
+    if len(raw) > _ARCHIVE_ENTRY_MAX_BYTES:
+        raise HTTPException(413, "Archive entry is too large to preview")
+    if _looks_binary(raw):
+        raise HTTPException(415, "Archive entry appears to be binary")
+    content = _decode_preview_bytes(raw, {"content-type": ""})[:_ARCHIVE_ENTRY_MAX_CHARS]
+    return {
+        "artifact_filename": safe_name,
+        "path": wanted,
+        "preview_type": "archive_entry",
+        "content": content,
+        "language": _language_hint(wanted, "text"),
+        "size": len(raw),
+        "truncated": len(content) >= _ARCHIVE_ENTRY_MAX_CHARS,
+        "entry": meta,
+    }
+
+
+def _artifact_text_preview_allowed(artifact: dict) -> bool:
+    kind = (artifact.get("kind") or "").lower()
+    if kind in {"html", "markdown", "code", "data", "text"}:
+        return True
+    ext = os.path.splitext((artifact.get("filename") or "").lower())[1]
+    return ext in {
+        ".txt", ".log", ".md", ".html", ".htm", ".py", ".js", ".ts", ".json",
+        ".css", ".sh", ".rs", ".go", ".java", ".c", ".cpp", ".yaml", ".yml",
+        ".toml", ".xml", ".csv", ".ini", ".conf", ".cfg",
+    }
+
+
+def _safe_local_artifact_path(path: str | None) -> str | None:
+    if not path:
+        return None
+    try:
+        abs_path = os.path.abspath(os.path.expanduser(path))
+    except Exception:
+        return None
+    roots = [
+        config.SANDBOX_OUTPUTS_DIR,
+        config.UPLOAD_DIR,
+        config.KB_DIR,
+    ]
+    for root in roots:
+        root_abs = os.path.abspath(root)
+        if abs_path == root_abs or abs_path.startswith(root_abs + os.sep):
+            return abs_path
+    return None
+
+
+def _artifact_path_for_row(artifact: dict) -> tuple[str | None, str]:
+    storage_path = _safe_local_artifact_path(artifact.get("storage_path"))
+    if storage_path:
+        return (storage_path if os.path.exists(storage_path) else None), os.path.basename(storage_path)
+    filename = os.path.basename(artifact.get("filename") or "")
+    if not filename and artifact.get("url"):
+        filename = os.path.basename(urllib.parse.urlparse(artifact["url"]).path)
+    if not filename:
+        return None, ""
+    return _resolve_download_path(filename)
+
+
+def _artifact_file_metadata(filepath: str) -> dict:
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return {"size_bytes": os.path.getsize(filepath), "sha256": h.hexdigest()}
+
+
+def _language_hint(filename: str, kind: str = "") -> str:
+    ext = os.path.splitext((filename or "").lower())[1].lstrip(".")
+    aliases = {"md": "markdown", "markdown": "markdown", "py": "python", "js": "javascript", "ts": "typescript", "sh": "bash", "yml": "yaml"}
+    if ext:
+        return aliases.get(ext, ext)
+    return (kind or "text").lower()
+
+
+def _strip_html_text(raw_html: str, max_chars: int) -> str:
+    text = re.sub(r"<script[^>]*>.*?</script>", " ", raw_html, flags=re.I | re.S)
+    text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(re.sub(r"\s+", " ", text)).strip()
+    return text[:max_chars]
+
+
+def _extract_indexable_text(filepath: str, kind: str, mime_type: str = "", max_chars: int = 500000) -> str:
+    filename = os.path.basename(filepath)
+    lower = filename.lower()
+    kind = (kind or db.artifact_kind_for_filename(filename, mime_type)).lower()
+    try:
+        if kind in {"image", "pdf"}:
+            meta = _artifact_file_metadata(filepath)
+            return f"{filename}\n{kind.upper()} artifact\nsize_bytes={meta['size_bytes']}\nsha256={meta['sha256']}"
+        if kind == "archive":
+            preview = _archive_contents_for_path(filepath, filename)
+            lines = [f"Archive: {filename}", f"Files: {preview.get('file_count', 0)}"]
+            for entry in preview.get("entries", [])[:500]:
+                suffix = "/" if entry.get("is_dir") and not str(entry.get("name", "")).endswith("/") else ""
+                lines.append(f"{entry.get('name','')}{suffix} {entry.get('size',0)} bytes")
+            return "\n".join(lines)[:max_chars]
+        with open(filepath, "rb") as f:
+            raw = f.read(min(max_chars * 4, 4 * 1024 * 1024))
+        text = _decode_preview_bytes(raw, {"content-type": mime_type or ""})
+        if kind == "html" or lower.endswith((".html", ".htm")):
+            return _strip_html_text(text, max_chars)
+        return text[:max_chars]
+    except Exception:
+        return ""
+
+
+def _render_markdown_safe(markdown_text: str) -> str:
+    blocks = []
+    in_code = False
+    code_lines = []
+    for line in (markdown_text or "").splitlines()[:2000]:
+        if line.strip().startswith("```"):
+            if in_code:
+                blocks.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+                code_lines = []
+                in_code = False
+            else:
+                in_code = True
+            continue
+        if in_code:
+            code_lines.append(line)
+            continue
+        escaped = html.escape(line)
+        if not escaped.strip():
+            blocks.append("<br>")
+        elif escaped.startswith("### "):
+            blocks.append(f"<h3>{escaped[4:]}</h3>")
+        elif escaped.startswith("## "):
+            blocks.append(f"<h2>{escaped[3:]}</h2>")
+        elif escaped.startswith("# "):
+            blocks.append(f"<h1>{escaped[2:]}</h1>")
+        elif escaped.startswith("- "):
+            blocks.append(f"<div>&bull; {escaped[2:]}</div>")
+        else:
+            blocks.append(f"<p>{escaped}</p>")
+    if in_code:
+        blocks.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+    return "\n".join(blocks)
 
 
 # ============================================================
@@ -173,11 +577,29 @@ events = EventBus()
 # ============================================================
 _cleanup_task_ref = None
 
+# Strong refs for fire-and-forget background jobs (indexing, research runners).
+# Without this, the event loop only weakly references a bare create_task() result,
+# so an in-flight job can be garbage-collected and silently cancelled mid-run.
+_BG_TASKS: set = set()
+
+
+def _track_bg(coro):
+    t = asyncio.create_task(coro)
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+    return t
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _cleanup_task_ref, _health_task_ref
     await db.init_db()
+    try:
+        _reaped = await db.reap_stale_runs()
+        if _reaped.get("runs_reaped") or _reaped.get("workflows_blocked"):
+            print(f"[Startup] Reaped stale runs: {_reaped}")
+    except Exception as _re:
+        print(f"[Startup] Stale-run reaper failed (non-fatal): {_re}")
     os.makedirs(config.UPLOAD_DIR, exist_ok=True)
     os.makedirs(config.TOOLS_DIR, exist_ok=True)
     os.makedirs(config.KB_DIR, exist_ok=True)
@@ -231,7 +653,7 @@ async def lifespan(app: FastAPI):
         config.OPENHANDS_ENABLED = _settings["openhands_enabled"]
         print(f"[Config] Loaded OpenHands enabled: {config.OPENHANDS_ENABLED}")
     if "openhands_max_rounds" in _settings:
-        config.OPENHANDS_MAX_ROUNDS = int(_settings["openhands_max_rounds"])
+        config.OPENHANDS_MAX_ROUNDS = config.coerce_int(_settings["openhands_max_rounds"], config.OPENHANDS_MAX_ROUNDS, minimum=1, maximum=200)
         print(f"[Config] Loaded OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
     if "openhands_num_ctx" in _settings:
         config.OPENHANDS_NUM_CTX = config.coerce_num_ctx(
@@ -272,6 +694,12 @@ async def lifespan(app: FastAPI):
             fallback=config.DEFAULT_NUM_CTX,
         )
         print(f"[Config] Loaded default num_ctx: {config.DEFAULT_NUM_CTX}")
+    if "research_num_ctx" in _settings:
+        config.RESEARCH_NUM_CTX = config.coerce_num_ctx(
+            _settings["research_num_ctx"],
+            fallback=config.RESEARCH_NUM_CTX,
+        )
+        print(f"[Config] Loaded research num_ctx: {config.RESEARCH_NUM_CTX}")
     if "quick_search_mode" in _settings:
         _qsm = (_settings["quick_search_mode"] or "balanced").strip().lower()
         if _qsm not in ("speed", "balanced", "quality"):
@@ -284,16 +712,18 @@ async def lifespan(app: FastAPI):
     _cleanup_task_ref = asyncio.create_task(_cleanup_loop())
     # Start health check loop (every 5 min)
     _health_task_ref = asyncio.create_task(_health_check_loop())
-    # Load RAG settings from persistent config
+    # Load RAG settings from persistent config — clamped like the PATCH path,
+    # so a legacy settings.json with junk values (e.g. chunk_size -5) can't
+    # poison the runtime chunker after a restart.
     _rag_cfg = _settings.get("rag", {})
     if _rag_cfg.get("embed_model"):
         rag.EMBED_MODEL = _rag_cfg["embed_model"]
     if _rag_cfg.get("chunk_size"):
-        rag.CHUNK_SIZE = int(_rag_cfg["chunk_size"])
+        rag.CHUNK_SIZE = config.coerce_int(_rag_cfg["chunk_size"], rag.CHUNK_SIZE, minimum=100, maximum=8000)
     if _rag_cfg.get("chunk_overlap") is not None:
-        rag.CHUNK_OVERLAP = int(_rag_cfg["chunk_overlap"])
+        rag.CHUNK_OVERLAP = config.coerce_int(_rag_cfg["chunk_overlap"], rag.CHUNK_OVERLAP, minimum=0, maximum=2000)
     # Ensure RAG embedding model is available (non-blocking pull)
-    asyncio.create_task(rag.ensure_embed_model())
+    _track_bg(rag.ensure_embed_model())
     yield
     for task in [_cleanup_task_ref, _health_task_ref]:
         if task:
@@ -320,6 +750,7 @@ app.add_middleware(
 
 _USER_SCOPED_PREFIXES = (
     "/api/conversations",
+    "/api/artifacts",
     "/api/chat/stream",
     "/api/council/chat/stream",
     "/api/coder",
@@ -542,6 +973,48 @@ class ToolUpdate(BaseModel):
     description: Optional[str] = None
     code: Optional[str] = None
 
+class MCPServerCreate(BaseModel):
+    name: str
+    transport: str = "stdio"
+    command: str = ""
+    url: str = ""
+    args: list[str] = []
+    env: dict = {}
+    headers: dict = {}
+    allow_private: bool = False
+    enabled: bool = True
+
+class MCPServerUpdate(BaseModel):
+    name: Optional[str] = None
+    transport: Optional[str] = None
+    command: Optional[str] = None
+    url: Optional[str] = None
+    args: Optional[list[str]] = None
+    env: Optional[dict] = None
+    headers: Optional[dict] = None
+    allow_private: Optional[bool] = None
+    enabled: Optional[bool] = None
+
+class OpenAPIConnectorCreate(BaseModel):
+    name: str
+    spec_url: str = ""
+    spec_json: Any = ""
+    base_url: str = ""
+    auth: dict = {}
+    headers: dict = {}
+    allow_private: bool = False
+    enabled: bool = True
+
+class OpenAPIConnectorUpdate(BaseModel):
+    name: Optional[str] = None
+    spec_url: Optional[str] = None
+    spec_json: Optional[Any] = None
+    base_url: Optional[str] = None
+    auth: Optional[dict] = None
+    headers: Optional[dict] = None
+    allow_private: Optional[bool] = None
+    enabled: Optional[bool] = None
+
 class ModelConfigCreate(BaseModel):
     name: str
     base_model: str
@@ -577,6 +1050,55 @@ class UserUpdate(BaseModel):
     name: Optional[str] = None
     password: Optional[str] = None
     clear_password: Optional[bool] = False
+
+class ArtifactUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    workspace_id: Optional[str] = None
+    workspace_ids: Optional[list[str]] = None
+    status: Optional[str] = None
+    pinned: Optional[bool] = None
+    tags: Optional[list[str]] = None
+    parent_artifact_id: Optional[str] = None
+    supersedes_artifact_id: Optional[str] = None
+
+class ArtifactUseInChatRequest(BaseModel):
+    conversation_id: Optional[str] = None
+    max_chars: int = 20000
+
+class ArtifactAddToKBRequest(BaseModel):
+    kb_id: str
+    filename: Optional[str] = None
+    max_chars: int = 500000
+
+class ArtifactResearchRequest(BaseModel):
+    query: Optional[str] = None
+    title: Optional[str] = None
+    focus: str = ""
+    report_type: str = "analyst"
+    depth: Optional[int] = None
+    model: str = ""
+    planner_model: str = ""
+    auditor_model: str = ""
+    kb_ids: list[str] = []
+    max_chars: int = 50000
+
+class ArtifactReviseRequest(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    filename: Optional[str] = None
+    content: Optional[str] = None
+    tags: Optional[list[str]] = None
+    workspace_ids: Optional[list[str]] = None
+
+class ArtifactBundleRequest(BaseModel):
+    artifact_ids: list[str]
+    title: Optional[str] = None
+    filename: Optional[str] = None
+    workspace_ids: Optional[list[str]] = None
+
+class ArtifactMergeDuplicateRequest(BaseModel):
+    duplicate_id: str
 
 
 # ============================================================
@@ -818,21 +1340,35 @@ async def health_history(days: int = Query(default=90, ge=1, le=365)):
 # ============================================================
 @app.get("/api/models")
 async def list_models():
-    """Fetch available models from Ollama."""
+    """Fetch available models from Ollama plus enabled cloud providers."""
+    models: list[str] = []
+    model_details: dict[str, Any] = {}
+    ollama_error: Exception | None = None
     try:
         r = await http.get(f"{config.OLLAMA_URL}/api/tags")
         r.raise_for_status()
         data = r.json()
         raw = data.get("models", [])
-        model_details = {m["name"]: {
+        model_details.update({m["name"]: {
             "size": m.get("size", 0),
             "modified_at": m.get("modified_at", ""),
             "details": m.get("details", {}),
             "digest": m.get("digest", ""),
-        } for m in raw}
-        return {"models": [m["name"] for m in raw], "model_details": model_details}
+        } for m in raw})
+        models.extend([m["name"] for m in raw])
     except Exception as e:
-        raise HTTPException(502, f"Failed to reach Ollama: {e}")
+        ollama_error = e
+
+    cloud_models, cloud_details, cloud_errors = await model_providers.list_cloud_models(http)
+    models.extend(cloud_models)
+    model_details.update(cloud_details)
+    if not models and ollama_error:
+        raise HTTPException(502, f"Failed to reach Ollama: {ollama_error}")
+    return {
+        "models": models,
+        "model_details": model_details,
+        **({"provider_errors": cloud_errors} if cloud_errors else {}),
+    }
 
 
 @app.post("/api/chat/stream")
@@ -841,12 +1377,23 @@ async def chat_stream(req: ChatRequest):
     _all_custom = await db.get_tools()
     custom_tool_map: dict = {t["name"]: t for t in _all_custom}
     custom_tool_id_map: dict = {t["id"]: t for t in _all_custom}
+    _all_connector_tools = await db.get_connector_tools(enabled_only=True)
+    connector_tool_id_map: dict = {t["id"]: t for t in _all_connector_tools}
+    connector_tool_name_map: dict = {t["tool_name"]: t for t in _all_connector_tools}
     user_id = db.current_user_id()
 
     async def _stream():
         token = db.set_current_user_id(user_id)
         try:
-            async for chunk in chat_stream_generate(req, http, events, custom_tool_map, custom_tool_id_map):
+            async for chunk in chat_stream_generate(
+                req,
+                http,
+                events,
+                custom_tool_map,
+                custom_tool_id_map,
+                connector_tool_id_map,
+                connector_tool_name_map,
+            ):
                 yield chunk
         finally:
             db.reset_current_user_id(token)
@@ -858,64 +1405,639 @@ async def chat_stream(req: ChatRequest):
 
 
 # ============================================================
+# ARTIFACTS
+# ============================================================
+async def _annotate_artifact_staleness(artifacts: list[dict]) -> list[dict]:
+    """For archive artifacts: set `stale` when the project changed (a successful
+    edit run started) after the artifact was packaged, and `latest_for_project`
+    for the newest archive of each project within the given set. Edit-run lookups
+    are cached per project_id so a list page costs one query per distinct project."""
+    if not artifacts:
+        return artifacts
+    edit_ts_cache: dict[str, str | None] = {}
+    newest_by_project: dict[str, str] = {}
+    for a in artifacts:
+        if (a.get("kind") or "") != "archive":
+            continue
+        pid = str(((a.get("metadata") or {}).get("project_id") or "")).strip()
+        if not pid:
+            continue
+        ca = a.get("created_at") or ""
+        if ca > newest_by_project.get(pid, ""):
+            newest_by_project[pid] = ca
+    for a in artifacts:
+        if (a.get("kind") or "") != "archive":
+            continue
+        pid = str(((a.get("metadata") or {}).get("project_id") or "")).strip()
+        if not pid:
+            continue
+        if pid not in edit_ts_cache:
+            try:
+                edit_ts_cache[pid] = await db.latest_edit_run_after(pid)
+            except Exception as e:
+                print(f"[artifacts] stale lookup failed for {pid}: {e}")
+                edit_ts_cache[pid] = None
+        edit_ts = edit_ts_cache[pid]
+        ca = a.get("created_at") or ""
+        a["stale"] = bool(edit_ts and ca and edit_ts > ca)
+        a["latest_for_project"] = bool(ca and ca == newest_by_project.get(pid))
+    return artifacts
+
+
+@app.get("/api/artifacts")
+async def list_artifacts_ep(
+    conversation_id: Optional[str] = Query(None),
+    workspace_id: Optional[str] = Query(None),
+    run_id: Optional[str] = Query(None),
+    workflow_id: Optional[str] = Query(None),
+    kind: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    pinned: Optional[str] = Query(None),
+    tag: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    source: Optional[str] = Query(None),
+    limit: int = Query(80, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    artifacts = await db.list_artifacts(
+        conversation_id=conversation_id,
+        workspace_id=workspace_id,
+        run_id=run_id,
+        workflow_id=workflow_id,
+        kind=kind,
+        status=status,
+        pinned=pinned,
+        tag=tag,
+        q=q,
+        date_from=date_from,
+        date_to=date_to,
+        source=source,
+        limit=limit,
+        offset=offset,
+    )
+    return await _annotate_artifact_staleness(artifacts)
+
+
+@app.get("/api/artifacts/{artifact_id}")
+async def get_artifact_ep(artifact_id: str):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    # Annotate across the full lineage so `latest_for_project` reflects the whole
+    # version set, not just this single row. Mutates `versions` in place too.
+    await _annotate_artifact_staleness([artifact] + (artifact.get("versions") or []))
+    return artifact
+
+
+@app.get("/api/artifacts/{artifact_id}/download")
+async def download_artifact_ep(artifact_id: str):
+    """Serve THIS artifact's exact bytes (immutable), keyed on artifact id rather
+    than a shared basename — so an old pill always downloads what it packaged even
+    after a newer delivery overwrote the friendly /api/downloads/{name} file."""
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    filepath, safe_name = _artifact_path_for_row(artifact)
+    if not filepath:
+        raise HTTPException(404, "Artifact file is missing")
+    download_name = os.path.basename(artifact.get("filename") or "") or safe_name
+    return FileResponse(filepath, filename=download_name)
+
+
+@app.get("/api/artifacts/{artifact_id}/duplicates")
+async def get_artifact_duplicates_ep(artifact_id: str):
+    duplicates = await db.get_artifact_duplicates(artifact_id)
+    if duplicates is None:
+        raise HTTPException(404, "Artifact not found")
+    return {"artifact_id": artifact_id, "duplicates": duplicates}
+
+
+@app.get("/api/artifacts/{artifact_id}/timeline")
+async def get_artifact_timeline_ep(artifact_id: str):
+    timeline = await db.get_artifact_timeline(artifact_id)
+    if timeline is None:
+        raise HTTPException(404, "Artifact not found")
+    return {"artifact_id": artifact_id, "events": timeline}
+
+
+@app.post("/api/artifacts/{artifact_id}/merge-duplicate")
+async def merge_artifact_duplicate_ep(artifact_id: str, req: ArtifactMergeDuplicateRequest):
+    try:
+        merged = await db.merge_duplicate_artifact(artifact_id, req.duplicate_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not merged:
+        raise HTTPException(404, "Artifact not found")
+    return merged
+
+
+@app.patch("/api/artifacts/{artifact_id}")
+async def update_artifact_ep(artifact_id: str, req: ArtifactUpdate):
+    artifact = await db.update_artifact(
+        artifact_id,
+        **{k: v for k, v in req.dict(exclude_unset=True).items()},
+    )
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    return artifact
+
+
+@app.delete("/api/artifacts/{artifact_id}")
+async def delete_artifact_ep(artifact_id: str):
+    ok = await db.delete_artifact(artifact_id)
+    if not ok:
+        raise HTTPException(404, "Artifact not found")
+    return {"status": "deleted", "deleted_file": False}
+
+
+@app.get("/api/artifacts/{artifact_id}/preview")
+async def preview_artifact_ep(artifact_id: str, max_chars: int = Query(200000, ge=1000, le=1000000)):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    filepath, safe_name = _artifact_path_for_row(artifact)
+    if not filepath:
+        updated = await db.update_artifact_file_metadata(artifact_id, exists_status="missing")
+        return {
+            **(updated or artifact),
+            "id": artifact_id,
+            "filename": safe_name or artifact.get("filename") or "",
+            "kind": artifact.get("kind") or "file",
+            "mime_type": artifact.get("mime_type") or "",
+            "exists_status": "missing",
+            "preview_type": "missing",
+            "error": "File not found. It may have been cleaned up.",
+        }
+
+    kind = (artifact.get("kind") or "file").lower()
+    lower_name = (safe_name or artifact.get("filename") or "").lower()
+    file_meta = _artifact_file_metadata(filepath)
+    if kind == "archive":
+        try:
+            return {
+                **artifact,
+                "preview": _archive_contents_for_path(filepath, safe_name),
+                "preview_type": "archive",
+                "file_size": file_meta["size_bytes"],
+                "download_url": artifact.get("url"),
+            }
+        except HTTPException as e:
+            return JSONResponse({"error": e.detail, "preview_type": "archive"}, status_code=e.status_code)
+        except Exception as e:
+            return JSONResponse({"error": str(e), "preview_type": "archive"}, status_code=500)
+    if kind in {"image", "pdf"}:
+        return {
+            **artifact,
+            "preview_type": kind,
+            "file_size": file_meta["size_bytes"],
+            "sha256": file_meta["sha256"],
+            "download_url": artifact.get("url"),
+        }
+    if not _artifact_text_preview_allowed(artifact):
+        return {
+            **artifact,
+            "preview_type": "metadata",
+            "file_size": file_meta["size_bytes"],
+            "sha256": file_meta["sha256"],
+            "message": "Binary preview is not available for this artifact type.",
+        }
+    try:
+        def _read_preview_bytes():
+            with open(filepath, "rb") as f:
+                return f.read(min(max_chars * 4, 4 * 1024 * 1024))
+        raw = await asyncio.to_thread(_read_preview_bytes)
+        content = _decode_preview_bytes(raw, {"content-type": artifact.get("mime_type") or ""})[:max_chars]
+        truncated = os.path.getsize(filepath) > len(raw) or len(content) >= max_chars
+        if lower_name.endswith((".csv", ".tsv")):
+            delimiter = "\t" if lower_name.endswith(".tsv") else ","
+            reader = csv.reader(io.StringIO(content), delimiter=delimiter)
+            parsed = list(reader)
+            columns = parsed[0] if parsed else []
+            rows = parsed[1:201] if len(parsed) > 1 else []
+            return {
+                **artifact,
+                "preview_type": "table",
+                "table_type": "csv" if delimiter == "," else "tsv",
+                "columns": columns,
+                "rows": rows,
+                "row_count": max(0, len(parsed) - 1),
+                "truncated": truncated or len(parsed) > 201,
+                "file_size": file_meta["size_bytes"],
+            }
+        if lower_name.endswith((".json", ".jsonl", ".ndjson")):
+            parsed = None
+            parse_error = ""
+            try:
+                if lower_name.endswith((".jsonl", ".ndjson")):
+                    parsed = [json.loads(line) for line in content.splitlines() if line.strip()][:200]
+                else:
+                    parsed = json.loads(content)
+            except Exception as e:
+                parse_error = str(e)
+            return {
+                **artifact,
+                "preview_type": "json",
+                "content": content,
+                "json": parsed,
+                "parse_error": parse_error,
+                "truncated": truncated,
+                "file_size": file_meta["size_bytes"],
+            }
+        if kind == "markdown" or lower_name.endswith((".md", ".markdown", ".mdx")):
+            return {
+                **artifact,
+                "preview_type": "markdown",
+                "content": content,
+                "html": _render_markdown_safe(content),
+                "truncated": truncated,
+                "file_size": file_meta["size_bytes"],
+            }
+        if kind == "html" or lower_name.endswith((".html", ".htm")):
+            title_match = re.search(r"<title[^>]*>(.*?)</title>", content, flags=re.I | re.S)
+            return {
+                **artifact,
+                "preview_type": "html",
+                "content": _sanitize_preview_html(content, artifact.get("url") or ""),
+                "metadata": {"title": html.unescape(re.sub(r"\s+", " ", title_match.group(1)).strip()) if title_match else ""},
+                "download_url": artifact.get("url"),
+                "truncated": truncated,
+                "file_size": file_meta["size_bytes"],
+            }
+        return {
+            **artifact,
+            "preview_type": "text",
+            "content": content,
+            "language": _language_hint(safe_name, kind),
+            "truncated": truncated,
+            "file_size": file_meta["size_bytes"],
+        }
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to read preview: {e}"}, status_code=500)
+
+
+@app.get("/api/artifacts/{artifact_id}/archive-entry")
+async def preview_artifact_archive_entry_ep(artifact_id: str, path: str = Query(..., min_length=1)):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    if (artifact.get("kind") or "").lower() != "archive":
+        raise HTTPException(400, "Artifact is not an archive")
+    filepath, safe_name = _artifact_path_for_row(artifact)
+    if not filepath:
+        await db.update_artifact_file_metadata(artifact_id, exists_status="missing")
+        raise HTTPException(404, "Artifact file is missing")
+    try:
+        return _archive_entry_preview_for_path(filepath, safe_name or artifact.get("filename") or "", path)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Failed to preview archive entry: {e}")
+
+
+@app.post("/api/artifacts/{artifact_id}/check-file")
+async def check_artifact_file_ep(artifact_id: str):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    filepath, _safe_name = _artifact_path_for_row(artifact)
+    if not filepath:
+        updated = await db.update_artifact_file_metadata(artifact_id, exists_status="missing")
+        return updated or {**artifact, "exists_status": "missing"}
+    meta = _artifact_file_metadata(filepath)
+    content_text = _extract_indexable_text(filepath, artifact.get("kind") or "", artifact.get("mime_type") or "")
+    updated = await db.update_artifact_file_metadata(
+        artifact_id,
+        storage_path=filepath,
+        size_bytes=meta["size_bytes"],
+        sha256=meta["sha256"],
+        exists_status="present",
+        content_text=content_text,
+    )
+    return updated
+
+
+@app.post("/api/artifacts/{artifact_id}/use-in-chat")
+async def use_artifact_in_chat_ep(artifact_id: str, req: ArtifactUseInChatRequest):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    filepath, _safe_name = _artifact_path_for_row(artifact)
+    content = (artifact.get("content_text") or "").strip()
+    if not content and filepath:
+        content = _extract_indexable_text(filepath, artifact.get("kind") or "", artifact.get("mime_type") or "", max_chars=req.max_chars)
+    if not content:
+        content = f"[Artifact: {artifact.get('title') or artifact.get('filename')} ({artifact.get('kind') or 'file'})]"
+    content = content[: max(1000, min(req.max_chars or 20000, 100000))]
+    attachment = {
+        "name": artifact.get("title") or artifact.get("filename") or artifact_id,
+        "content": content,
+        "type": "text",
+        "artifact_id": artifact_id,
+        "url": artifact.get("url"),
+    }
+    return {
+        "artifact_id": artifact_id,
+        "conversation_id": req.conversation_id,
+        "attachment": attachment,
+        "context": f"Artifact: {attachment['name']}\n{content}",
+    }
+
+
+@app.post("/api/artifacts/{artifact_id}/add-to-kb")
+async def add_artifact_to_kb_ep(artifact_id: str, req: ArtifactAddToKBRequest):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    owned = await db.get_kb(req.kb_id)
+    if not owned:
+        raise HTTPException(404, "KB not found")
+    filepath, _safe_name = _artifact_path_for_row(artifact)
+    content = (artifact.get("content_text") or "").strip()
+    if not content and filepath:
+        content = _extract_indexable_text(filepath, artifact.get("kind") or "", artifact.get("mime_type") or "", max_chars=req.max_chars)
+    if not content or (artifact.get("kind") or "").lower() in {"image", "pdf"}:
+        raise HTTPException(400, "Artifact does not have safe text content to import")
+    kb_dir = os.path.join(config.KB_DIR, req.kb_id)
+    os.makedirs(kb_dir, exist_ok=True)
+    base_name = os.path.basename(req.filename or artifact.get("filename") or f"{artifact_id}.txt")
+    if not os.path.splitext(base_name)[1]:
+        base_name += ".txt"
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", base_name)[:180] or f"{artifact_id}.txt"
+    if not safe_name.lower().endswith((".txt", ".md", ".csv", ".json", ".jsonl", ".html", ".htm", ".py", ".js", ".ts", ".css", ".sh", ".yaml", ".yml", ".toml", ".xml")):
+        safe_name += ".txt"
+    dest = os.path.abspath(os.path.join(kb_dir, safe_name))
+    if not dest.startswith(os.path.abspath(kb_dir) + os.sep):
+        raise HTTPException(400, "Invalid KB filename")
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write(content[: max(1000, min(req.max_chars or 500000, 1000000))])
+    file_id = await db.add_kb_file(req.kb_id, safe_name, dest, os.path.getsize(dest), "text/plain")
+
+    async def _bg_index_artifact_import():
+        try:
+            await rag.index_file(req.kb_id, safe_name, dest)
+        except Exception as e:
+            print(f"[RAG] Artifact KB import indexing failed for {safe_name}: {e}")
+
+    _track_bg(_bg_index_artifact_import())
+    await db.add_artifact_event(
+        artifact_id,
+        "added_to_kb",
+        f"Added to knowledge base {owned.get('name') or req.kb_id}",
+        {"kb_id": req.kb_id, "kb_name": owned.get("name"), "file_id": file_id, "filename": safe_name},
+    )
+    return {"artifact_id": artifact_id, "kb_id": req.kb_id, "file_id": file_id, "filename": safe_name, "indexing": True}
+
+
+@app.post("/api/artifacts/{artifact_id}/send-to-research")
+async def send_artifact_to_research_ep(artifact_id: str, req: ArtifactResearchRequest):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    filepath, _safe_name = _artifact_path_for_row(artifact)
+    content = (artifact.get("content_text") or "").strip()
+    if not content and filepath:
+        content = _extract_indexable_text(filepath, artifact.get("kind") or "", artifact.get("mime_type") or "", max_chars=req.max_chars)
+    title = req.title or f"Research: {artifact.get('title') or artifact.get('filename')}"
+    query = req.query or f"Analyze this artifact: {artifact.get('title') or artifact.get('filename')}"
+    report = await _create_and_start_research_report(ResearchReportCreate(
+        title=title,
+        query=query,
+        focus=req.focus or f"Use artifact {artifact_id} as primary context.",
+        report_type=req.report_type or "analyst",
+        depth=req.depth,
+        model=req.model,
+        planner_model=req.planner_model,
+        auditor_model=req.auditor_model,
+        kb_ids=req.kb_ids,
+        inputs=[{
+            "type": "artifact",
+            "artifact_id": artifact_id,
+            "title": artifact.get("title") or artifact.get("filename"),
+            "filename": artifact.get("filename"),
+            "content": content[: max(1000, min(req.max_chars or 50000, 200000))],
+        }],
+    ))
+    await db.add_artifact_event(
+        artifact_id,
+        "sent_to_research",
+        f"Sent to research report {report.get('title') or report.get('id') or ''}".strip(),
+        {"report_id": report.get("id"), "title": report.get("title"), "query": query},
+    )
+    return report
+
+
+@app.post("/api/artifacts/{artifact_id}/fork-to-codebox")
+async def fork_artifact_to_codebox_ep(artifact_id: str):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    filepath, safe_name = _artifact_path_for_row(artifact)
+    if not filepath:
+        raise HTTPException(404, "Artifact file is missing")
+    size = os.path.getsize(filepath)
+    if size > config.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+        raise HTTPException(413, f"Artifact exceeds {config.MAX_UPLOAD_SIZE_MB}MB Codebox copy limit")
+    def _read_b64():
+        with open(filepath, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    b64 = await asyncio.to_thread(_read_b64)
+    remote_dir = f"/root/artifacts/{shlex.quote(artifact_id)}"
+    remote_path = f"/root/artifacts/{artifact_id}/{safe_name}"
+    cmd = f"mkdir -p {remote_dir} && printf '%s' {shlex.quote(b64)} | base64 -d > {shlex.quote(remote_path)} && ls -lah {shlex.quote(remote_path)}"
+    try:
+        r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 60}, timeout=70)
+        data = r.json()
+        if r.status_code >= 400 or data.get("exit_code", 0) != 0:
+            raise HTTPException(502, data.get("stderr") or "Codebox copy failed")
+        result = {
+            "artifact_id": artifact_id,
+            "path": remote_path,
+            "project_path": f"/root/artifacts/{artifact_id}",
+            "filename": safe_name,
+            "size_bytes": size,
+            "stdout": data.get("stdout", "")[:1000],
+        }
+        await db.add_artifact_event(
+            artifact_id,
+            "forked_to_codebox",
+            f"Copied to Codebox at {remote_path}",
+            {"path": remote_path, "project_path": result["project_path"], "size_bytes": size},
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Codebox copy failed: {e}")
+
+
+@app.post("/api/artifacts/{artifact_id}/revise")
+async def revise_artifact_ep(artifact_id: str, req: ArtifactReviseRequest):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    filepath, safe_name = _artifact_path_for_row(artifact)
+    os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
+    filename = os.path.basename(req.filename or safe_name or artifact.get("filename") or f"{artifact_id}.txt")
+    stem, ext = os.path.splitext(filename)
+    if not ext:
+        ext = ".txt"
+    new_name = f"{stem}-revision-{uuid.uuid4().hex[:6]}{ext}"
+    dest = os.path.abspath(os.path.join(config.SANDBOX_OUTPUTS_DIR, new_name))
+    if not dest.startswith(os.path.abspath(config.SANDBOX_OUTPUTS_DIR) + os.sep):
+        raise HTTPException(400, "Invalid revision filename")
+    if req.content is not None:
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write(req.content)
+    elif filepath:
+        shutil.copy2(filepath, dest)
+    else:
+        raise HTTPException(404, "Original artifact file is missing; provide content to revise")
+    mime_type = db.artifact_mime_type_for_filename(new_name)
+    kind = db.artifact_kind_for_filename(new_name, mime_type)
+    meta = _artifact_file_metadata(dest)
+    content_text = _extract_indexable_text(dest, kind, mime_type)
+    parent_id = artifact.get("parent_artifact_id") or artifact["id"]
+    new_artifact = await db.add_artifact(
+        conversation_id=artifact.get("conversation_id"),
+        message_id=artifact.get("message_id"),
+        workspace_ids=req.workspace_ids if req.workspace_ids is not None else artifact.get("workspace_ids", []),
+        run_id=artifact.get("run_id"),
+        workflow_id=artifact.get("workflow_id"),
+        filename=new_name,
+        url=f"/api/downloads/{new_name}",
+        kind=kind,
+        mime_type=mime_type,
+        title=req.title or f"{artifact.get('title') or artifact.get('filename')} revision",
+        description=req.description if req.description is not None else artifact.get("description", ""),
+        storage_path=dest,
+        size_bytes=meta["size_bytes"],
+        sha256=meta["sha256"],
+        exists_status="present",
+        parent_artifact_id=parent_id,
+        supersedes_artifact_id=artifact["id"],
+        content_text=content_text,
+        tags=req.tags if req.tags is not None else artifact.get("tags", []),
+        metadata={**(artifact.get("metadata") or {}), "source_tool": "artifact_revise", "revised_from": artifact["id"]},
+    )
+    await db.add_artifact_event(
+        artifact["id"],
+        "revised",
+        f"Created revision {new_artifact.get('id')}",
+        {"related_artifact_id": new_artifact.get("id"), "filename": new_name},
+    )
+    await db.add_artifact_event(
+        new_artifact["id"],
+        "supersedes",
+        f"Supersedes {artifact['id']}",
+        {"related_artifact_id": artifact["id"], "parent_artifact_id": parent_id},
+    )
+    return new_artifact
+
+
+@app.post("/api/artifacts/bundle")
+async def bundle_artifacts_ep(req: ArtifactBundleRequest):
+    ids = []
+    seen = set()
+    for artifact_id in req.artifact_ids or []:
+        if artifact_id and artifact_id not in seen:
+            seen.add(artifact_id)
+            ids.append(artifact_id)
+    if not ids:
+        raise HTTPException(400, "No artifacts selected")
+    artifacts = []
+    for artifact_id in ids[:100]:
+        artifact = await db.get_artifact(artifact_id)
+        if not artifact:
+            raise HTTPException(404, f"Artifact not found: {artifact_id}")
+        filepath, safe_name = _artifact_path_for_row(artifact)
+        if not filepath:
+            raise HTTPException(404, f"Artifact file is missing: {artifact.get('filename') or artifact_id}")
+        artifacts.append((artifact, filepath, safe_name or os.path.basename(filepath)))
+    os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
+    raw_name = os.path.basename(req.filename or (req.title or f"artifact-bundle-{uuid.uuid4().hex[:6]}.zip"))
+    if not raw_name.lower().endswith(".zip"):
+        raw_name += ".zip"
+    safe_bundle = re.sub(r"[^A-Za-z0-9._-]+", "-", raw_name)[:180] or f"artifact-bundle-{uuid.uuid4().hex[:6]}.zip"
+    dest = os.path.abspath(os.path.join(config.SANDBOX_OUTPUTS_DIR, safe_bundle))
+    if not dest.startswith(os.path.abspath(config.SANDBOX_OUTPUTS_DIR) + os.sep):
+        raise HTTPException(400, "Invalid bundle filename")
+    with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        used_names = set()
+        for artifact, filepath, safe_name in artifacts:
+            arcname = safe_name
+            if arcname in used_names:
+                stem, ext = os.path.splitext(arcname)
+                arcname = f"{stem}-{artifact['id']}{ext}"
+            used_names.add(arcname)
+            zf.write(filepath, arcname)
+    meta = _artifact_file_metadata(dest)
+    content_text = _extract_indexable_text(dest, "archive", "application/zip")
+    workspace_ids = req.workspace_ids
+    if workspace_ids is None:
+        ws_seen = set()
+        workspace_ids = []
+        for artifact, _path, _safe in artifacts:
+            for ws_id in artifact.get("workspace_ids", []):
+                if ws_id not in ws_seen:
+                    ws_seen.add(ws_id)
+                    workspace_ids.append(ws_id)
+    bundle = await db.add_artifact(
+        filename=safe_bundle,
+        url=f"/api/downloads/{safe_bundle}",
+        kind="archive",
+        mime_type="application/zip",
+        title=req.title or "Artifact bundle",
+        description=f"Bundle of {len(artifacts)} artifact(s).",
+        storage_path=dest,
+        size_bytes=meta["size_bytes"],
+        sha256=meta["sha256"],
+        exists_status="present",
+        status="draft",
+        workspace_ids=workspace_ids,
+        content_text=content_text,
+        tags=["bundle"],
+        metadata={"source_tool": "artifact_bundle", "artifact_ids": ids[:100]},
+    )
+    await db.add_artifact_event(
+        bundle["id"],
+        "bundled_from",
+        f"Bundled {len(artifacts)} artifact(s)",
+        {"related_artifact_ids": ids[:100]},
+    )
+    for artifact, _path, _safe in artifacts:
+        await db.add_artifact_event(
+            artifact["id"],
+            "included_in_bundle",
+            f"Included in bundle {bundle.get('id')}",
+            {"related_artifact_id": bundle.get("id"), "filename": safe_bundle},
+        )
+    return bundle
+
+
+# ============================================================
 # FILE DOWNLOADS
 # ============================================================
 @app.get("/api/downloads/{filename}")
 async def download_file_endpoint(filename: str):
     """Serve tool-generated files. Looks in sandbox/outputs first, falls back to legacy UPLOAD_DIR."""
-    safe_name = os.path.basename(filename)
-    if not safe_name or safe_name != filename:
-        raise HTTPException(400, "Invalid filename")
-    for search_dir in [config.SANDBOX_OUTPUTS_DIR, config.UPLOAD_DIR]:
-        filepath = os.path.join(search_dir, safe_name)
-        if not os.path.abspath(filepath).startswith(os.path.abspath(search_dir)):
-            continue
-        if os.path.exists(filepath):
-            return FileResponse(filepath, filename=safe_name)
+    filepath, safe_name = _resolve_download_path(filename)
+    if filepath:
+        return FileResponse(filepath, filename=safe_name)
     return JSONResponse({"error": "File not found"}, status_code=404)
 
 
 @app.get("/api/downloads/{filename}/contents")
 async def archive_contents(filename: str):
     """List files inside a .tar.gz or .zip archive for preview."""
-    import tarfile
-    import zipfile
-    safe_name = os.path.basename(filename)
-    if not safe_name or safe_name != filename:
-        raise HTTPException(400, "Invalid filename")
-    filepath = None
-    for search_dir in [config.SANDBOX_OUTPUTS_DIR, config.UPLOAD_DIR]:
-        candidate = os.path.join(search_dir, safe_name)
-        if os.path.exists(candidate):
-            filepath = candidate
-            break
+    filepath, safe_name = _resolve_download_path(filename)
     if not filepath:
         return JSONResponse({"error": "File not found"}, status_code=404)
     try:
-        entries = []
-        if tarfile.is_tarfile(filepath):
-            with tarfile.open(filepath, "r:*") as tf:
-                for m in tf.getmembers():
-                    entries.append({"name": m.name, "size": m.size, "is_dir": m.isdir()})
-        elif zipfile.is_zipfile(filepath):
-            with zipfile.ZipFile(filepath) as zf:
-                for info in zf.infolist():
-                    entries.append({"name": info.filename, "size": info.file_size, "is_dir": info.is_dir()})
-        else:
-            return JSONResponse({"error": "Not a supported archive"}, status_code=400)
-        # Sort by path so files appear under their parent directories
-        # For each entry, sort key is the directory path + a flag (dirs before files at same level)
-        def _sort_key(e):
-            parts = e["name"].rstrip("/").split("/")
-            # Build a key that sorts dirs before files at the same level
-            key = []
-            for i, p in enumerate(parts):
-                is_last = (i == len(parts) - 1)
-                # Directories sort before files at the same level
-                key.append((0 if (e["is_dir"] or not is_last) else 1, p.lower()))
-            return key
-        entries.sort(key=_sort_key)
-        return {"filename": safe_name, "file_count": len([e for e in entries if not e["is_dir"]]), "entries": entries}
+        return _archive_contents_for_path(filepath, safe_name)
+    except HTTPException as e:
+        return JSONResponse({"error": e.detail}, status_code=e.status_code)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -1211,20 +2333,25 @@ async def upload_coder_project(
         print(f"[CoderUpload] DB save failed (non-fatal): {e}")
 
     workflow_id = f"cw-{uuid.uuid4().hex[:12]}"
-    try:
-        await db.create_coder_workflow(
-            workflow_id,
-            conv_id,
-            project_id=project_id,
-            mode="fix_uploaded_project",
-            state="planning",
-            user_task=f"Uploaded project: {safe_name}",
-            contract=project_contract,
-            artifact_status="not_ready",
-        )
-    except Exception as e:
-        print(f"[CoderUpload] workflow create failed (non-fatal): {e}")
-        workflow_id = ""
+    workflow_status = "created"
+    for _wf_attempt in (1, 2):
+        try:
+            await db.create_coder_workflow(
+                workflow_id,
+                conv_id,
+                project_id=project_id,
+                mode="fix_uploaded_project",
+                state="planning",
+                user_task=f"Uploaded project: {safe_name}",
+                contract=project_contract,
+                artifact_status="not_ready",
+            )
+            break
+        except Exception as e:
+            print(f"[CoderUpload] workflow create failed (attempt {_wf_attempt}): {e}")
+            if _wf_attempt == 2:
+                workflow_id = ""
+                workflow_status = "failed"
 
     # Phase 4.2 — fire the Project Indexer in the background. It walks the
     # uploaded tree, detects build system, and seeds ChromaDB code_memory so
@@ -1270,6 +2397,7 @@ async def upload_coder_project(
     return {
         "project_id": project_id,
         "workflow_id": workflow_id,
+        "workflow_status": workflow_status,
         "name": project_name,
         "language": language,
         "file_count": len(manifest),
@@ -1632,7 +2760,7 @@ async def _create_and_start_research_report(req: ResearchReportCreate) -> dict:
         finally:
             db.reset_current_user_id(token)
 
-    asyncio.create_task(_runner())
+    _track_bg(_runner())
     return await db.get_research_report(report_id)
 
 
@@ -1766,7 +2894,7 @@ async def cancel_run(run_id: str):
     db_marked = False
     try:
         row = await db.get_run(run_id)
-        if row and row.get("status") in ("running", "pending"):
+        if row and row.get("status") in ("running", "pending", "queued"):
             envelope = row.get("result_envelope") or {}
             if not isinstance(envelope, dict):
                 envelope = {}
@@ -1968,7 +3096,7 @@ async def update_kb(kb_id: str, req: KBCreate):
 
 @app.delete("/api/knowledge-bases/{kb_id}")
 async def delete_kb(kb_id: str):
-    owned = next((k for k in await db.get_kbs() if k["id"] == kb_id), None)
+    owned = await db.get_kb(kb_id)
     if not owned:
         raise HTTPException(404, "KB not found")
     kb_dir = os.path.join(config.KB_DIR, kb_id)
@@ -1989,7 +3117,7 @@ _indexing_status: dict[str, dict] = {}  # key: "kb_id:filename" → status dict
 
 @app.post("/api/knowledge-bases/{kb_id}/files")
 async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
-    owned = next((k for k in await db.get_kbs() if k["id"] == kb_id), None)
+    owned = await db.get_kb(kb_id)
     if not owned:
         raise HTTPException(404, "KB not found")
     kb_dir = os.path.join(config.KB_DIR, kb_id)
@@ -2006,8 +3134,10 @@ async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
     if len(content) > config.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
         raise HTTPException(413, f"File too large (max {config.MAX_UPLOAD_SIZE_MB}MB)")
 
-    with open(filepath, "wb") as f:
-        f.write(content)
+    def _write_upload():
+        with open(filepath, "wb") as f:
+            f.write(content)
+    await asyncio.to_thread(_write_upload)
 
     file_id = await db.add_kb_file(kb_id, safe_name, filepath, len(content), file.content_type or "")
 
@@ -2023,7 +3153,7 @@ async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
             print(f"[RAG] Indexing failed for {safe_name}: {e}")
             _indexing_status[status_key] = {"status": "error", "filename": safe_name, "error": str(e)}
 
-    asyncio.create_task(_bg_index())
+    _track_bg(_bg_index())
 
     return {"id": file_id, "filename": safe_name, "file_size": len(content), "indexing": True}
 
@@ -2031,7 +3161,7 @@ async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
 @app.get("/api/knowledge-bases/{kb_id}/files/{filename}/status")
 async def get_file_index_status(kb_id: str, filename: str):
     """Check background indexing status for a file."""
-    owned = next((k for k in await db.get_kbs() if k["id"] == kb_id), None)
+    owned = await db.get_kb(kb_id)
     if not owned:
         raise HTTPException(404, "KB not found")
     status_key = f"{kb_id}:{filename}"
@@ -2069,8 +3199,10 @@ async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200):
     if not os.path.exists(file_path):
         raise HTTPException(404, "File not found on disk")
     try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            all_lines = f.readlines()
+        def _read_lines():
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                return f.readlines()
+        all_lines = await asyncio.to_thread(_read_lines)
         total = len(all_lines)
         content = "".join(all_lines[:lines])
         return {"filename": filename, "content": content, "truncated": total > lines, "total_lines": total}
@@ -2103,15 +3235,18 @@ async def pdf_text_preview(kb_id: str, file_id: int, pages: int = 10):
     if not os.path.exists(file_path):
         raise HTTPException(404, "File not found on disk")
     try:
-        from pypdf import PdfReader
-        reader = PdfReader(file_path)
-        total_pages = len(reader.pages)
-        extracted = []
-        for i, page in enumerate(reader.pages[:pages]):
-            text = page.extract_text() or ""
-            if text.strip():
-                extracted.append(f"[Page {i+1}]\n{text}")
-        content = "\n\n".join(extracted) if extracted else "No extractable text found in this PDF."
+        def _extract_pdf_text():
+            from pypdf import PdfReader
+            reader = PdfReader(file_path)
+            total_pages = len(reader.pages)
+            extracted = []
+            for i, page in enumerate(reader.pages[:pages]):
+                text = page.extract_text() or ""
+                if text.strip():
+                    extracted.append(f"[Page {i+1}]\n{text}")
+            content = "\n\n".join(extracted) if extracted else "No extractable text found in this PDF."
+            return content, total_pages
+        content, total_pages = await asyncio.to_thread(_extract_pdf_text)
         return {"filename": filename, "content": content, "total_pages": total_pages, "previewed_pages": min(pages, total_pages), "truncated": total_pages > pages}
     except ImportError:
         return {"filename": filename, "content": "pypdf not installed — text extraction unavailable.", "total_pages": 0, "previewed_pages": 0, "truncated": False}
@@ -2212,7 +3347,10 @@ async def reindex_kb(kb_id: str):
     files = kb.get("files", [])
     if not files:
         return {"status": "no files to index"}
-    results = await rag.reindex_kb(kb_id, files)
+    try:
+        results = await rag.reindex_kb(kb_id, files)
+    except Exception as e:
+        raise HTTPException(500, f"Reindex failed for {kb.get('name', kb_id)}: {e}")
     return {"status": "reindexed", "results": results}
 
 
@@ -2221,12 +3359,20 @@ async def reindex_all_kbs():
     """Reindex all knowledge bases — one-time migration to RAG."""
     kbs = await db.get_kbs()
     all_results = []
+    errors = []
     for kb in kbs:
         files = kb.get("files", [])
-        if files:
+        if not files:
+            continue
+        try:
             results = await rag.reindex_kb(kb["id"], files)
             all_results.append({"kb_id": kb["id"], "name": kb["name"], "results": results})
-    return {"status": "reindexed", "kbs": all_results}
+        except Exception as e:
+            # One broken KB shouldn't abort the rest of the sweep.
+            errors.append({"kb_id": kb["id"], "name": kb["name"], "error": str(e)[:300]})
+    if errors and not all_results:
+        raise HTTPException(500, f"Reindex failed: {errors[0]['name']}: {errors[0]['error']}")
+    return {"status": "reindexed", "kbs": all_results, "errors": errors}
 
 
 # ============================================================
@@ -2297,6 +3443,156 @@ async def update_tool_put(tool_id: str, req: ToolUpdate):
     if kwargs:
         await db.update_tool(tool_id, **kwargs)
     return {"status": "updated"}
+
+
+# ============================================================
+# CONNECTORS
+# ============================================================
+def _spec_json_to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value)
+
+
+def _connector_tool_public(tl: dict) -> dict:
+    out = dict(tl)
+    out["name"] = tl.get("display_name") or tl.get("external_name") or tl.get("tool_name")
+    out["description"] = tl.get("description", "")
+    out["icon"] = "plug"
+    out["connector"] = True
+    return out
+
+
+@app.get("/api/connector-tools")
+async def list_connector_tools(enabled_only: bool = Query(True)):
+    tools = await db.get_connector_tools(enabled_only=enabled_only)
+    return [_connector_tool_public(t) for t in tools]
+
+
+@app.get("/api/mcp-servers")
+async def list_mcp_servers():
+    return await db.get_mcp_servers()
+
+
+@app.post("/api/mcp-servers")
+async def create_mcp_server(req: MCPServerCreate):
+    server_id = f"mcp-{uuid.uuid4().hex[:12]}"
+    transport = (req.transport or "stdio").strip().lower()
+    if transport not in {"stdio", "http", "streamable_http", "sse"}:
+        raise HTTPException(400, "transport must be stdio, http, streamable_http, or sse")
+    await db.create_mcp_server(
+        server_id,
+        req.name,
+        transport=transport,
+        command=req.command,
+        url=req.url,
+        args=req.args,
+        env=req.env,
+        headers=req.headers,
+        allow_private=req.allow_private,
+        enabled=req.enabled,
+    )
+    return await db.get_mcp_server(server_id)
+
+
+@app.patch("/api/mcp-servers/{server_id}")
+async def update_mcp_server(server_id: str, req: MCPServerUpdate):
+    kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
+    if "transport" in kwargs:
+        kwargs["transport"] = (kwargs["transport"] or "stdio").strip().lower()
+        if kwargs["transport"] not in {"stdio", "http", "streamable_http", "sse"}:
+            raise HTTPException(400, "transport must be stdio, http, streamable_http, or sse")
+    await db.update_mcp_server(server_id, **kwargs)
+    return await db.get_mcp_server(server_id)
+
+
+@app.delete("/api/mcp-servers/{server_id}")
+async def delete_mcp_server(server_id: str):
+    await db.delete_mcp_server(server_id)
+    return {"status": "deleted"}
+
+
+@app.post("/api/mcp-servers/{server_id}/discover")
+async def discover_mcp_server(server_id: str):
+    try:
+        return await connectors.discover_mcp_server(http, server_id)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/mcp-servers/{server_id}/health")
+async def health_mcp_server(server_id: str):
+    try:
+        result = await connectors.discover_mcp_server(http, server_id)
+        return {"status": "ok", "tool_count": result.get("tool_count", 0)}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/mcp-servers/{server_id}/tools")
+async def list_mcp_server_tools(server_id: str):
+    return [_connector_tool_public(t) for t in await db.get_connector_tools("mcp", server_id, enabled_only=False)]
+
+
+@app.get("/api/openapi-connectors")
+async def list_openapi_connectors():
+    return await db.get_openapi_connectors()
+
+
+@app.post("/api/openapi-connectors")
+async def create_openapi_connector(req: OpenAPIConnectorCreate):
+    connector_id = f"openapi-{uuid.uuid4().hex[:12]}"
+    await db.create_openapi_connector(
+        connector_id,
+        req.name,
+        spec_url=req.spec_url,
+        spec_json=_spec_json_to_text(req.spec_json),
+        base_url=req.base_url,
+        auth=req.auth,
+        headers=req.headers,
+        allow_private=req.allow_private,
+        enabled=req.enabled,
+    )
+    return await db.get_openapi_connector(connector_id)
+
+
+@app.patch("/api/openapi-connectors/{connector_id}")
+async def update_openapi_connector(connector_id: str, req: OpenAPIConnectorUpdate):
+    kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
+    if "spec_json" in kwargs:
+        kwargs["spec_json"] = _spec_json_to_text(kwargs["spec_json"])
+    await db.update_openapi_connector(connector_id, **kwargs)
+    return await db.get_openapi_connector(connector_id)
+
+
+@app.delete("/api/openapi-connectors/{connector_id}")
+async def delete_openapi_connector(connector_id: str):
+    await db.delete_openapi_connector(connector_id)
+    return {"status": "deleted"}
+
+
+@app.post("/api/openapi-connectors/{connector_id}/discover")
+async def discover_openapi_connector(connector_id: str):
+    try:
+        return await connectors.discover_openapi_connector(http, connector_id)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/openapi-connectors/{connector_id}/health")
+async def health_openapi_connector(connector_id: str):
+    try:
+        result = await connectors.discover_openapi_connector(http, connector_id)
+        return {"status": "ok", "tool_count": result.get("tool_count", 0)}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/openapi-connectors/{connector_id}/tools")
+async def list_openapi_connector_tools(connector_id: str):
+    return [_connector_tool_public(t) for t in await db.get_connector_tools("openapi", connector_id, enabled_only=False)]
 
 
 # ============================================================
@@ -3779,6 +5075,55 @@ async def quick_search(req: QuickSearchRequest):
 # ============================================================
 # SETTINGS & SANDBOX API
 # ============================================================
+@app.get("/api/model-providers")
+async def get_model_provider_settings():
+    return {"providers": await model_providers.provider_statuses()}
+
+
+@app.patch("/api/model-providers/{provider}")
+async def update_model_provider_settings(provider: str, body: dict = Body(...)):
+    if provider not in model_providers.CLOUD_PROVIDERS:
+        raise HTTPException(404, "Unsupported model provider")
+    api_key = body.get("api_key")
+    enabled = body.get("enabled") if "enabled" in body else None
+    try:
+        status = await model_providers.save_provider(
+            provider,
+            api_key=api_key if isinstance(api_key, str) and api_key.strip() else None,
+            enabled=bool(enabled) if enabled is not None else None,
+        )
+        return status
+    except model_providers.ProviderError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/model-providers/{provider}")
+async def delete_model_provider_settings(provider: str):
+    if provider not in model_providers.CLOUD_PROVIDERS:
+        raise HTTPException(404, "Unsupported model provider")
+    try:
+        return await model_providers.delete_provider(provider)
+    except model_providers.ProviderError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/model-providers/{provider}/test")
+async def test_model_provider_settings(provider: str, body: dict = Body(default={})):
+    if provider not in model_providers.CLOUD_PROVIDERS:
+        raise HTTPException(404, "Unsupported model provider")
+    api_key = body.get("api_key") if isinstance(body, dict) else None
+    try:
+        return await model_providers.test_provider(
+            http,
+            provider,
+            api_key=api_key if isinstance(api_key, str) and api_key.strip() else None,
+        )
+    except model_providers.ProviderError as e:
+        raise HTTPException(e.status_code or 400, str(e))
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/settings")
 async def get_app_settings():
     settings = load_settings()
@@ -3814,6 +5159,7 @@ async def get_app_settings():
         "aider_auto_test": config.AIDER_AUTO_TEST,
         "aider_worker_url": config.AIDER_WORKER_URL,
         "default_num_ctx": config.DEFAULT_NUM_CTX,
+        "research_num_ctx": config.RESEARCH_NUM_CTX,
         "quick_search_mode": config.QUICK_SEARCH_MODE,
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
@@ -3833,19 +5179,35 @@ async def update_app_settings(body: dict = Body(...)):
                "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
                "openhands_reasoning_effort",
                "aider_enabled", "aider_model", "aider_num_ctx", "aider_auto_test", "aider_worker_url",
-               "default_num_ctx", "quick_search_mode"}
+               "default_num_ctx", "research_num_ctx", "quick_search_mode"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
-    # Apply RAG settings to rag module at runtime
+    # Sanitize + apply RAG settings. The clamped values are what get PERSISTED
+    # (settings["rag"]), not the raw body — a junk PATCH (e.g. chunk_size -5)
+    # used to be saved verbatim and re-poison the chunker on every restart.
     if "rag" in body and isinstance(body["rag"], dict):
         rag_cfg = body["rag"]
-        if rag_cfg.get("embed_model"):
-            rag.EMBED_MODEL = rag_cfg["embed_model"]
-        if rag_cfg.get("chunk_size"):
-            rag.CHUNK_SIZE = int(rag_cfg["chunk_size"])
-        if rag_cfg.get("chunk_overlap") is not None:
-            rag.CHUNK_OVERLAP = int(rag_cfg["chunk_overlap"])
+        prior = {**config.DEFAULT_SETTINGS.get("rag", {}), **(settings.get("rag") or {})}
+
+        def _rag_int(key, default, lo, hi):
+            fallback = config.coerce_int(prior.get(key), default, minimum=lo, maximum=hi)
+            value = rag_cfg.get(key, fallback)
+            return config.coerce_int(value, fallback, minimum=lo, maximum=hi)
+
+        clean = {
+            "embed_model": str(rag_cfg.get("embed_model") or prior.get("embed_model") or "nomic-embed-text"),
+            "chunk_size": _rag_int("chunk_size", 500, 100, 8000),
+            "chunk_overlap": _rag_int("chunk_overlap", 50, 0, 2000),
+            "top_k": _rag_int("top_k", 6, 1, 20),
+            "max_context_chars": _rag_int("max_context_chars", 6000, 500, 60000),
+            "research_top_k": _rag_int("research_top_k", 4, 1, 20),
+            "research_max_chars": _rag_int("research_max_chars", 3000, 500, 60000),
+        }
+        settings["rag"] = clean
+        rag.EMBED_MODEL = clean["embed_model"]
+        rag.CHUNK_SIZE = clean["chunk_size"]
+        rag.CHUNK_OVERLAP = clean["chunk_overlap"]
         print(f"[Config] Updated RAG settings: model={rag.EMBED_MODEL} chunk={rag.CHUNK_SIZE}/{rag.CHUNK_OVERLAP}")
     if "ollama_url" in body and body["ollama_url"]:
         config.OLLAMA_URL = _coerce_service_url(body["ollama_url"], "OLLAMA_URL", "http://127.0.0.1:11434")
@@ -3900,7 +5262,7 @@ async def update_app_settings(body: dict = Body(...)):
         config.OPENHANDS_ENABLED = bool(body["openhands_enabled"])
         print(f"[Config] OpenHands enabled: {config.OPENHANDS_ENABLED}")
     if "openhands_max_rounds" in body:
-        config.OPENHANDS_MAX_ROUNDS = int(body["openhands_max_rounds"])
+        config.OPENHANDS_MAX_ROUNDS = config.coerce_int(body["openhands_max_rounds"], config.OPENHANDS_MAX_ROUNDS, minimum=1, maximum=200)
         print(f"[Config] OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
     if "openhands_num_ctx" in body:
         config.OPENHANDS_NUM_CTX = config.coerce_num_ctx(
@@ -3944,6 +5306,13 @@ async def update_app_settings(body: dict = Body(...)):
         )
         settings["default_num_ctx"] = config.DEFAULT_NUM_CTX
         print(f"[Config] Default num_ctx: {config.DEFAULT_NUM_CTX}")
+    if "research_num_ctx" in body:
+        config.RESEARCH_NUM_CTX = config.coerce_num_ctx(
+            body["research_num_ctx"],
+            fallback=config.RESEARCH_NUM_CTX,
+        )
+        settings["research_num_ctx"] = config.RESEARCH_NUM_CTX
+        print(f"[Config] Research num_ctx: {config.RESEARCH_NUM_CTX}")
     if "quick_search_mode" in body:
         _qsm = (body["quick_search_mode"] or "balanced").strip().lower()
         if _qsm not in ("speed", "balanced", "quality"):
@@ -3977,6 +5346,7 @@ async def update_app_settings(body: dict = Body(...)):
         "aider_auto_test": config.AIDER_AUTO_TEST,
         "aider_worker_url": config.AIDER_WORKER_URL,
         "default_num_ctx": config.DEFAULT_NUM_CTX,
+        "research_num_ctx": config.RESEARCH_NUM_CTX,
         "quick_search_mode": config.QUICK_SEARCH_MODE,
     }
 

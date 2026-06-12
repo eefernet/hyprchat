@@ -821,6 +821,10 @@ async def _fetch_clean_page(http, url: str) -> dict | None:
             )
         if r.status_code >= 400:
             return None
+        # SSRF: re-check the FINAL URL after redirects — the initial _url_safe
+        # gate ran on the pre-redirect URL; a result can 302 to an internal host.
+        if not _url_safe(str(r.url)):
+            return None
         ct = r.headers.get("content-type", "")
         if "text" not in ct and "html" not in ct and "json" not in ct:
             return None
@@ -1164,6 +1168,9 @@ async def _fetch_og_image(http, page_url: str) -> str:
                     "Accept-Language": "en-US,en;q=0.5",
                 },
             )
+        # SSRF: re-check the final URL after redirects.
+        if not _url_safe(str(resp.url)):
+            return ""
         html = resp.text[:30000]
         for pattern in _OG_PATTERNS:
             m = re.search(pattern, html, re.IGNORECASE)
@@ -1210,15 +1217,18 @@ async def run_quick_search_for_chat(
 
     Returns: {"context": str, "rewritten_query": str, "skipped": bool, "reason": str}
     """
+    # Lazy import to avoid circular dependency — search_agent imports helpers
+    # from this module.
+    import model_providers
+    from search_agent import run_search_agent
+    # The refine call goes to Ollama; never inherit a cloud-prefixed chat model
+    # (it would 404). Cloud is honored only via an explicit triage/workspace model.
     refine_model = (
         getattr(config, "QUICK_SEARCH_TRIAGE_MODEL", "")
         or workspace_model
-        or chat_model
-        or default_model
+        or model_providers.reject_cloud(chat_model)
+        or model_providers.reject_cloud(default_model)
     )
-    # Lazy import to avoid circular dependency — search_agent imports helpers
-    # from this module.
-    from search_agent import run_search_agent
     return await run_search_agent(
         http, ollama_url, refine_model, refine_model,
         events, conv_id, messages,

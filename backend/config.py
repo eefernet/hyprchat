@@ -54,6 +54,7 @@ SANDBOX_WORKSPACE_DIR = os.path.join(SANDBOX_DIR, "workspace")  # temp working d
 # SETTINGS FILE (persistent JSON for runtime-editable options)
 # ============================================================
 SETTINGS_PATH = os.getenv("SETTINGS_PATH", "/opt/hyprchat/data/settings.json")
+CONNECTOR_SECRETS_PATH = os.getenv("CONNECTOR_SECRETS_PATH", "/opt/hyprchat/data/connector_secrets.json")
 DEFAULT_SETTINGS = {
     "file_cleanup_days": 30,  # 0 = never clean
     "ollama_url": "",  # empty = use OLLAMA_URL from env/default
@@ -156,7 +157,26 @@ def coerce_num_ctx(value, fallback=16384, minimum=None):
     return fb if fb >= minimum else 16384
 
 
+def coerce_int(value, fallback, *, minimum=None, maximum=None):
+    """Parse an int from untrusted settings input, clamped to [minimum, maximum].
+    Junk / out-of-range values fall back instead of raising (a raw int(...) on
+    a settings PATCH would otherwise 500 or accept negatives)."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    if minimum is not None and n < minimum:
+        return minimum
+    if maximum is not None and n > maximum:
+        return maximum
+    return n
+
+
 DEFAULT_NUM_CTX = coerce_num_ctx(os.getenv("DEFAULT_NUM_CTX", "16384"))
+# Context window for Deep Research LLM calls (planning, findings, audit,
+# synthesis). Defaults higher than DEFAULT_NUM_CTX because depth 3-5 evidence
+# contexts overflow a 16K window; evidence budgets scale down to fit this.
+RESEARCH_NUM_CTX = coerce_num_ctx(os.getenv("RESEARCH_NUM_CTX", "40960"))
 MAX_AGENT_ROUNDS = int(os.getenv("MAX_AGENT_ROUNDS", "12"))
 MAX_AGENT_ROUNDS_CODER = int(os.getenv("MAX_AGENT_ROUNDS_CODER", "30"))
 DEFAULT_SYSTEM_PROMPT = """You are CodeAgent, an autonomous coding assistant with a sandboxed Linux environment (CodeBox).

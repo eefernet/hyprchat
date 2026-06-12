@@ -25,6 +25,9 @@ import uuid
 import config
 import database as db
 import cancel_registry
+import model_providers
+
+from agents.acceptance import _configured_num_ctx
 
 
 # Required top-level keys in the validated plan.
@@ -120,7 +123,7 @@ def _validate_plan(plan: dict) -> tuple[bool, str]:
 
 
 async def _call_planning_model(http, model: str, prompt: str,
-                                num_ctx: int = 16384,
+                                num_ctx: int | None = None,
                                 run_id: str = "") -> str:
     """Single non-streaming call to Ollama, returns the message content.
 
@@ -129,22 +132,16 @@ async def _call_planning_model(http, model: str, prompt: str,
     `run_architect` can mark the run cancelled instead of letting it dangle
     on the 600s timeout.
     """
+    if not num_ctx:
+        num_ctx = _configured_num_ctx()
     try:
-        coro = http.post(
-            f"{config.OLLAMA_URL}/api/chat",
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-                "think": False,
-                "options": {"temperature": 0.2, "num_ctx": num_ctx},
-            },
-            timeout=600,
+        coro = model_providers.complete_chat(
+            http, model, prompt,
+            temperature=0.2, num_ctx=num_ctx, num_predict=4096,
+            format_json=True, timeout=600,
+            ollama_url=config.OLLAMA_URL,
         )
-        r = await cancel_registry.await_cancellable(coro, run_id)
-        if r.status_code == 200:
-            return (r.json().get("message", {}).get("content") or "").strip()
-        return ""
+        return await cancel_registry.await_cancellable(coro, run_id)
     except cancel_registry.RunCancelled:
         raise
     except Exception as e:
@@ -173,7 +170,12 @@ async def run_architect(http, events, conv_id: str, *,
 
     # Per-agent override (config.ARCHITECT_MODEL) wins if set; otherwise fall
     # through to the umbrella PLANNING_MODEL, then the chat model, then default.
-    model = (config.ARCHITECT_MODEL or config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL or "")
+    # Cloud-prefixed models are honored only from explicit Settings values
+    # (per-agent override / Planning Model) — never inherited from the chat
+    # model, so agent calls can't silently route to a paid API.
+    model = (config.ARCHITECT_MODEL or config.PLANNING_MODEL
+             or model_providers.reject_cloud(conv_model)
+             or model_providers.reject_cloud(config.DEFAULT_MODEL) or "")
     if not model:
         envelope = {"status": "error",
                     "summary": "No planning model configured for Architect",

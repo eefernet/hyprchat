@@ -18,7 +18,9 @@ def test_tool_enabled_generation_streams_live_and_clears_tool_drafts():
     assert "_streamed_content = False" in source
     assert "Stream assistant text live even when tools" in source
     assert "'type': 'token', 'content': _chunk_buf" in source
-    assert "if _streamed_content:" in source
+    # Drafts are cleared only after a text-tool-call round (stronger contract
+    # than the old unconditional clear).
+    assert "if _streamed_content and _text_tool_call_round:" in source
     assert "'type': 'clear'" in source
 
 

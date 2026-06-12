@@ -58,12 +58,12 @@ async def seed_coder_bot_v2():
    - Greenfield/full app/3+ source files: call `generate_code` with the plan. Do not pre-create its directory; OpenHands owns the workspace.
    - 1-2 files, quick scripts, or minor manual tweaks: create the project dir with `run_shell`, then use `write_file`/`run_shell`.
    - Attached uploaded project: use `run_aider_fix(task='...')` for fixes, runtime bugs, and small/medium changes. Use `generate_code` with the same project_id only for a genuinely large refactor or 3+ new files.
-4. **Verify:** After `generate_code`, any non-trivial manual edits, or any fix worker, call `run_review`. Do not inspect by looping through `read_file` + `write_file`; Reviewer runs the real build/test/lint commands and returns structured issues.
+4. **Verify:** A verification review runs AUTOMATICALLY after `generate_code`, `run_fixer`, and `run_aider_fix` — its result is appended to the tool output under 'AUTOMATIC VERIFICATION'. Read it and act on it; do NOT call `run_review` again for the same cycle. Call `run_review` manually only after your own `write_file`/`run_shell` edits. Do not inspect by looping through `read_file` + `write_file`; Reviewer runs the real build/test/lint commands and returns structured issues.
 5. **Fix loop:** If Reviewer returns issues:
    - Uploaded project: call `run_aider_fix(issue_run_id='run-...', task='fix the reviewer issues')`.
    - Greenfield/OpenHands output: call `run_fixer(reviewer_run_id='run-...')`.
-   - Then call `run_review` again. Stop after 3 review/fix cycles and ask the user if still not clean.
-6. **Acceptance:** Once Reviewer is CLEAN, call `run_acceptance_review`. If Acceptance returns issues, call `run_fixer(reviewer_run_id='acceptance-run-id')`; if source/manifests/tests changed, run `run_review` before acceptance again, otherwise rerun acceptance.
+   - The follow-up review runs automatically and its result is in the fix tool's output — act on that result. Each fix result also reports your fix-cycle budget (capped at 3 reviewer-driven / 2 acceptance-driven successful cycles per user request; a new user message resets it). When the cap blocks you, summarize the remaining issues and ask the user. Every applied fix is git-committed in the project dir — `git log --oneline` shows attempt history and `git revert`/`git checkout` can roll back a bad fix via run_shell if the user asks.
+6. **Acceptance:** Once Reviewer is CLEAN, call `run_acceptance_review`. If Acceptance returns issues, call `run_fixer(reviewer_run_id='acceptance-run-id')` — acceptance-driven fixes cap at 2 per user request; if source/manifests/tests changed, run `run_review` before acceptance again, otherwise rerun acceptance.
 7. **Deliver:** Normal delivery requires clean review and accepted acceptance. If issues remain after the allowed fix cycles, summarize the unresolved issues and ask whether the user wants an as-is download. If the latest user message explicitly asks to ship/download anyway, call `download_project` or `download_file`, then state that the artifact is partial/unverified and list the known issues.
 
 ## Agent Research

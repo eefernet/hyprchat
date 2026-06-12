@@ -210,12 +210,24 @@ async def run_aider_fix(http, events, conv_id: str, *,
             cancel_registry.cleanup(run_id)
         if workflow_id:
             try:
-                state = "reviewing" if run_status == "succeeded" else "blocked"
+                # Don't overwrite a cancel the user already issued through the
+                # cancel route/tool. State check only — cancel_requested stays
+                # set on the row, and the dispatcher reuses the workflow for
+                # later fixes, so keying off it would block all future updates.
+                wf = await db.get_coder_workflow(workflow_id)
+                if wf and wf.get("state") == "cancelled":
+                    return
+                if run_status == "succeeded":
+                    state, artifact = "reviewing", "not_ready"
+                elif run_status == "cancelled":
+                    state, artifact = "cancelled", "cancelled"
+                else:
+                    state, artifact = "blocked", "not_ready"
                 await db.update_coder_workflow(
                     workflow_id,
                     state=state,
                     active_run_id=run_id,
-                    artifact_status="not_ready",
+                    artifact_status=artifact,
                 )
             except Exception as e:
                 print(f"[AIDER] workflow update failed (non-fatal): {e}")
@@ -310,7 +322,16 @@ async def run_aider_fix(http, events, conv_id: str, *,
             await _signal_worker_cancel("chat stream cancelled")
             raise
         except Exception as e:
-            await _step("fallback", f"stream failed: {type(e).__name__}: {e}", step=step_n + 1)
+            # The streaming attempt may already have started Aider on the
+            # worker — cancel it first, and never start a second Aider against
+            # the same project_dir once edits may have begun.
+            await _signal_worker_cancel(f"stream failed: {type(e).__name__}")
+            if step_n > 0:
+                raise RuntimeError(
+                    f"Aider stream broke after {step_n} step(s) — not restarting "
+                    f"to avoid concurrent edits ({type(e).__name__}: {e})"
+                )
+            await _step("fallback", f"stream failed before start: {type(e).__name__}: {e}", step=1)
             resp = await http.post(f"{worker_url}/aider/run", json=payload, timeout=900)
             if resp.status_code != 200:
                 raise RuntimeError(f"Aider worker HTTP {resp.status_code}: {resp.text[:300]}")

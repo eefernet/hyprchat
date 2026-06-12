@@ -50,6 +50,8 @@ WATCHED = {
     "backend/config.py":            ("Config",           REMOTE_BACKEND,            True),
     "backend/database.py":          ("Database",         REMOTE_BACKEND,            True),
     "backend/tools.py":             ("Tools",            REMOTE_BACKEND,            True),
+    "backend/connectors.py":        ("Connectors",       REMOTE_BACKEND,            True),
+    "backend/model_providers.py":   ("Model Providers",  REMOTE_BACKEND,            True),
     "backend/cancel_registry.py":   ("Cancel Registry",  REMOTE_BACKEND,            True),
     "backend/rag.py":               ("RAG Pipeline",     REMOTE_BACKEND,            True),
     "backend/research.py":          ("Research",         REMOTE_BACKEND,            True),

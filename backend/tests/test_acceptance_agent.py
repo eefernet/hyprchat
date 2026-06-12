@@ -60,10 +60,42 @@ class _FakeResponse:
         return self._payload
 
 
+
+
+class _OllamaStreamShim:
+    """Adapts a post()-style fake to complete_chat's streaming Ollama path:
+    wraps the fake's JSON body into a single NDJSON chunk."""
+
+    def __init__(self, fake, url, json_payload, timeout):
+        self.fake = fake
+        self.url = url
+        self.json_payload = json_payload
+        self.timeout = timeout
+
+    async def __aenter__(self):
+        import json as _json
+        resp = await self.fake.post(self.url, json=self.json_payload, timeout=self.timeout)
+        body = resp.json() if resp.status_code == 200 else {}
+
+        class _SResp:
+            status_code = resp.status_code
+
+            async def aiter_lines(_s):
+                msg = body.get("message") if isinstance(body.get("message"), dict) else {}
+                yield _json.dumps({"message": msg, "thinking": body.get("thinking"), "done": True})
+
+        return _SResp()
+
+    async def __aexit__(self, *a):
+        return False
+
 class _FakeHTTP:
     def __init__(self, ollama_payload):
         self.ollama_payload = ollama_payload
         self.posts = []
+
+    def stream(self, method, url, json=None, timeout=None):
+        return _OllamaStreamShim(self, url, json, timeout)
 
     async def post(self, url, json=None, timeout=None):
         self.posts.append({"url": url, "json": json, "timeout": timeout})
@@ -176,3 +208,130 @@ def test_acceptance_invalid_json_returns_error():
     assert envelope["status"] == "error"
     assert envelope["summary"] == "Acceptance model did not return valid JSON."
     assert envelope["issues"][0]["summary"] == "Acceptance reviewer output could not be parsed."
+
+
+def test_acceptance_generic_exception_persists_failed():
+    """An Ollama transport error must not strand the run at 'running'."""
+
+    class _ExplodingHTTP(_FakeHTTP):
+        async def post(self, url, json=None, timeout=None):
+            if url.endswith("/api/chat"):
+                raise RuntimeError("simulated ollama timeout")
+            return await super().post(url, json=json, timeout=timeout)
+
+    http = _ExplodingHTTP({})
+    events = _FakeEvents()
+    clean_review = {
+        "status": "clean",
+        "summary": "Build, tests, and lint pass.",
+        "project_dir": "/root/projects/demo",
+        "language": "python",
+    }
+    update_run = AsyncMock(return_value=None)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(acceptance.db, "create_run", new=AsyncMock(return_value=None)))
+        stack.enter_context(patch.object(acceptance.db, "update_run", new=update_run))
+        stack.enter_context(patch.object(acceptance.db, "get_run", new=AsyncMock(return_value={
+            "result_envelope": clean_review,
+        })))
+        stack.enter_context(patch.object(acceptance.db, "get_conversation", new=AsyncMock(return_value={
+            "messages": [{"role": "user", "content": "Build a tiny Python demo."}],
+        })))
+        stack.enter_context(patch.object(acceptance, "_project_plan", new=AsyncMock(return_value="plan")))
+        stack.enter_context(patch.object(acceptance.config, "CODEBOX_URL", "http://codebox"))
+        stack.enter_context(patch.object(acceptance.config, "OLLAMA_URL", "http://ollama"))
+        stack.enter_context(patch.object(acceptance.config, "ACCEPTANCE_MODEL", ""))
+        stack.enter_context(patch.object(acceptance.config, "PLANNING_MODEL", "acceptance-test-model"))
+        stack.enter_context(patch.object(acceptance.config, "DEFAULT_MODEL", "fallback-model"))
+        stack.enter_context(patch.object(acceptance.config, "DEFAULT_NUM_CTX", 8192))
+
+        envelope = _run(acceptance.run_acceptance_review(
+            http, events, "conv-1",
+            project_dir="/root/projects/demo",
+            reviewer_run_id="run-review",
+        ))
+
+    assert envelope["status"] == "error"
+    assert "simulated ollama timeout" in envelope["summary"]
+    final_calls = [c for c in update_run.await_args_list if c.kwargs.get("ended")]
+    assert final_calls, "run must be finalized"
+    assert final_calls[-1].kwargs["status"] == "failed"
+
+
+def test_section_caps_fit_configured_ctx():
+    """Σ(section caps) must fit inside the prompt budget at the default ctx."""
+    for ctx in (16384, 65536):
+        budgets = acceptance._section_budgets(ctx)
+        assert sum(budgets.values()) <= ctx * 3
+    # Source budget grows with ctx but never exceeds the absolute ceiling.
+    assert (acceptance._section_budgets(262144)["source"]
+            == acceptance._SOURCE_SECTION_CAP_MAX)
+    # Auto/0 and garbage fall back to the 16384 default.
+    assert acceptance._section_budgets(0) == acceptance._section_budgets(16384)
+    assert acceptance._section_budgets("x") == acceptance._section_budgets(16384)
+
+
+def _acceptance_config_patches(stack, *, acceptance_model="", planning_model="",
+                               default_model="fallback-model"):
+    clean_review = {
+        "status": "clean",
+        "summary": "Build, tests, and lint pass.",
+        "project_dir": "/root/projects/demo",
+        "language": "python",
+    }
+    stack.enter_context(patch.object(acceptance.db, "create_run", new=AsyncMock(return_value=None)))
+    stack.enter_context(patch.object(acceptance.db, "update_run", new=AsyncMock(return_value=None)))
+    stack.enter_context(patch.object(acceptance.db, "get_run", new=AsyncMock(return_value={
+        "result_envelope": clean_review,
+    })))
+    stack.enter_context(patch.object(acceptance.db, "get_conversation", new=AsyncMock(return_value={
+        "messages": [{"role": "user", "content": "Build a tiny Python demo."}],
+    })))
+    stack.enter_context(patch.object(acceptance, "_project_plan", new=AsyncMock(return_value="plan")))
+    stack.enter_context(patch.object(acceptance.config, "CODEBOX_URL", "http://codebox"))
+    stack.enter_context(patch.object(acceptance.config, "OLLAMA_URL", "http://ollama"))
+    stack.enter_context(patch.object(acceptance.config, "ACCEPTANCE_MODEL", acceptance_model))
+    stack.enter_context(patch.object(acceptance.config, "PLANNING_MODEL", planning_model))
+    stack.enter_context(patch.object(acceptance.config, "DEFAULT_MODEL", default_model))
+    stack.enter_context(patch.object(acceptance.config, "DEFAULT_NUM_CTX", 8192))
+
+
+def test_cloud_chat_model_is_not_inherited_by_acceptance():
+    """A cloud conversation model must NOT silently power the agent — the
+    chain falls through to the non-cloud default."""
+    http = _FakeHTTP({"message": {"content": _accepted_json()}})
+    with ExitStack() as stack:
+        _acceptance_config_patches(stack)
+        envelope = _run(acceptance.run_acceptance_review(
+            http, _FakeEvents(), "conv-1",
+            project_dir="/root/projects/demo",
+            reviewer_run_id="run-review",
+            conv_model="anthropic:claude-test-model",
+        ))
+
+    assert envelope["status"] == "accepted"
+    ollama_call = [p for p in http.posts if p["url"].endswith("/api/chat")][0]
+    assert ollama_call["json"]["model"] == "fallback-model"
+
+
+def test_explicit_cloud_acceptance_model_routes_to_provider():
+    """An explicitly-configured cloud model uses the provider stream, not Ollama."""
+    async def fake_stream(_http, model_id, _messages, options=None):
+        assert model_id == "anthropic:claude-test-model"
+        for part in ('{"status": "accepted", ', '"summary": "ok", "issues": []}'):
+            yield {"type": "token", "content": part}
+
+    http = _FakeHTTP({"message": {"content": "should not be used"}})
+    with ExitStack() as stack:
+        _acceptance_config_patches(stack, acceptance_model="anthropic:claude-test-model")
+        stack.enter_context(patch.object(
+            acceptance.model_providers, "stream_provider_chat", new=fake_stream))
+        envelope = _run(acceptance.run_acceptance_review(
+            http, _FakeEvents(), "conv-1",
+            project_dir="/root/projects/demo",
+            reviewer_run_id="run-review",
+        ))
+
+    assert envelope["status"] == "accepted"
+    assert not [p for p in http.posts if p["url"].endswith("/api/chat")]

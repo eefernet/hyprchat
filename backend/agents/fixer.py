@@ -30,6 +30,7 @@ import uuid
 import config
 import database as db
 import cancel_registry
+import model_providers
 
 
 _FIXER_PROMPT = """You are the Fixer — a focused code-editing agent. You MUST only edit the files listed in 'allowed_paths' to address the issues described below. Do not touch any other files. Do not add new files. Do not refactor unrelated code.
@@ -40,7 +41,7 @@ _FIXER_PROMPT = """You are the Fixer — a focused code-editing agent. You MUST 
 - Build command: {build_cmd}
 - Test command: {test_cmd}
 - Issue source: {source_role}
-{research_section}
+{research_section}{attempts_section}
 ## Issues to fix
 {issue_block}
 
@@ -51,14 +52,34 @@ _FIXER_PROMPT = """You are the Fixer — a focused code-editing agent. You MUST 
 {files_section}
 
 ## Output format — STRICT
-For each file you want to change, write ONE section in this exact format:
+For each file you want to change, write ONE section with SEARCH/REPLACE blocks:
 
 ### EDIT: <full file path from allowed_paths>
 ```{lang_tag}
-<COMPLETE new file contents — every line of the file, not a diff>
+<<<<<<< SEARCH
+exact lines copied VERBATIM from the current file contents above
+=======
+the replacement lines
+>>>>>>> REPLACE
 ```
 
-After all your EDIT sections (zero or more), write ONE summary line:
+A section may contain several SEARCH/REPLACE blocks (one per change site).
+The SEARCH text must match the file exactly — copy it, do not retype it.
+Keep each SEARCH small: just the lines being changed plus 1-2 anchor lines.
+
+If an issue says a file should NOT exist (runtime state, generated junk,
+stray artifacts), delete it with a section of its own — no fence, no body:
+
+### DELETE: <full file path from allowed_paths>
+
+ONLY if more than half the file must change, you may instead rewrite it:
+
+### REWRITE: <full file path from allowed_paths>
+```{lang_tag}
+<COMPLETE new file contents — every line of the file>
+```
+
+After all sections (zero or more), write ONE summary line:
 
 ### SUMMARY: <one short line describing what you changed and why>
 
@@ -67,11 +88,12 @@ If you genuinely cannot fix any issue (ambiguous, need info not provided, etc.),
 ### CANNOT_FIX: <one-line reason>
 
 ## Rules
-1. The path after `### EDIT:` MUST exactly match one of allowed_paths. No relative paths.
-2. The contents inside ``` fences MUST be the COMPLETE file (every line). Not a diff. Not a snippet.
-3. NO prose, explanation, or commentary outside the EDIT sections. The first line of your response should be either `### EDIT:`, `### SUMMARY:`, or `### CANNOT_FIX:`.
-4. If a file in allowed_paths needs no change, simply do not include an EDIT section for it.
-5. Address ALL listed issues in a single pass. If two issues touch the same file, emit ONE EDIT section for that file with both fixes applied.
+1. The path after `### EDIT:`/`### REWRITE:` MUST exactly match one of allowed_paths. No relative paths.
+2. Prefer SEARCH/REPLACE. Rewrites of files whose contents were shown truncated WILL LOSE the unseen part — never REWRITE a truncated file.
+3. NO prose, explanation, or commentary outside the sections. The first line of your response should be `### EDIT:`, `### REWRITE:`, `### SUMMARY:`, or `### CANNOT_FIX:`.
+4. If a file in allowed_paths needs no change, simply do not include a section for it.
+5. Address ALL listed issues in a single pass. If two issues touch the same file, put all its SEARCH/REPLACE blocks in ONE EDIT section.
+6. "This file should not be in the project" issues are fixed with `### DELETE:` — editing .gitignore or README does NOT remove the file and the issue will come back.
 
 Output your sections now:"""
 
@@ -109,7 +131,7 @@ async def _write_file_sandbox(http, path: str, content: str) -> tuple[bool, str]
         b64 = base64.b64encode(content.encode("utf-8", errors="replace")).decode()
         qp = shlex.quote(path)
         cmd = (
-            f"mkdir -p $(dirname {qp}) && "
+            f'mkdir -p "$(dirname {qp})" && '
             f"printf '%s' {shlex.quote(b64)} | base64 -d > {qp} && echo OK"
         )
         r = await http.post(
@@ -132,20 +154,152 @@ async def _write_file_sandbox(http, path: str, content: str) -> tuple[bool, str]
         return (False, f"{type(e).__name__}: {e}")
 
 
+async def _delete_file_sandbox(http, path: str) -> tuple[bool, str]:
+    """Delete a file via Codebox. Returns (ok, error_detail)."""
+    try:
+        qp = shlex.quote(path)
+        r = await http.post(
+            f"{config.CODEBOX_URL}/command",
+            json={"command": f"rm -f -- {qp} && echo OK", "timeout": 15},
+            timeout=20,
+        )
+        if r.status_code != 200:
+            return (False, f"codebox HTTP {r.status_code}")
+        j = r.json()
+        if "OK" in (j.get("stdout") or "") or int(j.get("exit_code", 1) or 1) == 0:
+            return (True, "")
+        return (False, (j.get("stderr") or j.get("stdout") or "")[:200])
+    except Exception as e:
+        return (False, f"{type(e).__name__}: {e}")
+
+
 # Matches:
 #   ### EDIT: <path>
 #   ```[lang]
 #   <content lines>
 #   ```
 # - path captured (no newline allowed)
-# - content captured lazily, terminated by closing fence
+# - content runs from the section's first fence line to its LAST bare ```
+#   line, with the next ### header (not the first inner fence) bounding the
+#   section — files that themselves contain markdown fences survive intact
 # - tolerates an optional language tag after the opening fence
-_EDIT_RE = re.compile(
-    r"###\s*EDIT\s*:\s*([^\n]+?)\s*\n```[A-Za-z0-9_.+#\-]*\s*\n(.*?)\n```",
+_EDIT_HEADER_RE = re.compile(r"^###\s*(EDIT|REWRITE|DELETE)\s*:\s*([^\n]+?)\s*$", re.MULTILINE)
+_SECTION_HEADER_RE = re.compile(r"^###\s*(?:EDIT\s*:|REWRITE\s*:|DELETE\s*:|SUMMARY|CANNOT[_\s]?FIX)", re.MULTILINE)
+_SR_BLOCK_RE = re.compile(
+    r"<<<<<<<\s*SEARCH\s*\n(.*?)\n?=======\s*\n(.*?)\n?>>>>>>>\s*REPLACE",
     re.DOTALL,
 )
+_FENCE_OPEN_RE = re.compile(r"^```[A-Za-z0-9_.+#\-]*\s*$", re.MULTILINE)
+_FENCE_CLOSE_RE = re.compile(r"^```\s*$", re.MULTILINE)
 _SUMMARY_RE = re.compile(r"###\s*SUMMARY\s*:?\s*(.+?)(?=\n\s*###|\Z)", re.DOTALL)
 _CANNOT_FIX_RE = re.compile(r"###\s*CANNOT[_\s]?FIX\s*:?\s*(.+?)(?=\n\s*###|\Z)", re.DOTALL)
+
+
+def _extract_edits(text: str) -> tuple[list[dict], list[str]]:
+    """Extract `### EDIT:` sections. Returns (edits, parse_errors).
+
+    An unterminated fence (truncated model output) yields a parse error and
+    NO edit — the old regex parser silently wrote truncated file content.
+    """
+    edits: list[dict] = []
+    parse_errors: list[str] = []
+    for m in _EDIT_HEADER_RE.finditer(text):
+        header_kind = m.group(1).upper()
+        path = m.group(2).strip()
+        sec_start = m.end()
+        nxt = _SECTION_HEADER_RE.search(text, sec_start)
+        sec_end = nxt.start() if nxt else len(text)
+        section = text[sec_start:sec_end]
+
+        if header_kind == "DELETE":
+            edits.append({"path": path, "mode": "delete"})
+            continue
+
+        open_m = _FENCE_OPEN_RE.search(section)
+        if not open_m:
+            parse_errors.append(f"{path}: no fenced content after EDIT header — skipped")
+            continue
+        body_start = open_m.end()
+        close_start = -1
+        for fm in _FENCE_CLOSE_RE.finditer(section, body_start):
+            close_start = fm.start()
+        if close_start < 0:
+            parse_errors.append(
+                f"{path}: unterminated code fence (model output truncated?) — "
+                f"refused to write partial content"
+            )
+            continue
+        content = section[body_start:close_start]
+        if content.startswith("\n"):
+            content = content[1:]
+        if content.endswith("\n"):
+            content = content[:-1]
+        # Strip a single extra trailing newline if the model added one inside the fence.
+        if content.endswith("\n") and not content.endswith("\n\n"):
+            content = content[:-1]
+
+        # SEARCH/REPLACE blocks inside an EDIT section → surgical diff mode.
+        # A fenced body without S/R markers stays a whole-file rewrite (the
+        # legacy format and the explicit ### REWRITE escape hatch).
+        blocks = [(g1, g2) for g1, g2 in _SR_BLOCK_RE.findall(content)]
+        if header_kind == "EDIT" and "<<<<<<<" in content and not blocks:
+            parse_errors.append(
+                f"{path}: malformed SEARCH/REPLACE markers — section skipped"
+            )
+            continue
+        if blocks:
+            edits.append({"path": path, "mode": "replace", "blocks": blocks})
+        else:
+            edits.append({"path": path, "mode": "rewrite", "content": content})
+    return edits, parse_errors
+
+
+def _fuzzy_locate(content: str, search: str):
+    """Whitespace-tolerant fallback: match SEARCH lines against content lines
+    comparing stripped text. Returns (char_start, char_end) or None."""
+    c_lines = content.splitlines(keepends=True)
+    s_lines = [l.strip() for l in search.splitlines()]
+    if not s_lines:
+        return None
+    n = len(s_lines)
+    offsets = []
+    pos = 0
+    for line in c_lines:
+        offsets.append(pos)
+        pos += len(line)
+    for i in range(len(c_lines) - n + 1):
+        if all(c_lines[i + j].strip() == s_lines[j] for j in range(n)):
+            start = offsets[i]
+            end = offsets[i + n - 1] + len(c_lines[i + n - 1])
+            # Don't swallow the trailing newline of the last matched line.
+            if c_lines[i + n - 1].endswith("\n"):
+                end -= 1
+            return (start, end)
+    return None
+
+
+def _apply_search_replace(original: str, blocks: list) -> tuple[str | None, list[str]]:
+    """Apply SEARCH/REPLACE blocks to file content. Returns (new_content_or_None,
+    errors). Unmatched blocks error individually; matched ones still apply."""
+    content = original
+    errors: list[str] = []
+    applied = 0
+    for i, (search, replace) in enumerate(blocks, 1):
+        if not (search or "").strip():
+            errors.append(f"block {i}: empty SEARCH text")
+            continue
+        if search in content:
+            content = content.replace(search, replace, 1)
+            applied += 1
+            continue
+        loc = _fuzzy_locate(content, search)
+        if loc is None:
+            errors.append(f"block {i}: SEARCH text not found in current file")
+            continue
+        start, end = loc
+        content = content[:start] + replace + content[end:]
+        applied += 1
+    return (content if applied else None), errors
 
 
 def _paths_are_docs_only(paths: list[str]) -> bool:
@@ -172,30 +326,25 @@ def _parse_fixer_output(text: str) -> dict:
 
     # CANNOT_FIX is a hard exit — return early with no edits.
     cf = _CANNOT_FIX_RE.search(text)
-    if cf and not _EDIT_RE.search(text):
+    if cf and not _EDIT_HEADER_RE.search(text):
         return {"edits": [], "summary": f"Cannot fix — {cf.group(1).strip()[:200]}",
-                "cannot_fix": True}
+                "cannot_fix": True, "parse_errors": []}
 
-    edits = []
-    for m in _EDIT_RE.finditer(text):
-        path = m.group(1).strip()
-        content = m.group(2)
-        # Strip a single trailing newline if the model added one inside the fence.
-        if content.endswith("\n") and not content.endswith("\n\n"):
-            content = content[:-1]
-        edits.append({"path": path, "content": content})
+    edits, parse_errors = _extract_edits(text)
 
     s = _SUMMARY_RE.search(text)
     summary = s.group(1).strip()[:200] if s else ""
     if not summary and edits:
         summary = f"Applied {len(edits)} edit(s)"
-    return {"edits": edits, "summary": summary, "cannot_fix": False}
+    return {"edits": edits, "summary": summary, "cannot_fix": False,
+            "parse_errors": parse_errors}
 
 
 async def run_fixer(http, events, conv_id: str, *,
                     reviewer_run_id: str = "",
                     parent_run_id: str = "",
-                    research_context: str = "") -> dict:
+                    research_context: str = "",
+                    attempt_history: str = "") -> dict:
     """Execute a Fixer run that addresses every issue in a prior Reviewer/Acceptance envelope.
 
     Returns a structured envelope. Creates a `runs` row with role='fixer' and
@@ -348,6 +497,19 @@ async def run_fixer(http, events, conv_id: str, *,
     else:
         research_section = ""
 
+    if attempt_history:
+        _attempts_excerpt = attempt_history.strip()[:1500]
+        attempts_section = (
+            "\n## Previous fix attempts for this request\n"
+            "These edits were ALREADY made and the issues below still remain. "
+            "Do NOT repeat the same change — diagnose why the prior approach "
+            "didn't work and try something different.\n\n"
+            f"{_attempts_excerpt}\n"
+        )
+        await _step("attempt-history-injected", f"{len(_attempts_excerpt)} chars")
+    else:
+        attempts_section = ""
+
     def _normalize_path(p: str) -> str:
         if not p:
             return ""
@@ -431,19 +593,21 @@ async def run_fixer(http, events, conv_id: str, *,
         })
         return envelope
 
-    # Cap total scope files to keep prompt size bounded.
+    # Cap total scope files to keep prompt size bounded. This is a note, not
+    # an error — it must not downgrade an otherwise clean run to 'partial'.
     capped_scope = all_scope[:15]
     _allowed_set = set(capped_scope)
+    notes: list[str] = []
     if len(all_scope) > 15:
-        errors.append(f"Scope truncated from {len(all_scope)} to 15 files — "
-                      f"{len(all_scope) - 15} file(s) not shown to fixer")
+        notes.append(f"Scope truncated from {len(all_scope)} to 15 files — "
+                     f"{len(all_scope) - 15} file(s) not shown to fixer")
 
     issue_block = "\n\n".join(issue_blocks)
 
     # Compute per-file character budget so the prompt fits the context window.
     _fixer_ctx = config.DEFAULT_NUM_CTX or 16384
     _char_budget = _fixer_ctx * 3
-    _overhead = len(issue_block) + len(research_section) + 2000
+    _overhead = len(issue_block) + len(research_section) + len(attempts_section) + 2000
     _file_budget = max(_char_budget - _overhead, 8000)
     _per_file_cap = min(max(_file_budget // max(len(capped_scope), 1), 1000), 8000)
     print(f"[FIXER] budget: num_ctx={_fixer_ctx}, files={len(capped_scope)}, "
@@ -471,6 +635,7 @@ async def run_fixer(http, events, conv_id: str, *,
         test_cmd=test_cmd or "(none)",
         source_role=source_role,
         research_section=research_section,
+        attempts_section=attempts_section,
         issue_block=issue_block,
         allowed_paths_list="\n".join(f"  - {p}" for p in capped_scope),
         files_section="\n\n".join(files_section_lines),
@@ -481,23 +646,16 @@ async def run_fixer(http, events, conv_id: str, *,
     await _step(f"calling {fixer_model}", f"{len(issue_blocks)} issue(s) batched")
     text = ""
     try:
-        coro = http.post(
-            f"{config.OLLAMA_URL}/api/chat",
-            json={
-                "model": fixer_model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-                "think": False,
-                "options": {"temperature": 0.2,
-                            "num_ctx": config.DEFAULT_NUM_CTX},
-            },
-            timeout=600,
+        # Streams internally so Stop aborts the Ollama runner immediately.
+        # No num_predict cap: the Fixer emits complete files.
+        coro = model_providers.complete_chat(
+            http, fixer_model, prompt,
+            temperature=0.2, num_ctx=config.DEFAULT_NUM_CTX, timeout=600,
+            ollama_url=config.OLLAMA_URL,
         )
-        r = await cancel_registry.await_cancellable(coro, run_id)
-        if r.status_code == 200:
-            text = (r.json().get("message", {}).get("content") or "").strip()
-        else:
-            errors.append(f"Model HTTP {r.status_code}")
+        text = await cancel_registry.await_cancellable(coro, run_id)
+        if not text:
+            errors.append("Model returned no output")
     except cancel_registry.RunCancelled:
         cancelled_env = {
             "status": "cancelled",
@@ -512,6 +670,7 @@ async def run_fixer(http, events, conv_id: str, *,
             "language": language,
             "reviewer_run_id": reviewer_run_id,
             "research_used": bool(research_context),
+        "attempt_history_used": bool(attempt_history),
         }
         try:
             await events.emit(conv_id, "tool_end", {
@@ -537,6 +696,7 @@ async def run_fixer(http, events, conv_id: str, *,
         parsed = _parse_fixer_output(text)
         edits = parsed.get("edits") or []
         edit_summary = (parsed.get("summary") or "")[:140]
+        errors.extend(parsed.get("parse_errors") or [])
 
         if parsed.get("cannot_fix"):
             errors.append(f"Fixer declined — {edit_summary}")
@@ -549,13 +709,40 @@ async def run_fixer(http, events, conv_id: str, *,
         else:
             for edit in edits[:20]:  # safety cap
                 path = (edit.get("path") or "").strip()
-                content = edit.get("content")
-                if not path or content is None:
+                if not path:
                     continue
                 if path not in _allowed_set:
                     errors.append(f"Model tried out-of-scope edit on {path} — refused")
                     continue
                 rel = path[len(project_dir) + 1:] if path.startswith(project_dir + "/") else path
+                if edit.get("mode") == "delete":
+                    await _step("deleting", rel)
+                    ok, err_detail = await _delete_file_sandbox(http, path)
+                    if ok:
+                        files_touched.add(path)
+                        diffs.append({"path": path, "summary": f"deleted {rel}"})
+                    else:
+                        errors.append(f"Delete failed for {path} — {err_detail}")
+                    continue
+                if edit.get("mode") == "replace":
+                    # Re-read the FULL file as the apply base — the prompt view
+                    # may have been truncated, and S/R must never lose the rest.
+                    original = await _read_file_sandbox(http, path)
+                    if not original:
+                        errors.append(f"{rel}: could not read file to apply search/replace — skipped")
+                        continue
+                    new_content, sr_errors = _apply_search_replace(original, edit.get("blocks") or [])
+                    errors.extend(f"{rel}: {e}" for e in sr_errors)
+                    if new_content is None:
+                        continue
+                    if new_content == original:
+                        errors.append(f"{rel}: edits produced no change — skipped")
+                        continue
+                    content = new_content
+                else:
+                    content = edit.get("content")
+                    if content is None:
+                        continue
                 await _step("writing", rel)
                 ok, err_detail = await _write_file_sandbox(http, path, content)
                 if ok:
@@ -572,15 +759,27 @@ async def run_fixer(http, events, conv_id: str, *,
     else:
         status = "no_op"
 
+    # An issue counts as addressed only when a file in its scope was actually
+    # written — `len(issues) - skipped` over-reported on cannot_fix/no-op runs.
+    issues_addressed = 0
+    for issue in issues:
+        _paths = list(issue.get("suggested_fix_scope") or [])
+        if issue.get("file"):
+            _paths.append(issue["file"])
+        _norm = {ap for ap in (_normalize_path(p) for p in _paths) if ap}
+        if _norm & files_touched:
+            issues_addressed += 1
+
     envelope = {
         "status": status,
         "summary": (f"Applied edits to {len(files_touched)} file(s) across "
                     f"{len(issues)} issue(s)") if files_touched
                    else "No edits applied — see errors",
-        "issues_addressed": len(issues) - skipped,
+        "issues_addressed": issues_addressed,
         "files_touched": sorted(files_touched),
         "diffs": diffs[:20],
         "errors": errors[:10],
+        "notes": notes[:5],
         "fixer_model": fixer_model,
         "project_dir": project_dir,
         "language": language,
@@ -589,6 +788,7 @@ async def run_fixer(http, events, conv_id: str, *,
         "source_role": source_role,
         "docs_only": _paths_are_docs_only(sorted(files_touched)),
         "research_used": bool(research_context),
+        "attempt_history_used": bool(attempt_history),
     }
 
     await events.emit(conv_id, "tool_end", {
@@ -600,9 +800,14 @@ async def run_fixer(http, events, conv_id: str, *,
     })
     if run_id:
         try:
+            # 'partial' (some writes failed / out-of-scope refusals) is its own
+            # run status: it still forces PENDING_REVIEW but does not consume a
+            # cycle-cap slot, which counts only 'succeeded' fixer runs.
+            _run_status = ("succeeded" if status == "applied"
+                           else "partial" if status == "partial" else "failed")
             await db.update_run(
                 run_id,
-                status=("succeeded" if files_touched else "failed"),
+                status=_run_status,
                 result_envelope=envelope, ended=True,
             )
         except Exception as e:

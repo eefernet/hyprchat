@@ -1,3 +1,124 @@
+# Alpha v17.2.0 — June 12, 2026
+
+> This update focuses on existing system hardening and and improving existing features.
+
+## Cloud Model Support (optional)
+- Added API key entry for openAI
+- Added API key entry for Anthropic
+- Cloud models can be used for regular chat, research and agents.
+
+## Deep Research & SearXNG
+- **SSRF-safe page fetchers** with 2 MB body cap and per-hop DNS checks
+- **Redirect URLs tracked** for proper attribution (no more "S?" sources)
+- **Research tokens via SSE only** (no DB writes per chunk)
+- **Cancel can't be resurrected** — pre-cancelled rows honored at start
+- **Embeddings batched** (64-text per Ollama request)
+- **ChromaDB off event loop** — large upserts don't freeze the server
+- **Parallel seed/GitHub fetches** with cancellable loop
+- **Context window setting** (`research_num_ctx`, default 40960) prevents prompt truncation
+- **SearXNG failures logged**, Google fallback capped at 8/report
+- **RAG reindex fixed** — chunk size clamped, upserts batched ≤5000 records
+- **SearXNG hourly rotation** (was 10-min) — engines no longer suspended
+
+## Core System
+- **Event logs append-only** — O(n²) write amplification eliminated
+- **Startup reaper** covers both runs and research reports
+- **Memory suggestions run post-turn** in background (no more 90s delays)
+- **Cloud models safe for judgment agents** — JSON output enforced
+- **Mid-stream failures persist partial messages** with "interrupted" note
+- **Council debates can't wedge** — done-sentinel always fires
+- **RAG reindex clears orphan chunks**
+- **Settings PATCH clamps junk values**
+- **Frontend:** bounded message metadata, memoized markdown rendering
+
+## Daedalus (Coder Bot v2)
+
+### Architecture & Workflow
+- **SEARCH/REPLACE diffs** instead of whole-file regeneration; `### REWRITE:` escape for full rewrites. Fixes data-loss from truncated prompts.
+- **Git commits after every build/fix cycle** — `git log --oneline` is now the authoritative attempt history for easy reverts
+- **Real FSM workflow state** with single transition function (`PLAN_DONE`, `BUILD_OK`, `REVIEW_CLEAN/ISSUES`, `FIX_APPLIED`, `ACCEPT_OK/ISSUES`)
+- **Auto-verification** after `generate_code`, `run_fixer`, and `run_aider_fix` — Reviewer runs automatically, removing LLM routing rounds
+- **Schema-constrained Architect output** (`format=json`) eliminates most plan parse-retry rounds
+- **Fixer can delete files** (`# DELETE:` sections) — fixes infinite loops on runtime/state files that should be removed
+- **Reviewer smoke phase cleans up** its own artifacts — verification doesn't pollute the tree it grades
+
+### Cancellation & Control
+- **Stop frees GPU immediately** — agent LLM calls now stream internally instead of non-streaming, aborting Ollama on cancel
+- **Workers self-cancel on disconnect** — OpenHands/Aider SSE consumer vanishes triggers worker cancellation
+- **4096 token cap** on structured-output agents (plan/review/acceptance JSON, QA answers)
+- **Acceptance progress ticker** — "analyzing… Ns elapsed" during model calls
+- **Fix-budget feedback** — "Fix-cycle budget: N/3 used" in every fixer/Aider result
+- **Reviewer smokes real CLI** — reads `[project.scripts]` and runs `<script> --help` for pyproject projects
+
+### Agentic Improvements
+- **Fix attempts have memory** — Fixer/Aider see compact history of prior changes ("touched app.py — renamed handler")
+- **Cloud models opt-in** for Architect/Reviewer/Acceptance via Settings → Coder Bot (never silently inherited)
+- **Fix-cycle caps per request** (3 reviewer-driven, 2 acceptance-driven), reset by new user message
+- **Uploaded-project indexer** prioritizes entrypoints/larger source files (was 100 smallest), cancellable via Stop
+- **Context window respected** — Architect uses configured `research_num_ctx` instead of hardcoded 16384
+- **Duplicate-BLOCKED detection** keys on blocking trigger, not tool name
+- **Frontend polling** stops on terminal states (`cancelled`, `skipped`, `blocked`)
+
+---
+
+**Migration:** Run `POST /api/seed/coder-bot-v2` after deploy for updated persona prompts.
+
+## Deep Research & SearXNG
+- **SSRF-safe page fetchers** with 2 MB body cap and per-hop DNS checks
+- **Redirect URLs tracked** for proper attribution (no more "S?" sources)
+- **Research tokens via SSE only** (no DB writes per chunk)
+- **Cancel can't be resurrected** — pre-cancelled rows honored at start
+- **Embeddings batched** (64-text per Ollama request)
+- **ChromaDB off event loop** — large upserts don't freeze the server
+- **Parallel seed/GitHub fetches** with cancellable loop
+- **Context window setting** (`research_num_ctx`, default 40960) prevents prompt truncation
+- **SearXNG failures logged**, Google fallback capped at 8/report
+- **RAG reindex fixed** — chunk size clamped, upserts batched ≤5000 records
+- **SearXNG hourly rotation** (was 10-min) — engines no longer suspended
+
+## Core System
+- **Event logs append-only** — O(n²) write amplification eliminated
+- **Startup reaper** covers both runs and research reports
+- **Memory suggestions run post-turn** in background (no more 90s delays)
+- **Cloud models safe for judgment agents** — JSON output enforced
+- **Mid-stream failures persist partial messages** with "interrupted" note
+- **Council debates can't wedge** — done-sentinel always fires
+- **RAG reindex clears orphan chunks**
+- **Settings PATCH clamps junk values**
+- **Frontend:** bounded message metadata, memoized markdown rendering
+
+## Daedalus (Coder Bot v2)
+
+### Architecture & Workflow
+- **SEARCH/REPLACE diffs** instead of whole-file regeneration; `### REWRITE:` escape for full rewrites. Fixes data-loss from truncated prompts.
+- **Git commits after every build/fix cycle** — `git log --oneline` is now the authoritative attempt history for easy reverts
+- **Real FSM workflow state** with single transition function (`PLAN_DONE`, `BUILD_OK`, `REVIEW_CLEAN/ISSUES`, `FIX_APPLIED`, `ACCEPT_OK/ISSUES`)
+- **Auto-verification** after `generate_code`, `run_fixer`, and `run_aider_fix` — Reviewer runs automatically, removing LLM routing rounds
+- **Schema-constrained Architect output** (`format=json`) eliminates most plan parse-retry rounds
+- **Fixer can delete files** (`# DELETE:` sections) — fixes infinite loops on runtime/state files that should be removed
+- **Reviewer smoke phase cleans up** its own artifacts — verification doesn't pollute the tree it grades
+
+### Cancellation & Control
+- **Stop frees GPU immediately** — agent LLM calls now stream internally instead of non-streaming, aborting Ollama on cancel
+- **Workers self-cancel on disconnect** — OpenHands/Aider SSE consumer vanishes triggers worker cancellation
+- **4096 token cap** on structured-output agents (plan/review/acceptance JSON, QA answers)
+- **Acceptance progress ticker** — "analyzing… Ns elapsed" during model calls
+- **Fix-budget feedback** — "Fix-cycle budget: N/3 used" in every fixer/Aider result
+- **Reviewer smokes real CLI** — reads `[project.scripts]` and runs `<script> --help` for pyproject projects
+
+### Agentic Improvements
+- **Fix attempts have memory** — Fixer/Aider see compact history of prior changes ("touched app.py — renamed handler")
+- **Cloud models opt-in** for Architect/Reviewer/Acceptance via Settings → Coder Bot (never silently inherited)
+- **Fix-cycle caps per request** (3 reviewer-driven, 2 acceptance-driven), reset by new user message
+- **Uploaded-project indexer** prioritizes entrypoints/larger source files (was 100 smallest), cancellable via Stop
+- **Context window respected** — Architect uses configured `research_num_ctx` instead of hardcoded 16384
+- **Duplicate-BLOCKED detection** keys on blocking trigger, not tool name
+- **Frontend polling** stops on terminal states (`cancelled`, `skipped`, `blocked`)
+
+---
+
+**Migration:** Run `POST /api/seed/coder-bot-v2` after deploy for updated persona prompts.
+
 ## Alpha v17.1.2 — June 10, 2026
 
 ### HyprChat Memory & Navigation
