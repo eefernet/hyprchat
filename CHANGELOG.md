@@ -32,6 +32,8 @@
 - Removed dead code across `database.py`, `cancel_registry.py`, `acceptance.py`, and `connectors.py`.
 - `create-lxc.sh` and `deploy.sh` updated for the built-`dist/` layout.
 
+---
+
 # Alpha v17.2.0 — June 12, 2026
 
 > This update focuses on existing system hardening and and improving existing features.
@@ -93,9 +95,9 @@
 - **Duplicate-BLOCKED detection** keys on blocking trigger, not tool name
 - **Frontend polling** stops on terminal states (`cancelled`, `skipped`, `blocked`)
 
----
-
 **Migration:** Run `POST /api/seed/coder-bot-v2` after deploy for updated persona prompts.
+
+---
 
 ## Alpha v17.1.2 — June 10, 2026
 
@@ -131,6 +133,7 @@
 ### Bug Fixes
 - Fixed a fresh empty-chat race where selecting a model in the top-left picker and immediately sending could create the chat with the selected model but stream the first response through a stale/default model before React state caught up.
 
+---
 
 ## Alpha v17.1.1 — June 8, 2026
 
@@ -167,6 +170,8 @@
 - Fixed Deep Research panel cancel/delete/rerun state so active reports do not stay stuck as running or duplicate report rows.
 - Added regression coverage for Agent Research cache handoff, Daedalus stuck-fix research gating, and durable Deep Research report persistence.
 - Updated backend test defaults to the Tailscale HTTP endpoint the service actually listens on.
+
+---
 
 ## Alpha v17.1 — June 3, 2026
 
@@ -252,6 +257,8 @@
 ### Bug Fixes
 - Fixed Acceptance falsely reporting long source files as truncated or syntactically incomplete when its static source excerpt ended mid-statement. Acceptance now reads much larger source excerpts, marks any remaining excerpt truncation explicitly, and treats the clean Reviewer build/lint result as authoritative for syntax status.
 
+---
+
 ## Alpha v17.0.2 — June 2, 2026
 
 ### Coder Bot v2 — uploaded-project repair hardening
@@ -303,6 +310,8 @@
 ### Tests
 
 - Added focused Acceptance structured-output tests, frontend settings hydration guard tests, Workspace Model context-cap tests, and a Quick Search recency test for `time_range="month"`.
+
+---
 
 ## Alpha v17.0.1 — May 26, 2026
 
@@ -356,6 +365,7 @@ Pulled the highest-ROI patterns from Perplexica (24k★), Khoj (18k★), and Ope
 - **Removed** — `_fetch_page` import in `quick_search.py` (replaced by `_fetch_clean_page`); stale `_rewrite_query` references in docstrings.
 - **New dep** — `trafilatura>=1.10.0` in `requirements.txt`.
 
+---
 
 ## Alpha v17 — May 7, 2026
 
@@ -546,6 +556,7 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Fixed Bash render error where `$VAR` and command-substitution `$(cmd)` inside a `bash` code fence prematurely terminated rendering.
 - Fixed `num_ctx` from user settings being silently ignored by OpenHands runs after the first model load — now evict-and-reload guarantees the runtime context matches the requested value.
 
+---
 
 ## Alpha v16.2 — April 22, 2026
 
@@ -574,6 +585,7 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - **New SSE event** — `refinement_start` `{round, total}` signals each review pass to the frontend. The `done` payload now carries `refinements: N` which is persisted to the message metadata so the badge survives reload.
 - **Storage** — `localStorage["hc-effort-level"]` for the global default; `localStorage["hc-effort-per-chat"] = {convId: level}` for per-chat overrides. No DB migration needed.
 
+---
 
 ## Alpha v16.1.1 — April 22, 2026
 
@@ -621,6 +633,7 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Reduced chat-loop allocations — the per-round `_PARALLEL_SAFE` set and 22-entry `_TOOL_ICONS` dict are now module-level constants instead of being rebuilt every tool-calling round.
 - Minor: avatar upload no longer evaluates `file.filename or ""` three times in one expression.
 
+---
 
 ## Alpha v16.1 — April 2026
 
@@ -675,6 +688,7 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Fixed auto-title not firing reliably — stale React closure caused message count check to miss; now triggers based on conversation title instead
 - Fixed workspace file preview panel not showing when Workspace tab is active — preview panel moved outside panel ternary so it renders alongside any active panel
 
+---
 
 ## Alpha v16 — March 2026
 
