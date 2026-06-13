@@ -443,6 +443,7 @@ const TIC = {code:IC.Code,search:IC.Search,terminal:IC.Terminal,globe:IC.Globe,w
 const Pill = ({ev,t,expanded,onToggle})=>{
   const scrollRef = useRef(null);
   const stickRef = useRef(true);  // sticky-bottom: auto-scroll to new steps unless user scrolled up
+  const [copiedDetail,setCopiedDetail]=useState("");
   const isS = ev.type==="tool_start"||ev.type==="tool_progress"||ev.type==="thinking";
   const isE = ev.type==="tool_error"||ev.type==="error";
   const isD = ev.type==="tool_end"||ev.type==="tool_done"||ev.type==="complete"||ev.type==="thought_done";
@@ -485,6 +486,7 @@ const Pill = ({ev,t,expanded,onToggle})=>{
     "research": isD ? ["📡", "Signal Acquired"] : ["🔎", "Scanning"],
     "deep_research": isD ? ["📊", "Research Ready"] : ["🔬", "Agent Research"],
     "conspiracy_research": isD ? ["🕵️", "Dossier Ready"] : ["🔮", "Digging"],
+    "generate_image": isD ? ["🖼️", "Image ready"] : ["🖼️", "Generating image"],
     "write_file": isD ? ["💾", "Committed"] : ["📝", "Writing"],
     "read_file": isD ? ["📖", "Loaded"] : ["📂", "Reading"],
     "list_files": isD ? ["📋", "Indexed"] : ["🗂️", "Scanning"],
@@ -530,6 +532,46 @@ const Pill = ({ev,t,expanded,onToggle})=>{
     return "bop 1.5s ease-in-out infinite";
   };
   const marqueeKey = Math.floor(displayStatus.length / 30);
+  const copyDetailText=(key,text)=>{
+    try{
+      navigator.clipboard?.writeText(String(text||""));
+      setCopiedDetail(key);
+      window.setTimeout(()=>setCopiedDetail(""),1200);
+    }catch{}
+  };
+  const isImageDetail=detail&&typeof detail==="object"&&detail.tool==="generate_image";
+  const ImagePromptDetail=()=>{
+    const preS={margin:0,padding:8,background:`${t.surface}88`,borderRadius:5,whiteSpace:"pre-wrap",wordBreak:"break-word",color:t.dim,fontSize:11,maxHeight:150,overflow:"auto",border:`1px solid ${t.brd}18`};
+    const block=(key,label,value)=>value?<div style={{marginBottom:8}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+        <span style={{fontSize:10,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.5}}>{label}</span>
+        <button onClick={()=>copyDetailText(key,value)} style={{marginLeft:"auto",fontSize:9,padding:"2px 7px",borderRadius:6,border:`1px solid ${t.acc}33`,background:`${t.acc}10`,color:t.acc,cursor:"pointer",fontFamily:"inherit"}}>{copiedDetail===key?"Copied":"Copy"}</button>
+      </div>
+      <pre style={preS}>{value}</pre>
+    </div>:null;
+    const flags=[
+      ["Size",detail.width&&detail.height?`${detail.width} x ${detail.height}`:""],
+      ["Steps",detail.steps],
+      ["CFG",detail.cfg],
+      ["Sampler",detail.sampler],
+      ["Scheduler",detail.scheduler],
+      ["Model type",detail.model_sampling],
+      ["Persona profile",detail.profile_active?"yes":"no"],
+      ["Workflow",detail.workflow_active?(detail.profile_workflow?"persona":"global"):"default"],
+      ["LoRAs",detail.loras_active?"yes":"no"],
+      ["Fallback",detail.prompt_fallback?"yes":"no"],
+    ].filter(([,v])=>v!==undefined&&v!==null&&v!=="");
+    return <div>
+      {block("prompt","Prompt sent to ComfyUI",detail.prompt)}
+      {block("negative","Negative prompt",detail.negative_prompt)}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:6,marginTop:2}}>
+        {flags.map(([k,v])=><div key={k} style={{border:`1px solid ${t.brd}22`,background:`${t.surface}55`,borderRadius:6,padding:"6px 8px",minWidth:0}}>
+          <div style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:2}}>{k}</div>
+          <div style={{fontSize:10,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{String(v)}</div>
+        </div>)}
+      </div>
+    </div>;
+  };
 
   return <div style={{animation:"fadeIn .3s",marginBottom:2}}>
     <div onClick={isClickable?onToggle:undefined} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 12px",background:bg,border:`1px solid ${bc}`,borderRadius:expanded?"9px 9px 0 0":9,fontSize:12,color:tc,cursor:isClickable?"pointer":"default",maxWidth:"100%",transition:"all .2s",animation:isActive?`fadeIn .3s, pillGlow 2s ease-in-out infinite`:"fadeIn .3s",boxShadow:isActive?`0 0 8px ${bc}`:"none"}}>
@@ -549,6 +591,7 @@ const Pill = ({ev,t,expanded,onToggle})=>{
     {expanded&&(detail||isThink)&&<div ref={scrollRef} onScroll={handlePanelScroll} style={{background:`${t.bgDeep}`,border:`1px solid ${bc}`,borderTop:"none",borderRadius:"0 0 8px 8px",padding:10,fontSize:11,maxHeight:300,overflowY:"auto",maxWidth:600}}>
       {!detail?<div style={{color:t.dim,fontStyle:"italic",lineHeight:1.6,whiteSpace:"pre-wrap",opacity:.7}}>{status||"Thinking..."}</div>
       :typeof detail==="string"?<pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontFamily:"inherit"}}>{detail}</pre>
+      :isImageDetail?<ImagePromptDetail/>
       :detail.thinking?<div ref={el=>{if(el&&isActive)el.scrollTop=el.scrollHeight;}} style={{color:t.dim,fontStyle:"italic",lineHeight:1.6,whiteSpace:"pre-wrap",maxHeight:250,overflowY:"auto"}}>{detail.thinking}</div>
       :detail.code?<div>
         {detail.language&&<div style={{color:t.mut,marginBottom:4,fontSize:10}}>🔧 <span style={{color:t.acc}}>{detail.language}</span></div>}
@@ -1009,6 +1052,9 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
   const [viewIdx,setViewIdx]=useState(0);     // index into gallery shown in the main viewer (0 = newest)
   const [lightbox,setLightbox]=useState(false);
   const [enhancing,setEnhancing]=useState(false);
+  const [restartingComfy,setRestartingComfy]=useState(false);
+  const [freeingComfy,setFreeingComfy]=useState(false);
+  const [comfyMemory,setComfyMemory]=useState(null);
   const [showAdvanced,setShowAdvanced]=useState(()=>{try{return localStorage.getItem("hc-img-adv")==="1";}catch{return false;}});
   const [error,setError]=useState("");
   const pollRef=useRef(null);
@@ -1025,6 +1071,23 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
         const rows=Array.isArray(d)?d:(d.artifacts||[]);
         setGallery(rows.filter(a=>(a.metadata||{}).source_tool==="image_studio"));
       }).catch(()=>{}).finally(()=>setGalleryLoading(false));
+  };
+  const loadComfyMemoryStatus=async()=>{
+    if(!configured)return null;
+    try{
+      const r=await fetch(`${API}/api/images/memory-status`);
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok){
+        setComfyMemory({available:false,message:d.detail||d.error||`HTTP ${r.status}`});
+        return null;
+      }
+      const next={available:true,...d};
+      setComfyMemory(next);
+      return next;
+    }catch(e){
+      setComfyMemory({available:false,message:String(e.message||e)});
+      return null;
+    }
   };
   const enhance=async()=>{
     if(!prompt.trim()||enhancing||job)return;
@@ -1083,6 +1146,50 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
       notify&&notify({type:"success",text:"All image traces deleted",detail:bits.join(" · ")+(d.comfyui_files_deleted==null?" — install the ComfyUI cleanup node for instant remote file removal":""),duration:5000});
     }catch(e){notify&&notify({type:"error",text:"Purge failed",detail:String(e.message||e)});}
   };
+  const restartComfyUI=async()=>{
+    if(job||restartingComfy||freeingComfy)return;
+    setRestartingComfy(true);
+    setError("");
+    try{
+      const r=await fetch(`${API}/api/images/restart-comfyui`,{method:"POST"});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      notify&&notify({
+        type:"success",
+        text:"ComfyUI restart requested",
+        detail:d.message||"The image service will be unavailable briefly while it restarts.",
+        duration:4500,
+      });
+      setTimeout(()=>loadComfyMemoryStatus(),4000);
+    }catch(e){
+      const msg=String(e.message||e);
+      setError(msg);
+      notify&&notify({type:"error",text:"Restart failed",detail:msg});
+    }
+    finally{setRestartingComfy(false);}
+  };
+  const freeComfyMemory=async()=>{
+    if(job||restartingComfy||freeingComfy)return;
+    setFreeingComfy(true);
+    setError("");
+    try{
+      const r=await fetch(`${API}/api/images/free-memory`,{method:"POST"});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||d.error||`HTTP ${r.status}`);
+      notify&&notify({
+        type:"success",
+        text:"ComfyUI memory unload requested",
+        detail:d.message||(d.custom_node?"Resident models unloaded and VRAM free requested.":"Built-in unload accepted; install the HyprChat control node for CPU RAM idle unload."),
+        duration:4500,
+      });
+      await loadComfyMemoryStatus();
+    }catch(e){
+      const msg=String(e.message||e);
+      setError(msg);
+      notify&&notify({type:"error",text:"Unload failed",detail:msg});
+    }
+    finally{setFreeingComfy(false);}
+  };
   const applySettings=(s)=>{
     if(!s)return;
     if(s.steps)setSteps(s.steps);
@@ -1110,6 +1217,7 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
     }).catch(()=>{});
     loadWorkflows();
     loadGallery();
+    loadComfyMemoryStatus();
     return stopPoll;
   },[configured]);
   // Lightbox keyboard nav (mermaid-fullscreen pattern): Escape closes,
@@ -1231,25 +1339,36 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
     }catch(e){notify&&notify({type:"error",text:"Use in chat failed",detail:String(e.message||e)});}
   };
   const inputS={width:"100%",background:`${t.bgDeep}E6`,border:`1px solid ${t.brd}55`,color:t.text,padding:"9px 12px",borderRadius:7,fontFamily:font,fontSize:13,outline:"none",boxSizing:"border-box"};
-  const smallNum={...inputS,width:74,padding:"6px 8px",fontSize:12};
+  const smallNum={...inputS,width:"100%",padding:"7px 8px",fontSize:12};
+  const labelS={fontSize:10,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.55,display:"flex",flexDirection:"column",gap:5,minWidth:0};
+  const railSectionS={padding:"0 0 14px",borderBottom:`1px solid ${t.brd}24`,display:"flex",flexDirection:"column",gap:10};
+  const sectionHead=(label,Icon,extra=null)=><div style={{display:"flex",alignItems:"center",gap:7,minHeight:22}}>
+    {Icon&&<span style={{display:"flex",color:t.acc}}><Icon/></span>}
+    <span style={{fontSize:10,fontWeight:900,letterSpacing:.9,textTransform:"uppercase",color:t.acc}}>{label}</span>
+    <div style={{flex:1}}/>
+    {extra}
+  </div>;
+  const section=(label,Icon,children,extra=null)=><section style={railSectionS}>{sectionHead(label,Icon,extra)}{children}</section>;
+  const grid2={display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8,alignItems:"end"};
+  const railBtn=(c,opts={})=>({minHeight:34,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6,padding:"7px 10px",borderRadius:7,background:opts.solid?c:`${c}14`,border:opts.solid?`1px solid ${c}`:`1px solid ${c}3d`,color:opts.solid?t.bgDeep:c,cursor:opts.disabled?"default":"pointer",fontFamily:font,fontWeight:800,fontSize:11,opacity:opts.disabled?0.55:1,boxSizing:"border-box"});
   if(!configured)return <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:10,color:t.mut}}>
     <span style={{fontSize:42,opacity:.5}}>🎨</span>
     <div style={{fontSize:14,fontWeight:700,color:t.dim}}>Image Studio</div>
     <div style={{fontSize:12,maxWidth:380,textAlign:"center"}}>ComfyUI is not configured. Set the ComfyUI URL in Settings → Connections to enable local Stable Diffusion image generation.</div>
   </div>;
   const elapsed=job?Math.round((Date.now()-job.started)/1000):0;
-  const smallBtn=(c)=>({fontSize:10,padding:"4px 9px",borderRadius:5,background:`${c}15`,border:`1px solid ${c}33`,color:c,cursor:"pointer",fontFamily:font,fontWeight:600});
+  const smallBtn=(c)=>({fontSize:10,padding:"6px 9px",borderRadius:7,background:`${c}14`,border:`1px solid ${c}35`,color:c,cursor:"pointer",fontFamily:font,fontWeight:800,display:"inline-flex",alignItems:"center",gap:5,textDecoration:"none"});
   const cur=gallery[viewIdx]||null;
   const curMeta=(cur&&cur.metadata)||{};
   const metaLine=(m)=>`seed ${m.seed} · ${m.steps} steps · ${m.width}×${m.height}${m.checkpoint?` · ${String(m.checkpoint).replace(/\.(safetensors|ckpt)$/i,"")}`:""}`;
   const actionChips=(a,m)=>(<div style={{display:"flex",gap:5,flexWrap:"wrap",justifyContent:"center"}}>
-    <a href={`${API}/api/artifacts/${a.id}/download`} download={a.filename} style={{...smallBtn(t.ok),textDecoration:"none"}}>Download</a>
-    <button onClick={()=>useInChat({artifact_id:a.id})} style={smallBtn(t.acc)}>Use in chat</button>
-    <button onClick={()=>reuseParams(m)} title="Load this image's prompt and settings back into the form" style={smallBtn(t.acc2)}>Reuse</button>
-    {m.seed!=null&&<button onClick={()=>setSeed(String(m.seed))} title="Reuse this seed only" style={smallBtn(t.warm)}>Seed</button>}
-    <button onClick={()=>deleteOne(a)} title="Delete this image" style={smallBtn(t.err)}>✕</button>
+    <a href={`${API}/api/artifacts/${a.id}/download`} download={a.filename} style={smallBtn(t.ok)}><IC.Download/>Download</a>
+    <button onClick={()=>useInChat({artifact_id:a.id})} style={smallBtn(t.acc)}><IC.Send/>Use in chat</button>
+    <button onClick={()=>reuseParams(m)} title="Load this image's prompt and settings back into the form" style={smallBtn(t.acc2)}><IC.Refresh/>Reuse</button>
+    {m.seed!=null&&<button onClick={()=>setSeed(String(m.seed))} title="Reuse this seed only" style={smallBtn(t.warm)}><IC.Star/>Seed</button>}
+    <button onClick={()=>deleteOne(a)} title="Delete this image" style={smallBtn(t.err)}><IC.Trash/>Delete</button>
   </div>);
-  const navBtn=(dir,disabled,onClick,big)=>(<button onClick={onClick} disabled={disabled} style={{width:big?46:30,height:big?46:58,flexShrink:0,borderRadius:big?23:8,border:`1px solid ${t.brd}40`,background:big?"rgba(0,0,0,.45)":`${t.surface}cc`,color:disabled?t.mut:t.text,fontSize:big?20:14,cursor:disabled?"default":"pointer",opacity:disabled?.35:1,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:font}}>{dir}</button>);
+  const navBtn=(dir,disabled,onClick,big)=>(<button onClick={onClick} disabled={disabled} style={{width:big?46:30,height:big?46:58,flexShrink:0,borderRadius:big?23:8,border:`1px solid ${t.brd}40`,background:big?"rgba(0,0,0,.45)":`${t.surface}cc`,color:disabled?t.mut:t.text,fontSize:big?20:14,cursor:disabled?"default":"pointer",opacity:disabled?0.35:1,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:font}}>{dir}</button>);
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",alignItems:"center",gap:8}}>
       <IC.Image/><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Image Studio</span>
@@ -1261,87 +1380,123 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
     <div style={{flex:1,display:"flex",overflow:"hidden"}}>
       {/* LEFT RAIL — prompt + all generation inputs */}
       <div style={{width:"clamp(330px,30vw,420px)",flexShrink:0,borderRight:`1px solid ${t.brd}28`,overflowY:"auto",padding:16,display:"flex",flexDirection:"column",gap:12}}>
-          <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&(e.metaKey||e.ctrlKey)){e.preventDefault();generate();}}} placeholder="Describe the image — subject, style, lighting, mood…" rows={5} style={{...inputS,resize:"vertical",lineHeight:1.55,fontSize:13.5,padding:"11px 13px"}}/>
-          <div style={{display:"flex",gap:8}}>
-            <button onClick={enhance} disabled={!prompt.trim()||enhancing||!!job} title="Use the local LLM to expand your idea into a detailed SDXL prompt (subject, style, lighting, quality tags) plus a negative prompt" style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"10px 0",borderRadius:8,background:`${t.acc2}14`,border:`1px solid ${t.acc2}40`,color:prompt.trim()&&!enhancing&&!job?t.acc2:`${t.acc2}88`,cursor:prompt.trim()&&!enhancing&&!job?"pointer":"default",fontFamily:font,fontWeight:700,fontSize:12}}>
-              {enhancing?<><div style={{width:11,height:11,border:`2px solid ${t.acc2}44`,borderTopColor:t.acc2,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>Enhancing…</>:<>✨ Enhance</>}
+        {section("Prompt",IC.Pencil,<>
+          <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&(e.metaKey||e.ctrlKey)){e.preventDefault();generate();}}} placeholder="Subject, style, lighting, mood" rows={5} style={{...inputS,resize:"vertical",lineHeight:1.55,fontSize:13.5,padding:"11px 13px"}}/>
+          <textarea value={negPrompt} onChange={e=>setNegPrompt(e.target.value)} placeholder="Negative prompt" rows={1} style={{...inputS,resize:"vertical",fontSize:12,minHeight:38}}/>
+          <div style={grid2}>
+            <button onClick={enhance} disabled={!prompt.trim()||enhancing||!!job} title="Enhance prompt" style={railBtn(t.acc2,{disabled:!prompt.trim()||enhancing||!!job})}>
+              {enhancing?<div style={{width:11,height:11,border:`2px solid ${t.acc2}44`,borderTopColor:t.acc2,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>:<IC.Star/>}
+              {enhancing?"Enhancing":"Enhance"}
             </button>
             {!job
-              ?<button onClick={generate} disabled={!prompt.trim()} style={{flex:1.4,padding:"10px 0",borderRadius:8,border:"none",background:prompt.trim()?t.acc:`${t.acc}44`,color:t.bgDeep,fontFamily:font,fontWeight:800,fontSize:13,cursor:prompt.trim()?"pointer":"default"}}>Generate</button>
-              :<button onClick={cancelJob} style={{flex:1.4,padding:"10px 0",borderRadius:8,border:`1px solid ${t.err}66`,background:`${t.err}18`,color:t.err,fontFamily:font,fontWeight:700,fontSize:13,cursor:"pointer"}}>Stop</button>}
+              ?<button onClick={generate} disabled={!prompt.trim()} style={railBtn(t.acc,{solid:true,disabled:!prompt.trim()})}><IC.Image/>Generate</button>
+              :<button onClick={cancelJob} style={railBtn(t.err)}><IC.Stop/>Stop</button>}
           </div>
-          {checkpoints.length>0&&<label style={{fontSize:10,color:t.mut}}>Model{ckptSettings[checkpoint]?.user_override&&<span title="Using your saved defaults for this model" style={{color:t.acc}}> ★</span>}
-            <select value={checkpoint} onChange={e=>applyCheckpoint(e.target.value)} title="Selecting a model auto-applies its correct settings (type, sampler, CFG, steps)" style={{...inputS,padding:"8px 10px",fontSize:12,marginTop:3}}>
-              {checkpoints.map(c=><option key={c} value={c}>{c.replace(/\.(safetensors|ckpt)$/i,"")}</option>)}
-            </select>
-          </label>}
-          <div style={{display:"flex",gap:8}}>
-            <label style={{fontSize:10,color:t.mut,flex:1}}>Aspect ratio
-              <select value={size} onChange={e=>setSize(e.target.value)} style={{...inputS,padding:"8px 10px",fontSize:12,marginTop:3}}>
-                <option value="1024x1024">Square — 1024 × 1024</option>
-                <option value="1216x832">Landscape — 1216 × 832</option>
-                <option value="832x1216">Portrait — 832 × 1216</option>
-                <option value="custom">Custom…</option>
+        </>)}
+        {section("Model",IC.Layers,<>
+          {checkpoints.length>0?<div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto auto",gap:8,alignItems:"end"}}>
+            <label style={labelS}>Model{ckptSettings[checkpoint]?.user_override&&<span title="Using saved defaults" style={{color:t.acc,marginLeft:4}}>★</span>}
+              <select value={checkpoint} onChange={e=>applyCheckpoint(e.target.value)} title="Selecting a model auto-applies its saved settings" style={{...inputS,padding:"8px 10px",fontSize:12}}>
+                {checkpoints.map(c=><option key={c} value={c}>{c.replace(/\.(safetensors|ckpt)$/i,"")}</option>)}
               </select>
             </label>
-            <label style={{fontSize:10,color:t.mut,width:64,flexShrink:0}}>Count
-              <select value={count} onChange={e=>setCount(e.target.value)} style={{...inputS,padding:"8px 10px",fontSize:12,marginTop:3}}>{[1,2,3,4].map(n=><option key={n} value={n}>{n}</option>)}</select>
+            <button onClick={freeComfyMemory} disabled={!!job||restartingComfy||freeingComfy} title="Unload resident ComfyUI models and free VRAM" style={railBtn(t.f1,{disabled:!!job||restartingComfy||freeingComfy})}>
+              {freeingComfy?<div style={{width:11,height:11,border:`2px solid ${t.f1}44`,borderTopColor:t.f1,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>:<IC.Activity/>}
+              {freeingComfy?"Unloading":"Unload"}
+            </button>
+            <button onClick={restartComfyUI} disabled={!!job||restartingComfy||freeingComfy} title="Restart ComfyUI to release system RAM held by the image service" style={railBtn(t.warm,{disabled:!!job||restartingComfy||freeingComfy})}>
+              {restartingComfy?<div style={{width:11,height:11,border:`2px solid ${t.warm}44`,borderTopColor:t.warm,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>:<IC.Refresh/>}
+              {restartingComfy?"Restarting":"Restart"}
+            </button>
+          </div>:<div style={{fontSize:11,color:t.mut}}>No checkpoints reported.</div>}
+        </>)}
+        {section("Canvas",IC.Image,<>
+          <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 74px",gap:8,alignItems:"end"}}>
+            <label style={labelS}>Aspect ratio
+              <select value={size} onChange={e=>setSize(e.target.value)} style={{...inputS,padding:"8px 10px",fontSize:12}}>
+                <option value="1024x1024">Square · 1024 x 1024</option>
+                <option value="1216x832">Landscape · 1216 x 832</option>
+                <option value="832x1216">Portrait · 832 x 1216</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+            <label style={labelS}>Count
+              <select value={count} onChange={e=>setCount(e.target.value)} style={{...inputS,padding:"8px 10px",fontSize:12}}>{[1,2,3,4].map(n=><option key={n} value={n}>{n}</option>)}</select>
             </label>
           </div>
-          {size==="custom"&&<div style={{display:"flex",gap:8}}>
-            <label style={{fontSize:10,color:t.mut}}>W<br/><input type="number" min={256} max={2048} step={8} value={customW} onChange={e=>setCustomW(e.target.value)} style={{...smallNum,marginTop:3}}/></label>
-            <label style={{fontSize:10,color:t.mut}}>H<br/><input type="number" min={256} max={2048} step={8} value={customH} onChange={e=>setCustomH(e.target.value)} style={{...smallNum,marginTop:3}}/></label>
+          {size==="custom"&&<div style={grid2}>
+            <label style={labelS}>Width<input type="number" min={256} max={2048} step={8} value={customW} onChange={e=>setCustomW(e.target.value)} style={smallNum}/></label>
+            <label style={labelS}>Height<input type="number" min={256} max={2048} step={8} value={customH} onChange={e=>setCustomH(e.target.value)} style={smallNum}/></label>
           </div>}
-          {job&&<div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:`${t.acc}0d`,border:`1px solid ${t.acc}28`,borderRadius:8,fontSize:12,color:t.dim}}>
+        </>)}
+        {section("Status",IC.Activity,<>
+          {job?<div style={{display:"flex",alignItems:"center",gap:10,padding:"9px 11px",background:`${t.acc}0d`,border:`1px solid ${t.acc}28`,borderRadius:8,fontSize:12,color:t.dim}}>
             <div style={{width:14,height:14,border:`2px solid ${t.acc}44`,borderTopColor:t.acc,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
-            {job.status==="queued"&&job.queuePos>0?`Queued behind ${job.queuePos} job(s)…`:elapsed<8?"Generating…":elapsed<60?`Generating… ${elapsed}s`:`Generating… ${elapsed}s (model may be cold-loading)`}
+            {job.status==="queued"&&job.queuePos>0?`Queued behind ${job.queuePos}`:elapsed<8?"Generating":elapsed<60?`Generating ${elapsed}s`:`Generating ${elapsed}s`}
+          </div>:<div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:8,alignItems:"center",fontSize:11,color:t.mut}}>
+            <span>Ready</span><span>{gallery.length} image{gallery.length===1?"":"s"}</span>
           </div>}
-          {error&&<div style={{padding:"10px 14px",background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:8,fontSize:12,color:t.err}}>{error}</div>}
-          <button onClick={toggleAdvanced} style={{marginTop:14,fontSize:11,padding:0,background:"none",border:"none",color:t.mut,cursor:"pointer",fontFamily:font,fontWeight:600,letterSpacing:.4}}>{showAdvanced?"▾":"▸"} Advanced</button>
-          {showAdvanced&&<div style={{marginTop:10,paddingTop:12,borderTop:`1px solid ${t.brd}28`}}>
-            <textarea value={negPrompt} onChange={e=>setNegPrompt(e.target.value)} placeholder="Negative prompt (optional) — things to avoid" rows={1} style={{...inputS,resize:"vertical",fontSize:12}}/>
-            <div style={{display:"flex",gap:14,flexWrap:"wrap",alignItems:"flex-end",marginTop:12}}>
-              <label style={{fontSize:10,color:t.mut}}>Steps<br/><input type="number" min={1} max={60} value={steps} onChange={e=>setSteps(e.target.value)} style={{...smallNum,marginTop:3}}/></label>
-              <label style={{fontSize:10,color:t.mut}}>CFG<br/><input type="number" min={1} max={20} step={0.5} value={cfg} onChange={e=>setCfg(e.target.value)} style={{...smallNum,marginTop:3}}/></label>
-              <label style={{fontSize:10,color:t.mut}}>Seed<br/><input type="text" placeholder="random" value={seed} onChange={e=>setSeed(e.target.value.replace(/[^\d]/g,""))} style={{...smallNum,width:104,marginTop:3}}/></label>
-              <label style={{fontSize:10,color:t.mut}}>Sampler<br/>
-                <select value={sampler} onChange={e=>setSampler(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>
+          {comfyMemory&&<div style={{padding:"8px 10px",background:`${comfyMemory.available?t.surface:t.warm}22`,border:`1px solid ${comfyMemory.available?t.brd:t.warm}33`,borderRadius:8,fontSize:10,color:comfyMemory.available?t.mut:t.warm,lineHeight:1.45}}>
+            {comfyMemory.available
+              ?`Queue ${comfyMemory.running||0}/${comfyMemory.pending||0} · idle ${comfyMemory.idle_seconds||0}s · loaded ${comfyMemory.loaded_models??"?"}`
+              :`Control node unavailable: ${comfyMemory.message}`}
+          </div>}
+          {error&&<div style={{padding:"9px 11px",background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:8,fontSize:12,color:t.err}}>{error}</div>}
+        </>)}
+        <section style={railSectionS}>
+          <button onClick={toggleAdvanced} style={{display:"flex",alignItems:"center",gap:7,width:"100%",padding:0,background:"none",border:"none",color:t.acc,cursor:"pointer",fontFamily:font}}>
+            <IC.Settings/><span style={{fontSize:10,fontWeight:900,letterSpacing:.9,textTransform:"uppercase"}}>Advanced Sampling</span><div style={{flex:1}}/><span style={{display:"flex",transform:showAdvanced?"rotate(0deg)":"rotate(-90deg)",transition:"transform .15s"}}><IC.ChevDown/></span>
+          </button>
+          {showAdvanced&&<div style={{display:"flex",flexDirection:"column",gap:10}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(0,1fr))",gap:8,alignItems:"end"}}>
+              <label style={labelS}>Steps<input type="number" min={1} max={60} value={steps} onChange={e=>setSteps(e.target.value)} style={smallNum}/></label>
+              <label style={labelS}>CFG<input type="number" min={1} max={20} step={0.5} value={cfg} onChange={e=>setCfg(e.target.value)} style={smallNum}/></label>
+              <label style={labelS}>Seed<input type="text" placeholder="random" value={seed} onChange={e=>setSeed(e.target.value.replace(/[^\d]/g,""))} style={smallNum}/></label>
+            </div>
+            <div style={grid2}>
+              <label style={labelS}>Sampler
+                <select value={sampler} onChange={e=>setSampler(e.target.value)} style={{...inputS,padding:"7px 8px",fontSize:12}}>
                   {["euler","euler_ancestral","dpmpp_2m","dpmpp_2m_sde","dpmpp_3m_sde","dpmpp_sde","heun","ddim","uni_pc","lcm"].map(s2=><option key={s2} value={s2}>{s2}</option>)}
                 </select>
               </label>
-              <label style={{fontSize:10,color:t.mut}}>Scheduler<br/>
-                <select value={scheduler} onChange={e=>setScheduler(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>
+              <label style={labelS}>Scheduler
+                <select value={scheduler} onChange={e=>setScheduler(e.target.value)} style={{...inputS,padding:"7px 8px",fontSize:12}}>
                   {["normal","karras","sgm_uniform","exponential","simple","beta"].map(s2=><option key={s2} value={s2}>{s2}</option>)}
                 </select>
               </label>
-              <label title="How the checkpoint was trained. Standard = normal SDXL (sd_xl_base, most merges). Flow = Flow Matching models like BigASP v2.5 (adds ModelSamplingSD3). v-pred = v-prediction models like NoobAI vpred (adds ModelSamplingDiscrete + RescaleCFG). Wrong choice → solid-color or deep-fried output." style={{fontSize:10,color:modelSampling?t.acc:t.mut}}>Model type<br/>
-                <select value={modelSampling} onChange={e=>setModelSampling(e.target.value)} style={{...inputS,width:"auto",padding:"6px 8px",fontSize:12,marginTop:3}}>
-                  <option value="">Standard (eps)</option>
-                  <option value="flow">Flow — BigASP v2.5</option>
-                  <option value="vpred">v-pred — NoobAI etc.</option>
+            </div>
+            <div style={grid2}>
+              <label title="Checkpoint training type" style={{...labelS,color:modelSampling?t.acc:t.mut}}>Model type
+                <select value={modelSampling} onChange={e=>setModelSampling(e.target.value)} style={{...inputS,padding:"7px 8px",fontSize:12}}>
+                  <option value="">Standard</option>
+                  <option value="flow">Flow matching</option>
+                  <option value="vpred">v-prediction</option>
                 </select>
               </label>
-              {vaes.length>0&&<label title="Override the checkpoint's baked-in VAE. Baked is usually fine; fp16-fix cures black/NaN images, contrast VAEs punch up colors. Ignored by Flux workflows." style={{fontSize:10,color:vae?t.acc:t.mut}}>VAE<br/>
-                <select value={vae} onChange={e=>setVae(e.target.value)} style={{...inputS,width:"auto",maxWidth:200,padding:"6px 8px",fontSize:12,marginTop:3}}>
-                  <option value="">Baked (checkpoint)</option>
+              {vaes.length>0?<label title="Override the checkpoint VAE" style={{...labelS,color:vae?t.acc:t.mut}}>VAE
+                <select value={vae} onChange={e=>setVae(e.target.value)} style={{...inputS,padding:"7px 8px",fontSize:12}}>
+                  <option value="">Baked</option>
                   {vaes.map(v=><option key={v} value={v}>{v.replace(/\.(safetensors|pt|ckpt)$/i,"")}</option>)}
                 </select>
-              </label>}
-              {checkpoint&&<button onClick={saveModelDefaults} title={`Save the current Model type / Sampler / Scheduler / CFG / Steps as the automatic defaults for ${checkpoint}`} style={{fontSize:10,padding:"6px 9px",borderRadius:6,background:`${t.warm}10`,border:`1px solid ${t.warm}33`,color:t.warm,cursor:"pointer",fontFamily:font,fontWeight:600}}>★ Save defaults</button>}
+              </label>:<span/>}
             </div>
-            <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",marginTop:12}}>
-              <label style={{fontSize:10,color:t.mut}}>Workflow&nbsp;
-                <select value={workflow} onChange={e=>applyWorkflow(e.target.value)} style={{...inputS,width:"auto",maxWidth:260,padding:"6px 8px",fontSize:12}}>
-                  <option value="">Default (built-in SDXL)</option>
-                  {workflows.map(w=><option key={w.name} value={w.name}>{w.name}{w.has_lora?" ⚡":""}</option>)}
-                </select>
-              </label>
-              <button onClick={()=>wfUploadRef.current?.click()} title="Upload a workflow: API-format JSON (ComfyUI → Dev mode → Export (API)) OR any PNG generated by ComfyUI — the workflow is read from the image metadata" style={{fontSize:10,padding:"6px 10px",borderRadius:6,background:`${t.acc}12`,border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",fontFamily:font,fontWeight:600}}>+ Upload workflow / image</button>
-              <input ref={wfUploadRef} type="file" accept=".json,.png,application/json,image/png" style={{display:"none"}} onChange={e=>{uploadWorkflow(e.target.files?.[0]);e.target.value="";}}/>
-              {workflow&&<button onClick={async()=>{if(!confirm(`Delete workflow "${workflow}"?`))return;await fetch(`${API}/api/images/workflows/${encodeURIComponent(workflow)}`,{method:"DELETE"}).catch(()=>{});setWorkflow("");loadWorkflows();}} title="Delete this saved workflow" style={{fontSize:10,padding:"6px 8px",borderRadius:6,background:`${t.err}10`,border:`1px solid ${t.err}30`,color:t.err,cursor:"pointer",fontFamily:font}}>✕</button>}
-              {activeWf?.model_sampling_builtin&&<span style={{fontSize:9,color:t.warm}}>{activeWf.model_sampling_builtin==="flow"?"flow-matching":activeWf.model_sampling_builtin==="flux-graph"?"Flux architecture":"v-pred"} — sampling built into workflow{activeWf.model_sampling_builtin==="flux-graph"?" (Model dropdown not used)":""}</span>}
-            </div>
+            {checkpoint&&<button onClick={saveModelDefaults} title="Save current sampling defaults for the selected model" style={{...railBtn(t.warm),alignSelf:"flex-start"}}><IC.Star/>Save defaults</button>}
           </div>}
+        </section>
+        {section("Workflow",IC.Cube,<>
+          <label style={labelS}>Workflow
+            <select value={workflow} onChange={e=>applyWorkflow(e.target.value)} style={{...inputS,padding:"8px 10px",fontSize:12}}>
+              <option value="">Default built-in graph</option>
+              {workflows.map(w=><option key={w.name} value={w.name}>{w.name}{w.has_lora?" *":""}</option>)}
+            </select>
+          </label>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+            <button onClick={()=>wfUploadRef.current?.click()} title="Upload API JSON or workflow-bearing PNG" style={railBtn(t.acc)}><IC.Upload/>Upload</button>
+            <input ref={wfUploadRef} type="file" accept=".json,.png,application/json,image/png" style={{display:"none"}} onChange={e=>{uploadWorkflow(e.target.files?.[0]);e.target.value="";}}/>
+            {workflow&&<button onClick={async()=>{if(!confirm(`Delete workflow "${workflow}"?`))return;await fetch(`${API}/api/images/workflows/${encodeURIComponent(workflow)}`,{method:"DELETE"}).catch(()=>{});setWorkflow("");loadWorkflows();}} title="Delete this saved workflow" style={railBtn(t.err)}><IC.Trash/>Delete</button>}
+            {activeWf?.model_sampling_builtin&&<span style={{fontSize:9,color:t.warm}}>{activeWf.model_sampling_builtin==="flow"?"flow-matching":activeWf.model_sampling_builtin==="flux-graph"?"Flux architecture":"v-pred"} sampling built in</span>}
+          </div>
+        </>)}
         </div>
       {/* RIGHT VIEWER — newest/selected image large, carousel of the rest below */}
       <div style={{flex:1,minWidth:0,display:"flex",flexDirection:"column",padding:16,gap:10,overflow:"hidden"}}>
@@ -1794,7 +1949,7 @@ function ResearchLiveStatus({t,font,events=[],metrics={},sources=[],researchRunn
 }
 
 // Inline tool status: shows latest pill, expands to show all
-const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifact,historical,md,savedEvts})=>{
+const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifact,historical,md,savedEvts,msgContent})=>{
   const [showAll,setShowAll]=useState(false);
   if(!evts.length) return null;
 
@@ -1917,8 +2072,14 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
     fileReadyEvts.forEach(e=>{const d=e.data||{};if(!d.filename)return;if(!fileMap[d.filename])fileMap[d.filename]={d,count:1};else{fileMap[d.filename].d=d;fileMap[d.filename].count++;}});
     return <>{Object.values(fileMap).map(({d,count},i)=>{
     const isImg=d.is_image||/\.(png|jpe?g|gif|svg|webp)$/i.test(d.filename);
+    // The backend now streams generated-image markdown inline at the point of
+    // generation, so the image already renders inside the message body. Skip the
+    // duplicate <img> here when the message content already references this URL;
+    // keep the download/preview/artifact buttons. Older messages (no inline
+    // markdown) and post-clear refinement paths fall back to rendering it here.
+    const inlineAlready=isImg&&d.url&&typeof msgContent==="string"&&msgContent.includes(d.url);
     return <div key={i} style={{marginTop:5}}>
-      {isImg&&<img src={`${API}${d.url}`} alt={d.filename} style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`,cursor:"pointer"}} onClick={()=>onPreview&&onPreview(d.filename,d.url)} onError={e=>e.target.style.display="none"}/>}
+      {isImg&&!inlineAlready&&<img src={`${API}${d.url}`} alt={d.filename} style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`,cursor:"pointer"}} onClick={()=>onPreview&&onPreview(d.filename,d.url)} onError={e=>e.target.style.display="none"}/>}
       <div style={{display:"inline-flex",alignItems:"center",gap:4,marginTop:isImg?2:0}}>
       <a href={d.artifact_id?`${API}/api/artifacts/${d.artifact_id}/download`:`${API}${d.url}`} download={d.filename}
         style={{display:"inline-flex",alignItems:"center",gap:7,padding:"7px 14px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontSize:12,fontWeight:700,cursor:"pointer"}}>
@@ -2184,7 +2345,7 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
       {editing?<><button onClick={()=>saveMemEdit(m,mode==="suggested")} style={btnS(t.ok)}>{mode==="suggested"?"Save + Accept":"Save"}</button><button onClick={()=>{setMemEdit(null);setMemEditText("");}} style={btnS(t.mut)}>Cancel</button></>
       :mode==="suggested"?<><button onClick={()=>acceptMemory(m)} style={btnS(t.ok)}>Accept</button><button onClick={()=>startMemEdit(m)} style={btnS(t.acc)}>Edit</button><button onClick={()=>rejectMemory(m)} style={btnS(t.err)}>Reject</button></>
       :<><button onClick={()=>patchMemory(m,{pinned:m.pinned?0:1})} style={btnS(m.pinned?t.warm:t.mut)}>{m.pinned?"Unpin":"Pin"}</button><button onClick={()=>startMemEdit(m)} style={btnS(t.acc)}>Edit</button><button onClick={()=>patchMemory(m,{status:"archived"})} style={btnS(t.mut)}>Archive</button><button onClick={()=>deleteMemory(m)} style={btnS(t.err)}>Delete</button></>}
-      {m.source_conversation_id&&<button onClick={()=>onOpenConv&&onOpenConv(m.source_conversation_id)} style={{...btnS(t.f1),marginLeft:"auto"}}>Source -></button>}
+      {m.source_conversation_id&&<button onClick={()=>onOpenConv&&onOpenConv(m.source_conversation_id)} style={{...btnS(t.f1),marginLeft:"auto"}}>Source</button>}
     </div>
   </div>;};
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
@@ -3399,6 +3560,8 @@ function HyprChat(){
   const [imgChatCkpt,setImgChatCkpt]=useState(()=>lsGet("hc-img-chat-ckpt",""));
   const [imgChatRes,setImgChatRes]=useState(()=>lsGet("hc-img-chat-res","1024x1024")||"1024x1024");
   const [imgChatVae,setImgChatVae]=useState(()=>lsGet("hc-img-chat-vae",""));
+  const [imgChatWorkflow,setImgChatWorkflow]=useState(()=>lsGet("hc-img-chat-workflow",""));
+  const [imgChatWorkflows,setImgChatWorkflows]=useState([]); // saved workflow names for the chat-default selector
   const [imgChatPrefix,setImgChatPrefix]=useState("");
   const [imgChatNeg,setImgChatNeg]=useState("");
   const [imgChatComposeModel,setImgChatComposeModel]=useState(()=>lsGet("hc-img-chat-compose",""));
@@ -3564,6 +3727,7 @@ function HyprChat(){
   useEffect(()=>{persistServerSetting("hc-img-chat-ckpt","image_chat_checkpoint",imgChatCkpt);},[imgChatCkpt]);
   useEffect(()=>{persistServerSetting("hc-img-chat-res","image_chat_resolution",imgChatRes);},[imgChatRes]);
   useEffect(()=>{persistServerSetting("hc-img-chat-vae","image_chat_vae",imgChatVae);},[imgChatVae]);
+  useEffect(()=>{persistServerSetting("hc-img-chat-workflow","image_chat_workflow",imgChatWorkflow);},[imgChatWorkflow]);
   useEffect(()=>{persistServerSetting("hc-img-chat-compose","image_chat_compose_model",imgChatComposeModel);},[imgChatComposeModel]);
   // Per-model prompt fields track the selected default image model
   useEffect(()=>{
@@ -3621,13 +3785,14 @@ function HyprChat(){
   const [artifactFocusId,setArtifactFocusId]=useState(null);
   const previousPanelRef=useRef("chat");
   const [settingsTab,setSettingsTab]=useState("connections");
-  // Lazy-load the checkpoint/VAE dropdown data the first time the Model &
-  // Generation tab is opened with ComfyUI configured. (Must stay below the
+  // Lazy-load the checkpoint/VAE dropdown data and refresh saved workflow names
+  // when the Model & Generation tab is opened with ComfyUI configured. (Must stay below the
   // panel/settingsTab declarations — hooks read them at render time.)
   useEffect(()=>{
-    if(panel!=="settings"||settingsTab!=="generation"||!comfyuiUrl||imgChatLists)return;
-    fetch(`${API}/api/images/checkpoints`).then(r=>r.ok?r.json():null).then(d=>{if(d)setImgChatLists(d);}).catch(()=>{});
-  },[panel,settingsTab,comfyuiUrl,imgChatLists]);
+    if(panel!=="settings"||settingsTab!=="generation"||!comfyuiUrl)return;
+    if(!imgChatLists)fetch(`${API}/api/images/checkpoints`).then(r=>r.ok?r.json():null).then(d=>{if(d)setImgChatLists(d);}).catch(()=>{});
+    fetch(`${API}/api/images/workflows`).then(r=>r.ok?r.json():null).then(d=>{if(d)setImgChatWorkflows(d.workflows||[]);}).catch(()=>{});
+  },[panel,settingsTab,comfyuiUrl]);
   const [users,setUsers]=useState([]);
   const [currentUser,setCurrentUser]=useState(null);
   const [currentUserId,setCurrentUserId]=useState(()=>hcStoredUserId());
@@ -4351,6 +4516,7 @@ function HyprChat(){
       if(d.image_chat_checkpoint!=null)hydrateServerSetting("image_chat_checkpoint",setImgChatCkpt,d.image_chat_checkpoint,imgChatCkpt);
       if(d.image_chat_resolution)hydrateServerSetting("image_chat_resolution",setImgChatRes,d.image_chat_resolution,imgChatRes);
       if(d.image_chat_vae!=null)hydrateServerSetting("image_chat_vae",setImgChatVae,d.image_chat_vae,imgChatVae);
+      if(d.image_chat_workflow!=null)hydrateServerSetting("image_chat_workflow",setImgChatWorkflow,d.image_chat_workflow,imgChatWorkflow);
       if(d.image_chat_prompt_prefix!=null)setImgChatPrefix(d.image_chat_prompt_prefix);
       if(d.image_chat_negative!=null)setImgChatNeg(d.image_chat_negative);
       if(d.image_chat_compose_model!=null)hydrateServerSetting("image_chat_compose_model",setImgChatComposeModel,d.image_chat_compose_model,imgChatComposeModel);
@@ -9204,7 +9370,15 @@ function HyprChat(){
                       {vaeList.map(v=><option key={v} value={v}>{v.replace(/\.(safetensors|pt|ckpt)$/i,"")}</option>)}
                     </select>
                   </label>
+                  <label style={{fontSize:10,color:t.mut}}>Workflow<br/>
+                    <select value={imgChatWorkflow} onChange={e=>setImgChatWorkflow(e.target.value)} style={{...sel,maxWidth:240,marginTop:3}}>
+                      <option value="">Default (built-in SDXL)</option>
+                      {imgChatWorkflows.map(w=><option key={w.name} value={w.name}>{w.name}{w.has_lora?" ⚡":""}</option>)}
+                      {imgChatWorkflow&&!imgChatWorkflows.some(w=>w.name===imgChatWorkflow)&&<option value={imgChatWorkflow}>{imgChatWorkflow} (missing!)</option>}
+                    </select>
+                  </label>
                 </div>
+                <div style={{fontSize:10,color:t.mut,marginTop:-4,marginBottom:8}}>A saved workflow renders every chat image instead of the built-in template (personas with their own image workflow still override it). The checkpoint/VAE above patch into KSampler-family graphs; a Flux/UNET workflow owns its own model.</div>
                 {imgChatCkpt?<>
                   <div style={{marginBottom:8}}>
                     <div style={{fontSize:10,color:t.mut,marginBottom:3}}>Default prompt for <span style={{color:t.acc,fontWeight:600}}>{imgChatCkpt.replace(/\.(safetensors|ckpt)$/i,"")}</span> — saved with this model, switches when you change models</div>
@@ -10123,11 +10297,11 @@ function HyprChat(){
                       </span>)}
                     </div>}
                     {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                    {msg.isS&&!msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
+                    {msg.isS&&!msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
                   </div>
-                  {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
-                  {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
-                  {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>;})()}
+                  {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
+                  {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
+                  {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>;})()}
                   {(()=>{if(isU)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;if(i!==lastAI||!coderWorkflows.length)return null;return coderWorkflows.slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
                   {/* Coder Bot v2 — durable run cards. Render one card per unique run_id.
                       Sources, in priority: explicit metadata.run_ids (written server-side at

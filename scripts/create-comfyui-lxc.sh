@@ -103,12 +103,30 @@ PHASE 2 — run inside the container (pct enter $CTID):
 Description=ComfyUI
 After=network.target
 [Service]
+Environment=HYPRCHAT_COMFY_IDLE_UNLOAD_SECONDS=300
+Environment=HYPRCHAT_COMFY_WATCH_INTERVAL_SECONDS=10
+Environment="HYPRCHAT_COMFY_RESTART_COMMAND=systemctl restart comfyui"
 ExecStart=/opt/comfyui/venv/bin/python main.py --listen 0.0.0.0 --port 8188 --cuda-device 1 --disable-smart-memory
 WorkingDirectory=/opt/comfyui
 Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 UNIT
+
+  # 2b. Install HyprChat's ComfyUI control node from this repo on your dev machine.
+  #     The node is optional but enables purge cleanup, explicit model unload,
+  #     memory status, restart, and 5-minute idle model unload:
+  #       scp scripts/comfyui_hyprchat_cleanup.py root@$IP:/opt/comfyui/custom_nodes/
+  #       systemctl daemon-reload
+  #       systemctl enable --now comfyui
+  #       journalctl -u comfyui -n 80 --no-pager | grep "HyprChat ComfyUI" || true
+  #
+  #     To tune idle unload later:
+  #       systemctl edit comfyui
+  #       # [Service]
+  #       # Environment=HYPRCHAT_COMFY_IDLE_UNLOAD_SECONDS=300
+  #       # Environment=HYPRCHAT_COMFY_WATCH_INTERVAL_SECONDS=10
+  #       # Environment="HYPRCHAT_COMFY_RESTART_COMMAND=systemctl restart comfyui"
 
   # 3. Voice services (docker is simplest; both are OpenAI-compatible).
   #    nvidia-container-toolkit needs NVIDIA's apt repo; docker-in-LXC needs
@@ -133,6 +151,9 @@ UNIT
 
 VERIFY (from any LAN box):
   curl http://$IP:8188/system_stats
+  curl -X POST http://$IP:8188/hyprchat/free
+  curl http://$IP:8188/hyprchat/memory
+  curl -X POST http://$IP:8188/hyprchat/restart
   curl http://$IP:8001/v1/models
   curl http://$IP:8880/v1/audio/voices
 

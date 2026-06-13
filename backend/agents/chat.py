@@ -12,6 +12,7 @@ from datetime import datetime
 import config
 import database as db
 import model_providers
+import persona_images
 import rag
 from tools import (CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls,
                    strip_tool_calls, _v2_name_match)
@@ -69,14 +70,27 @@ _PERSONA_PLACEHOLDER_RE = re.compile(
 # Explicit "photo of you" request — gate for the selfie rescue. Deliberately
 # narrow: generic "make me an image of X" must NOT match (that's normal
 # generate_image territory, not a persona selfie).
+_ADULT_PHOTO_CUE_RE_PART = (
+    r"(?:adult(?:-only)?|nsfw|explicit|unrated|mature|nude|naked|"
+    r"undressed|without\s+clothes|no\s+clothes|topless|bottomless|"
+    r"lingerie|lewd|naughty|spicy|sexy|sensual|erotic|sexual)"
+)
 _SELFIE_REQUEST_RE = re.compile(
     r"\bselfie\b"
     r"|\b(?:photo|pic|picture|image|snap)s?\b.{0,30}\bof\s+(?:you|yourself|u|urself|ur\s*self|your)\b"
     r"|\b(?:send|show|share)\s+(?:me\s+)?(?:a\s+|another\s+)?(?:photo|pic|picture)\s+of\s+(?:you|u)\b"
-    r"|\bsend\s+(?:me\s+)?nudes?\b"
+    rf"|\b(?:send|show|share|give)\s+(?:me\s+)?(?:some\s+)?nudes?\b"
+    rf"|\b(?:send|show|share|give)\s+(?:me\s+)?(?:a\s+|an\s+|another\s+|some\s+)?{_ADULT_PHOTO_CUE_RE_PART}\s+(?:photo|pic|picture|selfie|snap)s?\b"
+    rf"|\b{_ADULT_PHOTO_CUE_RE_PART}\s+(?:photo|pic|picture|selfie|snap)s?\b"
     r"|\bwhat\s+do\s+(?:you|u)\s+look\s+like\b"
     r"|\bsee\s+(?:you|u)\s+(?:irl|rn)\b"
     r"|\b(?:another|one\s+more)\s+(?:photo|pic|picture|selfie)s?\b",
+    re.IGNORECASE,
+)
+_VISUAL_PHOTO_REQUEST_RE = re.compile(
+    r"\b(?:photo|photos|pic|pics|picture|pictures|image|images|snapshot|snap|selfie|see\s+(?:you|u)|show\s+(?:me\s+)?(?:you|yourself|u))\b"
+    r"|\b(?:facing\s+away|turned\s+away|back\s+to\s+(?:the\s+)?camera|from\s+behind|back\s+view|rear\s+view|"
+    r"lying|laying|reclining|on\s+(?:a\s+|the\s+)?bed|sitting|standing|kneeling|crouching|pose|outfit|fit\s+check)\b",
     re.IGNORECASE,
 )
 
@@ -138,12 +152,30 @@ _TOOL_JUNK_MARKER_RE = re.compile(
 async def _compose_persona_photo_prompt(http, appearance: str, user_request: str,
                                          reply_text: str, *, model: str = "",
                                          rating_text: str = "") -> str:
-    """Rescue tier 2: write an image prompt that fits the persona's appearance,
-    the user's specific request, and the current scene. The caller picks the
-    model (normally the conversation's own chat model — in an uncensored
-    roleplay a stock helper model would refuse or quietly sanitize the prompt).
-    Returns "" on any failure so the deterministic tier runs."""
+    """Rescue tier 2: structured image prompt composition.
+
+    The caller picks the model (normally the conversation's own chat model). The
+    model must return JSON, which is strictly validated before use. Invalid JSON
+    falls back to the deterministic persona_images composer; transport/model
+    failures return "" so the caller's last-resort deterministic tier runs.
+    """
     model = model or model_providers.reject_cloud(config.WORKSPACE_MODEL or "") or config.DEFAULT_MODEL
+    rating_key = next(
+        (k for k in sorted(_PERSONA_RATING_GUIDANCE, key=len, reverse=True)
+         if str(rating_text or "").startswith(k)),
+        rating_text or "PG-13",
+    )
+    visual_context = persona_images.build_visual_context(
+        appearance=appearance,
+        rating=rating_key,
+        user_request=user_request,
+        tool_prompt=user_request,
+        current_reply=reply_text,
+    )
+    public_visual_context = {
+        k: v for k, v in visual_context.items()
+        if not str(k).startswith("_")
+    }
     rating_line = (
         f"Content rating for this roleplay: {rating_text} — match the prompt's explicitness "
         "to this rating and to what the user asked for; do not tone down a request the rating "
@@ -152,26 +184,35 @@ async def _compose_persona_photo_prompt(http, appearance: str, user_request: str
     prompt = (
         "You are an expert Stable Diffusion prompt writer. This is a technical task, not a "
         "conversation: do NOT greet, chat, roleplay, ask questions, or use emoji.\n"
-        "Write ONE image prompt (comma-separated descriptive phrases, 30-70 words, third "
-        "person, no explanations, no quotes, no markdown) for a photo of a roleplay character.\n"
-        f"Character appearance: {appearance[:400]}\n"
-        f"The user asked for: {user_request[:300]}\n"
-        f"The character's current reply (scene/outfit/mood cues): {reply_text[:400]}\n"
+        "Return ONLY valid JSON with exactly these string keys: prompt, negative_prompt, "
+        "framing, continuity_notes. No markdown, no code fence, no explanation.\n"
+        "The prompt value must be one comma-separated image prompt, 30-70 words, third person.\n"
+        f"Compact visual context JSON: {json.dumps(public_visual_context, ensure_ascii=True)[:1800]}\n"
         + rating_line +
         "The prompt must depict the character fulfilling the user's SPECIFIC request in the "
-        "current scene — not a generic portrait. Use selfie framing (selfie, phone camera "
-        "angle, looking at viewer) if a selfie was asked for, otherwise candid photo framing. "
-        "Output ONLY the prompt, nothing else."
+        "latest user request — not a generic portrait and not an older caption. Preserve "
+        "explicit pose, body orientation, camera viewpoint, location, activity, clothing/state, "
+        "and mood from the latest user request. Reuse prior scene details only when "
+        "continuity_requested is true. If the request says the character is facing away, "
+        "back-facing, reclining, or located on furniture, those details must be visible in the "
+        "prompt. Use selfie framing only if a selfie was asked for; otherwise use "
+        "candid/request-specific framing. Do not add a phone, holding-phone prop, "
+        "phone-camera wording, or mirror framing unless the user explicitly requested a phone "
+        "or mirror selfie. "
+        "Output ONLY the JSON object."
     )
     try:
         out = await model_providers.complete_chat(
             http, model, prompt, temperature=0.8, num_ctx=4096, num_predict=250,
             timeout=30, ollama_url=config.OLLAMA_URL)
-        out = re.sub(r"\s+", " ", (out or "").strip().strip('"').strip())
-        if not _looks_like_image_prompt(out):
-            print(f"[CHAT] photo prompt compose rejected (not a prompt, {len(out)} chars)")
-            return ""
-        return out[:800]
+        payload = persona_images.compose_persona_image_prompt(
+            raw_prompt=user_request,
+            visual_context=visual_context,
+            structured=out,
+        )
+        if payload.get("fallback_used"):
+            print("[CHAT] photo prompt compose fell back after invalid structured JSON")
+        return (payload.get("prompt") or "")[:900]
     except Exception as e:
         print(f"[CHAT] photo prompt compose failed: {e}")
         return ""
@@ -873,7 +914,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     persona_kb_ids = []
     persona_think_budget = None
     persona_placeholder_ctx = None
+    persona_name = ""
     persona_appearance = ""
+    persona_scenario = ""
+    persona_lore = ""
     persona_rating_guidance = ""
     persona_rating_key = "PG-13"  # safe default: rescue treats unknown personas as SFW
     _is_v2_persona = False
@@ -881,6 +925,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         all_configs = await db.get_model_configs()
         mc = next((c for c in all_configs if c["id"] == req.persona_id), None)
         if mc:
+            persona_name = mc.get("name") or ""
             persona_system_prompt = mc.get("system_prompt") or None
             # Same matching rules as the tools.py gate (_is_v2_persona); the
             # two still differ on source — req.persona_id here vs the
@@ -901,6 +946,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 }
                 persona_fields = params.get("persona") if isinstance(params.get("persona"), dict) else {}
                 persona_appearance = str(persona_fields.get("appearance") or "").strip()
+                persona_scenario = str(persona_fields.get("scenario") or "").strip()
+                persona_lore = str(persona_fields.get("lore") or "").strip()
                 thinking_mode = _normalize_persona_thinking_mode(persona_fields.get("thinking_mode", params.get("thinking_mode")))
                 if thinking_mode != "auto":
                     persona_think_budget = 0 if thinking_mode == "off" else 1
@@ -1149,12 +1196,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 "user receives no image.\n"
                 "If you cannot use native tool calling, output EXACTLY this format:\n"
                 "<tool_call>\n"
-                '{"name": "generate_image", "arguments": {"prompt": "selfie of ' + _app_example +
-                ', [CURRENT SCENE], [CURRENT OUTFIT AND ACTIVITY], [MOOD], phone camera angle, '
-                'looking at viewer, casual candid"}}\n'
+                '{"name": "generate_image", "arguments": {"prompt": "photo of ' + _app_example +
+                ', [REQUESTED POSE OR VIEWPOINT], [CURRENT SCENE], [CURRENT OUTFIT AND ACTIVITY], '
+                '[MOOD], candid natural camera framing"}}\n'
                 "</tool_call>\n"
-                "Replace every [BRACKETED] part with the real current scene, outfit, activity, and "
-                "the user's SPECIFIC request. NEVER send the example verbatim and NEVER reuse a "
+                "Replace every [BRACKETED] part with the real requested pose/viewpoint, current "
+                "scene, outfit, activity, and the user's SPECIFIC request. NEVER send the example verbatim and NEVER reuse a "
                 "previous photo's prompt — every photo must be different and match exactly what was "
                 "asked and what is happening in the conversation right now. The photo's "
                 "explicitness follows the PERSONA CONTENT RATING section and the user's request: "
@@ -1163,7 +1210,9 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 "State the requested outfit/undress state EXPLICITLY in the prompt — never "
                 "substitute clothing or coverage the user did not ask for; the prompt must match "
                 "the request, not a toned-down version of it. "
-                "For non-selfie shots use candid photo framing instead of selfie tags. You may tease or stay playful in "
+                "For non-selfie shots use candid or request-specific framing instead of selfie tags. "
+                "Never include a phone, holding-phone prop, phone-camera wording, or mirror framing unless the "
+                "user explicitly asked for a phone or mirror selfie. You may tease or stay playful in "
                 "your text, but the tool call is not optional. Present the result in character as "
                 "a photo of yourself — never mention image generation, Stable Diffusion, or "
                 "prompts. You can also send photos of places or things you're talking about the "
@@ -1243,7 +1292,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             "needs an equation, reference it by name in the node and write the actual equation "
             "as a separate `$$...$$` block ABOVE or BELOW the diagram. Never put `$...$` or "
             "`\\frac{}{}` or other LaTeX syntax inside a mermaid node label — it will show as "
-            "raw dollar-sign text instead of rendered math."
+            "raw dollar-sign text instead of rendered math. Likewise keep backticks and "
+            "parentheses out of node labels (they break Mermaid parsing) — use plain words."
         )
     })
 
@@ -1586,6 +1636,13 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     _review_round = 0
     _review_budget = max(0, min(3, int(getattr(req, "effort_rounds", 0) or 0)))
     _best_review_content = ""  # Longest detailed answer seen so far — used for anti-regression
+    # Inline images: generated-image markdown is streamed at the point of
+    # generation (between round texts) so it renders where it was made, not at
+    # the end. `_turn_text` mirrors everything streamed this turn (round texts +
+    # injected image markdown) in order, so a mid-turn disconnect snapshot
+    # matches what the user saw. The happy-path final content still comes from
+    # the frontend PATCH on `done`.
+    _turn_text = ""
 
     for round_num in range(MAX_ROUNDS):
         content = ""
@@ -2279,7 +2336,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         if (not tool_calls and not _selfie_rescued and not _gen_image_called
                 and persona_appearance and config.COMFYUI_URL
                 and "generate_image" in available_tool_names
-                and _SELFIE_REQUEST_RE.search(_latest_user_text)):
+                and (_SELFIE_REQUEST_RE.search(_latest_user_text)
+                     or re.search(r"\b(?:photo|photos|pic|pics|picture|pictures|image|images|snapshot|snap)\b", _latest_user_text, re.I))):
             _selfie_rescued = True
             _gen_image_called = True
             # Build a prompt that fits THIS request and scene — never a fixed
@@ -2317,7 +2375,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             if not _photo_prompt:
                 _req_words = "" if _sfw_persona else _request_words(_latest_user_text)
                 _photo_prompt = (f"{persona_appearance}, {(_req_words + ', ') if _req_words else ''}"
-                                 "selfie, phone camera angle, looking at viewer, casual candid photo")
+                                 "request-specific candid photo, natural camera framing")
             tool_calls = [{"function": {"name": "generate_image", "arguments": {"prompt": _photo_prompt[:900]}}}]
             messages.append({"role": "tool", "content": "SYSTEM: Your photo was auto-sent because you described it without calling the tool. Next time call generate_image directly in your reply."})
             print("[CHAT]   selfie-rescue: forced generate_image (prompt fitted to request/scene)")
@@ -2359,7 +2417,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 _stream_run_ids = [r["id"] for r in _runs_now
                                     if r.get("started_at", "") >= _stream_started_at]
                 await db.update_message(_assistant_msg_id,
-                    content=content,
+                    content=(_turn_text + content) if _turn_text else content,
                     metadata={
                         "stream_started_at": _stream_started_at,
                         "in_progress": True,
@@ -2453,7 +2511,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                             return
                         messages.append({"role": "tool", "content": "STOP. You are stuck in a loop. Summarize what you accomplished and respond to the user NOW. Do not call any more tools."})
                     else:
-                        messages.append({"role": "tool", "content": "You already called this tool with the same arguments. Do NOT repeat the same call. Provide your final response to the user now."})
+                        messages.append({"role": "tool", "content": "You already called this tool with the same arguments. Do NOT repeat the same call, and do NOT restart or repeat the answer you already wrote above — it is already visible to the user. Continue from where you left off, or finish if the answer is complete."})
                     continue
 
                 _prev_tool_key = _tool_key
@@ -2464,10 +2522,24 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             if _streamed_content and _text_tool_call_round:
                 yield f"data: {json.dumps({'type': 'clear'})}\n\n"
             if content:
-                cleaned = re.sub(r'```\w*\n.*?```', '', content, flags=re.DOTALL).strip()
+                # Replace fenced blocks in the MODEL-facing copy with a
+                # placeholder (not nothing). Deleting them outright made the
+                # model see its own answer with empty sections and "re-present"
+                # the whole showcase next round (triple-restart bug). The
+                # placeholder keeps structure and says the block is already
+                # shown, so the model continues instead of restarting.
+                cleaned = re.sub(
+                    r'```\w*\n.*?```',
+                    '`[code/chart/diagram block already shown to the user above — do not rewrite it]`',
+                    content, flags=re.DOTALL).strip()
                 msg["content"] = cleaned
 
             messages.append(msg)
+            # Accumulate this round's user-visible text for the disconnect
+            # snapshot. Text-tool-call rounds get cleared from the frontend, so
+            # they contribute nothing visible — skip them.
+            if content.strip() and not _text_tool_call_round:
+                _turn_text += content
             yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
 
             # ── Classify tools for parallel vs sequential execution ──
@@ -2490,11 +2562,11 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             # ── Request-fidelity backstop (adult-rated personas only): the
             # chat model sometimes says one thing in prose but writes a
             # toned-down image prompt (e.g. dresses the character despite the
-            # request). If the user's photo-request words are missing from a
+            # request). If the user's visual-request words are missing from a
             # generate_image prompt, append them with ComfyUI weight syntax so
-            # the requested state outweighs contradictory phrasing.
+            # the requested pose/state outweighs contradictory phrasing.
             if (persona_appearance and not _sfw_persona
-                    and _SELFIE_REQUEST_RE.search(_latest_user_text)):
+                    and _VISUAL_PHOTO_REQUEST_RE.search(_latest_user_text)):
                 # Sanitize for ComfyUI weight syntax — user punctuation like
                 # ( ) : would break the (text:1.2) wrapper.
                 _rw = re.sub(r"[():]", " ", _request_words(_latest_user_text))
@@ -2561,17 +2633,60 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     elif tool_name == "generate_code":
                         _tool_detail = f" ({tool_args.get('language', '')})"
 
-                    await events.emit(conv_id, "tool_start", {
-                        "tool": tool_name, "icon": _tool_icon,
-                        "status": f"{_tool_label}{_tool_detail}",
-                    })
+                    # generate_image emits its own first status after resolving
+                    # the final ComfyUI prompt, so the expandable pill can show
+                    # the exact prompt/settings that will be submitted.
+                    if tool_name != "generate_image":
+                        await events.emit(conv_id, "tool_start", {
+                            "tool": tool_name, "icon": _tool_icon,
+                            "status": f"{_tool_label}{_tool_detail}",
+                        })
 
                     # Execute via integrated CodeAgent — with keepalive loop
                     _tf = asyncio.get_running_loop().create_future()
                     _tool_chars = [0]
-                    async def _run_tool_bg(_n=tool_name, _a=tool_args, _c=conv_id, _f=_tf, _tc=_tool_chars, _kb=persona_kb_ids):
+                    async def _run_tool_bg(_n=tool_name, _a=tool_args, _c=conv_id, _f=_tf, _tc=_tool_chars, _kb=persona_kb_ids, _reply=content):
                         try:
-                            r = await exec_tool(http, events, _n, _a, _c, custom_tool_map, connector_tool_name_map=connector_tool_name_map, conv_model=req.model, kb_ids=_kb, artifact_message_id=_assistant_msg_id)
+                            _persona_context = None
+                            if _n == "generate_image" and req.persona_id:
+                                _prior_images = []
+                                try:
+                                    _prior_images = await db.list_artifacts(
+                                        conversation_id=_c,
+                                        kind="image",
+                                        source="generate_image",
+                                        limit=3,
+                                    )
+                                except Exception as _pie:
+                                    print(f"[CHAT] prior image metadata lookup failed: {_pie}")
+                                _recent_messages = [
+                                    {
+                                        "role": str(m.get("role") or ""),
+                                        "content": str(m.get("content") or "")[:700],
+                                    }
+                                    for m in (req.messages or [])[-8:]
+                                    if isinstance(m, dict)
+                                ]
+                                _persona_context = {
+                                    "persona_id": req.persona_id,
+                                    "persona_name": persona_name,
+                                    "persona_rating": persona_rating_key,
+                                    "appearance": persona_appearance,
+                                    "scenario": persona_scenario,
+                                    "lore": persona_lore,
+                                    "user_request": _latest_user_text,
+                                    "current_reply": _reply or "",
+                                    "recent_messages": _recent_messages,
+                                    "prior_images": _prior_images,
+                                }
+                            r = await exec_tool(
+                                http, events, _n, _a, _c, custom_tool_map,
+                                connector_tool_name_map=connector_tool_name_map,
+                                conv_model=req.model,
+                                kb_ids=_kb,
+                                artifact_message_id=_assistant_msg_id,
+                                persona_context=_persona_context,
+                            )
                             _tc[0] = len(r) if r else 0
                             if not _f.done(): _f.set_result(r)
                         except Exception as _e:
@@ -2605,6 +2720,40 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         tool_result = _tf.result()
                     except Exception as te:
                         tool_result = f"**Tool error ({tool_name}):** {str(te)}"
+
+                    # ── Inline image injection ──
+                    # generate_image returns ![..](url) markdown intended for the
+                    # model to echo, but models often don't (or restart their
+                    # whole answer instead). Stream the image markdown right here,
+                    # at the point of generation, so it renders inline regardless
+                    # of model behavior — then strip the renderable markdown from
+                    # the model-facing tool result so it has nothing to echo
+                    # (avoids a duplicate image) and a text note tells it to
+                    # continue.
+                    if tool_name == "generate_image" and not tool_result.startswith("ERROR"):
+                        _img_md = re.findall(
+                            r'^(!\[[^\]]*\]\(/api/downloads/[^\s)]+\))$',
+                            tool_result, flags=re.M)
+                        if _img_md:
+                            _img_block = "\n\n" + "\n\n".join(_img_md) + "\n\n"
+                            yield f"data: {json.dumps({'type': 'token', 'content': _img_block})}\n\n"
+                            _streamed_content = True
+                            _turn_text += _img_block
+                            # Strip renderable image + download markdown from the
+                            # model-facing copy; keep the seed/meta line.
+                            _model_copy = re.sub(
+                                r'^!\[[^\]]*\]\(/api/downloads/[^\s)]+\)$', '',
+                                tool_result, flags=re.M)
+                            _model_copy = re.sub(
+                                r'^\*\*\[Download[^\]]*\]\(/api/downloads/[^\s)]+\)\*\*$', '',
+                                _model_copy, flags=re.M)
+                            _model_copy = re.sub(r'\n{3,}', '\n\n', _model_copy).strip()
+                            tool_result = (
+                                "SYSTEM: Image generated and already inserted "
+                                "inline into your reply to the user at this point. "
+                                "Do NOT write the image or download markdown for it "
+                                "again — continue your answer naturally."
+                                + ("\n\n" + _model_copy if _model_copy else ""))
 
                     # Truncate huge results — keep head + tail (errors are usually at the bottom)
                     MAX_TOOL_RESULT = 24000
@@ -2790,6 +2939,20 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         break
                 except Exception as _qe:
                     print(f"[CHAT]   QA short-circuit lookup failed (non-fatal): {_qe}")
+
+            # ── Continuation nudge ──
+            # When the model wrote visible prose before calling tool(s), that
+            # prose is already shown to the user as part of THIS reply. Some
+            # models otherwise re-introduce/repeat the whole answer each round
+            # (qwen3.6 emitted a showcase, then restarted it 3×). Tell it to
+            # continue, not restart. Inert for tool-only coder rounds (no prose).
+            if content.strip() and not _called_ask_project:
+                messages.append({"role": "tool", "content": (
+                    "SYSTEM: Everything you wrote above (before calling the "
+                    "tool) is ALREADY visible to the user as part of this same "
+                    "reply. CONTINUE from where you left off — do NOT restart, "
+                    "repeat, or re-introduce earlier sections. Just add what "
+                    "comes next, or finish if the answer is complete.")})
 
             continue
 

@@ -16,6 +16,7 @@ from datetime import datetime
 import comfyui
 import config
 import database as db
+import persona_images
 import cancel_registry
 from connectors import execute_connector_tool
 from research import fetch_bytes_safely, run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
@@ -1724,7 +1725,22 @@ def strip_tool_calls(content: str) -> str:
     """Remove tool call artifacts from content so the user sees clean text."""
     # Remove <tool_call>...</tool_call>
     content = re.sub(
-        r'<tool[_\-]?call[s]?>\s*.*?\s*</tool[_\-]?call[s]?>',
+        r'<tool[_\-]?call[s]?\b[^>]*>\s*.*?\s*</tool[_\-]?call[s]?>',
+        '', content, flags=re.DOTALL | re.IGNORECASE
+    )
+    # Remove <tools>...</tools> wrappers used by some text-tool-call models.
+    content = re.sub(
+        r'<tools?\b[^>]*>\s*.*?\s*</tools?>',
+        '', content, flags=re.DOTALL | re.IGNORECASE
+    )
+    # If a model opens a tool tag and truncates before closing it, treat the
+    # rest of the response as tool junk. Keeping it visible leaks raw tool JSON.
+    content = re.sub(
+        r'<tool[_\-]?call[s]?\b[^>]*>.*$',
+        '', content, flags=re.DOTALL | re.IGNORECASE
+    )
+    content = re.sub(
+        r'<tools?\b[^>]*>.*$',
         '', content, flags=re.DOTALL | re.IGNORECASE
     )
     # Remove qwen3-coder / Hermes-style <function=name>...<parameter=k>v</parameter>...</function>
@@ -1770,8 +1786,9 @@ def strip_tool_calls(content: str) -> str:
             merged.append([s, e])
     for s, e in reversed(merged):
         content = content[:s] + content[e:]
-    # Stray <tools>/<tool> wrapper tags (often unpaired)
-    content = re.sub(r'</?tools?>', '', content, flags=re.IGNORECASE)
+    # Stray wrapper tags (often unpaired)
+    content = re.sub(r'</?tools?\b[^>]*>', '', content, flags=re.IGNORECASE)
+    content = re.sub(r'</?tool[_\-]?call[s]?\b[^>]*>', '', content, flags=re.IGNORECASE)
     return content.strip()
 
 
@@ -1939,6 +1956,257 @@ async def _maybe_auto_redeliver(
         return ""
 
 
+def _clean_text(value) -> str:
+    return str(value or "").strip()
+
+
+def _profile_text(profile: dict | None, *keys: str) -> str:
+    for key in keys:
+        value = _clean_text((profile or {}).get(key))
+        if value:
+            return value
+    return ""
+
+
+def _profile_value(profile: dict | None, *keys: str):
+    for key in keys:
+        if isinstance(profile, dict) and profile.get(key) not in (None, ""):
+            return profile.get(key)
+    return None
+
+
+def _join_prompt_parts(*parts: str) -> str:
+    return ", ".join(p.strip(" ,") for p in parts if str(p or "").strip(" ,"))
+
+
+def _image_chat_resolution() -> tuple[int, int]:
+    try:
+        w, h = (int(x) for x in (config.IMAGE_CHAT_RESOLUTION or "1024x1024").split("x"))
+        return w, h
+    except Exception:
+        return 1024, 1024
+
+
+def _profile_loras(profile: dict | None) -> list:
+    loras = (profile or {}).get("loras")
+    if loras is None:
+        loras = (profile or {}).get("lora")
+    if loras is None:
+        return []
+    if isinstance(loras, (str, dict)):
+        return [loras]
+    if isinstance(loras, list):
+        return loras
+    return []
+
+
+def _profile_metadata(selection: dict | None, *, active: bool, fallback_reason: str = "") -> dict:
+    if not selection:
+        return {}
+    profile = selection.get("profile") or {}
+    meta = {
+        "active": active,
+        "profile": selection.get("key") or "",
+        "intent": selection.get("intent") or "",
+        "adult_request": bool(selection.get("adult_request")),
+        "workflow_configured": bool(_profile_text(profile, "workflow", "workflow_name", "saved_workflow")),
+        "checkpoint_configured": bool(_profile_text(profile, "checkpoint", "ckpt", "ckpt_name")),
+        "vae_configured": bool(_profile_text(profile, "vae", "vae_name")),
+        "lora_count": len(_profile_loras(profile)),
+    }
+    if fallback_reason:
+        meta["fallback_reason"] = fallback_reason
+    return meta
+
+
+def _persona_visual_context(args: dict, persona_context: dict) -> dict:
+    visual_context = persona_context.get("visual_context")
+    if isinstance(visual_context, dict):
+        return visual_context
+    return persona_images.build_visual_context(
+        persona_id=_clean_text(persona_context.get("persona_id")),
+        persona_name=_clean_text(persona_context.get("persona_name")),
+        appearance=_clean_text(persona_context.get("appearance")),
+        scenario=_clean_text(persona_context.get("scenario")),
+        lore=_clean_text(persona_context.get("lore")),
+        rating=_clean_text(persona_context.get("persona_rating") or "PG-13"),
+        user_request=_clean_text(persona_context.get("user_request")),
+        tool_prompt=_clean_text(args.get("prompt")),
+        current_reply=_clean_text(persona_context.get("current_reply")),
+        recent_messages=persona_context.get("recent_messages") if isinstance(persona_context.get("recent_messages"), list) else [],
+        prior_images=persona_context.get("prior_images") if isinstance(persona_context.get("prior_images"), list) else [],
+    )
+
+
+def _resolve_chat_image_recipe(args: dict, persona_context: dict | None = None) -> dict:
+    """Resolve chat generate_image settings without submitting to ComfyUI."""
+    args = args or {}
+    persona_context = persona_context or {}
+    gi_prompt = _clean_text(args.get("prompt"))
+    gi_negative_arg = _clean_text(args.get("negative_prompt"))
+    default_w, default_h = _image_chat_resolution()
+
+    selection = None
+    profile = None
+    template = None
+    workflow_name = ""
+    fallback_reason = ""
+    visual_context = {}
+    prompt_payload = {}
+    if persona_context.get("persona_id"):
+        visual_context = _persona_visual_context(args, persona_context)
+        prompt_payload = persona_images.compose_persona_image_prompt(
+            raw_prompt=gi_prompt,
+            negative_prompt=gi_negative_arg,
+            visual_context=visual_context,
+        )
+        gi_prompt = prompt_payload.get("prompt") or gi_prompt
+        gi_negative_arg = prompt_payload.get("negative_prompt") or gi_negative_arg
+        config_data = persona_images.load_persona_image_profiles()
+        selection = persona_images.select_persona_image_profile(
+            config_data,
+            persona_id=_clean_text(persona_context.get("persona_id")),
+            persona_name=_clean_text(persona_context.get("persona_name")),
+            persona_rating=_clean_text(persona_context.get("persona_rating") or "PG-13"),
+            prompt=gi_prompt,
+            user_request=_clean_text(persona_context.get("user_request")),
+        )
+        if selection:
+            profile = selection.get("profile") or {}
+            workflow_name = _profile_text(profile, "workflow", "workflow_name", "saved_workflow")
+            if workflow_name:
+                template = comfyui.load_workflow(workflow_name)
+                if template is None:
+                    fallback_reason = "missing_workflow"
+                    profile = None
+                    workflow_name = ""
+
+    active_profile = profile if isinstance(profile, dict) else None
+    # Global workflow fallback: when no persona profile applied, render through
+    # the admin-selected saved workflow (Settings → Chat Image Generation).
+    # Persona workflows already won above; this only fills the empty slot. A
+    # missing file leaves template=None so generate_image falls back to the
+    # built-in SDXL template.
+    if template is None and not active_profile and (config.IMAGE_CHAT_WORKFLOW or "").strip():
+        template = comfyui.load_workflow(config.IMAGE_CHAT_WORKFLOW.strip())
+        if template is not None:
+            workflow_name = config.IMAGE_CHAT_WORKFLOW.strip()
+    gi_ckpt = (
+        _profile_text(active_profile, "checkpoint", "ckpt", "ckpt_name")
+        if active_profile else ""
+    ) or (config.IMAGE_CHAT_CHECKPOINT or "").strip()
+    gi_preset = comfyui.settings_for_checkpoint(gi_ckpt) if gi_ckpt else {}
+
+    gi_width = (
+        _profile_value(active_profile, "width")
+        if active_profile else None
+    ) or args.get("width") or default_w
+    gi_height = (
+        _profile_value(active_profile, "height")
+        if active_profile else None
+    ) or args.get("height") or default_h
+    gi_steps = (
+        _profile_value(active_profile, "steps")
+        if active_profile else None
+    ) or gi_preset.get("steps") or args.get("steps") or 25
+    gi_cfg = (
+        _profile_value(active_profile, "cfg", "guidance")
+        if active_profile else None
+    ) or gi_preset.get("cfg") or 7.0
+    gi_sampler = (
+        _profile_text(active_profile, "sampler", "sampler_name")
+        if active_profile else ""
+    ) or gi_preset.get("sampler") or ""
+    gi_scheduler = (
+        _profile_text(active_profile, "scheduler")
+        if active_profile else ""
+    ) or gi_preset.get("scheduler") or ""
+    gi_model_sampling = (
+        _profile_text(active_profile, "model_sampling", "sampling")
+        if active_profile else ""
+    ) or gi_preset.get("model_sampling") or ""
+    gi_vae = (
+        _profile_text(active_profile, "vae", "vae_name")
+        if active_profile else ""
+    ) or (config.IMAGE_CHAT_VAE or "").strip()
+
+    base_prompt_prefix = (gi_preset.get("prompt_prefix") or config.IMAGE_CHAT_PROMPT_PREFIX or "").strip()
+    profile_prompt_prefix = (
+        _profile_text(active_profile, "prompt_prefix", "positive_prefix")
+        if active_profile else ""
+    )
+    profile_prompt_suffix = (
+        _profile_text(active_profile, "prompt_suffix", "positive_suffix")
+        if active_profile else ""
+    )
+    gi_full_prompt = _join_prompt_parts(base_prompt_prefix, profile_prompt_prefix, gi_prompt, profile_prompt_suffix)
+    gi_negative = _join_prompt_parts(
+        (gi_preset.get("negative_prefix") or config.IMAGE_CHAT_NEGATIVE or "").strip(),
+        _profile_text(active_profile, "negative_prefix", "negative_prompt") if active_profile else "",
+        gi_negative_arg,
+    )
+    profile_metadata = _profile_metadata(selection, active=bool(active_profile), fallback_reason=fallback_reason)
+    if prompt_payload:
+        profile_metadata.update({
+            "prompt_intent": prompt_payload.get("primary_intent") or "",
+            "intents": prompt_payload.get("intents") or [],
+            "framing": prompt_payload.get("framing") or "",
+            "continuity_notes": prompt_payload.get("continuity_notes") or "",
+            "prompt_fallback": bool(prompt_payload.get("fallback_used")),
+            "prior_image_count": int(
+                visual_context.get("prior_image_count")
+                if isinstance(visual_context, dict) and visual_context.get("prior_image_count") is not None
+                else (len(visual_context.get("prior_images") or []) if isinstance(visual_context, dict) else 0)
+            ),
+        })
+
+    return {
+        "prompt": gi_full_prompt,
+        "negative_prompt": gi_negative,
+        "width": gi_width,
+        "height": gi_height,
+        "steps": gi_steps,
+        "cfg": gi_cfg,
+        "seed": args.get("seed"),
+        "checkpoint": gi_ckpt,
+        "sampler_name": gi_sampler,
+        "scheduler": gi_scheduler,
+        "model_sampling": gi_model_sampling,
+        "vae": gi_vae,
+        "template": template,
+        "workflow_name": workflow_name,
+        "loras": _profile_loras(active_profile) if active_profile else [],
+        "profile_metadata": profile_metadata,
+        "profile_active": bool(active_profile),
+    }
+
+
+def _image_recipe_event_detail(recipe: dict) -> dict:
+    """Return prompt-visible generate_image details without local profile names."""
+    profile_meta = recipe.get("profile_metadata") if isinstance(recipe.get("profile_metadata"), dict) else {}
+    workflow_active = bool(recipe.get("workflow_name"))
+    profile_active = bool(recipe.get("profile_active"))
+    return {
+        "tool": "generate_image",
+        "prompt": recipe.get("prompt") or "",
+        "negative_prompt": recipe.get("negative_prompt") or "",
+        "width": recipe.get("width"),
+        "height": recipe.get("height"),
+        "steps": recipe.get("steps"),
+        "cfg": recipe.get("cfg"),
+        "sampler": recipe.get("sampler_name") or "",
+        "scheduler": recipe.get("scheduler") or "",
+        "model_sampling": recipe.get("model_sampling") or "",
+        "profile_active": profile_active,
+        "workflow_active": workflow_active,
+        "profile_workflow": bool(profile_active and workflow_active),
+        "global_workflow": bool(workflow_active and not profile_active),
+        "loras_active": bool(recipe.get("loras")),
+        "prompt_fallback": bool(profile_meta.get("prompt_fallback")),
+        "adult_request": bool(profile_meta.get("adult_request")),
+    }
+
+
 # ── Tool execution dispatcher ──
 
 async def exec_tool(
@@ -1952,6 +2220,7 @@ async def exec_tool(
     conv_model: str = "",
     kb_ids: list = None,
     artifact_message_id: int | None = None,
+    persona_context: dict | None = None,
 ) -> str:
     """Execute a built-in or custom tool and return the result string."""
     custom_tool_map = custom_tool_map or {}
@@ -3082,51 +3351,49 @@ async def exec_tool(
             gi_prompt = (args.get("prompt") or "").strip()
             if not gi_prompt:
                 return "ERROR: generate_image requires a prompt describing the image."
+            # Settings-driven defaults plus persona-only local profile routing.
+            # The profile file lives in ignored data/ and only selects known
+            # saved workflows/checkpoints/LoRAs; the model never invents graphs.
+            gi_recipe = _resolve_chat_image_recipe(args, persona_context=persona_context)
+            gi_detail = _image_recipe_event_detail(gi_recipe)
+            gi_detail_json = json.dumps(gi_detail, ensure_ascii=True)
             await events.emit(conv_id, "tool_start", {
                 "tool": "generate_image", "icon": "image",
-                "status": f"Generating image: {gi_prompt[:80]}",
+                "status": "Generating image",
+                "detail": gi_detail_json,
             })
-            # Settings-driven defaults (Settings → Model & Generation → Chat
-            # Image Generation). When a default checkpoint is configured, its
-            # saved per-model preset (sampler/scheduler/cfg/steps/model type)
-            # wins over the LLM's args; the LLM's prompt describes content and
-            # the global style prefix is prepended. Unset = legacy template.
-            gi_ckpt = (config.IMAGE_CHAT_CHECKPOINT or "").strip()
-            gi_preset = comfyui.settings_for_checkpoint(gi_ckpt) if gi_ckpt else {}
-            try:
-                _dw, _dh = (int(x) for x in (config.IMAGE_CHAT_RESOLUTION or "1024x1024").split("x"))
-            except ValueError:
-                _dw, _dh = 1024, 1024
-            gi_width = args.get("width") or _dw
-            gi_height = args.get("height") or _dh
-            gi_steps = gi_preset.get("steps") or args.get("steps") or 25
-            # Per-model prompt prefix/negative (saved with the checkpoint's ★
-            # preset) wins; the global Settings value is only a fallback.
-            gi_prefix = (gi_preset.get("prompt_prefix") or config.IMAGE_CHAT_PROMPT_PREFIX or "").strip()
-            gi_full_prompt = f"{gi_prefix}, {gi_prompt}" if gi_prefix else gi_prompt
-            gi_negative = ", ".join(p for p in (
-                (gi_preset.get("negative_prefix") or config.IMAGE_CHAT_NEGATIVE or "").strip(),
-                (args.get("negative_prompt") or "").strip(),
-            ) if p)
+            gi_full_prompt = gi_recipe["prompt"]
+            gi_negative = gi_recipe["negative_prompt"]
+            gi_width = gi_recipe["width"]
+            gi_height = gi_recipe["height"]
+            gi_steps = gi_recipe["steps"]
+            gi_cfg = gi_recipe["cfg"]
+            gi_ckpt = gi_recipe["checkpoint"]
+            gi_vae = gi_recipe["vae"]
             try:
                 workflow, gi_seed = comfyui.build_workflow(
-                    comfyui.load_template(),
+                    gi_recipe["template"] or comfyui.load_template(),
                     prompt=gi_full_prompt,
                     negative_prompt=gi_negative,
                     width=gi_width,
                     height=gi_height,
                     steps=gi_steps,
-                    cfg=gi_preset.get("cfg") or 7.0,
-                    seed=args.get("seed"),
+                    cfg=gi_cfg,
+                    seed=gi_recipe["seed"],
                     checkpoint=gi_ckpt,
-                    sampler_name=gi_preset.get("sampler") or "",
-                    scheduler=gi_preset.get("scheduler") or "",
-                    model_sampling=gi_preset.get("model_sampling") or "",
-                    vae=(config.IMAGE_CHAT_VAE or "").strip(),
+                    sampler_name=gi_recipe["sampler_name"],
+                    scheduler=gi_recipe["scheduler"],
+                    model_sampling=gi_recipe["model_sampling"],
+                    vae=gi_vae,
+                    loras=gi_recipe["loras"],
                 )
                 prompt_id = await comfyui.submit(workflow)
             except Exception as e:
-                await events.emit(conv_id, "tool_error", {"tool": "generate_image", "icon": "image", "status": f"Submit failed: {str(e)[:160]}"})
+                await events.emit(conv_id, "tool_error", {
+                    "tool": "generate_image", "icon": "image",
+                    "status": f"Submit failed: {str(e)[:160]}",
+                    "detail": gi_detail_json,
+                })
                 return f"ERROR: Could not start image generation: {str(e)[:300]}"
             # Poll: 300s budget covers a 30-60s cold checkpoint load
             _gi_t0 = time.time()
@@ -3141,7 +3408,11 @@ async def exec_tool(
                 if history and (history.get("outputs") or {}):
                     break
                 if history and history.get("status", {}).get("status_str") == "error":
-                    await events.emit(conv_id, "tool_error", {"tool": "generate_image", "icon": "image", "status": "ComfyUI reported a workflow error"})
+                    await events.emit(conv_id, "tool_error", {
+                        "tool": "generate_image", "icon": "image",
+                        "status": "ComfyUI reported a workflow error",
+                        "detail": gi_detail_json,
+                    })
                     comfyui.finish_job(prompt_id)
                     return "ERROR: ComfyUI failed to execute the workflow (check checkpoint name and VRAM)."
                 history = None
@@ -3152,16 +3423,25 @@ async def exec_tool(
                     hint = f"queued behind {qpos}" if qpos else ("rendering" if qpos == 0 else "loading model")
                     await events.emit(conv_id, "tool_progress", {
                         "tool": "generate_image", "icon": "image",
-                        "status": f"Generating image… {elapsed}s ({hint})",
+                        "status": f"Rendering image {elapsed}s ({hint})",
+                        "detail": gi_detail_json,
                     })
             if not history:
                 await comfyui.cancel(prompt_id)
                 comfyui.finish_job(prompt_id)
-                await events.emit(conv_id, "tool_error", {"tool": "generate_image", "icon": "image", "status": "Timed out after 300s"})
+                await events.emit(conv_id, "tool_error", {
+                    "tool": "generate_image", "icon": "image",
+                    "status": "Timed out after 300s",
+                    "detail": gi_detail_json,
+                })
                 return "ERROR: Image generation timed out after 300 seconds."
             images = comfyui.outputs_from_history(history)
             if not images:
-                await events.emit(conv_id, "tool_error", {"tool": "generate_image", "icon": "image", "status": "No image produced"})
+                await events.emit(conv_id, "tool_error", {
+                    "tool": "generate_image", "icon": "image",
+                    "status": "No image produced",
+                    "detail": gi_detail_json,
+                })
                 comfyui.finish_job(prompt_id)
                 return "ERROR: ComfyUI finished but produced no output images."
             os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
@@ -3200,14 +3480,16 @@ async def exec_tool(
                             "negative_prompt": gi_negative[:300],
                             "seed": gi_seed,
                             "steps": gi_steps,
-                            "cfg": gi_preset.get("cfg") or 7.0,
+                            "cfg": gi_cfg,
                             "width": gi_width,
                             "height": gi_height,
-                            "checkpoint": gi_ckpt,
-                            "sampler": gi_preset.get("sampler") or "",
-                            "scheduler": gi_preset.get("scheduler") or "",
-                            "model_sampling": gi_preset.get("model_sampling") or "",
-                            "vae": (config.IMAGE_CHAT_VAE or "").strip(),
+                            "checkpoint": "[profile]" if gi_recipe["profile_active"] and gi_ckpt else gi_ckpt,
+                            "sampler": gi_recipe["sampler_name"],
+                            "scheduler": gi_recipe["scheduler"],
+                            "model_sampling": gi_recipe["model_sampling"],
+                            "vae": "[profile]" if gi_recipe["profile_active"] and gi_vae else gi_vae,
+                            "workflow": "[profile]" if gi_recipe["profile_active"] and gi_recipe["workflow_name"] else "",
+                            "persona_image_profile": gi_recipe["profile_metadata"],
                             "size_bytes": file_meta["size_bytes"],
                             "sha256": file_meta["sha256"],
                         },
@@ -3224,12 +3506,17 @@ async def exec_tool(
                 md_lines.append(f"![{filename}]({download_url})")
                 md_lines.append(f"**[Download {filename}]({download_url})**")
             if not md_lines:
-                await events.emit(conv_id, "tool_error", {"tool": "generate_image", "icon": "image", "status": "Image fetch failed"})
+                await events.emit(conv_id, "tool_error", {
+                    "tool": "generate_image", "icon": "image",
+                    "status": "Image fetch failed",
+                    "detail": gi_detail_json,
+                })
                 comfyui.finish_job(prompt_id)
                 return "ERROR: Generated image could not be fetched from ComfyUI."
             await events.emit(conv_id, "tool_end", {
                 "tool": "generate_image", "icon": "image",
-                "status": f"Image ready ({int(time.time() - _gi_t0)}s, seed {gi_seed})",
+                "status": f"Image ready ({int(time.time() - _gi_t0)}s)",
+                "detail": gi_detail_json,
             })
             # Hand GPU 1 back to Ollama between generations
             await comfyui.free_memory()

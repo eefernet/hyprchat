@@ -44,7 +44,8 @@ pass "System packages ready"
 
 # ── [2/5] Create directories ──
 step "Creating directories..."
-mkdir -p /opt/hyprchat/data/{uploads/avatars,tools,knowledge_bases}
+mkdir -p /opt/hyprchat/data/{uploads/avatars,tools,knowledge_bases,comfy_workflows}
+mkdir -p /opt/hyprchat/data/sandbox/{outputs,workspace}
 mkdir -p /opt/hyprchat/backend/agents
 pass "Directories created"
 

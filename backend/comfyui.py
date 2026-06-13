@@ -253,7 +253,7 @@ def workflow_from_png(data: bytes) -> dict | None:
 def describe_workflow(wf: dict) -> dict:
     """Extract the form-relevant base settings so the UI can prefill controls."""
     out = {}
-    sampler_id = _find_by_class(wf, "KSampler")
+    sampler_id = _find_by_class(wf, "KSampler") or _find_by_class(wf, "KSamplerAdvanced")
     if sampler_id:
         s = wf[sampler_id].get("inputs", {})
         out.update(steps=s.get("steps"), cfg=s.get("cfg"),
@@ -316,9 +316,144 @@ ALLOWED_SAMPLERS = {
 ALLOWED_SCHEDULERS = {"normal", "karras", "exponential", "sgm_uniform", "simple", "ddim_uniform", "beta"}
 
 
+def _is_link(value) -> bool:
+    return isinstance(value, list) and len(value) >= 2
+
+
+def _same_link(a, b) -> bool:
+    if not (_is_link(a) and _is_link(b) and str(a[0]) == str(b[0])):
+        return False
+    try:
+        return int(a[1]) == int(b[1])
+    except (TypeError, ValueError):
+        return str(a[1]) == str(b[1])
+
+
+def _coerce_lora_strength(value, fallback: float) -> float:
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        n = fallback
+    return max(-5.0, min(5.0, n))
+
+
+def _coerce_lora_chain(loras) -> list[dict]:
+    if not loras:
+        return []
+    if isinstance(loras, (str, dict)):
+        loras = [loras]
+    if not isinstance(loras, list):
+        return []
+    out = []
+    for entry in loras:
+        if isinstance(entry, str):
+            name = entry.strip()
+            strength_model = strength_clip = 1.0
+        elif isinstance(entry, dict):
+            name = str(entry.get("name") or entry.get("lora_name") or "").strip()
+            strength = entry.get("strength", 1.0)
+            strength_model = _coerce_lora_strength(
+                entry.get("strength_model", entry.get("model_strength", strength)),
+                1.0,
+            )
+            strength_clip = _coerce_lora_strength(
+                entry.get("strength_clip", entry.get("clip_strength", strength)),
+                strength_model,
+            )
+        else:
+            continue
+        if name:
+            out.append({
+                "name": name,
+                "strength_model": strength_model,
+                "strength_clip": strength_clip,
+            })
+    return out
+
+
+def _new_node_id(workflow: dict, prefix: str) -> str:
+    i = 1
+    while f"{prefix}_{i}" in workflow:
+        i += 1
+    return f"{prefix}_{i}"
+
+
+def _find_link_input(workflow: dict, input_name: str, preferred_classes: tuple[str, ...]) -> list | None:
+    fallback = None
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs") or {}
+        link = inputs.get(input_name)
+        if not _is_link(link):
+            continue
+        if node.get("class_type") in preferred_classes:
+            return list(link)
+        if fallback is None:
+            fallback = list(link)
+    return fallback
+
+
+def _rewire_link(workflow: dict, old_link: list, new_link: list, *,
+                 input_names: set[str], skip_ids: set[str]):
+    for node_id, node in workflow.items():
+        if node_id in skip_ids or not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs") or {}
+        for key, value in list(inputs.items()):
+            if key in input_names and _same_link(value, old_link):
+                inputs[key] = list(new_link)
+
+
+def _insert_lora_chain(workflow: dict, loras, *,
+                       model_link: list | None = None,
+                       clip_link: list | None = None) -> int:
+    """Insert core ComfyUI LoraLoader nodes into an API graph.
+
+    Names and strengths come only from local runtime config. If no valid chain
+    or no model/clip links are present, the graph is left unchanged.
+    """
+    chain = _coerce_lora_chain(loras)
+    if not chain:
+        return 0
+    model_link = list(model_link) if _is_link(model_link) else _find_link_input(
+        workflow, "model", ("KSampler", "BasicScheduler", "BasicGuider", "ModelSamplingFlux")
+    )
+    clip_link = list(clip_link) if _is_link(clip_link) else _find_link_input(
+        workflow, "clip", ("CLIPTextEncode", "CLIPTextEncodeFlux")
+    )
+    if not (_is_link(model_link) and _is_link(clip_link)):
+        return 0
+
+    old_model = list(model_link)
+    old_clip = list(clip_link)
+    current_model = list(model_link)
+    current_clip = list(clip_link)
+    new_ids: set[str] = set()
+    for item in chain:
+        node_id = _new_node_id(workflow, "profile_lora")
+        new_ids.add(node_id)
+        workflow[node_id] = {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "lora_name": item["name"],
+                "strength_model": item["strength_model"],
+                "strength_clip": item["strength_clip"],
+                "model": current_model,
+                "clip": current_clip,
+            },
+        }
+        current_model = [node_id, 0]
+        current_clip = [node_id, 1]
+
+    _rewire_link(workflow, old_model, current_model, input_names={"model"}, skip_ids=new_ids)
+    _rewire_link(workflow, old_clip, current_clip, input_names={"clip"}, skip_ids=new_ids)
+    return len(new_ids)
+
+
 def _patch_flux_graph(wf: dict, *, prompt: str, width: int, height: int,
                       steps: int, cfg, seed: int, sampler_name: str,
-                      scheduler: str, batch_size: int):
+                      scheduler: str, batch_size: int, loras=None):
     """Patch a Flux-style graph (SamplerCustomAdvanced family — no KSampler).
 
     Maps the Image Studio controls onto Flux nodes: seed → RandomNoise,
@@ -357,6 +492,7 @@ def _patch_flux_graph(wf: dict, *, prompt: str, width: int, height: int,
         elif ct == "ModelSamplingFlux":
             ins["width"] = _clamp_dim(width, 1024)
             ins["height"] = _clamp_dim(height, 1024)
+    _insert_lora_chain(wf, loras)
 
 
 def build_workflow(template: dict, *, prompt: str, negative_prompt: str = "",
@@ -365,10 +501,11 @@ def build_workflow(template: dict, *, prompt: str, negative_prompt: str = "",
                    checkpoint: str = "", batch_size: int = 1,
                    sampler_name: str = "", scheduler: str = "",
                    v_prediction: bool = False,
-                   model_sampling: str = "", vae: str = "") -> tuple[dict, int]:
+                   model_sampling: str = "", vae: str = "",
+                   loras=None) -> tuple[dict, int]:
     """Patch a copy of an API-format workflow with the requested parameters.
 
-    Locates nodes by class_type and follows the KSampler's positive/negative
+    Locates nodes by class_type and follows the sampler's positive/negative
     graph links to the right CLIPTextEncode nodes. Raises ValueError when a
     required node is missing.
     """
@@ -387,20 +524,27 @@ def build_workflow(template: dict, *, prompt: str, negative_prompt: str = "",
         batch_size = 1
 
     sampler_id = _find_by_class(wf, "KSampler")
+    sampler_class = "KSampler"
+    if not sampler_id:
+        sampler_id = _find_by_class(wf, "KSamplerAdvanced")
+        sampler_class = "KSamplerAdvanced"
     if not sampler_id:
         if _find_by_class(wf, "SamplerCustomAdvanced"):
             _patch_flux_graph(wf, prompt=prompt, width=width, height=height,
                               steps=steps, cfg=cfg, seed=int(seed),
                               sampler_name=sampler_name, scheduler=scheduler,
-                              batch_size=batch_size)
+                              batch_size=batch_size, loras=loras)
             save_id = _find_by_class(wf, "SaveImage")
             if save_id:
                 wf[save_id]["inputs"]["filename_prefix"] = "hyprchat"
             return wf, int(seed)
-        raise ValueError("Workflow has no KSampler or SamplerCustomAdvanced node")
+        raise ValueError("Workflow has no KSampler, KSamplerAdvanced, or SamplerCustomAdvanced node")
     sampler = wf[sampler_id]["inputs"]
 
-    sampler["seed"] = int(seed)
+    if sampler_class == "KSamplerAdvanced":
+        sampler["noise_seed"] = int(seed)
+    else:
+        sampler["seed"] = int(seed)
     sampler["steps"] = steps
     try:
         sampler["cfg"] = float(cfg)
@@ -410,6 +554,8 @@ def build_workflow(template: dict, *, prompt: str, negative_prompt: str = "",
         sampler["sampler_name"] = sampler_name
     if scheduler and scheduler in ALLOWED_SCHEDULERS:
         sampler["scheduler"] = scheduler
+
+    _insert_lora_chain(wf, loras, model_link=sampler.get("model"))
 
     # Non-epsilon checkpoints produce garbage when sampled as standard SDXL:
     # v-prediction models (NoobAI vpred, ...) need ModelSamplingDiscrete +
@@ -581,6 +727,91 @@ async def free_memory():
             await client.post(f"{_base()}/free", json={"unload_models": True, "free_memory": True})
     except Exception as e:
         print(f"[COMFYUI] free_memory error: {e}")
+
+
+async def hyprchat_free() -> dict:
+    """Unload resident ComfyUI models now.
+
+    Prefer HyprChat's custom ComfyUI node because it unloads CPU RAM and clears
+    caches immediately. Fall back to ComfyUI's built-in /free route when the
+    node is not installed. Even when the custom node exists, also call the
+    built-in route; newer ComfyUI builds can release additional VRAM there that
+    model_management.unload_all_models() alone may leave reserved.
+    """
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(f"{_base()}/hyprchat/free")
+        if r.status_code in (404, 405):
+            fallback = await client.post(
+                f"{_base()}/free",
+                json={"unload_models": True, "free_memory": True},
+            )
+            fallback.raise_for_status()
+            return {
+                "ok": True,
+                "custom_node": False,
+                "status": "requested",
+                "message": "ComfyUI accepted built-in free request; install the HyprChat custom node for idle CPU RAM unload.",
+            }
+        data = {}
+        try:
+            data = r.json()
+        except Exception:
+            pass
+        if r.status_code == 409:
+            return {**data, "ok": False, "custom_node": True, "status": "busy"}
+        r.raise_for_status()
+        builtin_free = await client.post(
+            f"{_base()}/free",
+            json={"unload_models": True, "free_memory": True},
+        )
+        builtin_free.raise_for_status()
+        if isinstance(data, dict):
+            return {**data, "custom_node": True, "builtin_free": True}
+        return {"ok": True, "custom_node": True, "builtin_free": True}
+
+
+async def hyprchat_memory() -> dict | None:
+    """Return optional HyprChat custom-node memory/queue status."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{_base()}/hyprchat/memory")
+            if r.status_code in (404, 405):
+                return None
+            r.raise_for_status()
+            data = r.json()
+            return data if isinstance(data, dict) else None
+    except Exception as e:
+        print(f"[COMFYUI] hyprchat_memory error: {e}")
+        return None
+
+
+async def hyprchat_restart() -> dict:
+    """Ask the HyprChat ComfyUI control node to restart ComfyUI.
+
+    This is intentionally custom-node only. ComfyUI's built-in /free endpoint can
+    release VRAM, but it does not reliably return system RAM to the LXC; a
+    process/service restart does.
+    """
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(f"{_base()}/hyprchat/restart")
+        if r.status_code in (404, 405):
+            return {
+                "ok": False,
+                "status": "missing_restart_route",
+                "custom_node": False,
+                "error": "HyprChat ComfyUI control node needs to be updated to enable restart.",
+            }
+        data = {}
+        try:
+            data = r.json()
+        except Exception:
+            pass
+        if r.status_code == 409:
+            return {**data, "ok": False, "custom_node": True, "status": "busy"}
+        r.raise_for_status()
+        if isinstance(data, dict):
+            return {**data, "custom_node": True}
+        return {"ok": True, "custom_node": True, "status": "restart_scheduled"}
 
 
 async def clear_history():

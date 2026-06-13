@@ -722,6 +722,10 @@ async def lifespan(app: FastAPI):
         config.IMAGE_CHAT_CHECKPOINT = str(_settings["image_chat_checkpoint"] or "").strip()[:200]
         if config.IMAGE_CHAT_CHECKPOINT:
             print(f"[Config] Loaded chat image checkpoint: {config.IMAGE_CHAT_CHECKPOINT}")
+    if "image_chat_workflow" in _settings:
+        config.IMAGE_CHAT_WORKFLOW = str(_settings["image_chat_workflow"] or "").strip()[:200]
+        if config.IMAGE_CHAT_WORKFLOW:
+            print(f"[Config] Loaded chat image workflow: {config.IMAGE_CHAT_WORKFLOW}")
     if "image_chat_resolution" in _settings:
         _res = str(_settings["image_chat_resolution"] or "").strip()
         config.IMAGE_CHAT_RESOLUTION = _res if re.fullmatch(r"\d{3,4}x\d{3,4}", _res) else "1024x1024"
@@ -3620,6 +3624,48 @@ async def cancel_image_job(job_id: str):
     return {"status": "cancelled"}
 
 
+@app.post("/api/images/free-memory")
+async def free_image_memory():
+    """Unload cached ComfyUI models from RAM/VRAM on demand."""
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured")
+    try:
+        result = await comfyui.hyprchat_free()
+    except Exception as e:
+        raise HTTPException(502, f"ComfyUI model unload failed: {str(e)[:200]}")
+    if result.get("status") == "busy" or result.get("ok") is False:
+        detail = result.get("error") or "ComfyUI queue is active"
+        raise HTTPException(409, detail)
+    return result
+
+
+@app.post("/api/images/restart-comfyui")
+async def restart_comfyui_image_service():
+    """Restart ComfyUI to release system RAM held by the Python process."""
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured")
+    try:
+        result = await comfyui.hyprchat_restart()
+    except Exception as e:
+        raise HTTPException(502, f"ComfyUI restart failed: {str(e)[:200]}")
+    if result.get("status") == "busy" or result.get("ok") is False:
+        status = 409 if result.get("status") == "busy" else 502
+        detail = result.get("error") or "ComfyUI restart was not accepted"
+        raise HTTPException(status, detail)
+    return result
+
+
+@app.get("/api/images/memory-status")
+async def get_image_memory_status():
+    """Optional status from the HyprChat ComfyUI control node."""
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured")
+    status = await comfyui.hyprchat_memory()
+    if status is None:
+        raise HTTPException(404, "HyprChat ComfyUI control node is not installed")
+    return status
+
+
 @app.get("/api/images/workflows")
 async def list_image_workflows():
     if not config.COMFYUI_URL:
@@ -3736,11 +3782,14 @@ async def clear_model_settings_ep(checkpoint: str):
 
 # NOTE: uses <IDEA> token replacement, not str.format — the JSON example's
 # braces would otherwise need escaping and a stray { breaks .format at runtime.
-_ENHANCE_PROMPT_TEMPLATE = """You are an expert Stable Diffusion XL prompt writer. Expand the user's idea into a high-quality SDXL generation prompt.
+_ENHANCE_PROMPT_TEMPLATE = """You are an expert Stable Diffusion XL prompt writer. Expand the user's idea into a high-quality SDXL generation prompt that stays tightly focused on the user's request.
 
 Rules:
 - Keep the user's subject and intent exactly — never replace or reinterpret the subject, and do not add people unless the user asked for them.
-- Write the positive prompt as comma-separated descriptive tags/phrases (roughly 40-90 words): subject details, medium, art style, lighting, color palette, composition/camera, then quality tags.
+- Add concrete details that clarify the requested subject, pose, orientation, action, setting, materials, expression, lighting, color palette, and composition/camera. Prioritize details directly implied by the user's idea over generic style filler.
+- If the user requests a specific pose, viewpoint, location, or activity, preserve it explicitly in the prompt. Do not turn a specific request into a generic portrait.
+- Do not add unrelated props, phones, selfie framing, mirror framing, extra people, or extra actions unless the user asked for them.
+- Write the positive prompt as comma-separated descriptive tags/phrases (roughly 40-90 words): request-specific subject details first, then scene/composition/lighting, then a few quality tags.
 - Write a negative prompt of 5-15 short comma-separated tags: standard SDXL negatives plus anything that contradicts the user's idea. Never more than 15 tags, never prose.
 - Both fields must be non-empty. No prose, no explanations. No Midjourney-style parameters (--ar, --v, --style) — SDXL does not understand them.
 
@@ -5756,6 +5805,7 @@ async def get_app_settings():
         "research_num_ctx": config.RESEARCH_NUM_CTX,
         "quick_search_mode": config.QUICK_SEARCH_MODE,
         "image_chat_checkpoint": config.IMAGE_CHAT_CHECKPOINT,
+        "image_chat_workflow": config.IMAGE_CHAT_WORKFLOW,
         "image_chat_resolution": config.IMAGE_CHAT_RESOLUTION,
         "image_chat_vae": config.IMAGE_CHAT_VAE,
         "image_chat_prompt_prefix": config.IMAGE_CHAT_PROMPT_PREFIX,
@@ -5781,7 +5831,7 @@ async def update_app_settings(body: dict = Body(...)):
                "openhands_reasoning_effort",
                "aider_enabled", "aider_model", "aider_num_ctx", "aider_auto_test", "aider_worker_url",
                "default_num_ctx", "research_num_ctx", "quick_search_mode",
-               "image_chat_checkpoint", "image_chat_resolution", "image_chat_vae",
+               "image_chat_checkpoint", "image_chat_workflow", "image_chat_resolution", "image_chat_vae",
                "image_chat_prompt_prefix", "image_chat_negative", "image_chat_compose_model"}
     for k, v in body.items():
         if k in allowed:
@@ -5954,6 +6004,16 @@ async def update_app_settings(body: dict = Body(...)):
         config.IMAGE_CHAT_CHECKPOINT = str(body["image_chat_checkpoint"] or "").strip()[:200]
         settings["image_chat_checkpoint"] = config.IMAGE_CHAT_CHECKPOINT
         print(f"[Config] Chat image checkpoint: {config.IMAGE_CHAT_CHECKPOINT or '(built-in template)'}")
+    if "image_chat_workflow" in body:
+        _wf = str(body["image_chat_workflow"] or "").strip()[:200]
+        # Only accept a workflow that actually exists; blank an unknown/deleted
+        # name so chat image gen can't be stranded pointing at a missing graph.
+        if _wf and _wf not in comfyui.list_workflows():
+            print(f"[Config] Ignoring unknown chat image workflow: {_wf}")
+            _wf = ""
+        config.IMAGE_CHAT_WORKFLOW = _wf
+        settings["image_chat_workflow"] = _wf
+        print(f"[Config] Chat image workflow: {_wf or '(built-in template)'}")
     if "image_chat_resolution" in body:
         _res = str(body["image_chat_resolution"] or "").strip()
         if not re.fullmatch(r"\d{3,4}x\d{3,4}", _res):
