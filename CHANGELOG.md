@@ -1,41 +1,53 @@
 # Alpha v17.3.0 — June 20, 2026
 
-> Three new feature pillars: local image generation (ComfyUI), voice input/output (Whisper + Kokoro), and hybrid RAG retrieval with inline source citations.
+> Adds three major local-first capabilities: ComfyUI image generation, voice input/output, and hybrid RAG citations.
 
-## Image Generation (ComfyUI)
-- **New `generate_image` chat tool** — ask any chat for a picture and local Stable Diffusion (SDXL via ComfyUI) renders it inline, with seed/steps/dimensions reported for reproducible variations. Charts and diagrams still use ```chart/```mermaid fences; the tool is pictures-only.
-- **New Image Studio panel** (nav → More) — prompt/negative-prompt boxes, size presets, steps/CFG/seed/count, checkpoint picker, live progress with queue position, Stop, and a results grid with Download / Use in chat / Reuse seed.
-- **✨ Enhance button** — new `POST /api/images/enhance-prompt` expands a short idea into a detailed SDXL prompt + negative prompt via the local LLM (workspace/default model, cloud IDs rejected; Midjourney-style `--ar` junk stripped).
-- **Persistent gallery** — past generations now load from artifacts (`kind=image`, `source_tool=image_studio`) and survive refresh, with Download / Use in chat / Reuse (full prompt+settings) / Seed / per-image Delete.
-- **Delete all = total trace removal** — `POST /api/images/purge` now erases every trace of generated images: Image Studio AND chat-tool artifacts + files, chat attachment rows, and the chat messages themselves are rewritten (inline image markdown, download links, seed footers, and saved generate_image events are stripped); these files can stack up overtime and take up valuable space that could be used for models. Depends on how big you make your container but min recommended space is 64 gigabytes.
-- **No new traces** — every generation now auto-erases its ComfyUI history entry + file copy seconds after HyprChat downloads the image, and image prompts are redacted from backend log lines.
-- **Hardening pass** — full audit of the new image/persona features: purge now actually deletes chat attachment rows (was keyed on the wrong id) and paginates correctly; G-rated personas get the same SFW photo gating as PG/PG-13; per-job ComfyUI cleanup and the purge both respect in-flight generations (`_ACTIVE_JOBS`) so one job's cleanup can't eat another's output; the loose tool-call parser is whitelisted to content-safe tools and word-boundary-anchored; tool-junk stripping merges overlapping spans and leaves backtick-quoted prose alone; the request-fidelity backstop filters stopwords and sanitizes weight syntax; tool-arg parse failures no longer log raw content.
-- **VAE selector** — Image Studio Advanced gains a VAE dropdown (Baked default; standalone VAEs listed live from ComfyUI's `models/vae`); the backend injects a `VAELoader` and rewires decode nodes. Flux graphs keep their own VAE.
-- **Chat image generation defaults** — new Settings → Model & Generation → "Chat Image Generation (ComfyUI)" section: default image model, resolution, VAE, default prompt (style/quality tags prepended to every chat request), and default negative prompt. The in-chat `generate_image` tool now loads the selected checkpoint with its per-model ★ presets (sampler/scheduler/CFG/steps/model type) instead of always using the bare SDXL template; the chat model describes content only. All values are runtime settings in `data/settings.json`.
-- **Per-model default prompts** — prompt prefix + negative prompt are now saved per checkpoint (in the same store as the ★ sampler/CFG presets) instead of one global string, so switching the chat image model switches its style tags too. XL/SD1-2/Illustrious/NoobAI-family checkpoints get score-tag prompts built in. The Settings prompt fields edit the selected model's values; the model-settings PUT now merges instead of replacing, so sampling presets and prompt prefixes can be saved independently.
-- **Persona selfies** — personas gain an **Appearance** field (persona editor + character-card import maps `appearance`/`outfits`/`looks`/`body` into it). When set, chat injects the appearance plus a mandatory-tool-use instruction so "send me a selfie" actually calls `generate_image` (selfie/candid phone-photo framing, in-character presentation). A selfie-rescue in the agent loop force-dispatches the tool from the appearance when a small roleplay model describes the photo in words without calling it.
-- **Rating-faithful persona photos** — photo explicitness now follows the persona's content rating in both directions: adult-rated personas get the photo-prompt composed by the conversation's own (uncensored) chat model or a configurable "Photo prompt model" (new `image_chat_compose_model` setting, also used by ✨ Enhance), so allowed requests aren't refused or quietly sanitized by a stock helper model; PG/PG-13 personas are enforced deterministically in the rescue (the chat model's wording is never trusted, composition runs on the stock model whose conservative output is the gate, and the deterministic fallback stays appearance-only). Compose output is validated to actually be an image prompt — conversational replies from roleplay models are rejected and fall through to the deterministic tier.
-- **Persona photo reliability + scene-fit prompts** — builds a prompt that fits the conversation: the model's own attempted prompt when salvageable, else a small-model compose from appearance + the user's specific request + the current reply's scene cues, else appearance + the request's distinctive words — no more identical-looking photos from a fixed template. The instruction example is built from the persona's own appearance in exact `<tool_call>` JSON, so even verbatim parroting produces a valid, persona-correct call.
-- Generated images are tracked artifacts (`kind=image`) with prompt/seed metadata, visible in Artifact Studio.
-- New backend module `backend/comfyui.py` patches any API-format ComfyUI workflow by node class (custom workflows via `COMFYUI_WORKFLOW_PATH`); routes under `/api/images/*`.
-- Settings → Connections gains a **ComfyUI** URL field (empty = feature hidden/disabled) and a health pill.
-- **VRAM note:** run ComfyUI pinned to one GPU (e.g. `--cuda-device 1`) so SDXL (~7 GB) doesn't fight Ollama's multi-model spread; drop `OLLAMA_MAX_LOADED_MODELS` if OOMs appear.
+## Highlights
+- Local image generation is now available from chat and the new Image Studio.
+- Voice STT/TTS is proxied through HyprChat, keeping browser traffic pointed at the main server.
+- Knowledge-base answers now use hybrid retrieval and render clickable inline citations.
 
-## Voice — Speech-to-Text and Text-to-Speech
-- **Mic button in the composer** records audio and transcribes it into the input box via a self-hosted OpenAI-compatible STT server (Speaches / faster-whisper recommended).
-- **Speak button on assistant replies** synthesizes audio via a self-hosted TTS server (kokoro-fastapi recommended); markdown, code fences, links, and citations are stripped server-side before synthesis. Optional **Auto-play replies** toggle.
-- New backend module `backend/voice.py` and routes `/api/audio/transcribe`, `/api/audio/speech`, `/api/audio/voices` — the browser only ever talks to HyprChat; the LAN voice services stay unexposed.
-- Settings → Connections gains **Voice STT** / **Voice TTS** URL fields, a voice picker, and health pills.
-- **Mic gotcha:** `getUserMedia` requires a secure context. Over plain HTTP (e.g. `http://100.122.119.50:8000`), allow the origin in `chrome://flags/#unsafely-treat-insecure-origin-as-secure` or serve via HTTPS, or the mic button will report "Microphone unavailable".
+## Image Generation
+- New `generate_image` chat tool renders ComfyUI images inline with seed, size, steps, and artifact metadata.
+- Image Studio adds prompt controls, model/VAE/workflow selectors, queue progress, Stop, gallery, reuse, delete, and full purge tools.
+- Settings → Model & Generation now includes chat image defaults: checkpoint, saved workflow, resolution, VAE, prompt defaults, negative prompt, and compose model.
+- Saved workflows can be uploaded from API JSON or workflow-bearing PNGs; KSampler and Flux-family graphs are patched by node class.
+- Per-checkpoint presets now include sampler, scheduler, CFG, steps, model type, and prompt prefixes.
+- Generated images are tracked as `kind=image` artifacts and appear in Artifact Studio.
+- Image cleanup is trace-aware: completed jobs forget ComfyUI history/output copies when the optional control node is installed, and Delete all purges HyprChat artifacts, chat image references, ComfyUI traces, and logs where available.
+- New unload/restart controls and optional ComfyUI custom routes: `/hyprchat/free`, `/hyprchat/memory`, `/hyprchat/restart`, `/hyprchat/cleanup`, plus idle model unload.
+- Hardening pass: in-flight job guards, prompt redaction, safer tool-call parsing, purge pagination fixes, chat attachment cleanup, and stricter persona/photo prompt validation.
 
-## Hybrid RAG + Inline Citations
-- **Hybrid retrieval:** KB queries now fuse ChromaDB vector search with a new SQLite FTS5 keyword index (`kb_chunks_fts`) via Reciprocal Rank Fusion — exact tokens like part numbers, error strings, and IDs now rank reliably. If embeddings fail (Ollama down), retrieval degrades to keyword-only instead of returning nothing.
-- **Inline citations:** RAG excerpts are numbered and the model cites `[n]` inline; citations render as clickable chips opening a source popover (file, chunk, relevance, snippet), plus a collapsible **Sources (n)** strip under the reply. Citations persist across reloads via saved events.
-- Existing KBs are backfilled into the keyword index automatically at startup; `Reindex` rebuilds both stores.
-- New probe endpoint `POST /api/knowledge-bases/query` for retrieval testing.
+## Persona Photos
+- Personas now have an Appearance field used for selfie and character-photo requests.
+- Photo prompts are composed from appearance, current scene, user request, prior images, and optional per-persona image profiles.
+- Persona content ratings gate image prompts: PG/PG-13 stays conservative, while adult-rated personas can use the configured compose model for allowed requests.
+- Selfie rescue forces `generate_image` when a persona describes a requested photo in text instead of calling the tool.
 
-## Tests
-- New suites: `test_rag_hybrid.py` (keyword vs vector legs, FTS metachar safety, delete/reindex sync), `test_audio.py` (transcribe/speech/strip, skips when unconfigured), `test_image_generation.py` (workflow patching units + live job lifecycle, skips when ComfyUI is down).
+## Voice
+- Composer mic button records audio and transcribes it through an OpenAI-compatible STT service such as Speaches.
+- Assistant reply Speak button and optional autoplay synthesize audio through an OpenAI-compatible TTS service such as Kokoro.
+- Markdown, code fences, links, and citations are stripped before TTS.
+- Settings → Connections adds Voice STT/TTS URLs, health status, and a voice picker.
+- Plain HTTP installs still need a browser secure-context exception for microphone capture.
+
+## RAG + Citations
+- KB search now fuses Chroma vector results with SQLite FTS5 keyword results using Reciprocal Rank Fusion.
+- Exact tokens such as part numbers, IDs, and error strings rank more reliably.
+- Retrieval falls back to keyword-only if embeddings are unavailable.
+- Answers cite numbered excerpts with `[n]`; citations render as chips and persist in saved events.
+- Existing KBs backfill into FTS automatically; Reindex rebuilds both stores.
+- Added `POST /api/knowledge-bases/query` for retrieval testing.
+
+## Bug fixes
+- Fixed KB reindex failures from readonly RAG/Chroma SQLite storage with clearer diagnostics and deploy-time data-directory permission repair.
+
+## Setup, Ops, and Tests
+- `.env.example`, deploy scripts, `create-lxc.sh`, and `deploy_monitor.py` now cover current media, connector, sandbox, workflow, Quick Search, and Aider settings.
+- `create-lxc.sh` can optionally hand off to the ComfyUI/Voice LXC installer.
+- `create-comfyui-lxc.sh` documents the HyprChat ComfyUI control node, idle unload env vars, restart route, and verification commands.
+- New and expanded tests cover workflow patching, persona image prompts, ComfyUI control endpoints, hybrid RAG, and audio routes.
+- Live media tests skip cleanly when the configured services are unavailable.
 
 ---
 

@@ -42,6 +42,7 @@ from agents.personas import seed_coder_bot as _seed_coder_bot, seed_coder_bot_v2
 import hf as hf_module
 from hf import parse_ollama_progress
 import rag
+import storage_diagnostics
 import connectors
 import comfyui
 import voice
@@ -591,6 +592,69 @@ def _track_bg(coro):
     return t
 
 
+def _runtime_storage_dirs() -> list[str]:
+    data_dir = os.path.dirname(config.DATABASE_PATH)
+    settings_dir = os.path.dirname(config.SETTINGS_PATH)
+    connector_dir = os.path.dirname(config.CONNECTOR_SECRETS_PATH)
+    dirs = [
+        data_dir,
+        config.UPLOAD_DIR,
+        os.path.join(config.UPLOAD_DIR, "avatars"),
+        config.TOOLS_DIR,
+        config.KB_DIR,
+        rag.CHROMA_DIR,
+        settings_dir,
+        os.path.join(settings_dir, "comfy_workflows"),
+        config.SANDBOX_DIR,
+        config.SANDBOX_OUTPUTS_DIR,
+        config.SANDBOX_WORKSPACE_DIR,
+        config.SANDBOX_VENV_DIR,
+        connector_dir,
+    ]
+    seen = set()
+    out = []
+    for path in dirs:
+        if path and path not in seen:
+            seen.add(path)
+            out.append(path)
+    return out
+
+
+def _ensure_runtime_storage_dirs() -> None:
+    for path in _runtime_storage_dirs():
+        os.makedirs(path, exist_ok=True)
+
+
+def _storage_health_check() -> dict:
+    started = time.time()
+    try:
+        _ensure_runtime_storage_dirs()
+        result = storage_diagnostics.runtime_storage_status(config.DATABASE_PATH, rag.CHROMA_DIR)
+    except Exception as exc:
+        result = {"status": "error", "error": str(exc)}
+    result["response_ms"] = round((time.time() - started) * 1000)
+    return result
+
+
+def _raise_if_rag_storage_unwritable() -> None:
+    try:
+        _ensure_runtime_storage_dirs()
+    except Exception as exc:
+        print(f"[RAG] Storage directory setup failed: {exc}")
+        raise HTTPException(500, storage_diagnostics.readonly_storage_message())
+    status = storage_diagnostics.directory_storage_status(rag.CHROMA_DIR, "rag_chroma", scan_children=True)
+    if status.get("status") != "ok":
+        err = status.get("write_error") or status.get("error") or "RAG Chroma storage is not writable"
+        print(f"[RAG] Storage preflight failed: {err}")
+        raise HTTPException(500, storage_diagnostics.readonly_storage_message())
+
+
+def _format_reindex_error(kb_name: str, error: Exception) -> str:
+    if storage_diagnostics.is_readonly_storage_error(error):
+        return f"{kb_name}: {storage_diagnostics.readonly_storage_message()}"
+    return f"{kb_name}: {error}"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _cleanup_task_ref, _health_task_ref
@@ -601,9 +665,10 @@ async def lifespan(app: FastAPI):
             print(f"[Startup] Reaped stale runs: {_reaped}")
     except Exception as _re:
         print(f"[Startup] Stale-run reaper failed (non-fatal): {_re}")
-    os.makedirs(config.UPLOAD_DIR, exist_ok=True)
-    os.makedirs(config.TOOLS_DIR, exist_ok=True)
-    os.makedirs(config.KB_DIR, exist_ok=True)
+    try:
+        _ensure_runtime_storage_dirs()
+    except Exception as exc:
+        print(f"[Startup] Runtime storage setup failed: {exc}")
     # Init sandbox dirs + venv
     _init_sandbox()
     # Override service URLs from persistent settings if set. Empty values inherit
@@ -1269,7 +1334,7 @@ _HEALTH_ENDPOINTS = {
 
 async def _run_health_checks() -> dict:
     """Run all health checks and log to DB."""
-    checks = {}
+    checks = {"storage": _storage_health_check()}
     for name, url_fn in _HEALTH_ENDPOINTS.items():
         result = await _check_service(name, url_fn())
         checks[name] = result
@@ -3418,10 +3483,11 @@ async def reindex_kb(kb_id: str):
     files = kb.get("files", [])
     if not files:
         return {"status": "no files to index"}
+    _raise_if_rag_storage_unwritable()
     try:
         results = await rag.reindex_kb(kb_id, files)
     except Exception as e:
-        raise HTTPException(500, f"Reindex failed for {kb.get('name', kb_id)}: {e}")
+        raise HTTPException(500, f"Reindex failed: {_format_reindex_error(kb.get('name', kb_id), e)}")
     return {"status": "reindexed", "results": results}
 
 
@@ -3436,13 +3502,18 @@ async def reindex_all_kbs():
         if not files:
             continue
         try:
+            _raise_if_rag_storage_unwritable()
             results = await rag.reindex_kb(kb["id"], files)
             all_results.append({"kb_id": kb["id"], "name": kb["name"], "results": results})
         except Exception as e:
             # One broken KB shouldn't abort the rest of the sweep.
-            errors.append({"kb_id": kb["id"], "name": kb["name"], "error": str(e)[:300]})
+            if isinstance(e, HTTPException):
+                err = str(e.detail)
+            else:
+                err = _format_reindex_error(kb["name"], e)
+            errors.append({"kb_id": kb["id"], "name": kb["name"], "error": err[:300]})
     if errors and not all_results:
-        raise HTTPException(500, f"Reindex failed: {errors[0]['name']}: {errors[0]['error']}")
+        raise HTTPException(500, f"Reindex failed: {errors[0]['error']}")
     return {"status": "reindexed", "kbs": all_results, "errors": errors}
 
 

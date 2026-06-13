@@ -36,6 +36,13 @@ fail() {
     echo -e "${FAIL} $1"
 }
 
+repair_data_permissions() {
+    if id -u hyprchat > /dev/null 2>&1; then
+        chown -R hyprchat:hyprchat /opt/hyprchat/data 2>/dev/null || chown -R hyprchat /opt/hyprchat/data 2>/dev/null || true
+        chmod -R u+rwX /opt/hyprchat/data 2>/dev/null || true
+    fi
+}
+
 # ── [1/5] System packages ──
 step "Installing system packages..."
 apt update -qq > /dev/null 2>&1
@@ -44,9 +51,10 @@ pass "System packages ready"
 
 # ── [2/5] Create directories ──
 step "Creating directories..."
-mkdir -p /opt/hyprchat/data/{uploads/avatars,tools,knowledge_bases,comfy_workflows}
-mkdir -p /opt/hyprchat/data/sandbox/{outputs,workspace}
+mkdir -p /opt/hyprchat/data/{uploads/avatars,tools,knowledge_bases,chroma_db,comfy_workflows}
+mkdir -p /opt/hyprchat/data/sandbox/{outputs,workspace,venv}
 mkdir -p /opt/hyprchat/backend/agents
+repair_data_permissions
 pass "Directories created"
 
 # ── [3/5] Install Python deps ──
@@ -73,6 +81,7 @@ step "Installing systemd service..."
 cp /opt/hyprchat/backend/hyprchat.service /etc/systemd/system/ 2>/dev/null || true
 systemctl daemon-reload
 systemctl enable hyprchat > /dev/null 2>&1
+repair_data_permissions
 systemctl restart hyprchat
 pass "Service started"
 

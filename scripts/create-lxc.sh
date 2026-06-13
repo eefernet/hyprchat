@@ -88,8 +88,8 @@ pct exec $CTID -- bash -c "
 
 echo "[5/5] Creating project directory structure..."
 pct exec $CTID -- bash -c "
-    mkdir -p /opt/hyprchat/{backend,frontend/dist,scripts,data/{uploads/avatars,tools,knowledge_bases,comfy_workflows}}
-    mkdir -p /opt/hyprchat/data/sandbox/{outputs,workspace}
+    mkdir -p /opt/hyprchat/{backend,frontend/dist,scripts,data/{uploads/avatars,tools,knowledge_bases,chroma_db,comfy_workflows}}
+    mkdir -p /opt/hyprchat/data/sandbox/{outputs,workspace,venv}
 "
 
 echo ""

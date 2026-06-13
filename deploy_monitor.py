@@ -60,6 +60,7 @@ WATCHED = {
     "backend/research.py":          ("Research",         REMOTE_BACKEND,            True),
     "backend/quick_search.py":      ("Quick Search",     REMOTE_BACKEND,            True),
     "backend/search_agent.py":      ("Search Agent",     REMOTE_BACKEND,            True),
+    "backend/storage_diagnostics.py": ("Storage Diagnostics", REMOTE_BACKEND,        True),
     "backend/events.py":            ("Events",           REMOTE_BACKEND,            True),
     "backend/council.py":           ("Council",          REMOTE_BACKEND,            True),
     "backend/hf.py":                ("HuggingFace",      REMOTE_BACKEND,            True),
@@ -397,6 +398,23 @@ def _hyprchat_host_ready(hypr):
     return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], cmd, timeout=20)
 
 
+def _hyprchat_data_permissions_cmd():
+    return (
+        "mkdir -p /opt/hyprchat/data/uploads/avatars /opt/hyprchat/data/tools "
+        "/opt/hyprchat/data/knowledge_bases /opt/hyprchat/data/chroma_db "
+        "/opt/hyprchat/data/comfy_workflows /opt/hyprchat/data/sandbox/outputs "
+        "/opt/hyprchat/data/sandbox/workspace /opt/hyprchat/data/sandbox/venv\n"
+        "if id -u hyprchat >/dev/null 2>&1; then\n"
+        "  chown -R hyprchat:hyprchat /opt/hyprchat/data 2>/dev/null || chown -R hyprchat /opt/hyprchat/data 2>/dev/null || true\n"
+        "  chmod -R u+rwX /opt/hyprchat/data 2>/dev/null || true\n"
+        "fi\n"
+    )
+
+
+def _repair_hyprchat_data_permissions(hypr):
+    return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], _hyprchat_data_permissions_cmd(), timeout=90)
+
+
 def _bootstrap_hyprchat_host(hypr, codebox_ip, searxng_ip=""):
     env_text = shlex.quote(_default_env_text(codebox_ip, searxng_ip))
     cmd = (
@@ -410,11 +428,13 @@ def _bootstrap_hyprchat_host(hypr, codebox_ip, searxng_ip=""):
         "fi\n"
         "mkdir -p /opt/hyprchat/backend/agents /opt/hyprchat/frontend/dist "
         "/opt/hyprchat/data/uploads/avatars /opt/hyprchat/data/tools "
-        "/opt/hyprchat/data/knowledge_bases /opt/hyprchat/data/comfy_workflows "
-        "/opt/hyprchat/data/sandbox/outputs /opt/hyprchat/data/sandbox/workspace\n"
+        "/opt/hyprchat/data/knowledge_bases /opt/hyprchat/data/chroma_db "
+        "/opt/hyprchat/data/comfy_workflows /opt/hyprchat/data/sandbox/outputs "
+        "/opt/hyprchat/data/sandbox/workspace /opt/hyprchat/data/sandbox/venv\n"
         f"if [ ! -f /opt/hyprchat/.env ]; then printf %s {env_text} > /opt/hyprchat/.env; fi\n"
         "chmod 640 /opt/hyprchat/.env 2>/dev/null || true\n"
         "chown -R hyprchat:hyprchat /opt/hyprchat/data 2>/dev/null || chown -R hyprchat /opt/hyprchat/data\n"
+        "chmod -R u+rwX /opt/hyprchat/data 2>/dev/null || true\n"
     )
     return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], cmd, timeout=180)
 
@@ -440,6 +460,7 @@ def _set_hyprchat_env(hypr, key, value):
 
 
 def _restart_hyprchat(hypr):
+    _repair_hyprchat_data_permissions(hypr)
     ok, out, err = ssh_cmd(
         hypr["ip"], hypr["user"], hypr["pass"],
         "systemctl restart hyprchat 2>&1", timeout=150,
@@ -784,6 +805,14 @@ def deploy_changes(changed, cfg):
             print(f"  {R}\u2717{RST} daemon-reload failed: {err}")
 
     if needs_restart:
+        print()
+        print(f"  {Y}\u25b6{RST} Repairing HyprChat data permissions...")
+        ok_perm, _, err_perm = _repair_hyprchat_data_permissions(hypr)
+        if ok_perm:
+            print(f"  {G}\u2713{RST} Data directory writable for hyprchat")
+        else:
+            print(f"  {Y}!{RST} Data permission repair may have failed: {err_perm}")
+
         print()
         print(f"  {Y}\u25b6{RST} Restarting hyprchat service...")
         ok, out, err = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
