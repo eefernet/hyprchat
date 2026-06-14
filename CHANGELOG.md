@@ -1,6 +1,6 @@
 # Alpha v17.3.0 — June 20, 2026
 
-> Adds three major local-first capabilities: ComfyUI image generation, voice input/output, and hybrid RAG citations.
+> Adds three major local-first capabilities: ComfyUI image generation, voice input/output, and hybrid RAG citations. This is the first Phase of voice and image generation features. More voices, photo editing and more will be added at a later date.
 
 ## Highlights
 - Local image generation is now available from chat and the new Image Studio.
