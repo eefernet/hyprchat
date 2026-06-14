@@ -1026,7 +1026,7 @@ function ArtifactPreviewBlock({preview,t,font}){
   return <pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:11,color:t.dim,fontFamily:font,lineHeight:1.55}}>{preview.content||preview.message||"No preview available."}</pre>;
 }
 
-function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
+function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify,confirmAction}){
   const [prompt,setPrompt]=useState("");
   const [negPrompt,setNegPrompt]=useState("");
   const [size,setSize]=useState("1024x1024");
@@ -1122,7 +1122,13 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
     if(meta.seed!=null)setSeed(String(meta.seed));
   };
   const deleteOne=async(a)=>{
-    if(!confirm("Delete this image? Removes the file and its record from HyprChat."))return;
+    const ok=await confirmAction({
+      title:"Delete image",
+      body:"This removes the file and its record from HyprChat.",
+      confirmLabel:"Delete Image",
+      tone:"danger",
+    });
+    if(!ok)return;
     try{
       const r=await fetch(`${API}/api/artifacts/${a.id}`,{method:"DELETE"});
       if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${r.status}`);}
@@ -1133,7 +1139,13 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
     }catch(e){notify&&notify({type:"error",text:"Delete failed",detail:String(e.message||e)});}
   };
   const purgeAll=async()=>{
-    if(!confirm("Delete ALL generated images — everywhere?\n\nThis removes every trace: Image Studio AND chat-generated images, their files and records on HyprChat, references inside chat messages (replies that included a photo are edited to remove it), ComfyUI's job history and file copies, and the server logs. This cannot be undone."))return;
+    const ok=await confirmAction({
+      title:"Delete all generated images",
+      body:"This removes every trace: Image Studio AND chat-generated images, their files and records on HyprChat, references inside chat messages (replies that included a photo are edited to remove it), ComfyUI's job history and file copies, and the server logs. This cannot be undone.",
+      confirmLabel:"Delete Everything",
+      tone:"danger",
+    });
+    if(!ok)return;
     try{
       const r=await fetch(`${API}/api/images/purge`,{method:"POST"});
       const d=await r.json();
@@ -1493,7 +1505,7 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify}){
           <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
             <button onClick={()=>wfUploadRef.current?.click()} title="Upload API JSON or workflow-bearing PNG" style={railBtn(t.acc)}><IC.Upload/>Upload</button>
             <input ref={wfUploadRef} type="file" accept=".json,.png,application/json,image/png" style={{display:"none"}} onChange={e=>{uploadWorkflow(e.target.files?.[0]);e.target.value="";}}/>
-            {workflow&&<button onClick={async()=>{if(!confirm(`Delete workflow "${workflow}"?`))return;await fetch(`${API}/api/images/workflows/${encodeURIComponent(workflow)}`,{method:"DELETE"}).catch(()=>{});setWorkflow("");loadWorkflows();}} title="Delete this saved workflow" style={railBtn(t.err)}><IC.Trash/>Delete</button>}
+            {workflow&&<button onClick={async()=>{const ok=await confirmAction({title:"Delete workflow",body:`Delete workflow "${workflow}"?`,confirmLabel:"Delete Workflow",tone:"danger"});if(!ok)return;await fetch(`${API}/api/images/workflows/${encodeURIComponent(workflow)}`,{method:"DELETE"}).catch(()=>{});setWorkflow("");loadWorkflows();}} title="Delete this saved workflow" style={railBtn(t.err)}><IC.Trash/>Delete</button>}
             {activeWf?.model_sampling_builtin&&<span style={{fontSize:9,color:t.warm}}>{activeWf.model_sampling_builtin==="flow"?"flow-matching":activeWf.model_sampling_builtin==="flux-graph"?"Flux architecture":"v-pred"} sampling built in</span>}
           </div>
         </>)}
@@ -7440,7 +7452,7 @@ function HyprChat(){
             notify={notify}
             onPersonaCreated={mc=>{const norm={...mc,parameters:normalizeProfileParams(mc)};setMcs(p=>[...p,norm]);setProfileTab(getProfileType(norm)==="persona"?"personas":"agents");setPanel("personas");setEditMc(mc.id);}}/>
       :panel==="artifacts"?<ArtifactStudioPanel t={t} font={font} workspaces={workspaces} kbs={kbs} onPreview={openPreview} onOpenConv={id=>loadConversation(id)} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Artifact added to composer",duration:1800});}}} focusId={artifactFocusId} onFocusConsumed={()=>setArtifactFocusId(null)} notify={notify}/>
-      :panel==="images"?<ImageStudioPanel t={t} font={font} configured={!!comfyuiUrl} onPreview={openPreview} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Image added to composer",duration:1800});}}} notify={notify}/>
+      :panel==="images"?<ImageStudioPanel t={t} font={font} configured={!!comfyuiUrl} onPreview={openPreview} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Image added to composer",duration:1800});}}} notify={notify} confirmAction={confirmAction}/>
       :panel==="memory"?<MemoryProfilePanel t={t} API={API} font={font} notify={notify} onOpenConv={id=>loadConversation(id)} models={models} wsModel={wsModel}/>
       :panel==="kb"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
