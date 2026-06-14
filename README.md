@@ -146,7 +146,7 @@ Upload documents, attach knowledge bases to profiles, index uploaded code projec
 
 ### 🧩 Agents & Personas
 
-Agents are task profiles for coding, research, automation, and tool-heavy work. Personas are voice and scenario profiles with their own model, prompt, avatar, tools, knowledge bases, generation settings, and optional image appearance context for in-character photos.
+Agents are task profiles for coding, research, automation, and tool-heavy work. Personas are voice and scenario profiles with their own model, prompt, avatar, tools, knowledge bases, generation settings, and optional image appearance context for in-character photos. Photos sent by the persona are restricted based on their age rating. Yes, you can have nsfw conversations and images sent from your persona 😉.
 
 <p align="center">
   <img src="docs/images/agents.png" alt="HyprChat agents manager" width="440">
