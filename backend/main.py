@@ -47,6 +47,7 @@ import connectors
 import comfyui
 import voice
 import model_providers
+from image_prompt_enhancer import normalize_enhancer_response
 from research import (
     REPORT_TEMPLATES,
     REPORT_TEMPLATE_MAP,
@@ -3891,39 +3892,12 @@ async def enhance_image_prompt(body: dict = Body(...)):
     raw = (raw or "").strip()
     if not raw:
         raise HTTPException(502, "Prompt enhancer unavailable — check that Ollama is reachable")
-    parsed = None
-    try:
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        pass
-    if isinstance(parsed, dict):
-        enhanced = str(parsed.get("prompt") or "").strip()
-        negative = str(parsed.get("negative_prompt") or "").strip()
-        # Small models sometimes echo the schema with empty/placeholder values.
-        # Valid JSON with no usable prompt is a failure — NEVER fall back to the
-        # raw JSON text here, that puts literal {"prompt": ""} in the user's box.
-        if enhanced in ("", "...", "…"):
-            raise HTTPException(502, "Prompt enhancer returned an empty result — try again")
-    else:
-        # Non-JSON output: treat the text as the prompt
-        enhanced, negative = raw, ""
-    # Small models love appending Midjourney params (--ar 16:9 etc.) no matter
-    # what the prompt says — SDXL treats them as literal tokens, so strip them.
-    mj_param = re.compile(r"\s*--\w+(?:\s+[\w:.]+)?")
-    enhanced = mj_param.sub("", enhanced).strip().rstrip(",").strip()
-    negative = mj_param.sub("", negative).strip().rstrip(",").strip()
-    # Enforce 5-15 negative tags deterministically — the template asks for
-    # 5-15 but small models ramble past it or skip the negative entirely.
-    neg_tags = [tag.strip() for tag in negative.split(",") if tag.strip()][:15]
-    if len(neg_tags) < 5:
-        _existing = {x.lower() for x in neg_tags}
-        for tag in ("lowres", "bad anatomy", "bad hands", "extra fingers", "blurry",
-                    "watermark", "text", "jpeg artifacts", "worst quality", "deformed"):
-            if len(neg_tags) >= 10:
-                break
-            if tag not in _existing:
-                neg_tags.append(tag)
-    negative = ", ".join(neg_tags[:15])
+    enhanced, negative = normalize_enhancer_response(raw)
+    # Small models sometimes echo the schema with empty/placeholder values or
+    # ignore JSON instructions entirely. Never fall back to raw text here,
+    # because assistant reasoning becomes literal SDXL prompt tokens.
+    if enhanced in ("", "...", "…"):
+        raise HTTPException(502, "Prompt enhancer returned no usable prompt — try again")
     return {"prompt": enhanced[:1500], "negative_prompt": negative[:1500], "model": model}
 
 

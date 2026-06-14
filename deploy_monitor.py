@@ -55,6 +55,7 @@ WATCHED = {
     "backend/cancel_registry.py":   ("Cancel Registry",  REMOTE_BACKEND,            True),
     "backend/rag.py":               ("RAG Pipeline",     REMOTE_BACKEND,            True),
     "backend/comfyui.py":           ("ComfyUI Client",   REMOTE_BACKEND,            True),
+    "backend/image_prompt_enhancer.py": ("Image Prompt Enhancer", REMOTE_BACKEND,   True),
     "backend/persona_images.py":    ("Persona Images",   REMOTE_BACKEND,            True),
     "backend/voice.py":             ("Voice",            REMOTE_BACKEND,            True),
     "backend/research.py":          ("Research",         REMOTE_BACKEND,            True),

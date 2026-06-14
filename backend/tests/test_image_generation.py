@@ -466,6 +466,79 @@ def test_enhance_prompt_template_prioritizes_request_fidelity():
     assert "do not add unrelated props, phones, selfie framing, mirror framing, extra people" in template
 
 
+def test_enhance_prompt_parser_accepts_valid_json():
+    from image_prompt_enhancer import normalize_enhancer_response
+
+    prompt, negative = normalize_enhancer_response(json.dumps({
+        "prompt": "a red fox standing in deep fresh snow, winter forest clearing, soft overcast daylight, detailed orange fur, shallow depth of field",
+        "negative_prompt": "lowres, blurry, watermark, text, jpeg artifacts",
+    }))
+
+    assert prompt.startswith("a red fox standing in deep fresh snow")
+    assert negative == "lowres, blurry, watermark, text, jpeg artifacts"
+
+
+def test_enhance_prompt_parser_extracts_embedded_json():
+    from image_prompt_enhancer import normalize_enhancer_response
+
+    raw = """Here is the JSON:
+```json
+{"prompt": "a crystal lighthouse on a black volcanic coast, storm waves, blue beacon light, wide angle view, cinematic atmosphere, highly detailed", "negative_prompt": "lowres, blurry, watermark, text, jpeg artifacts"}
+```"""
+    prompt, negative = normalize_enhancer_response(raw)
+
+    assert prompt.startswith("a crystal lighthouse")
+    assert "Here is" not in prompt
+    assert negative == "lowres, blurry, watermark, text, jpeg artifacts"
+
+
+def test_enhance_prompt_parser_strips_reasoning_wrapper():
+    from image_prompt_enhancer import normalize_enhancer_response
+
+    raw = """"We need to produce a prompt for SDXL generation: "american eagle, american flags"
+
+a majestic bald eagle soaring over a field of waving American flags, sunrise sky, golden light, crisp wings, realistic feathers, dynamic lighting, patriotic landscape, detailed focus"""
+    prompt, negative = normalize_enhancer_response(raw)
+
+    assert prompt.startswith("a majestic bald eagle")
+    assert "We need" not in prompt
+    assert "american eagle, american flags" not in prompt
+    assert "lowres" in negative
+
+
+def test_enhance_prompt_parser_splits_labeled_prose():
+    from image_prompt_enhancer import normalize_enhancer_response
+
+    raw = """Prompt: "a crystal lighthouse on a black volcanic coast, storm waves, blue beacon light, wide angle view, cinematic atmosphere, highly detailed"
+Negative prompt: "lowres, blurry, watermark, text, jpeg artifacts, dull colors" """
+    prompt, negative = normalize_enhancer_response(raw)
+
+    assert prompt == "a crystal lighthouse on a black volcanic coast, storm waves, blue beacon light, wide angle view, cinematic atmosphere, highly detailed"
+    assert negative == "lowres, blurry, watermark, text, jpeg artifacts, dull colors"
+
+
+def test_enhance_prompt_parser_salvages_quoted_prompt_after_explanation():
+    from image_prompt_enhancer import normalize_enhancer_response
+
+    raw = """The prompt should be: "a bronze airship drifting above a neon desert city, glowing engine rings, sweeping wide angle, sunset haze, reflective metal panels, cinematic lighting, ultra detailed" """
+    prompt, negative = normalize_enhancer_response(raw)
+
+    assert prompt.startswith("a bronze airship")
+    assert "The prompt should be" not in prompt
+    assert "lowres" in negative
+
+
+def test_enhance_prompt_parser_rejects_unusable_ramble():
+    from image_prompt_enhancer import normalize_enhancer_response
+
+    prompt, negative = normalize_enhancer_response(
+        "Sure, I can help with that. The prompt should be vivid and high quality."
+    )
+
+    assert prompt == ""
+    assert "lowres" in negative
+
+
 def test_persona_structured_prompt_validation_and_fallback():
     import persona_images
 
