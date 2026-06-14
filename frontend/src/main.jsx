@@ -1,496 +1,27 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>HyprChat</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%230B1D24'/><rect x='28' y='24' width='18' height='52' rx='3' fill='%2358BFEF'/><rect x='54' y='24' width='18' height='52' rx='3' fill='%23D7A72F'/></svg>">
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { height: 100%; width: 100%; overflow: hidden; }
+// HyprChat frontend entry.
+//
+// This file is the former inline `<script type="text/babel">` body from
+// dist/index.html, now compiled by Vite instead of in-browser Babel. The JSX
+// below is UNCHANGED except for the heavy-library lazy-load triggers (mermaid /
+// chart.js / html2pdf), which now call the ensureX() helpers from ./vendor.js.
+//
+// vendor.js must be imported first: it bundles the former CDN globals
+// (Prism, KaTeX, renderMathInElement) and assigns them to window.* so the
+// component code below — which references window.Prism / window.katex etc. —
+// keeps working untouched.
+import './vendor.js';
 
-  #root { height: 100%; width: 100%; overflow: hidden; }
+import React from 'react';
+import * as ReactDOMFull from 'react-dom';
+import { createRoot, hydrateRoot } from 'react-dom/client';
 
-  /* ── Loading Screen ── */
-  #hc-loading {
-    position: fixed; inset: 0; z-index: 99999;
-    --hc-bg: #282C34;
-    --hc-bg-deep: #111418;
-    --hc-surface: #171B21;
-    --hc-surface-alpha: rgba(23,27,33,.86);
-    --hc-brd: #355A66;
-    --hc-brd-alpha: rgba(53,90,102,.55);
-    --hc-text: #CDEFF7;
-    --hc-dim: #9CDEF2;
-    --hc-mut: #6B8A94;
-    --hc-acc: #9CDEF2;
-    --hc-acc-soft: rgba(156,239,247,.10);
-    --hc-warm: #E06C75;
-    background: var(--hc-bg);
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
-    color: var(--hc-text);
-    overflow: hidden;
-    transition: opacity 0.9s ease;
-    pointer-events: all;
-  }
+// The original code used the UMD ReactDOM global, which exposed BOTH
+// createRoot (React 18 client) and createPortal (react-dom). Rebuild a single
+// object with both so the bare `ReactDOM.createRoot` / `ReactDOM.createPortal`
+// references in the body resolve exactly as before.
+const ReactDOM = { ...ReactDOMFull, createRoot, hydrateRoot };
 
-  #hc-loading.hc-dismiss {
-    opacity: 0;
-    pointer-events: none;
-  }
-
-  #hc-loading::before {
-    content: ''; position: absolute; inset: 0; opacity: 0;
-    pointer-events: none; z-index: 0;
-  }
-  #hc-loading[data-bg-effect="dots"]::before {
-    opacity: .42;
-    background-image: radial-gradient(circle, var(--hc-acc-soft) 1px, transparent 1.4px);
-    background-size: 24px 24px;
-  }
-  #hc-loading[data-bg-effect="scanlines"]::before {
-    opacity: .42;
-    background: linear-gradient(180deg, transparent 0%, var(--hc-acc-soft) 50%, transparent 100%);
-    background-size: 100% 4px;
-    animation: hcScanline 8s linear infinite;
-  }
-  #hc-loading-bg {
-    position: absolute; inset: 0; width: 100%; height: 100%;
-    z-index: 0; pointer-events: none; opacity: .78;
-  }
-  #hc-loading[data-bg-effect="rain"] #hc-loading-bg { opacity: .58; }
-  #hc-loading[data-bg-effect="flow"] #hc-loading-bg { opacity: .86; }
-  #hc-loading[data-bg-effect="aurora"] #hc-loading-bg { opacity: .66; }
-  #hc-loading[data-bg-effect="stars"] #hc-loading-bg { opacity: .82; }
-  #hc-loading[data-bg-effect="circuit"] #hc-loading-bg { opacity: .78; }
-  #hc-loading > :not(#hc-loading-bg) {
-    position: relative; z-index: 1;
-  }
-  @keyframes hcScanline {
-    0% { background-position: 0 0; }
-    100% { background-position: 0 100%; }
-  }
-
-  .hc-load-logo {
-    position: relative; width: 28px; height: 28px; border-radius: 8px;
-    background: var(--hc-bg-deep);
-    border: 1px solid var(--hc-brd-alpha);
-    box-shadow: 0 0 20px var(--hc-acc-soft);
-    margin-bottom: 18px;
-    animation: hcGlow 2.5s ease-in-out infinite;
-  }
-  .hc-load-logo::before {
-    content: ''; position: absolute; left: 7px; top: 6px;
-    width: 6px; height: 16px; border-radius: 2px;
-    background: var(--hc-acc);
-    box-shadow: 8px 0 0 var(--hc-warm);
-  }
-  @keyframes hcGlow {
-    0%,100% { box-shadow: 0 0 14px var(--hc-acc-soft); }
-    50%      { box-shadow: 0 0 26px var(--hc-acc-soft); }
-  }
-
-  .hc-load-title {
-    font-size: 11px; letter-spacing: 4px; text-transform: uppercase;
-    color: var(--hc-acc); margin-bottom: 28px; font-weight: 700;
-    opacity: .78;
-  }
-
-  .hc-load-card {
-    position: relative; max-width: 520px; width: 88%;
-    background: var(--hc-surface-alpha); backdrop-filter: none;
-    border: 1px solid var(--hc-brd-alpha);
-    border-radius: 8px; padding: 30px 36px;
-    text-align: center;
-    box-shadow: none;
-    animation: hcSlideUp .9s cubic-bezier(.16,1,.3,1) both;
-  }
-  @keyframes hcSlideUp {
-    from { opacity: 0; transform: translateY(28px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
-
-  .hc-load-quote {
-    font-size: 15px; line-height: 1.75; color: var(--hc-text);
-    font-style: italic; margin-bottom: 14px;
-  }
-  .hc-load-attr {
-    font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: var(--hc-acc);
-    opacity: .72;
-  }
-
-  .hc-em {
-    display: none;
-    position: fixed; font-size: 22px; pointer-events: none; user-select: none;
-    animation: hcFloat var(--hc-float-dur,4s) ease-in-out infinite var(--hc-float-del,0s);
-  }
-  @keyframes hcFloat {
-    0%   { transform: translateY(0px)   rotate(-4deg) scale(1);    opacity: .7; }
-    30%  { transform: translateY(-18px) rotate( 4deg) scale(1.06); opacity: 1; }
-    60%  { transform: translateY(-8px)  rotate(-2deg) scale(.97);  opacity: .8; }
-    100% { transform: translateY(0px)   rotate(-4deg) scale(1);    opacity: .7; }
-  }
-
-  /* pulsing dots */
-  .hc-dot {
-    width: 7px; height: 7px; border-radius: 50%; background: var(--hc-acc);
-    box-shadow: 0 0 8px var(--hc-acc-soft);
-    display: inline-block; margin: 0 4px;
-    animation: hcPulse 1.4s ease-in-out infinite;
-  }
-  @keyframes hcPulse {
-    0%,100% { opacity: .3; transform: scale(.7); }
-    50%      { opacity: 1;  transform: scale(1.2); }
-  }
-
-  .hc-load-status {
-    margin-top: 26px; font-size: 10px; color: var(--hc-mut);
-    letter-spacing: 2px; text-transform: uppercase;
-    animation: hcSlideUp .9s .3s cubic-bezier(.16,1,.3,1) both;
-  }
-
-  /* ── KaTeX + Mermaid integration ── */
-  .katex { color: inherit; font-size: 1.05em; }
-  .katex-display { margin: 8px 0; overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
-  .katex-display > .katex { white-space: normal; }
-  .katex-error { color: #BF616A; font-family: monospace; font-size: 0.9em; background: rgba(191,97,106,0.08); padding: 1px 4px; border-radius: 3px; }
-  .mermaid-container { display: flex; justify-content: center; padding: 14px 12px; }
-  .mermaid-container svg { max-width: 100%; height: auto; }
-</style>
-</head>
-<body>
-
-<!-- ═══════════════════════════════════════════
-     LOADING SCREEN — pure HTML, no React dep
-     Dismissed by React once models load
-     ═══════════════════════════════════════════ -->
-<div id="hc-loading">
-  <canvas id="hc-loading-bg" aria-hidden="true"></canvas>
-  <!-- Floating emojis scattered around the viewport -->
-  <span class="hc-em" style="top:7%;  left:8%;  --hc-float-dur:4.1s;--hc-float-del:0s;   --hc-spin:-12deg">✨</span>
-  <span class="hc-em" style="top:12%; right:10%;--hc-float-dur:3.7s;--hc-float-del:.4s;  --hc-spin: 18deg">🔭</span>
-  <span class="hc-em" style="top:28%; left:4%;  --hc-float-dur:5.2s;--hc-float-del:.9s;  --hc-spin:-20deg">✝️</span>
-  <span class="hc-em" style="top:22%; right:6%; --hc-float-dur:4.6s;--hc-float-del:.2s;  --hc-spin: 15deg">💫</span>
-  <span class="hc-em" style="top:55%; left:5%;  --hc-float-dur:4.9s;--hc-float-del:.6s;  --hc-spin:-10deg">🧬</span>
-  <span class="hc-em" style="top:60%; right:7%; --hc-float-dur:3.9s;--hc-float-del:1.1s; --hc-spin: 22deg">📖</span>
-  <span class="hc-em" style="top:75%; left:11%; --hc-float-dur:5.5s;--hc-float-del:.3s;  --hc-spin:-16deg">🌌</span>
-  <span class="hc-em" style="top:78%; right:12%;--hc-float-dur:4.3s;--hc-float-del:.7s;  --hc-spin: 9deg">💡</span>
-  <span class="hc-em" style="top:40%; left:2%;  --hc-float-dur:6.1s;--hc-float-del:.1s;  --hc-spin:-25deg">🕊️</span>
-  <span class="hc-em" style="top:45%; right:3%; --hc-float-dur:4.7s;--hc-float-del:.5s;  --hc-spin: 14deg">⭐</span>
-  <span class="hc-em" style="top:88%; left:20%; --hc-float-dur:5.0s;--hc-float-del:.8s;  --hc-spin:-8deg">🙏</span>
-  <span class="hc-em" style="top:85%; right:22%;--hc-float-dur:3.8s;--hc-float-del:.2s;  --hc-spin: 30deg">🔬</span>
-
-  <div class="hc-load-logo"></div>
-  <div class="hc-load-title">HyprChat</div>
-
-  <div class="hc-load-card">
-    <div class="hc-load-quote" id="hc-quote-text"></div>
-    <div class="hc-load-attr"  id="hc-quote-attr"></div>
-  </div>
-
-  <div class="hc-load-status">
-    <span class="hc-dot" style="animation-delay:0s"></span>
-    <span class="hc-dot" style="animation-delay:.18s"></span>
-    <span class="hc-dot" style="animation-delay:.36s"></span>
-    <span style="margin-left:10px">Initializing</span>
-  </div>
-</div>
-
-<script>
-(function(){
-  var loadThemes={
-    hyprflat:{bg:"#282C34",bgDeep:"#111418",surface:"#171B21",brd:"#355A66",text:"#CDEFF7",dim:"#9CDEF2",mut:"#6B8A94",acc:"#9CDEF2",acc2:"#74CFE7",warm:"#E06C75",pink:"#B48EAD",f1:"#88C0D0"},
-    nord:{bg:"#2E3440",bgDeep:"#242933",surface:"#3B4252",brd:"#4C566A",text:"#ECEFF4",dim:"#D8DEE9",mut:"#81A1C1",acc:"#88C0D0",acc2:"#81A1C1",warm:"#EBCB8B",pink:"#B48EAD",f1:"#8FBCBB"},
-    catppuccin:{bg:"#1E1E2E",bgDeep:"#181825",surface:"#313244",brd:"#45475A",text:"#CDD6F4",dim:"#BAC2DE",mut:"#89B4FA",acc:"#89B4FA",acc2:"#74C7EC",warm:"#F9E2AF",pink:"#CBA6F7",f1:"#94E2D5"},
-    gruvbox:{bg:"#282828",bgDeep:"#1D2021",surface:"#3C3836",brd:"#504945",text:"#EBDBB2",dim:"#D5C4A1",mut:"#a89984",acc:"#83A598",acc2:"#8EC07C",warm:"#FABD2F",pink:"#D3869B",f1:"#8EC07C"},
-    tokyoNight:{bg:"#1A1B26",bgDeep:"#16161E",surface:"#24283B",brd:"#3B4261",text:"#C0CAF5",dim:"#A9B1D6",mut:"#7AA2F7",acc:"#7AA2F7",acc2:"#7DCFFF",warm:"#E0AF68",pink:"#BB9AF7",f1:"#73DACA"},
-    rosePine:{bg:"#191724",bgDeep:"#1F1D2E",surface:"#26233A",brd:"#403D52",text:"#E0DEF4",dim:"#c9bdde",mut:"#908caa",acc:"#9CCFD8",acc2:"#C4A7E7",warm:"#F6C177",pink:"#C4A7E7",f1:"#9CCFD8"},
-    dracula:{bg:"#282A36",bgDeep:"#1E1F29",surface:"#343746",brd:"#44475A",text:"#F8F8F2",dim:"#CFCFCF",mut:"#8a9cd0",acc:"#BD93F9",acc2:"#FF79C6",warm:"#F1FA8C",pink:"#FF79C6",f1:"#8BE9FD"},
-    oneLight:{bg:"#FAFAFA",bgDeep:"#EFEFEF",surface:"#E2E3E5",brd:"#B0B1B8",text:"#282A30",dim:"#3E4047",mut:"#6B6E78",acc:"#3569D6",acc2:"#4260CC",warm:"#A06D00",pink:"#9021A0",f1:"#0174A8"},
-    midnight:{bg:"#0A0A0F",bgDeep:"#050508",surface:"#111118",brd:"#1E1E2E",text:"#C8C8E8",dim:"#9090B8",mut:"#7a7aa8",acc:"#9b8ce0",acc2:"#6e63b8",warm:"#E0A060",pink:"#c080c0",f1:"#5ab8d0"},
-    terminal:{bg:"#0a0f0a",bgDeep:"#050805",surface:"#0d1a0d",brd:"#1a3a1a",text:"#baffc6",dim:"#7fe89a",mut:"#5ca776",acc:"#00ff41",acc2:"#33ff77",warm:"#ffcc00",pink:"#ff66ff",f1:"#7ad6ff"},
-    cyberpunk:{bg:"#0d0015",bgDeep:"#080010",surface:"#150025",brd:"#2a0045",text:"#f0e6ff",dim:"#d2b8ff",mut:"#b083d8",acc:"#f26bff",acc2:"#d859e5",warm:"#ffe066",pink:"#ff66d4",f1:"#5cc9ff"},
-    solarizedDark:{bg:"#002b36",bgDeep:"#001e27",surface:"#073642",brd:"#094858",text:"#d6dcd6",dim:"#a7b4b3",mut:"#839496",acc:"#4ba6e8",acc2:"#4dbab0",warm:"#cfa036",pink:"#e25999",f1:"#4dbab0"},
-    solarizedLight:{bg:"#fdf6e3",bgDeep:"#eee8d5",surface:"#e8e1cc",brd:"#b5ad96",text:"#3b4d53",dim:"#475963",mut:"#6e7f86",acc:"#1a7abf",acc2:"#1f8c85",warm:"#a37400",pink:"#c42484",f1:"#1f8c85"},
-    materialOcean:{bg:"#0f111a",bgDeep:"#090b10",surface:"#1a1c25",brd:"#2a2d3a",text:"#a6accd",dim:"#8b91b8",mut:"#4b526d",acc:"#82aaff",acc2:"#89ddff",warm:"#ffcb6b",pink:"#c792ea",f1:"#89ddff"},
-    ayuDark:{bg:"#0b0e14",bgDeep:"#070910",surface:"#0d1017",brd:"#1a1f2e",text:"#cccac2",dim:"#b3b1ad",mut:"#626a73",acc:"#39bae6",acc2:"#59c2ff",warm:"#ffb454",pink:"#d2a6ff",f1:"#95e6cb"}
-  };
-  var validEffects={dots:1,rain:1,flow:1,aurora:1,stars:1,circuit:1,scanlines:1,off:1};
-  var savedTheme="hyprflat", savedEffect="dots";
-  try{savedTheme=localStorage.getItem("hc-theme")||savedTheme;}catch{}
-  try{savedEffect=localStorage.getItem("hc-bg-effect")||(localStorage.getItem("hc-scanline")==="1"?"scanlines":"dots");}catch{}
-  if(!loadThemes[savedTheme])savedTheme="hyprflat";
-  if(!validEffects[savedEffect])savedEffect="dots";
-  var loader=document.getElementById("hc-loading");
-  var th=loadThemes[savedTheme];
-  function hexToRgb(hex){
-    var s=String(hex||"").replace("#","");
-    var m=s.match(/^([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
-    return m?{r:parseInt(m[1],16),g:parseInt(m[2],16),b:parseInt(m[3],16)}:{r:17,g:20,b:24};
-  }
-  function rgba(hex,a){var c=hexToRgb(hex);return "rgba("+c.r+","+c.g+","+c.b+","+a+")";}
-  function snap(v,s){s=s||4;return Math.round(v/s)*s;}
-  function clamp(n,min,max){return Math.min(max,Math.max(min,Math.floor(n)));}
-  if(loader){
-    loader.setAttribute("data-theme",savedTheme);
-    loader.setAttribute("data-bg-effect",savedEffect);
-    loader.style.setProperty("--hc-bg",th.bg);
-    loader.style.setProperty("--hc-bg-deep",th.bgDeep);
-    loader.style.setProperty("--hc-surface",th.surface);
-    loader.style.setProperty("--hc-surface-alpha",rgba(th.surface,.88));
-    loader.style.setProperty("--hc-brd",th.brd);
-    loader.style.setProperty("--hc-brd-alpha",rgba(th.brd,.55));
-    loader.style.setProperty("--hc-text",th.text);
-    loader.style.setProperty("--hc-dim",th.dim);
-    loader.style.setProperty("--hc-mut",th.mut);
-    loader.style.setProperty("--hc-acc",th.acc);
-    loader.style.setProperty("--hc-acc-soft",rgba(th.acc,.14));
-    loader.style.setProperty("--hc-warm",th.warm);
-  }
-  function startLoadingBg(effect,theme){
-    var canvasEffects=["rain","flow","aurora","stars","circuit","neural","sacred","signal","quantum","veins","solar","terminalGhost","orbital","lattice","synapse","sonar","magnetic","candle","microwave","blueprint"];
-    if(canvasEffects.indexOf(effect)<0)return;
-    var canvas=document.getElementById("hc-loading-bg");
-    if(!canvas)return;
-    var ctx=canvas.getContext("2d");
-    if(!ctx)return;
-    var reduced=false;
-    try{reduced=window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches;}catch{}
-    var colors=[theme.acc,theme.warm,theme.f1||theme.acc,theme.acc2||theme.acc];
-    var particles=[], w=1, h=1, dpr=1, raf=0, stopped=false;
-    function n2(x,y){var v=Math.sin(x*127.1+y*311.7)*43758.5453123;return v-Math.floor(v);}
-    function noise(x,y){
-      var xi=Math.floor(x), yi=Math.floor(y), xf=x-xi, yf=y-yi;
-      var u=xf*xf*(3-2*xf), v=yf*yf*(3-2*yf);
-      var a=n2(xi,yi), b=n2(xi+1,yi), c=n2(xi,yi+1), d=n2(xi+1,yi+1);
-      return (a+(b-a)*u)+((c+(d-c)*u)-(a+(b-a)*u))*v;
-    }
-    function makeRain(i){return {x:Math.random()*w,y:Math.random()*h-h*.4,c:colors[i%colors.length],a:.08+Math.random()*.16,v:1+Math.random()*2.6,drift:(Math.random()-.5)*.42,size:2+(Math.random()>.82?2:0),blocks:1+Math.floor(Math.random()*4),gap:6+Math.floor(Math.random()*8)};}
-    function makeFlow(i){return {x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.16+Math.random()*.24,s:.36+Math.random()*.8};}
-    function makeStar(i){return {x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.28+Math.random()*.48,v:.18+Math.random()*.65,size:1+(Math.random()>.62?1:0)+(Math.random()>.9?1:0)};}
-    function makePoint(i){return {x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.08+Math.random()*.3,v:.15+Math.random()*.9,r:1+Math.random()*3,phase:Math.random()*Math.PI*2};}
-    function makeCircuit(i){
-      var segs=[];
-      for(var j=0;j<5+Math.floor(Math.random()*5);j++){
-        var len=(30+Math.random()*130)*(Math.random()>.5?1:-1);
-        segs.push(Math.random()>.5?[len,0]:[0,len*.55]);
-      }
-      return {x:Math.random()*w,y:Math.random()*h,segs:segs,c:colors[i%colors.length],a:.11+Math.random()*.16,phase:Math.random()*Math.PI*2,v:.045+Math.random()*.1};
-    }
-    function seed(){
-      var area=w*h;
-      if(effect==="rain")particles=Array.from({length:clamp(area/36000,24,78)},function(_,i){return makeRain(i);});
-      else if(effect==="flow")particles=Array.from({length:clamp(area/11000,70,240)},function(_,i){return makeFlow(i);});
-      else if(effect==="stars")particles=Array.from({length:clamp(area/8000,90,300)},function(_,i){return makeStar(i);});
-      else if(effect==="circuit")particles=Array.from({length:clamp(area/30000,25,82)},function(_,i){return makeCircuit(i);});
-      else particles=Array.from({length:clamp(area/15000,55,260)},function(_,i){return makePoint(i);});
-    }
-    function resize(){
-      var rect=canvas.getBoundingClientRect();
-      dpr=Math.min(window.devicePixelRatio||1,2);
-      w=Math.max(1,rect.width);h=Math.max(1,rect.height);
-      canvas.width=Math.max(1,Math.floor(w*dpr));canvas.height=Math.max(1,Math.floor(h*dpr));
-      ctx.setTransform(dpr,0,0,dpr,0,0);ctx.imageSmoothingEnabled=false;seed();ctx.clearRect(0,0,w,h);
-    }
-    function drawRain(time){
-      ctx.clearRect(0,0,w,h);
-      particles.forEach(function(p,i){
-        p.y+=p.v;p.x+=p.drift+Math.sin(time*.001+i)*.05;
-        if(p.y>h+40||p.x<-20||p.x>w+20){particles[i]=p=makeRain(i);p.y=-Math.random()*h*.35;}
-        var x=snap(p.x,4), y=snap(p.y,4);
-        ctx.fillStyle=p.c;ctx.globalAlpha=p.a;
-        for(var b=0;b<p.blocks;b++)ctx.fillRect(x,y-b*p.gap,p.size,p.size*2);
-      });
-      ctx.globalAlpha=1;
-    }
-    function drawFlow(time){
-      ctx.globalCompositeOperation="destination-out";ctx.fillStyle="rgba(0,0,0,.12)";ctx.fillRect(0,0,w,h);ctx.globalCompositeOperation="source-over";
-      particles.forEach(function(p,i){
-        var px=p.x, py=p.y, ang=noise(p.x*.0036+time*.000035,p.y*.0036-time*.000022)*Math.PI*4;
-        p.x+=Math.cos(ang)*(0.28+p.s);p.y+=Math.sin(ang)*(0.28+p.s);
-        if(p.x<-8||p.x>w+8||p.y<-8||p.y>h+8){particles[i]=makeFlow(i);return;}
-        ctx.globalAlpha=p.a;ctx.strokeStyle=p.c;ctx.lineWidth=1.35;ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(p.x,p.y);ctx.stroke();
-      });
-      ctx.globalAlpha=1;
-    }
-    function drawAurora(time){
-      ctx.clearRect(0,0,w,h);
-      for(var i=0;i<7;i++){
-        var yBase=h*(.16+i*.12);
-        ctx.beginPath();
-        for(var x=-80;x<=w+80;x+=48){
-          var y=yBase+Math.sin(x*.006+time*.00024+i)*32+Math.sin(x*.017-time*.00018+i*2)*12;
-          if(x===-80)ctx.moveTo(x,y);else ctx.lineTo(x,y);
-        }
-        ctx.strokeStyle=colors[i%colors.length];ctx.globalAlpha=.06+i*.011;ctx.lineWidth=1.3+(i%3)*.55;ctx.stroke();
-      }
-      ctx.globalAlpha=1;
-    }
-    function drawStars(time){
-      ctx.clearRect(0,0,w,h);
-      particles.forEach(function(p,i){
-        p.y+=p.v;p.x+=Math.sin(time*.00045+i)*.08;
-        if(p.y>h+8){particles[i]=p=makeStar(i);p.y=-8;}
-        ctx.fillStyle=p.c;ctx.globalAlpha=p.a*(.72+.28*Math.sin(time*.002+i));
-        var x=snap(p.x,2), y=snap(p.y,2);ctx.fillRect(x,y,p.size,p.size);
-        if(p.size>1){ctx.globalAlpha*=.36;ctx.fillRect(x-2,y,p.size+4,1);ctx.fillRect(x,y-2,1,p.size+4);}
-      });
-      ctx.globalAlpha=1;
-    }
-    function drawCircuit(time){
-      ctx.clearRect(0,0,w,h);
-      particles.forEach(function(p,i){
-        p.y+=p.v;if(p.y>h+160){particles[i]=p=makeCircuit(i);p.y=-120;}
-        var x=p.x,y=p.y;ctx.beginPath();ctx.moveTo(snap(x,8),snap(y,8));
-        p.segs.forEach(function(seg){x+=seg[0];y+=seg[1];ctx.lineTo(snap(x,8),snap(y,8));});
-        ctx.strokeStyle=p.c;ctx.globalAlpha=p.a*(.6+.4*Math.sin(time*.001+p.phase));ctx.lineWidth=1.45;ctx.stroke();
-        ctx.fillStyle=p.c;ctx.globalAlpha*=.8;ctx.fillRect(snap(x,8)-2,snap(y,8)-2,5,5);
-      });
-      ctx.globalAlpha=1;
-    }
-    function drawNewEffect(time){
-      ctx.clearRect(0,0,w,h);
-      if(effect==="sacred"){
-        ctx.save();ctx.translate(w/2,h/2);ctx.rotate(time*.00008);ctx.strokeStyle=theme.acc;ctx.lineWidth=1.2;
-        for(var ring=0;ring<5;ring++){var r=Math.min(w,h)*(.11+ring*.075);ctx.globalAlpha=.08+ring*.018;ctx.beginPath();ctx.arc(0,0,r,0,Math.PI*2);ctx.stroke();for(var i=0;i<6;i++){var a=i*Math.PI/3+ring*.34;ctx.beginPath();ctx.arc(Math.cos(a)*r*.82,Math.sin(a)*r*.82,r*.38,0,Math.PI*2);ctx.stroke();}}
-        ctx.restore();ctx.globalAlpha=1;return;
-      }
-      if(effect==="signal"||effect==="sonar"){
-        var cx=effect==="sonar"?w*.78:w*.22,cy=effect==="sonar"?h*.68:h*.72,max=Math.max(w,h);
-        for(var s=0;s<9;s++){var rr=(time*.055+s*110)%max;ctx.globalAlpha=Math.max(0,.18-rr/max*.18);ctx.strokeStyle=colors[s%colors.length];ctx.beginPath();ctx.arc(cx,cy,rr,effect==="signal"?-.95:0,effect==="signal"?-.05:Math.PI*2);ctx.stroke();}
-        ctx.globalAlpha=1;return;
-      }
-      if(effect==="candle"){
-        var grd=ctx.createRadialGradient(w*.5,h*.42,20,w*.5,h*.42,Math.max(w,h)*.7);grd.addColorStop(0,rgba(theme.warm,.16));grd.addColorStop(1,"rgba(0,0,0,0)");ctx.fillStyle=grd;ctx.globalAlpha=.5+.1*Math.sin(time*.006);ctx.fillRect(0,0,w,h);ctx.globalAlpha=1;return;
-      }
-      if(effect==="terminalGhost")ctx.font="11px monospace";
-      particles.forEach(function(p,i){
-        if(effect==="neural"){p.x+=Math.sin(time*.00035+p.phase)*.16;p.y+=Math.cos(time*.00028+p.phase)*.16;for(var j=i+1;j<particles.length;j+=8){var b=particles[j],dx=p.x-b.x,dy=p.y-b.y,d=Math.sqrt(dx*dx+dy*dy);if(d<145){ctx.globalAlpha=(1-d/145)*.1;ctx.strokeStyle=p.c;ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(b.x,b.y);ctx.stroke();}}}
-        else if(effect==="terminalGhost"){var glyphs="01AF39#{}[]<>/sys:root",yy=(p.y+time*.018*(1+i%4))%(h+40);ctx.globalAlpha=.04+p.a*.22;ctx.fillStyle=p.c;ctx.fillText(glyphs[(i+Math.floor(time*.002))%glyphs.length],snap(p.x,12),snap(yy,14));return;}
-        else if(effect==="lattice"){return;}
-        else {p.x+=Math.sin(time*.001+p.phase)*.2;p.y+=Math.cos(time*.0008+p.phase)*.2;}
-        ctx.globalAlpha=p.a;ctx.fillStyle=p.c;ctx.fillRect(snap(p.x,2),snap(p.y,2),p.r,p.r);
-      });
-      if(effect==="lattice"||effect==="magnetic"||effect==="solar"){for(var l=0;l<24;l++){ctx.globalAlpha=.04+(l%5)*.01;ctx.strokeStyle=colors[l%colors.length];ctx.beginPath();for(var x=-80;x<w+80;x+=34){var y=h*(.16+l*.035)+Math.sin(x*.01+time*.0005+l)*26;if(x===-80)ctx.moveTo(x,y);else ctx.lineTo(x,y);}ctx.stroke();}}
-      if(effect==="blueprint"){ctx.strokeStyle=theme.acc;for(var q=0;q<16;q++){var p2=particles[q]||{x:0,y:0};ctx.globalAlpha=.055;ctx.strokeRect(snap(p2.x,16),snap(p2.y,16),60+(q%5)*26,30+(q%4)*18);}}
-      ctx.globalAlpha=1;
-    }
-    function stop(){stopped=true;cancelAnimationFrame(raf);window.removeEventListener("resize",resize);}
-    function step(time){
-      if(stopped||!document.body.contains(canvas)){stop();return;}
-      if(effect==="rain")drawRain(time);else if(effect==="flow")drawFlow(time);else if(effect==="aurora")drawAurora(time);else if(effect==="stars")drawStars(time);else if(effect==="circuit")drawCircuit(time);else drawNewEffect(time);
-      if(!reduced)raf=requestAnimationFrame(step);
-    }
-    resize();window.addEventListener("resize",resize);
-    if(loader)loader.addEventListener("transitionend",stop,{once:true});
-    step(performance.now());
-  }
-  startLoadingBg(savedEffect,th);
-
-  var defaults=[
-    {t:'"The fear of the LORD is the beginning of wisdom, and knowledge of the Holy One is understanding."',a:'Proverbs 9:10'},
-    {t:'"The heavens declare the glory of God; the skies proclaim the work of his hands."',a:'Psalm 19:1'},
-    {t:'"Science without religion is lame, religion without science is blind."',a:'Albert Einstein'},
-    {t:'"Two things fill the mind with ever-increasing wonder and awe — the starry heavens above me and the moral law within me."',a:'Immanuel Kant'},
-    {t:'"For in him we live and move and have our being."',a:'Acts 17:28'},
-    {t:'"The more I study science, the more I believe in God."',a:'Albert Einstein'},
-    {t:'"I am the way, the truth, and the life."',a:'John 14:6'},
-    {t:'"We are made of star-stuff. We are a way for the cosmos to know itself."',a:'Carl Sagan'},
-    {t:'"The important thing is not to stop questioning. Curiosity has its own reason for existing."',a:'Albert Einstein'},
-    {t:'"For wisdom is more precious than rubies, and nothing you desire can compare with her."',a:'Proverbs 8:11'},
-    {t:'"For God so loved the world that he gave his one and only Son, that whoever believes in him shall not perish but have eternal life."',a:'John 3:16'},
-    {t:'"Equipped with his five senses, man explores the universe around him and calls the adventure Science."',a:'Edwin Hubble'},
-    {t:'"The universe is not only stranger than we imagine, it is stranger than we can imagine."',a:'J.B.S. Haldane'},
-    {t:'"Ask and it will be given to you; seek and you will find; knock and the door will be opened to you."',a:'Matthew 7:7'},
-    {t:'"He who has a why to live can bear almost any how."',a:'Friedrich Nietzsche'},
-    {t:'"The only true wisdom is in knowing you know nothing."',a:'Socrates'},
-    {t:'"God does not play dice with the universe."',a:'Albert Einstein'},
-    {t:'"The unexamined life is not worth living."',a:'Socrates'},
-    {t:'"In the beginning was the Word, and the Word was with God, and the Word was God."',a:'John 1:1'},
-    {t:'"I think, therefore I am."',a:'René Descartes'},
-    {t:'"The eternal silence of these infinite spaces frightens me."',a:'Blaise Pascal'},
-    {t:'"Man is but a reed, the most feeble thing in nature; but he is a thinking reed."',a:'Blaise Pascal'},
-    {t:'"There are more things in heaven and earth, Horatio, than are dreamt of in your philosophy."',a:'William Shakespeare'},
-    {t:'"Not only does God play dice, He sometimes throws them where they cannot be seen."',a:'Stephen Hawking'},
-    {t:'"The mind is its own place, and in itself can make a heaven of hell, a hell of heaven."',a:'John Milton'},
-    {t:'"If you gaze long into an abyss, the abyss also gazes into you."',a:'Friedrich Nietzsche'},
-    {t:'"The most incomprehensible thing about the universe is that it is comprehensible."',a:'Albert Einstein'},
-    {t:'"We are not human beings having a spiritual experience. We are spiritual beings having a human experience."',a:'Pierre Teilhard de Chardin'},
-    {t:'"I have lived on the lip of insanity, wanting to know reasons, knocking on a door. It opens. I have been knocking from the inside."',a:'Rumi'},
-    {t:'"The wound is the place where the Light enters you."',a:'Rumi'},
-    {t:'"What we observe is not nature itself, but nature exposed to our method of questioning."',a:'Werner Heisenberg'},
-    {t:'"The cosmos is within us. We are made of star-stuff. We are a way for the universe to know itself."',a:'Carl Sagan'},
-    {t:'"Reality is merely an illusion, albeit a very persistent one."',a:'Albert Einstein'},
-    {t:'"Whoever fights monsters should see to it that in the process he does not become a monster."',a:'Friedrich Nietzsche'},
-    {t:'"The deeper I search, the more I find that there is something inconceivably great and wonderful behind it all."',a:'Max Planck'},
-    {t:'"There is a theory which states that if ever anyone discovers exactly what the Universe is for and why it is here, it will instantly disappear and be replaced by something even more bizarre and inexplicable."',a:'Douglas Adams'},
-    {t:'"The first gulp from the glass of natural sciences will turn you into an atheist, but at the bottom of the glass God is waiting for you."',a:'Werner Heisenberg'},
-    {t:'"Is man merely a mistake of God\'s? Or God merely a mistake of man\'s?"',a:'Friedrich Nietzsche'},
-    {t:'"The nitrogen in our DNA, the calcium in our teeth, the iron in our blood, the carbon in our apple pies were made in the interiors of collapsing stars."',a:'Carl Sagan'},
-    {t:'"I do not feel obliged to believe that the same God who has endowed us with senses, reason, and intellect has intended us to forgo their use."',a:'Galileo Galilei'},
-    {t:'"The soul that sees beauty may sometimes walk alone."',a:'Johann Wolfgang von Goethe'},
-    {t:'"What is now proved was once only imagined."',a:'William Blake'},
-    {t:'"Man suffers only because he takes seriously what the gods made for fun."',a:'Alan Watts'},
-    {t:'"The knowledge of all things is possible."',a:'Leonardo da Vinci'},
-    {t:'"God is dead. God remains dead. And we have killed him. How shall we comfort ourselves, the murderers of all murderers?"',a:'Friedrich Nietzsche'},
-    {t:'"Deep in the human unconscious is a pervasive need for a logical universe that makes sense. But the real universe is always one step beyond logic."',a:'Frank Herbert'},
-    {t:'"The measure of intelligence is the ability to change."',a:'Albert Einstein'},
-    {t:'"The heart has its reasons of which reason knows nothing."',a:'Blaise Pascal'},
-    {t:'"Imagination is more important than knowledge. Knowledge is limited. Imagination encircles the world."',a:'Albert Einstein'},
-    {t:'"To see a world in a grain of sand, and a heaven in a wild flower, hold infinity in the palm of your hand, and eternity in an hour."',a:'William Blake'},
-    {t:'"In my beginning is my end."',a:'T.S. Eliot'},
-    {t:'"The only way to deal with an unfree world is to become so absolutely free that your very existence is an act of rebellion."',a:'Albert Camus'},
-    {t:'"Before I formed you in the womb I knew you, before you were born I set you apart."',a:'Jeremiah 1:5'},
-    {t:'"The riddle does not exist. If a question can be put at all, then it can also be answered."',a:'Ludwig Wittgenstein'},
-    {t:'"Whereof one cannot speak, thereof one must be silent."',a:'Ludwig Wittgenstein'},
-    {t:'"I am become Death, the destroyer of worlds."',a:'J. Robert Oppenheimer, quoting the Bhagavad Gita'},
-    {t:'"The most beautiful thing we can experience is the mysterious. It is the source of all true art and science."',a:'Albert Einstein'},
-    {t:'"One cannot step into the same river twice, for it is not the same river and one is not the same person."',a:'Heraclitus'},
-    {t:'"If the doors of perception were cleansed everything would appear to man as it is — infinite."',a:'William Blake'},
-    {t:'"He who would learn to fly one day must first learn to stand and walk and run and climb and dance; one cannot fly into flying."',a:'Friedrich Nietzsche'},
-    {t:'"The truth is not for all men, but only for those who seek it."',a:'Ayn Rand'},
-    {t:'"Coincidence is God\'s way of remaining anonymous."',a:'Albert Einstein'},
-    {t:'"We shall not cease from exploration, and the end of all our exploring will be to arrive where we started and know the place for the first time."',a:'T.S. Eliot'},
-    {t:'"The universe began with a word. Is not that so? A word which is not the word of God is the origin of all lies."',a:'Thomas Aquinas'},
-    {t:'"Any sufficiently advanced technology is indistinguishable from magic."',a:'Arthur C. Clarke'},
-    {t:'"The total number of minds in the universe is one. In fact, consciousness is a singularity phasing within all beings."',a:'Erwin Schrödinger'},
-    {t:'"Not only is the universe stranger than we think, it is stranger than we can think."',a:'Werner Heisenberg'},
-    {t:'"When you make the two into one, and when you make the inner like the outer, then you will enter the kingdom."',a:'Gospel of Thomas'},
-    {t:'"The eye through which I see God is the same eye through which God sees me."',a:'Meister Eckhart'},
-    {t:'"Sell your cleverness and buy bewilderment."',a:'Rumi'},
-    {t:'"Be still, and know that I am God."',a:'Psalm 46:10'},
-    {t:'"Reason is the natural order of truth; but imagination is the organ of meaning."',a:'C.S. Lewis'},
-    {t:'"I believe in God, only I spell it Nature."',a:'Frank Lloyd Wright'},
-    {t:'"The further the spiritual evolution of mankind advances, the more certain it seems to me that the path to genuine religiosity does not lie through the fear of life, and the fear of death, and blind faith, but through striving after rational knowledge."',a:'Albert Einstein'},
-    {t:'"There are only two ways to live your life. One is as though nothing is a miracle. The other is as though everything is a miracle."',a:'Albert Einstein'},
-  ];
-  var custom=[];
-  try{custom=JSON.parse(localStorage.getItem('hc-custom-quotes')||'[]');}catch{}
-  var all=defaults.concat(custom.filter(function(q){return q&&q.t;}));
-  var q=all[Math.floor(Math.random()*all.length)];
-  var txt=q.t;
-  if(txt[0]!=='"')txt='"'+txt+'"';
-  document.getElementById('hc-quote-text').textContent=txt;
-  document.getElementById('hc-quote-attr').textContent=q.a?'— '+q.a:'';
-})();
-</script>
-
-<div id="root"></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css">
-<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js" data-manual></script>
-<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" data-autoloader-path="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/"></script>
-<script type="text/babel" data-presets="react" data-type="module">
+// ───────────────────────── original component body ─────────────────────────
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 const API = window.HYPRCHAT_API || "";
@@ -910,7 +441,7 @@ const TIC = {code:IC.Code,search:IC.Search,terminal:IC.Terminal,globe:IC.Globe,w
 const Pill = ({ev,t,expanded,onToggle})=>{
   const scrollRef = useRef(null);
   const stickRef = useRef(true);  // sticky-bottom: auto-scroll to new steps unless user scrolled up
-  const isS = ev.type==="tool_start"||ev.type==="tool_progress"||ev.type==="thinking"||ev.type==="streaming";
+  const isS = ev.type==="tool_start"||ev.type==="tool_progress"||ev.type==="thinking";
   const isE = ev.type==="tool_error"||ev.type==="error";
   const isD = ev.type==="tool_end"||ev.type==="tool_done"||ev.type==="complete"||ev.type==="thought_done";
   const isThink = ev.type==="thinking"||ev.type==="thought_done";
@@ -958,7 +489,6 @@ const Pill = ({ev,t,expanded,onToggle})=>{
     "run_shell": isD ? ["⚡", "Exited"] : ["🖥️", "Shell"],
     "fetch_url": isD ? ["🌐", "Fetched"] : ["🕸️", "Spidering"],
     "install_package": isD ? ["📦", "Installed"] : ["📥", "Installing"],
-    "streaming": ["✍️", "Transmitting"],
     "complete": ["✅", "Done"],
     "download_file": isD ? ["📎", "Ready"] : ["📤", "Packaging"],
     "delete_file": isD ? ["🗑️", "Deleted"] : ["🗑️", "Deleting"],
@@ -994,7 +524,7 @@ const Pill = ({ev,t,expanded,onToggle})=>{
     if(name==="write_file"||name==="download_file"||name==="download_project") return "bounce 1s ease-in-out infinite";
     if(name==="memory") return "memoryPulse 1.8s ease-in-out infinite";
     if(name==="generating") return "writing 0.8s ease-in-out infinite";
-    if(name==="thinking"||name==="streaming") return "bop 2s ease-in-out infinite";
+    if(name==="thinking") return "bop 2s ease-in-out infinite";
     return "bop 1.5s ease-in-out infinite";
   };
   const marqueeKey = Math.floor(displayStatus.length / 30);
@@ -1147,7 +677,7 @@ const _STEP_ACTION_ICONS = {
   // Indexer
   "indexing": "📚",  "found_files": "📁",  "reading": "📖",  "read_done": "📖",
   // QA
-  "question": "❓",  "list_files": "📁",  "keywords": "🏷",  "grep": "🔎",
+  "question": "❓",  "list_files": "📁",  "keywords": "🏷",
   "filename_targets": "🎯",  "matched_files": "🎯",  "snippets": "📑",
   "compose": "✍️",  "fallback": "↩",  "no_match": "❌",
   // Generic
@@ -1794,7 +1324,6 @@ const _phaseFromEvent = (ev)=>{
   if(ev.type==="tool_error"||ev.type==="error")return{phase:"failed",label:"Failed",detail:status||tool,pct:d.pct};
   if(ev.type==="tool_end"||ev.type==="tool_done")return{phase:"complete",label:"Tool complete",detail:status||tool,pct:d.pct||100};
   if(ev.type==="tool_start"||ev.type==="tool_progress"||ev.type==="tool_status")return{phase:"tool",label:(tool||"tool").replaceAll("_"," "),detail:status,pct:d.pct};
-  if(ev.type==="streaming")return{phase:"streaming",label:"Streaming",detail:status,pct:d.pct};
   return null;
 };
 
@@ -1857,10 +1386,10 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
   if(!evts.length) return null;
 
   // Stable string key for expandedPill — avoids collapse when new events arrive
-  // Guard: if evts only has source_links/search_results (no tool/thinking/streaming), merged will be empty
+  // Guard: if evts only has source_links/search_results (no tool/thinking), merged will be empty
   const getPillKey = (ev, idx) => {
     if(ev.type==="thinking"||ev.type==="thought_done") return "thinking";
-    if(ev.type==="streaming"||ev.type==="complete") return "streaming";
+    if(ev.type==="complete") return "streaming";
     if(idx!==undefined) return `${ev.data?.tool||ev.type}_${idx}`;
     return ev.data?.tool || ev.type;
   };
@@ -1871,8 +1400,8 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
   // First pass: group by category
   const thinkingEvts = evts.filter(e=>e.type==="thinking"||e.type==="thought_done");
   const toolEvts = evts.filter(e=>e.type==="tool_start"||e.type==="tool_progress"||e.type==="tool_end"||e.type==="tool_done"||e.type==="tool_error");
-  const streamEvts = evts.filter(e=>e.type==="streaming"||e.type==="complete");
-  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_progress","tool_end","tool_done","tool_error","streaming","complete","code_output","file_ready","search_results","source_links"].includes(e.type));
+  const streamEvts = evts.filter(e=>e.type==="complete");
+  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_progress","tool_end","tool_done","tool_error","complete","code_output","file_ready","search_results","source_links"].includes(e.type));
 
   // Thinking: collapse to just the final state
   if(thinkingEvts.length){
@@ -2892,6 +2421,14 @@ function initMermaidTheme(theme,font){
     securityLevel:"strict",
     theme:"base",
     fontFamily:font,
+    // SVG <text> labels everywhere. The default htmlLabels mode puts flowchart/class/
+    // state labels in <foreignObject> HTML, which browsers (notably WebKit with a
+    // CSS-scaled svg) can fail to paint — boxes render but text is invisible — and
+    // html2canvas can't rasterize for PDF export. Sequence diagrams already use SVG
+    // text, which is why they were unaffected.
+    htmlLabels:false,
+    flowchart:{htmlLabels:false},
+    class:{htmlLabels:false},
     themeVariables:{
       background:bg,
       primaryColor:surface,
@@ -2907,9 +2444,22 @@ function initMermaidTheme(theme,font){
       textColor:text,
       mainBkg:surface,
       nodeBorder:acc,
+      nodeTextColor:text,
       clusterBkg:bg,
       clusterBorder:brd,
-      edgeLabelBackground:bg,
+      titleColor:text,
+      // Edge labels (e.g. flowchart link text) sit on a solid panel-colored chip so
+      // they stay legible over any theme background.
+      edgeLabelBackground:surface,
+      // Class-diagram text — not covered by the default base-theme vars, which is why
+      // class diagrams previously rendered with empty/invisible boxes.
+      classText:text,
+      relationLabelColor:text,
+      relationLabelBackground:surface,
+      // State / pie diagram text
+      stateLabelColor:text,
+      pieTitleTextColor:text,
+      pieSectionTextColor:text,
       noteBkgColor:`${warm}22`,
       noteTextColor:text,
       noteBorderColor:warm,
@@ -2942,15 +2492,21 @@ function MermaidBlock({code,theme,font,epoch,printMode=false,streaming=false}){
   const [cpd,setCpd]=useState(false);
   const [showSrc,setShowSrc]=useState(false);
   const [fs,setFs]=useState(false);
+  const [tick,setTick]=useState(0); // bumped when the lazy mermaid chunk loads
   const id=useMemo(()=>`mmd-${Math.random().toString(36).slice(2,10)}`,[]);
   useEffect(()=>{
-    if(!window.mermaid||!containerRef.current||showSrc)return;
+    if(!window.mermaid){window.ensureMermaid&&window.ensureMermaid().then(()=>setTick(x=>x+1));return;}
+    if(!containerRef.current||showSrc)return;
     let cancelled=false;
     setErr(null);
     setRepaired(false);
     setPending(true);
     try{
-      if(printMode)initMermaidTheme(t,font);
+      // Apply the current theme before rendering. Mermaid is lazy-loaded now, so the
+      // app-level init effect may have run (and bailed) before mermaid existed — this
+      // guarantees the user's theme colors are set for the block that triggered the load
+      // and on every theme change (effect deps include t/font).
+      initMermaidTheme(t,font);
       const repairedCode=sanitizeMermaidCode(code);
       const renderOne=(src,suffix)=>window.mermaid.render(`${id}-${suffix}`,src);
       renderOne(code,"raw").then(({svg})=>{
@@ -2977,7 +2533,7 @@ function MermaidBlock({code,theme,font,epoch,printMode=false,streaming=false}){
       else{setPending(false);setErr(String(e?.message||e));}
     }
     return()=>{cancelled=true;};
-  },[code,epoch,showSrc,id,printMode,t,font,streaming]);
+  },[code,epoch,showSrc,id,printMode,t,font,streaming,tick]);
   useEffect(()=>{
     if(!fs||!fsRef.current||!containerRef.current)return;
     const srcSvg=containerRef.current.querySelector("svg");
@@ -3090,8 +2646,10 @@ function ChartBlock({code,theme,font,epoch,kind="chart",printMode=false,streamin
   const [pending,setPending]=useState(false);
   const [cpd,setCpd]=useState(false);
   const [showSrc,setShowSrc]=useState(false);
+  const [tick,setTick]=useState(0); // bumped when the lazy chart.js chunk loads
   useEffect(()=>{
-    if(!window.Chart||!canvasRef.current||showSrc){if(streaming&&!showSrc)setPending(true);return;}
+    if(!window.Chart){window.ensureChart&&window.ensureChart().then(()=>setTick(x=>x+1));if(streaming)setPending(true);return;}
+    if(!canvasRef.current||showSrc){if(streaming&&!showSrc)setPending(true);return;}
     let cfg;
     try{cfg=parseChartConfig(code);}
     catch(e){
@@ -3151,7 +2709,7 @@ function ChartBlock({code,theme,font,epoch,kind="chart",printMode=false,streamin
       else{setPending(false);setErr("Chart error: "+String(e.message));}
     }
     return()=>{if(chartRef.current){try{chartRef.current.destroy();}catch{}chartRef.current=null;}};
-  },[code,epoch,showSrc,t,font,printMode,streaming]);
+  },[code,epoch,showSrc,t,font,printMode,streaming,tick]);
   const copyCode=()=>{try{navigator.clipboard.writeText(code);setCpd(true);setTimeout(()=>setCpd(false),1500);}catch{}};
   const headerBtn={background:"none",border:"none",cursor:"pointer",padding:"3px 6px",fontSize:10,fontFamily:font,borderRadius:5,display:"flex",alignItems:"center",gap:3};
   const wrapStyle=printMode
@@ -3467,7 +3025,9 @@ function HyprChat(){
   // Mermaid init — re-runs when theme/font changes; bumps epoch to force diagram re-render
   const [mermaidEpoch,setMermaidEpoch]=useState(0);
   useEffect(()=>{
-    if(!window.mermaid)return;
+    // Mermaid is lazy-loaded; if it isn't in yet, kick the load and re-run once it
+    // resolves so every existing diagram re-themes/re-renders (epoch bump).
+    if(!window.mermaid){window.ensureMermaid&&window.ensureMermaid().then(()=>setMermaidEpoch(e=>e+1));return;}
     try{
       initMermaidTheme(t,font);
       setMermaidEpoch(e=>e+1);
@@ -3720,6 +3280,7 @@ function HyprChat(){
   const [councilVotes,setCouncilVotes]=useState([]); // live votes during current stream
   const [councilVoting,setCouncilVoting]=useState(false); // voting phase active
   const [councilRound,setCouncilRound]=useState(null); // {round, total_rounds, label}
+  const [councilKbStatus,setCouncilKbStatus]=useState(""); // KB retrieval status line
   // Ref to track active council stream — survives conversation switches
   const councilStreamRef=useRef(null); // {cid, running, responses, hostContent, votes, voting, round}
   const [expandedRounds,setExpandedRounds]=useState({}); // {"turnIdx-roundNum": true/false}
@@ -4674,6 +4235,7 @@ function HyprChat(){
     const report=activeResearch;
     const body=(researchLiveMarkdown||report?.report_markdown||"").trim();
     if(!body){notify({type:"warning",text:"No report body to export"});return;}
+    if(!window.html2pdf&&window.ensureHtml2pdf){try{await window.ensureHtml2pdf();}catch{}}
     if(!window.html2pdf){await printResearchReport();return;}
     const host=document.createElement("div");
     host.style.position="fixed";host.style.left="-10000px";host.style.top="0";host.style.width="7.15in";
@@ -5177,20 +4739,18 @@ function HyprChat(){
     const cid=actId;const cv=convs.find(c=>c.id===cid);
     if(!cv?.council_config_id)return;
     const userMsg=inp.trim();setInp("");setCouncilSuggestions([]);if(inpRef.current){inpRef.current.style.height="auto";}
-    // Quick search fires in parallel — don't block council
+    // Quick search runs server-side in council.py (one SearXNG hit shared by
+    // members + carousel). Its search_results / tool_done events arrive on the
+    // conversation EventBus, which populates quickResults and clears loading.
     if(quickSearch&&userMsg){
       setSearchLoading(true);setQuickResults([]);setQuickSearchError(null);
-      fetch(`${API}/api/quick-search`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:userMsg,count:6})})
-        .then(async r=>{if(!r.ok)throw new Error(`HTTP ${r.status}`);return r.json();})
-        .then(d=>{setQuickResults(d.results||[]);setQuickSearchError(null);setSearchLoading(false);})
-        .catch(e=>{setQuickResults([]);setQuickSearchError(e.message||"Search failed");setSearchLoading(false);});
     }else{setQuickResults([]);setQuickSearchError(null);}
     // Add user message to UI (backend council.py also saves it, so don't POST here)
     uConv(cid,c=>({...c,messages:[...(c.messages||[]),{role:"user",content:userMsg,metadata:{},created_at:new Date().toISOString()}]}));
     // Title generation
     if(!(cv.messages||[]).length){const title=userMsg.slice(0,40)+(userMsg.length>40?"...":"");uConv(cid,{title});fetch(`${API}/api/conversations/${cid}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({title})}).catch(()=>{});}
     // Start council streaming
-    setCouncilRunning(true);setCouncilResponses({});setCouncilHostContent("");setCouncilVotes([]);setCouncilVoting(false);setCouncilRound(null);
+    setCouncilRunning(true);setCouncilResponses({});setCouncilHostContent("");setCouncilVotes([]);setCouncilVoting(false);setCouncilRound(null);setCouncilKbStatus("");
     // Initialize stream ref for cross-navigation persistence
     const sRef={cid,running:true,responses:{},hostContent:"",votes:[],voting:false,round:null};
     councilStreamRef.current=sRef;
@@ -5206,7 +4766,9 @@ function HyprChat(){
         for(const ln of lines){
           if(!ln.startsWith("data: "))continue;
           try{const d=JSON.parse(ln.slice(6));
-            if(d.type==="council_round"){
+            if(d.type==="council_kb"){
+              setCouncilKbStatus(d.status||"");
+            }else if(d.type==="council_round"){
               const rnd={round:d.round,total_rounds:d.total_rounds,label:d.label};
               setCouncilRound(rnd);sRef.round=rnd;
               // On new debate round, reload messages from backend to get previous rounds persisted
@@ -5241,7 +4803,7 @@ function HyprChat(){
               setCouncilHostContent(p=>{const n=p+d.content;sRef.hostContent=n;return n;});
             }else if(d.type==="council_complete"){
               sRef.running=false;
-              setCouncilResponses({});setCouncilHostContent("");setCouncilVotes([]);setCouncilVoting(false);
+              setCouncilResponses({});setCouncilHostContent("");setCouncilVotes([]);setCouncilVoting(false);setCouncilKbStatus("");
               // Reload conversation from backend to get all rounds with correct metadata
               try{
                 const fullR=await fetch(`${API}/api/conversations/${cid}`);
@@ -6684,7 +6246,7 @@ function HyprChat(){
     return()=>clearTimeout(id);
   },[isEmptyChatSurface]);
   const latestLivePhase=(()=>{
-    const useful=evts.filter(e=>["thinking","thought_done","tool_start","tool_progress","tool_status","tool_end","tool_done","tool_error","error","streaming","search_results"].includes(e.type));
+    const useful=evts.filter(e=>["thinking","thought_done","tool_start","tool_progress","tool_status","tool_end","tool_done","tool_error","error","search_results"].includes(e.type));
     for(let i=useful.length-1;i>=0;i--){
       const phase=_phaseFromEvent(useful[i]);
       if(phase)return phase;
@@ -9728,6 +9290,7 @@ function HyprChat(){
                       </span>
                       <div style={{flex:1,height:1,background:`${t.pink}33`}}/>
                     </div>
+                    {councilKbStatus&&<div style={{fontSize:10,color:t.dim,textAlign:"center",marginBottom:6}}>📚 {councilKbStatus}</div>}
                     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:10}}>
                       {Object.entries(councilResponses).map(([mid,resp])=>{
                         const member=councilCfg?.members?.find(m=>m.id===mid)||{};
@@ -10313,6 +9876,3 @@ function HyprChat(){
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<HyprChat/>);
-</script>
-</body>
-</html>

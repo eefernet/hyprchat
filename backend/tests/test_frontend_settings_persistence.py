@@ -8,7 +8,7 @@ settings on page load.
 from pathlib import Path
 
 
-FRONTEND = Path(__file__).resolve().parents[2] / "frontend" / "dist" / "index.html"
+FRONTEND = Path(__file__).resolve().parents[2] / "frontend" / "src" / "main.jsx"
 
 
 def _html() -> str:

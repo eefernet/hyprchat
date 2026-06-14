@@ -34,9 +34,8 @@ from pydantic import BaseModel
 
 import config
 import database as db
-from tools import CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls, strip_tool_calls
 from council import stream_council_chat
-from events import EventBus, parse_tool_params
+from events import EventBus
 import quick_search as qs_module
 from agents.chat import chat_stream_generate, TOOL_TEMPLATES, detect_template_family
 from agents.personas import seed_coder_bot as _seed_coder_bot, seed_coder_bot_v2 as _seed_coder_bot_v2, seed_conspiracy_bot as _seed_conspiracy_bot, seed_based_bot as _seed_based_bot, seed_all_defaults as _seed_all_defaults
@@ -5593,9 +5592,32 @@ async def hf_download_ep(request: Request):
 # ============================================================
 # SERVE FRONTEND (production)
 # ============================================================
+class _FrontendStaticFiles(StaticFiles):
+    """StaticFiles with deploy-safe cache headers.
+
+    Vite assets are content-hashed, so they can be cached forever — but
+    index.html must NOT be cached: deploys delete the old hashed assets, and a
+    browser holding a stale cached index.html would request chunks that no
+    longer exist (blank app until hard refresh).
+    """
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        path = str(getattr(resp, "path", "") or "")
+        if "/assets/" in path.replace(os.sep, "/"):
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
 frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
-if os.path.exists(frontend_dir):
-    app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
+if os.path.isfile(os.path.join(frontend_dir, "index.html")):
+    app.mount("/", _FrontendStaticFiles(directory=frontend_dir, html=True), name="frontend")
+else:
+    print("[STARTUP] WARNING: frontend/dist/index.html not found — the UI will not be served.")
+    print("[STARTUP]          frontend/dist/ is build output (not committed). Build it with:")
+    print("[STARTUP]              cd frontend && npm install && npm run build")
 
 
 if __name__ == "__main__":

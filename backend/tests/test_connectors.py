@@ -63,7 +63,7 @@ def test_openapi_operation_to_connector_maps_parameters_and_body():
 
 def test_private_openapi_url_is_blocked():
     with pytest.raises(connectors.ConnectorError):
-        connectors.assert_url_allowed("http://127.0.0.1:8000/openapi.json", allow_private=False)
+        asyncio.run(connectors.assert_url_allowed("http://127.0.0.1:8000/openapi.json", allow_private=False))
 
 
 def test_plain_env_placeholder_resolution(monkeypatch):

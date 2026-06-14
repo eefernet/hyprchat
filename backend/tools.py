@@ -1337,7 +1337,7 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
     # Strip markdown code fences and model-specific special tokens for parsing
     stripped = re.sub(r'```(?:json|tool_call|tool)?\s*\n?', '', content).strip().rstrip('`')
     # Strip GPT-OSS / other model special tokens that appear after JSON
-    stripped = re.sub(r'<\|(?:call|message|im_end|im_start|eot_id|end)\|>.*', '', stripped, flags=re.DOTALL).strip()
+    stripped = re.sub(r'<\|(?:call|message|channel|im_end|im_start|eot_id|end)\|>.*', '', stripped, flags=re.DOTALL).strip()
 
     # 1. Entire response is a single JSON tool call
     for _try_str in (stripped, _fix_json_newlines(stripped)):
@@ -1777,26 +1777,7 @@ def _kb_filename_hints_for_language(language: str, task: str = "") -> list[str] 
     return out
 
 
-def _get_run_cmd(language: str, filepath: str) -> str:
-    """Return the shell command to run a file for the given language."""
-    lang = language.lower()
-    if lang in ("python", "python3", "py"):
-        return f"python3 {filepath}"
-    elif lang in ("javascript", "js"):
-        return f"node {filepath}"
-    elif lang in ("bash", "sh"):
-        return f"bash {filepath}"
-    elif lang in ("typescript", "ts"):
-        return f"npx ts-node {filepath}"
-    elif lang in ("rust", "rs"):
-        return f"rustc {filepath} -o /tmp/_hc_bin && /tmp/_hc_bin"
-    elif lang in ("go",):
-        return f"go run {filepath}"
-    elif lang in ("c",):
-        return f"gcc {filepath} -o /tmp/_hc_bin -lm && /tmp/_hc_bin"
-    elif lang in ("cpp", "c++"):
-        return f"g++ {filepath} -o /tmp/_hc_bin && /tmp/_hc_bin"
-    return filepath
+
 
 
 async def _maybe_auto_redeliver(

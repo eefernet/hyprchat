@@ -1,3 +1,39 @@
+# Alpha v17.2.1 - June 14, 2026
+> This update focuses on the first series to migrate a single file react **no build step** app into a built app versus having all built at runtime on the users browser. Load times should be faster and it should be easier to maintain the code base in the future.
+
+## Vite Migration
+- **The frontend now has a build step.** Source moved to `frontend/src/main.jsx` (same single component file); `frontend/dist/` is Vite build output and is **no longer committed** — fresh clones must run `cd frontend && npm install && npm run build` before the backend can serve the UI.
+- **No more in-browser Babel** — JSX is pre-compiled, so pages load faster and a bad edit fails loudly at `npm run build` instead of white-screening the app.
+- Third-party libs (React, Prism, KaTeX, Mermaid, Chart.js, html2pdf, svg-pan-zoom) are npm-bundled locally — no runtime CDN. Mermaid/Chart/html2pdf lazy-load on demand.
+- **Deploy-safe caching:** hashed `assets/` are served immutable (1-year cache); `index.html` is always `no-cache`, so a deploy can never leave browsers requesting deleted chunks.
+- **Atomic frontend deploys:** `deploy_monitor.py` watches `frontend/src/**`, builds, uploads to a staging dir, and swaps it in — a failed upload no longer leaves the server with no frontend. The server stays Node-free.
+- Backend prints clear startup instructions if `frontend/dist/` is missing instead of serving nothing silently.
+
+## Ollama 0.30 Compatibility
+- **Leaked-reasoning guard:** some models (e.g. gemma4 on Ollama 0.30.x) emit chain-of-thought as plain content after tool rounds; the chat stream now detects this and routes it to the thinking pane instead of the reply.
+- The same strip (`strip_leaked_cot`) protects non-streamed agent calls, council member responses, and research synthesis, so leaked CoT never enters debate context, votes, or the database.
+
+## Artifact Delivery & Versioning
+- **Auto-redelivery:** a feature-addition turn on an already-delivered project repackages it automatically and posts a fresh download pill (skipped if the reviewer flagged issues).
+- **Per-version downloads:** new `/api/artifacts/{id}/download` endpoint serves each artifact's exact bytes — old pills always download what they originally packaged.
+- **`latest` / `⚠ stale` badges** on artifacts and version lists when the project changed after packaging, with per-version download links.
+
+## UI Updates
+- **Cleaner chat list:** icon-based pin/tag/delete actions that appear on hover, row hover highlight, tighter spacing, and proper title truncation.
+- Artifact cards: Add to KB always available, version rows show status badges inline.
+
+## Bug fixes
+- **Phantom-completion guard:** a coder persona claiming it built something while calling zero tools is re-prompted to actually do the work (or admit it didn't) — users are never handed a false success.
+- Council sends no longer fire a duplicate quick-search request; one SearXNG fetch feeds both the members and the results carousel.
+- Connector URL safety checks (`assert_url_allowed`) are now async with DNS resolution off the event loop.
+
+## Cleanup
+- Removed the deprecated Quick Search LLM triage path and its tests (deterministic planner is the only path).
+- Removed dead code across `database.py`, `cancel_registry.py`, `acceptance.py`, and `connectors.py`.
+- `create-lxc.sh` and `deploy.sh` updated for the built-`dist/` layout.
+
+---
+
 # Alpha v17.2.0 — June 12, 2026
 
 > This update focuses on existing system hardening and and improving existing features.
@@ -59,65 +95,9 @@
 - **Duplicate-BLOCKED detection** keys on blocking trigger, not tool name
 - **Frontend polling** stops on terminal states (`cancelled`, `skipped`, `blocked`)
 
----
-
 **Migration:** Run `POST /api/seed/coder-bot-v2` after deploy for updated persona prompts.
 
-## Deep Research & SearXNG
-- **SSRF-safe page fetchers** with 2 MB body cap and per-hop DNS checks
-- **Redirect URLs tracked** for proper attribution (no more "S?" sources)
-- **Research tokens via SSE only** (no DB writes per chunk)
-- **Cancel can't be resurrected** — pre-cancelled rows honored at start
-- **Embeddings batched** (64-text per Ollama request)
-- **ChromaDB off event loop** — large upserts don't freeze the server
-- **Parallel seed/GitHub fetches** with cancellable loop
-- **Context window setting** (`research_num_ctx`, default 40960) prevents prompt truncation
-- **SearXNG failures logged**, Google fallback capped at 8/report
-- **RAG reindex fixed** — chunk size clamped, upserts batched ≤5000 records
-- **SearXNG hourly rotation** (was 10-min) — engines no longer suspended
-
-## Core System
-- **Event logs append-only** — O(n²) write amplification eliminated
-- **Startup reaper** covers both runs and research reports
-- **Memory suggestions run post-turn** in background (no more 90s delays)
-- **Cloud models safe for judgment agents** — JSON output enforced
-- **Mid-stream failures persist partial messages** with "interrupted" note
-- **Council debates can't wedge** — done-sentinel always fires
-- **RAG reindex clears orphan chunks**
-- **Settings PATCH clamps junk values**
-- **Frontend:** bounded message metadata, memoized markdown rendering
-
-## Daedalus (Coder Bot v2)
-
-### Architecture & Workflow
-- **SEARCH/REPLACE diffs** instead of whole-file regeneration; `### REWRITE:` escape for full rewrites. Fixes data-loss from truncated prompts.
-- **Git commits after every build/fix cycle** — `git log --oneline` is now the authoritative attempt history for easy reverts
-- **Real FSM workflow state** with single transition function (`PLAN_DONE`, `BUILD_OK`, `REVIEW_CLEAN/ISSUES`, `FIX_APPLIED`, `ACCEPT_OK/ISSUES`)
-- **Auto-verification** after `generate_code`, `run_fixer`, and `run_aider_fix` — Reviewer runs automatically, removing LLM routing rounds
-- **Schema-constrained Architect output** (`format=json`) eliminates most plan parse-retry rounds
-- **Fixer can delete files** (`# DELETE:` sections) — fixes infinite loops on runtime/state files that should be removed
-- **Reviewer smoke phase cleans up** its own artifacts — verification doesn't pollute the tree it grades
-
-### Cancellation & Control
-- **Stop frees GPU immediately** — agent LLM calls now stream internally instead of non-streaming, aborting Ollama on cancel
-- **Workers self-cancel on disconnect** — OpenHands/Aider SSE consumer vanishes triggers worker cancellation
-- **4096 token cap** on structured-output agents (plan/review/acceptance JSON, QA answers)
-- **Acceptance progress ticker** — "analyzing… Ns elapsed" during model calls
-- **Fix-budget feedback** — "Fix-cycle budget: N/3 used" in every fixer/Aider result
-- **Reviewer smokes real CLI** — reads `[project.scripts]` and runs `<script> --help` for pyproject projects
-
-### Agentic Improvements
-- **Fix attempts have memory** — Fixer/Aider see compact history of prior changes ("touched app.py — renamed handler")
-- **Cloud models opt-in** for Architect/Reviewer/Acceptance via Settings → Coder Bot (never silently inherited)
-- **Fix-cycle caps per request** (3 reviewer-driven, 2 acceptance-driven), reset by new user message
-- **Uploaded-project indexer** prioritizes entrypoints/larger source files (was 100 smallest), cancellable via Stop
-- **Context window respected** — Architect uses configured `research_num_ctx` instead of hardcoded 16384
-- **Duplicate-BLOCKED detection** keys on blocking trigger, not tool name
-- **Frontend polling** stops on terminal states (`cancelled`, `skipped`, `blocked`)
-
 ---
-
-**Migration:** Run `POST /api/seed/coder-bot-v2` after deploy for updated persona prompts.
 
 ## Alpha v17.1.2 — June 10, 2026
 
@@ -153,6 +133,7 @@
 ### Bug Fixes
 - Fixed a fresh empty-chat race where selecting a model in the top-left picker and immediately sending could create the chat with the selected model but stream the first response through a stale/default model before React state caught up.
 
+---
 
 ## Alpha v17.1.1 — June 8, 2026
 
@@ -189,6 +170,8 @@
 - Fixed Deep Research panel cancel/delete/rerun state so active reports do not stay stuck as running or duplicate report rows.
 - Added regression coverage for Agent Research cache handoff, Daedalus stuck-fix research gating, and durable Deep Research report persistence.
 - Updated backend test defaults to the Tailscale HTTP endpoint the service actually listens on.
+
+---
 
 ## Alpha v17.1 — June 3, 2026
 
@@ -274,6 +257,8 @@
 ### Bug Fixes
 - Fixed Acceptance falsely reporting long source files as truncated or syntactically incomplete when its static source excerpt ended mid-statement. Acceptance now reads much larger source excerpts, marks any remaining excerpt truncation explicitly, and treats the clean Reviewer build/lint result as authoritative for syntax status.
 
+---
+
 ## Alpha v17.0.2 — June 2, 2026
 
 ### Coder Bot v2 — uploaded-project repair hardening
@@ -325,6 +310,8 @@
 ### Tests
 
 - Added focused Acceptance structured-output tests, frontend settings hydration guard tests, Workspace Model context-cap tests, and a Quick Search recency test for `time_range="month"`.
+
+---
 
 ## Alpha v17.0.1 — May 26, 2026
 
@@ -378,6 +365,7 @@ Pulled the highest-ROI patterns from Perplexica (24k★), Khoj (18k★), and Ope
 - **Removed** — `_fetch_page` import in `quick_search.py` (replaced by `_fetch_clean_page`); stale `_rewrite_query` references in docstrings.
 - **New dep** — `trafilatura>=1.10.0` in `requirements.txt`.
 
+---
 
 ## Alpha v17 — May 7, 2026
 
@@ -568,6 +556,7 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Fixed Bash render error where `$VAR` and command-substitution `$(cmd)` inside a `bash` code fence prematurely terminated rendering.
 - Fixed `num_ctx` from user settings being silently ignored by OpenHands runs after the first model load — now evict-and-reload guarantees the runtime context matches the requested value.
 
+---
 
 ## Alpha v16.2 — April 22, 2026
 
@@ -596,6 +585,7 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - **New SSE event** — `refinement_start` `{round, total}` signals each review pass to the frontend. The `done` payload now carries `refinements: N` which is persisted to the message metadata so the badge survives reload.
 - **Storage** — `localStorage["hc-effort-level"]` for the global default; `localStorage["hc-effort-per-chat"] = {convId: level}` for per-chat overrides. No DB migration needed.
 
+---
 
 ## Alpha v16.1.1 — April 22, 2026
 
@@ -643,6 +633,7 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Reduced chat-loop allocations — the per-round `_PARALLEL_SAFE` set and 22-entry `_TOOL_ICONS` dict are now module-level constants instead of being rebuilt every tool-calling round.
 - Minor: avatar upload no longer evaluates `file.filename or ""` three times in one expression.
 
+---
 
 ## Alpha v16.1 — April 2026
 
@@ -697,6 +688,7 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Fixed auto-title not firing reliably — stale React closure caused message count check to miss; now triggers based on conversation title instead
 - Fixed workspace file preview panel not showing when Workspace tab is active — preview panel moved outside panel ternary so it renders alongside any active panel
 
+---
 
 ## Alpha v16 — March 2026
 

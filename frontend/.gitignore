@@ -1,0 +1,8 @@
+node_modules/
+.vite/
+*.local
+
+# Build output — not committed (it re-hashes every build, ~110 files). It stays on
+# disk and is shipped to the server by deploy_monitor.py / scp. A fresh clone must
+# run `npm install && npm run build` before the backend can serve the frontend.
+dist/

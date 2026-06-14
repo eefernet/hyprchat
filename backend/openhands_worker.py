@@ -205,13 +205,21 @@ class AiderRunResponse(BaseModel):
 
 
 CACHE_PATH = Path("/opt/openhands-worker/.tool_cache.json")
+# Bump to invalidate persisted entries when the detection logic changes.
+# v2: Ollama 0.30 capabilities-aware check — pre-0.30 entries misclassified
+# llama.cpp-backend models (degenerate template, no .Tools) as prompt-based.
+_TOOL_CACHE_VERSION = 2
 _tool_support_cache: dict[str, bool] = {}
 
-# Load persisted cache on startup
+# Load persisted cache on startup; discard stale-version caches wholesale.
 try:
     if CACHE_PATH.exists():
-        _tool_support_cache = json.loads(CACHE_PATH.read_text())
-        print(f"[OH-Worker] Loaded {len(_tool_support_cache)} cached tool support entries")
+        _raw_cache = json.loads(CACHE_PATH.read_text())
+        if isinstance(_raw_cache, dict) and _raw_cache.get("_v") == _TOOL_CACHE_VERSION:
+            _tool_support_cache = _raw_cache.get("entries", {})
+            print(f"[OH-Worker] Loaded {len(_tool_support_cache)} cached tool support entries")
+        else:
+            print("[OH-Worker] Tool cache version mismatch — discarding stale entries")
 except Exception as e:
     print(f"[OH-Worker] Failed to load tool cache: {e}")
 
@@ -220,7 +228,7 @@ def _persist_tool_cache():
     """Write tool support cache to disk."""
     try:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CACHE_PATH.write_text(json.dumps(_tool_support_cache))
+        CACHE_PATH.write_text(json.dumps({"_v": _TOOL_CACHE_VERSION, "entries": _tool_support_cache}))
     except Exception as e:
         print(f"[OH-Worker] Failed to persist tool cache: {e}")
 
@@ -925,20 +933,38 @@ def _check_tool_support(ollama_base: str, model: str) -> bool:
         print(f"[OH-Worker] {model}: native_tool_calling={cached} (cached)")
         return cached
 
-    # Quick template check first — skip the live test if no .Tools at all
+    # Quick capability/template check first — skip the live test if the model
+    # clearly has no tool support. Ollama 0.30+ publishes a `capabilities`
+    # list on /api/show; prefer it, because llama.cpp-backend models return a
+    # degenerate "{{ .Prompt }}" template with no .Tools even when they fully
+    # support native tool calling (e.g. gemma4).
     try:
         r = requests.post(f"{ollama_base}/api/show", json={"name": model}, timeout=5)
         if r.ok:
-            template = r.json().get("template", "")
-            if ".Tools" not in template:
+            body = r.json()
+            caps = body.get("capabilities") or []
+            if caps:
+                if "tools" not in caps:
+                    print(f"[OH-Worker] {model}: capabilities={caps} → prompt-based")
+                    _tool_support_cache[cache_key] = False
+                    _persist_tool_cache()
+                    return False
+                # Capabilities are authoritative on 0.30+ — trust them. The
+                # "Say hello" live test false-negatives on capable models that
+                # simply answer in text instead of calling the dummy tool.
+                print(f"[OH-Worker] {model}: capabilities advertise tools → native")
+                _tool_support_cache[cache_key] = True
+                _persist_tool_cache()
+                return True
+            elif ".Tools" not in body.get("template", ""):
                 print(f"[OH-Worker] {model}: no .Tools in template → prompt-based")
                 _tool_support_cache[cache_key] = False
                 _persist_tool_cache()
                 return False
     except Exception as e:
+        # Transient (Ollama restarting, timeout): fall back to prompt-based
+        # for THIS run but don't poison the persisted cache.
         print(f"[OH-Worker] Template check failed for {model}: {e}")
-        _tool_support_cache[cache_key] = False
-        _persist_tool_cache()
         return False
 
     # Live test: send a trivial tool call and check for structured response
@@ -970,10 +996,9 @@ def _check_tool_support(ollama_base: str, model: str) -> bool:
             _persist_tool_cache()
             return has_tool_calls
     except Exception as e:
+        # Transient failure — don't persist a False verdict for the model.
         print(f"[OH-Worker] Live tool test failed for {model}: {e}")
 
-    _tool_support_cache[cache_key] = False
-    _persist_tool_cache()
     return False
 
 

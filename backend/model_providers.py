@@ -461,6 +461,48 @@ def reject_cloud(model_id: str) -> str:
     return "" if is_cloud_model(model_id or "") else (model_id or "")
 
 
+# ── Leaked-reasoning strip (Ollama 0.30.x + gemma4-style models) ──
+# CoT can arrive detokenized as plain content in two shapes:
+#   1. "thought\n<CoT...><|channel|><real answer>"   (opener + marker)
+#   2. "<CoT...><|channel|><real answer>"            (marker only)
+# The chat streaming loop has its own incremental guard (agents/chat.py);
+# this is the shared one-shot equivalent for non-streamed agent text
+# (complete_chat), council members, and research synthesis.
+_LEAK_OPEN_RE = re.compile(r"\s*[Tt]hought[ \t]*\n")
+_LEAK_TRANSITION_MARKERS = ("<|channel|>", "<channel|>", "<|message|>")
+# Line-anchored fence counter: prose often *mentions* ``` mid-line, which
+# must not count as a real fence.
+_FENCE_LINE_RE = re.compile(r"(?m)^[ \t]*```")
+
+
+def _in_open_fence(text: str) -> bool:
+    return len(_FENCE_LINE_RE.findall(text)) % 2 == 1
+
+
+def strip_leaked_cot(text: str) -> tuple[str, str]:
+    """Split leaked chain-of-thought out of model output.
+
+    Returns (clean_content, leaked_thinking). When no leak shape is
+    detected, returns (text, "") unchanged.
+    """
+    if not text:
+        return text, ""
+    opener = _LEAK_OPEN_RE.match(text)
+    if opener:
+        rest = text[opener.end():]
+        for mk in _LEAK_TRANSITION_MARKERS:
+            mi = rest.find(mk)
+            if mi != -1:
+                return rest[mi + len(mk):].lstrip(), rest[:mi].strip()
+        # Opener with no transition marker: the whole thing is CoT.
+        return "", rest.strip()
+    for mk in _LEAK_TRANSITION_MARKERS:
+        mi = text.find(mk)
+        if mi != -1 and not _in_open_fence(text[:mi]):
+            return text[mi + len(mk):].lstrip(), text[:mi].strip()
+    return text, ""
+
+
 async def complete_chat(http, model_id: str, prompt: str, *,
                         temperature: float = 0.2, num_ctx: int = 16384,
                         num_predict: int | None = None,
@@ -554,6 +596,14 @@ async def complete_chat(http, model_id: str, prompt: str, *,
             if chunk.get("done"):
                 break
     text = "".join(content_parts).strip()
+    if text and not format_json:
+        # format=json grammar-constrains decoding, so leaks can't occur there.
+        clean, leaked = strip_leaked_cot(text)
+        if leaked:
+            print(f"[complete_chat] stripped {len(leaked)} chars of leaked CoT from {model_id}")
+            # An opener with no transition marker means the whole output was
+            # CoT — better to hand the caller that than an empty string.
+            text = clean or leaked
     return text or "".join(thinking_parts).strip()
 
 

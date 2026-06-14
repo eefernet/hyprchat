@@ -103,140 +103,6 @@ def test_relevance_score_no_user_content():
     assert search_agent.relevance_score("the and is to", ["x"], [{"title": "y"}]) == 1.0
 
 
-# ── _validate_triage ──
-def test_validate_triage_accepts_valid():
-    out = search_agent._validate_triage(
-        {
-            "needs_search": True,
-            "queries": ["UK general election 2026 results"],
-            "category": "news",
-            "reason": "follow-up about UK elections",
-        },
-        latest="whos winning?",
-        prior_tokens={"election", "uk"},
-    )
-    assert out is not None
-    assert out["needs_search"] is True
-    assert out["queries"] == ["UK general election 2026 results"]
-    assert out["category"] == "news"
-
-
-def test_validate_triage_rejects_non_dict():
-    assert search_agent._validate_triage("not a dict", "hi", set()) is None
-    assert search_agent._validate_triage(None, "hi", set()) is None
-
-
-def test_validate_triage_rejects_missing_fields():
-    assert search_agent._validate_triage({"queries": []}, "hi", set()) is None
-    assert search_agent._validate_triage(
-        {"needs_search": True, "queries": []}, "hi", set(),
-    ) is None  # claims search but produced no usable queries
-
-
-def test_validate_triage_drops_url_queries():
-    out = search_agent._validate_triage(
-        {
-            "needs_search": True,
-            "queries": ["good query about cats", "https://example.com/ignore"],
-            "category": "general",
-        },
-        latest="cats",
-        prior_tokens=set(),
-    )
-    assert out is not None
-    assert out["queries"] == ["good query about cats"]
-
-
-def test_validate_triage_followup_must_carry_topic():
-    # Latest is a bare follow-up, prior is about UK elections, but the queries
-    # don't share any prior content tokens → reject.
-    out = search_agent._validate_triage(
-        {
-            "needs_search": True,
-            "queries": ["random unrelated topic about whales"],
-            "category": "general",
-        },
-        latest="whos winning?",
-        prior_tokens={"uk", "election", "general"},
-    )
-    assert out is None, "follow-up that drops prior topic must be rejected"
-
-
-def test_validate_triage_normalizes_bad_category():
-    out = search_agent._validate_triage(
-        {
-            "needs_search": True,
-            "queries": ["python regex tutorial"],
-            "category": "weather",  # not in allowed set
-        },
-        latest="python regex",
-        prior_tokens=set(),
-    )
-    assert out is not None
-    assert out["category"] == "general"
-
-
-def test_validate_triage_skip_path_normalized():
-    out = search_agent._validate_triage(
-        {"needs_search": False, "queries": ["leftover"], "category": "general"},
-        latest="hi",
-        prior_tokens=set(),
-    )
-    assert out is not None
-    assert out["needs_search"] is False
-    assert out["queries"] == []
-
-
-# ── triage with mocked HTTP ──
-def test_triage_valid_json_returns_plan():
-    plan_json = json.dumps({
-        "needs_search": True,
-        "queries": ["UK election 2026 results"],
-        "category": "news",
-        "reason": "follow-up",
-    })
-    http = _FakeHTTP([_ollama_response(plan_json)])
-
-    messages = [
-        {"role": "user", "content": "tell me about elections in the UK"},
-        {"role": "assistant", "content": "The UK holds general elections..."},
-    ]
-    out = _run(search_agent.triage(http, "http://ollama", "test-model", messages, "whos winning?"))
-    assert out is not None
-    assert out["needs_search"] is True
-    assert out["queries"] == ["UK election 2026 results"]
-    assert out["category"] == "news"
-    # Ollama call uses format=json
-    assert http.calls[0]["json"]["format"] == "json"
-
-
-def test_triage_invalid_json_returns_none():
-    http = _FakeHTTP([_ollama_response("this is not json at all, just words")])
-    out = _run(search_agent.triage(http, "http://ollama", "test-model", [], "hi there"))
-    assert out is None
-
-
-def test_triage_strips_code_fence():
-    fenced = "```json\n" + json.dumps({
-        "needs_search": False, "queries": [], "category": "general", "reason": "greeting",
-    }) + "\n```"
-    http = _FakeHTTP([_ollama_response(fenced)])
-    out = _run(search_agent.triage(http, "http://ollama", "test-model", [], "hello"))
-    assert out is not None
-    assert out["needs_search"] is False
-
-
-def test_triage_returns_none_on_empty_model():
-    out = _run(search_agent.triage(None, "http://ollama", "", [], "hi"))
-    assert out is None
-
-
-def test_triage_returns_none_on_http_error():
-    http = _FakeHTTP([RuntimeError("network down")])
-    out = _run(search_agent.triage(http, "http://ollama", "test-model", [], "hi"))
-    assert out is None
-
-
 # ── _merge_unique ──
 def test_merge_unique_dedupes_by_url():
     a = [{"url": "https://a.com", "title": "A"}, {"url": "https://b.com", "title": "B"}]
@@ -271,7 +137,7 @@ def test_run_search_agent_skip_gate():
     http = _FakeHTTP([])  # no responses queued — would error if triage ran
     messages = [{"role": "user", "content": "hi"}]
     out = _run(search_agent.run_search_agent(
-        http, "http://ollama", "test-model", "test-model",
+        http, "http://ollama", "test-model",
         events=None, conv_id=None, messages=messages,
     ))
     assert out["skipped"] is True
@@ -279,8 +145,8 @@ def test_run_search_agent_skip_gate():
     assert http.calls == []  # zero LLM calls
 
 
-def test_run_search_agent_triage_skip():
-    """Triage returns needs_search=false → no SearXNG, return skip."""
+def test_run_search_agent_operate_on_attached_skips():
+    """Operate-on-attached messages hit the skip gate → no SearXNG."""
     plan = json.dumps({
         "needs_search": False, "queries": [], "category": "general", "reason": "operate on attached",
     })
@@ -289,11 +155,11 @@ def test_run_search_agent_triage_skip():
 
     with patch.object(quick_search, "_cached_search", new=AsyncMock()) as mock_search:
         out = _run(search_agent.run_search_agent(
-            http, "http://ollama", "test-model", "test-model",
+            http, "http://ollama", "test-model",
             events=None, conv_id=None, messages=messages,
         ))
         assert out["skipped"] is True
-        assert mock_search.await_count == 0  # triage said no, no search ran
+        assert mock_search.await_count == 0  # skip gate fired, no search ran
 
 
 def test_run_search_agent_high_relevance_no_refine():
@@ -314,7 +180,7 @@ def test_run_search_agent_high_relevance_no_refine():
          patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
          patch.object(search_agent, "refine_query", new=AsyncMock(return_value="should-not-be-called")) as mock_refine:
         out = _run(search_agent.run_search_agent(
-            http, "http://ollama", "test-model", "test-model",
+            http, "http://ollama", "test-model",
             events=None, conv_id=None, messages=messages,
         ))
         assert out["skipped"] is False
@@ -336,7 +202,7 @@ def test_run_search_agent_news_recency_passes_month_time_range():
          patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
          patch.object(search_agent, "refine_query", new=AsyncMock(return_value="should-not-be-called")):
         out = _run(search_agent.run_search_agent(
-            http, "http://ollama", "test-model", "test-model",
+            http, "http://ollama", "test-model",
             events=None, conv_id=None, messages=messages,
         ))
         assert out["skipped"] is False
@@ -358,7 +224,7 @@ def test_run_search_agent_passes_configured_searxng_engines():
          patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
          patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)):
         out = _run(search_agent.run_search_agent(
-            http, "http://ollama", "test-model", "test-model",
+            http, "http://ollama", "test-model",
             events=None, conv_id=None, messages=messages,
         ))
 
@@ -395,7 +261,7 @@ def test_run_search_agent_today_uses_day_freshness_and_resolved_date():
          patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
          patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)):
         out = _run(search_agent.run_search_agent(
-            http, "http://ollama", "test-model", "test-model",
+            http, "http://ollama", "test-model",
             events=events, conv_id="conv-today", messages=messages,
         ))
 
@@ -434,7 +300,7 @@ def test_run_search_agent_today_event_query_uses_general_web_fallback():
          patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
          patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)):
         out = _run(search_agent.run_search_agent(
-            http, "http://ollama", "test-model", "test-model",
+            http, "http://ollama", "test-model",
             events=None, conv_id="conv-wwdc", messages=messages,
         ))
 
@@ -467,7 +333,7 @@ def test_run_search_agent_today_warns_when_sources_are_not_same_day():
          patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
          patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)):
         out = _run(search_agent.run_search_agent(
-            http, "http://ollama", "test-model", "test-model",
+            http, "http://ollama", "test-model",
             events=None, conv_id=None, messages=messages,
         ))
 
@@ -491,7 +357,7 @@ def test_run_search_agent_returns_balanced_target_chat_results():
          patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
          patch.object(search_agent, "refine_query", new=AsyncMock(return_value="should-not-be-called")):
         out = _run(search_agent.run_search_agent(
-            http, "http://ollama", "test-model", "test-model",
+            http, "http://ollama", "test-model",
             events=events, conv_id="conv-1", messages=messages,
         ))
 
@@ -537,37 +403,6 @@ def test_embed_dedup_backfills_to_35_when_candidates_exist():
     assert all(results[i]["url"] not in urls for i in range(1, 6))
 
 
-def test_rank_domain_limit_still_reaches_35_with_diverse_sources():
-    repeated = [
-        {
-            "title": f"Repeated {i}",
-            "url": f"https://example.com/article-{i}",
-            "content": "search topic repeated domain",
-            "score": 100 - i,
-            "type": "web",
-        }
-        for i in range(20)
-    ]
-    diverse = [
-        {
-            "title": f"Diverse {i}",
-            "url": f"https://diverse{i}.org/article",
-            "content": "search topic diverse domain",
-            "score": 50,
-            "type": "web",
-        }
-        for i in range(60)
-    ]
-
-    out = quick_search._rank_and_filter_for_chat(
-        repeated + diverse, "search topic", category="general",
-        limit=quick_search.CHAT_MAX_RESULTS,
-    )
-    domains = [quick_search._registrable_domain(r["url"]) for r in out]
-    assert len(out) == quick_search.CHAT_MAX_RESULTS
-    assert domains.count("example.com") <= 2
-
-
 def test_run_search_agent_page_enrichment_only_uses_top_configured_results():
     http = _FakeHTTP([])
     messages = [{"role": "user", "content": "latest broad search topic"}]
@@ -586,7 +421,7 @@ def test_run_search_agent_page_enrichment_only_uses_top_configured_results():
          patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
          patch.object(search_agent, "refine_query", new=AsyncMock(return_value="should-not-be-called")):
         out = _run(search_agent.run_search_agent(
-            http, "http://ollama", "test-model", "test-model",
+            http, "http://ollama", "test-model",
             events=None, conv_id=None, messages=messages,
         ))
 
@@ -627,7 +462,7 @@ def test_run_search_agent_low_relevance_refines():
          patch.object(config, "QUICK_SEARCH_MODE", "quality"), \
          patch.object(search_agent, "refine_query", new=AsyncMock(return_value="UK Reform Party 2026 election")) as mock_refine:
         out = _run(search_agent.run_search_agent(
-            http, "http://ollama", "test-model", "test-model",
+            http, "http://ollama", "test-model",
             events=None, conv_id=None, messages=messages,
         ))
         assert out["skipped"] is False
@@ -651,7 +486,7 @@ def test_run_search_agent_max_rounds_caps():
          patch.object(config, "QUICK_SEARCH_MODE", "quality"), \
          patch.object(search_agent, "refine_query", new=AsyncMock(return_value="another query")) as mock_refine:
         out = _run(search_agent.run_search_agent(
-            http, "http://ollama", "test-model", "test-model",
+            http, "http://ollama", "test-model",
             events=None, conv_id=None, messages=messages,
             max_rounds=2,
         ))
@@ -669,7 +504,7 @@ def test_run_search_agent_no_results():
 
     with patch.object(quick_search, "_cached_search", new=AsyncMock(return_value=[])):
         out = _run(search_agent.run_search_agent(
-            http, "http://ollama", "test-model", "test-model",
+            http, "http://ollama", "test-model",
             events=None, conv_id=None, messages=messages,
         ))
         assert out["skipped"] is False
@@ -685,7 +520,7 @@ def test_run_search_agent_search_failure_injects_unavailable_context():
 
     with patch.object(quick_search, "_cached_search", new=failing_search):
         out = _run(search_agent.run_search_agent(
-            http, "http://ollama", "test-model", "test-model",
+            http, "http://ollama", "test-model",
             events=None, conv_id=None, messages=messages,
         ))
 
@@ -712,7 +547,7 @@ def test_run_search_agent_default_path_does_not_call_triage():
          patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
          patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)):
         out = _run(search_agent.run_search_agent(
-            http, "http://ollama", "test-model", "test-model",
+            http, "http://ollama", "test-model",
             events=None, conv_id=None, messages=messages,
             default_model="test-model",
         ))

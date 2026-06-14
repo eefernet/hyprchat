@@ -9,11 +9,11 @@
 </p>
 
 <p align="center">
-  Built with FastAPI + a single-file React SPA. No build step, no cloud dependencies.
+  Built with FastAPI + a single-file React SPA compiled with Vite. Local-first with no required cloud dependencies — optional OpenAI/Anthropic models via your own API keys.
 </p>
 
 <p align="center">
-  <code>FastAPI</code> · <code>React 18</code> · <code>Ollama</code> · <code>SQLite</code> · <code>SearXNG</code> · <code>Codebox</code>
+  <code>FastAPI</code> · <code>React 18</code> · <code>Vite</code> · <code>Ollama</code> · <code>SQLite</code> · <code>SearXNG</code> · <code>Codebox</code>
 </p>
 
 > ⚠️ Alpha software — actively developed, expect rough edges. Check [releases](https://github.com/eefernet/hyprchat/releases) for stable builds.
@@ -28,7 +28,7 @@ HyprChat can execute code, upload files, call local services, and drive coding a
 
 ## What It Is
 
-HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-style dashboards. It combines normal chat, model management, web research, RAG, agent profiles, project workspaces, and a coding-agent workflow into one FastAPI service and one browser-loaded React file.
+HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-style dashboards. It combines normal chat, model management, web research, RAG, agent profiles, project workspaces, and a coding-agent workflow into one FastAPI service and one Vite-built React component file.
 
 <p align="center">
   <img src="docs/images/mainScreen.png" alt="HyprChat main chat screen" width="900">
@@ -42,9 +42,12 @@ HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-styl
 | 🏛️ Daedalus | Architect → Builder → Reviewer → Acceptance workflow for building and fixing projects |
 | 🔎 Research | Quick Search, deep research reports, source cards, page reading, durable report history |
 | 🧰 Tools | Code execution, shell/file tools, URL fetch, custom Python tools, uploaded project awareness |
+| 🔌 Connectors | MCP servers and OpenAPI specs discovered into chat-usable tools, with credential placeholders and private-URL guards |
 | 📚 Knowledge | RAG knowledge bases, ChromaDB retrieval, workspace memory, project indexing |
+| 🧠 Memory | Global user memory plus workspace memory with reviewed suggestions, pinned blocks, and Ghost Mode for unsaved chats |
+| 📁 Artifacts | Artifact Studio tracks delivered files/projects with previews, versions, revisions, bundles, and timelines |
 | 🗳️ Councils | Run multiple models in parallel, debate answers, vote, and synthesize the result |
-| 📦 Models | Ollama model browser, HuggingFace GGUF search/downloads, capability badges |
+| 📦 Models | Ollama model browser, HuggingFace GGUF search/downloads, capability badges, optional OpenAI/Anthropic cloud models |
 | 🧩 Profiles | Agents for tasks, Personas for style/roleplay, per-profile tools and knowledge bases |
 
 ## Feature Tour
@@ -125,7 +128,7 @@ Agents are task profiles for coding, research, automation, and tool-heavy work. 
 
 ### 📦 Models, Activity, Settings
 
-Manage installed Ollama models, browse HuggingFace GGUF files, watch active downloads and long jobs, and tune appearance, generation, RAG, Daedalus, and service connections from the Settings overlay.
+Manage installed Ollama models, browse HuggingFace GGUF files, watch active downloads and long jobs, and tune appearance, generation, RAG, Daedalus, and service connections from the Settings overlay. Optional OpenAI and Anthropic API keys (Settings → Connections) add cloud models alongside local Ollama models in the picker.
 
 <p align="center">
   <img src="docs/images/modelManager.png" alt="HyprChat model manager" width="440">
@@ -140,14 +143,18 @@ Manage installed Ollama models, browse HuggingFace GGUF files, watch active down
 
 ```text
 User → HyprChat (:8000)
-         ├── Frontend: single-file React SPA, inline Babel, no build step
+         ├── Frontend: single-component React SPA, Vite build
+         │    (source frontend/src/main.jsx → built frontend/dist/)
          ├── Backend: FastAPI + SSE streaming + SQLite
          │    ├── Chat/tool loop
          │    ├── Daedalus workflow router
          │    ├── Research + Quick Search
          │    ├── RAG + ChromaDB
+         │    ├── MCP/OpenAPI connector tools
+         │    ├── Artifact Studio + global/workspace memory
          │    └── Model, profile, workspace, council APIs
          ├── Ollama (:11434) - local LLM inference
+         ├── OpenAI / Anthropic (optional) - cloud models via API keys
          ├── Codebox (:8585) - sandboxed execution
          ├── OpenHands Worker (:8586) - OpenHands + Aider bridge
          ├── SearXNG (:8888) - private web search
@@ -163,9 +170,11 @@ User → HyprChat (:8000)
 | `backend/tools.py` | Tool execution, Daedalus routing/gates, OpenHands/Aider dispatch |
 | `backend/agents/*.py` | Daedalus agents, personas, reviewer, acceptance, project QA, indexer |
 | `backend/database.py` | SQLite schema, migrations, conversations, runs, workflows, reports |
+| `backend/model_providers.py` | Optional OpenAI/Anthropic cloud model adapters, key storage, streaming bridges |
+| `backend/connectors.py` | MCP/OpenAPI connector discovery, credential placeholders, execution guardrails |
 | `backend/research.py` | Deep research and safe URL fetch pipeline |
 | `backend/quick_search.py` / `backend/search_agent.py` | Per-turn SearXNG search planning, ranking, page fetch, result cards |
-| `frontend/dist/index.html` | The entire React frontend |
+| `frontend/src/main.jsx` | The entire React frontend (Vite-built to `frontend/dist/`, which the backend serves) |
 | `deploy_monitor.py` | File watcher that deploys local changes to the homelab host |
 
 ## Quick Start
@@ -175,6 +184,12 @@ HyprChat expects Python 3.11+, Ollama, and at least one pulled model. Codebox, O
 ### Local Run
 
 ```bash
+# Build the frontend first (requires Node.js + npm; dist/ is not committed)
+cd frontend
+npm install
+npm run build
+cd ..
+
 cd backend
 python3 -m pip install -r requirements.txt
 HOST=127.0.0.1 PORT=8000 python3 main.py
@@ -209,6 +224,10 @@ HYPRCHAT_OUTBOUND_PROXY=
 DEFAULT_MODEL=qwen3.5:27b
 PLANNING_MODEL=qwen3.5:27b
 CODER_MODEL=qwen2.5-coder:14b
+
+# Optional cloud model providers (or save keys per user in Settings → Connections)
+OPENAI_API_KEY=
+ANTHROPIC_API_KEY=
 ```
 
 `HYPRCHAT_OUTBOUND_PROXY` is optional. The first-time deploy monitor can set it
@@ -256,7 +275,13 @@ Manual deploy:
 ```bash
 scp backend/*.py root@<SERVER_IP>:/opt/hyprchat/backend/
 scp backend/agents/*.py root@<SERVER_IP>:/opt/hyprchat/backend/agents/
-scp frontend/dist/index.html root@<SERVER_IP>:/opt/hyprchat/frontend/dist/
+
+# Frontend: build on the dev machine, then ship the WHOLE dist/ (the hashed
+# asset names change every build, so clear the old ones first).
+( cd frontend && npm run build )
+ssh root@<SERVER_IP> "rm -rf /opt/hyprchat/frontend/dist/assets"
+scp -r frontend/dist/. root@<SERVER_IP>:/opt/hyprchat/frontend/dist/
+
 ssh root@<SERVER_IP> "systemctl restart hyprchat"
 ```
 
@@ -292,16 +317,16 @@ HYPRCHAT_URL=http://127.0.0.1:8000 python3 -m pytest tests/ -v
 | Layer | Tech |
 |---|---|
 | Backend | Python 3.11+, FastAPI, httpx, aiosqlite |
-| Frontend | React 18 via CDN, in-browser Babel, one HTML file |
+| Frontend | React 18, single component file (`frontend/src/main.jsx`), Vite build with npm-bundled libs |
 | Database | SQLite + ChromaDB |
-| LLM Runtime | Ollama with native tool calling plus text fallback |
+| LLM Runtime | Ollama with native tool calling plus text fallback; optional OpenAI/Anthropic cloud models |
 | Search | SearXNG |
 | Coding Sandbox | Codebox LXC + OpenHands + Aider |
 | Automation | External n8n integration |
 
 ## Project Notes
 
-- The frontend intentionally has no build step.
+- The frontend is one large component file built with Vite. Build on the dev machine (`cd frontend && npm run build`); the server just serves `frontend/dist/` and stays Node-free.
 - SQLite is the default database.
 - Tool-call fallback stays because not every Ollama model supports native tools.
 - Keep secrets out of Git: `.deploy_config.json`, `.env*`, keys, tokens, databases, and uploaded data.
