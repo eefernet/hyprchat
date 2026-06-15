@@ -2849,6 +2849,46 @@ const cloudModelProvider=(m)=>{
 };
 const isCloudModelName=(m)=>!!cloudModelProvider(m);
 const cloudModelName=(m)=>String(m||"").replace(/^(openai|anthropic):/,"");
+const modelInfo=(modelDetails,m)=>modelDetails?.[m]||{};
+const modelDetail=(modelDetails,m)=>modelInfo(modelDetails,m).details||{};
+const modelFamilies=(modelDetails,m)=>{
+  const d=modelDetail(modelDetails,m);
+  return [d.family,...(Array.isArray(d.families)?d.families:[])].filter(Boolean).map(x=>String(x).toLowerCase());
+};
+const modelContextLength=(modelDetails,m)=>{
+  const d=modelDetail(modelDetails,m);
+  const n=Number(d.context_length||d.num_ctx||d.context||0);
+  return Number.isFinite(n)&&n>0?n:0;
+};
+const formatModelCtx=n=>{
+  const v=Number(n)||0;
+  if(!v)return"";
+  if(v>=1000000)return`${Math.round(v/100000)/10}M`;
+  return`${Math.round(v/1000)}K`;
+};
+const isMoeModelName=(m,modelDetails={})=>{
+  const s=String(m||"").toLowerCase();
+  const fam=modelFamilies(modelDetails,m).join(" ");
+  return /\bmoe\b|a\d+b|qwen\d*moe|qwen3moe|qwen35moe|mixtral/.test(`${s} ${fam}`);
+};
+const isEmbeddingModelName=(m,modelDetails={})=>{
+  const s=String(m||"").toLowerCase();
+  const d=modelDetail(modelDetails,m);
+  const fam=modelFamilies(modelDetails,m).join(" ");
+  return /embed|embedding|nomic-bert/.test(`${s} ${fam}`)||Number(d.embedding_length||0)>0&&/embed|nomic/.test(s);
+};
+const researchModelOptions=(models,modelDetails={})=>(models||[]).filter(m=>m===""||!isEmbeddingModelName(m,modelDetails));
+const cleanResearchMarkdown=text=>{
+  let s=String(text||"");
+  if(!s)return"";
+  s=s.replace(/<think\b[^>]*>[\s\S]*?<\/think\s*>/gi,"");
+  const lower=s.toLowerCase();
+  const close=lower.lastIndexOf("</think>");
+  if(close>=0)s=s.slice(close+"</think>".length);
+  s=s.replace(/<think\b[^>]*>/gi,"").replace(/<\/think\s*>/gi,"");
+  s=s.replace(/^\s*thought\s*\n[\s\S]*?(?:<\|channel\|>|<channel\|>|<\|message\|>)/i,"");
+  return s.trim();
+};
 
 function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact=false,onRefresh}){
   const [open,setOpen]=useState(false);
@@ -2879,6 +2919,7 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
   const modelCaps=(m)=>{const b=(m||"").toLowerCase();const caps=[];
     if(b.startsWith("openai:")||b.startsWith("anthropic:"))return[{emoji:"☁",color:"#4aa3ff",label:"Cloud"}];
     if(b.match(/embed/))return[{emoji:"🔢",color:"#9b59b6",label:"Embed"}];
+    if(isMoeModelName(m,modelDetails))caps.push({emoji:"MoE",color:"#66d9ef",label:"Expert"});
     if(b.match(/llava|vision|[\-:]vl[\-:$]/)||b.match(/vl\b/))caps.push({emoji:"👁",color:"#e67e22",label:"Vision"});
     if(b.match(/qwen3|deepseek-r1|r1[\-:]|qwq/))caps.push({emoji:"💭",color:"#c792ea",label:"Thinking"});
     if(b.match(/coder|codestral|starcoder|deepseek-coder/))caps.push({emoji:"💻",color:"#2ecc71",label:"Code"});
@@ -2890,6 +2931,7 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
   const caps=modelCaps(value||"");
   const md=modelDetails?.[value]||{};
   const paramSz=md.details?.parameter_size||"";
+  const ctxLen=modelContextLength(modelDetails,value);
   const isMissing=value&&models.length>0&&!models.includes(value);
   return <div ref={triggerRef} style={{position:"relative",...style}}>
     <div onClick={openDropdown} style={{display:"flex",alignItems:"center",gap:6,padding:compact?"3px 8px":"5px 10px",background:isMissing?`${t.err}15`:open?`${t.acc}15`:t.bgDeep,border:`1px solid ${isMissing?t.err:open?t.acc:t.brd}${open||isMissing?"55":"33"}`,borderRadius:8,cursor:"pointer",minWidth:compact?100:150,transition:"all .15s",userSelect:"none"}}>
@@ -2899,6 +2941,7 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
         {!compact&&<div style={{display:"flex",gap:3,flexWrap:"wrap",marginTop:1}}>
           <span style={{fontSize:8,color:sc,fontWeight:700}}>{tag}</span>
           {paramSz&&<span style={{fontSize:8,color:t.mut}}>{paramSz}</span>}
+          {ctxLen>0&&<span style={{fontSize:8,color:t.mut}}>{formatModelCtx(ctxLen)} ctx</span>}
           {caps.map(c=><span key={c.label} style={{fontSize:7,padding:"0px 3px",borderRadius:3,background:`${c.color}20`,color:c.color,fontWeight:700,border:`1px solid ${c.color}33`}}>{c.emoji}</span>)}
         </div>}
       </div>
@@ -2944,6 +2987,7 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
             const displayName=provider?mt:(isHF?m.replace("hf.co/","").split("/").pop()?.split(":")[0]||mn:mn);
             const sc2=szCol(mt);const sel=m===value;
             const mc=modelCaps(m);const mdi=modelDetails?.[m]||{};const ps=mdi.details?.parameter_size||"";
+            const ctx2=modelContextLength(modelDetails,m);
             return <div key={m} onClick={()=>{onChange(m);setOpen(false);}}
               style={{display:"flex",alignItems:"center",gap:8,padding:"6px 9px",borderRadius:7,cursor:"pointer",background:sel?`${t.acc}18`:isHF?`#ff660008`:"transparent",border:`1px solid ${sel?t.acc:isHF?"#ff660033":"transparent"}`,marginBottom:1,transition:"background .1s"}}
               onMouseEnter={e=>{if(!sel)e.currentTarget.style.background=isHF?`#ff660015`:`${t.surface}88`;}}
@@ -2958,6 +3002,7 @@ function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact
                 <div style={{display:"flex",gap:3,alignItems:"center",marginTop:1,flexWrap:"wrap"}}>
                   <span style={{fontSize:8,color:sc2,fontWeight:700}}>{mt}</span>
                   {ps&&<span style={{fontSize:8,color:t.mut}}>{ps}</span>}
+                  {ctx2>0&&<span style={{fontSize:8,color:t.mut}}>{formatModelCtx(ctx2)} ctx</span>}
                   {mc.map(c=><span key={c.label} style={{fontSize:8,padding:"1px 4px",borderRadius:4,background:`${c.color}20`,color:c.color,fontWeight:600,border:`1px solid ${c.color}33`}}>{c.emoji} {c.label}</span>)}
                 </div>
               </div>
@@ -3981,18 +4026,45 @@ function HyprChat(){
   const [speakingMid,setSpeakingMid]=useState(null);
   const [ttsLoadingMid,setTtsLoadingMid]=useState(null);
   const [ttsPhase,setTtsPhase]=useState("");
-  const mediaRecRef=useRef(null),recChunksRef=useRef([]),audioRef=useRef(null),ttsAbortRef=useRef(null);
+  const mediaRecRef=useRef(null),recChunksRef=useRef([]),audioRef=useRef(null),ttsAbortRef=useRef(null),ttsPreparedRef=useRef(null);
+  const releaseTtsAudio=(audio)=>{
+    if(!audio)return;
+    try{audio.pause();audio.removeAttribute("src");audio.load();}catch{}
+    if(audio._url)URL.revokeObjectURL(audio._url);
+  };
   const stopSpeaking=()=>{
     if(ttsAbortRef.current){ttsAbortRef.current.abort();ttsAbortRef.current=null;}
-    if(audioRef.current){
-      try{audioRef.current.pause();audioRef.current.removeAttribute("src");audioRef.current.load();}catch{}
-      if(audioRef.current._url)URL.revokeObjectURL(audioRef.current._url);
-      audioRef.current=null;
-    }
+    const audios=new Set([audioRef.current,ttsPreparedRef.current?.audio].filter(Boolean));
+    audioRef.current=null;ttsPreparedRef.current=null;
+    audios.forEach(releaseTtsAudio);
     setSpeakingMid(null);setTtsLoadingMid(null);setTtsPhase("");
   };
   const ttsAbortError=()=>{const e=new Error("Aborted");e.name="AbortError";return e;};
-  const speechErrorDetail=(e)=>{const msg=String(e?.message||e||"");if(/first audio|no audio/i.test(msg))return "TTS is responding slowly; Kokoro has not returned audio yet.";if(/timeout|timed out/i.test(msg))return "The TTS service timed out before audio could start.";if(/503/.test(msg))return "Text-to-speech is not configured or unavailable.";if(/502/.test(msg))return "The TTS service rejected the request or could not be reached.";return msg||"The browser could not load the generated audio stream.";};
+  const mediaErrorDetail=(audio)=>{
+    const code=audio?.error?.code;
+    if(code===1)return "Audio loading was aborted.";
+    if(code===2)return "The browser hit a network error while loading the generated audio.";
+    if(code===3)return "The browser could not decode the generated audio.";
+    if(code===4)return "The browser cannot play the generated audio format.";
+    return "The browser could not load the generated audio stream.";
+  };
+  const ttsMediaError=(audio,fallback="Audio stream failed")=>{
+    const e=new Error(audio?.error?mediaErrorDetail(audio):fallback);
+    e.name=audio?.error?.code===4?"NotSupportedError":"MediaError";
+    e.mediaError=audio?.error||null;
+    return e;
+  };
+  const speechErrorDetail=(e)=>{
+    const msg=String(e?.message||e||"");
+    if(e?.name==="NotAllowedError")return "Browser blocked playback. Click speak again to play the prepared audio.";
+    if(e?.name==="NotSupportedError")return msg||"The browser cannot play the generated audio format.";
+    if(e?.name==="MediaError")return msg||"The browser could not load the generated audio stream.";
+    if(/first audio|no audio/i.test(msg))return "TTS is responding slowly; Kokoro has not returned audio yet.";
+    if(/504/.test(msg)||/timeout|timed out/i.test(msg))return "The TTS service timed out before audio could start.";
+    if(/503/.test(msg))return "Text-to-speech is not configured or unavailable.";
+    if(/502/.test(msg))return "The TTS service rejected the request or could not be reached.";
+    return msg||"The browser could not load the generated audio stream.";
+  };
   const cleanTtsText=(text)=>String(text||"")
     .replace(/<think>[\s\S]*?<\/think>/gi," ")
     .replace(/(?:^|\n)[ \t]{0,3}```[\s\S]*?(?:\n[ \t]{0,3}```|$)/g," ")
@@ -4003,97 +4075,112 @@ function HyprChat(){
     .replace(/[`*_#>|]/g," ")
     .replace(/\s+/g," ")
     .trim();
-  const splitTtsChunks=(text,maxLen=170)=>{
-    const clean=cleanTtsText(text);
-    if(!clean)return [];
-    const sentences=clean.match(/[^.!?]+[.!?]+["')\]]*|[^.!?]+$/g)||[clean];
-    const chunks=[];
-    const addPiece=(piece)=>{
-      const words=String(piece||"").trim().split(/\s+/).filter(Boolean);
-      let cur="";
-      for(const word of words){
-        const next=cur?`${cur} ${word}`:word;
-        if(next.length>maxLen&&cur){chunks.push(cur);cur=word;}
-        else cur=next;
-      }
-      if(cur)chunks.push(cur);
-    };
-    let cur="";
-    for(const sentence of sentences){
-      const s=sentence.trim();
-      if(!s)continue;
-      if(s.length>maxLen){if(cur){chunks.push(cur);cur="";}addPiece(s);continue;}
-      const next=cur?`${cur} ${s}`:s;
-      if(next.length>maxLen&&cur){chunks.push(cur);cur=s;}
-      else cur=next;
-    }
-    if(cur)chunks.push(cur);
-    return chunks;
-  };
-  const waitForAudioStart=(audio,signal,timeoutMs=20000)=>new Promise((resolve,reject)=>{
+  const waitForAudioStart=(audio,signal,timeoutMs=20000,opts={})=>new Promise((resolve,reject)=>{
     if(signal?.aborted){reject(ttsAbortError());return;}
     let done=false;
-    const finish=(fn,val)=>{if(done)return;done=true;clearTimeout(timer);audio.removeEventListener("playing",onPlaying);audio.removeEventListener("error",onError);signal?.removeEventListener("abort",onAbort);fn(val);};
-    const onPlaying=()=>finish(resolve);
-    const onError=()=>finish(reject,new Error("Audio stream failed"));
+    const finish=(fn,val)=>{if(done)return;done=true;clearTimeout(timer);audio.removeEventListener("loadeddata",onReady);audio.removeEventListener("canplay",onReady);audio.removeEventListener("playing",onPlaying);audio.removeEventListener("error",onError);audio.removeEventListener("abort",onMediaAbort);signal?.removeEventListener("abort",onAbort);fn(val);};
+    const onReady=()=>{opts.onReady&&opts.onReady();};
+    const onPlaying=()=>{opts.onPlaying&&opts.onPlaying();finish(resolve);};
+    const onError=()=>finish(reject,ttsMediaError(audio));
+    const onMediaAbort=()=>finish(reject,ttsMediaError(audio,"Audio loading was aborted"));
     const onAbort=()=>finish(reject,ttsAbortError());
     const timer=setTimeout(()=>finish(reject,new Error("TTS first audio timeout")),timeoutMs);
+    audio.addEventListener("loadeddata",onReady);
+    audio.addEventListener("canplay",onReady);
     audio.addEventListener("playing",onPlaying,{once:true});
     audio.addEventListener("error",onError,{once:true});
+    audio.addEventListener("abort",onMediaAbort,{once:true});
     signal?.addEventListener("abort",onAbort,{once:true});
-    const p=audio.play();
-    if(p&&p.catch)p.catch(e=>finish(reject,e));
+    if(audio.readyState>=2)onReady();
+    let p;
+    try{p=audio.play();}catch(e){finish(reject,e);return;}
+    if(p&&p.then)p.then(()=>{if(!done&&!audio.paused)onPlaying();}).catch(e=>finish(reject,e));
   });
-  const waitForAudioEnd=(audio,signal)=>new Promise((resolve,reject)=>{
+  const waitForAudioEnd=(audio,signal,opts={})=>new Promise((resolve,reject)=>{
     if(signal?.aborted){reject(ttsAbortError());return;}
+    if(audio.ended){opts.onEnded&&opts.onEnded();resolve();return;}
     let done=false;
-    const finish=(fn,val)=>{if(done)return;done=true;audio.removeEventListener("ended",onEnded);audio.removeEventListener("error",onError);signal?.removeEventListener("abort",onAbort);fn(val);};
-    const onEnded=()=>finish(resolve);
-    const onError=()=>finish(reject,new Error("Audio stream failed"));
+    const finish=(fn,val)=>{if(done)return;done=true;audio.removeEventListener("ended",onEnded);audio.removeEventListener("error",onError);audio.removeEventListener("abort",onMediaAbort);signal?.removeEventListener("abort",onAbort);fn(val);};
+    const onEnded=()=>{opts.onEnded&&opts.onEnded();finish(resolve);};
+    const onError=()=>finish(reject,ttsMediaError(audio));
+    const onMediaAbort=()=>finish(reject,ttsMediaError(audio,"Audio playback was aborted"));
     const onAbort=()=>finish(reject,ttsAbortError());
     audio.addEventListener("ended",onEnded,{once:true});
     audio.addEventListener("error",onError,{once:true});
+    audio.addEventListener("abort",onMediaAbort,{once:true});
     signal?.addEventListener("abort",onAbort,{once:true});
   });
-  const speak=async(text,mid)=>{
-    if(!ttsUrl||!text)return;
-    if(speakingMid===mid||ttsLoadingMid===mid){stopSpeaking();return;}
-    const chunks=splitTtsChunks(text);
-    if(!chunks.length)return;
-    stopSpeaking();
-    setTtsLoadingMid(mid);
-    setTtsPhase("generating");
+  const playTtsSequence=async({mid,chunks,startIndex=0,firstAudio=null,firstHasSource=false,textKey})=>{
     const ctrl=new AbortController();ttsAbortRef.current=ctrl;
-    let pendingAudio=null,started=false;
+    let currentAudio=null,currentPrepared=null;
     try{
-      for(let ci=0;ci<chunks.length;ci++){
+      for(let ci=startIndex;ci<chunks.length;ci++){
         if(ttsAbortRef.current!==ctrl||ctrl.signal.aborted)throw ttsAbortError();
-        pendingAudio=null;
-        setTtsLoadingMid(mid);setTtsPhase(chunks.length>1?`generating ${ci+1}/${chunks.length}`:"generating");
-        const r=await fetch(`${API}/api/audio/speech/request`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:chunks[ci],voice:ttsVoice}),signal:ctrl.signal});
-        if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${r.status}`);}
-        const d=await r.json();
-        if(ttsAbortRef.current!==ctrl||ctrl.signal.aborted)throw ttsAbortError();
-        const streamUrl=d.url?.startsWith("http")?d.url:`${API}${d.url||`/api/audio/speech/${d.id}`}`;
-        const audio=new Audio();
-        pendingAudio=audio;
+        const audio=(ci===startIndex&&firstAudio)?firstAudio:new Audio();
+        currentAudio=audio;
         audioRef.current=audio;
         audio.preload="auto";
-        audio.src=streamUrl;
-        await waitForAudioStart(audio,ctrl.signal,20000);
+        currentPrepared={mid,chunks,index:ci,audio,voice:ttsVoice||"",textKey};
+        setTtsLoadingMid(mid);setTtsPhase(chunks.length>1?`generating ${ci+1}/${chunks.length}`:"generating");
+        if(!(ci===startIndex&&firstHasSource&&audio.src)){
+          const r=await fetch(`${API}/api/audio/speech/request`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:chunks[ci],voice:ttsVoice}),signal:ctrl.signal});
+          if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${r.status}`);}
+          const d=await r.json();
+          if(ttsAbortRef.current!==ctrl||ctrl.signal.aborted)throw ttsAbortError();
+          const streamUrl=d.url?.startsWith("http")?d.url:`${API}${d.url||`/api/audio/speech/${d.id}`}`;
+          audio.src=streamUrl;
+          try{audio.load();}catch{}
+        }
         if(ttsAbortRef.current!==ctrl||ctrl.signal.aborted)throw ttsAbortError();
-        started=true;setTtsLoadingMid(null);setTtsPhase("playing");setSpeakingMid(mid);
-        await waitForAudioEnd(audio,ctrl.signal);
+        setTtsLoadingMid(mid);setTtsPhase(chunks.length>1?`loading ${ci+1}/${chunks.length}`:"loading");
+        await waitForAudioStart(audio,ctrl.signal,20000,{
+          onReady:()=>{if(ttsAbortRef.current===ctrl){setTtsLoadingMid(mid);setTtsPhase(chunks.length>1?`ready ${ci+1}/${chunks.length}`:"ready");}},
+          onPlaying:()=>{if(ttsAbortRef.current===ctrl){setTtsLoadingMid(null);setSpeakingMid(mid);setTtsPhase(chunks.length>1?`playing ${ci+1}/${chunks.length}`:"playing");}},
+        });
+        if(ttsAbortRef.current!==ctrl||ctrl.signal.aborted)throw ttsAbortError();
+        currentPrepared=null;
+        await waitForAudioEnd(audio,ctrl.signal,{onEnded:()=>{if(audioRef.current===audio)audioRef.current=null;}});
         if(audioRef.current===audio)audioRef.current=null;
+        currentAudio=null;
       }
       if(ttsAbortRef.current===ctrl)ttsAbortRef.current=null;
       setSpeakingMid(null);setTtsLoadingMid(null);setTtsPhase("");
     }catch(e){
-      if(pendingAudio&&audioRef.current===pendingAudio){try{pendingAudio.pause();pendingAudio.removeAttribute("src");pendingAudio.load();}catch{}audioRef.current=null;}
       if(ttsAbortRef.current===ctrl)ttsAbortRef.current=null;
-      if(e.name!=="AbortError")notify({type:"error",text:"Speech failed",detail:speechErrorDetail(e)});
+      if(e.name==="NotAllowedError"&&currentPrepared?.audio){
+        ttsPreparedRef.current=currentPrepared;
+        audioRef.current=currentPrepared.audio;
+        notify({type:"warning",text:"Browser blocked playback",detail:"Click speak again to play the prepared audio.",duration:6000});
+      }else{
+        if(currentAudio&&audioRef.current===currentAudio){releaseTtsAudio(currentAudio);audioRef.current=null;}
+        if(e.name!=="AbortError")notify({type:"error",text:"Speech failed",detail:speechErrorDetail(e)});
+      }
       setTtsLoadingMid(null);setSpeakingMid(null);setTtsPhase("");
     }
+  };
+  const speak=async(text,mid)=>{
+    if(!ttsUrl||!text)return;
+    const textKey=cleanTtsText(text);
+    const prepared=ttsPreparedRef.current;
+    if(prepared&&(prepared.mid!==mid||prepared.textKey!==textKey||prepared.voice!==(ttsVoice||""))){
+      if(audioRef.current===prepared.audio)audioRef.current=null;
+      releaseTtsAudio(prepared.audio);
+      ttsPreparedRef.current=null;
+    }
+    if(ttsPreparedRef.current?.mid===mid&&ttsPreparedRef.current?.textKey===textKey&&ttsPreparedRef.current?.voice===(ttsVoice||"")){
+      const ready=ttsPreparedRef.current;
+      ttsPreparedRef.current=null;
+      await playTtsSequence({mid,chunks:ready.chunks,startIndex:ready.index,firstAudio:ready.audio,firstHasSource:true,textKey});
+      return;
+    }
+    if(speakingMid===mid||ttsLoadingMid===mid){stopSpeaking();return;}
+    if(!textKey)return;
+    const chunks=[textKey];
+    stopSpeaking();
+    const firstAudio=new Audio();
+    firstAudio.preload="auto";
+    audioRef.current=firstAudio;
+    await playTtsSequence({mid,chunks,startIndex:0,firstAudio,textKey});
   };
   const toggleRecording=async()=>{
     if(recording){try{mediaRecRef.current?.stop();}catch{}return;}
@@ -4707,7 +4794,7 @@ function HyprChat(){
       const d=await r.json();
       setActiveResearchId(id);setActiveResearch(d);
       setResearchEvents(d.events_log||[]);
-      setResearchLiveMarkdown(d.report_markdown||"");
+      setResearchLiveMarkdown(cleanResearchMarkdown(d.report_markdown||""));
       setResearchRunning(["queued","running"].includes(d.status));
       if(openPanel)setPanel("research");
     }catch(e){console.error("Research report load failed",e);notify({type:"error",text:"Research report failed to load",detail:e.message||String(e)});}
@@ -4747,7 +4834,7 @@ function HyprChat(){
         if(closed)return;
         setActiveResearch(d);
         setResearchEvents(d.events_log||[]);
-        if(d.report_markdown)setResearchLiveMarkdown(d.report_markdown||"");
+        if(d.report_markdown)setResearchLiveMarkdown(cleanResearchMarkdown(d.report_markdown||""));
         setResearchReports(p=>{
           const rest=p.filter(x=>x.id!==d.id);
           return [d,...rest];
@@ -4769,7 +4856,7 @@ function HyprChat(){
     const notes=(researchInputText||"").trim();
     const inputs=[...(researchDraft.inputs||[])];
     if(notes)inputs.push({name:"Pasted notes",type:"notes",content:notes});
-    const body={...researchDraft,query,depth:parseInt(researchDraft.depth)||3,model:researchDraft.model||models[0]||"",inputs};
+    const body={...researchDraft,query,depth:parseInt(researchDraft.depth)||3,model:researchDraft.model||researchSelectableModels[0]||models[0]||"",inputs};
     setResearchRunning(true);setResearchEvents([]);setResearchLiveMarkdown("");setResearchLoading(true);
     try{
       const r=await fetch(`${API}/api/research/reports`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
@@ -5067,7 +5154,7 @@ function HyprChat(){
 
   const exportResearchMarkdown=()=>{
     const report=activeResearch;
-    const body=(researchLiveMarkdown||report?.report_markdown||"").trim();
+    const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();
     if(!body)return;
     const blob=new Blob([body],{type:"text/markdown"});
     const url=URL.createObjectURL(blob);
@@ -5078,7 +5165,7 @@ function HyprChat(){
 
   const exportResearchPdf=async()=>{
     const report=activeResearch;
-    const body=(researchLiveMarkdown||report?.report_markdown||"").trim();
+    const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();
     if(!body){notify({type:"warning",text:"No report body to export"});return;}
     if(!window.html2pdf&&window.ensureHtml2pdf){try{await window.ensureHtml2pdf();}catch{}}
     if(!window.html2pdf){await printResearchReport();return;}
@@ -5112,7 +5199,7 @@ function HyprChat(){
 
   const printResearchReport=async()=>{
     const report=activeResearch;
-    const body=(researchLiveMarkdown||report?.report_markdown||"").trim();
+    const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();
     if(!body){notify({type:"warning",text:"No report body to print"});return;}
     const title=(report?.title||"HyprChat Research Report").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
     const w=window.open("","_blank");
@@ -7124,6 +7211,38 @@ function HyprChat(){
   const composerActive=streaming||councilRunning;
   const composerColor=composerState==="error"?t.err:composerState==="stopped"?t.mut:councilRunning?t.pink:streaming?t.warm:composerFocused?t.acc:quickSearch?t.f1:t.acc;
   const sidebarSearchActive=showMessageSearch||sq||ftsQuery;
+  const researchSelectableModels=researchModelOptions(models,modelDetails);
+  const selectedResearchModel=researchDraft.model||researchSelectableModels[0]||models[0]||"";
+  const selectedResearchCtx=modelContextLength(modelDetails,selectedResearchModel);
+  const selectedResearchIsCloud=isCloudModelName(selectedResearchModel);
+  const selectedResearchIsMoe=isMoeModelName(selectedResearchModel,modelDetails);
+  const localMoeResearchModels=researchSelectableModels.filter(m=>m&&!isCloudModelName(m)&&isMoeModelName(m,modelDetails));
+  const cloudResearchModels=researchSelectableModels.filter(isCloudModelName);
+  const deepMoeResearchModel=localMoeResearchModels.find(m=>modelContextLength(modelDetails,m)>=131072);
+  const clampResearchCtx=(n,lo=8192,hi=131072)=>Math.max(lo,Math.min(hi,Math.round((Number(n)||lo)/2048)*2048));
+  const smallResearchRoleModel=researchSelectableModels.find(m=>m&&!isCloudModelName(m)&&!isMoeModelName(m,modelDetails)&&/qwen3\.5:4b|qwen3:14b|gemma|phi|llama3\.1:8b/i.test(m))||"";
+  const applyResearchPreset=kind=>{
+    if(kind==="balanced_moe"){
+      const target=selectedResearchIsMoe&&!selectedResearchIsCloud?selectedResearchModel:localMoeResearchModels[0];
+      if(!target)return;
+      const ctx=modelContextLength(modelDetails,target)||40960;
+      setResearchDraft(p=>({...p,model:target,planner_model:"",auditor_model:""}));
+      setResearchNumCtx(clampResearchCtx(Math.min(Math.max(ctx,40960),65536),40960,65536));
+    }else if(kind==="deep_moe"){
+      const target=(selectedResearchIsMoe&&!selectedResearchIsCloud&&selectedResearchCtx>=131072)?selectedResearchModel:deepMoeResearchModel;
+      if(!target)return;
+      const ctx=modelContextLength(modelDetails,target)||131072;
+      setResearchDraft(p=>({...p,model:target,planner_model:"",auditor_model:""}));
+      setResearchNumCtx(clampResearchCtx(Math.min(ctx,131072),40960,131072));
+    }else if(kind==="cloud"){
+      const target=selectedResearchIsCloud?selectedResearchModel:cloudResearchModels[0];
+      if(!target)return;
+      setResearchDraft(p=>({...p,model:target,planner_model:target,auditor_model:target}));
+    }else if(kind==="fast_planning"){
+      if(!smallResearchRoleModel)return;
+      setResearchDraft(p=>({...p,planner_model:smallResearchRoleModel,auditor_model:smallResearchRoleModel}));
+    }
+  };
   const settingsTabs=[
     ["users","👤","Users","Profiles and sign-in"],
     ["connections","🔌","Connections","Runtime endpoints and status"],
@@ -7877,7 +7996,7 @@ function HyprChat(){
     </div>
   </div>
 
-      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return `Audit complete${d.coverage_score!==undefined?` - coverage ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return d.summary?`Report complete - ${d.summary}`:"Report complete";if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=[...(report?.outline?.sections||[])].map(s=>s.heading||s).filter(Boolean);return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return `Audit complete${d.coverage_score!==undefined?` - coverage ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return d.summary?`Report complete - ${d.summary}`:"Report complete";if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=[...(report?.outline?.sections||[])].map(s=>s.heading||s).filter(Boolean);return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}>
       <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}><IC.Search/><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Deep Research</span>{researchRunning&&<span style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.acc}14`,border:`1px solid ${t.acc}33`,color:t.acc}}>live</span>}<div style={{display:"flex",gap:3,marginLeft:8,padding:3,border:`1px solid ${t.brd}28`,borderRadius:8,background:`${t.bgDeep}88`}}>{[["new","New"],["reports",researchReports.length?`Reports ${researchReports.length}`:"Reports"]].map(([id,label])=><button key={id} onClick={()=>setResearchView(id)} style={{fontSize:10,padding:"5px 9px",borderRadius:6,border:"none",background:researchView===id?`${t.acc}22`:"transparent",color:researchView===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontWeight:researchView===id?800:600}}>{label}</button>)}</div></div>
       <div style={{display:"flex",gap:6,alignItems:"center"}}>
@@ -7910,14 +8029,20 @@ function HyprChat(){
               <option value={5}>🧠 Exhaustive</option>
             </select>
           </div>
-          <ModelPicker value={researchDraft.model||models[0]||""} onChange={v=>setResearchDraft(p=>({...p,model:v}))} models={models} modelDetails={modelDetails} t={t} font={font}/>
+          <ModelPicker value={researchDraft.model||researchSelectableModels[0]||""} onChange={v=>setResearchDraft(p=>({...p,model:v}))} models={researchSelectableModels} modelDetails={modelDetails} t={t} font={font}/>
+          <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+            {localMoeResearchModels.length>0&&<button onClick={()=>applyResearchPreset("balanced_moe")} style={{...btnS(t.acc),fontSize:9}}>Balanced MoE</button>}
+            {deepMoeResearchModel&&<button onClick={()=>applyResearchPreset("deep_moe")} style={{...btnS(t.f1),fontSize:9}}>Deep MoE</button>}
+            {cloudResearchModels.length>0&&<button onClick={()=>applyResearchPreset("cloud")} style={{...btnS(t.pink),fontSize:9}}>Cloud Research</button>}
+            {smallResearchRoleModel&&<button onClick={()=>applyResearchPreset("fast_planning")} style={{...btnS(t.mut),fontSize:9}}>Fast Planning</button>}
+          </div>
           <details style={{border:`1px solid ${t.brd}22`,borderRadius:8,padding:"7px 9px",background:`${t.bgDeep}88`}}>
             <summary style={{cursor:"pointer",fontSize:10,fontWeight:800,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Role Models</summary>
             <div style={{display:"flex",flexDirection:"column",gap:7,marginTop:8}}>
               <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Planner</div>
-              <ModelPicker value={researchDraft.planner_model||""} onChange={v=>setResearchDraft(p=>({...p,planner_model:v}))} models={["",...models]} modelDetails={modelDetails} t={t} font={font}/>
+              <ModelPicker value={researchDraft.planner_model||""} onChange={v=>setResearchDraft(p=>({...p,planner_model:v}))} models={["",...researchSelectableModels]} modelDetails={modelDetails} t={t} font={font}/>
               <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Auditor</div>
-              <ModelPicker value={researchDraft.auditor_model||""} onChange={v=>setResearchDraft(p=>({...p,auditor_model:v}))} models={["",...models]} modelDetails={modelDetails} t={t} font={font}/>
+              <ModelPicker value={researchDraft.auditor_model||""} onChange={v=>setResearchDraft(p=>({...p,auditor_model:v}))} models={["",...researchSelectableModels]} modelDetails={modelDetails} t={t} font={font}/>
             </div>
           </details>
           <div style={{border:`1px solid ${t.brd}22`,borderRadius:8,padding:"7px 9px",background:`${t.bgDeep}88`}}>
@@ -7927,6 +8052,13 @@ function HyprChat(){
               {researchNumCtx<=16384?<><b style={{color:t.acc}}>Compact (&le;16K)</b> — evidence is clamped hard; fine for depth 1–2 reports.</>
               :researchNumCtx<=65536?<><b style={{color:t.acc}}>Recommended (32–64K)</b> — full evidence budgets through depth 4 fit without truncation.</>
               :<><b style={{color:t.acc}}>Maximum (64–128K)</b> — full depth-5 evidence; uses more VRAM while a report runs.</>}
+            </div>
+            <div style={{fontSize:9,color:selectedResearchIsCloud?t.pink:(selectedResearchCtx&&researchNumCtx>selectedResearchCtx?t.warm:t.mut),marginTop:5,lineHeight:1.4}}>
+              {selectedResearchIsCloud?<>Cloud model selected — local context window only affects Ollama role models.</>
+              :selectedResearchCtx&&researchNumCtx>selectedResearchCtx?<><b>Context exceeds selected model ({formatModelCtx(selectedResearchCtx)} ctx).</b> <button onClick={()=>setResearchNumCtx(clampResearchCtx(selectedResearchCtx))} style={{background:"none",border:"none",color:t.acc,cursor:"pointer",fontFamily:font,fontSize:9,padding:0}}>Clamp</button></>
+              :selectedResearchIsMoe?<><b style={{color:t.acc}}>MoE expert model</b> — active experts are lighter than dense parameter size, but long research contexts still use KV cache.</>
+              :parseInt(researchDraft.depth||3)>=4&&selectedResearchCtx&&selectedResearchCtx<=40960?<><b style={{color:t.warm}}>Depth {researchDraft.depth} on {formatModelCtx(selectedResearchCtx)} ctx</b> — evidence may be clamped; use a larger-context model for exhaustive reports.</>
+              :<>Selected model context: {selectedResearchCtx?`${formatModelCtx(selectedResearchCtx)} ctx`:"unknown"}.</>}
             </div>
           </div>
           <textarea value={researchInputText} onChange={e=>setResearchInputText(e.target.value)} placeholder="Optional pasted notes, constraints, or source excerpts" rows={4} style={{...inputS,resize:"vertical",fontSize:11,lineHeight:1.45}}/>

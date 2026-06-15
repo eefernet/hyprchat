@@ -197,6 +197,61 @@ def test_research_token_events_are_ephemeral(tmp_path):
     assert "research_token" not in [e["type"] for e in report["events_log"]]
 
 
+def test_streamed_report_tokens_filter_thinking_leaks(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    import research
+
+    _run(db.create_research_report("research-stream", query="stream", status="running"))
+    emitted = []
+
+    class _FakeEvents:
+        async def emit(self, channel, ev_type, data):
+            emitted.append((channel, ev_type, data))
+
+    class _FakeStream:
+        def __init__(self, pieces):
+            self.pieces = pieces
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_lines(self):
+            import json
+            for piece in self.pieces:
+                yield json.dumps({"response": piece})
+            yield json.dumps({"done": True})
+
+    class _FakeHTTP:
+        def stream(self, *_args, **_kwargs):
+            return _FakeStream([
+                "Okay, I need to reason about the report first. ",
+                "Still hidden.\n</think>\n\n# Clean Report\n\nVisible body [S1].",
+            ])
+
+    text = _run(research._ask_report_streamed(
+        _FakeHTTP(), "http://ollama", _FakeEvents(), "research-stream", "prompt", model="qwen3moe:test",
+    ))
+    token_text = "".join(e[2].get("content", "") for e in emitted if e[1] == "research_token")
+    assert text == "# Clean Report\n\nVisible body [S1]."
+    assert token_text == text
+    assert "reason" not in token_text.lower()
+    assert "</think>" not in token_text
+
+    async def fake_stream_provider_chat(*_args, **_kwargs):
+        yield {"type": "token", "content": "cloud hidden</think>\n# Cloud Report\n\nBody"}
+
+    monkeypatch.setattr(research, "is_cloud_model", lambda m: str(m).startswith("openai:"))
+    monkeypatch.setattr(research, "stream_provider_chat", fake_stream_provider_chat)
+    text = _run(research._ask_report_streamed(
+        None, "http://ollama", _FakeEvents(), "research-stream", "prompt", model="openai:gpt-test",
+    ))
+    assert text == "# Cloud Report\n\nBody"
+
+
 def test_research_report_routes_cancel_and_rerun_preserve_original_fields(tmp_path, monkeypatch):
     db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
     _run(db.init_db())
