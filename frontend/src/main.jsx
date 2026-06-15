@@ -3980,32 +3980,119 @@ function HyprChat(){
   const [transcribing,setTranscribing]=useState(false);
   const [speakingMid,setSpeakingMid]=useState(null);
   const [ttsLoadingMid,setTtsLoadingMid]=useState(null);
+  const [ttsPhase,setTtsPhase]=useState("");
   const mediaRecRef=useRef(null),recChunksRef=useRef([]),audioRef=useRef(null),ttsAbortRef=useRef(null);
   const stopSpeaking=()=>{
     if(ttsAbortRef.current){ttsAbortRef.current.abort();ttsAbortRef.current=null;}
-    if(audioRef.current){try{audioRef.current.pause();}catch{}if(audioRef.current._url)URL.revokeObjectURL(audioRef.current._url);audioRef.current=null;}
-    setSpeakingMid(null);setTtsLoadingMid(null);
+    if(audioRef.current){
+      try{audioRef.current.pause();audioRef.current.removeAttribute("src");audioRef.current.load();}catch{}
+      if(audioRef.current._url)URL.revokeObjectURL(audioRef.current._url);
+      audioRef.current=null;
+    }
+    setSpeakingMid(null);setTtsLoadingMid(null);setTtsPhase("");
   };
+  const ttsAbortError=()=>{const e=new Error("Aborted");e.name="AbortError";return e;};
+  const speechErrorDetail=(e)=>{const msg=String(e?.message||e||"");if(/first audio|no audio/i.test(msg))return "TTS is responding slowly; Kokoro has not returned audio yet.";if(/timeout|timed out/i.test(msg))return "The TTS service timed out before audio could start.";if(/503/.test(msg))return "Text-to-speech is not configured or unavailable.";if(/502/.test(msg))return "The TTS service rejected the request or could not be reached.";return msg||"The browser could not load the generated audio stream.";};
+  const cleanTtsText=(text)=>String(text||"")
+    .replace(/<think>[\s\S]*?<\/think>/gi," ")
+    .replace(/(?:^|\n)[ \t]{0,3}```[\s\S]*?(?:\n[ \t]{0,3}```|$)/g," ")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g,"$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g,"$1")
+    .replace(/https?:\/\/\S+/g," ")
+    .replace(/\[\^?\d{1,2}\]/g," ")
+    .replace(/[`*_#>|]/g," ")
+    .replace(/\s+/g," ")
+    .trim();
+  const splitTtsChunks=(text,maxLen=170)=>{
+    const clean=cleanTtsText(text);
+    if(!clean)return [];
+    const sentences=clean.match(/[^.!?]+[.!?]+["')\]]*|[^.!?]+$/g)||[clean];
+    const chunks=[];
+    const addPiece=(piece)=>{
+      const words=String(piece||"").trim().split(/\s+/).filter(Boolean);
+      let cur="";
+      for(const word of words){
+        const next=cur?`${cur} ${word}`:word;
+        if(next.length>maxLen&&cur){chunks.push(cur);cur=word;}
+        else cur=next;
+      }
+      if(cur)chunks.push(cur);
+    };
+    let cur="";
+    for(const sentence of sentences){
+      const s=sentence.trim();
+      if(!s)continue;
+      if(s.length>maxLen){if(cur){chunks.push(cur);cur="";}addPiece(s);continue;}
+      const next=cur?`${cur} ${s}`:s;
+      if(next.length>maxLen&&cur){chunks.push(cur);cur=s;}
+      else cur=next;
+    }
+    if(cur)chunks.push(cur);
+    return chunks;
+  };
+  const waitForAudioStart=(audio,signal,timeoutMs=20000)=>new Promise((resolve,reject)=>{
+    if(signal?.aborted){reject(ttsAbortError());return;}
+    let done=false;
+    const finish=(fn,val)=>{if(done)return;done=true;clearTimeout(timer);audio.removeEventListener("playing",onPlaying);audio.removeEventListener("error",onError);signal?.removeEventListener("abort",onAbort);fn(val);};
+    const onPlaying=()=>finish(resolve);
+    const onError=()=>finish(reject,new Error("Audio stream failed"));
+    const onAbort=()=>finish(reject,ttsAbortError());
+    const timer=setTimeout(()=>finish(reject,new Error("TTS first audio timeout")),timeoutMs);
+    audio.addEventListener("playing",onPlaying,{once:true});
+    audio.addEventListener("error",onError,{once:true});
+    signal?.addEventListener("abort",onAbort,{once:true});
+    const p=audio.play();
+    if(p&&p.catch)p.catch(e=>finish(reject,e));
+  });
+  const waitForAudioEnd=(audio,signal)=>new Promise((resolve,reject)=>{
+    if(signal?.aborted){reject(ttsAbortError());return;}
+    let done=false;
+    const finish=(fn,val)=>{if(done)return;done=true;audio.removeEventListener("ended",onEnded);audio.removeEventListener("error",onError);signal?.removeEventListener("abort",onAbort);fn(val);};
+    const onEnded=()=>finish(resolve);
+    const onError=()=>finish(reject,new Error("Audio stream failed"));
+    const onAbort=()=>finish(reject,ttsAbortError());
+    audio.addEventListener("ended",onEnded,{once:true});
+    audio.addEventListener("error",onError,{once:true});
+    signal?.addEventListener("abort",onAbort,{once:true});
+  });
   const speak=async(text,mid)=>{
     if(!ttsUrl||!text)return;
     if(speakingMid===mid||ttsLoadingMid===mid){stopSpeaking();return;}
+    const chunks=splitTtsChunks(text);
+    if(!chunks.length)return;
     stopSpeaking();
     setTtsLoadingMid(mid);
+    setTtsPhase("generating");
     const ctrl=new AbortController();ttsAbortRef.current=ctrl;
+    let pendingAudio=null,started=false;
     try{
-      const r=await fetch(`${API}/api/audio/speech`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text,voice:ttsVoice}),signal:ctrl.signal});
-      if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${r.status}`);}
-      const blob=await r.blob();
-      if(ttsAbortRef.current!==ctrl)return; // superseded by another speak/stop
-      const url=URL.createObjectURL(blob);
-      const audio=new Audio(url);audio._url=url;
-      audioRef.current=audio;
-      audio.onended=()=>{URL.revokeObjectURL(url);if(audioRef.current===audio)audioRef.current=null;setSpeakingMid(p=>p===mid?null:p);};
-      setTtsLoadingMid(null);setSpeakingMid(mid);
-      await audio.play();
+      for(let ci=0;ci<chunks.length;ci++){
+        if(ttsAbortRef.current!==ctrl||ctrl.signal.aborted)throw ttsAbortError();
+        pendingAudio=null;
+        setTtsLoadingMid(mid);setTtsPhase(chunks.length>1?`generating ${ci+1}/${chunks.length}`:"generating");
+        const r=await fetch(`${API}/api/audio/speech/request`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:chunks[ci],voice:ttsVoice}),signal:ctrl.signal});
+        if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${r.status}`);}
+        const d=await r.json();
+        if(ttsAbortRef.current!==ctrl||ctrl.signal.aborted)throw ttsAbortError();
+        const streamUrl=d.url?.startsWith("http")?d.url:`${API}${d.url||`/api/audio/speech/${d.id}`}`;
+        const audio=new Audio();
+        pendingAudio=audio;
+        audioRef.current=audio;
+        audio.preload="auto";
+        audio.src=streamUrl;
+        await waitForAudioStart(audio,ctrl.signal,20000);
+        if(ttsAbortRef.current!==ctrl||ctrl.signal.aborted)throw ttsAbortError();
+        started=true;setTtsLoadingMid(null);setTtsPhase("playing");setSpeakingMid(mid);
+        await waitForAudioEnd(audio,ctrl.signal);
+        if(audioRef.current===audio)audioRef.current=null;
+      }
+      if(ttsAbortRef.current===ctrl)ttsAbortRef.current=null;
+      setSpeakingMid(null);setTtsLoadingMid(null);setTtsPhase("");
     }catch(e){
-      if(e.name!=="AbortError")notify({type:"error",text:"Speech failed",detail:String(e.message||e)});
-      setTtsLoadingMid(null);setSpeakingMid(null);
+      if(pendingAudio&&audioRef.current===pendingAudio){try{pendingAudio.pause();pendingAudio.removeAttribute("src");pendingAudio.load();}catch{}audioRef.current=null;}
+      if(ttsAbortRef.current===ctrl)ttsAbortRef.current=null;
+      if(e.name!=="AbortError")notify({type:"error",text:"Speech failed",detail:speechErrorDetail(e)});
+      setTtsLoadingMid(null);setSpeakingMid(null);setTtsPhase("");
     }
   };
   const toggleRecording=async()=>{
@@ -10369,9 +10456,9 @@ function HyprChat(){
                     {!isU&&msg.content&&<button onClick={()=>cp(renderedContent,mid)} style={msgActionS(copied===mid?t.ok:t.mut)}>
                       {copied===mid?<><IC.Check/> copied</>:<><IC.Copy/> copy</>}
                     </button>}
-                    {!isU&&msg.content&&ttsUrl&&<button onClick={()=>speak(renderedContent,mid)} title={speakingMid===mid?"Stop playback":"Read aloud"} style={msgActionS(speakingMid===mid?t.acc:ttsLoadingMid===mid?t.warm:t.mut)}>
-                      {ttsLoadingMid===mid?<><span style={{width:10,height:10,border:`2px solid ${t.warm}44`,borderTopColor:t.warm,borderRadius:"50%",display:"inline-block",animation:"spin 1s linear infinite"}}/> loading</>:speakingMid===mid?<><IC.Stop/> stop</>:<><IC.Volume/> speak</>}
-                    </button>}
+                    {!isU&&msg.content&&ttsUrl&&(()=>{const generating=ttsLoadingMid===mid,playing=speakingMid===mid;return <button onClick={()=>speak(renderedContent,mid)} title={(playing||generating)?"Stop playback":"Read aloud"} style={msgActionS(playing?t.acc:generating?t.warm:t.mut)}>
+                      {generating?<><span style={{width:10,height:10,border:`2px solid ${t.warm}44`,borderTopColor:t.warm,borderRadius:"50%",display:"inline-block",animation:"spin 1s linear infinite"}}/> {ttsPhase||"generating"}</>:playing?<><IC.Stop/> playing</>:<><IC.Volume/> speak</>}
+                    </button>;})()}
                     {!isU&&msg.content&&!streaming&&<div style={{position:"relative",display:"inline-flex"}}>
                       <button onClick={()=>regenerate(i)} style={{...msgActionS(t.mut),borderRadius:"5px 0 0 5px"}}>
                         <IC.Refresh/> regenerate

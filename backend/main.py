@@ -1277,6 +1277,9 @@ async def _check_service(name: str, url: str, timeout: float = 8) -> dict:
             status = "degraded" if ms > 3000 else "ok"
             return {"status": status, "response_ms": ms}
         return {"status": "error", "response_ms": ms, "error": f"HTTP {r.status_code}"}
+    except httpx.TimeoutException:
+        ms = int((time.time() - t0) * 1000)
+        return {"status": "error", "response_ms": ms, "error": f"timed out after {timeout}s"}
     except Exception as e:
         ms = int((time.time() - t0) * 1000)
         return {"status": "error", "response_ms": ms, "error": str(e)[:200]}
@@ -1346,7 +1349,7 @@ async def _run_health_checks() -> dict:
     if config.STT_URL:
         checks["stt"] = await _check_service("stt", f"{config.STT_URL}/v1/models")
     if config.TTS_URL:
-        checks["tts"] = await _check_service("tts", f"{config.TTS_URL}/v1/models")
+        checks["tts"] = await _check_service("tts", f"{config.TTS_URL}/v1/models", timeout=12)
     # Log to DB (non-blocking)
     try:
         conn = await db.get_db()
@@ -4020,6 +4023,35 @@ async def purge_image_studio():
     }
 
 
+_TTS_REQUEST_TTL = 300
+_tts_requests: dict[str, dict] = {}
+
+
+def _cleanup_tts_requests():
+    now = time.time()
+    expired = [rid for rid, req in _tts_requests.items() if req.get("expires_at", 0) <= now]
+    for rid in expired:
+        _tts_requests.pop(rid, None)
+    if len(_tts_requests) > 500:
+        for rid, _ in sorted(_tts_requests.items(), key=lambda kv: kv[1].get("expires_at", 0))[:100]:
+            _tts_requests.pop(rid, None)
+
+
+async def _tts_streaming_response(text: str, voice_name: str, request_id: str = ""):
+    try:
+        stream = await voice.open_speech_stream(text, voice_name)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, f"TTS service error: HTTP {e.response.status_code}")
+    except httpx.TimeoutException:
+        raise HTTPException(504, "TTS service timed out before audio could start")
+    except Exception as e:
+        raise HTTPException(502, f"TTS service unreachable: {str(e)[:200]}")
+    headers = {"Cache-Control": "no-store"}
+    if request_id:
+        headers["X-Hyprchat-TTS-Request"] = request_id
+    return StreamingResponse(stream.aiter_bytes(), media_type="audio/mpeg", headers=headers)
+
+
 # ============================================================
 # AUDIO — voice STT/TTS proxy
 # ============================================================
@@ -4048,7 +4080,40 @@ async def synthesize_speech(body: dict = Body(...)):
     if not text:
         raise HTTPException(400, "Nothing speakable in the provided text")
     voice_name = (body.get("voice") or "").strip()
-    return StreamingResponse(voice.speech_stream(text, voice_name), media_type="audio/mpeg")
+    return await _tts_streaming_response(text, voice_name)
+
+
+@app.post("/api/audio/speech/request")
+async def create_speech_request(body: dict = Body(...)):
+    if not config.TTS_URL:
+        raise HTTPException(503, "Text-to-speech is not configured. Set the TTS URL in Settings → Connections.")
+    text = voice.strip_for_tts(body.get("text") or "")
+    if not text:
+        raise HTTPException(400, "Nothing speakable in the provided text")
+    _cleanup_tts_requests()
+    request_id = uuid.uuid4().hex
+    _tts_requests[request_id] = {
+        "text": text,
+        "voice": (body.get("voice") or "").strip(),
+        "expires_at": time.time() + _TTS_REQUEST_TTL,
+    }
+    return {
+        "id": request_id,
+        "url": f"/api/audio/speech/{request_id}",
+        "expires_in": _TTS_REQUEST_TTL,
+        "chars": len(text),
+    }
+
+
+@app.get("/api/audio/speech/{request_id}")
+async def stream_speech_request(request_id: str):
+    if not config.TTS_URL:
+        raise HTTPException(503, "Text-to-speech is not configured. Set the TTS URL in Settings → Connections.")
+    _cleanup_tts_requests()
+    req = _tts_requests.get(request_id)
+    if not req:
+        raise HTTPException(404, "Speech request expired or was not found")
+    return await _tts_streaming_response(req["text"], req.get("voice", ""), request_id=request_id)
 
 
 @app.get("/api/audio/voices")
@@ -5955,10 +6020,12 @@ async def update_app_settings(body: dict = Body(...)):
     if "tts_url" in body and body["tts_url"]:
         config.TTS_URL = _coerce_service_url(body["tts_url"], "TTS_URL", "")
         settings["tts_url"] = config.TTS_URL
+        voice.clear_voice_cache()
         print(f"[Config] Updated TTS URL to: {config.TTS_URL}")
     elif "tts_url" in body and not body["tts_url"]:
         settings["tts_url"] = ""
         config.TTS_URL = os.getenv("TTS_URL", "")
+        voice.clear_voice_cache()
     if "tts_voice" in body:
         config.TTS_VOICE = str(body["tts_voice"] or os.getenv("TTS_VOICE", "af_heart"))
         settings["tts_voice"] = config.TTS_VOICE
