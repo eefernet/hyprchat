@@ -20,6 +20,7 @@ if str(_BACKEND) not in sys.path:
 
 import search_agent  # noqa: E402
 import quick_search  # noqa: E402  (we patch helpers on this module)
+import research  # noqa: E402
 import config  # noqa: E402
 
 
@@ -50,6 +51,35 @@ class _FakeHTTP:
         if isinstance(nxt, Exception):
             raise nxt
         return _FakeResponse(nxt)
+
+
+class _StreamResponse:
+    def __init__(self, *, url, status_code=200, headers=None, content=b"ok"):
+        self.url = url
+        self.status_code = status_code
+        self.headers = headers or {"content-type": "text/html; charset=utf-8"}
+        self._content = content
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def aiter_bytes(self):
+        yield self._content
+
+
+class _StreamHTTP:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.urls = []
+
+    def stream(self, method, url, **kwargs):
+        self.urls.append(url)
+        if not self.responses:
+            raise AssertionError(f"unexpected fetch: {url}")
+        return self.responses.pop(0)
 
 
 class _FakeEvents:
@@ -130,6 +160,42 @@ def _many_web_results(n: int, *, prefix: str = "Result") -> list[dict]:
         }
         for i in range(n)
     ]
+
+
+def _seed_public_dns(host: str):
+    now = datetime.now(tz=timezone.utc).timestamp()
+    quick_search._DNS_CACHE[host] = (now, True)
+    research._DNS_CACHE[host] = (now, True)
+
+
+def test_fetch_clean_page_rejects_private_redirect_before_fetching_target():
+    _seed_public_dns("example.com")
+    http = _StreamHTTP([
+        _StreamResponse(
+            url="https://example.com/start",
+            status_code=302,
+            headers={"location": "http://127.0.0.1/private"},
+            content=b"",
+        )
+    ])
+
+    assert _run(quick_search._fetch_clean_page(http, "https://example.com/start")) is None
+    assert http.urls == ["https://example.com/start"]
+
+
+def test_fetch_og_image_rejects_private_redirect_before_fetching_target():
+    _seed_public_dns("example.com")
+    http = _StreamHTTP([
+        _StreamResponse(
+            url="https://example.com/article",
+            status_code=302,
+            headers={"location": "http://127.0.0.1/private"},
+            content=b"",
+        )
+    ])
+
+    assert _run(quick_search._fetch_og_image(http, "https://example.com/article")) == ""
+    assert http.urls == ["https://example.com/article"]
 
 
 def test_run_search_agent_skip_gate():

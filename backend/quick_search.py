@@ -31,7 +31,7 @@ from datetime import date, datetime
 from email.utils import parsedate_to_datetime
 
 import config
-from research import _search_searxng, _rank_urls, web_get
+from research import _search_searxng, _rank_urls, fetch_bytes_safely
 
 
 # ── 10-min TTL cache, keyed by (query, time_range, categories, engines), bounded LRU ──
@@ -788,22 +788,23 @@ async def _fetch_clean_page(http, url: str) -> dict | None:
         return None
     try:
         async with _FETCH_SEMA:
-            r = await web_get(
+            status, headers, _final_url, body = await fetch_bytes_safely(
                 http,
-                url, timeout=15, follow_redirects=True,
+                url, timeout=15, max_bytes=2 * 1024 * 1024,
                 headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                                        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"},
             )
-        if r.status_code >= 400:
+        if status >= 400:
             return None
-        # SSRF: re-check the FINAL URL after redirects — the initial _url_safe
-        # gate ran on the pre-redirect URL; a result can 302 to an internal host.
-        if not await _url_safe(str(r.url)):
-            return None
-        ct = r.headers.get("content-type", "")
+        ct = headers.get("content-type", "")
         if "text" not in ct and "html" not in ct and "json" not in ct:
             return None
-        html = r.text
+        m = re.search(r"charset=([^;\s]+)", ct, re.I)
+        enc = (m.group(1) if m else "utf-8").strip("\"'")
+        try:
+            html = body.decode(enc, errors="replace")
+        except LookupError:
+            html = body.decode("utf-8", errors="replace")
     except Exception:
         return None
 
@@ -1141,9 +1142,9 @@ async def _fetch_og_image(http, page_url: str) -> str:
         return ""
     try:
         async with _FETCH_SEMA:
-            resp = await web_get(
+            status, _headers, _final_url, body = await fetch_bytes_safely(
                 http,
-                page_url, timeout=6, follow_redirects=True,
+                page_url, timeout=6, max_bytes=256 * 1024,
                 headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                                   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -1151,10 +1152,9 @@ async def _fetch_og_image(http, page_url: str) -> str:
                     "Accept-Language": "en-US,en;q=0.5",
                 },
             )
-        # SSRF: re-check the final URL after redirects.
-        if not await _url_safe(str(resp.url)):
+        if status >= 400:
             return ""
-        html = resp.text[:30000]
+        html = body.decode("utf-8", errors="replace")[:30000]
         for pattern in _OG_PATTERNS:
             m = re.search(pattern, html, re.IGNORECASE)
             if not m:

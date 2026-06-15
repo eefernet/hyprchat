@@ -12,7 +12,11 @@ import time
 import httpx
 import pytest
 
+from .optional_deps import HAS_AIOSQLITE, install_aiosqlite_stub
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+if not HAS_AIOSQLITE:
+    install_aiosqlite_stub()
 
 
 # ── Pure-unit: workflow patching (no live dependency) ─────────────────────
