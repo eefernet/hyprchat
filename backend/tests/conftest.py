@@ -13,6 +13,8 @@ import os
 import pytest
 import httpx
 
+from .optional_deps import HAS_AIOSQLITE, HAS_CHROMADB, HAS_FASTAPI  # noqa: F401
+
 BASE_URL = os.getenv("HYPRCHAT_URL", "http://100.122.119.50:8000")
 
 

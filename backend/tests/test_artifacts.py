@@ -1,9 +1,10 @@
 import asyncio
-import importlib.util
 import sys
 from pathlib import Path
 
 import pytest
+
+from .optional_deps import HAS_AIOSQLITE
 
 
 BACKEND = Path(__file__).resolve().parent.parent
@@ -11,7 +12,7 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 pytestmark = pytest.mark.skipif(
-    importlib.util.find_spec("aiosqlite") is None,
+    not HAS_AIOSQLITE,
     reason="aiosqlite not installed",
 )
 

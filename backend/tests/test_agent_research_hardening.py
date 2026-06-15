@@ -1,17 +1,18 @@
 import asyncio
-import importlib.util
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
+from .optional_deps import HAS_AIOSQLITE
+
 
 BACKEND = Path(__file__).resolve().parent.parent
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-if importlib.util.find_spec("aiosqlite") is None:
+if not HAS_AIOSQLITE:
     pytest.skip("aiosqlite not installed", allow_module_level=True)
 
 import database as db  # noqa: E402

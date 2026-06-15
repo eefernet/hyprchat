@@ -41,6 +41,9 @@
 
 ## Bug fixes
 - Fixed KB reindex failures from readonly RAG/Chroma SQLite storage with clearer diagnostics and deploy-time data-directory permission repair.
+- Hardened `/api/img-proxy` so proxied chat images use the same safe-fetch path as URL previewing, blocking loopback/private targets and unsafe redirects before any private URL is fetched.
+- Kept image proxy behavior intact while enforcing the existing 5 MB cap, image-only content check, cache header, and domain-matched Referer.
+- Fixed dependency-light backend test collection by replacing fragile optional-dependency stubs with proper module stubs and centralized `aiosqlite`/`chromadb` availability checks.
 
 ## Setup, Ops, and Tests
 - `.env.example`, deploy scripts, `create-lxc.sh`, and `deploy_monitor.py` now cover current media, connector, sandbox, workflow, Quick Search, and Aider settings.

@@ -54,7 +54,6 @@ from research import (
     close_web_fetch_client,
     fetch_bytes_safely,
     run_research_report,
-    web_get,
 )
 
 # ============================================================
@@ -5721,25 +5720,29 @@ async def img_proxy(u: str):
     parsed = urllib.parse.urlparse(u)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="bad url")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; image-proxy)",
+        "Accept": "image/*",
+        "Referer": f"{parsed.scheme}://{parsed.netloc}/",
+    }
     try:
-        r = await web_get(
-            http,
-            u, timeout=8, follow_redirects=True,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; image-proxy)",
-                "Accept": "image/*",
-                "Referer": f"{parsed.scheme}://{parsed.netloc}/",
-            },
+        status, resp_headers, _final_url, content = await fetch_bytes_safely(
+            http, u, timeout=8, headers=headers, max_bytes=5 * 1024 * 1024
         )
+    except ValueError as e:
+        detail = str(e)
+        if "too large" in detail.lower():
+            raise HTTPException(status_code=413, detail="too large")
+        raise HTTPException(status_code=400, detail=detail)
     except Exception:
         raise HTTPException(status_code=502, detail="fetch failed")
-    ct = r.headers.get("content-type", "")
-    if r.status_code != 200 or not ct.lower().startswith("image/"):
+    ct = resp_headers.get("content-type", "")
+    if status != 200 or not ct.lower().startswith("image/"):
         raise HTTPException(status_code=404, detail="not found")
-    if len(r.content) > 5 * 1024 * 1024:
+    if len(content) > 5 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="too large")
     return Response(
-        content=r.content, media_type=ct,
+        content=content, media_type=ct,
         headers={"Cache-Control": "public, max-age=86400"},
     )
 

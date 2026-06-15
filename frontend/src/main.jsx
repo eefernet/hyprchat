@@ -52,6 +52,12 @@ const userScopedUrl = path => {
   const sep = String(path).includes("?") ? "&" : "?";
   return `${API}${path}${sep}user_id=${encodeURIComponent(uid)}${session ? `&session=${encodeURIComponent(session)}` : ""}`;
 };
+const proxiedImageUrl = src => {
+  if(!/^https?:\/\//i.test(src||""))return src;
+  let raw = src;
+  if(/%25[0-9A-F]{2}/i.test(raw)){try{raw = decodeURIComponent(raw);}catch{}}
+  return `${API}/api/img-proxy?u=${encodeURIComponent(raw)}`;
+};
 const _hyprFetch = window.fetch.bind(window);
 window.fetch = (input, init = {}) => {
   const rawUrl = typeof input === "string" ? input : (input && input.url) || "";
@@ -6658,13 +6664,7 @@ function HyprChat(){
         // Force any third-party image URL through our proxy: privacy (no IP/cookies leaked
         // to NYT/Wikipedia/etc), hotlink bypass (proxy sends domain-matched Referer), and
         // mixed-content fix. /api/img-proxy URLs and same-origin /api/ URLs pass through.
-        let finalSrc = src;
-        if(/^https?:\/\//i.test(src)){
-          // Decode once if double-encoded (model sometimes encodes %28 → %2528)
-          let raw = src;
-          if(/%25[0-9A-F]{2}/i.test(raw)){try{raw = decodeURIComponent(raw);}catch{}}
-          finalSrc = `${API}/api/img-proxy?u=${encodeURIComponent(raw)}`;
-        }
+        const finalSrc = proxiedImageUrl(src);
         return <img key={k} src={finalSrc} alt={alt||""} referrerPolicy="no-referrer" loading="lazy" style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`}} onError={e=>e.target.style.display="none"}/>;}
       if(s.startsWith("`")&&s.endsWith("`")&&s.length>1)
         return <code key={k} style={{background:`${t.surface}CC`,padding:"1px 5px",borderRadius:3,fontFamily:font,fontSize:"0.88em",color:t.warm}}>{s.slice(1,-1)}</code>;

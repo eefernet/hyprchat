@@ -1,16 +1,15 @@
 import asyncio
 import os
 import sys
-import types
 
 import httpx
 import pytest
 
+from .optional_deps import HAS_AIOSQLITE, install_aiosqlite_stub
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-try:
-    import aiosqlite  # noqa: F401
-except ModuleNotFoundError:
-    sys.modules.setdefault("database", types.SimpleNamespace())
+if not HAS_AIOSQLITE:
+    install_aiosqlite_stub()
 
 import connectors
 

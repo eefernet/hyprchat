@@ -7,17 +7,18 @@ ChromaDB's ~5461-record single-upsert cap and 500'd the reindex endpoint.
 No live ChromaDB or Ollama required.
 """
 import asyncio
-import importlib.util
 import sys
 from pathlib import Path
 
 import pytest
 
+from .optional_deps import HAS_CHROMADB
+
 _BACKEND = Path(__file__).resolve().parent.parent
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-if importlib.util.find_spec("chromadb") is None:
+if not HAS_CHROMADB:
     pytest.skip("chromadb not installed", allow_module_level=True)
 
 import rag  # noqa: E402

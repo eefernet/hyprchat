@@ -1,19 +1,19 @@
 import asyncio
 import importlib
-import importlib.util
 import sys
-import types
 from datetime import datetime
 from pathlib import Path
 
 import pytest
+
+from .optional_deps import HAS_AIOSQLITE, HAS_CHROMADB, HAS_FASTAPI, install_rag_stub
 
 
 BACKEND = Path(__file__).resolve().parent.parent
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-if importlib.util.find_spec("aiosqlite") is None:
+if not HAS_AIOSQLITE:
     pytest.skip("aiosqlite not installed", allow_module_level=True)
 
 import database as db  # noqa: E402
@@ -24,20 +24,10 @@ def _run(coro):
 
 
 def _import_main_for_research_routes(monkeypatch):
-    if importlib.util.find_spec("fastapi") is None:
+    if not HAS_FASTAPI:
         pytest.skip("fastapi not installed")
-    if importlib.util.find_spec("chromadb") is None:
-        async def _noop_async(*_args, **_kwargs):
-            return []
-
-        monkeypatch.setitem(sys.modules, "rag", types.SimpleNamespace(
-            RESEARCH_TOOLS=set(),
-            query=_noop_async,
-            format_context=lambda *_args, **_kwargs: "",
-            ensure_embed_model=_noop_async,
-            parse_file=lambda *_args, **_kwargs: "",
-            index_research=_noop_async,
-        ))
+    if not HAS_CHROMADB:
+        install_rag_stub(monkeypatch)
     sys.modules.pop("main", None)
     return importlib.import_module("main")
 
