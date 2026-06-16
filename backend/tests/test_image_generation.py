@@ -664,8 +664,8 @@ def test_chat_image_recipe_uses_persona_profile_workflow(tmp_path, monkeypatch):
     assert recipe["workflow_name"] == "dummy-private-workflow"
     assert recipe["checkpoint"] == "dummy-private-checkpoint"
     assert recipe["vae"] == "dummy-private-vae"
-    assert recipe["width"] == 832
-    assert recipe["height"] == 1216
+    assert recipe["width"] == 640
+    assert recipe["height"] == 640
     assert recipe["steps"] == 31
     assert recipe["cfg"] == 5.5
     assert recipe["sampler_name"] == "euler"
@@ -725,12 +725,50 @@ def test_chat_image_recipe_falls_back_when_profile_workflow_missing(tmp_path, mo
     assert recipe["template"] is None
     assert recipe["workflow_name"] == ""
     assert recipe["checkpoint"] == "fallback-checkpoint"
-    assert recipe["width"] == 512
+    assert recipe["width"] == 640
     assert recipe["height"] == 768
     assert "fallback-prefix" in recipe["prompt"]
     assert "dummy-profile-prefix" not in recipe["prompt"]
     assert recipe["profile_metadata"]["active"] is False
     assert recipe["profile_metadata"]["fallback_reason"] == "missing_workflow"
+
+
+def test_chat_image_recipe_global_resolution_overrides_profile_and_tool_args(tmp_path, monkeypatch):
+    import comfyui
+    import config
+    import tools
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(config, "IMAGE_CHAT_CHECKPOINT", "fallback-checkpoint")
+    monkeypatch.setattr(config, "IMAGE_CHAT_RESOLUTION", "832x1216")
+    monkeypatch.setattr(config, "IMAGE_CHAT_PROMPT_PREFIX", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_NEGATIVE", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_VAE", "")
+    (tmp_path / "persona_image_profiles.json").write_text(json.dumps({
+        "profiles": {
+            "sfw_photo": {
+                "workflow": "dummy-private-workflow",
+                "checkpoint": "dummy-private-checkpoint",
+                "width": 1024,
+                "height": 1024,
+            }
+        }
+    }), encoding="utf-8")
+    monkeypatch.setattr(comfyui, "load_workflow", lambda name: {"template": True} if name == "dummy-private-workflow" else None)
+    monkeypatch.setattr(comfyui, "settings_for_checkpoint", lambda _ckpt: {})
+
+    recipe = tools._resolve_chat_image_recipe(
+        {"prompt": "portrait", "width": 512, "height": 512},
+        persona_context={
+            "persona_id": "persona-1",
+            "persona_rating": "PG-13",
+            "user_request": "send a portrait",
+        },
+    )
+
+    assert recipe["width"] == 832
+    assert recipe["height"] == 1216
+    assert recipe["profile_metadata"]["active"] is True
 
 
 class _FakeComfyResponse:

@@ -1004,12 +1004,10 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "generate_image",
-            "description": "Generate an image from a text description using local Stable Diffusion (SDXL). For pictures/art/photos — NOT charts or diagrams.",
+            "description": "Generate an image from a text description using local Stable Diffusion (SDXL). For pictures/art/photos — NOT charts or diagrams. Dimensions come from the global chat image settings.",
             "parameters": {"type": "object", "properties": {
                 "prompt": {"type": "string", "description": "What the image should show, descriptive and specific"},
                 "negative_prompt": {"type": "string", "description": "Optional: things to avoid in the image"},
-                "width": {"type": "integer", "description": "Image width in px (256-2048, default 1024)"},
-                "height": {"type": "integer", "description": "Image height in px (256-2048, default 1024)"},
                 "steps": {"type": "integer", "description": "Sampling steps (1-60; ignored when a default image model with saved presets is configured)"},
                 "seed": {"type": "integer", "description": "Optional seed for reproducible results"},
             }, "required": ["prompt"]},
@@ -2097,14 +2095,10 @@ def _resolve_chat_image_recipe(args: dict, persona_context: dict | None = None) 
     ) or (config.IMAGE_CHAT_CHECKPOINT or "").strip()
     gi_preset = comfyui.settings_for_checkpoint(gi_ckpt) if gi_ckpt else {}
 
-    gi_width = (
-        _profile_value(active_profile, "width")
-        if active_profile else None
-    ) or args.get("width") or default_w
-    gi_height = (
-        _profile_value(active_profile, "height")
-        if active_profile else None
-    ) or args.get("height") or default_h
+    # Chat image dimensions are a global admin preference. Persona profiles and
+    # model-supplied tool args may steer workflow/model/style, but not size.
+    gi_width = default_w
+    gi_height = default_h
     gi_steps = (
         _profile_value(active_profile, "steps")
         if active_profile else None
