@@ -3658,15 +3658,15 @@ async def get_image_job(job_id: str):
         url = f"/api/downloads/{filename}"
         artifact_id = None
         try:
-            sha = hashlib.sha256(open(filepath, "rb").read()).hexdigest()
+            file_meta = await asyncio.to_thread(_artifact_file_metadata, filepath)
             artifact = await db.add_artifact(
                 filename=filename,
                 url=url,
                 kind="image",
                 mime_type="image/png",
                 storage_path=filepath,
-                size_bytes=os.path.getsize(filepath),
-                sha256=sha,
+                size_bytes=file_meta["size_bytes"],
+                sha256=file_meta["sha256"],
                 exists_status="present",
                 status="draft",
                 metadata={"source_tool": "image_studio", **params},

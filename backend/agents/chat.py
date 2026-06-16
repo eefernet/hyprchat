@@ -1368,7 +1368,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 "explicitly asks for the tarball/zip. They already uploaded it."
             )
         else:
-            # v1 path — keep the existing read_file → write_file/generate_code flow.
+            # Ordinary code-capable path — keep the existing
+            # read_file -> write_file/generate_code flow outside Daedalus.
             _ap_lines.append(
                 "\nIf the user reports a bug, error, or asks for changes to this project: "
                 "use read_file on the relevant files first to see the current code, then fix "
@@ -1620,7 +1621,6 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     _last_error_sig = None  # Signature of last tool error for loop detection
     _error_repeat_count = 0  # Consecutive times we've seen the same error
     _generate_code_fail_rounds = 0  # Counter: successful rounds since generate_code failure (0 = no failure or just failed)
-    _generate_code_done = False    # Guard: stop tool calls after successful generate_code
     _rescue_count = 0              # How many times we rescued code blocks
     _selfie_rescued = False        # One forced generate_image per turn when persona text-RPs a photo
     _gen_image_called = False      # Did any round actually call generate_image?
@@ -2466,7 +2466,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     _had_write_since = _prev_tool_key != _tool_key and any(
                         '"write_file"' in h or '"file_editor"' in h
                         for h in _tool_history[_tool_history.index(_tool_key)+1:]
-                    ) if _tool_key in _tool_history else False
+                    )
                     if _is_test_rerun and _had_write_since:
                         print(f"[CHAT]   Allowing re-test after file modification")
                     elif _all_loop_tools:
@@ -2812,9 +2812,9 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     elif _generate_code_fail_rounds < 0:
                         _generate_code_fail_rounds += 1
 
-                    # When generate_code succeeds (PROJECT COMPLETE), enable overseer review
+                    # When generate_code succeeds (PROJECT COMPLETE), ask the
+                    # model to inspect the generated result before delivery.
                     if tool_name == "generate_code" and "PROJECT COMPLETE" in tool_result:
-                        _generate_code_done = True
                         print("[CHAT]   generate_code succeeded — overseer reviewing output")
                         messages.append({"role": "tool", "content": (
                             "SYSTEM: The coding agent has finished. Review the file contents above "

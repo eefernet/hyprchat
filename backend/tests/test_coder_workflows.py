@@ -889,6 +889,35 @@ def test_v2_name_match_word_boundary():
     assert not tools._v2_name_match("")
 
 
+def test_event_bus_unsubscribe_deletes_empty_conversation_key():
+    from events import EventBus
+
+    bus = EventBus()
+    q = _run(bus.subscribe("conv-events"))
+
+    assert "conv-events" in bus._subscribers
+
+    _run(bus.unsubscribe("conv-events", q))
+
+    assert "conv-events" not in bus._subscribers
+
+
+def test_seed_coder_kb_targets_daedalus_not_generic_coder_profile():
+    if not HAS_CHROMADB:
+        install_rag_stub()
+    from seed_kb import seed_coder_kb
+
+    picked = seed_coder_kb._find_daedalus_config([
+        {"id": "mc-coder", "name": "Personal Coder Helper", "kb_ids": []},
+        {"id": "mc-daedalus", "name": "🏛️ Daedalus", "kb_ids": []},
+    ])
+
+    assert picked["id"] == "mc-daedalus"
+    assert seed_coder_kb._find_daedalus_config([
+        {"id": "mc-coder", "name": "Personal Coder Helper", "kb_ids": []},
+    ]) is None
+
+
 def test_blocked_counter_ignores_tool_name_and_interleaved_success(monkeypatch):
     chat = _import_chat_with_optional_stubs(monkeypatch)
     state = {"key": "", "count": 0}

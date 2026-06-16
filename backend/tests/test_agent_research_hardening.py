@@ -43,6 +43,11 @@ class _FakeEvents:
         self.events.append((conv_id, event_type, data))
 
 
+class _NoPostHTTP:
+    async def post(self, *_args, **_kwargs):
+        raise AssertionError("unexpected direct HTTP post")
+
+
 
 
 class _OllamaStreamShim:
@@ -279,6 +284,90 @@ def test_v2_gate_allows_agent_research_after_fixer_attempt(tmp_path, monkeypatch
     assert result.startswith("# Agent Research: API mismatch exact error")
     assert tools._get_recent_research("conv-v2") is not None
     assert any(ev[1] == "tool_start" and ev[2].get("tool") == "deep_research" for ev in events.events)
+
+
+def test_conspiracy_research_depth_coercion_handles_bad_strings(monkeypatch):
+    seen = []
+
+    async def fake_conspiracy_research(_http, _ollama_url, _default_model, _searxng_url,
+                                       _events, topic, angle, depth, conv_id,
+                                       kb_context=""):
+        seen.append({"topic": topic, "angle": angle, "depth": depth, "conv_id": conv_id})
+        return f"depth={depth}"
+
+    monkeypatch.setattr(tools, "run_conspiracy_research", fake_conspiracy_research)
+
+    result = _run(tools.exec_tool(
+        http=object(), events=_FakeEvents(),
+        name="conspiracy_research",
+        args={"topic": "dummy topic", "angle": "evidence", "depth": "not-a-number"},
+        conv_id="",
+    ))
+
+    assert result == "depth=4"
+    assert seen == [{"topic": "dummy topic", "angle": "evidence", "depth": 4, "conv_id": ""}]
+
+    result = _run(tools.exec_tool(
+        http=object(), events=_FakeEvents(),
+        name="conspiracy_research",
+        args={"topic": "dummy topic", "depth": "5"},
+        conv_id="",
+    ))
+
+    assert result == "depth=5"
+    assert seen[-1]["depth"] == 5
+
+
+def test_plan_project_uses_architect_for_non_daedalus_codeagent(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_model_config(
+        "mc-codeagent", "Plain CodeAgent", "test-model",
+        tool_ids=["plan_project", "generate_code"],
+    ))
+    _run(db.create_conversation(
+        "conv-codeagent", "Non-Daedalus CodeAgent", model_config_id="mc-codeagent",
+    ))
+
+    from agents import architect
+
+    calls = []
+
+    async def fake_run_architect(http, events, conv_id, *, task, language_hint,
+                                 kb_chunks=None, conv_model=""):
+        calls.append({
+            "http": http,
+            "conv_id": conv_id,
+            "task": task,
+            "language_hint": language_hint,
+            "kb_chunks": kb_chunks,
+            "conv_model": conv_model,
+        })
+        return {
+            "status": "ok",
+            "run_id": "run-architect",
+            "plan": {"project_id": "proj-architect"},
+        }
+
+    monkeypatch.setattr(architect, "run_architect", fake_run_architect)
+    monkeypatch.setattr(architect, "format_plan_for_chat", lambda plan: "ARCHITECT PLAN")
+
+    result = _run(tools.exec_tool(
+        http=_NoPostHTTP(), events=_FakeEvents(),
+        name="plan_project",
+        args={"task": "build a tiny app", "language": "python"},
+        conv_id="conv-codeagent",
+        conv_model="plain-model",
+    ))
+
+    assert result == "ARCHITECT PLAN"
+    assert len(calls) == 1
+    assert calls[0]["conv_id"] == "conv-codeagent"
+    assert calls[0]["language_hint"] == "python"
+    workflow = _run(db.get_latest_coder_workflow("conv-codeagent", "proj-architect"))
+    assert workflow is not None
+    assert workflow["state"] == "planning"
+    assert workflow["active_run_id"] == "run-architect"
 
 
 # ---------------------------------------------------------------------------

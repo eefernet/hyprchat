@@ -12,6 +12,7 @@ import copy
 import json
 import os
 import random
+import uuid
 
 import httpx
 
@@ -82,6 +83,20 @@ def _find_by_class(workflow: dict, class_type: str) -> str | None:
         if isinstance(node, dict) and node.get("class_type") == class_type:
             return node_id
     return None
+
+
+def _has_model_sampling_mode(workflow: dict, mode: str) -> bool:
+    """Return True only when the graph already has the requested sampler mode."""
+    mode = (mode or "").strip().lower()
+    if mode == "flow":
+        return _find_by_class(workflow, "ModelSamplingSD3") is not None
+    if mode == "vpred":
+        for node in workflow.values():
+            if not isinstance(node, dict) or node.get("class_type") != "ModelSamplingDiscrete":
+                continue
+            if node.get("inputs", {}).get("sampling") == "v_prediction":
+                return True
+    return False
 
 
 # ── Per-checkpoint generation settings ──
@@ -561,13 +576,11 @@ def build_workflow(template: dict, *, prompt: str, negative_prompt: str = "",
     # v-prediction models (NoobAI vpred, ...) need ModelSamplingDiscrete +
     # RescaleCFG; Flow Matching models (BigASP v2.5) need ModelSamplingSD3.
     # Splice the node between the sampler's existing model source and the
-    # sampler, preserving any LoRA chain — and skip when the workflow already
-    # carries its own sampling node.
+    # sampler, preserving any LoRA chain — and skip only when the workflow
+    # already carries the requested sampling mode.
     if not model_sampling and v_prediction:
         model_sampling = "vpred"
-    _has_sampling_node = bool(_find_by_class(wf, "ModelSamplingDiscrete")
-                              or _find_by_class(wf, "ModelSamplingSD3"))
-    if model_sampling in ("vpred", "flow") and not _has_sampling_node:
+    if model_sampling in ("vpred", "flow") and not _has_model_sampling_mode(wf, model_sampling):
         model_src = sampler.get("model")
         if isinstance(model_src, list) and model_src:
             if model_sampling == "flow":
@@ -634,10 +647,11 @@ def _base() -> str:
     return (config.COMFYUI_URL or "").rstrip("/")
 
 
-# In-flight HyprChat generations (prompt_ids). Guards cleanup_outputs against
-# a cross-job race: it deletes ALL hyprchat-prefixed files on ComfyUI, which
-# would destroy another job's output before HyprChat downloads it. In-process
-# only — a restart clears it (and reaped jobs error out anyway).
+# In-flight HyprChat generations (prompt_ids plus short-lived pending
+# submission sentinels). Guards cleanup_outputs against a cross-job race: it
+# deletes ALL hyprchat-prefixed files on ComfyUI, which would destroy another
+# job's output before HyprChat downloads it. In-process only — a restart clears
+# it (and reaped jobs error out anyway).
 _ACTIVE_JOBS: set[str] = set()
 
 
@@ -648,15 +662,20 @@ def finish_job(prompt_id: str):
 
 async def submit(workflow: dict) -> str:
     """Queue a workflow; returns the prompt_id."""
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(f"{_base()}/prompt", json={"prompt": workflow})
-        r.raise_for_status()
-        data = r.json()
-    pid = data.get("prompt_id")
-    if not pid:
-        raise RuntimeError(f"ComfyUI rejected the workflow: {json.dumps(data)[:300]}")
-    _ACTIVE_JOBS.add(pid)
-    return pid
+    pending_id = f"pending-{uuid.uuid4().hex}"
+    _ACTIVE_JOBS.add(pending_id)
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(f"{_base()}/prompt", json={"prompt": workflow})
+            r.raise_for_status()
+            data = r.json()
+        pid = data.get("prompt_id")
+        if not pid:
+            raise RuntimeError(f"ComfyUI rejected the workflow: {json.dumps(data)[:300]}")
+        _ACTIVE_JOBS.add(pid)
+        return pid
+    finally:
+        _ACTIVE_JOBS.discard(pending_id)
 
 
 async def get_history(prompt_id: str) -> dict | None:

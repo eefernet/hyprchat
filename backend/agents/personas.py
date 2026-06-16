@@ -24,12 +24,7 @@ async def seed_coder_bot():
 
 
 async def seed_coder_bot_v2():
-    """Seed Daedalus — the Coder Bot v2 persona.
-
-    Same toolset as v1 but with a system prompt that routes review/fix work
-    through the new run_review tool instead of 28 rounds of manual file edits.
-    Lives alongside v1 in the persona list so users can A/B them.
-    """
+    """Seed Daedalus, the maintained coding persona."""
     persona_name = "🏛️ Daedalus"
     all_configs = await db.get_model_configs()
     existing = next(

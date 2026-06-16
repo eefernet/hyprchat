@@ -132,13 +132,6 @@ async def open_speech_stream(text: str, voice_name: str = "") -> SpeechStream:
         raise
 
 
-async def speech_stream(text: str, voice_name: str = ""):
-    """Async generator yielding MP3 chunks from /v1/audio/speech."""
-    stream = await open_speech_stream(text, voice_name)
-    async for chunk in stream.aiter_bytes():
-        yield chunk
-
-
 def clear_voice_cache():
     _voices_cache.update({"base": "", "expires_at": 0.0, "voices": []})
 

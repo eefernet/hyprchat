@@ -332,18 +332,6 @@ def _classify_query(q: str) -> str:
     return "general"
 
 
-def _apply_domain_bias(results: list, category: str) -> list:
-    """Push downranked-for-category domains to the bottom; keep order otherwise."""
-    bad = _DOWNRANK_DOMAINS.get(category) or frozenset()
-    if not bad:
-        return results
-    keep, defer = [], []
-    for r in results:
-        d = _registrable_domain(r.get("url", ""))
-        (defer if d in bad else keep).append(r)
-    return keep + defer
-
-
 _MAJOR_SOURCE_DOMAINS = frozenset({
     "apnews.com", "reuters.com", "bbc.com", "bbc.co.uk", "npr.org", "pbs.org",
     "nytimes.com", "washingtonpost.com", "theguardian.com", "bloomberg.com",

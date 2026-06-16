@@ -23,6 +23,8 @@ class EventBus:
         async with self._lock:
             if conv_id in self._subscribers:
                 self._subscribers[conv_id] = [x for x in self._subscribers[conv_id] if x is not q]
+                if not self._subscribers[conv_id]:
+                    del self._subscribers[conv_id]
 
     async def emit(self, conv_id: str, event_type: str, data: dict):
         """Emit a status event to all subscribers of a conversation."""

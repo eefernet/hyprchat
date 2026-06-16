@@ -69,7 +69,7 @@ Use HyprChat like a normal chat app, then turn on heavier tools only when needed
 
 Generate pictures directly in chat with the `generate_image` tool, or use Image Studio for a full ComfyUI control surface. Chat images render inline, are stored as artifacts, and can use global defaults for checkpoint, workflow, resolution, VAE, prompt prefix, negative prompt, and compose model.
 
-Image Studio supports local Stable Diffusion and Flux-style ComfyUI workflows, checkpoint/VAE selection, sampler and scheduler defaults, model-sampling presets, saved API workflows from JSON or workflow-bearing PNG uploads, prompt enhancement, thumbnail galleries, lightbox preview, artifact reuse, full-trace purge, and ComfyUI memory controls.
+Image Studio supports local Stable Diffusion and Flux-style ComfyUI workflows, checkpoint/VAE selection, sampler and scheduler defaults, model-sampling presets, saved API workflows from JSON or workflow-bearing PNG uploads, prompt enhancement, thumbnail galleries, lightbox preview, artifact reuse, full-trace purge, and ComfyUI memory controls. HyprChat injects v-prediction or flow sampling nodes only when the workflow does not already contain the matching mode, and defers ComfyUI cleanup while any generation or prompt submission is still in flight.
 
 <p align="center">
   <img src="docs/images/image%20studio.png" alt="HyprChat Image Studio" width="900">
@@ -92,7 +92,7 @@ The browser only talks to HyprChat. The backend proxies OpenAI-compatible STT an
 
 ### 🏛️ Daedalus Agentic Coding
 
-Daedalus is the coding workflow. It plans, builds, reviews, fixes, and acceptance-checks projects instead of sending a single giant prompt and hoping for the best.
+Daedalus is the coding workflow. It plans, builds, reviews, fixes, and acceptance-checks projects instead of sending a single giant prompt and hoping for the best. `plan_project` always uses the structured Architect path, so Builder and Reviewer receive the same manifest contract across coding profiles.
 
 <p align="center">
   <img src="docs/images/daedalus%20Prompt.png" alt="Daedalus coding prompt result" width="440">

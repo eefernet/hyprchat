@@ -675,7 +675,7 @@ const PlanPanel = ({plan,t,streaming,md,onCopy})=>{
 // Role → (emoji, friendly label). Each agent gets a distinct visual identity
 // so a stack of cards reads as a sequence of distinct phases instead of
 // "🤖 Run · builder.feature succeeded" × N. Lookup tolerates minor variants
-// (builder.legacy, builder.scaffold, builder.feature, builder.continue) by
+// (builder.scaffold, builder.feature, builder.continue) by
 // falling back to the role's prefix before the dot.
 const _ROLE_VISUALS = {
   "architect":         {icon: "📐", label: "Designing plan"},
@@ -684,7 +684,6 @@ const _ROLE_VISUALS = {
   "builder.continue":  {icon: "🔄", label: "Resuming build"},
   "builder.feature":   {icon: "✨", label: "Adding feature"},
   "builder.bugfix":    {icon: "🩹", label: "Bug fix build"},
-  "builder.legacy":    {icon: "🤖", label: "OpenHands build"},
   "reviewer":          {icon: "🔍", label: "Reviewing"},
   "fixer":             {icon: "🛠", label: "Fixing issues"},
   "qa":                {icon: "❓", label: "Investigating"},

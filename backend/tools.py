@@ -263,7 +263,6 @@ _WF_EVENT_TRANSITIONS = {
     "REVIEW_ISSUES": ("fixing",    "not_ready"),
     "ACCEPT_OK":     ("accepted",  "accepted"),
     "ACCEPT_ISSUES": ("fixing",    "not_ready"),
-    "QA_DONE":       ("answering", "not_applicable"),
 }
 
 
@@ -366,21 +365,6 @@ def _issue_signatures(envelope: dict) -> set:
         if f and s:
             sigs.add((f, s))
     return sigs
-
-
-def _paths_are_docs_only(paths: list[str]) -> bool:
-    """True when a fixer touched only documentation files."""
-    if not paths:
-        return False
-    doc_exts = {".md", ".rst", ".txt"}
-    doc_names = {"README", "README.md", "README.rst", "README.txt"}
-    for path in paths:
-        name = os.path.basename(path or "")
-        ext = os.path.splitext(name)[1].lower()
-        if name in doc_names or ext in doc_exts:
-            continue
-        return False
-    return True
 
 
 async def _deep_research_called_since(conv_id: str, since_iso: str | None) -> bool:
@@ -2222,8 +2206,8 @@ async def exec_tool(
     try:
         # ─── v2 workflow gate (deterministic over persuasion) ───────────────
         # Two interlocking states gate every non-meta tool call. Both fire
-        # only for v2 personas (detected by model_config.name containing "v2").
-        # v1 stays untouched.
+        # only for Daedalus/v2 personas; ordinary chat personas stay outside
+        # the coder workflow gates.
         #
         #   State 1 — PENDING REVIEW: a builder or fixer just succeeded but
         #     no reviewer ran after it. Block everything except run_review.
@@ -3532,8 +3516,8 @@ async def exec_tool(
             # Reviewer gate (Coder Bot v2): if the most recent reviewer run on
             # this conversation reported issues or could not identify the
             # project, refuse to ship until the orchestrator runs a fixer pass
-            # and re-runs run_review. v1 personas don't produce reviewer runs,
-            # so this is naturally inert for them.
+            # and re-runs run_review. Ordinary chat personas do not create
+            # reviewer runs, so this is naturally inert for them.
             if conv_id:
                 try:
                     _runs_for_gate = await db.get_runs_by_conversation(conv_id, limit=20)
@@ -5096,122 +5080,54 @@ async def exec_tool(
             constraints = args.get("constraints", "")
             if not task:
                 return "ERROR: task is required"
+            architect_task = task
+            if constraints:
+                architect_task = f"{task}\n\nConstraints:\n{constraints}"
 
-            # ─── v2: route through structured Architect agent ─────────
-            # The Architect produces a JSON manifest the Builder/Reviewer
-            # consume directly, instead of the v1 prose plan that every
-            # downstream agent has to re-parse from markdown. v1 personas
-            # keep the existing prose path below.
-            _is_v2_for_plan = bool(conv_id) and await _check_v2()
-
-            if _is_v2_for_plan:
-                from agents import architect
-                await events.emit(conv_id, "tool_start", {
-                    "tool": "plan_project", "icon": "activity",
-                    "status": "🧠 Architect planning structured manifest...",
-                })
-                # KB chunks for the planning model: filter by language hints
-                # using the existing rag plumbing. Best effort — if RAG isn't
-                # configured or fails, the architect just runs without KB.
-                _kb_chunks = []
-                if kb_ids:
-                    try:
-                        import rag
-                        _hints = _kb_filename_hints_for_language(language, task)
-                        _kb_chunks = await rag.query(
-                            kb_ids, query_text=task[:500], top_k=3,
-                            prefer_filename_hints=_hints,
-                        )
-                        # Visibility for "is the KB actually being used" question.
-                        # Logs the filenames + scores so you can see at a glance
-                        # whether retrieval found anything relevant.
-                        if _kb_chunks:
-                            _kb_summary = ", ".join(
-                                f"{c.get('filename','?')}({c.get('score',0):.2f})"
-                                for c in _kb_chunks
-                            )
-                            print(f"[plan_project] KB chunks for architect: "
-                                  f"kb_ids={kb_ids} hints={_hints} → {_kb_summary}",
-                                  flush=True)
-                        else:
-                            print(f"[plan_project] No KB chunks returned "
-                                  f"(kb_ids={kb_ids}, hints={_hints})", flush=True)
-                    except Exception as _rge:
-                        print(f"[plan_project] RAG query failed (non-fatal): {_rge}")
-                plan = await architect.run_architect(
-                    http, events, conv_id,
-                    task=task, language_hint=language,
-                    kb_chunks=_kb_chunks,
-                    conv_model=conv_model,
-                )
-                if (plan.get("status") or "") == "ok":
-                    await _apply_workflow_event(
-                        conv_id, "PLAN_DONE",
-                        run_id=plan.get("run_id", ""),
-                        project_id=plan.get("plan", {}).get("project_id", "") if isinstance(plan.get("plan"), dict) else "",
-                        user_task=task,
+            # Architect produces the structured manifest consumed by Builder
+            # and Reviewer. The old prose planner was removed so every
+            # CodeAgent profile gets the same plan contract.
+            from agents import architect
+            await events.emit(conv_id, "tool_start", {
+                "tool": "plan_project", "icon": "activity",
+                "status": "🧠 Architect planning structured manifest...",
+            })
+            _kb_chunks = []
+            if kb_ids:
+                try:
+                    import rag
+                    _hints = _kb_filename_hints_for_language(language, architect_task)
+                    _kb_chunks = await rag.query(
+                        kb_ids, query_text=architect_task[:500], top_k=3,
+                        prefer_filename_hints=_hints,
                     )
-                return architect.format_plan_for_chat(plan)
-
-            # ─── v1 path: existing prose plan_project ─────────────────
-            planning_model = config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL
-            await events.emit(conv_id, "tool_start", {"tool": "plan_project", "icon": "activity", "status": f"🧠 Planning architecture with {planning_model}..."})
-            plan_prompt = f"""You are a senior software architect. Design a complete implementation plan for this project.
-
-## Requirements
-{task}
-
-## Language
-{language}
-
-## Constraints
-{constraints if constraints else "None specified"}
-
-## Your plan MUST include:
-1. **File Tree** — every file to create, with a one-line description of its purpose
-2. **Dependencies** — packages/libraries needed with install commands
-3. **Component Design** — how components interact (data flow, API contracts, imports)
-4. **Build Order** — which files to create first (dependencies before dependents)
-5. **Key Design Decisions** — why this architecture over alternatives
-6. **Testing Strategy** — what to test and how
-
-Be specific. Name actual files, functions, classes, and routes. This plan will be handed to a coding agent for implementation."""
-            try:
-                r = await http.post(
-                    f"{config.OLLAMA_URL}/api/chat",
-                    json={"model": planning_model, "messages": [{"role": "user", "content": plan_prompt}], "stream": False, "options": {"temperature": 0.3, "num_ctx": config.DEFAULT_NUM_CTX}},
-                    timeout=180,
-                )
-                if r.status_code == 200:
-                    data = r.json()
-                    plan = data.get("message", {}).get("content", "")
-                    if plan:
-                        await events.emit(conv_id, "tool_end", {
-                            "tool": "plan_project",
-                            "icon": "activity",
-                            "status": "🧠 Architecture plan ready",
-                            "detail": json.dumps({"plan": plan[:12000], "language": language, "task": task[:200]}),
-                        })
-                        # Save plan to project memory
-                        try:
-                            proj_id = f"proj-{uuid.uuid4().hex[:12]}"
-                            await db.upsert_coding_project(
-                                project_id=proj_id, name=task[:60].strip().replace("\n", " "),
-                                conversation_id=conv_id, description=task[:500],
-                                language=language, last_plan=plan[:8000],
-                            )
-                        except Exception as proj_e:
-                            print(f"[PLAN] Failed to save project: {proj_e}")
-                        return f"## Architecture Plan\n\n{plan}\n\n---\n*Now implement this plan step by step using write_file, run_shell, and other tools.*"
+                    if _kb_chunks:
+                        _kb_summary = ", ".join(
+                            f"{c.get('filename','?')}({c.get('score',0):.2f})"
+                            for c in _kb_chunks
+                        )
+                        print(f"[plan_project] KB chunks for architect: "
+                              f"kb_ids={kb_ids} hints={_hints} → {_kb_summary}",
+                              flush=True)
                     else:
-                        await events.emit(conv_id, "tool_end", {"tool": "plan_project", "icon": "activity", "status": "⚠ Planning returned empty"})
-                        return "ERROR: Planning model returned empty response"
-                else:
-                    await events.emit(conv_id, "tool_end", {"tool": "plan_project", "icon": "activity", "status": f"⚠ Planning failed ({r.status_code})"})
-                    return f"ERROR: Planning model returned HTTP {r.status_code}: {r.text[:200]}"
-            except Exception as e:
-                await events.emit(conv_id, "tool_end", {"tool": "plan_project", "icon": "activity", "status": "⚠ Planning failed"})
-                return f"ERROR: Planning call failed: {e}"
+                        print(f"[plan_project] No KB chunks returned "
+                              f"(kb_ids={kb_ids}, hints={_hints})", flush=True)
+                except Exception as _rge:
+                    print(f"[plan_project] RAG query failed (non-fatal): {_rge}")
+            plan = await architect.run_architect(
+                http, events, conv_id,
+                task=architect_task, language_hint=language,
+                kb_chunks=_kb_chunks,
+                conv_model=conv_model,
+            )
+            if (plan.get("status") or "") == "ok":
+                await _apply_workflow_event(
+                    conv_id, "PLAN_DONE",
+                    run_id=plan.get("run_id", ""),
+                    project_id=plan.get("plan", {}).get("project_id", "") if isinstance(plan.get("plan"), dict) else "",
+                    user_task=architect_task,
+                )
+            return architect.format_plan_for_chat(plan)
 
         elif name == "deep_research":
             topic = args.get("topic", "")
@@ -5295,7 +5211,15 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
         elif name == "conspiracy_research":
             topic = args.get("topic", "")
             angle = args.get("angle", "evidence")
-            depth = max(3, min(5, int(args.get("depth", 4))))
+            depth = args.get("depth", 4)
+            if isinstance(depth, str):
+                label = depth.strip().lower()
+                depth = {"quick": 3, "standard": 4, "deep": 5}.get(label, depth)
+            try:
+                depth = int(depth)
+            except (TypeError, ValueError):
+                depth = 4
+            depth = max(3, min(5, depth))
 
             # Pre-query KB for existing knowledge on this topic
             kb_prior = ""
@@ -5616,8 +5540,8 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
             # Phase 3 — inject the most recent Architect manifest into the
             # context so OpenHands follows the structured plan (file list,
             # build/test commands, success criteria) instead of re-deriving
-            # them from prose. Best effort: only fires if v2 plan_project
-            # was called this conv and produced a successful architect run.
+            # them from prose. Best effort: only fires if plan_project was
+            # called this conversation and produced a successful architect run.
             if conv_id:
                 try:
                     _runs_for_arch = await db.get_runs_by_conversation(conv_id, limit=20)

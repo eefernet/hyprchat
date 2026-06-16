@@ -40,6 +40,12 @@
 - Added `POST /api/knowledge-bases/query` for retrieval testing.
 
 ## Bug fixes
+- Fixed `conspiracy_research` depth parsing so malformed values fall back safely instead of crashing the tool call.
+- Fixed Image Studio artifact hashing to use a closed, non-blocking metadata path during job polling.
+- Fixed ComfyUI v-prediction/flow sampling injection so unrelated sampling nodes no longer suppress the required mode-specific node.
+- Fixed ComfyUI cleanup races by tracking pending prompt submissions before ComfyUI returns a prompt id.
+- Fixed empty SSE subscriber lists lingering after the last client unsubscribes.
+- Removed the remaining runtime v1 CodeAgent planning path; `plan_project` now always routes through the structured Architect path.
 - Fixed KB reindex failures from readonly RAG/Chroma SQLite storage with clearer diagnostics and deploy-time data-directory permission repair.
 - Hardened `/api/img-proxy` so proxied chat images use the same safe-fetch path as URL previewing, blocking loopback/private targets and unsafe redirects before any private URL is fetched.
 - Kept image proxy behavior intact while enforcing the existing 5 MB cap, image-only content check, cache header, and domain-matched Referer.

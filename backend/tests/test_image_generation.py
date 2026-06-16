@@ -174,6 +174,116 @@ def test_build_workflow_accepts_ksampler_advanced():
     assert comfyui.describe_workflow(wf)["steps"] == 31
 
 
+def test_build_workflow_injects_required_sampling_when_existing_node_mismatches():
+    import comfyui
+
+    template = json.loads(json.dumps(comfyui.SDXL_T2I_TEMPLATE))
+    template["wrong_ms"] = {
+        "class_type": "ModelSamplingDiscrete",
+        "inputs": {"sampling": "eps", "zsnr": False, "model": ["4", 0]},
+    }
+    template["3"]["inputs"]["model"] = ["wrong_ms", 0]
+
+    wf, _ = comfyui.build_workflow(
+        template,
+        prompt="flow model prompt",
+        model_sampling="flow",
+    )
+
+    assert wf["ms_flow"]["class_type"] == "ModelSamplingSD3"
+    assert wf["ms_flow"]["inputs"]["model"] == ["wrong_ms", 0]
+    assert wf["3"]["inputs"]["model"] == ["ms_flow", 0]
+
+    template = json.loads(json.dumps(comfyui.SDXL_T2I_TEMPLATE))
+    template["wrong_flow"] = {
+        "class_type": "ModelSamplingSD3",
+        "inputs": {"shift": 3.0, "model": ["4", 0]},
+    }
+    template["3"]["inputs"]["model"] = ["wrong_flow", 0]
+
+    wf, _ = comfyui.build_workflow(
+        template,
+        prompt="vpred model prompt",
+        model_sampling="vpred",
+    )
+
+    assert wf["vpred_ms"]["class_type"] == "ModelSamplingDiscrete"
+    assert wf["vpred_ms"]["inputs"]["sampling"] == "v_prediction"
+    assert wf["vpred_ms"]["inputs"]["model"] == ["wrong_flow", 0]
+    assert wf["3"]["inputs"]["model"] == ["vpred_rc", 0]
+
+
+def test_build_workflow_skips_sampling_injection_when_mode_already_matches():
+    import comfyui
+
+    template = json.loads(json.dumps(comfyui.SDXL_T2I_TEMPLATE))
+    template["existing_flow"] = {
+        "class_type": "ModelSamplingSD3",
+        "inputs": {"shift": 3.0, "model": ["4", 0]},
+    }
+    template["3"]["inputs"]["model"] = ["existing_flow", 0]
+
+    wf, _ = comfyui.build_workflow(
+        template,
+        prompt="flow model prompt",
+        model_sampling="flow",
+    )
+
+    assert "ms_flow" not in wf
+    assert wf["3"]["inputs"]["model"] == ["existing_flow", 0]
+
+
+def test_submit_pending_guard_blocks_cleanup_during_prompt_registration(monkeypatch):
+    import comfyui
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"prompt_id": "prompt-new"}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            assert any(job.startswith("pending-") for job in comfyui._ACTIVE_JOBS)
+            await comfyui.forget_job("prompt-finished")
+            return _Resp()
+
+    cleanup_calls = []
+
+    async def _delete_history(_prompt_id):
+        return None
+
+    async def _cleanup_outputs():
+        cleanup_calls.append("cleanup")
+        return {"deleted": 0}
+
+    comfyui._ACTIVE_JOBS.clear()
+    monkeypatch.setattr(comfyui.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(comfyui, "delete_history", _delete_history)
+    monkeypatch.setattr(comfyui, "cleanup_outputs", _cleanup_outputs)
+
+    prompt_id = asyncio.run(comfyui.submit({"1": {"class_type": "SaveImage", "inputs": {}}}))
+
+    assert prompt_id == "prompt-new"
+    assert cleanup_calls == []
+    assert comfyui._ACTIVE_JOBS == {"prompt-new"}
+
+    asyncio.run(comfyui.forget_job("prompt-new"))
+
+    assert cleanup_calls == ["cleanup"]
+    assert comfyui._ACTIVE_JOBS == set()
+
+
 def test_persona_image_profiles_load_from_data_dir(tmp_path, monkeypatch):
     import config
     import persona_images
