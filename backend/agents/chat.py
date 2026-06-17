@@ -1553,14 +1553,22 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
         if "generate_code" in available_tool_names:
             tool_sys += (
-                "### PRIMARY WORKFLOW: generate_code\n"
-                "For coding tasks, call generate_code FIRST with a COMPLETE task description.\n"
-                "It builds entire projects autonomously. Call it ONCE. If it fails, use write_file + run_shell.\n\n"
+                "### PRIMARY WORKFLOW: plan_project or generate_code\n"
+                "For simple, self-contained builds, you may skip plan_project and call "
+                "generate_code directly with a COMPLETE task description. When you do "
+                "that, include exactly one short visible sentence before the tool call: "
+                "\"This is simple enough to build directly, so I'll skip a separate plan "
+                "and start CodeAgent.\" For larger, ambiguous, multi-screen, or "
+                "architecture-sensitive builds, call plan_project first, then "
+                "generate_code. generate_code builds entire projects autonomously. "
+                "Call it ONCE. If it fails, use write_file + run_shell.\n\n"
             )
 
         tool_sys += (
             "### RULES\n"
-            "1. FIRST response MUST be a tool call.\n"
+            "1. FIRST response MUST be a tool call. Exception: for a simple direct "
+            "generate_code build, include the one-sentence skip-plan note and the "
+            "generate_code tool call in the same response.\n"
             "2. NEVER write code in chat text — use execute_code, write_file, or generate_code.\n"
             "3. execute_code = run code directly (NO stdin, NO sys.argv). For scripts with args: write_file + run_shell.\n"
             "4. When code fails: read the error, fix the ROOT CAUSE, try DIFFERENTLY.\n"
@@ -2600,6 +2608,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             if _all_parallel:
                 print(f"[CHAT]   Running {len(_parsed_calls)} tools in parallel")
 
+            _direct_codegen_note_sent = False
             for batch_start in range(0, len(_parsed_calls), max(1, len(_parsed_calls) if _all_parallel else 1)):
                 batch_end = len(_parsed_calls) if _all_parallel else batch_start + 1
                 batch = _parsed_calls[batch_start:batch_end]
@@ -2632,6 +2641,23 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         _tool_detail = f": {tool_args.get('path', '')}"
                     elif tool_name == "generate_code":
                         _tool_detail = f" ({tool_args.get('language', '')})"
+
+                    if (
+                        tool_name == "generate_code"
+                        and not _direct_codegen_note_sent
+                        and not ephemeral
+                        and not (content or "").strip()
+                        and not str(tool_args.get("project_id") or "").strip()
+                    ):
+                        _direct_codegen_note_sent = True
+                        await events.emit(conv_id, "codeagent_note", {
+                            "kind": "direct_build",
+                            "status": (
+                                "This is simple enough to build directly, so "
+                                "I'll skip a separate plan and start CodeAgent."
+                            ),
+                            "tool": "generate_code",
+                        })
 
                     # generate_image emits its own first status after resolving
                     # the final ComfyUI prompt, so the expandable pill can show

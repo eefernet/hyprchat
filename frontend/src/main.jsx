@@ -1986,7 +1986,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
   const thinkingEvts = evts.filter(e=>e.type==="thinking"||e.type==="thought_done");
   const toolEvts = evts.filter(e=>e.type==="tool_start"||e.type==="tool_progress"||e.type==="tool_end"||e.type==="tool_done"||e.type==="tool_error");
   const streamEvts = evts.filter(e=>e.type==="complete");
-  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_progress","tool_end","tool_done","tool_error","complete","code_output","file_ready","search_results","source_links"].includes(e.type));
+  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_progress","tool_end","tool_done","tool_error","complete","code_output","file_ready","search_results","source_links","kb_sources","codeagent_note"].includes(e.type));
 
   // Thinking: collapse to just the final state
   if(thinkingEvts.length){
@@ -2005,9 +2005,10 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
       const idx = [..._pendingStarts].reverse().findIndex(p=>p.key===key);
       if(idx>=0) _pendingStarts[_pendingStarts.length-1-idx].evt = e;
     } else { // tool_end, tool_done, tool_error
-      // Match with the oldest pending start for this tool
-      const idx = _pendingStarts.findIndex(p=>p.key===key);
-      if(idx>=0) _pendingStarts.splice(idx, 1);
+      // Match with the newest pending start for this tool. Some tools emit an
+      // outer chat-level start and then an inner run-level start with run_id.
+      const revIdx = [..._pendingStarts].reverse().findIndex(p=>p.key===key);
+      if(revIdx>=0) _pendingStarts.splice(_pendingStarts.length-1-revIdx, 1);
       merged.push(e);
     }
   }
@@ -2035,6 +2036,8 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
 
   const codeOutputEvts = evts.filter(e=>e.type==="code_output");
   const fileReadyEvts = evts.filter(e=>e.type==="file_ready");
+  const kbSourceEvts = evts.filter(e=>e.type==="kb_sources");
+  const codeAgentNoteEvts = evts.filter(e=>e.type==="codeagent_note");
   // Skip search_agent's events here — those render in the QUICK SEARCH RESULTS
   // carousel above the message via quickResults state. SearchResultCards is
   // for the `research` tool's mid-message results, which don't carry source.
@@ -2107,6 +2110,44 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
       </div>
     </div>;
   })}</>;};
+
+  const CodeAgentNoteCards = ()=><>{codeAgentNoteEvts.map((e,i)=>{
+    const d=e.data||{};
+    const text=d.status||d.detail||"CodeAgent is starting a direct build.";
+    return <div key={i} style={{marginTop:6,border:`1px solid ${t.acc}30`,background:`${t.acc}0F`,borderRadius:8,padding:"7px 10px",display:"flex",alignItems:"flex-start",gap:8,maxWidth:640}}>
+      <span style={{fontSize:13,lineHeight:1.35,flexShrink:0}}>🧬</span>
+      <div style={{minWidth:0}}>
+        <div style={{fontSize:9,color:t.acc,textTransform:"uppercase",letterSpacing:.7,fontWeight:800,marginBottom:2}}>Direct build</div>
+        <div style={{fontSize:11,color:t.dim,lineHeight:1.45}}>{text}</div>
+      </div>
+    </div>;
+  })}</>;
+
+  const KbSourceCards = ()=>{
+    const latestKb = kbSourceEvts[kbSourceEvts.length-1];
+    const sources = latestKb?.data?.sources||[];
+    if(!sources.length)return null;
+    const names=[...new Set(sources.map(s=>s.filename).filter(Boolean))];
+    return <div style={{marginTop:6,border:`1px solid ${t.acc}28`,background:`${t.surface}42`,borderRadius:8,padding:"7px 10px",maxWidth:680}}>
+      <div style={{fontSize:9,color:t.acc,textTransform:"uppercase",letterSpacing:.7,fontWeight:800,marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
+        <span>📚</span><span>Knowledge sources</span><span style={{color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0}}>· {sources.length} chunk{sources.length!==1?"s":""}</span>
+      </div>
+      <div style={{fontSize:11,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:5}}>
+        {names.length?names.slice(0,4).join(", "):"Knowledge base context"}
+        {names.length>4?` +${names.length-4} more`:""}
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:4}}>
+        {sources.slice(0,3).map((s,si)=><div key={`${s.filename||"source"}-${s.chunk_index||si}-${si}`} style={{display:"flex",gap:7,alignItems:"flex-start",fontSize:10,color:t.dim,lineHeight:1.35}}>
+          <span style={{fontWeight:800,color:t.acc,flexShrink:0}}>[{s.n||si+1}]</span>
+          <span style={{minWidth:0,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>
+            <span style={{color:t.text,fontWeight:700}}>{s.filename||"source"}</span>
+            {typeof s.chunk_index==="number"?<span style={{color:t.mut}}> chunk {s.chunk_index}</span>:null}
+            {s.snippet?` - ${s.snippet}`:""}
+          </span>
+        </div>)}
+      </div>
+    </div>;
+  };
 
   const SearchResultCards = ()=><>{searchResultEvts.map((e,ei)=>{
     const d=e.data||{};
@@ -2182,9 +2223,12 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
 
   if(!showAll){
     const activeThinking = merged.find(e=>e.type==="thinking");
-    const primaryPill = activeThinking || latest;
+    const activeTool = [...merged].reverse().find(e=>e.type==="tool_start"||e.type==="tool_progress");
+    const primaryPill = activeThinking || activeTool || latest;
     return <div style={{padding:"4px 0"}}>
       {Panels}
+      <CodeAgentNoteCards/>
+      <KbSourceCards/>
       {primaryPill&&<div style={{display:"flex",flexDirection:"column",gap:3}}>
         <Pill ev={primaryPill} t={t} expanded={expandedPill===getPillKey(primaryPill)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(primaryPill)?null:getPillKey(primaryPill))}/>
         {primaryPill!==latest&&latest&&<Pill ev={latest} t={t} expanded={expandedPill===getPillKey(latest)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(latest)?null:getPillKey(latest))}/>}
@@ -2201,6 +2245,8 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
 
   return <div style={{padding:"4px 0"}}>
     {Panels}
+    <CodeAgentNoteCards/>
+    <KbSourceCards/>
     <button onClick={()=>setShowAll(false)} style={{background:`${t.surface}60`,border:`1px solid ${t.brd}22`,color:t.mut,padding:"2px 8px",borderRadius:10,fontSize:10,cursor:"pointer",fontFamily:"inherit",marginBottom:4}}>
       Hide steps ▴
     </button>
@@ -5887,7 +5933,7 @@ function HyprChat(){
       // Capture relevant events into metadata for persistence (tool status + search results + source links)
       // Prefer the persistent stream-save buffer, which survives chat switches. Fall back to evtsRef for safety.
       const _rawEvts = streamSaveEvtsRef.current.length > 0 ? streamSaveEvtsRef.current : evtsRef.current;
-      let _savedEvts = _rawEvts.filter(e=>["source_links","search_results","kb_sources","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
+      let _savedEvts = _rawEvts.filter(e=>["source_links","search_results","kb_sources","codeagent_note","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
       // Bound the persisted metadata. `thinking` events are cumulative 3KB tail
       // snapshots emitted every ~100 chars — a long reasoning trace persists
       // ~100 overlapping copies (~300KB on one message, reloaded every fetch).
