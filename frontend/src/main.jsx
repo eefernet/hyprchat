@@ -3947,6 +3947,7 @@ function HyprChat(){
   const [regenPopover,setRegenPopover]=useState(null); // {index, model, temperature, personaId}
   const [toasts,setToasts]=useState([]); // [{id,type,text,detail,action}]
   const [confirmDialog,setConfirmDialog]=useState(null);
+  const [confirmPhrase,setConfirmPhrase]=useState("");
   const [collapsedOutputs,setCollapsedOutputs]=useState(()=>new Set()); // Set of "msgIdx-outputIdx" keys
   const [attachments,setAttachments]=useState([]); // [{name, content}]
   const [coderProjUploading,setCoderProjUploading]=useState(false);
@@ -3961,12 +3962,15 @@ function HyprChat(){
     return id;
   },[]);
   const confirmAction=useCallback((opts={})=>new Promise(resolve=>{
+    setConfirmPhrase("");
     setConfirmDialog({
       title:opts.title||"Confirm action",
       body:opts.body||"",
       confirmLabel:opts.confirmLabel||"Confirm",
       cancelLabel:opts.cancelLabel||"Cancel",
       tone:opts.tone||"warning",
+      requiredText:opts.requiredText||"",
+      inputLabel:opts.inputLabel||"Type to confirm",
       resolve
     });
   }),[]);
@@ -5693,6 +5697,125 @@ function HyprChat(){
     }catch(e){console.error("Analytics error",e);notify({type:"warning",text:"Analytics failed to load",detail:e.message||String(e),duration:5000});}
   },[analyticsDays,analyticsGroup,notify]);
   useEffect(()=>{if(panel==="analytics")loadAnalytics();},[panel,loadAnalytics]);
+
+  const clearDeletedModelRefs=(deletedModels=[],newModels=models)=>{
+    const deletedSet=new Set((deletedModels||[]).filter(Boolean));
+    if(!deletedSet.size)return;
+    const fallback=(newModels||[]).find(m=>!deletedSet.has(m))||"";
+    setConvs(prev=>prev.map(c=>{
+      if(deletedSet.has(c.model)){
+        const patch={model:fallback};
+        if(!c.id.startsWith("l-")&&!c.id.startsWith("ghost-"))fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)}).catch(()=>{});
+        return {...c,...patch};
+      }
+      return c;
+    }));
+    if(deletedSet.has(planningModel))setPlanningModel("");
+    if(deletedSet.has(coderModel))setCoderModel("");
+    if(deletedSet.has(architectModel))setArchitectModel("");
+    if(deletedSet.has(reviewerModel))setReviewerModel("");
+    if(deletedSet.has(acceptanceModel))setAcceptanceModel("");
+    if(deletedSet.has(builderModel))setBuilderModel("");
+    if(deletedSet.has(fixerModel))setFixerModel("");
+    if(deletedSet.has(qaModel))setQaModel("");
+    if(deletedSet.has(wsModel))setWsModel(fallback);
+    if(deletedSet.has(modelParamsOpen))setModelParamsOpen(null);
+    try{const last=localStorage.getItem("hc-last-model")||"";if(deletedSet.has(last))localStorage.setItem("hc-last-model",fallback);}catch{}
+  };
+  const refreshModelListAfterDelete=async(deletedModels=[])=>{
+    let next=[];
+    try{
+      const r=await fetch(`${API}/api/models`);
+      const d=await r.json().catch(()=>({}));
+      if(r.ok){next=d.models||[];setModels(next);setModelDetails(d.model_details||{});}
+    }catch{}
+    clearDeletedModelRefs(deletedModels,next);
+    return next;
+  };
+  const clearAllChats=async()=>{
+    const ok=await confirmAction({title:"Delete all chats",body:"Delete all conversations? This cannot be undone.",confirmLabel:"Delete All Chats",tone:"danger"});
+    if(!ok)return;
+    try{
+      const r=await fetch(`${API}/api/conversations`,{method:"DELETE"});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      setConvs([]);setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];setCoderWorkflows([]);
+      notify({type:"success",text:"Chats deleted",detail:`Deleted ${d.deleted||0} conversations.`});
+    }catch(e){notify({type:"error",text:"Delete failed",detail:e.message});}
+  };
+  const clearAllMemories=async()=>{
+    const ok=await confirmAction({title:"Clear all memories",body:"Delete all global and workspace memories for the current user? Chats, artifacts, models, and statistics are kept.",confirmLabel:"Clear Memories",tone:"danger"});
+    if(!ok)return;
+    try{
+      const r=await fetch(`${API}/api/memory/memories`,{method:"DELETE"});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      notify({type:"success",text:"Memories cleared",detail:`Deleted ${d.deleted||0} memories.`});
+    }catch(e){notify({type:"error",text:"Memory clear failed",detail:e.message});}
+  };
+  const clearAllArtifacts=async()=>{
+    const ok=await confirmAction({title:"Clear all artifacts",body:"Delete every artifact record and removable artifact file for the current user? Chats, memories, models, and statistics are kept.",confirmLabel:"Clear Artifacts",tone:"danger"});
+    if(!ok)return;
+    try{
+      const r=await fetch(`${API}/api/artifacts`,{method:"DELETE"});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      setArtifactFocusId(null);
+      notify({type:"success",text:"Artifacts cleared",detail:`Deleted ${d.deleted||0} artifacts and ${d.deleted_files||0} file(s).`});
+    }catch(e){notify({type:"error",text:"Artifact clear failed",detail:e.message});}
+  };
+  const clearStatistics=async()=>{
+    const ok=await confirmAction({title:"Clear statistics",body:"Delete all token usage and analytics rows for the current user? This does not affect chats or models.",confirmLabel:"Clear Statistics",tone:"danger"});
+    if(!ok)return;
+    try{
+      const r=await fetch(`${API}/api/analytics/tokens`,{method:"DELETE"});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      setAnalyticsData(null);
+      if(panel==="analytics")loadAnalytics();
+      notify({type:"success",text:"Statistics cleared",detail:`Deleted ${d.deleted||0} usage rows.`});
+    }catch(e){notify({type:"error",text:"Statistics clear failed",detail:e.message});}
+  };
+  const deleteAllModels=async()=>{
+    const ok=await confirmAction({title:"Delete all models",body:"Delete every locally installed Ollama model? Cloud provider keys and HuggingFace search data are not deleted. Type DELETE MODELS to confirm.",confirmLabel:"Delete All Models",tone:"danger",requiredText:"DELETE MODELS"});
+    if(!ok)return;
+    try{
+      const r=await fetch(`${API}/api/models`,{method:"DELETE"});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      await refreshModelListAfterDelete(d.models||[]);
+      notify({type:d.failed?.length?"warning":"success",text:d.failed?.length?"Models partially deleted":"Models deleted",detail:`Deleted ${d.deleted||0} model(s)${d.failed?.length?`; ${d.failed.length} failed`:""}.`,duration:6000});
+    }catch(e){notify({type:"error",text:"Model delete failed",detail:e.message});}
+  };
+  const deleteOtherUsers=async()=>{
+    const count=Math.max(0,(users||[]).filter(u=>u.id!==currentUserId).length);
+    const ok=await confirmAction({title:"Delete other users",body:`Delete ${count} other user profile${count===1?"":"s"} and all data associated with them? The current user (${currentUser?.name||currentUserId||"current"}) is kept. Type DELETE OTHER USERS to confirm.`,confirmLabel:"Delete Other Users",tone:"danger",requiredText:"DELETE OTHER USERS"});
+    if(!ok)return;
+    try{
+      const r=await fetch(`${API}/api/users`,{method:"DELETE"});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      try{(users||[]).forEach(u=>{if(u.id!==currentUserId)localStorage.removeItem(hcSessionKey(u.id));});}catch{}
+      await refreshUsers().catch(()=>{});
+      notify({type:"success",text:"Other users deleted",detail:`Deleted ${d.deleted||0} profile(s).`});
+    }catch(e){notify({type:"error",text:"User cleanup failed",detail:e.message});}
+  };
+  const freshInstallReset=async()=>{
+    const ok=await confirmAction({title:"Delete all / fresh install",body:"Delete all users, sessions, chats, memories, artifacts, statistics, and locally installed Ollama models? This includes the current user. Type DELETE EVERYTHING to confirm.",confirmLabel:"Delete Everything",tone:"danger",requiredText:"DELETE EVERYTHING"});
+    if(!ok)return;
+    try{
+      const r=await fetch(`${API}/api/danger-zone/fresh-install`,{method:"POST"});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      try{
+        Object.keys(localStorage).forEach(k=>{if(k===HC_USER_KEY||k.startsWith(HC_SESSION_PREFIX)||k==="hc-last-model")localStorage.removeItem(k);});
+      }catch{}
+      hcSetUserContext("default","");
+      resetUserScopedState();setUsers([]);setCurrentUser(null);setCurrentUserId("default");setLoginUserId("default");setLoginPassword("");setNewUserName("");setNewUserPassword("");
+      setAuthReady(false);setUserGateOpen(true);setModels([]);setModelDetails({});setAnalyticsData(null);setLoginError("Fresh install complete. Create a new profile to continue.");
+      notify({type:d.models?.status==="failed"?"warning":"success",text:"Fresh install reset complete",detail:d.models?.status==="failed"?`User data was reset. Model cleanup failed: ${d.models.error}`:`Deleted ${d.users_deleted||0} profile(s) and ${d.models?.deleted||0} model(s).`,duration:8000});
+    }catch(e){notify({type:"error",text:"Fresh install reset failed",detail:e.message,duration:9000});}
+  };
 
   // Start a new council chat session
   const startCouncilChat=async(councilId)=>{
@@ -7444,16 +7567,18 @@ function HyprChat(){
             <div style={{fontSize:10,color:t.mut,marginTop:2,display:"flex",gap:4,alignItems:"center"}}><span style={{fontSize:8,padding:"1px 4px",borderRadius:3,background:`${t.brd}22`,color:t.dim}}>{r.role}</span></div>
             <div style={{fontSize:10,color:t.dim,marginTop:2,lineHeight:1.4,maxHeight:40,overflow:"hidden"}} dangerouslySetInnerHTML={{__html:(r.snippet||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/&lt;(\/?mark)&gt;/g,"<$1>")}}/>
           </div>)}
-        </div>:(()=>{const pinnedC=filtC.filter(c=>c.pinned==="1"||c.pinned===1);const unpinnedC=filtC.filter(c=>c.pinned!=="1"&&c.pinned!==1);const renderConv=(c)=>{const isCouncil=c.is_council==="1"||c.is_council===1||c.is_council===true;const hasPersona=!!c.persona_name&&!isCouncil;const profileType=hasPersona?getConversationProfileType(c):null;const convProfile=hasPersona?getProfileForConversation(c):null;const convAvatar=hasPersona?(c.persona_avatar||profileAvatar(convProfile)):null;const tags=convTags[c.id]||[];const isAct=c.id===actId&&panel==="chat";const accentColor=isCouncil?t.pink:profileType==="persona"?t.pink:hasPersona?t.acc:t.acc;const isPinned=c.pinned==="1"||c.pinned===1;return <div key={c.id} style={{marginBottom:1}}>
-        <div className={`conv-row${isAct?" is-act":""}`} onClick={()=>loadConversation(c.id)} style={{padding:"9px 8px 9px 11px",borderRadius:8,cursor:"pointer",background:isAct?`${accentColor}14`:(isCouncil||hasPersona)?`${accentColor}0C`:"transparent",border:isAct?`1px solid ${accentColor}50`:(isCouncil||hasPersona)?`1px solid ${accentColor}25`:"1px solid transparent",display:"flex",justifyContent:"space-between",alignItems:"center",gap:4,borderLeft:`3px solid ${isAct?accentColor:(isCouncil||hasPersona)?`${accentColor}66`:"transparent"}`}}>
-          <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:13,color:isAct?t.text:t.dim,flex:1,minWidth:0,fontWeight:isAct?500:400,display:"flex",alignItems:"center",gap:6}}>
+        </div>:(()=>{const pinnedC=filtC.filter(c=>c.pinned==="1"||c.pinned===1);const unpinnedC=filtC.filter(c=>c.pinned!=="1"&&c.pinned!==1);const renderConv=(c)=>{const isCouncil=c.is_council==="1"||c.is_council===1||c.is_council===true;const hasPersona=!!c.persona_name&&!isCouncil;const profileType=hasPersona?getConversationProfileType(c):null;const convProfile=hasPersona?getProfileForConversation(c):null;const convAvatar=hasPersona?(c.persona_avatar||profileAvatar(convProfile)):null;const tags=convTags[c.id]||[];const isAct=c.id===actId&&panel==="chat";const accentColor=isCouncil?t.pink:profileType==="persona"?t.pink:hasPersona?t.acc:t.acc;const isPinned=c.pinned==="1"||c.pinned===1;const title=c.title||"New Chat";const rowBg=isAct?`${accentColor}14`:(isCouncil||hasPersona)?`${accentColor}0C`:"transparent";const measureTitle=e=>{const row=e.currentTarget;const clip=row.querySelector(".conv-title-clip");const text=row.querySelector(".conv-title-text");if(!clip||!text)return;const overflow=Math.max(0,text.scrollWidth-clip.clientWidth);row.style.setProperty("--conv-title-marquee",`${overflow+18}px`);row.setAttribute("data-title-overflow",overflow>3?"1":"0");};const resetTitle=e=>{e.currentTarget.setAttribute("data-title-overflow","0");};return <div key={c.id} style={{marginBottom:1}}>
+        <div className={`conv-row${isAct?" is-act":""}`} onClick={()=>loadConversation(c.id)} onMouseEnter={measureTitle} onFocus={measureTitle} onMouseLeave={resetTitle} onBlur={resetTitle} style={{padding:"9px 7px 9px 9px",borderRadius:8,cursor:"pointer",background:rowBg,border:isAct?`1px solid ${accentColor}50`:(isCouncil||hasPersona)?`1px solid ${accentColor}25`:"1px solid transparent",display:"flex",alignItems:"center",gap:0,borderLeft:`3px solid ${isAct?accentColor:(isCouncil||hasPersona)?`${accentColor}66`:"transparent"}`,position:"relative",overflow:"hidden"}}>
+          <div style={{overflow:"hidden",whiteSpace:"nowrap",fontSize:13,color:isAct?t.text:t.dim,flex:1,minWidth:0,fontWeight:isAct?500:400,display:"flex",alignItems:"center",gap:6}}>
             {isCouncil&&<span style={{flexShrink:0,color:t.pink,display:"flex",opacity:isAct?1:.7}}><IC.Council/></span>}
             {hasPersona&&(convAvatar?<img src={avatarSrc(convAvatar)} style={{width:isAct?24:16,height:isAct?24:16,borderRadius:isAct?7:5,objectFit:"cover",flexShrink:0,opacity:isAct?1:.85}} alt=""/>:<span style={{flexShrink:0,color:accentColor,display:"flex",alignItems:"center",justifyContent:"center",width:isAct?24:16,height:isAct?24:16,opacity:isAct?1:.75}}>{profileType==="persona"?<IC.User/>:<IC.Bot/>}</span>)}
             {c.forked_from&&<span style={{flexShrink:0,color:t.f1||t.acc,display:"flex",opacity:.6}} title="Forked conversation"><IC.GitBranch/></span>}
-            <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.title||"New Chat"}</span>
+            <span className="conv-title-clip" title={title} style={{minWidth:0,flex:1,overflow:"hidden",whiteSpace:"nowrap",WebkitMaskImage:"linear-gradient(90deg,#000 0%,#000 calc(100% - 28px),transparent 100%)",maskImage:"linear-gradient(90deg,#000 0%,#000 calc(100% - 28px),transparent 100%)"}}>
+              <span className="conv-title-text">{title}</span>
+            </span>
           </div>
-          <div style={{display:"flex",gap:1,flexShrink:0,alignItems:"center"}}>
-            {(() => {const aBtn={background:"none",border:"none",cursor:"pointer",padding:4,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:5,lineHeight:0};return <>
+          <div className="conv-actions" style={{display:"flex",gap:1,flexShrink:0,alignItems:"center",position:"absolute",right:4,top:"50%",transform:"translateY(-50%)",paddingLeft:22,background:`linear-gradient(90deg,transparent,${rowBg==="transparent"?t.bg:rowBg} 42%)`,pointerEvents:"none"}}>
+            {(() => {const aBtn={background:"none",border:"none",cursor:"pointer",padding:4,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:5,lineHeight:0,pointerEvents:"auto"};return <>
             <button className={`conv-act${isPinned?" on":""}`} onClick={e=>{e.stopPropagation();const newP=isPinned?"0":"1";uConv(c.id,{pinned:newP});fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({pinned:newP})});}} title={isPinned?"Unpin":"Pin to top"} style={{...aBtn,color:isPinned?t.warm:t.mut}}><IC.Pin/></button>
             <button className={`conv-act${tags.length?" on":""}`} onClick={e=>{e.stopPropagation();setShowTagEditor(showTagEditor===c.id?null:c.id);setNewTagInput("");}} title="Tags" style={{...aBtn,color:tags.length?t.warm:t.mut}}><IC.Tag/></button>
             <button className="conv-act conv-del" onClick={e=>{e.stopPropagation();delChat(c.id);}} title="Delete" style={{...aBtn,color:t.mut}}><IC.Trash/></button>
@@ -10229,23 +10354,28 @@ function HyprChat(){
         <SandboxSection t={t} btnS={btnS} labelS={labelS} notify={notify} addActivity={addActivity} updateActivity={updateActivity}/>
       </div>
 
-      {/* TILE: Danger Zone */}
-      <div style={{display:settingsTab==="danger"?"block":"none",background:`${t.err}06`,border:`1px solid ${t.err}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
-        <div style={{fontSize:14,fontWeight:700,color:t.err,letterSpacing:.5,marginBottom:12,display:"flex",alignItems:"center",gap:8}}>⚠️ Danger Zone</div>
-        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-          <button onClick={async()=>{
-            const ok=await confirmAction({title:"Delete all chats",body:"Delete all conversations? This cannot be undone.",confirmLabel:"Delete All Chats",tone:"danger"});
-            if(!ok)return;
-            try{const r=await fetch(`${API}/api/conversations`,{method:"DELETE"});const d=await r.json();
-              if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
-              setConvs([]);setActId(null);
-              notify({type:"success",text:"Chats deleted",detail:`Deleted ${d.deleted} conversations.`});
-            }catch(e){notify({type:"error",text:"Delete failed",detail:e.message});}
-          }} style={{...btnS(t.err),padding:"10px 16px",fontSize:12,fontWeight:700,flex:1,justifyContent:"center",minWidth:160}}>
-            🗑 Delete All Chats
-          </button>
-        </div>
-      </div>
+	      {/* TILE: Danger Zone */}
+	      <div style={{display:settingsTab==="danger"?"block":"none",background:`${t.err}06`,border:`1px solid ${t.err}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
+	        <div style={{fontSize:14,fontWeight:700,color:t.err,letterSpacing:.5,marginBottom:12,display:"flex",alignItems:"center",gap:8}}>⚠️ Danger Zone</div>
+	        <div style={{fontSize:11,color:t.dim,lineHeight:1.55,marginBottom:14}}>Each action opens a warning before anything is deleted. The strongest actions require typed confirmation.</div>
+	        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(210px,1fr))",gap:10}}>
+	          {[
+	            ["🗑️","Clear All Chats","Current user's conversations",clearAllChats,false],
+	            ["🧠","Clear All Memories","Current user's global and workspace memories",clearAllMemories,false],
+	            ["📦","Clear All Artifacts","Current user's artifact records and removable files",clearAllArtifacts,false],
+	            ["📊","Clear Statistics","Current user's token usage and analytics rows",clearStatistics,false],
+	            ["🧱","Delete All Models","Every local Ollama model",deleteAllModels,true],
+	            ["👥","Delete Other Users","All profiles except the current one",deleteOtherUsers,true],
+	            ["☢","Delete All / Fresh Install","Everything, including current user and local models",freshInstallReset,true],
+	          ].map(([icon,label,desc,onClick,strong])=><button key={label} onClick={onClick} style={{...btnS(t.err),padding:"10px 12px",minHeight:62,justifyContent:"flex-start",alignItems:"center",gap:10,background:strong?`${t.err}16`:`${t.err}0C`,borderColor:strong?`${t.err}55`:`${t.err}34`,textAlign:"left"}}>
+	            <span style={{fontSize:18,width:24,textAlign:"center",flexShrink:0}}>{icon}</span>
+	            <span style={{display:"flex",flexDirection:"column",gap:2,minWidth:0}}>
+	              <span style={{fontSize:12,fontWeight:900,color:t.err,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{label}</span>
+	              <span style={{fontSize:10,color:t.dim,lineHeight:1.3,fontWeight:600}}>{desc}</span>
+	            </span>
+	          </button>)}
+	        </div>
+	      </div>
 
       {/* TILE: Changelog */}
       <div style={{...settingsCardS,display:settingsTab==="changelog"?"block":"none",padding:0,overflow:"hidden"}}>
@@ -11010,16 +11140,20 @@ function HyprChat(){
       </div>
     </div>}
 
-    {confirmDialog&&ReactDOM.createPortal((()=>{const c={danger:t.err,warning:t.warm,success:t.ok,info:t.acc}[confirmDialog.tone]||t.acc;const close=v=>{const dlg=confirmDialog;setConfirmDialog(null);dlg.resolve&&dlg.resolve(v);};return <div style={{position:"fixed",inset:0,zIndex:500,background:"rgba(0,0,0,.66)",display:"flex",alignItems:"center",justifyContent:"center",padding:18,fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)close(false);}}>
+    {confirmDialog&&ReactDOM.createPortal((()=>{const c={danger:t.err,warning:t.warm,success:t.ok,info:t.acc}[confirmDialog.tone]||t.acc;const requiredText=confirmDialog.requiredText||"";const phraseOk=!requiredText||confirmPhrase===requiredText;const close=v=>{const dlg=confirmDialog;setConfirmDialog(null);setConfirmPhrase("");dlg.resolve&&dlg.resolve(v);};return <div style={{position:"fixed",inset:0,zIndex:500,background:"rgba(0,0,0,.66)",display:"flex",alignItems:"center",justifyContent:"center",padding:18,fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)close(false);}}>
       <div style={{width:"min(420px,94vw)",background:t.bgDeep,border:`1px solid ${c}44`,borderRadius:14,boxShadow:"0 18px 70px rgba(0,0,0,.55)",padding:18,animation:"fadeIn .16s"}}>
         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
           <div style={{width:28,height:28,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${c}16`,border:`1px solid ${c}35`,color:c,fontWeight:800}}>!</div>
           <div style={{fontSize:14,fontWeight:800,color:t.text,letterSpacing:.3}}>{confirmDialog.title}</div>
         </div>
         <div style={{fontSize:12,color:t.dim,lineHeight:1.6,marginBottom:18}}>{confirmDialog.body}</div>
+        {requiredText&&<div style={{margin:"-4px 0 18px",display:"grid",gap:7}}>
+          <div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:800}}>{confirmDialog.inputLabel}</div>
+          <input value={confirmPhrase} onChange={e=>setConfirmPhrase(e.target.value)} placeholder={requiredText} autoFocus style={{...inputS,borderColor:phraseOk?`${c}66`:`${c}33`,background:`${c}08`,fontSize:12}}/>
+        </div>}
         <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
           <button onClick={()=>close(false)} style={{...btnS(t.mut),fontSize:12,padding:"7px 12px"}}>{confirmDialog.cancelLabel}</button>
-          <button onClick={()=>close(true)} style={{...btnS(c),fontSize:12,padding:"7px 13px",fontWeight:800}}>{confirmDialog.confirmLabel}</button>
+          <button onClick={()=>phraseOk&&close(true)} disabled={!phraseOk} style={{...btnS(c),fontSize:12,padding:"7px 13px",fontWeight:800,opacity:phraseOk?1:.42,cursor:phraseOk?"pointer":"not-allowed"}}>{confirmDialog.confirmLabel}</button>
         </div>
       </div>
     </div>;})(),document.body)}
@@ -11071,17 +11205,21 @@ function HyprChat(){
   0%,100%{box-shadow:0 0 4px var(--pill-glow,rgba(120,200,255,.25));}
   50%{box-shadow:0 0 10px var(--pill-glow,rgba(120,200,255,.55));}
 }
-      @keyframes glitch{0%,90%,100%{transform:skewX(0)}92%{transform:skewX(-5deg)}94%{transform:skewX(5deg)}96%{transform:skewX(-3deg)}98%{transform:skewX(3deg)}}
-      @keyframes scanline{0%{transform:translateY(-100%)}100%{transform:translateY(100vh)}}
-      @keyframes ripple{0%{transform:scale(0);opacity:1}100%{transform:scale(4);opacity:0}}
-      a[download]:hover{background:${t.ok}28 !important;border-color:${t.ok}66 !important;transform:translateY(-1px);box-shadow:0 3px 12px ${t.ok}22;}
+	      @keyframes glitch{0%,90%,100%{transform:skewX(0)}92%{transform:skewX(-5deg)}94%{transform:skewX(5deg)}96%{transform:skewX(-3deg)}98%{transform:skewX(3deg)}}
+	      @keyframes scanline{0%{transform:translateY(-100%)}100%{transform:translateY(100vh)}}
+	      @keyframes ripple{0%{transform:scale(0);opacity:1}100%{transform:scale(4);opacity:0}}
+	      @keyframes convTitleMarquee{0%,12%{transform:translateX(0)}88%,100%{transform:translateX(calc(-1 * var(--conv-title-marquee,0px)))}}
+	      a[download]:hover{background:${t.ok}28 !important;border-color:${t.ok}66 !important;transform:translateY(-1px);box-shadow:0 3px 12px ${t.ok}22;}
       a[download]:active{transform:translateY(0);}
       .nav-panel-button:hover{background:var(--nav-hover-bg) !important;border-color:var(--nav-hover-border) !important;color:var(--nav-hover-color) !important;box-shadow:0 0 0 1px var(--nav-hover-ring),0 4px 14px var(--nav-hover-shadow) !important;transform:translateY(-1px);}
       .nav-panel-button.is-active:hover{background:var(--nav-active-hover-bg) !important;}
       .nav-panel-button:active{transform:translateY(0);}
-      .conv-row{transition:background .14s ease,border-color .14s ease;}
-      .conv-row:not(.is-act):hover{background:${t.sfBri}1f !important;}
-      .conv-act{opacity:0;transition:opacity .14s ease,color .14s ease,background .14s ease;}
+	      .conv-row{transition:background .14s ease,border-color .14s ease;}
+	      .conv-row:not(.is-act):hover{background:${t.sfBri}1f !important;}
+	      .conv-title-text{display:inline-block;white-space:nowrap;padding-right:34px;will-change:transform;}
+	      .conv-row[data-title-overflow="1"]:hover .conv-title-text,.conv-row[data-title-overflow="1"]:focus-within .conv-title-text{animation:convTitleMarquee 9s .35s linear infinite alternate;}
+	      @media (prefers-reduced-motion:reduce){.conv-row[data-title-overflow="1"]:hover .conv-title-text,.conv-row[data-title-overflow="1"]:focus-within .conv-title-text{animation:none;}}
+	      .conv-act{opacity:0;transition:opacity .14s ease,color .14s ease,background .14s ease;}
       .conv-act.on{opacity:1;}
       .conv-row:hover .conv-act{opacity:1;}
       .conv-act:hover{background:${t.sfBri}33 !important;}

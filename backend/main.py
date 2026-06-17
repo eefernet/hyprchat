@@ -862,6 +862,7 @@ _USER_SCOPED_PREFIXES = (
     "/api/research/reports",
     "/api/councils",
     "/api/analytics",
+    "/api/danger-zone",
     "/api/events",
 )
 
@@ -1263,6 +1264,57 @@ async def delete_user_ep(user_id: str, request: Request):
     return {"ok": True}
 
 
+async def _user_ids(exclude_user_id: str | None = None) -> list[str]:
+    conn = await db.get_db()
+    try:
+        if exclude_user_id:
+            rows = await conn.execute_fetchall("SELECT id FROM users WHERE id != ?", (exclude_user_id,))
+        else:
+            rows = await conn.execute_fetchall("SELECT id FROM users")
+        return [r["id"] for r in rows]
+    finally:
+        await conn.close()
+
+
+@app.delete("/api/users")
+async def delete_other_users_ep(request: Request):
+    current = await _validated_request_user(request)
+    other_user_ids = await _user_ids(exclude_user_id=current["id"])
+    deleted_files = await _delete_artifact_files_for_user_ids(other_user_ids)
+    result = await db.delete_users_except(current["id"])
+    try:
+        await db.vacuum_database()
+    except Exception as e:
+        print(f"[USERS] vacuum after delete-other-users failed: {e}")
+    return {"ok": True, **result, "deleted_files": deleted_files}
+
+
+@app.post("/api/danger-zone/fresh-install")
+async def fresh_install_reset_ep(request: Request):
+    await _validated_request_user(request)
+    user_ids = await _user_ids()
+    deleted_files = await _delete_artifact_files_for_user_ids(user_ids)
+    try:
+        model_result = await delete_all_models()
+    except HTTPException as e:
+        model_result = {"status": "failed", "error": str(e.detail), "deleted": 0, "models": [], "failed": []}
+    except Exception as e:
+        model_result = {"status": "failed", "error": str(e), "deleted": 0, "models": [], "failed": []}
+    user_result = await db.delete_all_users_and_data()
+    try:
+        await db.vacuum_database()
+    except Exception as e:
+        print(f"[DANGER] fresh-install vacuum failed: {e}")
+    return {
+        "ok": True,
+        "status": "reset",
+        "requires_user_setup": True,
+        "users_deleted": user_result.get("deleted", 0),
+        "artifact_files_deleted": deleted_files,
+        "models": model_result,
+    }
+
+
 # ============================================================
 # HEALTH & INFO
 # ============================================================
@@ -1480,6 +1532,61 @@ async def list_models():
     }
 
 
+async def _local_ollama_model_names() -> list[str]:
+    try:
+        r = await http.get(f"{config.OLLAMA_URL}/api/tags")
+        r.raise_for_status()
+        data = r.json()
+        return [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+    except Exception as e:
+        raise HTTPException(502, f"Failed to reach Ollama: {e}")
+
+
+async def _delete_ollama_model(model_name: str) -> dict:
+    """Delete a local Ollama model. Tries alternate HF name formats if needed."""
+    names_to_try = [model_name]
+    if not model_name.startswith("hf.co/") and "/" in model_name:
+        names_to_try.append(f"hf.co/{model_name}")
+    if model_name.startswith("hf.co/"):
+        names_to_try.append(model_name[len("hf.co/"):])
+    last_err = None
+    for name in names_to_try:
+        try:
+            r = await http.request("DELETE", f"{config.OLLAMA_URL}/api/delete", json={"name": name})
+            if r.status_code in (200, 204):
+                return {"status": "deleted", "model": model_name}
+            err_text = r.text[:400]
+            if "not found" in err_text.lower() and name != names_to_try[-1]:
+                continue
+            last_err = err_text
+        except Exception as e:
+            last_err = str(e)
+    if last_err and "not found" in last_err.lower():
+        return {"status": "deleted", "model": model_name, "note": "already removed from Ollama"}
+    raise HTTPException(502, f"Failed to delete model: {last_err}")
+
+
+@app.delete("/api/models")
+async def delete_all_models():
+    names = await _local_ollama_model_names()
+    deleted: list[str] = []
+    failed: list[dict] = []
+    for name in names:
+        try:
+            await _delete_ollama_model(name)
+            deleted.append(name)
+        except HTTPException as e:
+            failed.append({"model": name, "error": str(e.detail)})
+        except Exception as e:
+            failed.append({"model": name, "error": str(e)})
+    return {
+        "status": "deleted" if not failed else "partial",
+        "deleted": len(deleted),
+        "models": deleted,
+        "failed": failed,
+    }
+
+
 @app.post("/api/chat/stream")
 async def chat_stream(req: ChatRequest):
     """Stream chat with multi-round tool-calling agent loop."""
@@ -1678,6 +1785,79 @@ async def _delete_artifact_row_and_file(artifact: dict) -> dict:
             except OSError as e:
                 print(f"[ARTIFACT] file delete failed for {filepath}: {e}")
     return {"deleted": True, "deleted_file": deleted_file}
+
+
+async def _delete_artifact_files_for_user_ids(user_ids: list[str]) -> int:
+    """Remove sandbox-output artifact files owned only by the given users."""
+    user_set = {u for u in user_ids if u}
+    if not user_set:
+        return 0
+    conn = await db.get_db()
+    try:
+        rows = [dict(r) for r in await conn.execute_fetchall("SELECT * FROM artifacts")]
+    finally:
+        await conn.close()
+    outputs_root = os.path.abspath(config.SANDBOX_OUTPUTS_DIR) + os.sep
+    keep_paths: set[str] = set()
+    target_paths: set[str] = set()
+    for artifact in rows:
+        filepath, _ = _artifact_path_for_row(artifact)
+        if not filepath:
+            continue
+        abs_path = os.path.abspath(filepath)
+        if not abs_path.startswith(outputs_root):
+            continue
+        if artifact.get("user_id") in user_set:
+            target_paths.add(abs_path)
+        else:
+            keep_paths.add(abs_path)
+    deleted = 0
+    for filepath in target_paths - keep_paths:
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+                deleted += 1
+        except OSError as e:
+            print(f"[ARTIFACT] bulk file delete failed for {filepath}: {e}")
+    return deleted
+
+
+@app.delete("/api/artifacts")
+async def delete_all_artifacts_ep():
+    targets: list[dict] = []
+    offset = 0
+    while True:
+        page = await db.list_artifacts(limit=200, offset=offset)
+        targets.extend(page)
+        if len(page) < 200:
+            break
+        offset += 200
+    deleted_artifacts = 0
+    deleted_files = 0
+    removed_attachments = 0
+    for artifact in targets:
+        result = await _delete_artifact_row_and_file(artifact)
+        if result["deleted"]:
+            deleted_artifacts += 1
+        if result["deleted_file"]:
+            deleted_files += 1
+        try:
+            cf_id = (artifact.get("metadata") or {}).get("conversation_file_id") or ""
+            if cf_id and await db.delete_conversation_file(cf_id):
+                removed_attachments += 1
+        except Exception:
+            pass
+    if deleted_artifacts:
+        try:
+            await db.vacuum_database()
+        except Exception as e:
+            print(f"[ARTIFACT] bulk vacuum failed: {e}")
+    return {
+        "status": "deleted",
+        "deleted": deleted_artifacts,
+        "deleted_files": deleted_files,
+        "removed_attachments": removed_attachments,
+    }
 
 
 @app.delete("/api/artifacts/{artifact_id}")
@@ -4429,30 +4609,7 @@ async def pull_model(request: Request):
 
 @app.delete("/api/models/{model_name:path}")
 async def delete_model(model_name: str):
-    """Delete a model from Ollama. Tries alternate name formats if not found."""
-    # Build list of name variants to try
-    names_to_try = [model_name]
-    if not model_name.startswith("hf.co/") and "/" in model_name:
-        names_to_try.append(f"hf.co/{model_name}")
-    if model_name.startswith("hf.co/"):
-        names_to_try.append(model_name[len("hf.co/"):])
-    last_err = None
-    for name in names_to_try:
-        try:
-            r = await http.request("DELETE", f"{config.OLLAMA_URL}/api/delete",
-                                   json={"name": name})
-            if r.status_code in (200, 204):
-                return {"status": "deleted", "model": model_name}
-            err_text = r.text[:400]
-            if "not found" in err_text.lower() and name != names_to_try[-1]:
-                continue  # Try next variant
-            last_err = err_text
-        except Exception as e:
-            last_err = str(e)
-    # If all variants returned "not found", the model is already gone — treat as success
-    if last_err and "not found" in last_err.lower():
-        return {"status": "deleted", "model": model_name, "note": "already removed from Ollama"}
-    raise HTTPException(502, f"Failed to delete model: {last_err}")
+    return await _delete_ollama_model(model_name)
 
 
 @app.post("/api/models/{model_name:path}/create-tool-model")
@@ -4790,6 +4947,12 @@ async def update_global_memory_ep(memory_id: str, body: dict = Body(...)):
     if not mem:
         raise HTTPException(404, "Memory not found")
     return mem
+
+
+@app.delete("/api/memory/memories")
+async def clear_all_memories_ep():
+    deleted = await db.clear_user_memories()
+    return {"ok": True, "deleted": deleted}
 
 
 @app.delete("/api/memory/memories/{memory_id}")
@@ -6392,6 +6555,12 @@ async def get_token_analytics(days: int = Query(30), group_by: str = Query("day"
     if group_by not in ("day", "model", "persona"):
         raise HTTPException(400, "group_by must be: day, model, or persona")
     return await db.get_token_usage(days, group_by)
+
+
+@app.delete("/api/analytics/tokens")
+async def clear_token_analytics():
+    deleted = await db.clear_token_usage()
+    return {"ok": True, "deleted": deleted}
 
 
 @app.get("/api/analytics/tokens/summary")

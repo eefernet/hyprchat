@@ -573,6 +573,9 @@ def _public_user(row, counts: dict | None = None) -> dict:
 
 
 async def _ensure_default_user_conn(conn: aiosqlite.Connection) -> None:
+    existing = await conn.execute_fetchall("SELECT COUNT(*) AS n FROM users")
+    if existing and existing[0]["n"]:
+        return
     now = datetime.utcnow().isoformat()
     await conn.execute(
         """INSERT OR IGNORE INTO users(id,name,password_hash,created_at,updated_at)
@@ -1157,46 +1160,101 @@ async def update_user(user_id: str, *, name: str | None = None,
     return await get_user(uid), None
 
 
-async def delete_user(user_id: str) -> bool:
+async def _delete_user_conn(conn: aiosqlite.Connection, uid: str, *, allow_default: bool = False) -> bool:
+    uid = _scope_user(uid)
+    if uid == DEFAULT_USER_ID and not allow_default:
+        return False
+    rows = await conn.execute_fetchall("SELECT id FROM users WHERE id=?", (uid,))
+    if not rows:
+        return False
+    await conn.execute("DELETE FROM conversation_files WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM workspace_conversations WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM workspace_conversations WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM workspace_research_reports WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM workspace_research_reports WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM research_sources WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM research_events WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?))", (uid,))
+    await conn.execute("DELETE FROM workspace_memory_blocks WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM council_members WHERE council_id IN (SELECT id FROM council_configs WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM artifact_tags WHERE artifact_id IN (SELECT id FROM artifacts WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM artifact_workspaces WHERE artifact_id IN (SELECT id FROM artifacts WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM artifact_events WHERE user_id=?", (uid,))
+    for table in (
+        "messages",
+        "runs",
+        "coder_workflows",
+    ):
+        await conn.execute(
+            f"DELETE FROM {table} WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
+            (uid,),
+        )
+    for table in (
+        "conversations", "knowledge_bases", "tools", "model_configs",
+        "workspaces", "council_configs", "memories", "research_reports",
+        "token_usage", "coding_projects",
+        "artifacts",
+        "mcp_servers", "openapi_connectors", "connector_tools",
+    ):
+        await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (uid,))
+    await conn.execute("DELETE FROM user_profile WHERE id=?", (uid,))
+    await conn.execute("DELETE FROM user_sessions WHERE user_id=?", (uid,))
+    await conn.execute("DELETE FROM users WHERE id=?", (uid,))
+    return True
+
+
+async def delete_user(user_id: str, *, allow_default: bool = False) -> bool:
     uid = _scope_user(user_id)
-    if uid == DEFAULT_USER_ID:
+    if uid == DEFAULT_USER_ID and not allow_default:
         return False
     db = await get_db()
     try:
-        rows = await db.execute_fetchall("SELECT id FROM users WHERE id=?", (uid,))
-        if not rows:
-            return False
-        await db.execute("DELETE FROM conversation_files WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)", (uid,))
-        await db.execute("DELETE FROM workspace_conversations WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)", (uid,))
-        await db.execute("DELETE FROM workspace_conversations WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id=?)", (uid,))
-        await db.execute("DELETE FROM workspace_research_reports WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id=?)", (uid,))
-        await db.execute("DELETE FROM workspace_research_reports WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
-        await db.execute("DELETE FROM research_sources WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
-        await db.execute("DELETE FROM artifact_tags WHERE artifact_id IN (SELECT id FROM artifacts WHERE user_id=?)", (uid,))
-        await db.execute("DELETE FROM artifact_workspaces WHERE artifact_id IN (SELECT id FROM artifacts WHERE user_id=?)", (uid,))
-        await db.execute("DELETE FROM artifact_events WHERE user_id=?", (uid,))
-        for table in (
-            "messages",
-            "runs",
-            "coder_workflows",
-        ):
-            await db.execute(
-                f"DELETE FROM {table} WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
-                (uid,),
-            )
-        for table in (
-            "conversations", "knowledge_bases", "tools", "model_configs",
-            "workspaces", "council_configs", "memories", "research_reports",
-            "token_usage", "coding_projects",
-            "artifacts",
-            "mcp_servers", "openapi_connectors", "connector_tools",
-        ):
-            await db.execute(f"DELETE FROM {table} WHERE user_id=?", (uid,))
-        await db.execute("DELETE FROM user_profile WHERE id=?", (uid,))
-        await db.execute("DELETE FROM user_sessions WHERE user_id=?", (uid,))
-        await db.execute("DELETE FROM users WHERE id=?", (uid,))
+        ok = await _delete_user_conn(db, uid, allow_default=allow_default)
         await db.commit()
-        return True
+        return ok
+    finally:
+        await db.close()
+
+
+async def delete_users_except(keep_user_id: str) -> dict:
+    keep_uid = _scope_user(keep_user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT id FROM users WHERE id != ?", (keep_uid,))
+        deleted = 0
+        for row in rows:
+            if await _delete_user_conn(db, row["id"], allow_default=True):
+                deleted += 1
+        await db.commit()
+        return {"deleted": deleted, "kept_user_id": keep_uid}
+    finally:
+        await db.close()
+
+
+async def delete_all_users_and_data() -> dict:
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT id FROM users")
+        deleted = 0
+        for row in rows:
+            if await _delete_user_conn(db, row["id"], allow_default=True):
+                deleted += 1
+        for table in (
+            "conversation_files", "workspace_conversations", "workspace_research_reports",
+            "research_sources", "research_events", "run_events", "workspace_memory_blocks",
+            "artifact_tags", "artifact_workspaces", "artifact_events", "council_members",
+        ):
+            await db.execute(f"DELETE FROM {table}")
+        for table in (
+            "messages", "runs", "coder_workflows", "conversations", "knowledge_bases",
+            "tools", "model_configs", "workspaces", "council_configs", "memories",
+            "research_reports", "token_usage", "coding_projects", "artifacts",
+            "mcp_servers", "openapi_connectors", "connector_tools",
+            "user_profile", "user_sessions", "users",
+        ):
+            await db.execute(f"DELETE FROM {table}")
+        await db.commit()
+        return {"deleted": deleted}
     finally:
         await db.close()
 
@@ -4134,6 +4192,17 @@ async def delete_global_memory(memory_id: str) -> bool:
         await db.close()
 
 
+async def clear_user_memories(user_id: str | None = None) -> int:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        cur = await db.execute("DELETE FROM memories WHERE user_id=?", (uid,))
+        await db.commit()
+        return cur.rowcount if cur.rowcount is not None else 0
+    finally:
+        await db.close()
+
+
 def _format_profile_context(profile: dict, remaining: int) -> tuple[list[str], int, bool]:
     lines = []
     has_content = False
@@ -4734,6 +4803,17 @@ async def get_token_usage(days: int = 30, group_by: str = "day"):
                    GROUP BY date(created_at) ORDER BY date ASC""".format(where=where)
         cursor = await db.execute(q, tuple(params))
         return [dict(r) for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+
+async def clear_token_usage(user_id: str | None = None) -> int:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        cur = await db.execute("DELETE FROM token_usage WHERE user_id=?", (uid,))
+        await db.commit()
+        return cur.rowcount if cur.rowcount is not None else 0
     finally:
         await db.close()
 

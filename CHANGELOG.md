@@ -49,6 +49,7 @@
 - Token usage is recorded per conversation/model/persona and exposed through `/api/analytics/tokens` and `/api/analytics/tokens/summary`.
 - Runtime storage diagnostics check SQLite and Chroma writeability so readonly data-dir failures surface as actionable errors instead of opaque RAG crashes.
 - Settings cleanup tools cover local sandbox outputs and Codebox project cleanup through `/api/settings/cleanup-now` and `/api/settings/cleanup-codebox`.
+- Danger Zone cleanup now covers chats, memories, artifacts, statistics, local Ollama models, other users, and a full fresh-install reset.
 - Health history persists dependency checks in `service_health_log` and is shown in Settings.
 
 ## Bug fixes
@@ -57,6 +58,7 @@
 - Fixed ComfyUI v-prediction/flow sampling injection so unrelated sampling nodes no longer suppress the required mode-specific node.
 - Fixed ComfyUI cleanup races by tracking pending prompt submissions before ComfyUI returns a prompt id.
 - Fixed empty SSE subscriber lists lingering after the last client unsubscribes.
+- Long chat titles now fade at the edge and marquee on hover instead of ending with hard ellipses.
 - Removed the remaining runtime v1 CodeAgent planning path; `plan_project` now always routes through the structured Architect path.
 - Fixed KB reindex failures from readonly RAG/Chroma SQLite storage with clearer diagnostics and deploy-time data-directory permission repair.
 - Hardened `/api/img-proxy` so proxied chat images use the same safe-fetch path as URL previewing, blocking loopback/private targets and unsafe redirects before any private URL is fetched.
