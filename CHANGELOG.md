@@ -9,6 +9,7 @@
 - Knowledge-base answers now use hybrid retrieval and render clickable inline citations.
 - Persona chats can generate rating-aware character photos from appearance/context.
 - Settings now exposes token analytics, health history, cleanup, media controls, and service connection status.
+- Chat list polish improves the sidebar styling and adds marquee hover behavior for long chat titles.
 
 ## Image Generation
 - New `generate_image` chat tool renders ComfyUI images inline with seed, size, steps, and artifact metadata.
