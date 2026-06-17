@@ -1,32 +1,38 @@
-# Alpha v17.3.0 — June 20, 2026
+# Alpha v17.3.0 — June 17, 2026
 
-> Adds three major local-first capabilities: ComfyUI image generation, voice input/output, and hybrid RAG citations. This is the first Phase of voice and image generation features. More voices, photo editing and more will be added at a later date.
+> Adds the local media stack, persona-aware image generation, voice input/output,
+> hybrid RAG citations, storage diagnostics, and token analytics.
 
 ## Highlights
 - Local image generation is now available from chat and the new Image Studio.
 - Voice STT/TTS is proxied through HyprChat, keeping browser traffic pointed at the main server.
 - Knowledge-base answers now use hybrid retrieval and render clickable inline citations.
+- Persona chats can generate rating-aware character photos from appearance/context.
+- Settings now exposes token analytics, health history, cleanup, media controls, and service connection status.
 
 ## Image Generation
 - New `generate_image` chat tool renders ComfyUI images inline with seed, size, steps, and artifact metadata.
 - Image Studio adds prompt controls, model/VAE/workflow selectors, queue progress, Stop, gallery, reuse, delete, and full purge tools.
 - Settings → Model & Generation now includes chat image defaults: checkpoint, saved workflow, resolution, VAE, prompt defaults, negative prompt, and compose model.
+- Prompt enhancement is available through `/api/images/enhance-prompt`, using the configured local compose/workspace model and rejecting unusable empty JSON output.
 - Saved workflows can be uploaded from API JSON or workflow-bearing PNGs; KSampler and Flux-family graphs are patched by node class.
 - Per-checkpoint presets now include sampler, scheduler, CFG, steps, model type, and prompt prefixes.
 - Generated images are tracked as `kind=image` artifacts and appear in Artifact Studio.
 - Image cleanup is trace-aware: completed jobs forget ComfyUI history/output copies when the optional control node is installed, and Delete all purges HyprChat artifacts, chat image references, ComfyUI traces, and logs where available.
-- New unload/restart controls and optional ComfyUI custom routes: `/hyprchat/free`, `/hyprchat/memory`, `/hyprchat/restart`, `/hyprchat/cleanup`, plus idle model unload.
+- New unload/restart/memory controls and optional ComfyUI custom routes: `/hyprchat/free`, `/hyprchat/memory`, `/hyprchat/restart`, `/hyprchat/cleanup`, plus idle model unload.
 - Hardening pass: in-flight job guards, prompt redaction, safer tool-call parsing, purge pagination fixes, chat attachment cleanup, and stricter persona/photo prompt validation.
 
 ## Persona Photos
 - Personas now have an Appearance field used for selfie and character-photo requests.
 - Photo prompts are composed from appearance, current scene, user request, prior images, and optional per-persona image profiles.
+- Persona image profiles live in `persona_image_profiles.json` and can route intents to profile-specific workflow/default settings.
 - Persona content ratings gate image prompts: PG/PG-13 stays conservative, while adult-rated personas can use the configured compose model for allowed requests.
 - Selfie rescue forces `generate_image` when a persona describes a requested photo in text instead of calling the tool.
 
 ## Voice
 - Composer mic button records audio and transcribes it through an OpenAI-compatible STT service such as Speaches.
 - Assistant reply Speak button and optional autoplay synthesize audio through an OpenAI-compatible TTS service such as Kokoro.
+- Deferred speech playback is available through `/api/audio/speech/request` and `/api/audio/speech/{request_id}` so the UI can create expiring TTS URLs.
 - Markdown, code fences, links, and citations are stripped before TTS.
 - Settings → Connections adds Voice STT/TTS URLs, health status, and a voice picker.
 - Plain HTTP installs still need a browser secure-context exception for microphone capture.
@@ -38,6 +44,12 @@
 - Answers cite numbered excerpts with `[n]`; citations render as chips and persist in saved events.
 - Existing KBs backfill into FTS automatically; Reindex rebuilds both stores.
 - Added `POST /api/knowledge-bases/query` for retrieval testing.
+
+## Analytics, Storage, and Cleanup
+- Token usage is recorded per conversation/model/persona and exposed through `/api/analytics/tokens` and `/api/analytics/tokens/summary`.
+- Runtime storage diagnostics check SQLite and Chroma writeability so readonly data-dir failures surface as actionable errors instead of opaque RAG crashes.
+- Settings cleanup tools cover local sandbox outputs and Codebox project cleanup through `/api/settings/cleanup-now` and `/api/settings/cleanup-codebox`.
+- Health history persists dependency checks in `service_health_log` and is shown in Settings.
 
 ## Bug fixes
 - Fixed `conspiracy_research` depth parsing so malformed values fall back safely instead of crashing the tool call.
@@ -52,10 +64,11 @@
 - Fixed dependency-light backend test collection by replacing fragile optional-dependency stubs with proper module stubs and centralized `aiosqlite`/`chromadb` availability checks.
 
 ## Setup, Ops, and Tests
-- `.env.example`, deploy scripts, `create-lxc.sh`, and `deploy_monitor.py` now cover current media, connector, sandbox, workflow, Quick Search, and Aider settings.
+- `.env.example`, deploy scripts, `create-lxc.sh`, and `deploy_monitor.py` were updated for the media services, connector secrets, sandbox paths, Quick Search, and Aider/OpenHands settings used by this release.
 - `create-lxc.sh` can optionally hand off to the ComfyUI/Voice LXC installer.
 - `create-comfyui-lxc.sh` documents the HyprChat ComfyUI control node, idle unload env vars, restart route, and verification commands.
-- New and expanded tests cover workflow patching, persona image prompts, ComfyUI control endpoints, hybrid RAG, and audio routes.
+- `deploy_monitor.py` now watches the Vite source/package files plus `image_prompt_enhancer.py`, `persona_images.py`, and `storage_diagnostics.py`.
+- New and expanded tests cover workflow patching, persona image prompts, prompt enhancement normalization, ComfyUI control endpoints, hybrid RAG, audio routes, storage diagnostics, and token analytics.
 - Live media tests skip cleanly when the configured services are unavailable.
 
 ---
