@@ -6399,7 +6399,17 @@ async def get_token_summary():
     today = await db.get_token_usage(1, "day")
     week = await db.get_token_usage(7, "model")
     month = await db.get_token_usage(30, "day")
-    return {"today": today, "by_model_7d": week, "daily_30d": month}
+    all_time = await db.get_token_usage(0, "day")
+    by_model_all = await db.get_token_usage(0, "model")
+    by_persona_all = await db.get_token_usage(0, "persona")
+    return {
+        "today": today,
+        "by_model_7d": week,
+        "daily_30d": month,
+        "all_time": all_time,
+        "by_model_all": by_model_all,
+        "by_persona_all": by_persona_all,
+    }
 
 
 # ============================================================

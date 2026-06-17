@@ -7196,12 +7196,20 @@ function HyprChat(){
   };
 
   const glass={background:`${t.surface}F2`,backdropFilter:"none",border:`1px solid ${t.brd}55`,boxShadow:"none"};
-  const _navShort={Chat:"Chat",Artifacts:"Artifacts",Memory:"Memory","Knowledge Bases":"KB",Tools:"Tools",Agents:"Agents","Prompt Library":"Prompts","Deep Research":"Research","Council of AI":"Council","Model Manager":"Models",Analytics:"Stats",Settings:"Settings",More:"More"};
+  const _navShort={Chat:"Chat",Artifacts:"Artifacts",Memory:"Memory","Knowledge Bases":"KB",Tools:"Tools",Agents:"Agents","Prompt Library":"Prompts","Deep Research":"Research","Council of AI":"Council","Image Studio":"Image Gen","Model Manager":"Models",Analytics:"Stats",Settings:"Settings",More:"More"};
   const openSettings=()=>{setShowNavMore(false);if(panel!=="settings")previousPanelRef.current=panel;setPanel("settings");};
   const closeSettings=()=>{setShowHealthMonitor(false);setPanel(previousPanelRef.current||"chat");};
-  const nb=(p,ico,lab)=><button onClick={()=>setPanel(p)} title={lab} style={{width:52,height:showNavLabels?48:46,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:8,cursor:"pointer",border:`1px solid ${panel===p?`${t.acc}55`:"transparent"}`,background:panel===p?`${t.acc}14`:"transparent",color:panel===p?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:"none",padding:showNavLabels?"3px 0 1px":0}}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{panel===p&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}</button>;
+  const navBtnS=(active=false,extra={})=>({
+    width:52,height:showNavLabels?48:46,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:8,cursor:"pointer",
+    border:`1px solid ${active?`${t.acc}55`:"transparent"}`,background:active?`${t.acc}14`:"transparent",color:active?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:"none",padding:showNavLabels?"3px 0 1px":0,
+    "--nav-hover-bg":`${t.acc}12`,"--nav-hover-border":`${t.acc}42`,"--nav-hover-color":t.acc,"--nav-hover-ring":`${t.acc}18`,"--nav-hover-shadow":`${t.acc}12`,"--nav-active-hover-bg":`${t.acc}1C`,
+    ...extra
+  });
+  const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>setPanel(p)} title={lab} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{active&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}</button>;};
   const moreNavItems=[
-    ["images",<IC.Image/>,"Image Studio",t.pink],
+    ["artifacts",<IC.Layers/>,"Artifacts",t.acc],
+    ["memory",<IC.Brain/>,"Memory",t.f4],
+    ["prompts",<IC.Zap/>,"Prompt Library",t.warm],
     ["kb",<IC.Database/>,"Knowledge Bases",t.ok],
     ["tools",<IC.Tool/>,"Tools",t.warm],
     ["models",<IC.Layers/>,"Model Manager",t.f1],
@@ -7302,6 +7310,9 @@ function HyprChat(){
   ];
   const activeSettingsTitle=(settingsTabs.find(([id])=>id===settingsTab)||settingsTabs[0])[2];
   const selectedLoginUser=users.find(u=>u.id===loginUserId)||users[0]||null;
+  const localModelCount=models.filter(m=>!m.startsWith("hf.co/")&&!isCloudModelName(m)).length;
+  const hfModelCount=models.filter(m=>m.startsWith("hf.co/")).length;
+  const installedModelCount=localModelCount+hfModelCount;
   const mmPanelS={background:`${t.surface}66`,border:`1px solid ${t.brd}24`,borderRadius:8,boxShadow:"none"};
   const mmPanelStrongS={background:`${t.surface}88`,border:`1px solid ${t.brd}33`,borderRadius:8,boxShadow:"none"};
   const mmKickerS={fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.7,fontWeight:800};
@@ -7360,33 +7371,31 @@ function HyprChat(){
     {/* NAV RAIL */}
     <div style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...glass,borderRight:`1px solid ${t.brd}55`,zIndex:11,padding:"12px 0",gap:4}}>
       <div style={{flex:1,minHeight:0,width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflowY:"auto",overflowX:"hidden",scrollbarWidth:"none",paddingBottom:4}}>
-        <button onClick={()=>{if(showMessageSearch&&sidebar)closeSidebarSearch();else openSidebarSearch("titles");}} title="Search conversations" style={{width:52,height:showNavLabels?48:46,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:8,cursor:"pointer",border:`1px solid ${sidebarSearchActive?`${t.acc}55`:"transparent"}`,background:sidebarSearchActive?`${t.acc}14`:"transparent",color:sidebarSearchActive?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:"none",padding:showNavLabels?"3px 0 1px":0}}>
+        <button className={`nav-panel-button${sidebarSearchActive?" is-active":""}`} onClick={()=>{if(showMessageSearch&&sidebar)closeSidebarSearch();else openSidebarSearch("titles");}} title="Search conversations" style={navBtnS(!!sidebarSearchActive)}>
           <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Search/></span>
           {showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>Search</div>}
           {sidebarSearchActive&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}
         </button>
         {nb("chat",<IC.Chat/>,"Chat")}
-        {nb("artifacts",<IC.Layers/>,"Artifacts")}
         {nb("research",<IC.Research/>,"Deep Research")}
         {nb("council",<IC.Council/>,"Council of AI")}
-        {nb("memory",<IC.Brain/>,"Memory")}
         {nb("personas",<IC.Cube/>,"Agents")}
-        {nb("prompts",<IC.Zap/>,"Prompt Library")}
-        <button onClick={()=>setShowNavMore(p=>!p)} title="More" aria-expanded={showNavMore} style={{width:52,height:showNavLabels?48:46,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:8,cursor:"pointer",border:`1px solid ${(showNavMore||moreNavActive)?`${t.acc}55`:"transparent"}`,background:(showNavMore||moreNavActive)?`${t.acc}14`:"transparent",color:(showNavMore||moreNavActive)?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:"none",padding:showNavLabels?"3px 0 1px":0}}>
+        {nb("images",<IC.Image/>,"Image Studio")}
+        <button className={`nav-panel-button${(showNavMore||moreNavActive)?" is-active":""}`} onClick={()=>setShowNavMore(p=>!p)} title="More" aria-expanded={showNavMore} style={navBtnS(showNavMore||moreNavActive)}>
           <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.More/></span>
           {showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>More</div>}
           {moreNavActive&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}
         </button>
-        <div aria-hidden={!showNavMore} style={{width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflow:"hidden",maxHeight:showNavMore?220:0,opacity:showNavMore?1:0,transform:showNavMore?"translateY(0)":"translateY(-6px)",transition:"max-height .22s ease, opacity .16s ease, transform .18s ease",pointerEvents:showNavMore?"auto":"none",flexShrink:0}}>
+        <div aria-hidden={!showNavMore} style={{width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflow:"hidden",maxHeight:showNavMore?392:0,opacity:showNavMore?1:0,transform:showNavMore?"translateY(0)":"translateY(-6px)",transition:"max-height .22s ease, opacity .16s ease, transform .18s ease",pointerEvents:showNavMore?"auto":"none",flexShrink:0}}>
           {moreNavItems.map(([p,ico,lab])=><React.Fragment key={p}>{nb(p,ico,lab)}</React.Fragment>)}
         </div>
       </div>
-      <button onClick={openSettings} title="Settings" style={{width:52,height:showNavLabels?48:46,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:8,cursor:"pointer",border:`1px solid ${panel==="settings"?`${t.acc}55`:"transparent"}`,background:panel==="settings"?`${t.acc}14`:"transparent",color:panel==="settings"?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:"none",padding:showNavLabels?"3px 0 1px":0}}>
+      <button className={`nav-panel-button${panel==="settings"?" is-active":""}`} onClick={openSettings} title="Settings" style={navBtnS(panel==="settings")}>
         <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Settings/></span>
         {showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>Settings</div>}
         {panel==="settings"&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}
       </button>
-      <button onClick={()=>setSidebar(p=>!p)} title={sidebar?"Hide conversations":"Show conversations"} style={{width:52,height:48,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:12,cursor:"pointer",border:"none",background:"transparent",color:t.mut,transition:"all .15s",marginTop:4}}>
+      <button className="nav-panel-button" onClick={()=>setSidebar(p=>!p)} title={sidebar?"Hide conversations":"Show conversations"} style={navBtnS(false,{height:48,flexDirection:"row",borderRadius:12,padding:0,marginTop:4})}>
         <IC.Sidebar/>
       </button>
     </div>
@@ -8676,11 +8685,11 @@ function HyprChat(){
         <span style={{display:"flex",color:t.acc}}><IC.Database/></span>
         <div>
           <div style={{fontSize:15,fontWeight:900,color:t.acc,letterSpacing:1.2,textTransform:"uppercase",lineHeight:1}}>Models</div>
-          <div style={{fontSize:10,color:t.mut,marginTop:3}}>{models.length} installed · {models.filter(m=>m.startsWith("hf.co/")).length} from HuggingFace</div>
+          <div style={{fontSize:10,color:t.mut,marginTop:3}}>{installedModelCount} installed · {hfModelCount} from HuggingFace</div>
         </div>
       </div>
       <div style={{display:"flex",alignItems:"center",gap:4,padding:3,borderRadius:8,border:`1px solid ${t.brd}28`,background:`${t.surface}44`}}>
-        {[["ollama","Installed",models.filter(m=>!isCloudModelName(m)).length],["hf","HuggingFace",models.filter(m=>m.startsWith("hf.co/")).length]].map(([key,label,count])=>{
+        {[["ollama","Installed",installedModelCount],["hf","HuggingFace",hfModelCount]].map(([key,label,count])=>{
           const active=modelsTab===key;
           return <button key={key} onClick={()=>setModelsTab(key)} style={{padding:"7px 13px",borderRadius:7,border:"none",background:active?`${t.acc}18`:"transparent",color:active?t.acc:t.mut,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:active?900:700,display:"flex",alignItems:"center",gap:7,transition:"all .15s"}}>
             <span>{key==="ollama"?"📦":"🤗"}</span><span>{label}</span><span style={{...mmChipS(active?t.acc:t.mut,active?`${t.acc}12`:`${t.surface}66`),fontSize:8,padding:"1px 5px"}}>{count}</span>
@@ -8710,7 +8719,7 @@ function HyprChat(){
           </div>
           <div style={{display:"flex",gap:6,alignItems:"center",justifyContent:"space-between"}}>
             <span style={mmKickerS}>Inventory</span>
-            <span style={mmMetaS}>{models.filter(m=>!m.startsWith("hf.co/")&&!isCloudModelName(m)).length} local · {models.filter(m=>m.startsWith("hf.co/")).length} HF</span>
+            <span style={mmMetaS}>{localModelCount} local · {hfModelCount} HF</span>
           </div>
         </div>
         <div style={{flex:1,overflowY:"auto",padding:"10px 12px 14px"}}>
@@ -8989,7 +8998,7 @@ function HyprChat(){
         <div style={{display:"flex",gap:4,padding:8,borderBottom:`1px solid ${t.brd}18`,flexShrink:0}}>
           {[["search","🔍 Search"],[true,"📦 Installed"]].map(([key,label])=>{
             const active=key==="search"?!hfInstalledTab:hfInstalledTab;
-            const count=key===true?models.filter(m=>m.startsWith("hf.co/")).length:0;
+            const count=key===true?hfModelCount:0;
             return <button key={String(key)} onClick={()=>setHfInstalledTab(key===true)} style={{flex:1,padding:"9px 11px",border:`1px solid ${active?t.acc:t.brd}30`,borderRadius:7,background:active?`${t.acc}14`:`${t.surface}33`,color:active?t.acc:t.mut,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:active?900:700,display:"flex",alignItems:"center",justifyContent:"center",gap:7,transition:"all .15s"}}>
               {label}{count>0&&key===true&&<span style={{fontSize:9,background:`${t.acc}22`,color:t.acc,padding:"1px 6px",borderRadius:8,border:`1px solid ${t.acc}33`}}>{count}</span>}
             </button>;
@@ -9282,59 +9291,80 @@ function HyprChat(){
 
       :panel==="analytics"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
         <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
-          <div style={{maxWidth:900}}>
-            <div style={{fontSize:20,fontWeight:700,marginBottom:16,display:"flex",alignItems:"center",gap:8}}><IC.BarChart/> Token Analytics</div>
-            <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
-              {[7,30,90].map(d=><button key={d} onClick={()=>setAnalyticsDays(d)} style={{...btnS(analyticsDays===d?t.acc:t.mut),padding:"5px 12px"}}>{d}d</button>)}
+          <div style={{maxWidth:980}}>
+            <div style={{fontSize:20,fontWeight:900,marginBottom:4,display:"flex",alignItems:"center",gap:8,color:t.acc}}><IC.BarChart/> Statistics</div>
+            <div style={{fontSize:11,color:t.mut,marginBottom:16}}>Overall HyprChat usage from recorded chat token telemetry.</div>
+            <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap",alignItems:"center"}}>
+              {[7,30,90,0].map(d=><button key={d} onClick={()=>setAnalyticsDays(d)} style={{...btnS(analyticsDays===d?t.acc:t.mut),padding:"5px 12px"}}>{d===0?"All":`${d}d`}</button>)}
               <div style={{flex:1}}/>
               {["day","model","persona"].map(g=><button key={g} onClick={()=>setAnalyticsGroup(g)} style={{...btnS(analyticsGroup===g?t.acc:t.mut),padding:"5px 12px",textTransform:"capitalize"}}>{g==="persona"?"profile":g}</button>)}
               <button onClick={loadAnalytics} style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
             </div>
-            {analyticsData?<>
-              {/* Summary cards */}
-              {analyticsData.summary&&<div style={{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap"}}>
-                {(()=>{const td=analyticsData.summary.today||[];const todayTotal=td.reduce((s,d)=>s+(d.total_tokens||0),0);const todayReqs=td.reduce((s,d)=>s+(d.request_count||0),0);return <div style={{...cardS,flex:"1 1 200px",minWidth:180}}>
-                  <div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Today</div>
-                  <div style={{fontSize:24,fontWeight:700,color:t.acc}}>{todayTotal.toLocaleString()}</div>
-                  <div style={{fontSize:10,color:t.mut}}>{todayReqs} requests</div>
-                </div>;})()}
-                {(()=>{const md=analyticsData.summary.daily_30d||[];const monthTotal=md.reduce((s,d)=>s+(d.total_tokens||0),0);const monthReqs=md.reduce((s,d)=>s+(d.request_count||0),0);return <div style={{...cardS,flex:"1 1 200px",minWidth:180}}>
-                  <div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Last 30 Days</div>
-                  <div style={{fontSize:24,fontWeight:700,color:t.warm||t.acc}}>{monthTotal.toLocaleString()}</div>
-                  <div style={{fontSize:10,color:t.mut}}>{monthReqs} requests</div>
-                </div>;})()}
-                {(()=>{const models=analyticsData.summary.by_model_7d||[];return <div style={{...cardS,flex:"1 1 200px",minWidth:180}}>
-                  <div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Top Model (7d)</div>
-                  <div style={{fontSize:16,fontWeight:700,color:t.pink||t.acc}}>{models[0]?.model||"—"}</div>
-                  <div style={{fontSize:10,color:t.mut}}>{(models[0]?.total_tokens||0).toLocaleString()} tokens</div>
-                </div>;})()}
-              </div>}
-              {/* Bar chart */}
-              {analyticsData.grouped.length>0?<div style={{...cardS,padding:20}}>
-                <div style={{fontSize:12,fontWeight:600,marginBottom:12,color:t.mut}}>Tokens by {analyticsGroup}</div>
-                <div style={{display:"flex",alignItems:"flex-end",gap:2,height:200,padding:"0 4px"}}>
-                  {(()=>{const data=analyticsData.grouped;const maxVal=Math.max(...data.map(d=>d.total_tokens||0),1);return data.map((d,i)=>{const h=Math.max(((d.total_tokens||0)/maxVal)*180,2);const label=d.date?d.date.slice(5):d.model||d.persona_name||"(none)";return <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4,minWidth:0}}>
+            {analyticsData?(()=>{
+              const summary=analyticsData.summary||{};
+              const sumRows=rows=>(rows||[]).reduce((a,d)=>({
+                prompt:a.prompt+(d.prompt_tokens||0),
+                completion:a.completion+(d.completion_tokens||0),
+                total:a.total+(d.total_tokens||0),
+                requests:a.requests+(d.request_count||0)
+              }),{prompt:0,completion:0,total:0,requests:0});
+              const all=sumRows(summary.all_time||[]);
+              const today=sumRows(summary.today||[]);
+              const month=sumRows(summary.daily_30d||[]);
+              const allModels=summary.by_model_all||[];
+              const allProfiles=summary.by_persona_all||[];
+              const topModel=allModels[0];
+              const statCard=(label,value,detail,color=t.acc)=><div style={{...cardS,flex:"1 1 170px",minWidth:160,marginBottom:0}}>
+                <div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:1,marginBottom:6,fontWeight:800}}>{label}</div>
+                <div style={{fontSize:24,fontWeight:900,color,lineHeight:1.05,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{value}</div>
+                <div style={{fontSize:10,color:t.mut,marginTop:5,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{detail}</div>
+              </div>;
+              const rows=analyticsData.grouped||[];
+              return <>
+              <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap"}}>
+                {statCard("Total Tokens",all.total.toLocaleString(),`${all.requests.toLocaleString()} recorded requests`,t.acc)}
+                {statCard("Processed",all.prompt.toLocaleString(),"prompt/context tokens",t.warm)}
+                {statCard("Generated",all.completion.toLocaleString(),"assistant output tokens",t.ok)}
+                {statCard("Models Used",allModels.length.toLocaleString(),topModel?topModel.model:"no model telemetry",t.pink||t.acc)}
+              </div>
+              <div style={{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap"}}>
+                {statCard("Today",today.total.toLocaleString(),`${today.requests.toLocaleString()} requests`,t.acc2||t.acc)}
+                {statCard("Last 30 Days",month.total.toLocaleString(),`${month.requests.toLocaleString()} requests`,t.f1||t.acc)}
+                {statCard("Top Model",topModel?.model||"-",`${(topModel?.total_tokens||0).toLocaleString()} tokens`,t.pink||t.acc)}
+              </div>
+              {rows.length>0?<div style={{...cardS,padding:20}}>
+                <div style={{fontSize:12,fontWeight:800,marginBottom:12,color:t.mut}}>Tokens by {analyticsGroup==="persona"?"profile":analyticsGroup} {analyticsDays===0?"(all time)":`(${analyticsDays}d)`}</div>
+                <div style={{display:"flex",alignItems:"flex-end",gap:2,height:210,padding:"0 4px",overflowX:"auto",overflowY:"hidden"}}>
+                  {(()=>{const maxVal=Math.max(...rows.map(d=>d.total_tokens||0),1);return rows.map((d,i)=>{const h=Math.max(((d.total_tokens||0)/maxVal)*180,2);const label=d.date?d.date.slice(5):d.model||d.persona_name||"(none)";return <div key={i} style={{flex:"1 0 26px",display:"flex",flexDirection:"column",alignItems:"center",gap:4,minWidth:26}}>
                     <div style={{fontSize:8,color:t.mut,textAlign:"center",lineHeight:1}}>{(d.total_tokens||0).toLocaleString()}</div>
                     <div title={`${label}: ${(d.total_tokens||0).toLocaleString()} tokens, ${d.request_count||0} reqs`} style={{width:"80%",maxWidth:40,height:h,background:`linear-gradient(180deg,${t.acc},${t.acc}66)`,borderRadius:"4px 4px 0 0",transition:"height .3s",cursor:"pointer",minWidth:6}}/>
-                    <div style={{fontSize:7,color:t.mut,textAlign:"center",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:50,transform:"rotate(-30deg)",transformOrigin:"top center"}}>{label}</div>
+                    <div style={{fontSize:7,color:t.mut,textAlign:"center",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:56,transform:"rotate(-30deg)",transformOrigin:"top center"}}>{label}</div>
                   </div>;});})()}
                 </div>
-              </div>:<div style={{textAlign:"center",padding:40,color:t.mut}}>No data yet. Start chatting to see analytics!</div>}
-              {/* Model breakdown table */}
-              {analyticsGroup==="model"&&analyticsData.grouped.length>0&&<div style={{...cardS,marginTop:16}}>
-                <div style={{fontSize:12,fontWeight:600,marginBottom:8,color:t.mut}}>Model Breakdown</div>
-                <div style={{display:"flex",padding:"6px 0",borderBottom:`1px solid ${t.brd}33`,fontSize:10,fontWeight:600,color:t.mut}}>
-                  <div style={{flex:2}}>Model</div><div style={{flex:1,textAlign:"right"}}>Prompt</div><div style={{flex:1,textAlign:"right"}}>Completion</div><div style={{flex:1,textAlign:"right"}}>Total</div><div style={{flex:1,textAlign:"right"}}>Requests</div>
+              </div>:<div style={{textAlign:"center",padding:40,color:t.mut}}>No statistics recorded yet. Start chatting to populate this page.</div>}
+              {allModels.length>0&&<div style={{...cardS,marginTop:16}}>
+                <div style={{fontSize:12,fontWeight:800,marginBottom:8,color:t.mut}}>All-Time Model Breakdown</div>
+                <div style={{display:"grid",gridTemplateColumns:"minmax(180px,2fr) repeat(4,minmax(80px,1fr))",gap:8,padding:"6px 0",borderBottom:`1px solid ${t.brd}33`,fontSize:10,fontWeight:800,color:t.mut}}>
+                  <div>Model</div><div style={{textAlign:"right"}}>Processed</div><div style={{textAlign:"right"}}>Generated</div><div style={{textAlign:"right"}}>Total</div><div style={{textAlign:"right"}}>Requests</div>
                 </div>
-                {analyticsData.grouped.map((d,i)=><div key={i} style={{display:"flex",padding:"5px 0",borderBottom:`1px solid ${t.brd}15`,fontSize:10}}>
-                  <div style={{flex:2,color:t.text,fontWeight:500}}>{d.model}</div>
-                  <div style={{flex:1,textAlign:"right",color:t.mut}}>{(d.prompt_tokens||0).toLocaleString()}</div>
-                  <div style={{flex:1,textAlign:"right",color:t.mut}}>{(d.completion_tokens||0).toLocaleString()}</div>
-                  <div style={{flex:1,textAlign:"right",color:t.acc,fontWeight:600}}>{(d.total_tokens||0).toLocaleString()}</div>
-                  <div style={{flex:1,textAlign:"right",color:t.mut}}>{d.request_count||0}</div>
+                {allModels.slice(0,20).map((d,i)=><div key={i} style={{display:"grid",gridTemplateColumns:"minmax(180px,2fr) repeat(4,minmax(80px,1fr))",gap:8,padding:"6px 0",borderBottom:`1px solid ${t.brd}15`,fontSize:10,alignItems:"center"}}>
+                  <div style={{color:t.text,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.model}</div>
+                  <div style={{textAlign:"right",color:t.mut}}>{(d.prompt_tokens||0).toLocaleString()}</div>
+                  <div style={{textAlign:"right",color:t.mut}}>{(d.completion_tokens||0).toLocaleString()}</div>
+                  <div style={{textAlign:"right",color:t.acc,fontWeight:800}}>{(d.total_tokens||0).toLocaleString()}</div>
+                  <div style={{textAlign:"right",color:t.mut}}>{d.request_count||0}</div>
                 </div>)}
               </div>}
-            </>:<div style={{textAlign:"center",padding:40,color:t.mut}}>Loading analytics...</div>}
+              {allProfiles.length>0&&<div style={{...cardS,marginTop:16}}>
+                <div style={{fontSize:12,fontWeight:800,marginBottom:8,color:t.mut}}>Top Profiles</div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {allProfiles.slice(0,10).map((d,i)=><span key={i} style={{fontSize:10,padding:"5px 8px",borderRadius:7,background:`${t.surface}66`,border:`1px solid ${t.brd}30`,color:t.dim}}>
+                    {d.persona_name||"Default"} · {(d.total_tokens||0).toLocaleString()}
+                  </span>)}
+                </div>
+              </div>}
+            </>;
+            })():<div style={{textAlign:"center",padding:40,color:t.mut}}>Loading statistics...</div>}
           </div>
         </div>
       </div>
@@ -9614,80 +9644,111 @@ function HyprChat(){
         </div>
 
         <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:6}}>
-          <div style={{fontSize:12,color:t.dim,marginBottom:4,fontWeight:600}}>🎨 Chat Image Generation (ComfyUI)</div>
-          <div style={{fontSize:10,color:t.mut,marginBottom:10}}>Defaults for the in-chat <code>generate_image</code> tool. The selected model's ★ presets from Image Studio (sampler, scheduler, CFG, steps, model type) apply automatically; the prompt prefix is prepended to whatever the chat asks for.</div>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+            <span style={{display:"flex",color:t.acc}}><IC.Image/></span>
+            <div style={{fontSize:12,color:t.dim,fontWeight:800,letterSpacing:.35}}>Chat Image Generation</div>
+            <span style={{fontSize:9,color:t.acc,background:`${t.acc}12`,border:`1px solid ${t.acc}28`,borderRadius:6,padding:"2px 6px",fontWeight:800}}>ComfyUI</span>
+          </div>
+          <div style={{fontSize:10,color:t.mut,marginBottom:10,lineHeight:1.5}}>Defaults for the in-chat <code>generate_image</code> tool. Image Studio ★ presets still apply automatically; this section controls the chat-facing model, workflow, prompt defaults, and optional prompt-writer model.</div>
           {!comfyuiUrl
             ?<div style={{fontSize:11,color:t.mut}}>ComfyUI is not configured — set its URL in Settings → Connections first.</div>
             :(()=>{
-              const sel={background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"7px 9px",borderRadius:7,fontFamily:font,fontSize:12,outline:"none"};
-              const inp={...sel,width:"100%",boxSizing:"border-box"};
+              const sel={background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"8px 10px",borderRadius:7,fontFamily:font,fontSize:12,outline:"none",boxSizing:"border-box"};
+              const inp={...sel,width:"100%"};
+              const imagePanelS={background:`${t.surface}44`,border:`1px solid ${t.brd}26`,borderRadius:10,padding:12};
+              const imageSectionS={background:`${t.bgDeep}70`,border:`1px solid ${t.brd}24`,borderRadius:8,padding:12,display:"flex",flexDirection:"column",gap:10};
+              const imageHeadS={display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:10,borderBottom:`1px solid ${t.brd}18`,paddingBottom:8};
+              const imageTitleS={fontSize:10,fontWeight:900,color:t.acc,textTransform:"uppercase",letterSpacing:.75};
+              const imageHintS={fontSize:9.5,color:t.mut,lineHeight:1.45};
+              const fieldLabelS={fontSize:10,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.55,display:"flex",flexDirection:"column",gap:5,minWidth:0};
+              const fieldGridS={display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:10,alignItems:"end"};
               const cks=imgChatLists?.checkpoints||[];
               const vaeList=imgChatLists?.vaes||[];
               const hasPreset=!!(imgChatLists?.settings?.[imgChatCkpt]?.user_override);
-              return <>
-                <div style={{display:"flex",gap:14,flexWrap:"wrap",alignItems:"flex-end",marginBottom:10}}>
-                  <label style={{fontSize:10,color:t.mut}}>Image model{hasPreset&&<span title="Has saved Image Studio defaults" style={{color:t.acc}}> ★</span>}<br/>
-                    <select value={imgChatCkpt} onChange={e=>setImgChatCkpt(e.target.value)} style={{...sel,maxWidth:280,marginTop:3}}>
+              const selectedModelLabel=imgChatCkpt?imgChatCkpt.replace(/\.(safetensors|ckpt)$/i,""):"global fallback";
+              return <div style={imagePanelS}>
+                <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr)",gap:10}}>
+                  <section style={imageSectionS}>
+                    <div style={imageHeadS}>
+                      <div style={imageTitleS}>Generation Target</div>
+                      {hasPreset&&<div title="Has saved Image Studio defaults" style={{fontSize:9,color:t.acc,fontWeight:800}}>★ preset</div>}
+                    </div>
+                    <div style={fieldGridS}>
+                      <label style={fieldLabelS}>Image model
+                        <select value={imgChatCkpt} onChange={e=>setImgChatCkpt(e.target.value)} style={{...sel,width:"100%"}}>
                       <option value="">(none — built-in SDXL template)</option>
                       {cks.map(c=><option key={c} value={c}>{c.replace(/\.(safetensors|ckpt)$/i,"")}</option>)}
                       {imgChatCkpt&&imgChatLists&&!cks.includes(imgChatCkpt)&&<option value={imgChatCkpt}>{imgChatCkpt} (missing!)</option>}
                     </select>
-                  </label>
-                  <label style={{fontSize:10,color:t.mut}}>Resolution<br/>
-                    <select value={imgChatRes} onChange={e=>setImgChatRes(e.target.value)} style={{...sel,marginTop:3}}>
+                      </label>
+                      <label style={fieldLabelS}>Resolution
+                        <select value={imgChatRes} onChange={e=>setImgChatRes(e.target.value)} style={{...sel,width:"100%"}}>
                       <option value="1024x1024">Square — 1024 × 1024</option>
                       <option value="1216x832">Landscape — 1216 × 832</option>
                       <option value="832x1216">Portrait — 832 × 1216</option>
                     </select>
-                  </label>
-                  <label style={{fontSize:10,color:t.mut}}>VAE<br/>
-                    <select value={imgChatVae} onChange={e=>setImgChatVae(e.target.value)} style={{...sel,maxWidth:200,marginTop:3}}>
+                      </label>
+                      <label style={fieldLabelS}>VAE
+                        <select value={imgChatVae} onChange={e=>setImgChatVae(e.target.value)} style={{...sel,width:"100%"}}>
                       <option value="">Baked (checkpoint)</option>
                       {vaeList.map(v=><option key={v} value={v}>{v.replace(/\.(safetensors|pt|ckpt)$/i,"")}</option>)}
                     </select>
-                  </label>
-                  <label style={{fontSize:10,color:t.mut}}>Workflow<br/>
-                    <select value={imgChatWorkflow} onChange={e=>setImgChatWorkflow(e.target.value)} style={{...sel,maxWidth:240,marginTop:3}}>
+                      </label>
+                      <label style={fieldLabelS}>Workflow
+                        <select value={imgChatWorkflow} onChange={e=>setImgChatWorkflow(e.target.value)} style={{...sel,width:"100%"}}>
                       <option value="">Default (built-in SDXL)</option>
                       {imgChatWorkflows.map(w=><option key={w.name} value={w.name}>{w.name}{w.has_lora?" ⚡":""}</option>)}
                       {imgChatWorkflow&&!imgChatWorkflows.some(w=>w.name===imgChatWorkflow)&&<option value={imgChatWorkflow}>{imgChatWorkflow} (missing!)</option>}
                     </select>
-                  </label>
-                </div>
-                <div style={{fontSize:10,color:t.mut,marginTop:-4,marginBottom:8}}>A saved workflow renders every chat image instead of the built-in template (personas with their own image workflow still override it). The checkpoint/VAE above patch into KSampler-family graphs; a Flux/UNET workflow owns its own model.</div>
-                {imgChatCkpt?<>
-                  <div style={{marginBottom:8}}>
-                    <div style={{fontSize:10,color:t.mut,marginBottom:3}}>Default prompt for <span style={{color:t.acc,fontWeight:600}}>{imgChatCkpt.replace(/\.(safetensors|ckpt)$/i,"")}</span> — saved with this model, switches when you change models</div>
+                      </label>
+                    </div>
+                    <div style={imageHintS}>A saved workflow renders every chat image instead of the built-in template. Persona-specific image workflows still take priority.</div>
+                  </section>
+
+                  <section style={imageSectionS}>
+                    <div style={imageHeadS}>
+                      <div style={imageTitleS}>Prompt Defaults</div>
+                      <div style={{fontSize:9,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:260}}>{selectedModelLabel}</div>
+                    </div>
+                    {imgChatCkpt?<>
+                  <div>
+                    <div style={{fontSize:10,color:t.mut,marginBottom:5}}>Default prompt saved with this model</div>
                     <input value={mdlPrefix} onChange={e=>setMdlPrefix(e.target.value)} onBlur={saveModelPrefix} placeholder="e.g. score_9, score_8_up, realistic, 35mm photo — or anime style tags for anime models" style={inp}/>
                   </div>
                   <div>
-                    <div style={{fontSize:10,color:t.mut,marginBottom:3}}>Default negative prompt for this model</div>
+                    <div style={{fontSize:10,color:t.mut,marginBottom:5}}>Default negative prompt for this model</div>
                     <input value={mdlNeg} onChange={e=>setMdlNeg(e.target.value)} onBlur={saveModelPrefix} placeholder="e.g. score_4, score_3, score_2, score_1, lowres, watermark" style={inp}/>
                   </div>
                 </>:<>
-                  <div style={{marginBottom:8}}>
-                    <div style={{fontSize:10,color:t.mut,marginBottom:3}}>Default prompt (global fallback — used only when the selected model has no saved prompt)</div>
+                  <div>
+                    <div style={{fontSize:10,color:t.mut,marginBottom:5}}>Default prompt (global fallback)</div>
                     <input value={imgChatPrefix} onChange={e=>setImgChatPrefix(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-prefix","image_chat_prompt_prefix",imgChatPrefix)} placeholder="style/quality tags prepended to every chat image" style={inp}/>
                   </div>
                   <div>
-                    <div style={{fontSize:10,color:t.mut,marginBottom:3}}>Default negative prompt (global fallback)</div>
+                    <div style={{fontSize:10,color:t.mut,marginBottom:5}}>Default negative prompt (global fallback)</div>
                     <input value={imgChatNeg} onChange={e=>setImgChatNeg(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-neg","image_chat_negative",imgChatNeg)} placeholder="things to avoid in every chat image" style={inp}/>
                   </div>
                 </>}
-                <div style={{fontSize:10,color:t.mut,marginTop:6}}>Text fields save when you click away. Pony-family models get score-tag prompts automatically unless you override them here.</div>
-                <div style={{marginTop:12,paddingTop:10,borderTop:`1px solid ${t.brd}22`}}>
-                  <div style={{fontSize:10,color:t.mut,marginBottom:4,fontWeight:600}}>Photo prompt model</div>
-                  {imgChatComposeModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+                    <div style={imageHintS}>Text fields save when you click away. Pony-family models get score-tag prompts automatically unless overridden here.</div>
+                  </section>
+
+                  <section style={imageSectionS}>
+                    <div style={imageHeadS}>
+                      <div style={imageTitleS}>Prompt Model</div>
+                      <div style={{fontSize:9,color:t.mut}}>persona photos + enhance</div>
+                    </div>
+                  {imgChatComposeModel?<div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:8,alignItems:"center"}}>
                     <div style={{flex:1}}><ModelPicker value={imgChatComposeModel} onChange={setImgChatComposeModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
-                    <button onClick={()=>setImgChatComposeModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
+                    <button onClick={()=>setImgChatComposeModel("")} style={{padding:"7px 10px",background:`${t.err}14`,border:`1px solid ${t.err}35`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:800,whiteSpace:"nowrap",fontFamily:font}}>Reset</button>
                   </div>:<div onClick={()=>setImgChatComposeModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer"}}>
                     <span style={{fontSize:14}}>📷</span>
                     <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Same as the conversation's chat model</div><div style={{fontSize:9,color:t.dim}}>Click to pick a dedicated model</div></div>
                     <span style={{fontSize:9,color:t.mut}}>▾</span>
                   </div>}
-                  <div style={{fontSize:10,color:t.mut,marginTop:5}}>Writes persona photo prompts and ✨ Enhance results. Empty = the chat's own model (recommended — for uncensored roleplay the chat model already matches the content rating). Pick a dedicated model only if your chat models write poor image prompts.</div>
+                  <div style={imageHintS}>Empty uses the chat's own model, which is usually best for matching conversation tone and content rating.</div>
+                  </section>
                 </div>
-              </>;
+              </div>;
             })()}
         </div>
       </div>
@@ -11015,6 +11076,9 @@ function HyprChat(){
       @keyframes ripple{0%{transform:scale(0);opacity:1}100%{transform:scale(4);opacity:0}}
       a[download]:hover{background:${t.ok}28 !important;border-color:${t.ok}66 !important;transform:translateY(-1px);box-shadow:0 3px 12px ${t.ok}22;}
       a[download]:active{transform:translateY(0);}
+      .nav-panel-button:hover{background:var(--nav-hover-bg) !important;border-color:var(--nav-hover-border) !important;color:var(--nav-hover-color) !important;box-shadow:0 0 0 1px var(--nav-hover-ring),0 4px 14px var(--nav-hover-shadow) !important;transform:translateY(-1px);}
+      .nav-panel-button.is-active:hover{background:var(--nav-active-hover-bg) !important;}
+      .nav-panel-button:active{transform:translateY(0);}
       .conv-row{transition:background .14s ease,border-color .14s ease;}
       .conv-row:not(.is-act):hover{background:${t.sfBri}1f !important;}
       .conv-act{opacity:0;transition:opacity .14s ease,color .14s ease,background .14s ease;}

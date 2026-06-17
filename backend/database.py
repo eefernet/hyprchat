@@ -4703,30 +4703,36 @@ async def record_token_usage(conversation_id: str, model: str, persona_name: str
 
 
 async def get_token_usage(days: int = 30, group_by: str = "day"):
-    """Aggregate token usage. group_by: day, model, persona."""
+    """Aggregate token usage. group_by: day, model, persona. days <= 0 means all time."""
     user_id = _scope_user()
     db = await get_db()
     try:
+        use_window = (days or 0) > 0
+        where = "WHERE user_id=?"
+        params = [user_id]
+        if use_window:
+            where += " AND created_at >= datetime('now', ?)"
+            params.append(f"-{days} days")
         if group_by == "model":
             q = """SELECT model, SUM(prompt_tokens) as prompt_tokens,
                    SUM(completion_tokens) as completion_tokens,
                    SUM(total_tokens) as total_tokens, COUNT(*) as request_count
-                   FROM token_usage WHERE user_id=? AND created_at >= datetime('now', ?)
-                   GROUP BY model ORDER BY total_tokens DESC"""
+                   FROM token_usage {where}
+                   GROUP BY model ORDER BY total_tokens DESC""".format(where=where)
         elif group_by == "persona":
             q = """SELECT persona_name, SUM(prompt_tokens) as prompt_tokens,
                    SUM(completion_tokens) as completion_tokens,
                    SUM(total_tokens) as total_tokens, COUNT(*) as request_count
-                   FROM token_usage WHERE user_id=? AND created_at >= datetime('now', ?)
-                   GROUP BY persona_name ORDER BY total_tokens DESC"""
+                   FROM token_usage {where}
+                   GROUP BY persona_name ORDER BY total_tokens DESC""".format(where=where)
         else:
             q = """SELECT date(created_at) as date,
                    SUM(prompt_tokens) as prompt_tokens,
                    SUM(completion_tokens) as completion_tokens,
                    SUM(total_tokens) as total_tokens, COUNT(*) as request_count
-                   FROM token_usage WHERE user_id=? AND created_at >= datetime('now', ?)
-                   GROUP BY date(created_at) ORDER BY date ASC"""
-        cursor = await db.execute(q, (user_id, f"-{days} days"))
+                   FROM token_usage {where}
+                   GROUP BY date(created_at) ORDER BY date ASC""".format(where=where)
+        cursor = await db.execute(q, tuple(params))
         return [dict(r) for r in await cursor.fetchall()]
     finally:
         await db.close()
