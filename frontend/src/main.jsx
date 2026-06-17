@@ -3722,7 +3722,7 @@ function HyprChat(){
   const [pasteToolName,setPasteToolName]=useState("");
   const [pasteToolDesc,setPasteToolDesc]=useState("");
   // Models page state
-  const [modelsTab,setModelsTab]=useState("ollama"); // "ollama"|"hf"
+  const [modelsTab,setModelsTab]=useState("ollama"); // "ollama"|"hf"|"hyprfit"
   const [hfSearch,setHfSearch]=useState("");
   const [hfResults,setHfResults]=useState([]);
   const [hfLoading,setHfLoading]=useState(false);
@@ -3737,6 +3737,10 @@ function HyprChat(){
   const [activityNow,setActivityNow]=useState(Date.now());
   const [hfSelectedFiles,setHfSelectedFiles]=useState([]); // filenames to download
   const [hfGgufOnly,setHfGgufOnly]=useState(true);
+  const [hyprfit,setHyprfit]=useState(null);
+  const [hyprfitLoading,setHyprfitLoading]=useState(false);
+  const [hyprfitSaving,setHyprfitSaving]=useState(false);
+  const [hyprfitProfile,setHyprfitProfile]=useState(null);
   const t=THEMES[tm], font=FONTS[fi].v;
   const LIGHT_PAIRS={hyprflat:"oneLight",nord:"oneLight",catppuccin:"oneLight",gruvbox:"oneLight",tokyoNight:"oneLight",rosePine:"oneLight",dracula:"oneLight",midnight:"oneLight",terminal:"oneLight",cyberpunk:"oneLight",solarizedDark:"solarizedLight",materialOcean:"oneLight",ayuDark:"oneLight",oneLight:"hyprflat",solarizedLight:"solarizedDark"};
   const isLightTheme=tm==="oneLight"||tm==="solarizedLight";
@@ -3866,7 +3870,6 @@ function HyprChat(){
   const [fixTemplateFamily,setFixTemplateFamily]=useState("chatml");
   const [fixingTemplate,setFixingTemplate]=useState(false);
   const [fixTemplateMsg,setFixTemplateMsg]=useState(null);
-  const [hfInstalledTab,setHfInstalledTab]=useState(false);
   const [makingToolModel,setMakingToolModel]=useState(null); // model name currently being processed
   const [sq,setSq]=useState("");
   const [ftsQuery,setFtsQuery]=useState("");
@@ -3929,6 +3932,7 @@ function HyprChat(){
   const [healthHistory,setHealthHistory]=useState(null);
   const [pullName,setPullName]=useState("");
   const [pullProg,setPullProg]=useState(null);
+  const pullInputRef=useRef(null);
   const [editMc,setEditMc]=useState(null);
   const [profileTab,setProfileTab]=useState("agents");
   const [editTool,setEditTool]=useState(null);
@@ -4761,6 +4765,7 @@ function HyprChat(){
       if(d.image_chat_prompt_prefix!=null)setImgChatPrefix(d.image_chat_prompt_prefix);
       if(d.image_chat_negative!=null)setImgChatNeg(d.image_chat_negative);
       if(d.image_chat_compose_model!=null)hydrateServerSetting("image_chat_compose_model",setImgChatComposeModel,d.image_chat_compose_model,imgChatComposeModel);
+      if(d.model_hardware_profile)setHyprfitProfile(d.model_hardware_profile);
       settingsLoadedRef.current=true;
     }).catch(()=>{settingsLoadedRef.current=true;});
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
@@ -4778,6 +4783,10 @@ function HyprChat(){
       ]);
     });
   },[authReady,currentUserId]);
+
+  useEffect(()=>{
+    if(authReady&&panel==="models"&&modelsTab==="hyprfit")loadHyprfit();
+  },[authReady,panel,modelsTab]);
 
   // SSE — with exponential backoff reconnection
   useEffect(()=>{
@@ -6661,6 +6670,41 @@ function HyprChat(){
 
   // Refresh models from Ollama (single source of truth)
   const refreshModels=async()=>{try{const r=await fetch(`${API}/api/models`);const d=await r.json();const next=d.models||[];setModels(next);setModelDetails(d.model_details||{});try{const last=localStorage.getItem("hc-last-model")||"";if(last&&next.length&&!next.includes(last))localStorage.setItem("hc-last-model",next[0]||"");}catch{}}catch{}};
+  const loadHyprfit=async()=>{
+    setHyprfitLoading(true);
+    try{
+      const r=await fetch(`${API}/api/models/hyprfit`);
+      const d=await r.json();
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      setHyprfit(d);
+      setHyprfitProfile(d.profile||null);
+    }catch(e){
+      notify({type:"error",text:"HyprFit failed to load",detail:e.message||String(e)});
+    }
+    setHyprfitLoading(false);
+  };
+  const saveHyprfitProfile=async()=>{
+    if(!hyprfitProfile||hyprfitSaving)return;
+    setHyprfitSaving(true);
+    try{
+      const r=await fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({model_hardware_profile:hyprfitProfile})});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      notify({type:"success",text:"HyprFit profile saved",duration:2200});
+      await loadHyprfit();
+    }catch(e){
+      notify({type:"error",text:"HyprFit profile save failed",detail:e.message||String(e)});
+    }
+    setHyprfitSaving(false);
+  };
+  const fillPullFromHyprfit=(name)=>{
+    if(!name)return;
+    setPullName(name);
+    setModelParamsOpen(null);
+    setShowModelfile(false);
+    setModelsTab("ollama");
+    setTimeout(()=>{try{pullInputRef.current?.scrollIntoView({block:"center",behavior:"smooth"});pullInputRef.current?.focus();}catch{}},80);
+  };
 
   const refreshModelProviders=async()=>{
     try{
@@ -6849,6 +6893,7 @@ function HyprChat(){
   };
   const hfSelectModel=async(model)=>{
     setHfSelected(model);setHfModelInfo(null);setHfReadme(null);setHfSelectedFiles([]);
+    setModelParamsOpen(null);
     const repoId=model.id;
     const defaultName=repoId.split("/").pop().toLowerCase().replace(/[^a-z0-9\-:.]/g,"-").slice(0,60);
     setHfDownloadName(defaultName);
@@ -8810,23 +8855,19 @@ function HyprChat(){
         <span style={{display:"flex",color:t.acc}}><IC.Database/></span>
         <div>
           <div style={{fontSize:15,fontWeight:900,color:t.acc,letterSpacing:1.2,textTransform:"uppercase",lineHeight:1}}>Models</div>
-          <div style={{fontSize:10,color:t.mut,marginTop:3}}>{installedModelCount} installed · {hfModelCount} from HuggingFace</div>
+          <div style={{fontSize:10,color:t.mut,marginTop:3}}>{installedModelCount} installed · {hfModelCount} from Hugging Face</div>
         </div>
       </div>
       <div style={{display:"flex",alignItems:"center",gap:4,padding:3,borderRadius:8,border:`1px solid ${t.brd}28`,background:`${t.surface}44`}}>
-        {[["ollama","Installed",installedModelCount],["hf","HuggingFace",hfModelCount]].map(([key,label,count])=>{
+        {[["ollama","Ollama","🦙",installedModelCount],["hf","Hugging Face","🤗",hfModelCount],["hyprfit","HyprFit","⚡",null]].map(([key,label,icon,count])=>{
           const active=modelsTab===key;
-          return <button key={key} onClick={()=>setModelsTab(key)} style={{padding:"7px 13px",borderRadius:7,border:"none",background:active?`${t.acc}18`:"transparent",color:active?t.acc:t.mut,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:active?900:700,display:"flex",alignItems:"center",gap:7,transition:"all .15s"}}>
-            <span>{key==="ollama"?"📦":"🤗"}</span><span>{label}</span><span style={{...mmChipS(active?t.acc:t.mut,active?`${t.acc}12`:`${t.surface}66`),fontSize:8,padding:"1px 5px"}}>{count}</span>
+          return <button key={key} onClick={()=>{setModelsTab(key);setModelParamsOpen(null);setShowModelfile(false);if(key!=="hf")setHfSelected(null);}} style={{padding:"7px 13px",borderRadius:7,border:"none",background:active?`${t.acc}18`:"transparent",color:active?t.acc:t.mut,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:active?900:700,display:"flex",alignItems:"center",gap:7,transition:"all .15s"}}>
+            <span>{icon}</span><span>{label}</span>{count!=null&&<span style={{...mmChipS(active?t.acc:t.mut,active?`${t.acc}12`:`${t.surface}66`),fontSize:8,padding:"1px 5px"}}>{count}</span>}
           </button>;
         })}
       </div>
       <div style={{flex:1}}/>
-      {modelsTab==="ollama"&&<div style={{display:"flex",gap:6,alignItems:"center",minWidth:280,maxWidth:430,flex:"1 1 320px"}}>
-        <input value={pullName} onChange={e=>setPullName(e.target.value)} placeholder="Pull model, e.g. llama3.1:8b" onKeyDown={e=>e.key==="Enter"&&pullModel()} style={{...inputS,flex:1,minWidth:180,fontSize:12,padding:"7px 10px",background:t.bgDeep}}/>
-        <button onClick={pullModel} disabled={!pullName.trim()} style={{...btnS(t.ok),padding:"7px 12px",fontSize:11,flexShrink:0,opacity:pullName.trim()?1:.55}}><IC.Download/> Pull</button>
-      </div>}
-      <button onClick={refreshModels} title="Refresh models" style={mmIconBtnS(t.acc)}><IC.Refresh/></button>
+      <button onClick={modelsTab==="hyprfit"?loadHyprfit:refreshModels} title={modelsTab==="hyprfit"?"Refresh HyprFit":"Refresh models"} style={mmIconBtnS(t.acc)}><IC.Refresh/></button>
     </div>
 
     {/* ── OLLAMA TAB ── */}
@@ -8920,6 +8961,19 @@ function HyprChat(){
         {!modelParamsOpen?
           /* Global defaults shown when nothing is selected */
           <div style={{maxWidth:860}}>
+            <div style={{...mmPanelStrongS,padding:18,marginBottom:16}}>
+              <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:16,flexWrap:"wrap"}}>
+                <div style={{minWidth:220,flex:"1 1 260px"}}>
+                  <div style={mmKickerS}>Ollama pull</div>
+                  <div style={{fontSize:17,fontWeight:900,color:t.text,marginTop:4}}>Pull Ollama model</div>
+                  <div style={{fontSize:12,color:t.mut,marginTop:5,lineHeight:1.45}}>Install a model by name, then tune its overrides from the inventory list.</div>
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"center",flex:"1 1 340px",minWidth:280}}>
+                  <input ref={pullInputRef} value={pullName} onChange={e=>setPullName(e.target.value)} placeholder="llama3.1:8b" onKeyDown={e=>e.key==="Enter"&&pullModel()} style={{...inputS,flex:1,minWidth:180,fontSize:13,padding:"9px 11px",background:t.bgDeep}}/>
+                  <button onClick={pullModel} disabled={!pullName.trim()} style={{...btnS(t.ok),padding:"9px 14px",fontSize:12,flexShrink:0,opacity:pullName.trim()?1:.55}}><IC.Download/> Pull</button>
+                </div>
+              </div>
+            </div>
             <div style={{...mmPanelStrongS,padding:20,marginBottom:16}}>
               <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:14,marginBottom:18,flexWrap:"wrap"}}>
                 <div>
@@ -9117,60 +9171,19 @@ function HyprChat(){
     {/* ── HUGGINGFACE TAB ── */}
     {modelsTab==="hf"&&<div style={{flex:1,display:"flex",overflow:"hidden",background:`${t.bg}22`}}>
 
-      {/* Left: search/installed toggle + results */}
+      {/* Left: search + installed Hugging Face models */}
       <div style={{width:"clamp(360px,30vw,460px)",minWidth:340,borderRight:`1px solid ${t.brd}20`,display:"flex",flexDirection:"column",overflow:"hidden",background:`${t.bgDeep}66`}}>
-        {/* Sub-tab toggle */}
-        <div style={{display:"flex",gap:4,padding:8,borderBottom:`1px solid ${t.brd}18`,flexShrink:0}}>
-          {[["search","🔍 Search"],[true,"📦 Installed"]].map(([key,label])=>{
-            const active=key==="search"?!hfInstalledTab:hfInstalledTab;
-            const count=key===true?hfModelCount:0;
-            return <button key={String(key)} onClick={()=>setHfInstalledTab(key===true)} style={{flex:1,padding:"9px 11px",border:`1px solid ${active?t.acc:t.brd}30`,borderRadius:7,background:active?`${t.acc}14`:`${t.surface}33`,color:active?t.acc:t.mut,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:active?900:700,display:"flex",alignItems:"center",justifyContent:"center",gap:7,transition:"all .15s"}}>
-              {label}{count>0&&key===true&&<span style={{fontSize:9,background:`${t.acc}22`,color:t.acc,padding:"1px 6px",borderRadius:8,border:`1px solid ${t.acc}33`}}>{count}</span>}
-            </button>;
-          })}
+        <div style={{padding:"12px 12px 10px",borderBottom:`1px solid ${t.brd}18`,flexShrink:0}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+            <div>
+              <div style={mmKickerS}>Hugging Face</div>
+              <div style={{fontSize:13,fontWeight:900,color:t.text,marginTop:3}}>Search GGUF models</div>
+            </div>
+            <span style={mmChipS(t.warm)}>{hfModelCount} installed</span>
+          </div>
         </div>
 
-        {/* INSTALLED HF MODELS */}
-        {hfInstalledTab?<div style={{flex:1,overflowY:"auto",padding:"10px 12px 14px"}}>
-          {(()=>{
-            const hfModels=models.filter(m=>m.startsWith("hf.co/"));
-            if(!hfModels.length)return <div style={{...mmPanelS,padding:"30px 14px",textAlign:"center",color:t.mut,fontSize:12,lineHeight:1.6}}>No HuggingFace models installed yet.<br/>Use Search to find and download GGUF models.</div>;
-            return hfModels.map(m=>{
-              const md=modelDetails[m]||{};
-              const quant=(md.details?.quantization_level||"").toUpperCase();
-              const paramSz=md.details?.parameter_size||"";
-              const diskSz=md.size?fmtSize(md.size):"";
-              const isSel=modelParamsOpen===m;
-              const repoPath=m.replace("hf.co/","");
-              const [repoBase,quantTag=""]=repoPath.split(":");
-              const repoName=repoBase.split("/").pop()||repoBase;
-              const caps=capTags(repoName);
-              // add vision cap for VL models
-              const allCaps=[...caps];
-              if(!allCaps.find(c=>c.label==="Vision")&&repoName.toLowerCase().match(/vl|vision|llava/))allCaps.push({label:"Vision",emoji:"👁",color:"#e67e22"});
-              return <div key={m} onClick={()=>{const newSel=isSel?null:m;setModelParamsOpen(newSel);setShowModelfile(false);if(newSel&&!modelInfoCache[newSel]){setModelInfoLoading(true);fetch(`${API}/api/models/${encodeURIComponent(newSel)}/info`).then(r=>r.json()).then(d=>setModelInfoCache(p=>({...p,[newSel]:d}))).catch(()=>{}).finally(()=>setModelInfoLoading(false));}}}
-                style={{padding:"13px 14px",borderRadius:8,marginBottom:7,cursor:"pointer",background:isSel?`${t.acc}14`:`${t.surface}40`,border:`1px solid ${isSel?t.acc:t.brd}${isSel?"55":"18"}`,transition:"all .12s",display:"flex",alignItems:"center",gap:12,boxShadow:isSel?`inset 3px 0 0 ${t.acc}`:"none"}}>
-                <span style={{fontSize:18,flexShrink:0,width:24,textAlign:"center"}}>🤗</span>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontSize:10,color:t.mut,marginBottom:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{repoBase}</div>
-                  <div style={{fontSize:14,fontWeight:800,color:isSel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:5}}>{repoName}</div>
-                  <div style={{display:"flex",gap:4,flexWrap:"wrap",alignItems:"center"}}>
-                    {quant&&(()=>{const qc=quantColor(quant);return <span style={{...mmChipS(qc),fontSize:10,padding:"2px 7px"}}>{quant}</span>;})()}
-                    {paramSz&&<span style={{fontSize:10,color:t.mut}}>{paramSz}</span>}
-                    {diskSz&&<span style={{fontSize:10,color:t.mut}}>{diskSz}</span>}
-                    {allCaps.slice(0,3).map(c=><span key={c.label} style={{...mmChipS(c.color),fontSize:10,padding:"2px 7px",fontWeight:700}}>{c.emoji} {c.label}</span>)}
-                  </div>
-                </div>
-                <div style={{display:"flex",flexDirection:"column",gap:3,flexShrink:0}}>
-                  <button onClick={e=>{e.stopPropagation();patchToolModel(m,"This HuggingFace model can now use tools.");}} disabled={!!makingToolModel} title="Patch modelfile to enable native tool calling" style={{background:makingToolModel===m?`${t.mut}15`:`${t.ok}18`,border:`1px solid ${makingToolModel===m?t.mut:t.ok}44`,color:makingToolModel===m?t.mut:t.ok,cursor:makingToolModel?"wait":"pointer",padding:"5px 8px",borderRadius:6,fontSize:10,fontWeight:800,whiteSpace:"nowrap",transition:"all .15s"}}>{makingToolModel===m?"Patching":"Enable Tools"}</button>
-                  <button onClick={e=>{e.stopPropagation();deleteModel(m);}} title="Delete model" style={{...mmIconBtnS(t.err),width:"100%",height:24,opacity:.45,background:"transparent"}} onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=.45}><IC.Trash/></button>
-                </div>
-                <span style={{fontSize:13,color:isSel?t.acc:t.mut,flexShrink:0,transition:"transform .2s",transform:isSel?"rotate(90deg)":"none"}}>›</span>
-              </div>;
-            });
-          })()}
-        </div>
-        :<>
+        <>
         <div style={{padding:"12px 12px 10px",flexShrink:0,borderBottom:`1px solid ${t.brd}16`}}>
           <div style={{display:"flex",gap:6}}>
             <input value={hfSearch} onChange={e=>setHfSearch(e.target.value)} onKeyDown={e=>e.key==="Enter"&&hfDoSearch(hfSearch)}
@@ -9214,13 +9227,49 @@ function HyprChat(){
               </div>
             </div>;
           })}
+          {(()=>{
+            const hfModels=models.filter(m=>m.startsWith("hf.co/"));
+            if(!hfModels.length)return null;
+            return <div style={{marginTop:hfResults.length?16:4,paddingTop:12,borderTop:`1px solid ${t.brd}18`}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,margin:"0 2px 8px"}}>
+                <span style={mmKickerS}>Installed from Hugging Face</span>
+                <span style={mmMetaS}>{hfModels.length} model{hfModels.length===1?"":"s"}</span>
+              </div>
+              {hfModels.map(m=>{
+                const md=modelDetails[m]||{};
+                const quant=(md.details?.quantization_level||"").toUpperCase();
+                const paramSz=md.details?.parameter_size||"";
+                const diskSz=md.size?fmtSize(md.size):"";
+                const isSel=modelParamsOpen===m;
+                const repoPath=m.replace("hf.co/","");
+                const repoBase=repoPath.split(":")[0];
+                const repoName=repoBase.split("/").pop()||repoBase;
+                const caps=capTags(repoName);
+                return <div key={m} onClick={()=>{const newSel=isSel?null:m;setModelParamsOpen(newSel);setHfSelected(null);setShowModelfile(false);if(newSel&&!modelInfoCache[newSel]){setModelInfoLoading(true);fetch(`${API}/api/models/${encodeURIComponent(newSel)}/info`).then(r=>r.json()).then(d=>setModelInfoCache(p=>({...p,[newSel]:d}))).catch(()=>{}).finally(()=>setModelInfoLoading(false));}}}
+                  style={{padding:"11px 12px",borderRadius:8,marginBottom:7,cursor:"pointer",background:isSel?`${t.acc}14`:`${t.surface}38`,border:`1px solid ${isSel?t.acc:t.brd}${isSel?"55":"18"}`,transition:"all .12s",display:"flex",alignItems:"center",gap:10,boxShadow:isSel?`inset 3px 0 0 ${t.acc}`:"none"}}>
+                  <span style={{fontSize:17,flexShrink:0,width:22,textAlign:"center"}}>🤗</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{repoBase}</div>
+                    <div style={{fontSize:13,fontWeight:900,color:isSel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:2}}>{repoName}</div>
+                    <div style={{display:"flex",gap:4,flexWrap:"wrap",alignItems:"center",marginTop:5}}>
+                      {quant&&<span style={{...mmChipS(quantColor(quant)),fontSize:9,padding:"2px 6px"}}>{quant}</span>}
+                      {paramSz&&<span style={{fontSize:9,color:t.mut}}>{paramSz}</span>}
+                      {diskSz&&<span style={{fontSize:9,color:t.mut}}>{diskSz}</span>}
+                      {caps.slice(0,2).map(c=><span key={c.label} style={{...mmChipS(c.color),fontSize:9,padding:"2px 6px",fontWeight:700}}>{c.emoji} {c.label}</span>)}
+                    </div>
+                  </div>
+                  <span style={{fontSize:13,color:isSel?t.acc:t.mut,flexShrink:0,transition:"transform .2s",transform:isSel?"rotate(90deg)":"none"}}>›</span>
+                </div>;
+              })}
+            </div>;
+          })()}
         </div>
-        </>}
+        </>
       </div>
 
       {/* Right: detail panel — installed model settings OR search detail */}
       <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-        {hfInstalledTab&&modelParamsOpen&&models.includes(modelParamsOpen)?
+        {modelParamsOpen&&modelParamsOpen.startsWith("hf.co/")&&models.includes(modelParamsOpen)?
           /* installed model settings panel */
           <div style={{flex:1,overflowY:"auto",padding:"24px 28px 40px"}}>
             {(()=>{
@@ -9304,14 +9353,6 @@ function HyprChat(){
                 {hasCustom&&<button onClick={()=>setModelParams(p=>{const n={...p};delete n[m];return n;})} style={{...btnS(t.err),fontSize:10,width:"100%",justifyContent:"center"}}>Reset All to Defaults</button>}
               </div>;
             })()}
-          </div>
-        :hfInstalledTab?
-          <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
-            <div style={{...mmPanelS,padding:"28px 34px",textAlign:"center",maxWidth:360}}>
-              <span style={{fontSize:32}}>🤗</span>
-              <div style={{fontSize:14,fontWeight:900,color:t.text,marginTop:10}}>Select an installed model</div>
-              <div style={{fontSize:12,color:t.mut,marginTop:5,lineHeight:1.5}}>Review settings, tool calling, and per-model overrides.</div>
-            </div>
           </div>
         :!hfSelected?<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
           <div style={{...mmPanelS,padding:"28px 34px",textAlign:"center",maxWidth:380}}>
@@ -9410,6 +9451,108 @@ function HyprChat(){
             </div>
           </div>
         </div>}
+      </div>
+    </div>}
+
+    {/* ── HYPRFIT TAB ── */}
+    {modelsTab==="hyprfit"&&<div style={{flex:1,display:"flex",overflow:"hidden",background:`${t.bg}22`}}>
+      <div style={{width:"clamp(340px,28vw,440px)",minWidth:320,borderRight:`1px solid ${t.brd}20`,background:`${t.bgDeep}66`,overflowY:"auto",padding:"18px 18px 28px",boxSizing:"border-box"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:14}}>
+          <div>
+            <div style={mmKickerS}>HyprFit</div>
+            <div style={{fontSize:18,fontWeight:900,color:t.text,marginTop:4}}>Hardware profile</div>
+            <div style={{fontSize:12,color:t.mut,marginTop:5,lineHeight:1.45}}>Saved profile used for model fit and loadout estimates.</div>
+          </div>
+          <button onClick={loadHyprfit} disabled={hyprfitLoading} style={{...mmIconBtnS(t.acc),opacity:hyprfitLoading?0.6:1}}><IC.Refresh/></button>
+        </div>
+        {!hyprfitProfile?<div style={{...mmPanelS,padding:20,color:t.mut,fontSize:12}}>Loading profile...</div>:<div style={{...mmPanelStrongS,padding:16}}>
+          {[
+            ["name","Profile name","text"],
+            ["gpu_name","GPU label","text"],
+          ].map(([key,label,type])=><label key={key} style={{display:"block",marginBottom:11}}>
+            <span style={{display:"block",fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:800,marginBottom:4}}>{label}</span>
+            <input type={type} value={hyprfitProfile[key]||""} onChange={e=>setHyprfitProfile(p=>({...p,[key]:e.target.value}))} style={{...inputS,fontSize:12,padding:"8px 10px",background:t.bgDeep}}/>
+          </label>)}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            {[
+              ["gpu_count","GPUs",1,16,1],
+              ["total_vram_gb","VRAM GB",0,512,1],
+              ["system_ram_gb","RAM GB",1,2048,1],
+              ["max_loaded_models","Warm models",1,32,1],
+              ["num_parallel","Parallel slots",1,16,1],
+            ].map(([key,label,min,max,step])=><label key={key} style={{display:"block",marginBottom:10}}>
+              <span style={{display:"block",fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:800,marginBottom:4}}>{label}</span>
+              <input type="number" min={min} max={max} step={step} value={hyprfitProfile[key]??""} onChange={e=>setHyprfitProfile(p=>({...p,[key]:Number(e.target.value)}))} style={{...inputS,fontSize:12,padding:"8px 10px",background:t.bgDeep}}/>
+            </label>)}
+            <label style={{display:"block",marginBottom:10}}>
+              <span style={{display:"block",fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:800,marginBottom:4}}>KV cache</span>
+              <select value={hyprfitProfile.kv_cache_type||"q8_0"} onChange={e=>setHyprfitProfile(p=>({...p,kv_cache_type:e.target.value}))} style={{...inputS,fontSize:12,padding:"8px 10px",background:t.bgDeep}}>
+                <option value="q8_0">q8_0</option>
+                <option value="f16">f16</option>
+                <option value="q4_0">q4_0</option>
+              </select>
+            </label>
+          </div>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:11,color:t.dim,cursor:"pointer",margin:"2px 0 14px"}}>
+            <input type="checkbox" checked={!!hyprfitProfile.sched_spread} onChange={e=>setHyprfitProfile(p=>({...p,sched_spread:e.target.checked}))} style={{accentColor:t.acc}}/>
+            Spread model across visible GPUs
+          </label>
+          <button onClick={saveHyprfitProfile} disabled={hyprfitSaving} style={{...btnS(t.ok),width:"100%",justifyContent:"center",padding:"9px 14px",fontSize:12,opacity:hyprfitSaving?0.65:1}}>{hyprfitSaving?"Saving...":"Save Hardware Profile"}</button>
+        </div>}
+        {hyprfit?.assumptions?.length>0&&<div style={{...mmPanelS,padding:"12px 14px",marginTop:14}}>
+          <div style={{...mmKickerS,marginBottom:7}}>Estimate notes</div>
+          {hyprfit.assumptions.map((a,i)=><div key={i} style={{fontSize:11,color:t.mut,lineHeight:1.5,marginBottom:i===hyprfit.assumptions.length-1?0:5}}>{a}</div>)}
+        </div>}
+      </div>
+      <div style={{flex:1,overflowY:"auto",padding:"22px 28px 38px"}}>
+        <div style={{maxWidth:1040}}>
+          <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:14,marginBottom:16,flexWrap:"wrap"}}>
+            <div>
+              <div style={mmKickerS}>Model loadout</div>
+              <div style={{fontSize:22,fontWeight:900,color:t.text,marginTop:4}}>HyprFit recommendations</div>
+              <div style={{fontSize:12,color:t.mut,marginTop:5,lineHeight:1.5,maxWidth:620}}>Ranked for the saved hardware profile, current Ollama inventory, warm-model budget, and estimated context memory.</div>
+            </div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"flex-end"}}>
+              <span style={mmChipS(t.acc)}>{hyprfit?.profile?.total_vram_gb??0} GB VRAM</span>
+              <span style={mmChipS(t.warm)}>{hyprfit?.profile?.kv_cache_type||"q8_0"} KV</span>
+              <span style={mmChipS(t.f1)}>{hyprfit?.profile?.max_loaded_models||1} warm</span>
+            </div>
+          </div>
+          {hyprfitLoading&&!hyprfit?<div style={{...mmPanelS,padding:30,color:t.mut,fontSize:12,textAlign:"center"}}>Loading HyprFit recommendations...</div>:
+          hyprfit?.ollama_error?<div style={{...mmPanelS,padding:"11px 13px",marginBottom:14,borderColor:`${t.warm}44`,color:t.warm,fontSize:11}}>Ollama inventory unavailable: {hyprfit.ollama_error}</div>:null}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12}}>
+            {(hyprfit?.recommendations||[]).map(rec=>{
+              const fitColor=rec.fit==="great"?t.ok:rec.fit==="fits"?t.acc:rec.fit==="tight"?t.warm:rec.fit==="too_large"?t.err:t.mut;
+              return <div key={rec.id} style={{...mmPanelStrongS,padding:16,display:"flex",flexDirection:"column",gap:12,minHeight:250,borderColor:`${fitColor}33`}}>
+                <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:10}}>
+                  <div style={{minWidth:0}}>
+                    <div style={mmKickerS}>{rec.purpose}</div>
+                    <div style={{fontSize:17,fontWeight:900,color:t.text,marginTop:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{rec.name}</div>
+                    <div style={{fontSize:11,color:t.mut,marginTop:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{rec.pull_name}</div>
+                  </div>
+                  <span style={mmChipS(fitColor)}>{rec.fit_label}</span>
+                </div>
+                <div style={{fontSize:12,color:t.dim,lineHeight:1.5,minHeight:36}}>{rec.summary}</div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+                  <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>VRAM</div><div style={{fontSize:15,fontWeight:900,color:fitColor,marginTop:4}}>{rec.estimated_vram_gb} GB</div></div>
+                  <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Context</div><div style={{fontSize:15,fontWeight:900,color:t.text,marginTop:4}}>{formatModelCtx(rec.context_tokens)}</div></div>
+                  <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Speed</div><div style={{fontSize:12,fontWeight:900,color:t.text,marginTop:5,lineHeight:1.2}}>{rec.estimated_speed}</div></div>
+                </div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  <span style={mmChipS(t.mut,`${t.surface}66`)}>{rec.params_b}B</span>
+                  <span style={mmChipS(quantColor(rec.quant))}>{rec.quant}</span>
+                  {rec.installed&&<span style={mmChipS(t.ok)}>Installed</span>}
+                </div>
+                <div style={{fontSize:11,color:fitColor,lineHeight:1.45,marginTop:"auto"}}>{rec.fit_note}</div>
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  <button onClick={()=>fillPullFromHyprfit(rec.pull_name)} style={{...btnS(t.acc),padding:"7px 11px",fontSize:11}}><IC.Download/> Fill Pull Field</button>
+                  {rec.installed&&<button onClick={()=>useModelFromManager(rec.installed_name)} style={{...btnS(t.ok),padding:"7px 11px",fontSize:11}}>Use Installed</button>}
+                </div>
+              </div>;
+            })}
+          </div>
+          {!hyprfitLoading&&!(hyprfit?.recommendations||[]).length&&<div style={{...mmPanelS,padding:30,color:t.mut,fontSize:12,textAlign:"center"}}>No recommendations available.</div>}
+        </div>
       </div>
     </div>}
   </div>

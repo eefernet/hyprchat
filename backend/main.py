@@ -1542,6 +1542,285 @@ async def _local_ollama_model_names() -> list[str]:
         raise HTTPException(502, f"Failed to reach Ollama: {e}")
 
 
+HYPRFIT_CATALOG: list[dict[str, Any]] = [
+    {
+        "id": "qwen3-32b",
+        "name": "Qwen 3 32B",
+        "pull_name": "qwen3:32b",
+        "family": "Qwen",
+        "params_b": 32,
+        "quant": "Q4_K_M",
+        "context_tokens": 32768,
+        "purpose": "Daily reasoning",
+        "summary": "Strong general reasoning and coding on high-VRAM Ollama hosts.",
+    },
+    {
+        "id": "qwen25-coder-32b",
+        "name": "Qwen 2.5 Coder 32B",
+        "pull_name": "qwen2.5-coder:32b",
+        "family": "Qwen Coder",
+        "params_b": 32,
+        "quant": "Q4_K_M",
+        "context_tokens": 32768,
+        "purpose": "Coding",
+        "summary": "Best fit when code quality matters more than keeping several large models warm.",
+    },
+    {
+        "id": "deepseek-r1-32b",
+        "name": "DeepSeek R1 32B",
+        "pull_name": "deepseek-r1:32b",
+        "family": "DeepSeek",
+        "params_b": 32,
+        "quant": "Q4_K_M",
+        "context_tokens": 32768,
+        "purpose": "Reasoning",
+        "summary": "Good for deliberate reasoning turns when latency is acceptable.",
+    },
+    {
+        "id": "mistral-small-24b",
+        "name": "Mistral Small 24B",
+        "pull_name": "mistral-small:24b",
+        "family": "Mistral",
+        "params_b": 24,
+        "quant": "Q4_K_M",
+        "context_tokens": 32768,
+        "purpose": "Fast balanced chat",
+        "summary": "Balanced model size for chat, tools, and moderate context.",
+    },
+    {
+        "id": "gemma3-27b",
+        "name": "Gemma 3 27B",
+        "pull_name": "gemma3:27b",
+        "family": "Gemma",
+        "params_b": 27,
+        "quant": "Q4_K_M",
+        "context_tokens": 32768,
+        "purpose": "Creative chat",
+        "summary": "Useful for polished chat and writing while staying below 32B-class weight.",
+    },
+    {
+        "id": "llama31-8b",
+        "name": "Llama 3.1 8B",
+        "pull_name": "llama3.1:8b",
+        "family": "Llama",
+        "params_b": 8,
+        "quant": "Q4_K_M",
+        "context_tokens": 32768,
+        "purpose": "Fast utility",
+        "summary": "Small, quick model that can stay warm alongside larger loadouts.",
+    },
+    {
+        "id": "nomic-embed-text",
+        "name": "Nomic Embed Text",
+        "pull_name": "nomic-embed-text:latest",
+        "family": "Embedding",
+        "params_b": 0.3,
+        "quant": "Q4_K_M",
+        "context_tokens": 8192,
+        "purpose": "Embeddings",
+        "summary": "Lightweight embedding model for local retrieval and utility work.",
+    },
+    {
+        "id": "llama33-70b",
+        "name": "Llama 3.3 70B",
+        "pull_name": "llama3.3:70b",
+        "family": "Llama",
+        "params_b": 70,
+        "quant": "Q4_K_M",
+        "context_tokens": 16384,
+        "purpose": "Large-model ceiling",
+        "summary": "Possible only as a tight solo loadout on 48 GB VRAM; avoid keeping other large models warm.",
+    },
+]
+
+
+def _clean_hyprfit_profile(raw: Any | None = None) -> dict[str, Any]:
+    prior = config.DEFAULT_SETTINGS.get("model_hardware_profile", {})
+    src = raw if isinstance(raw, dict) else {}
+
+    def _num(key: str, fallback: float, minimum: float, maximum: float) -> float:
+        try:
+            value = float(src.get(key, fallback))
+        except (TypeError, ValueError):
+            value = fallback
+        return min(max(value, minimum), maximum)
+
+    def _int(key: str, fallback: int, minimum: int, maximum: int) -> int:
+        return int(round(_num(key, fallback, minimum, maximum)))
+
+    kv = str(src.get("kv_cache_type") or prior.get("kv_cache_type") or "q8_0").strip().lower()
+    if kv not in {"f16", "q8_0", "q4_0"}:
+        kv = "q8_0"
+    return {
+        "name": str(src.get("name") or prior.get("name") or "Ollama host").strip()[:80],
+        "gpu_name": str(src.get("gpu_name") or prior.get("gpu_name") or "GPU").strip()[:80],
+        "gpu_count": _int("gpu_count", int(prior.get("gpu_count", 1)), 0, 16),
+        "total_vram_gb": round(_num("total_vram_gb", float(prior.get("total_vram_gb", 0)), 0, 512), 1),
+        "system_ram_gb": round(_num("system_ram_gb", float(prior.get("system_ram_gb", 16)), 1, 2048), 1),
+        "kv_cache_type": kv,
+        "num_parallel": _int("num_parallel", int(prior.get("num_parallel", 1)), 1, 16),
+        "max_loaded_models": _int("max_loaded_models", int(prior.get("max_loaded_models", 1)), 1, 32),
+        "sched_spread": bool(src.get("sched_spread", prior.get("sched_spread", False))),
+    }
+
+
+def _hyprfit_quant_bytes(quant: str) -> float:
+    q = (quant or "").lower()
+    if q.startswith(("f32", "fp32")):
+        return 4.0
+    if q.startswith(("f16", "fp16", "bf16")):
+        return 2.0
+    if q.startswith("q8"):
+        return 1.05
+    if q.startswith("q6"):
+        return 0.82
+    if q.startswith("q5"):
+        return 0.70
+    if q.startswith("q4"):
+        return 0.58
+    if q.startswith(("q3", "iq3")):
+        return 0.46
+    if q.startswith(("q2", "iq2")):
+        return 0.36
+    return 0.62
+
+
+def _hyprfit_weight_gb(params_b: float, quant: str) -> float:
+    return round(params_b * _hyprfit_quant_bytes(quant), 1)
+
+
+def _hyprfit_kv_gb(params_b: float, ctx_tokens: int, kv_cache_type: str, num_parallel: int) -> float:
+    # A 32B dense GQA model is roughly 128 KB/token at q8_0 KV. Scale by params
+    # as an advisory estimate; exact KV size depends on architecture.
+    kv_factor = {"q4_0": 0.5, "q8_0": 1.0, "f16": 2.0}.get(kv_cache_type, 1.0)
+    gb = (params_b * max(ctx_tokens, 0) / 262144.0) * kv_factor * max(num_parallel, 1)
+    return round(gb, 1)
+
+
+def _hyprfit_speed_label(params_b: float, fit_status: str) -> str:
+    if fit_status == "too_large":
+        return "not recommended"
+    if params_b <= 4:
+        base = "90-140 tok/s"
+    elif params_b <= 9:
+        base = "55-90 tok/s"
+    elif params_b <= 15:
+        base = "35-60 tok/s"
+    elif params_b <= 27:
+        base = "22-40 tok/s"
+    elif params_b <= 34:
+        base = "16-32 tok/s"
+    else:
+        base = "7-15 tok/s"
+    return f"{base}, VRAM-bound" if fit_status == "tight" else base
+
+
+def _hyprfit_model_key(name: str) -> str:
+    s = name.lower()
+    s = s.replace("hf.co/", "")
+    s = re.sub(r"[:/_\-.]+", "", s)
+    return s
+
+
+def _hyprfit_installed_match(pull_name: str, installed: list[str]) -> str:
+    wanted = _hyprfit_model_key(pull_name.split(":")[0])
+    for name in installed:
+        key = _hyprfit_model_key(name)
+        if wanted and wanted in key:
+            return name
+    return ""
+
+
+def _hyprfit_card(entry: dict[str, Any], profile: dict[str, Any], installed: list[str]) -> dict[str, Any]:
+    params_b = float(entry.get("params_b") or 0)
+    ctx = int(entry.get("context_tokens") or 32768)
+    quant = str(entry.get("quant") or "Q4_K_M")
+    weight_gb = _hyprfit_weight_gb(params_b, quant)
+    kv_gb = _hyprfit_kv_gb(params_b, ctx, profile["kv_cache_type"], profile["num_parallel"])
+    overhead_gb = max(1.0, weight_gb * 0.08)
+    total_gb = round(weight_gb + kv_gb + overhead_gb, 1)
+    total_vram = float(profile.get("total_vram_gb") or 0)
+    single_budget = total_vram * 0.90 if total_vram else 0
+    warm_budget = single_budget / max(int(profile.get("max_loaded_models") or 1), 1) if single_budget else 0
+    if total_vram <= 0:
+        fit = "unknown"
+        fit_label = "No GPU profile"
+        note = "Add VRAM to the hardware profile for fit guidance."
+        rank = 1
+    elif total_gb <= warm_budget:
+        fit = "great"
+        fit_label = "Warm-load friendly"
+        note = "Fits inside the per-model warm-load budget."
+        rank = 4
+    elif total_gb <= single_budget:
+        fit = "fits"
+        fit_label = "Fits solo"
+        note = "Fits VRAM, but reduce warm model count for long-context use."
+        rank = 3
+    elif total_gb <= single_budget * 1.18 and float(profile.get("system_ram_gb") or 0) >= 32:
+        fit = "tight"
+        fit_label = "Tight"
+        note = "May spill to system RAM or require shorter context."
+        rank = 2
+    else:
+        fit = "too_large"
+        fit_label = "Too large"
+        note = "Estimated load exceeds the saved VRAM profile."
+        rank = 0
+    installed_name = _hyprfit_installed_match(str(entry["pull_name"]), installed)
+    return {
+        **entry,
+        "installed": bool(installed_name),
+        "installed_name": installed_name,
+        "fit": fit,
+        "fit_label": fit_label,
+        "fit_note": note,
+        "rank": rank + (1 if installed_name else 0),
+        "estimated_vram_gb": total_gb,
+        "estimated_weight_gb": weight_gb,
+        "estimated_kv_gb": kv_gb,
+        "estimated_speed": _hyprfit_speed_label(params_b, fit),
+        "single_model_budget_gb": round(single_budget, 1),
+        "warm_model_budget_gb": round(warm_budget, 1),
+    }
+
+
+@app.get("/api/models/hyprfit")
+async def hyprfit_recommendations():
+    settings = load_settings()
+    profile = _clean_hyprfit_profile(settings.get("model_hardware_profile"))
+    installed_details: dict[str, Any] = {}
+    ollama_error = ""
+    try:
+        r = await http.get(f"{config.OLLAMA_URL}/api/tags")
+        r.raise_for_status()
+        raw = r.json().get("models", [])
+        installed_details = {
+            m.get("name", ""): {
+                "size": m.get("size", 0),
+                "details": m.get("details", {}),
+                "modified_at": m.get("modified_at", ""),
+            }
+            for m in raw
+            if m.get("name")
+        }
+    except Exception as e:
+        ollama_error = str(e)
+    installed = list(installed_details.keys())
+    recommendations = [_hyprfit_card(entry, profile, installed) for entry in HYPRFIT_CATALOG]
+    recommendations.sort(key=lambda r: (r["rank"], r["params_b"]), reverse=True)
+    return {
+        "profile": profile,
+        "recommendations": recommendations,
+        "installed": installed_details,
+        "ollama_error": ollama_error,
+        "assumptions": [
+            "Estimates are advisory and vary by architecture, quantization, context length, and runtime settings.",
+            "Warm-load budget divides VRAM by max_loaded_models; solo fit assumes other large models can unload.",
+        ],
+    }
+
+
 async def _delete_ollama_model(model_name: str) -> dict:
     """Delete a local Ollama model. Tries alternate HF name formats if needed."""
     names_to_try = [model_name]
@@ -6087,6 +6366,7 @@ async def get_app_settings():
         "image_chat_prompt_prefix": config.IMAGE_CHAT_PROMPT_PREFIX,
         "image_chat_negative": config.IMAGE_CHAT_NEGATIVE,
         "image_chat_compose_model": config.IMAGE_CHAT_COMPOSE_MODEL,
+        "model_hardware_profile": _clean_hyprfit_profile(settings.get("model_hardware_profile")),
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
         "sandbox_size_bytes": size,
@@ -6108,7 +6388,8 @@ async def update_app_settings(body: dict = Body(...)):
                "aider_enabled", "aider_model", "aider_num_ctx", "aider_auto_test", "aider_worker_url",
                "default_num_ctx", "research_num_ctx", "quick_search_mode",
                "image_chat_checkpoint", "image_chat_workflow", "image_chat_resolution", "image_chat_vae",
-               "image_chat_prompt_prefix", "image_chat_negative", "image_chat_compose_model"}
+               "image_chat_prompt_prefix", "image_chat_negative", "image_chat_compose_model",
+               "model_hardware_profile"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
@@ -6275,6 +6556,8 @@ async def update_app_settings(body: dict = Body(...)):
         config.QUICK_SEARCH_MODE = _qsm
         settings["quick_search_mode"] = _qsm
         print(f"[Config] Quick Search mode: {config.QUICK_SEARCH_MODE}")
+    if "model_hardware_profile" in body:
+        settings["model_hardware_profile"] = _clean_hyprfit_profile(body.get("model_hardware_profile"))
     # Chat image generation defaults. Checkpoint/VAE values come from the live
     # ComfyUI dropdowns in the UI; stored as-is (a stale name surfaces as a
     # tool_error at generation time, never a crash here).

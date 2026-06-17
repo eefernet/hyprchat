@@ -102,6 +102,17 @@ DEFAULT_SETTINGS = {
         "research_top_k": 4,
         "research_max_chars": 3000,
     },
+    "model_hardware_profile": {
+        "name": "Ollama host",
+        "gpu_name": "2x RTX 3090",
+        "gpu_count": 2,
+        "total_vram_gb": 48,
+        "system_ram_gb": 32,
+        "kv_cache_type": "q8_0",
+        "num_parallel": 1,
+        "max_loaded_models": 3,
+        "sched_spread": True,
+    },
 }
 
 # ============================================================
