@@ -3741,6 +3741,7 @@ function HyprChat(){
   const [hyprfitLoading,setHyprfitLoading]=useState(false);
   const [hyprfitSaving,setHyprfitSaving]=useState(false);
   const [hyprfitProfile,setHyprfitProfile]=useState(null);
+  const [hyprfitCategory,setHyprfitCategory]=useState("for_you");
   const t=THEMES[tm], font=FONTS[fi].v;
   const LIGHT_PAIRS={hyprflat:"oneLight",nord:"oneLight",catppuccin:"oneLight",gruvbox:"oneLight",tokyoNight:"oneLight",rosePine:"oneLight",dracula:"oneLight",midnight:"oneLight",terminal:"oneLight",cyberpunk:"oneLight",solarizedDark:"solarizedLight",materialOcean:"oneLight",ayuDark:"oneLight",oneLight:"hyprflat",solarizedLight:"solarizedDark"};
   const isLightTheme=tm==="oneLight"||tm==="solarizedLight";
@@ -6670,14 +6671,17 @@ function HyprChat(){
 
   // Refresh models from Ollama (single source of truth)
   const refreshModels=async()=>{try{const r=await fetch(`${API}/api/models`);const d=await r.json();const next=d.models||[];setModels(next);setModelDetails(d.model_details||{});try{const last=localStorage.getItem("hc-last-model")||"";if(last&&next.length&&!next.includes(last))localStorage.setItem("hc-last-model",next[0]||"");}catch{}}catch{}};
-  const loadHyprfit=async()=>{
+  const loadHyprfit=async(refresh=false)=>{
     setHyprfitLoading(true);
     try{
-      const r=await fetch(`${API}/api/models/hyprfit`);
+      const params=new URLSearchParams({live:"true"});
+      if(refresh)params.set("refresh","true");
+      const r=await fetch(`${API}/api/models/hyprfit?${params}`);
       const d=await r.json();
       if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
       setHyprfit(d);
       setHyprfitProfile(d.profile||null);
+      if(d.categories?.length&&!d.categories.some(c=>c.id===hyprfitCategory))setHyprfitCategory("for_you");
     }catch(e){
       notify({type:"error",text:"HyprFit failed to load",detail:e.message||String(e)});
     }
@@ -6691,7 +6695,7 @@ function HyprChat(){
       const d=await r.json().catch(()=>({}));
       if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
       notify({type:"success",text:"HyprFit profile saved",duration:2200});
-      await loadHyprfit();
+      await loadHyprfit(false);
     }catch(e){
       notify({type:"error",text:"HyprFit profile save failed",detail:e.message||String(e)});
     }
@@ -8867,7 +8871,7 @@ function HyprChat(){
         })}
       </div>
       <div style={{flex:1}}/>
-      <button onClick={modelsTab==="hyprfit"?loadHyprfit:refreshModels} title={modelsTab==="hyprfit"?"Refresh HyprFit":"Refresh models"} style={mmIconBtnS(t.acc)}><IC.Refresh/></button>
+      <button onClick={modelsTab==="hyprfit"?()=>loadHyprfit(true):refreshModels} title={modelsTab==="hyprfit"?"Refresh HyprFit":"Refresh models"} style={mmIconBtnS(t.acc)}><IC.Refresh/></button>
     </div>
 
     {/* ── OLLAMA TAB ── */}
@@ -9463,7 +9467,7 @@ function HyprChat(){
             <div style={{fontSize:18,fontWeight:900,color:t.text,marginTop:4}}>Hardware profile</div>
             <div style={{fontSize:12,color:t.mut,marginTop:5,lineHeight:1.45}}>Saved profile used for model fit and loadout estimates.</div>
           </div>
-          <button onClick={loadHyprfit} disabled={hyprfitLoading} style={{...mmIconBtnS(t.acc),opacity:hyprfitLoading?0.6:1}}><IC.Refresh/></button>
+          <button onClick={()=>loadHyprfit(true)} disabled={hyprfitLoading} style={{...mmIconBtnS(t.acc),opacity:hyprfitLoading?0.6:1}}><IC.Refresh/></button>
         </div>
         {!hyprfitProfile?<div style={{...mmPanelS,padding:20,color:t.mut,fontSize:12}}>Loading profile...</div>:<div style={{...mmPanelStrongS,padding:16}}>
           {[
@@ -9505,54 +9509,99 @@ function HyprChat(){
         </div>}
       </div>
       <div style={{flex:1,overflowY:"auto",padding:"22px 28px 38px"}}>
-        <div style={{maxWidth:1040}}>
-          <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:14,marginBottom:16,flexWrap:"wrap"}}>
-            <div>
-              <div style={mmKickerS}>Model loadout</div>
-              <div style={{fontSize:22,fontWeight:900,color:t.text,marginTop:4}}>HyprFit recommendations</div>
-              <div style={{fontSize:12,color:t.mut,marginTop:5,lineHeight:1.5,maxWidth:620}}>Ranked for the saved hardware profile, current Ollama inventory, warm-model budget, and estimated context memory.</div>
+        {(()=>{
+          const fallbackCats=[
+            {id:"for_you",label:"For You",summary:"Best fit for this hardware",count:(hyprfit?.recommendations||[]).length},
+            {id:"popular",label:"Popular",count:0},
+            {id:"newest",label:"Newest",count:0},
+            {id:"coding",label:"Coding",count:0},
+            {id:"chat",label:"Chat",count:0},
+            {id:"tool_calling",label:"Tool Calling",count:0},
+            {id:"reasoning",label:"Reasoning",count:0},
+            {id:"moe",label:"MoE",count:0},
+            {id:"long_context",label:"Long Context",count:0},
+            {id:"small_fast",label:"Small/Fast",count:0},
+            {id:"vision",label:"Vision",count:0},
+            {id:"embeddings",label:"Embeddings",count:0},
+          ];
+          const cats=hyprfit?.categories?.length?hyprfit.categories:fallbackCats;
+          const activeCat=cats.some(c=>c.id===hyprfitCategory)?hyprfitCategory:"for_you";
+          const activeMeta=cats.find(c=>c.id===activeCat)||cats[0]||fallbackCats[0];
+          const grouped=hyprfit?.grouped_recommendations||{};
+          const recs=grouped[activeCat]||((activeCat==="for_you")?(hyprfit?.recommendations||[]):[]);
+          const compact=n=>{const v=Number(n||0);if(v>=1000000)return`${(v/1000000).toFixed(v>=10000000?0:1)}m`;if(v>=1000)return`${(v/1000).toFixed(v>=10000?0:1)}k`;return String(v);};
+          const fmtDate=v=>{if(!v)return"";try{return new Date(v).toLocaleDateString();}catch{return v;}};
+          return <div style={{maxWidth:1120}}>
+            <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:14,marginBottom:14,flexWrap:"wrap"}}>
+              <div>
+                <div style={mmKickerS}>Model loadout</div>
+                <div style={{fontSize:22,fontWeight:900,color:t.text,marginTop:4}}>HyprFit recommendations</div>
+                <div style={{fontSize:12,color:t.mut,marginTop:5,lineHeight:1.5,maxWidth:660}}>{activeMeta?.summary||"Ranked for the saved hardware profile, current Ollama inventory, warm-model budget, and estimated context memory."}</div>
+              </div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"flex-end"}}>
+                <span style={mmChipS(t.acc)}>{hyprfit?.profile?.total_vram_gb??0} GB VRAM</span>
+                <span style={mmChipS(t.warm)}>{hyprfit?.profile?.kv_cache_type||"q8_0"} KV</span>
+                <span style={mmChipS(t.f1)}>{hyprfit?.profile?.max_loaded_models||1} warm</span>
+                {hyprfit?.live_enabled&&<span style={mmChipS(t.mut,`${t.surface}66`)}>{hyprfit?.live_count||0} live</span>}
+              </div>
             </div>
-            <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"flex-end"}}>
-              <span style={mmChipS(t.acc)}>{hyprfit?.profile?.total_vram_gb??0} GB VRAM</span>
-              <span style={mmChipS(t.warm)}>{hyprfit?.profile?.kv_cache_type||"q8_0"} KV</span>
-              <span style={mmChipS(t.f1)}>{hyprfit?.profile?.max_loaded_models||1} warm</span>
+            <div style={{display:"flex",gap:7,flexWrap:"wrap",marginBottom:16}}>
+              {cats.map(c=>{
+                const active=c.id===activeCat;
+                const count=c.count??(grouped[c.id]||[]).length;
+                return <button key={c.id} onClick={()=>setHyprfitCategory(c.id)} style={{...btnS(active?t.acc:t.mut,active?`${t.acc}1A`:`${t.surface}44`),padding:"7px 10px",fontSize:10,borderColor:active?`${t.acc}66`:`${t.brd}22`,whiteSpace:"nowrap"}}>
+                  <span>{c.label}</span>
+                  <span style={{...mmChipS(active?t.acc:t.mut,active?`${t.acc}12`:`${t.surface}66`),fontSize:8,padding:"1px 5px"}}>{count}</span>
+                </button>;
+              })}
             </div>
-          </div>
-          {hyprfitLoading&&!hyprfit?<div style={{...mmPanelS,padding:30,color:t.mut,fontSize:12,textAlign:"center"}}>Loading HyprFit recommendations...</div>:
-          hyprfit?.ollama_error?<div style={{...mmPanelS,padding:"11px 13px",marginBottom:14,borderColor:`${t.warm}44`,color:t.warm,fontSize:11}}>Ollama inventory unavailable: {hyprfit.ollama_error}</div>:null}
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12}}>
-            {(hyprfit?.recommendations||[]).map(rec=>{
-              const fitColor=rec.fit==="great"?t.ok:rec.fit==="fits"?t.acc:rec.fit==="tight"?t.warm:rec.fit==="too_large"?t.err:t.mut;
-              return <div key={rec.id} style={{...mmPanelStrongS,padding:16,display:"flex",flexDirection:"column",gap:12,minHeight:250,borderColor:`${fitColor}33`}}>
-                <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:10}}>
-                  <div style={{minWidth:0}}>
-                    <div style={mmKickerS}>{rec.purpose}</div>
-                    <div style={{fontSize:17,fontWeight:900,color:t.text,marginTop:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{rec.name}</div>
-                    <div style={{fontSize:11,color:t.mut,marginTop:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{rec.pull_name}</div>
+            {hyprfitLoading&&!hyprfit?<div style={{...mmPanelS,padding:30,color:t.mut,fontSize:12,textAlign:"center"}}>Loading HyprFit recommendations...</div>:
+            hyprfit?.ollama_error?<div style={{...mmPanelS,padding:"11px 13px",marginBottom:10,borderColor:`${t.warm}44`,color:t.warm,fontSize:11}}>Ollama inventory unavailable: {hyprfit.ollama_error}</div>:null}
+            {hyprfit?.hf_error&&<div style={{...mmPanelS,padding:"11px 13px",marginBottom:10,borderColor:`${t.warm}33`,color:t.mut,fontSize:11}}>Hugging Face discovery unavailable: {hyprfit.hf_error}</div>}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(292px,1fr))",gap:12}}>
+              {recs.map(rec=>{
+                const fitColor=rec.fit==="great"?t.ok:rec.fit==="fits"?t.acc:rec.fit==="tight"?t.warm:rec.fit==="too_large"?t.err:t.mut;
+                const sourceColor=rec.source==="Hugging Face"?t.warm:rec.source==="Curated + HF"?t.f1:t.acc;
+                const modified=fmtDate(rec.lastModified||rec.createdAt);
+                const paramsLabel=`${rec.params_estimated?"~":""}${rec.params_b}B`;
+                return <div key={`${activeCat}-${rec.id}`} style={{...mmPanelStrongS,padding:16,display:"flex",flexDirection:"column",gap:12,minHeight:292,borderColor:`${fitColor}33`}}>
+                  <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:10}}>
+                    <div style={{minWidth:0}}>
+                      <div style={mmKickerS}>{rec.purpose}</div>
+                      <div style={{fontSize:17,fontWeight:900,color:t.text,marginTop:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{rec.name}</div>
+                      <div style={{fontSize:11,color:t.mut,marginTop:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{rec.pull_name}</div>
+                    </div>
+                    <span style={mmChipS(fitColor)}>{rec.fit_label}</span>
                   </div>
-                  <span style={mmChipS(fitColor)}>{rec.fit_label}</span>
-                </div>
-                <div style={{fontSize:12,color:t.dim,lineHeight:1.5,minHeight:36}}>{rec.summary}</div>
-                <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
-                  <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>VRAM</div><div style={{fontSize:15,fontWeight:900,color:fitColor,marginTop:4}}>{rec.estimated_vram_gb} GB</div></div>
-                  <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Context</div><div style={{fontSize:15,fontWeight:900,color:t.text,marginTop:4}}>{formatModelCtx(rec.context_tokens)}</div></div>
-                  <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Speed</div><div style={{fontSize:12,fontWeight:900,color:t.text,marginTop:5,lineHeight:1.2}}>{rec.estimated_speed}</div></div>
-                </div>
-                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                  <span style={mmChipS(t.mut,`${t.surface}66`)}>{rec.params_b}B</span>
-                  <span style={mmChipS(quantColor(rec.quant))}>{rec.quant}</span>
-                  {rec.installed&&<span style={mmChipS(t.ok)}>Installed</span>}
-                </div>
-                <div style={{fontSize:11,color:fitColor,lineHeight:1.45,marginTop:"auto"}}>{rec.fit_note}</div>
-                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                  <button onClick={()=>fillPullFromHyprfit(rec.pull_name)} style={{...btnS(t.acc),padding:"7px 11px",fontSize:11}}><IC.Download/> Fill Pull Field</button>
-                  {rec.installed&&<button onClick={()=>useModelFromManager(rec.installed_name)} style={{...btnS(t.ok),padding:"7px 11px",fontSize:11}}>Use Installed</button>}
-                </div>
-              </div>;
-            })}
-          </div>
-          {!hyprfitLoading&&!(hyprfit?.recommendations||[]).length&&<div style={{...mmPanelS,padding:30,color:t.mut,fontSize:12,textAlign:"center"}}>No recommendations available.</div>}
-        </div>
+                  <div style={{fontSize:12,color:t.dim,lineHeight:1.5,minHeight:54}}>{rec.summary}</div>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>VRAM</div><div style={{fontSize:15,fontWeight:900,color:fitColor,marginTop:4}}>{rec.estimated_vram_gb} GB</div></div>
+                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Context</div><div style={{fontSize:15,fontWeight:900,color:t.text,marginTop:4}}>{formatModelCtx(rec.context_tokens)}</div></div>
+                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Speed</div><div style={{fontSize:12,fontWeight:900,color:t.text,marginTop:5,lineHeight:1.2}}>{rec.estimated_speed}</div></div>
+                  </div>
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+                    <span style={mmChipS(sourceColor)}>{rec.source||"Curated"}</span>
+                    <span style={mmChipS(t.mut,`${t.surface}66`)}>{paramsLabel}</span>
+                    <span style={mmChipS(quantColor(rec.quant))}>{rec.quant}</span>
+                    {rec.installed&&<span style={mmChipS(t.ok)}>Installed</span>}
+                    {(rec.badges||[]).slice(0,3).map(b=><span key={b} style={mmChipS(t.mut,`${t.surface}66`)}>{b}</span>)}
+                  </div>
+                  {(rec.downloads||rec.likes||modified)&&<div style={{display:"flex",gap:10,flexWrap:"wrap",fontSize:10,color:t.mut}}>
+                    {rec.downloads? <span>⬇ {compact(rec.downloads)}</span>:null}
+                    {rec.likes? <span>♥ {compact(rec.likes)}</span>:null}
+                    {modified? <span>{modified}</span>:null}
+                  </div>}
+                  <div style={{fontSize:11,color:fitColor,lineHeight:1.45,marginTop:"auto"}}>{rec.fit_note}</div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                    <button onClick={()=>fillPullFromHyprfit(rec.pull_name)} style={{...btnS(t.acc),padding:"7px 11px",fontSize:11}}><IC.Download/> Fill Pull Field</button>
+                    {rec.installed&&<button onClick={()=>useModelFromManager(rec.installed_name)} style={{...btnS(t.ok),padding:"7px 11px",fontSize:11}}>Use Installed</button>}
+                  </div>
+                </div>;
+              })}
+            </div>
+            {!hyprfitLoading&&!recs.length&&<div style={{...mmPanelS,padding:30,color:t.mut,fontSize:12,textAlign:"center"}}>No recommendations available in {activeMeta?.label||"this category"}.</div>}
+          </div>;
+        })()}
       </div>
     </div>}
   </div>

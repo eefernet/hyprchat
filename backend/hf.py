@@ -44,10 +44,19 @@ def parse_ollama_progress(line: str, final_name: str = "") -> tuple[str | None, 
     return None, None
 
 
-async def hf_search(http, q: str = "", limit: int = 20, gguf_only: bool = True):
+async def hf_search(
+    http,
+    q: str = "",
+    limit: int = 20,
+    gguf_only: bool = True,
+    sort: str = "downloads",
+    direction: int = -1,
+):
     """Search HuggingFace models."""
     try:
-        params: dict = {"search": q, "limit": limit, "sort": "downloads", "direction": -1}
+        sort = sort if sort in {"downloads", "likes", "lastModified", "createdAt"} else "downloads"
+        direction = -1 if int(direction) < 0 else 1
+        params: dict = {"search": q, "limit": limit, "sort": sort, "direction": direction}
         if gguf_only:
             params["filter"] = "gguf"
         r = await http.get("https://huggingface.co/api/models", params=params, timeout=15)
@@ -59,6 +68,7 @@ async def hf_search(http, q: str = "", limit: int = 20, gguf_only: bool = True):
                 "downloads": m.get("downloads", 0),
                 "likes": m.get("likes", 0),
                 "lastModified": m.get("lastModified", ""),
+                "createdAt": m.get("createdAt", ""),
                 "tags": (m.get("tags") or [])[:10],
                 "pipeline_tag": m.get("pipeline_tag", ""),
             }

@@ -1542,6 +1542,22 @@ async def _local_ollama_model_names() -> list[str]:
         raise HTTPException(502, f"Failed to reach Ollama: {e}")
 
 
+HYPRFIT_CATEGORIES: list[dict[str, str]] = [
+    {"id": "for_you", "label": "For You", "summary": "Best fit for the saved hardware profile."},
+    {"id": "popular", "label": "Popular", "summary": "High-interest local model families and live HF download leaders."},
+    {"id": "newest", "label": "Newest", "summary": "Recent GGUF releases from Hugging Face discovery."},
+    {"id": "coding", "label": "Coding", "summary": "Code generation, refactor, and debugging models."},
+    {"id": "chat", "label": "Chat", "summary": "General assistants, writing, and daily conversation."},
+    {"id": "tool_calling", "label": "Tool Calling", "summary": "Models with good tool-use or tool-patching prospects."},
+    {"id": "reasoning", "label": "Reasoning", "summary": "Thinking and deliberate problem-solving models."},
+    {"id": "moe", "label": "MoE", "summary": "Mixture-of-experts model families."},
+    {"id": "long_context", "label": "Long Context", "summary": "Models worth considering for larger context windows."},
+    {"id": "small_fast", "label": "Small/Fast", "summary": "Fast utility models that can stay warm beside larger models."},
+    {"id": "vision", "label": "Vision", "summary": "Multimodal models where Ollama support is available."},
+    {"id": "embeddings", "label": "Embeddings", "summary": "Local retrieval and semantic search models."},
+]
+
+
 HYPRFIT_CATALOG: list[dict[str, Any]] = [
     {
         "id": "qwen3-32b",
@@ -1553,6 +1569,21 @@ HYPRFIT_CATALOG: list[dict[str, Any]] = [
         "context_tokens": 32768,
         "purpose": "Daily reasoning",
         "summary": "Strong general reasoning and coding on high-VRAM Ollama hosts.",
+        "categories": ["popular", "chat", "coding", "tool_calling", "reasoning", "long_context"],
+        "badges": ["balanced", "thinking"],
+    },
+    {
+        "id": "qwen3-14b",
+        "name": "Qwen 3 14B",
+        "pull_name": "qwen3:14b",
+        "family": "Qwen",
+        "params_b": 14,
+        "quant": "Q4_K_M",
+        "context_tokens": 32768,
+        "purpose": "Efficient reasoning",
+        "summary": "Smaller Qwen reasoning loadout that leaves more room for warm models.",
+        "categories": ["chat", "tool_calling", "reasoning", "small_fast"],
+        "badges": ["efficient"],
     },
     {
         "id": "qwen25-coder-32b",
@@ -1564,6 +1595,21 @@ HYPRFIT_CATALOG: list[dict[str, Any]] = [
         "context_tokens": 32768,
         "purpose": "Coding",
         "summary": "Best fit when code quality matters more than keeping several large models warm.",
+        "categories": ["popular", "coding", "tool_calling", "long_context"],
+        "badges": ["code"],
+    },
+    {
+        "id": "qwen25-coder-14b",
+        "name": "Qwen 2.5 Coder 14B",
+        "pull_name": "qwen2.5-coder:14b",
+        "family": "Qwen Coder",
+        "params_b": 14,
+        "quant": "Q4_K_M",
+        "context_tokens": 32768,
+        "purpose": "Fast coding",
+        "summary": "Code-focused daily driver that is easier to keep warm.",
+        "categories": ["coding", "tool_calling", "small_fast"],
+        "badges": ["code", "fast"],
     },
     {
         "id": "deepseek-r1-32b",
@@ -1575,6 +1621,21 @@ HYPRFIT_CATALOG: list[dict[str, Any]] = [
         "context_tokens": 32768,
         "purpose": "Reasoning",
         "summary": "Good for deliberate reasoning turns when latency is acceptable.",
+        "categories": ["popular", "reasoning"],
+        "badges": ["thinking"],
+    },
+    {
+        "id": "deepseek-r1-14b",
+        "name": "DeepSeek R1 14B",
+        "pull_name": "deepseek-r1:14b",
+        "family": "DeepSeek",
+        "params_b": 14,
+        "quant": "Q4_K_M",
+        "context_tokens": 32768,
+        "purpose": "Fast reasoning",
+        "summary": "Reasoning-focused model that is more practical for warm-load setups.",
+        "categories": ["reasoning", "small_fast"],
+        "badges": ["thinking", "fast"],
     },
     {
         "id": "mistral-small-24b",
@@ -1586,6 +1647,34 @@ HYPRFIT_CATALOG: list[dict[str, Any]] = [
         "context_tokens": 32768,
         "purpose": "Fast balanced chat",
         "summary": "Balanced model size for chat, tools, and moderate context.",
+        "categories": ["popular", "chat", "tool_calling"],
+        "badges": ["balanced"],
+    },
+    {
+        "id": "mistral-nemo-12b",
+        "name": "Mistral Nemo 12B",
+        "pull_name": "mistral-nemo:12b",
+        "family": "Mistral",
+        "params_b": 12,
+        "quant": "Q4_K_M",
+        "context_tokens": 32768,
+        "purpose": "Small chat",
+        "summary": "Useful general assistant for fast responses and lower VRAM pressure.",
+        "categories": ["chat", "tool_calling", "small_fast"],
+        "badges": ["fast"],
+    },
+    {
+        "id": "codestral-22b",
+        "name": "Codestral 22B",
+        "pull_name": "codestral:22b",
+        "family": "Mistral",
+        "params_b": 22,
+        "quant": "Q4_K_M",
+        "context_tokens": 32768,
+        "purpose": "Coding",
+        "summary": "Code-specialized model that fits between 14B utility and 32B coder loadouts.",
+        "categories": ["coding", "long_context"],
+        "badges": ["code"],
     },
     {
         "id": "gemma3-27b",
@@ -1597,6 +1686,21 @@ HYPRFIT_CATALOG: list[dict[str, Any]] = [
         "context_tokens": 32768,
         "purpose": "Creative chat",
         "summary": "Useful for polished chat and writing while staying below 32B-class weight.",
+        "categories": ["popular", "chat", "vision"],
+        "badges": ["writing"],
+    },
+    {
+        "id": "gemma3-12b",
+        "name": "Gemma 3 12B",
+        "pull_name": "gemma3:12b",
+        "family": "Gemma",
+        "params_b": 12,
+        "quant": "Q4_K_M",
+        "context_tokens": 32768,
+        "purpose": "Efficient chat",
+        "summary": "Compact chat model for writing, summaries, and quick assistant turns.",
+        "categories": ["chat", "vision", "small_fast"],
+        "badges": ["fast"],
     },
     {
         "id": "llama31-8b",
@@ -1608,17 +1712,8 @@ HYPRFIT_CATALOG: list[dict[str, Any]] = [
         "context_tokens": 32768,
         "purpose": "Fast utility",
         "summary": "Small, quick model that can stay warm alongside larger loadouts.",
-    },
-    {
-        "id": "nomic-embed-text",
-        "name": "Nomic Embed Text",
-        "pull_name": "nomic-embed-text:latest",
-        "family": "Embedding",
-        "params_b": 0.3,
-        "quant": "Q4_K_M",
-        "context_tokens": 8192,
-        "purpose": "Embeddings",
-        "summary": "Lightweight embedding model for local retrieval and utility work.",
+        "categories": ["popular", "chat", "tool_calling", "small_fast"],
+        "badges": ["fast"],
     },
     {
         "id": "llama33-70b",
@@ -1630,8 +1725,155 @@ HYPRFIT_CATALOG: list[dict[str, Any]] = [
         "context_tokens": 16384,
         "purpose": "Large-model ceiling",
         "summary": "Possible only as a tight solo loadout on 48 GB VRAM; avoid keeping other large models warm.",
+        "categories": ["popular", "chat", "tool_calling"],
+        "badges": ["solo"],
+    },
+    {
+        "id": "command-r-35b",
+        "name": "Command R 35B",
+        "pull_name": "command-r:35b",
+        "family": "Command R",
+        "params_b": 35,
+        "quant": "Q4_K_M",
+        "context_tokens": 32768,
+        "purpose": "Tool-friendly chat",
+        "summary": "Good candidate for RAG and tool-heavy assistant workflows when run solo.",
+        "categories": ["chat", "tool_calling", "long_context"],
+        "badges": ["tools"],
+    },
+    {
+        "id": "mixtral-8x7b",
+        "name": "Mixtral 8x7B",
+        "pull_name": "mixtral:8x7b",
+        "family": "Mixtral",
+        "params_b": 47,
+        "quant": "Q4_K_M",
+        "context_tokens": 32768,
+        "purpose": "MoE chat",
+        "summary": "Classic MoE option for broad chat and instruction-following tests.",
+        "categories": ["chat", "moe", "tool_calling"],
+        "badges": ["moe"],
+    },
+    {
+        "id": "mixtral-8x22b",
+        "name": "Mixtral 8x22B",
+        "pull_name": "mixtral:8x22b",
+        "family": "Mixtral",
+        "params_b": 141,
+        "quant": "Q4_K_M",
+        "context_tokens": 16384,
+        "purpose": "Large MoE",
+        "summary": "Aspirational MoE loadout; useful mainly to show fit limits on this hardware.",
+        "categories": ["moe"],
+        "badges": ["moe", "solo"],
+    },
+    {
+        "id": "llama32-vision-11b",
+        "name": "Llama 3.2 Vision 11B",
+        "pull_name": "llama3.2-vision:11b",
+        "family": "Llama Vision",
+        "params_b": 11,
+        "quant": "Q4_K_M",
+        "context_tokens": 16384,
+        "purpose": "Vision",
+        "summary": "Multimodal model for image-aware chats when vision support is needed.",
+        "categories": ["vision", "chat", "small_fast"],
+        "badges": ["vision"],
+    },
+    {
+        "id": "llava-13b",
+        "name": "LLaVA 13B",
+        "pull_name": "llava:13b",
+        "family": "LLaVA",
+        "params_b": 13,
+        "quant": "Q4_K_M",
+        "context_tokens": 8192,
+        "purpose": "Vision",
+        "summary": "Established image-understanding option for local multimodal checks.",
+        "categories": ["vision"],
+        "badges": ["vision"],
+    },
+    {
+        "id": "phi3-mini",
+        "name": "Phi-3 Mini",
+        "pull_name": "phi3:mini",
+        "family": "Phi",
+        "params_b": 3.8,
+        "quant": "Q4_K_M",
+        "context_tokens": 8192,
+        "purpose": "Tiny utility",
+        "summary": "Very small model for quick routing, summaries, and low-latency utility work.",
+        "categories": ["small_fast", "chat"],
+        "badges": ["tiny"],
+    },
+    {
+        "id": "nomic-embed-text",
+        "name": "Nomic Embed Text",
+        "pull_name": "nomic-embed-text:latest",
+        "family": "Embedding",
+        "params_b": 0.3,
+        "quant": "Q4_K_M",
+        "context_tokens": 8192,
+        "purpose": "Embeddings",
+        "summary": "Lightweight embedding model for local retrieval and utility work.",
+        "categories": ["embeddings", "small_fast"],
+        "badges": ["rag"],
+    },
+    {
+        "id": "mxbai-embed-large",
+        "name": "MXBAI Embed Large",
+        "pull_name": "mxbai-embed-large:latest",
+        "family": "Embedding",
+        "params_b": 0.3,
+        "quant": "Q4_K_M",
+        "context_tokens": 512,
+        "purpose": "Embeddings",
+        "summary": "Popular local embedding option for semantic retrieval experiments.",
+        "categories": ["embeddings", "small_fast"],
+        "badges": ["rag"],
+    },
+    {
+        "id": "bge-m3",
+        "name": "BGE-M3",
+        "pull_name": "bge-m3:latest",
+        "family": "Embedding",
+        "params_b": 0.6,
+        "quant": "Q4_K_M",
+        "context_tokens": 8192,
+        "purpose": "Embeddings",
+        "summary": "Multilingual embedding candidate for broader retrieval workloads.",
+        "categories": ["embeddings", "long_context"],
+        "badges": ["rag"],
     },
 ]
+
+
+HYPRFIT_LIVE_SEARCHES: dict[str, list[dict[str, Any]]] = {
+    "popular": [{"q": "", "sort": "downloads", "limit": 12}],
+    "newest": [{"q": "", "sort": "lastModified", "limit": 12}],
+    "coding": [
+        {"q": "coder", "sort": "downloads", "limit": 8},
+        {"q": "codestral", "sort": "downloads", "limit": 6},
+    ],
+    "chat": [
+        {"q": "instruct", "sort": "downloads", "limit": 8},
+        {"q": "chat", "sort": "downloads", "limit": 6},
+    ],
+    "tool_calling": [
+        {"q": "tool", "sort": "downloads", "limit": 6},
+        {"q": "function calling", "sort": "downloads", "limit": 6},
+    ],
+    "reasoning": [
+        {"q": "reasoning", "sort": "downloads", "limit": 6},
+        {"q": "deepseek r1", "sort": "downloads", "limit": 6},
+    ],
+    "moe": [
+        {"q": "moe", "sort": "downloads", "limit": 6},
+        {"q": "mixtral", "sort": "downloads", "limit": 6},
+    ],
+}
+
+_HYPRFIT_HF_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
 def _clean_hyprfit_profile(raw: Any | None = None) -> dict[str, Any]:
@@ -1731,6 +1973,213 @@ def _hyprfit_installed_match(pull_name: str, installed: list[str]) -> str:
     return ""
 
 
+def _hyprfit_clean_categories(values: Any) -> list[str]:
+    valid = {c["id"] for c in HYPRFIT_CATEGORIES}
+    cats: list[str] = []
+    for value in values or []:
+        cat = str(value or "").strip()
+        if cat in valid and cat != "for_you" and cat not in cats:
+            cats.append(cat)
+    return cats
+
+
+def _hyprfit_infer_params_b(text: str, pipeline_tag: str = "") -> tuple[float, bool]:
+    lower = text.lower()
+    moe = re.search(r"(?<![a-z0-9])(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*b\b", lower)
+    if moe:
+        return round(float(moe.group(1)) * float(moe.group(2)), 1), False
+    matches = re.findall(r"(?<![a-z0-9])(\d+(?:\.\d+)?)\s*b\b", lower)
+    if matches:
+        return float(matches[-1]), False
+    if "embed" in lower or pipeline_tag == "feature-extraction":
+        return 0.5, True
+    return 7.0, True
+
+
+def _hyprfit_infer_quant(text: str) -> str:
+    upper = text.upper().replace("-", "_")
+    for pattern in (
+        r"IQ4_[A-Z0-9_]+",
+        r"IQ3_[A-Z0-9_]+",
+        r"Q8_0",
+        r"Q6_K(?:_[A-Z])?",
+        r"Q5_K(?:_[A-Z])?",
+        r"Q4_K(?:_[A-Z])?",
+        r"Q4_0",
+        r"Q3_K(?:_[A-Z])?",
+        r"Q2_K",
+    ):
+        m = re.search(pattern, upper)
+        if m:
+            return m.group(0)
+    return "Q4_K_M"
+
+
+def _hyprfit_infer_context(text: str, categories: list[str]) -> int:
+    lower = text.lower()
+    if re.search(r"1m|1000k|1024k", lower):
+        return 1_000_000
+    for value in (512, 256, 200, 128, 64, 32, 16, 8):
+        if re.search(rf"(?<!\d){value}\s*k\b", lower):
+            return value * 1024
+    if "long_context" in categories:
+        return 65_536
+    if "vision" in categories:
+        return 16_384
+    if "embeddings" in categories:
+        return 8_192
+    return 32_768
+
+
+def _hyprfit_infer_categories(text: str, pipeline_tag: str, params_b: float) -> list[str]:
+    lower = text.lower()
+    cats: list[str] = []
+
+    def add(cat: str):
+        if cat not in cats:
+            cats.append(cat)
+
+    if pipeline_tag == "feature-extraction" or re.search(r"embed|bge|e5-|gte-|nomic", lower):
+        add("embeddings")
+    if pipeline_tag in {"image-text-to-text", "image-to-text"} or re.search(r"llava|vision|\bvl\b|multimodal|mmproj", lower):
+        add("vision")
+    if re.search(r"coder|coding|code|codestral|starcoder|devstral|deepseek-coder", lower):
+        add("coding")
+    if re.search(r"tool|function|command-r|hermes|firefunction", lower):
+        add("tool_calling")
+    if re.search(r"reason|thinking|deepseek-r1|r1-|qwq|reflection|qwen3", lower):
+        add("reasoning")
+    if re.search(r"mixtral|moe|dbrx|jamba|arctic|8x\d+", lower):
+        add("moe")
+    if re.search(r"128k|200k|256k|512k|1m|long-context|long_context", lower):
+        add("long_context")
+    if 0 < params_b <= 14:
+        add("small_fast")
+    if not any(c in cats for c in ("embeddings", "vision")):
+        add("chat")
+    return cats
+
+
+def _hyprfit_pretty_name(repo_id: str) -> str:
+    base = repo_id.split("/")[-1]
+    base = re.sub(r"[-_]+", " ", base)
+    base = re.sub(r"\bgguf\b", "", base, flags=re.I)
+    return re.sub(r"\s+", " ", base).strip()[:80] or repo_id
+
+
+def _hyprfit_live_entry(model: dict[str, Any], category: str) -> dict[str, Any] | None:
+    repo_id = str(model.get("id") or "").strip()
+    if not repo_id:
+        return None
+    tags = [str(t) for t in model.get("tags") or []]
+    text = " ".join([repo_id, model.get("pipeline_tag") or "", *tags])
+    params_b, estimated_params = _hyprfit_infer_params_b(text, str(model.get("pipeline_tag") or ""))
+    inferred = _hyprfit_infer_categories(text, str(model.get("pipeline_tag") or ""), params_b)
+    categories = _hyprfit_clean_categories([category, *inferred])
+    quant = _hyprfit_infer_quant(text)
+    ctx = _hyprfit_infer_context(text, categories)
+    badges = ["HF"]
+    if estimated_params:
+        badges.append("estimated size")
+    if category == "newest":
+        badges.append("recent")
+    return {
+        "id": f"hf-{_hyprfit_model_key(repo_id)[:60]}",
+        "name": _hyprfit_pretty_name(repo_id),
+        "pull_name": f"hf.co/{repo_id}",
+        "family": repo_id.split("/")[0],
+        "params_b": params_b,
+        "params_estimated": estimated_params,
+        "quant": quant,
+        "context_tokens": ctx,
+        "purpose": next((c["label"] for c in HYPRFIT_CATEGORIES if c["id"] == category), "Hugging Face"),
+        "summary": "Live GGUF discovery from Hugging Face; inspect the repo if it contains multiple quant files.",
+        "categories": categories,
+        "badges": badges,
+        "source": "Hugging Face",
+        "downloads": int(model.get("downloads") or 0),
+        "likes": int(model.get("likes") or 0),
+        "lastModified": model.get("lastModified") or "",
+        "createdAt": model.get("createdAt") or "",
+        "pipeline_tag": model.get("pipeline_tag") or "",
+    }
+
+
+async def _hyprfit_hf_search(category: str, spec: dict[str, Any], refresh: bool) -> tuple[list[dict[str, Any]], str]:
+    q = str(spec.get("q") or "")
+    sort = str(spec.get("sort") or "downloads")
+    limit = int(spec.get("limit") or 8)
+    cache_key = json.dumps({"category": category, "q": q, "sort": sort, "limit": limit}, sort_keys=True)
+    cached = _HYPRFIT_HF_CACHE.get(cache_key)
+    if cached and not refresh and time.time() - cached[0] < 900:
+        return cached[1], ""
+    try:
+        data = await asyncio.wait_for(
+            hf_module.hf_search(http, q=q, limit=limit, gguf_only=True, sort=sort, direction=-1),
+            timeout=5,
+        )
+        entries = [entry for item in data if (entry := _hyprfit_live_entry(item, category))]
+        _HYPRFIT_HF_CACHE[cache_key] = (time.time(), entries)
+        return entries, ""
+    except Exception as e:
+        return [], str(e)
+
+
+async def _hyprfit_live_catalog(refresh: bool) -> tuple[list[dict[str, Any]], list[str]]:
+    tasks = [
+        _hyprfit_hf_search(category, spec, refresh)
+        for category, specs in HYPRFIT_LIVE_SEARCHES.items()
+        for spec in specs
+    ]
+    if not tasks:
+        return [], []
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    entries: list[dict[str, Any]] = []
+    errors: list[str] = []
+    seen_error: set[str] = set()
+    for result in results:
+        if isinstance(result, Exception):
+            err = str(result)
+            if err and err not in seen_error:
+                errors.append(err)
+                seen_error.add(err)
+            continue
+        batch, err = result
+        entries.extend(batch)
+        if err and err not in seen_error:
+            errors.append(err)
+            seen_error.add(err)
+    return entries, errors[:3]
+
+
+def _hyprfit_merge_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        pull_name = str(entry.get("pull_name") or entry.get("id") or "")
+        key = _hyprfit_model_key(pull_name)
+        if not key:
+            continue
+        if key not in merged:
+            merged[key] = {
+                **entry,
+                "categories": _hyprfit_clean_categories(entry.get("categories")),
+                "badges": list(dict.fromkeys(entry.get("badges") or [])),
+                "source": entry.get("source") or "Curated",
+            }
+            continue
+        prior = merged[key]
+        prior["categories"] = _hyprfit_clean_categories([*prior.get("categories", []), *entry.get("categories", [])])
+        prior["badges"] = list(dict.fromkeys([*prior.get("badges", []), *entry.get("badges", [])]))
+        for field in ("downloads", "likes"):
+            prior[field] = max(int(prior.get(field) or 0), int(entry.get(field) or 0))
+        for field in ("lastModified", "createdAt"):
+            if str(entry.get(field) or "") > str(prior.get(field) or ""):
+                prior[field] = entry.get(field)
+        if prior.get("source") != entry.get("source") and entry.get("source"):
+            prior["source"] = "Curated + HF" if prior.get("source") == "Curated" else prior.get("source")
+    return list(merged.values())
+
+
 def _hyprfit_card(entry: dict[str, Any], profile: dict[str, Any], installed: list[str]) -> dict[str, Any]:
     params_b = float(entry.get("params_b") or 0)
     ctx = int(entry.get("context_tokens") or 32768)
@@ -1770,6 +2219,9 @@ def _hyprfit_card(entry: dict[str, Any], profile: dict[str, Any], installed: lis
     installed_name = _hyprfit_installed_match(str(entry["pull_name"]), installed)
     return {
         **entry,
+        "categories": _hyprfit_clean_categories(entry.get("categories")),
+        "badges": list(dict.fromkeys(entry.get("badges") or [])),
+        "source": entry.get("source") or "Curated",
         "installed": bool(installed_name),
         "installed_name": installed_name,
         "fit": fit,
@@ -1785,8 +2237,58 @@ def _hyprfit_card(entry: dict[str, Any], profile: dict[str, Any], installed: lis
     }
 
 
+def _hyprfit_sort_key(card: dict[str, Any], category: str) -> tuple:
+    if category == "newest":
+        return (
+            str(card.get("lastModified") or card.get("createdAt") or ""),
+            int(card.get("downloads") or 0),
+            int(card.get("rank") or 0),
+        )
+    if category == "popular":
+        return (
+            int(card.get("downloads") or 0),
+            int(card.get("likes") or 0),
+            int(card.get("rank") or 0),
+        )
+    if category == "small_fast":
+        return (
+            int(card.get("rank") or 0),
+            -float(card.get("params_b") or 0),
+            int(card.get("downloads") or 0),
+        )
+    return (
+        int(card.get("rank") or 0),
+        1 if card.get("source") == "Curated" else 0,
+        int(card.get("downloads") or 0),
+        float(card.get("params_b") or 0),
+    )
+
+
+def _hyprfit_group_cards(cards: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {c["id"]: [] for c in HYPRFIT_CATEGORIES}
+    usable = [c for c in cards if c.get("fit") != "too_large"]
+    grouped["for_you"] = sorted(
+        usable or cards,
+        key=lambda card: (
+            int(card.get("rank") or 0),
+            1 if card.get("installed") else 0,
+            1 if card.get("source") == "Curated" else 0,
+            float(card.get("params_b") or 0),
+        ),
+        reverse=True,
+    )[:24]
+    for card in cards:
+        for category in _hyprfit_clean_categories(card.get("categories")):
+            grouped.setdefault(category, []).append(card)
+    for category, rows in grouped.items():
+        if category == "for_you":
+            continue
+        grouped[category] = sorted(rows, key=lambda card, cat=category: _hyprfit_sort_key(card, cat), reverse=True)[:32]
+    return grouped
+
+
 @app.get("/api/models/hyprfit")
-async def hyprfit_recommendations():
+async def hyprfit_recommendations(refresh: bool = False, live: bool = True):
     settings = load_settings()
     profile = _clean_hyprfit_profile(settings.get("model_hardware_profile"))
     installed_details: dict[str, Any] = {}
@@ -1807,16 +2309,28 @@ async def hyprfit_recommendations():
     except Exception as e:
         ollama_error = str(e)
     installed = list(installed_details.keys())
-    recommendations = [_hyprfit_card(entry, profile, installed) for entry in HYPRFIT_CATALOG]
-    recommendations.sort(key=lambda r: (r["rank"], r["params_b"]), reverse=True)
+    live_entries: list[dict[str, Any]] = []
+    hf_errors: list[str] = []
+    if live:
+        live_entries, hf_errors = await _hyprfit_live_catalog(refresh)
+    entries = _hyprfit_merge_entries([*HYPRFIT_CATALOG, *live_entries])
+    cards = [_hyprfit_card(entry, profile, installed) for entry in entries]
+    grouped = _hyprfit_group_cards(cards)
+    category_counts = {category["id"]: len(grouped.get(category["id"], [])) for category in HYPRFIT_CATEGORIES}
     return {
         "profile": profile,
-        "recommendations": recommendations,
+        "categories": [{**category, "count": category_counts.get(category["id"], 0)} for category in HYPRFIT_CATEGORIES],
+        "recommendations": grouped.get("for_you", []),
+        "grouped_recommendations": grouped,
         "installed": installed_details,
         "ollama_error": ollama_error,
+        "hf_error": "; ".join(hf_errors),
+        "live_enabled": live,
+        "live_count": len(live_entries),
         "assumptions": [
             "Estimates are advisory and vary by architecture, quantization, context length, and runtime settings.",
             "Warm-load budget divides VRAM by max_loaded_models; solo fit assumes other large models can unload.",
+            "Hugging Face discovery is best-effort and falls back to curated entries when unavailable.",
         ],
     }
 
@@ -6868,8 +7382,8 @@ async def get_token_summary():
 # HUGGINGFACE MODEL BROWSER (delegated to hf module)
 # ============================================================
 @app.get("/api/hf/search")
-async def hf_search_ep(q: str = "", limit: int = 20, gguf_only: bool = True):
-    return await hf_module.hf_search(http, q, limit, gguf_only)
+async def hf_search_ep(q: str = "", limit: int = 20, gguf_only: bool = True, sort: str = "downloads", direction: int = -1):
+    return await hf_module.hf_search(http, q, limit, gguf_only, sort, direction)
 
 @app.get("/api/hf/model")
 async def hf_model_info_ep(repo_id: str):
