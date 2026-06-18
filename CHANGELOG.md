@@ -1,3 +1,22 @@
+# Alpha v17.3.1 — June 18, 2026
+
+> Adds remote Ollama-aware HyprFit hardware profiling and clearer rescan status.
+
+## HyprFit
+- Rescan Hardware can now resolve the configured Ollama host used for model recommendations.
+- Remote Ollama profiles keep saved GPU/RAM capacity as the source of truth for fit estimates.
+- Remote availability checks use Ollama HTTP endpoints such as `/api/version`, `/api/tags`, and runtime state.
+- Local Ollama hosts continue to support automatic accelerator detection.
+
+## UI
+- New HyprFit rescan toasts distinguish local detection, remote verification, unreachable Ollama, and missing profile data.
+- New hardware profile chips show rescan mode, Ollama reachability, and the sanitized Ollama origin.
+
+## Deployment
+- `deploy_monitor.py` now includes the HyprFit backend module in watched deploy files.
+
+---
+
 # Alpha v17.3.0 — June 17, 2026
 
 > Adds the local media stack, persona-aware image generation, voice input/output,

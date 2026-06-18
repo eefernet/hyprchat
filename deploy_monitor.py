@@ -65,6 +65,7 @@ WATCHED = {
     "backend/events.py":            ("Events",           REMOTE_BACKEND,            True),
     "backend/council.py":           ("Council",          REMOTE_BACKEND,            True),
     "backend/hf.py":                ("HuggingFace",      REMOTE_BACKEND,            True),
+    "backend/hyprfit.py":           ("HyprFit",          REMOTE_BACKEND,            True),
     "backend/openhands_worker.py":  ("OpenHands Worker", REMOTE_OPENHANDS_WORKER,   False),
     "backend/agents/chat.py":           ("Chat Agent",         REMOTE_AGENTS, True),
     "backend/agents/personas.py":       ("Personas",           REMOTE_AGENTS, True),

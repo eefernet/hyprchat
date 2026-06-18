@@ -3740,6 +3740,8 @@ function HyprChat(){
   const [hyprfit,setHyprfit]=useState(null);
   const [hyprfitLoading,setHyprfitLoading]=useState(false);
   const [hyprfitSaving,setHyprfitSaving]=useState(false);
+  const [hyprfitRescanning,setHyprfitRescanning]=useState(false);
+  const [hyprfitRescanStatus,setHyprfitRescanStatus]=useState(null);
   const [hyprfitProfile,setHyprfitProfile]=useState(null);
   const [hyprfitCategory,setHyprfitCategory]=useState("for_you");
   const t=THEMES[tm], font=FONTS[fi].v;
@@ -6701,6 +6703,35 @@ function HyprChat(){
     }
     setHyprfitSaving(false);
   };
+  const hyprfitProfileHasHardware=p=>!!(((Number(p?.gpu_count||0)>0)&&(Number(p?.total_vram_gb||0)>0))||p?.unified_memory);
+  const hyprfitRescanCopy=(d={})=>{
+    const mode=d?.detection_mode||"";
+    if(mode==="local_detector")return{type:"success",text:"Local accelerator detected",chip:"local detector",color:t.ok};
+    if(mode==="remote_ollama_saved_profile")return{type:"info",text:"Remote Ollama verified",chip:"remote verified",color:t.acc};
+    if(mode==="remote_ollama_unreachable"){
+      const hasHardware=hyprfitProfileHasHardware(d?.profile);
+      return{type:"warning",text:hasHardware?"Ollama unreachable":"No saved hardware profile",chip:hasHardware?"remote unreachable":"no saved profile",color:t.warm};
+    }
+    if(mode==="cpu_fallback")return{type:"warning",text:d?.target==="ollama"?"No saved hardware profile":"No accelerator detected",chip:"CPU fallback",color:t.warm};
+    return{type:d?.persisted?"success":"info",text:d?.persisted?"HyprFit hardware detected":"HyprFit kept saved profile",chip:d?.persisted?"detected":"saved profile",color:d?.persisted?t.ok:t.mut};
+  };
+  const rescanHyprfitHardware=async()=>{
+    if(hyprfitRescanning)return;
+    setHyprfitRescanning(true);
+    try{
+      const r=await fetch(`${API}/api/models/hyprfit/rescan`,{method:"POST"});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      if(d.profile)setHyprfitProfile(d.profile);
+      setHyprfitRescanStatus(d);
+      const copy=hyprfitRescanCopy(d);
+      notify({type:copy.type,text:copy.text,detail:d.message||"",duration:3600});
+      await loadHyprfit(false);
+    }catch(e){
+      notify({type:"error",text:"HyprFit hardware rescan failed",detail:e.message||String(e)});
+    }
+    setHyprfitRescanning(false);
+  };
   const fillPullFromHyprfit=(name)=>{
     if(!name)return;
     setPullName(name);
@@ -9467,7 +9498,10 @@ function HyprChat(){
             <div style={{fontSize:18,fontWeight:900,color:t.text,marginTop:4}}>Hardware profile</div>
             <div style={{fontSize:12,color:t.mut,marginTop:5,lineHeight:1.45}}>Saved profile used for model fit and loadout estimates.</div>
           </div>
-          <button onClick={()=>loadHyprfit(true)} disabled={hyprfitLoading} style={{...mmIconBtnS(t.acc),opacity:hyprfitLoading?0.6:1}}><IC.Refresh/></button>
+          <div style={{display:"flex",gap:6}}>
+            <button title="Refresh recommendations" onClick={()=>loadHyprfit(true)} disabled={hyprfitLoading} style={{...mmIconBtnS(t.acc),opacity:hyprfitLoading?0.6:1}}><IC.Refresh/></button>
+            <button title="Rescan hardware" onClick={rescanHyprfitHardware} disabled={hyprfitRescanning} style={{...mmIconBtnS(t.warm),opacity:hyprfitRescanning?0.6:1}}><IC.Activity/></button>
+          </div>
         </div>
         {!hyprfitProfile?<div style={{...mmPanelS,padding:20,color:t.mut,fontSize:12}}>Loading profile...</div>:<div style={{...mmPanelStrongS,padding:16}}>
           {[
@@ -9501,7 +9535,23 @@ function HyprChat(){
             <input type="checkbox" checked={!!hyprfitProfile.sched_spread} onChange={e=>setHyprfitProfile(p=>({...p,sched_spread:e.target.checked}))} style={{accentColor:t.acc}}/>
             Spread model across visible GPUs
           </label>
-          <button onClick={saveHyprfitProfile} disabled={hyprfitSaving} style={{...btnS(t.ok),width:"100%",justifyContent:"center",padding:"9px 14px",fontSize:12,opacity:hyprfitSaving?0.65:1}}>{hyprfitSaving?"Saving...":"Save Hardware Profile"}</button>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+            <button onClick={saveHyprfitProfile} disabled={hyprfitSaving} style={{...btnS(t.ok),justifyContent:"center",padding:"9px 10px",fontSize:12,opacity:hyprfitSaving?0.65:1}}>{hyprfitSaving?"Saving...":"Save Profile"}</button>
+            <button onClick={rescanHyprfitHardware} disabled={hyprfitRescanning} style={{...btnS(t.warm),justifyContent:"center",padding:"9px 10px",fontSize:12,opacity:hyprfitRescanning?0.65:1}}><IC.Activity/> {hyprfitRescanning?"Scanning":"Rescan Hardware"}</button>
+          </div>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:12}}>
+            <span style={mmChipS(t.mut,`${t.surface}66`)}>{hyprfitProfile.backend||"unknown"}</span>
+            <span style={mmChipS(t.mut,`${t.surface}66`)}>{hyprfitProfile.unified_memory?"unified memory":"discrete memory"}</span>
+            <span style={mmChipS(t.mut,`${t.surface}66`)}>{hyprfitProfile.source||"manual"}</span>
+            {hyprfitRescanStatus?.detection_mode&&(()=>{
+              const copy=hyprfitRescanCopy(hyprfitRescanStatus);
+              return <>
+                <span style={mmChipS(copy.color)}>{copy.chip}</span>
+                {hyprfitRescanStatus.target==="ollama"&&<span style={mmChipS(hyprfitRescanStatus.ollama_reachable?t.ok:t.warm)}>{hyprfitRescanStatus.ollama_reachable?"Ollama reachable":"Ollama unreachable"}</span>}
+                {hyprfitRescanStatus.target==="ollama"&&hyprfitRescanStatus.ollama_url&&<span title={hyprfitRescanStatus.ollama_url} style={{...mmChipS(t.mut,`${t.surface}66`),maxWidth:180,overflow:"hidden",textOverflow:"ellipsis"}}>{hyprfitRescanStatus.ollama_url.replace(/^https?:\/\//,"")}</span>}
+              </>;
+            })()}
+          </div>
         </div>}
         {hyprfit?.assumptions?.length>0&&<div style={{...mmPanelS,padding:"12px 14px",marginTop:14}}>
           <div style={{...mmKickerS,marginBottom:7}}>Estimate notes</div>
@@ -9540,8 +9590,10 @@ function HyprChat(){
               </div>
               <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"flex-end"}}>
                 <span style={mmChipS(t.acc)}>{hyprfit?.profile?.total_vram_gb??0} GB VRAM</span>
+                <span style={mmChipS(t.mut,`${t.surface}66`)}>{hyprfit?.system?.backend||hyprfit?.profile?.backend||"backend"}</span>
                 <span style={mmChipS(t.warm)}>{hyprfit?.profile?.kv_cache_type||"q8_0"} KV</span>
                 <span style={mmChipS(t.f1)}>{hyprfit?.profile?.max_loaded_models||1} warm</span>
+                {hyprfit?.system?.gguf_budget?.solo_gb!=null&&<span style={mmChipS(t.mut,`${t.surface}66`)}>{hyprfit.system.gguf_budget.solo_gb} GB solo GGUF</span>}
                 {hyprfit?.live_enabled&&<span style={mmChipS(t.mut,`${t.surface}66`)}>{hyprfit?.live_count||0} live</span>}
               </div>
             </div>
@@ -9564,6 +9616,8 @@ function HyprChat(){
                 const sourceColor=rec.source==="Hugging Face"?t.warm:rec.source==="Curated + HF"?t.f1:t.acc;
                 const modified=fmtDate(rec.lastModified||rec.createdAt);
                 const paramsLabel=`${rec.params_estimated?"~":""}${rec.params_b}B`;
+                const scorePct=Math.round((rec.score||0)*100);
+                const requiredGb=rec.required_gb??rec.estimated_vram_gb;
                 return <div key={`${activeCat}-${rec.id}`} style={{...mmPanelStrongS,padding:16,display:"flex",flexDirection:"column",gap:12,minHeight:292,borderColor:`${fitColor}33`}}>
                   <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:10}}>
                     <div style={{minWidth:0}}>
@@ -9574,8 +9628,9 @@ function HyprChat(){
                     <span style={mmChipS(fitColor)}>{rec.fit_label}</span>
                   </div>
                   <div style={{fontSize:12,color:t.dim,lineHeight:1.5,minHeight:54}}>{rec.summary}</div>
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
-                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>VRAM</div><div style={{fontSize:15,fontWeight:900,color:fitColor,marginTop:4}}>{rec.estimated_vram_gb} GB</div></div>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(0,1fr))",gap:8}}>
+                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Score</div><div style={{fontSize:15,fontWeight:900,color:t.text,marginTop:4}}>{scorePct}</div></div>
+                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Need</div><div style={{fontSize:15,fontWeight:900,color:fitColor,marginTop:4}}>{requiredGb} GB</div></div>
                     <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Context</div><div style={{fontSize:15,fontWeight:900,color:t.text,marginTop:4}}>{formatModelCtx(rec.context_tokens)}</div></div>
                     <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Speed</div><div style={{fontSize:12,fontWeight:900,color:t.text,marginTop:5,lineHeight:1.2}}>{rec.estimated_speed}</div></div>
                   </div>
@@ -9583,6 +9638,8 @@ function HyprChat(){
                     <span style={mmChipS(sourceColor)}>{rec.source||"Curated"}</span>
                     <span style={mmChipS(t.mut,`${t.surface}66`)}>{paramsLabel}</span>
                     <span style={mmChipS(quantColor(rec.quant))}>{rec.quant}</span>
+                    <span style={mmChipS(t.mut,`${t.surface}66`)}>{rec.format||"gguf"}</span>
+                    <span style={mmChipS(t.mut,`${t.surface}66`)}>{(rec.run_mode||"runtime").replaceAll("_"," ")}</span>
                     {rec.installed&&<span style={mmChipS(t.ok)}>Installed</span>}
                     {(rec.badges||[]).slice(0,3).map(b=><span key={b} style={mmChipS(t.mut,`${t.surface}66`)}>{b}</span>)}
                   </div>

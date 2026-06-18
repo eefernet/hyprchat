@@ -49,7 +49,7 @@ HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-styl
 | 🧠 Memory | Global user memory plus workspace memory with reviewed suggestions, pinned blocks, and Ghost Mode for unsaved chats |
 | 📁 Artifacts | Artifact Studio tracks delivered files, projects, and generated images with previews, versions, revisions, bundles, and timelines |
 | 🗳️ Councils | Run multiple models in parallel, debate answers, vote, and synthesize the result |
-| 📦 Models | Ollama model browser, HuggingFace GGUF search/downloads, capability badges, optional OpenAI/Anthropic cloud models |
+| 📦 Models | Ollama model browser, HuggingFace GGUF search/downloads, HyprFit hardware-fit recommendations, capability badges, optional OpenAI/Anthropic cloud models |
 | 🧩 Profiles | Agents for tasks, Personas for style/roleplay, per-profile tools and knowledge bases |
 
 ## Feature Tour
@@ -155,7 +155,9 @@ Agents are task profiles for coding, research, automation, and tool-heavy work. 
 
 ### 📦 Models, Activity, Settings
 
-Manage installed Ollama models, browse HuggingFace GGUF files, watch active downloads and long jobs, and tune appearance, generation, chat image defaults, RAG, Daedalus, voice, and service connections from the Settings overlay. Optional OpenAI and Anthropic API keys (Settings → Connections) add cloud models alongside local Ollama models in the picker.
+Manage installed Ollama models, browse HuggingFace GGUF files, use HyprFit to rank pull candidates against the saved or detected hardware profile, watch active downloads and long jobs, and tune appearance, generation, chat image defaults, RAG, Daedalus, voice, and service connections from the Settings overlay. Optional OpenAI and Anthropic API keys (Settings → Connections) add cloud models alongside local Ollama models in the picker.
+
+HyprFit's hardware-fit ranking model is adapted from the MIT-licensed llmfit/Pewdiepie Odysseus Cookbook approach; see [docs/licenses/llmfit-MIT-LICENSE.txt](docs/licenses/llmfit-MIT-LICENSE.txt).
 
 <p align="center">
   <img src="docs/images/modelManager.png" alt="HyprChat model manager" width="440">
