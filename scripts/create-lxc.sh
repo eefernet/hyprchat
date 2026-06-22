@@ -9,6 +9,7 @@
 # ============================================================
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CTID=${1:-120}
 IP=${2:-"192.168.1.120"}
 GW="192.168.1.1"
@@ -87,8 +88,25 @@ pct exec $CTID -- bash -c "
 
 echo "[5/5] Creating project directory structure..."
 pct exec $CTID -- bash -c "
-    mkdir -p /opt/hyprchat/{backend,frontend/dist,scripts,data/{uploads/avatars,tools,knowledge_bases}}
+    mkdir -p /opt/hyprchat/{backend,frontend/dist,scripts,data/{uploads/avatars,tools,knowledge_bases,chroma_db,comfy_workflows}}
+    mkdir -p /opt/hyprchat/data/sandbox/{outputs,workspace,venv}
 "
+
+echo ""
+read -r -p "Create companion ComfyUI + Voice LXC now? [y/N] " CREATE_COMFY
+if [[ "$CREATE_COMFY" =~ ^[Yy]$ ]]; then
+    read -r -p "ComfyUI CTID [115]: " COMFY_CTID
+    read -r -p "ComfyUI IP [192.168.1.115]: " COMFY_IP
+    COMFY_CTID=${COMFY_CTID:-115}
+    COMFY_IP=${COMFY_IP:-192.168.1.115}
+    if [ -x "$SCRIPT_DIR/create-comfyui-lxc.sh" ] || [ -f "$SCRIPT_DIR/create-comfyui-lxc.sh" ]; then
+        bash "$SCRIPT_DIR/create-comfyui-lxc.sh" "$COMFY_CTID" "$COMFY_IP"
+    else
+        echo "[!] scripts/create-comfyui-lxc.sh not found. Run it later from this repo to create the companion media LXC."
+    fi
+else
+    echo "[*] Skipping companion ComfyUI + Voice LXC."
+fi
 
 echo ""
 echo "════════════════════════════════════════════════"

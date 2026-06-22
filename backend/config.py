@@ -4,6 +4,13 @@ Edit these values to match your homelab setup.
 """
 import os
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DATA_DIR = os.path.abspath(os.getenv("HYPRCHAT_DATA_DIR") or os.path.join(PROJECT_ROOT, "data"))
+
+
+def data_path(*parts: str) -> str:
+    return os.path.join(DATA_DIR, *parts)
+
 # ============================================================
 # INFRASTRUCTURE IPs
 # ============================================================
@@ -12,6 +19,27 @@ CODEBOX_URL = os.getenv("CODEBOX_URL", "http://127.0.0.1:8585")
 OPENHANDS_URL = os.getenv("OPENHANDS_URL", "http://127.0.0.1:8586")
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://127.0.0.1:8888")
 N8N_URL = os.getenv("N8N_URL", "http://127.0.0.1:5678")
+COMFYUI_URL = os.getenv("COMFYUI_URL", "")  # empty = image generation disabled
+COMFYUI_WORKFLOW_PATH = os.getenv("COMFYUI_WORKFLOW_PATH", "")  # optional API-format workflow override
+# Chat generate_image defaults (runtime-editable in Settings → Model & Generation).
+# Empty checkpoint = use the built-in SDXL template as-is. When set, the chat
+# tool loads the checkpoint's saved per-model preset (sampler/scheduler/cfg/
+# steps/model type) and prepends the prompt prefix to the model's request.
+IMAGE_CHAT_CHECKPOINT = os.getenv("IMAGE_CHAT_CHECKPOINT", "")
+# Global saved-workflow name for chat generate_image. Empty = built-in SDXL
+# template. A per-persona image profile workflow still takes precedence.
+IMAGE_CHAT_WORKFLOW = os.getenv("IMAGE_CHAT_WORKFLOW", "")
+IMAGE_CHAT_RESOLUTION = os.getenv("IMAGE_CHAT_RESOLUTION", "1024x1024")
+IMAGE_CHAT_VAE = os.getenv("IMAGE_CHAT_VAE", "")  # empty = checkpoint's baked VAE
+IMAGE_CHAT_PROMPT_PREFIX = os.getenv("IMAGE_CHAT_PROMPT_PREFIX", "")
+IMAGE_CHAT_NEGATIVE = os.getenv("IMAGE_CHAT_NEGATIVE", "")
+# Model that writes persona photo prompts (selfie-rescue compose tier) and
+# Image Studio enhancements. Empty = the conversation's own chat model.
+IMAGE_CHAT_COMPOSE_MODEL = os.getenv("IMAGE_CHAT_COMPOSE_MODEL", "")
+STT_URL = os.getenv("STT_URL", "")  # empty = voice transcription disabled (OpenAI-compatible, e.g. Speaches)
+TTS_URL = os.getenv("TTS_URL", "")  # empty = speech synthesis disabled (OpenAI-compatible, e.g. kokoro-fastapi)
+STT_MODEL = os.getenv("STT_MODEL", "Systran/faster-distil-whisper-large-v3")
+TTS_VOICE = os.getenv("TTS_VOICE", "af_heart")
 N8N_WEBHOOK_PATH = os.getenv("N8N_WEBHOOK_PATH", "/webhook/execute-code")
 N8N_RESEARCH_PATH = os.getenv("N8N_RESEARCH_PATH", "/webhook/deep-research")
 HTTP_VERIFY_SSL = os.getenv("HTTP_VERIFY_SSL", "true").lower() == "true"
@@ -32,20 +60,20 @@ DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 # ============================================================
 # DATABASE
 # ============================================================
-DATABASE_PATH = os.getenv("DATABASE_PATH", "/opt/hyprchat/data/hyprchat.db")
+DATABASE_PATH = os.getenv("DATABASE_PATH", data_path("hyprchat.db"))
 
 # ============================================================
 # FILE STORAGE
 # ============================================================
-UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/opt/hyprchat/data/uploads")
-TOOLS_DIR = os.getenv("TOOLS_DIR", "/opt/hyprchat/data/tools")
-KB_DIR = os.getenv("KB_DIR", "/opt/hyprchat/data/knowledge_bases")
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", data_path("uploads"))
+TOOLS_DIR = os.getenv("TOOLS_DIR", data_path("tools"))
+KB_DIR = os.getenv("KB_DIR", data_path("knowledge_bases"))
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "250"))
 
 # ============================================================
 # SANDBOX — isolated dir for all tool-generated output files
 # ============================================================
-SANDBOX_DIR = os.getenv("SANDBOX_DIR", "/opt/hyprchat/data/sandbox")
+SANDBOX_DIR = os.getenv("SANDBOX_DIR", data_path("sandbox"))
 SANDBOX_OUTPUTS_DIR = os.path.join(SANDBOX_DIR, "outputs")   # tool downloads/outputs → cleaned up
 SANDBOX_VENV_DIR    = os.path.join(SANDBOX_DIR, "venv")      # Python venv for local tool execution
 SANDBOX_WORKSPACE_DIR = os.path.join(SANDBOX_DIR, "workspace")  # temp working dir
@@ -53,14 +81,31 @@ SANDBOX_WORKSPACE_DIR = os.path.join(SANDBOX_DIR, "workspace")  # temp working d
 # ============================================================
 # SETTINGS FILE (persistent JSON for runtime-editable options)
 # ============================================================
-SETTINGS_PATH = os.getenv("SETTINGS_PATH", "/opt/hyprchat/data/settings.json")
-CONNECTOR_SECRETS_PATH = os.getenv("CONNECTOR_SECRETS_PATH", "/opt/hyprchat/data/connector_secrets.json")
+SETTINGS_PATH = os.getenv("SETTINGS_PATH", data_path("settings.json"))
+CONNECTOR_SECRETS_PATH = os.getenv("CONNECTOR_SECRETS_PATH", data_path("connector_secrets.json"))
 DEFAULT_SETTINGS = {
     "file_cleanup_days": 30,  # 0 = never clean
     "ollama_url": "",  # empty = use OLLAMA_URL from env/default
     "codebox_url": "",  # empty = use CODEBOX_URL from env/default
     "searxng_url": "",  # empty = use SEARXNG_URL from env/default
     "n8n_url": "",  # empty = use N8N_URL from env/default
+    "comfyui_url": "",  # empty = use COMFYUI_URL from env (image generation disabled when both empty)
+    "image_chat_checkpoint": "",  # empty = built-in SDXL template for chat image gen
+    "image_chat_workflow": "",  # empty = built-in SDXL template; persona workflows still override
+    "image_chat_resolution": "1024x1024",
+    "image_chat_vae": "",  # empty = checkpoint's baked VAE
+    "image_chat_prompt_prefix": "",
+    "image_chat_negative": "",
+    "image_chat_compose_model": "",  # empty = the conversation's chat model
+    "stt_url": "",  # empty = use STT_URL from env (voice input disabled when both empty)
+    "tts_url": "",  # empty = use TTS_URL from env (voice output disabled when both empty)
+    "tts_voice": "af_heart",
+    "ollama_scan_ssh_host": "",  # empty = derive host from the configured Ollama URL
+    "ollama_scan_ssh_port": 22,
+    "ollama_scan_ssh_user": "root",
+    "ollama_scan_ssh_auth_mode": "key",  # key | password
+    "ollama_scan_ssh_key_path": "",
+    "ollama_scan_ssh_password": "",  # local settings only; never returned by /api/settings
     "rag": {
         "embed_model": "nomic-embed-text",
         "chunk_size": 500,
@@ -69,6 +114,17 @@ DEFAULT_SETTINGS = {
         "max_context_chars": 6000,
         "research_top_k": 4,
         "research_max_chars": 3000,
+    },
+    "model_hardware_profile": {
+        "name": "Ollama host",
+        "gpu_name": "2x RTX 3090",
+        "gpu_count": 2,
+        "total_vram_gb": 48,
+        "system_ram_gb": 32,
+        "kv_cache_type": "q8_0",
+        "num_parallel": 1,
+        "max_loaded_models": 3,
+        "sched_spread": True,
     },
 }
 

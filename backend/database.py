@@ -573,6 +573,9 @@ def _public_user(row, counts: dict | None = None) -> dict:
 
 
 async def _ensure_default_user_conn(conn: aiosqlite.Connection) -> None:
+    existing = await conn.execute_fetchall("SELECT COUNT(*) AS n FROM users")
+    if existing and existing[0]["n"]:
+        return
     now = datetime.utcnow().isoformat()
     await conn.execute(
         """INSERT OR IGNORE INTO users(id,name,password_hash,created_at,updated_at)
@@ -1157,46 +1160,101 @@ async def update_user(user_id: str, *, name: str | None = None,
     return await get_user(uid), None
 
 
-async def delete_user(user_id: str) -> bool:
+async def _delete_user_conn(conn: aiosqlite.Connection, uid: str, *, allow_default: bool = False) -> bool:
+    uid = _scope_user(uid)
+    if uid == DEFAULT_USER_ID and not allow_default:
+        return False
+    rows = await conn.execute_fetchall("SELECT id FROM users WHERE id=?", (uid,))
+    if not rows:
+        return False
+    await conn.execute("DELETE FROM conversation_files WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM workspace_conversations WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM workspace_conversations WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM workspace_research_reports WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM workspace_research_reports WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM research_sources WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM research_events WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?))", (uid,))
+    await conn.execute("DELETE FROM workspace_memory_blocks WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM council_members WHERE council_id IN (SELECT id FROM council_configs WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM artifact_tags WHERE artifact_id IN (SELECT id FROM artifacts WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM artifact_workspaces WHERE artifact_id IN (SELECT id FROM artifacts WHERE user_id=?)", (uid,))
+    await conn.execute("DELETE FROM artifact_events WHERE user_id=?", (uid,))
+    for table in (
+        "messages",
+        "runs",
+        "coder_workflows",
+    ):
+        await conn.execute(
+            f"DELETE FROM {table} WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
+            (uid,),
+        )
+    for table in (
+        "conversations", "knowledge_bases", "tools", "model_configs",
+        "workspaces", "council_configs", "memories", "research_reports",
+        "token_usage", "coding_projects",
+        "artifacts",
+        "mcp_servers", "openapi_connectors", "connector_tools",
+    ):
+        await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (uid,))
+    await conn.execute("DELETE FROM user_profile WHERE id=?", (uid,))
+    await conn.execute("DELETE FROM user_sessions WHERE user_id=?", (uid,))
+    await conn.execute("DELETE FROM users WHERE id=?", (uid,))
+    return True
+
+
+async def delete_user(user_id: str, *, allow_default: bool = False) -> bool:
     uid = _scope_user(user_id)
-    if uid == DEFAULT_USER_ID:
+    if uid == DEFAULT_USER_ID and not allow_default:
         return False
     db = await get_db()
     try:
-        rows = await db.execute_fetchall("SELECT id FROM users WHERE id=?", (uid,))
-        if not rows:
-            return False
-        await db.execute("DELETE FROM conversation_files WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)", (uid,))
-        await db.execute("DELETE FROM workspace_conversations WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)", (uid,))
-        await db.execute("DELETE FROM workspace_conversations WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id=?)", (uid,))
-        await db.execute("DELETE FROM workspace_research_reports WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id=?)", (uid,))
-        await db.execute("DELETE FROM workspace_research_reports WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
-        await db.execute("DELETE FROM research_sources WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
-        await db.execute("DELETE FROM artifact_tags WHERE artifact_id IN (SELECT id FROM artifacts WHERE user_id=?)", (uid,))
-        await db.execute("DELETE FROM artifact_workspaces WHERE artifact_id IN (SELECT id FROM artifacts WHERE user_id=?)", (uid,))
-        await db.execute("DELETE FROM artifact_events WHERE user_id=?", (uid,))
-        for table in (
-            "messages",
-            "runs",
-            "coder_workflows",
-        ):
-            await db.execute(
-                f"DELETE FROM {table} WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
-                (uid,),
-            )
-        for table in (
-            "conversations", "knowledge_bases", "tools", "model_configs",
-            "workspaces", "council_configs", "memories", "research_reports",
-            "token_usage", "coding_projects",
-            "artifacts",
-            "mcp_servers", "openapi_connectors", "connector_tools",
-        ):
-            await db.execute(f"DELETE FROM {table} WHERE user_id=?", (uid,))
-        await db.execute("DELETE FROM user_profile WHERE id=?", (uid,))
-        await db.execute("DELETE FROM user_sessions WHERE user_id=?", (uid,))
-        await db.execute("DELETE FROM users WHERE id=?", (uid,))
+        ok = await _delete_user_conn(db, uid, allow_default=allow_default)
         await db.commit()
-        return True
+        return ok
+    finally:
+        await db.close()
+
+
+async def delete_users_except(keep_user_id: str) -> dict:
+    keep_uid = _scope_user(keep_user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT id FROM users WHERE id != ?", (keep_uid,))
+        deleted = 0
+        for row in rows:
+            if await _delete_user_conn(db, row["id"], allow_default=True):
+                deleted += 1
+        await db.commit()
+        return {"deleted": deleted, "kept_user_id": keep_uid}
+    finally:
+        await db.close()
+
+
+async def delete_all_users_and_data() -> dict:
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT id FROM users")
+        deleted = 0
+        for row in rows:
+            if await _delete_user_conn(db, row["id"], allow_default=True):
+                deleted += 1
+        for table in (
+            "conversation_files", "workspace_conversations", "workspace_research_reports",
+            "research_sources", "research_events", "run_events", "workspace_memory_blocks",
+            "artifact_tags", "artifact_workspaces", "artifact_events", "council_members",
+        ):
+            await db.execute(f"DELETE FROM {table}")
+        for table in (
+            "messages", "runs", "coder_workflows", "conversations", "knowledge_bases",
+            "tools", "model_configs", "workspaces", "council_configs", "memories",
+            "research_reports", "token_usage", "coding_projects", "artifacts",
+            "mcp_servers", "openapi_connectors", "connector_tools",
+            "user_profile", "user_sessions", "users",
+        ):
+            await db.execute(f"DELETE FROM {table}")
+        await db.commit()
+        return {"deleted": deleted}
     finally:
         await db.close()
 
@@ -1412,6 +1470,22 @@ async def init_db():
             # Rebuild index from existing messages
             await db.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
             print("[DB MIGRATION] Created FTS5 search index for messages")
+        # FTS5 keyword index for KB chunks (hybrid RAG). Standalone table —
+        # rag.py writes rows explicitly alongside ChromaDB, no triggers.
+        try:
+            await db.execute("SELECT * FROM kb_chunks_fts LIMIT 1")
+        except Exception:
+            await db.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS kb_chunks_fts USING fts5(
+                    text,
+                    filename,
+                    kb_id UNINDEXED,
+                    chunk_id UNINDEXED,
+                    chunk_index UNINDEXED,
+                    tokenize='porter unicode61'
+                )
+            """)
+            print("[DB MIGRATION] Created FTS5 keyword index for KB chunks")
         # The legacy Deep Researcher agent duplicates the first-class Deep
         # Research workspace and the Agent Research tool. Remove only the fixed
         # preset row; user-created research agents use their own IDs.
@@ -3358,6 +3432,130 @@ async def update_artifact_file_metadata(
         await db.close()
 
 
+async def count_artifacts_with_storage_path(storage_path: str, exclude_id: str = "") -> int:
+    """How many artifact rows (any user) still reference this file on disk.
+    Cross-user on purpose: the file must not be unlinked while anyone's row
+    points at it (duplicate-merge can leave several rows sharing one path)."""
+    if not storage_path:
+        return 0
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT COUNT(*) AS n FROM artifacts WHERE storage_path=? AND id != ?",
+            (storage_path, exclude_id or ""),
+        )
+        row = await cursor.fetchone()
+        return row["n"] if row else 0
+    finally:
+        await db.close()
+
+
+async def scrub_image_traces(filenames: list[str]) -> int:
+    """Rewrite chat messages so purged generated images leave no trace.
+
+    For every user-scoped message that references one of the deleted image
+    files: strips the inline image markdown / download-link lines, the
+    generation seed footer, and any image-tool entries (file refs, saved
+    generate_image events) from persisted metadata. Returns the number of
+    messages rewritten.
+
+    NOTE: metadata scrubbing is all-or-nothing by design — in a matched
+    message it drops EVERY generate_image-related list entry, not just those
+    naming the given files. Correct for the full purge (which deletes all
+    generated images); do NOT reuse for single-image deletion without
+    narrowing that clause.
+    """
+    user_id = _scope_user()
+    filenames = [f for f in (filenames or []) if f]
+    if not filenames:
+        return 0
+    db = await get_db()
+    scrubbed = 0
+    try:
+        rows_all, seen = [], set()
+        for i in range(0, len(filenames), 20):
+            batch = filenames[i:i + 20]
+            conds = " OR ".join(["m.content LIKE ? OR m.metadata LIKE ?"] * len(batch))
+            params: list = [user_id]
+            for fn in batch:
+                like = f"%{fn}%"
+                params.extend([like, like])
+            rows = await db.execute_fetchall(
+                f"SELECT m.id, m.content, m.metadata FROM messages m "
+                f"JOIN conversations c ON c.id = m.conversation_id "
+                f"WHERE c.user_id=? AND ({conds})", params)
+            for r in rows:
+                if r[0] not in seen:
+                    seen.add(r[0])
+                    rows_all.append(r)
+
+        def _mentions(obj) -> bool:
+            s = json.dumps(obj, default=str)
+            return any(fn in s for fn in filenames) or '"generate_image"' in s
+
+        for mid, content, meta_raw in rows_all:
+            new_content = content or ""
+            for fn in filenames:
+                if fn not in new_content:
+                    continue
+                esc = re.escape(fn)
+                new_content = re.sub(rf"!\[[^\]\n]*\]\([^)\n]*{esc}[^)\n]*\)", "", new_content)
+                # Any remaining line still naming the file (download links, bare URLs)
+                new_content = re.sub(rf"^.*{esc}.*$", "", new_content, flags=re.M)
+            if new_content != (content or ""):
+                new_content = re.sub(r"^Seed: `?\d+`?\s*·[^\n]*$", "", new_content, flags=re.M)
+                new_content = re.sub(r"\n{3,}", "\n\n", new_content).strip()
+            try:
+                meta = json.loads(meta_raw or "{}")
+                if not isinstance(meta, dict):
+                    meta = {}
+            except Exception:
+                meta = {}
+            changed_meta = False
+            for key, val in list(meta.items()):
+                if isinstance(val, list):
+                    kept = [x for x in val if not (isinstance(x, (dict, list)) and _mentions(x))]
+                    if len(kept) != len(val):
+                        meta[key] = kept
+                        changed_meta = True
+            if new_content != (content or "") or changed_meta:
+                await db.execute("UPDATE messages SET content=?, metadata=? WHERE id=?",
+                                 (new_content, json.dumps(meta), mid))
+                scrubbed += 1
+        await db.commit()
+        return scrubbed
+    finally:
+        await db.close()
+
+
+async def vacuum_database():
+    """WAL-checkpoint and VACUUM the DB so deleted rows leave no residual
+    bytes in the database or WAL file. Used by the image purge."""
+    db = await get_db()
+    try:
+        await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        await db.commit()
+        await db.execute("VACUUM")
+    finally:
+        await db.close()
+
+
+async def delete_conversation_file(file_id: str) -> bool:
+    """Remove a conversation_files row (chat attachment reference). Used by the
+    image purge so chat-generated images leave no dangling file reference."""
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "DELETE FROM conversation_files WHERE id=? AND conversation_id IN "
+            "(SELECT id FROM conversations WHERE user_id=?)",
+            (file_id, user_id))
+        await db.commit()
+        return cur.rowcount > 0
+    finally:
+        await db.close()
+
+
 async def delete_artifact(artifact_id: str) -> bool:
     user_id = _scope_user()
     db = await get_db()
@@ -3994,6 +4192,17 @@ async def delete_global_memory(memory_id: str) -> bool:
         await db.close()
 
 
+async def clear_user_memories(user_id: str | None = None) -> int:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        cur = await db.execute("DELETE FROM memories WHERE user_id=?", (uid,))
+        await db.commit()
+        return cur.rowcount if cur.rowcount is not None else 0
+    finally:
+        await db.close()
+
+
 def _format_profile_context(profile: dict, remaining: int) -> tuple[list[str], int, bool]:
     lines = []
     has_content = False
@@ -4382,6 +4591,116 @@ async def search_messages(query: str, limit: int = 20):
 
 
 # ============================================================
+# KB CHUNK KEYWORD INDEX (hybrid RAG — kb_chunks_fts)
+# ============================================================
+# No user scoping here: callers pass kb_ids already scoped by the persona /
+# route layer, same trust level as rag.query() over ChromaDB collections.
+
+def _fts_match_expr(query: str, max_terms: int = 12) -> str:
+    """Build a safe FTS5 MATCH expression from free-form text.
+
+    RAG queries are full sentences; raw MATCH treats them as implicit AND and
+    throws syntax errors on '?', quotes, hyphens, etc. Emit quoted OR-terms so
+    any token match ranks (bm25 still orders by how many/which terms hit).
+    """
+    tokens = re.findall(r"[A-Za-z0-9_]+", query)
+    # Drop single-char noise tokens but keep short alphanumerics (part numbers).
+    tokens = [t for t in tokens if len(t) > 1][:max_terms]
+    if not tokens:
+        return ""
+    return " OR ".join(f'"{t}"' for t in tokens)
+
+
+async def kb_fts_replace_file(kb_id: str, filename: str, chunks: list[dict]):
+    """Replace all FTS rows for one file. chunks: [{chunk_id, text, chunk_index}]."""
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM kb_chunks_fts WHERE kb_id=? AND filename=?", (kb_id, filename))
+        await db.executemany(
+            "INSERT INTO kb_chunks_fts (text, filename, kb_id, chunk_id, chunk_index) VALUES (?, ?, ?, ?, ?)",
+            [(c["text"], filename, kb_id, c["chunk_id"], c["chunk_index"]) for c in chunks]
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def kb_fts_remove_file(kb_id: str, filename: str):
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM kb_chunks_fts WHERE kb_id=? AND filename=?", (kb_id, filename))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def kb_fts_delete_kb(kb_id: str):
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM kb_chunks_fts WHERE kb_id=?", (kb_id,))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def list_all_kb_ids() -> list[str]:
+    """All KB ids across users — startup FTS backfill only (cross-user raw SQL,
+    same posture as reap_stale_runs)."""
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT id FROM knowledge_bases")
+        return [r["id"] for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+
+async def kb_fts_count(kb_id: str) -> int:
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT COUNT(*) AS n FROM kb_chunks_fts WHERE kb_id=?", (kb_id,))
+        row = await cursor.fetchone()
+        return row["n"] if row else 0
+    finally:
+        await db.close()
+
+
+async def kb_fts_search(kb_ids: list[str], query: str, limit: int = 18) -> list[dict]:
+    """BM25 keyword search over KB chunks. Returns best-first."""
+    if not kb_ids:
+        return []
+    match = _fts_match_expr(query)
+    if not match:
+        return []
+    db = await get_db()
+    try:
+        placeholders = ",".join("?" * len(kb_ids))
+        cursor = await db.execute(
+            f"""SELECT text, filename, kb_id, chunk_id, chunk_index, rank
+                FROM kb_chunks_fts
+                WHERE kb_chunks_fts MATCH ? AND kb_id IN ({placeholders})
+                ORDER BY rank LIMIT ?""",
+            (match, *kb_ids, limit)
+        )
+        out = []
+        for r in await cursor.fetchall():
+            d = dict(r)
+            out.append({
+                "text": d["text"],
+                "filename": d["filename"],
+                "kb_id": d["kb_id"],
+                "chunk_id": d["chunk_id"],
+                "chunk_index": int(d["chunk_index"] or 0),
+                "bm25": -float(d["rank"] or 0),  # fts5 rank is negative-better
+            })
+        return out
+    except Exception as e:
+        print(f"[KB FTS] Search error: {e}")
+        return []
+    finally:
+        await db.close()
+
+
+# ============================================================
 # CONVERSATION FORKING
 # ============================================================
 async def fork_conversation(original_conv_id: str, fork_msg_id: int, new_conv_id: str):
@@ -4453,31 +4772,48 @@ async def record_token_usage(conversation_id: str, model: str, persona_name: str
 
 
 async def get_token_usage(days: int = 30, group_by: str = "day"):
-    """Aggregate token usage. group_by: day, model, persona."""
+    """Aggregate token usage. group_by: day, model, persona. days <= 0 means all time."""
     user_id = _scope_user()
     db = await get_db()
     try:
+        use_window = (days or 0) > 0
+        where = "WHERE user_id=?"
+        params = [user_id]
+        if use_window:
+            where += " AND created_at >= datetime('now', ?)"
+            params.append(f"-{days} days")
         if group_by == "model":
             q = """SELECT model, SUM(prompt_tokens) as prompt_tokens,
                    SUM(completion_tokens) as completion_tokens,
                    SUM(total_tokens) as total_tokens, COUNT(*) as request_count
-                   FROM token_usage WHERE user_id=? AND created_at >= datetime('now', ?)
-                   GROUP BY model ORDER BY total_tokens DESC"""
+                   FROM token_usage {where}
+                   GROUP BY model ORDER BY total_tokens DESC""".format(where=where)
         elif group_by == "persona":
             q = """SELECT persona_name, SUM(prompt_tokens) as prompt_tokens,
                    SUM(completion_tokens) as completion_tokens,
                    SUM(total_tokens) as total_tokens, COUNT(*) as request_count
-                   FROM token_usage WHERE user_id=? AND created_at >= datetime('now', ?)
-                   GROUP BY persona_name ORDER BY total_tokens DESC"""
+                   FROM token_usage {where}
+                   GROUP BY persona_name ORDER BY total_tokens DESC""".format(where=where)
         else:
             q = """SELECT date(created_at) as date,
                    SUM(prompt_tokens) as prompt_tokens,
                    SUM(completion_tokens) as completion_tokens,
                    SUM(total_tokens) as total_tokens, COUNT(*) as request_count
-                   FROM token_usage WHERE user_id=? AND created_at >= datetime('now', ?)
-                   GROUP BY date(created_at) ORDER BY date ASC"""
-        cursor = await db.execute(q, (user_id, f"-{days} days"))
+                   FROM token_usage {where}
+                   GROUP BY date(created_at) ORDER BY date ASC""".format(where=where)
+        cursor = await db.execute(q, tuple(params))
         return [dict(r) for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+
+async def clear_token_usage(user_id: str | None = None) -> int:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        cur = await db.execute("DELETE FROM token_usage WHERE user_id=?", (uid,))
+        await db.commit()
+        return cur.rowcount if cur.rowcount is not None else 0
     finally:
         await db.close()
 

@@ -13,8 +13,10 @@ import time
 import uuid
 from datetime import datetime
 
+import comfyui
 import config
 import database as db
+import persona_images
 import cancel_registry
 from connectors import execute_connector_tool
 from research import fetch_bytes_safely, run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
@@ -261,7 +263,6 @@ _WF_EVENT_TRANSITIONS = {
     "REVIEW_ISSUES": ("fixing",    "not_ready"),
     "ACCEPT_OK":     ("accepted",  "accepted"),
     "ACCEPT_ISSUES": ("fixing",    "not_ready"),
-    "QA_DONE":       ("answering", "not_applicable"),
 }
 
 
@@ -364,21 +365,6 @@ def _issue_signatures(envelope: dict) -> set:
         if f and s:
             sigs.add((f, s))
     return sigs
-
-
-def _paths_are_docs_only(paths: list[str]) -> bool:
-    """True when a fixer touched only documentation files."""
-    if not paths:
-        return False
-    doc_exts = {".md", ".rst", ".txt"}
-    doc_names = {"README", "README.md", "README.rst", "README.txt"}
-    for path in paths:
-        name = os.path.basename(path or "")
-        ext = os.path.splitext(name)[1].lower()
-        if name in doc_names or ext in doc_exts:
-            continue
-        return False
-    return True
 
 
 async def _deep_research_called_since(conv_id: str, since_iso: str | None) -> bool:
@@ -998,6 +984,19 @@ CODEAGENT_TOOLS = {
             }, "required": ["path"]},
         },
     },
+    "generate_image": {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": "Generate an image from a text description using local Stable Diffusion (SDXL). For pictures/art/photos — NOT charts or diagrams. Dimensions come from the global chat image settings.",
+            "parameters": {"type": "object", "properties": {
+                "prompt": {"type": "string", "description": "What the image should show, descriptive and specific"},
+                "negative_prompt": {"type": "string", "description": "Optional: things to avoid in the image"},
+                "steps": {"type": "integer", "description": "Sampling steps (1-60; ignored when a default image model with saved presets is configured)"},
+                "seed": {"type": "integer", "description": "Optional seed for reproducible results"},
+            }, "required": ["prompt"]},
+        },
+    },
     "download_project": {
         "type": "function",
         "function": {
@@ -1438,6 +1437,10 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
     if not calls:
         calls = _parse_python_tool_calls(content, available_names)
 
+    # 6. Loose roleplay-model syntax: <tools> "generate_image" (prompt: ...)
+    if not calls:
+        calls = _parse_loose_tool_calls(content, available_names)
+
     return calls
 
 
@@ -1597,36 +1600,6 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
     if not args_list:
         return None
 
-    # Map positional args to known tool parameter names
-    TOOL_PARAMS = {
-        "execute_code": ["code", "language"],
-        "run_shell": ["command"],
-        "write_file": ["path", "content"],
-        "read_file": ["path"],
-        "list_files": ["path"],
-        "download_file": ["filename"],
-        "download_project": ["filenames", "project_name"],
-        "delete_file": ["path"],
-        "plan_project": ["task", "language", "constraints"],
-        "run_review": ["project_dir", "project_id"],
-        "run_acceptance_review": ["project_dir", "reviewer_run_id", "project_id"],
-        "search_files": ["pattern", "path", "file_pattern"],
-        "diff_files": ["path_a", "path_b"],
-        "git_init": ["path", "language"],
-        "git_diff": ["path"],
-        "git_commit": ["message", "path"],
-        "run_tests": ["path", "framework"],
-        "lint_code": ["path", "language"],
-        "resume_project": ["project_id"],
-        "research": ["query"],
-        "fetch_url": ["url"],
-        "generate_code": ["task", "language", "context"],
-        "start_coder_workflow": ["mode", "task", "project_id"],
-        "run_aider_fix": ["project_dir", "task", "issue_run_id"],
-        "get_coder_workflow": ["workflow_id"],
-        "cancel_coder_workflow": ["workflow_id"],
-    }
-
     param_names = TOOL_PARAMS.get(tool_name)
     if not param_names:
         # Unknown tool — use first arg as "input"
@@ -1639,11 +1612,117 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
     return result if result else None
 
 
+# Map positional args to known tool parameter names (used by the python-call
+# and loose-call text parsers)
+TOOL_PARAMS = {
+    "execute_code": ["code", "language"],
+    "run_shell": ["command"],
+    "write_file": ["path", "content"],
+    "read_file": ["path"],
+    "list_files": ["path"],
+    "download_file": ["filename"],
+    "generate_image": ["prompt", "negative_prompt"],
+    "download_project": ["filenames", "project_name"],
+    "delete_file": ["path"],
+    "plan_project": ["task", "language", "constraints"],
+    "run_review": ["project_dir", "project_id"],
+    "run_acceptance_review": ["project_dir", "reviewer_run_id", "project_id"],
+    "search_files": ["pattern", "path", "file_pattern"],
+    "diff_files": ["path_a", "path_b"],
+    "git_init": ["path", "language"],
+    "git_diff": ["path"],
+    "git_commit": ["message", "path"],
+    "run_tests": ["path", "framework"],
+    "lint_code": ["path", "language"],
+    "resume_project": ["project_id"],
+    "research": ["query"],
+    "fetch_url": ["url"],
+    "generate_code": ["task", "language", "context"],
+    "start_coder_workflow": ["mode", "task", "project_id"],
+    "run_aider_fix": ["project_dir", "task", "issue_run_id"],
+    "get_coder_workflow": ["workflow_id"],
+    "cancel_coder_workflow": ["workflow_id"],
+}
+
+
+def _parse_loose_args(name: str, raw: str) -> dict | None:
+    """Parse the loose `key: value` / `key=value` arg style some roleplay
+    models invent (unquoted values, prose commas). Commas split a new arg only
+    when followed by a `key:`/`key=` token, so commas inside a prompt survive."""
+    raw = raw.strip()
+    if not raw:
+        return {}
+    parts = re.split(r',\s*(?=[A-Za-z_]\w*\s*[:=])', raw)
+    args: dict = {}
+    for part in parts:
+        pm = re.match(r'\s*([A-Za-z_]\w*)\s*[:=]\s*(.+?)\s*$', part, re.DOTALL)
+        if not pm:
+            args = {}
+            break
+        args[pm.group(1)] = pm.group(2).strip().strip('"\'').strip()
+    if args:
+        return args
+    # Bare single positional: the whole body is the first known param
+    params = TOOL_PARAMS.get(name)
+    if params:
+        val = raw.strip().strip('"\'').strip()
+        if val:
+            return {params[0]: val}
+    return None
+
+
+# Loose parsing is restricted to content-safe tools: a shredded key:value
+# body fed to execute_code/run_shell would EXECUTE garbage. These tools take
+# a single descriptive string, so a slightly-mangled arg is harmless.
+_LOOSE_PARSE_SAFE_TOOLS = {"generate_image", "research", "fetch_url"}
+
+
+def _parse_loose_tool_calls(content: str, available_names: set) -> list[dict]:
+    """Last-resort parser for mangled tool-call text — e.g. the roleplay-model
+    shape `<tools> "generate_image" (prompt: selfie of ...)`: quoted name,
+    space before the paren, unquoted key: value args. Only fires when the text
+    shows tool-call INTENT (quoted/backticked name, or a <tool...> tag in the
+    content) so plain prose mentioning a tool name can't trigger it."""
+    calls = []
+    has_tag = bool(re.search(r'<tools?\b|<tool[_\-]?call', content, re.IGNORECASE))
+    for name in available_names & _LOOSE_PARSE_SAFE_TOOLS:
+        for m in re.finditer(rf'(?<![\w.])(["\'`]?){re.escape(name)}(["\'`]?)\s*\(', content):
+            quoted = bool(m.group(1) or m.group(2))
+            if not (quoted or has_tag):
+                continue
+            raw = _extract_balanced_parens(content, m.end())
+            if raw is None:
+                continue
+            # Loose key:value style first — _parse_python_args mangles it
+            # (treats "prompt: text, more text" as comma-split positionals).
+            args = _parse_loose_args(name, raw)
+            if not args:
+                args = _parse_python_args(name, raw)
+            if args:
+                calls.append({"function": {"name": name, "arguments": args}})
+    return calls
+
+
 def strip_tool_calls(content: str) -> str:
     """Remove tool call artifacts from content so the user sees clean text."""
     # Remove <tool_call>...</tool_call>
     content = re.sub(
-        r'<tool[_\-]?call[s]?>\s*.*?\s*</tool[_\-]?call[s]?>',
+        r'<tool[_\-]?call[s]?\b[^>]*>\s*.*?\s*</tool[_\-]?call[s]?>',
+        '', content, flags=re.DOTALL | re.IGNORECASE
+    )
+    # Remove <tools>...</tools> wrappers used by some text-tool-call models.
+    content = re.sub(
+        r'<tools?\b[^>]*>\s*.*?\s*</tools?>',
+        '', content, flags=re.DOTALL | re.IGNORECASE
+    )
+    # If a model opens a tool tag and truncates before closing it, treat the
+    # rest of the response as tool junk. Keeping it visible leaks raw tool JSON.
+    content = re.sub(
+        r'<tool[_\-]?call[s]?\b[^>]*>.*$',
+        '', content, flags=re.DOTALL | re.IGNORECASE
+    )
+    content = re.sub(
+        r'<tools?\b[^>]*>.*$',
         '', content, flags=re.DOTALL | re.IGNORECASE
     )
     # Remove qwen3-coder / Hermes-style <function=name>...<parameter=k>v</parameter>...</function>
@@ -1661,6 +1740,37 @@ def strip_tool_calls(content: str) -> str:
         r'\{\s*"name"\s*:\s*"[^"]*"\s*,\s*"arguments"\s*:\s*\{.*?\}\s*\}',
         '', content, flags=re.DOTALL
     )
+    # Remove loose roleplay-style calls: "tool_name" (args...) — only when the
+    # name is quote-wrapped (NOT backtick: `tool` (...) is normal prose) or a
+    # <tool...> tag is present, so 'you can use read_file (with a path)' and
+    # backtick-quoted explanations survive.
+    has_tag = bool(re.search(r'<tools?\b|<tool[_\-]?call', content, re.IGNORECASE))
+    spans = []
+    for name in CODEAGENT_TOOLS:
+        for m in re.finditer(rf'(?<![\w.])(["\']?){re.escape(name)}(["\']?)\s*\(', content):
+            if not (m.group(1) or m.group(2) or has_tag):
+                continue
+            inner = _extract_balanced_parens(content, m.end())
+            if inner is None:
+                # Unterminated call (model truncated mid-args) — junk runs to
+                # the end of the line; keep any following lines.
+                nl = content.find("\n", m.end())
+                spans.append((m.start(), nl if nl != -1 else len(content)))
+            else:
+                spans.append((m.start(), m.end() + len(inner) + 1))
+    # Merge overlapping/nested spans BEFORE splicing — removing an inner span
+    # first would leave the outer span's indices pointing at shifted text.
+    merged: list[list[int]] = []
+    for s, e in sorted(spans):
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    for s, e in reversed(merged):
+        content = content[:s] + content[e:]
+    # Stray wrapper tags (often unpaired)
+    content = re.sub(r'</?tools?\b[^>]*>', '', content, flags=re.IGNORECASE)
+    content = re.sub(r'</?tool[_\-]?call[s]?\b[^>]*>', '', content, flags=re.IGNORECASE)
     return content.strip()
 
 
@@ -1828,6 +1938,253 @@ async def _maybe_auto_redeliver(
         return ""
 
 
+def _clean_text(value) -> str:
+    return str(value or "").strip()
+
+
+def _profile_text(profile: dict | None, *keys: str) -> str:
+    for key in keys:
+        value = _clean_text((profile or {}).get(key))
+        if value:
+            return value
+    return ""
+
+
+def _profile_value(profile: dict | None, *keys: str):
+    for key in keys:
+        if isinstance(profile, dict) and profile.get(key) not in (None, ""):
+            return profile.get(key)
+    return None
+
+
+def _join_prompt_parts(*parts: str) -> str:
+    return ", ".join(p.strip(" ,") for p in parts if str(p or "").strip(" ,"))
+
+
+def _image_chat_resolution() -> tuple[int, int]:
+    try:
+        w, h = (int(x) for x in (config.IMAGE_CHAT_RESOLUTION or "1024x1024").split("x"))
+        return w, h
+    except Exception:
+        return 1024, 1024
+
+
+def _profile_loras(profile: dict | None) -> list:
+    loras = (profile or {}).get("loras")
+    if loras is None:
+        loras = (profile or {}).get("lora")
+    if loras is None:
+        return []
+    if isinstance(loras, (str, dict)):
+        return [loras]
+    if isinstance(loras, list):
+        return loras
+    return []
+
+
+def _profile_metadata(selection: dict | None, *, active: bool, fallback_reason: str = "") -> dict:
+    if not selection:
+        return {}
+    profile = selection.get("profile") or {}
+    meta = {
+        "active": active,
+        "profile": selection.get("key") or "",
+        "intent": selection.get("intent") or "",
+        "adult_request": bool(selection.get("adult_request")),
+        "workflow_configured": bool(_profile_text(profile, "workflow", "workflow_name", "saved_workflow")),
+        "checkpoint_configured": bool(_profile_text(profile, "checkpoint", "ckpt", "ckpt_name")),
+        "vae_configured": bool(_profile_text(profile, "vae", "vae_name")),
+        "lora_count": len(_profile_loras(profile)),
+    }
+    if fallback_reason:
+        meta["fallback_reason"] = fallback_reason
+    return meta
+
+
+def _persona_visual_context(args: dict, persona_context: dict) -> dict:
+    visual_context = persona_context.get("visual_context")
+    if isinstance(visual_context, dict):
+        return visual_context
+    return persona_images.build_visual_context(
+        persona_id=_clean_text(persona_context.get("persona_id")),
+        persona_name=_clean_text(persona_context.get("persona_name")),
+        appearance=_clean_text(persona_context.get("appearance")),
+        scenario=_clean_text(persona_context.get("scenario")),
+        lore=_clean_text(persona_context.get("lore")),
+        rating=_clean_text(persona_context.get("persona_rating") or "PG-13"),
+        user_request=_clean_text(persona_context.get("user_request")),
+        tool_prompt=_clean_text(args.get("prompt")),
+        current_reply=_clean_text(persona_context.get("current_reply")),
+        recent_messages=persona_context.get("recent_messages") if isinstance(persona_context.get("recent_messages"), list) else [],
+        prior_images=persona_context.get("prior_images") if isinstance(persona_context.get("prior_images"), list) else [],
+    )
+
+
+def _resolve_chat_image_recipe(args: dict, persona_context: dict | None = None) -> dict:
+    """Resolve chat generate_image settings without submitting to ComfyUI."""
+    args = args or {}
+    persona_context = persona_context or {}
+    gi_prompt = _clean_text(args.get("prompt"))
+    gi_negative_arg = _clean_text(args.get("negative_prompt"))
+    default_w, default_h = _image_chat_resolution()
+
+    selection = None
+    profile = None
+    template = None
+    workflow_name = ""
+    fallback_reason = ""
+    visual_context = {}
+    prompt_payload = {}
+    if persona_context.get("persona_id"):
+        visual_context = _persona_visual_context(args, persona_context)
+        prompt_payload = persona_images.compose_persona_image_prompt(
+            raw_prompt=gi_prompt,
+            negative_prompt=gi_negative_arg,
+            visual_context=visual_context,
+        )
+        gi_prompt = prompt_payload.get("prompt") or gi_prompt
+        gi_negative_arg = prompt_payload.get("negative_prompt") or gi_negative_arg
+        config_data = persona_images.load_persona_image_profiles()
+        selection = persona_images.select_persona_image_profile(
+            config_data,
+            persona_id=_clean_text(persona_context.get("persona_id")),
+            persona_name=_clean_text(persona_context.get("persona_name")),
+            persona_rating=_clean_text(persona_context.get("persona_rating") or "PG-13"),
+            prompt=gi_prompt,
+            user_request=_clean_text(persona_context.get("user_request")),
+        )
+        if selection:
+            profile = selection.get("profile") or {}
+            workflow_name = _profile_text(profile, "workflow", "workflow_name", "saved_workflow")
+            if workflow_name:
+                template = comfyui.load_workflow(workflow_name)
+                if template is None:
+                    fallback_reason = "missing_workflow"
+                    profile = None
+                    workflow_name = ""
+
+    active_profile = profile if isinstance(profile, dict) else None
+    # Global workflow fallback: when no persona profile applied, render through
+    # the admin-selected saved workflow (Settings → Chat Image Generation).
+    # Persona workflows already won above; this only fills the empty slot. A
+    # missing file leaves template=None so generate_image falls back to the
+    # built-in SDXL template.
+    if template is None and not active_profile and (config.IMAGE_CHAT_WORKFLOW or "").strip():
+        template = comfyui.load_workflow(config.IMAGE_CHAT_WORKFLOW.strip())
+        if template is not None:
+            workflow_name = config.IMAGE_CHAT_WORKFLOW.strip()
+    gi_ckpt = (
+        _profile_text(active_profile, "checkpoint", "ckpt", "ckpt_name")
+        if active_profile else ""
+    ) or (config.IMAGE_CHAT_CHECKPOINT or "").strip()
+    gi_preset = comfyui.settings_for_checkpoint(gi_ckpt) if gi_ckpt else {}
+
+    # Chat image dimensions are a global admin preference. Persona profiles and
+    # model-supplied tool args may steer workflow/model/style, but not size.
+    gi_width = default_w
+    gi_height = default_h
+    gi_steps = (
+        _profile_value(active_profile, "steps")
+        if active_profile else None
+    ) or gi_preset.get("steps") or args.get("steps") or 25
+    gi_cfg = (
+        _profile_value(active_profile, "cfg", "guidance")
+        if active_profile else None
+    ) or gi_preset.get("cfg") or 7.0
+    gi_sampler = (
+        _profile_text(active_profile, "sampler", "sampler_name")
+        if active_profile else ""
+    ) or gi_preset.get("sampler") or ""
+    gi_scheduler = (
+        _profile_text(active_profile, "scheduler")
+        if active_profile else ""
+    ) or gi_preset.get("scheduler") or ""
+    gi_model_sampling = (
+        _profile_text(active_profile, "model_sampling", "sampling")
+        if active_profile else ""
+    ) or gi_preset.get("model_sampling") or ""
+    gi_vae = (
+        _profile_text(active_profile, "vae", "vae_name")
+        if active_profile else ""
+    ) or (config.IMAGE_CHAT_VAE or "").strip()
+
+    base_prompt_prefix = (gi_preset.get("prompt_prefix") or config.IMAGE_CHAT_PROMPT_PREFIX or "").strip()
+    profile_prompt_prefix = (
+        _profile_text(active_profile, "prompt_prefix", "positive_prefix")
+        if active_profile else ""
+    )
+    profile_prompt_suffix = (
+        _profile_text(active_profile, "prompt_suffix", "positive_suffix")
+        if active_profile else ""
+    )
+    gi_full_prompt = _join_prompt_parts(base_prompt_prefix, profile_prompt_prefix, gi_prompt, profile_prompt_suffix)
+    gi_negative = _join_prompt_parts(
+        (gi_preset.get("negative_prefix") or config.IMAGE_CHAT_NEGATIVE or "").strip(),
+        _profile_text(active_profile, "negative_prefix", "negative_prompt") if active_profile else "",
+        gi_negative_arg,
+    )
+    profile_metadata = _profile_metadata(selection, active=bool(active_profile), fallback_reason=fallback_reason)
+    if prompt_payload:
+        profile_metadata.update({
+            "prompt_intent": prompt_payload.get("primary_intent") or "",
+            "intents": prompt_payload.get("intents") or [],
+            "framing": prompt_payload.get("framing") or "",
+            "continuity_notes": prompt_payload.get("continuity_notes") or "",
+            "prompt_fallback": bool(prompt_payload.get("fallback_used")),
+            "prior_image_count": int(
+                visual_context.get("prior_image_count")
+                if isinstance(visual_context, dict) and visual_context.get("prior_image_count") is not None
+                else (len(visual_context.get("prior_images") or []) if isinstance(visual_context, dict) else 0)
+            ),
+        })
+
+    return {
+        "prompt": gi_full_prompt,
+        "negative_prompt": gi_negative,
+        "width": gi_width,
+        "height": gi_height,
+        "steps": gi_steps,
+        "cfg": gi_cfg,
+        "seed": args.get("seed"),
+        "checkpoint": gi_ckpt,
+        "sampler_name": gi_sampler,
+        "scheduler": gi_scheduler,
+        "model_sampling": gi_model_sampling,
+        "vae": gi_vae,
+        "template": template,
+        "workflow_name": workflow_name,
+        "loras": _profile_loras(active_profile) if active_profile else [],
+        "profile_metadata": profile_metadata,
+        "profile_active": bool(active_profile),
+    }
+
+
+def _image_recipe_event_detail(recipe: dict) -> dict:
+    """Return prompt-visible generate_image details without local profile names."""
+    profile_meta = recipe.get("profile_metadata") if isinstance(recipe.get("profile_metadata"), dict) else {}
+    workflow_active = bool(recipe.get("workflow_name"))
+    profile_active = bool(recipe.get("profile_active"))
+    return {
+        "tool": "generate_image",
+        "prompt": recipe.get("prompt") or "",
+        "negative_prompt": recipe.get("negative_prompt") or "",
+        "width": recipe.get("width"),
+        "height": recipe.get("height"),
+        "steps": recipe.get("steps"),
+        "cfg": recipe.get("cfg"),
+        "sampler": recipe.get("sampler_name") or "",
+        "scheduler": recipe.get("scheduler") or "",
+        "model_sampling": recipe.get("model_sampling") or "",
+        "profile_active": profile_active,
+        "workflow_active": workflow_active,
+        "profile_workflow": bool(profile_active and workflow_active),
+        "global_workflow": bool(workflow_active and not profile_active),
+        "loras_active": bool(recipe.get("loras")),
+        "prompt_fallback": bool(profile_meta.get("prompt_fallback")),
+        "adult_request": bool(profile_meta.get("adult_request")),
+    }
+
+
 # ── Tool execution dispatcher ──
 
 async def exec_tool(
@@ -1841,6 +2198,7 @@ async def exec_tool(
     conv_model: str = "",
     kb_ids: list = None,
     artifact_message_id: int | None = None,
+    persona_context: dict | None = None,
 ) -> str:
     """Execute a built-in or custom tool and return the result string."""
     custom_tool_map = custom_tool_map or {}
@@ -1848,8 +2206,8 @@ async def exec_tool(
     try:
         # ─── v2 workflow gate (deterministic over persuasion) ───────────────
         # Two interlocking states gate every non-meta tool call. Both fire
-        # only for v2 personas (detected by model_config.name containing "v2").
-        # v1 stays untouched.
+        # only for Daedalus/v2 personas; ordinary chat personas stay outside
+        # the coder workflow gates.
         #
         #   State 1 — PENDING REVIEW: a builder or fixer just succeeded but
         #     no reviewer ran after it. Block everything except run_review.
@@ -2965,6 +3323,189 @@ async def exec_tool(
                 await events.emit(conv_id, "tool_end", {"tool": "download_file", "icon": "code", "status": f"File not found: {path}"})
                 return f"ERROR: File not found or could not read: {path}"
 
+        elif name == "generate_image":
+            if not config.COMFYUI_URL:
+                return "ERROR: Image generation is not configured. Set the ComfyUI URL in Settings → Connections."
+            gi_prompt = (args.get("prompt") or "").strip()
+            if not gi_prompt:
+                return "ERROR: generate_image requires a prompt describing the image."
+            # Settings-driven defaults plus persona-only local profile routing.
+            # The profile file lives in ignored data/ and only selects known
+            # saved workflows/checkpoints/LoRAs; the model never invents graphs.
+            gi_recipe = _resolve_chat_image_recipe(args, persona_context=persona_context)
+            gi_detail = _image_recipe_event_detail(gi_recipe)
+            gi_detail_json = json.dumps(gi_detail, ensure_ascii=True)
+            await events.emit(conv_id, "tool_start", {
+                "tool": "generate_image", "icon": "image",
+                "status": "Generating image",
+                "detail": gi_detail_json,
+            })
+            gi_full_prompt = gi_recipe["prompt"]
+            gi_negative = gi_recipe["negative_prompt"]
+            gi_width = gi_recipe["width"]
+            gi_height = gi_recipe["height"]
+            gi_steps = gi_recipe["steps"]
+            gi_cfg = gi_recipe["cfg"]
+            gi_ckpt = gi_recipe["checkpoint"]
+            gi_vae = gi_recipe["vae"]
+            try:
+                workflow, gi_seed = comfyui.build_workflow(
+                    gi_recipe["template"] or comfyui.load_template(),
+                    prompt=gi_full_prompt,
+                    negative_prompt=gi_negative,
+                    width=gi_width,
+                    height=gi_height,
+                    steps=gi_steps,
+                    cfg=gi_cfg,
+                    seed=gi_recipe["seed"],
+                    checkpoint=gi_ckpt,
+                    sampler_name=gi_recipe["sampler_name"],
+                    scheduler=gi_recipe["scheduler"],
+                    model_sampling=gi_recipe["model_sampling"],
+                    vae=gi_vae,
+                    loras=gi_recipe["loras"],
+                )
+                prompt_id = await comfyui.submit(workflow)
+            except Exception as e:
+                await events.emit(conv_id, "tool_error", {
+                    "tool": "generate_image", "icon": "image",
+                    "status": f"Submit failed: {str(e)[:160]}",
+                    "detail": gi_detail_json,
+                })
+                return f"ERROR: Could not start image generation: {str(e)[:300]}"
+            # Poll: 300s budget covers a 30-60s cold checkpoint load
+            _gi_t0 = time.time()
+            history = None
+            _last_progress = 0.0
+            while time.time() - _gi_t0 < 300:
+                await asyncio.sleep(1.5)
+                try:
+                    history = await comfyui.get_history(prompt_id)
+                except Exception:
+                    history = None
+                if history and (history.get("outputs") or {}):
+                    break
+                if history and history.get("status", {}).get("status_str") == "error":
+                    await events.emit(conv_id, "tool_error", {
+                        "tool": "generate_image", "icon": "image",
+                        "status": "ComfyUI reported a workflow error",
+                        "detail": gi_detail_json,
+                    })
+                    comfyui.finish_job(prompt_id)
+                    return "ERROR: ComfyUI failed to execute the workflow (check checkpoint name and VRAM)."
+                history = None
+                if time.time() - _last_progress >= 6:
+                    _last_progress = time.time()
+                    elapsed = int(time.time() - _gi_t0)
+                    qpos = await comfyui.queue_position(prompt_id)
+                    hint = f"queued behind {qpos}" if qpos else ("rendering" if qpos == 0 else "loading model")
+                    await events.emit(conv_id, "tool_progress", {
+                        "tool": "generate_image", "icon": "image",
+                        "status": f"Rendering image {elapsed}s ({hint})",
+                        "detail": gi_detail_json,
+                    })
+            if not history:
+                await comfyui.cancel(prompt_id)
+                comfyui.finish_job(prompt_id)
+                await events.emit(conv_id, "tool_error", {
+                    "tool": "generate_image", "icon": "image",
+                    "status": "Timed out after 300s",
+                    "detail": gi_detail_json,
+                })
+                return "ERROR: Image generation timed out after 300 seconds."
+            images = comfyui.outputs_from_history(history)
+            if not images:
+                await events.emit(conv_id, "tool_error", {
+                    "tool": "generate_image", "icon": "image",
+                    "status": "No image produced",
+                    "detail": gi_detail_json,
+                })
+                comfyui.finish_job(prompt_id)
+                return "ERROR: ComfyUI finished but produced no output images."
+            os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
+            md_lines = []
+            for gi_i, img in enumerate(images):
+                try:
+                    img_bytes = await comfyui.fetch_image(img)
+                except Exception as e:
+                    print(f"[IMAGE] fetch failed: {e}")
+                    continue
+                filename = f"comfy_{prompt_id[:8]}_{gi_i}.png"
+                filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, filename)
+                with open(filepath, "wb") as f:
+                    f.write(img_bytes)
+                file_meta = _artifact_file_metadata(filepath)
+                download_url = f"/api/downloads/{filename}"
+                artifact = None
+                try:
+                    cf_id = f"cf-{uuid.uuid4().hex[:8]}"
+                    artifact = await db.add_conversation_file(
+                        cf_id,
+                        conv_id,
+                        filename,
+                        download_url,
+                        message_id=artifact_message_id,
+                        kind="image",
+                        mime_type="image/png",
+                        storage_path=filepath,
+                        size_bytes=file_meta["size_bytes"],
+                        sha256=file_meta["sha256"],
+                        exists_status="present",
+                        status="draft",
+                        metadata={
+                            "source_tool": "generate_image",
+                            "prompt": gi_full_prompt[:500],
+                            "negative_prompt": gi_negative[:300],
+                            "seed": gi_seed,
+                            "steps": gi_steps,
+                            "cfg": gi_cfg,
+                            "width": gi_width,
+                            "height": gi_height,
+                            "checkpoint": "[profile]" if gi_recipe["profile_active"] and gi_ckpt else gi_ckpt,
+                            "sampler": gi_recipe["sampler_name"],
+                            "scheduler": gi_recipe["scheduler"],
+                            "model_sampling": gi_recipe["model_sampling"],
+                            "vae": "[profile]" if gi_recipe["profile_active"] and gi_vae else gi_vae,
+                            "workflow": "[profile]" if gi_recipe["profile_active"] and gi_recipe["workflow_name"] else "",
+                            "persona_image_profile": gi_recipe["profile_metadata"],
+                            "size_bytes": file_meta["size_bytes"],
+                            "sha256": file_meta["sha256"],
+                        },
+                    )
+                except Exception as e:
+                    print(f"[FileTrack] {e}")
+                await events.emit(conv_id, "file_ready", {
+                    "filename": filename, "url": download_url,
+                    "is_image": True,
+                    "artifact_id": (artifact or {}).get("id"),
+                    "kind": "image",
+                    "mime_type": "image/png",
+                })
+                md_lines.append(f"![{filename}]({download_url})")
+                md_lines.append(f"**[Download {filename}]({download_url})**")
+            if not md_lines:
+                await events.emit(conv_id, "tool_error", {
+                    "tool": "generate_image", "icon": "image",
+                    "status": "Image fetch failed",
+                    "detail": gi_detail_json,
+                })
+                comfyui.finish_job(prompt_id)
+                return "ERROR: Generated image could not be fetched from ComfyUI."
+            await events.emit(conv_id, "tool_end", {
+                "tool": "generate_image", "icon": "image",
+                "status": f"Image ready ({int(time.time() - _gi_t0)}s)",
+                "detail": gi_detail_json,
+            })
+            # Hand GPU 1 back to Ollama between generations
+            await comfyui.free_memory()
+            # HyprChat downloaded the images above — erase ComfyUI's traces
+            # (history entry + file copies when the cleanup node is installed)
+            await comfyui.forget_job(prompt_id)
+            md_lines.append(f"Seed: `{gi_seed}` · steps {gi_steps} · "
+                            f"{gi_width}×{gi_height} "
+                            f"(reuse the seed for reproducible variations)")
+            return "\n\n".join(md_lines)
+
         elif name == "download_project":
             directory = args.get("directory", "/root")
             _download_warning_lines = []
@@ -2975,8 +3516,8 @@ async def exec_tool(
             # Reviewer gate (Coder Bot v2): if the most recent reviewer run on
             # this conversation reported issues or could not identify the
             # project, refuse to ship until the orchestrator runs a fixer pass
-            # and re-runs run_review. v1 personas don't produce reviewer runs,
-            # so this is naturally inert for them.
+            # and re-runs run_review. Ordinary chat personas do not create
+            # reviewer runs, so this is naturally inert for them.
             if conv_id:
                 try:
                     _runs_for_gate = await db.get_runs_by_conversation(conv_id, limit=20)
@@ -4539,122 +5080,54 @@ async def exec_tool(
             constraints = args.get("constraints", "")
             if not task:
                 return "ERROR: task is required"
+            architect_task = task
+            if constraints:
+                architect_task = f"{task}\n\nConstraints:\n{constraints}"
 
-            # ─── v2: route through structured Architect agent ─────────
-            # The Architect produces a JSON manifest the Builder/Reviewer
-            # consume directly, instead of the v1 prose plan that every
-            # downstream agent has to re-parse from markdown. v1 personas
-            # keep the existing prose path below.
-            _is_v2_for_plan = bool(conv_id) and await _check_v2()
-
-            if _is_v2_for_plan:
-                from agents import architect
-                await events.emit(conv_id, "tool_start", {
-                    "tool": "plan_project", "icon": "activity",
-                    "status": "🧠 Architect planning structured manifest...",
-                })
-                # KB chunks for the planning model: filter by language hints
-                # using the existing rag plumbing. Best effort — if RAG isn't
-                # configured or fails, the architect just runs without KB.
-                _kb_chunks = []
-                if kb_ids:
-                    try:
-                        import rag
-                        _hints = _kb_filename_hints_for_language(language, task)
-                        _kb_chunks = await rag.query(
-                            kb_ids, query_text=task[:500], top_k=3,
-                            prefer_filename_hints=_hints,
-                        )
-                        # Visibility for "is the KB actually being used" question.
-                        # Logs the filenames + scores so you can see at a glance
-                        # whether retrieval found anything relevant.
-                        if _kb_chunks:
-                            _kb_summary = ", ".join(
-                                f"{c.get('filename','?')}({c.get('score',0):.2f})"
-                                for c in _kb_chunks
-                            )
-                            print(f"[plan_project] KB chunks for architect: "
-                                  f"kb_ids={kb_ids} hints={_hints} → {_kb_summary}",
-                                  flush=True)
-                        else:
-                            print(f"[plan_project] No KB chunks returned "
-                                  f"(kb_ids={kb_ids}, hints={_hints})", flush=True)
-                    except Exception as _rge:
-                        print(f"[plan_project] RAG query failed (non-fatal): {_rge}")
-                plan = await architect.run_architect(
-                    http, events, conv_id,
-                    task=task, language_hint=language,
-                    kb_chunks=_kb_chunks,
-                    conv_model=conv_model,
-                )
-                if (plan.get("status") or "") == "ok":
-                    await _apply_workflow_event(
-                        conv_id, "PLAN_DONE",
-                        run_id=plan.get("run_id", ""),
-                        project_id=plan.get("plan", {}).get("project_id", "") if isinstance(plan.get("plan"), dict) else "",
-                        user_task=task,
+            # Architect produces the structured manifest consumed by Builder
+            # and Reviewer. The old prose planner was removed so every
+            # CodeAgent profile gets the same plan contract.
+            from agents import architect
+            await events.emit(conv_id, "tool_start", {
+                "tool": "plan_project", "icon": "activity",
+                "status": "🧠 Architect planning structured manifest...",
+            })
+            _kb_chunks = []
+            if kb_ids:
+                try:
+                    import rag
+                    _hints = _kb_filename_hints_for_language(language, architect_task)
+                    _kb_chunks = await rag.query(
+                        kb_ids, query_text=architect_task[:500], top_k=3,
+                        prefer_filename_hints=_hints,
                     )
-                return architect.format_plan_for_chat(plan)
-
-            # ─── v1 path: existing prose plan_project ─────────────────
-            planning_model = config.PLANNING_MODEL or conv_model or config.DEFAULT_MODEL
-            await events.emit(conv_id, "tool_start", {"tool": "plan_project", "icon": "activity", "status": f"🧠 Planning architecture with {planning_model}..."})
-            plan_prompt = f"""You are a senior software architect. Design a complete implementation plan for this project.
-
-## Requirements
-{task}
-
-## Language
-{language}
-
-## Constraints
-{constraints if constraints else "None specified"}
-
-## Your plan MUST include:
-1. **File Tree** — every file to create, with a one-line description of its purpose
-2. **Dependencies** — packages/libraries needed with install commands
-3. **Component Design** — how components interact (data flow, API contracts, imports)
-4. **Build Order** — which files to create first (dependencies before dependents)
-5. **Key Design Decisions** — why this architecture over alternatives
-6. **Testing Strategy** — what to test and how
-
-Be specific. Name actual files, functions, classes, and routes. This plan will be handed to a coding agent for implementation."""
-            try:
-                r = await http.post(
-                    f"{config.OLLAMA_URL}/api/chat",
-                    json={"model": planning_model, "messages": [{"role": "user", "content": plan_prompt}], "stream": False, "options": {"temperature": 0.3, "num_ctx": config.DEFAULT_NUM_CTX}},
-                    timeout=180,
-                )
-                if r.status_code == 200:
-                    data = r.json()
-                    plan = data.get("message", {}).get("content", "")
-                    if plan:
-                        await events.emit(conv_id, "tool_end", {
-                            "tool": "plan_project",
-                            "icon": "activity",
-                            "status": "🧠 Architecture plan ready",
-                            "detail": json.dumps({"plan": plan[:12000], "language": language, "task": task[:200]}),
-                        })
-                        # Save plan to project memory
-                        try:
-                            proj_id = f"proj-{uuid.uuid4().hex[:12]}"
-                            await db.upsert_coding_project(
-                                project_id=proj_id, name=task[:60].strip().replace("\n", " "),
-                                conversation_id=conv_id, description=task[:500],
-                                language=language, last_plan=plan[:8000],
-                            )
-                        except Exception as proj_e:
-                            print(f"[PLAN] Failed to save project: {proj_e}")
-                        return f"## Architecture Plan\n\n{plan}\n\n---\n*Now implement this plan step by step using write_file, run_shell, and other tools.*"
+                    if _kb_chunks:
+                        _kb_summary = ", ".join(
+                            f"{c.get('filename','?')}({c.get('score',0):.2f})"
+                            for c in _kb_chunks
+                        )
+                        print(f"[plan_project] KB chunks for architect: "
+                              f"kb_ids={kb_ids} hints={_hints} → {_kb_summary}",
+                              flush=True)
                     else:
-                        await events.emit(conv_id, "tool_end", {"tool": "plan_project", "icon": "activity", "status": "⚠ Planning returned empty"})
-                        return "ERROR: Planning model returned empty response"
-                else:
-                    await events.emit(conv_id, "tool_end", {"tool": "plan_project", "icon": "activity", "status": f"⚠ Planning failed ({r.status_code})"})
-                    return f"ERROR: Planning model returned HTTP {r.status_code}: {r.text[:200]}"
-            except Exception as e:
-                await events.emit(conv_id, "tool_end", {"tool": "plan_project", "icon": "activity", "status": "⚠ Planning failed"})
-                return f"ERROR: Planning call failed: {e}"
+                        print(f"[plan_project] No KB chunks returned "
+                              f"(kb_ids={kb_ids}, hints={_hints})", flush=True)
+                except Exception as _rge:
+                    print(f"[plan_project] RAG query failed (non-fatal): {_rge}")
+            plan = await architect.run_architect(
+                http, events, conv_id,
+                task=architect_task, language_hint=language,
+                kb_chunks=_kb_chunks,
+                conv_model=conv_model,
+            )
+            if (plan.get("status") or "") == "ok":
+                await _apply_workflow_event(
+                    conv_id, "PLAN_DONE",
+                    run_id=plan.get("run_id", ""),
+                    project_id=plan.get("plan", {}).get("project_id", "") if isinstance(plan.get("plan"), dict) else "",
+                    user_task=architect_task,
+                )
+            return architect.format_plan_for_chat(plan)
 
         elif name == "deep_research":
             topic = args.get("topic", "")
@@ -4738,7 +5211,15 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
         elif name == "conspiracy_research":
             topic = args.get("topic", "")
             angle = args.get("angle", "evidence")
-            depth = max(3, min(5, int(args.get("depth", 4))))
+            depth = args.get("depth", 4)
+            if isinstance(depth, str):
+                label = depth.strip().lower()
+                depth = {"quick": 3, "standard": 4, "deep": 5}.get(label, depth)
+            try:
+                depth = int(depth)
+            except (TypeError, ValueError):
+                depth = 4
+            depth = max(3, min(5, depth))
 
             # Pre-query KB for existing knowledge on this topic
             kb_prior = ""
@@ -5059,8 +5540,8 @@ Be specific. Name actual files, functions, classes, and routes. This plan will b
             # Phase 3 — inject the most recent Architect manifest into the
             # context so OpenHands follows the structured plan (file list,
             # build/test commands, success criteria) instead of re-deriving
-            # them from prose. Best effort: only fires if v2 plan_project
-            # was called this conv and produced a successful architect run.
+            # them from prose. Best effort: only fires if plan_project was
+            # called this conversation and produced a successful architect run.
             if conv_id:
                 try:
                     _runs_for_arch = await db.get_runs_by_conversation(conv_id, limit=20)

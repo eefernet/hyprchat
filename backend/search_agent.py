@@ -12,8 +12,6 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any
-
 import config
 import quick_search as _qs
 

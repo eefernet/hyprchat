@@ -54,12 +54,18 @@ WATCHED = {
     "backend/model_providers.py":   ("Model Providers",  REMOTE_BACKEND,            True),
     "backend/cancel_registry.py":   ("Cancel Registry",  REMOTE_BACKEND,            True),
     "backend/rag.py":               ("RAG Pipeline",     REMOTE_BACKEND,            True),
+    "backend/comfyui.py":           ("ComfyUI Client",   REMOTE_BACKEND,            True),
+    "backend/image_prompt_enhancer.py": ("Image Prompt Enhancer", REMOTE_BACKEND,   True),
+    "backend/persona_images.py":    ("Persona Images",   REMOTE_BACKEND,            True),
+    "backend/voice.py":             ("Voice",            REMOTE_BACKEND,            True),
     "backend/research.py":          ("Research",         REMOTE_BACKEND,            True),
     "backend/quick_search.py":      ("Quick Search",     REMOTE_BACKEND,            True),
     "backend/search_agent.py":      ("Search Agent",     REMOTE_BACKEND,            True),
+    "backend/storage_diagnostics.py": ("Storage Diagnostics", REMOTE_BACKEND,        True),
     "backend/events.py":            ("Events",           REMOTE_BACKEND,            True),
     "backend/council.py":           ("Council",          REMOTE_BACKEND,            True),
     "backend/hf.py":                ("HuggingFace",      REMOTE_BACKEND,            True),
+    "backend/hyprfit.py":           ("HyprFit",          REMOTE_BACKEND,            True),
     "backend/openhands_worker.py":  ("OpenHands Worker", REMOTE_OPENHANDS_WORKER,   False),
     "backend/agents/chat.py":           ("Chat Agent",         REMOTE_AGENTS, True),
     "backend/agents/personas.py":       ("Personas",           REMOTE_AGENTS, True),
@@ -248,13 +254,27 @@ def setup_servers():
 
 # ── SCP / SSH with sshpass ──
 
+# When a password is supplied we MUST stop ssh/scp from offering ssh-agent
+# keys first: every offered key counts against the server's MaxAuthTries
+# (default 6), so on a host without our key installed a loaded agent can burn
+# all attempts on pubkeys and get "Permission denied (publickey,password)"
+# before the password is ever tried — intermittently, depending on agent
+# state and how many connections a deploy made just before. Forcing
+# password-only auth makes the configured password the first and only method.
+_PW_AUTH_OPTS = [
+    "-o", "PubkeyAuthentication=no",
+    "-o", "PreferredAuthentications=password",
+    "-o", "NumberOfPasswordPrompts=1",
+]
+
+
 def scp(local, remote_host, remote_path, user, password):
     """Copy a file to remote via scp. Returns (ok, msg)."""
     dest = f"{user}@{remote_host}:{remote_path}"
     if password:
         cmd = [
             "sshpass", "-p", password,
-            "scp", "-o", "StrictHostKeyChecking=no", "-q",
+            "scp", "-o", "StrictHostKeyChecking=no", *_PW_AUTH_OPTS, "-q",
             local, dest
         ]
     else:
@@ -285,7 +305,9 @@ def scp_recursive(local, remote_host, remote_path, user, password, timeout=120):
     dest = f"{user}@{remote_host}:{remote_path}"
     base = ["scp", "-o", "StrictHostKeyChecking=no", "-q", "-r", local, dest]
     try:
-        cmd = (["sshpass", "-p", password] + base) if password else base
+        cmd = (["sshpass", "-p", password,
+                "scp", "-o", "StrictHostKeyChecking=no", *_PW_AUTH_OPTS,
+                "-q", "-r", local, dest]) if password else base
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if r.returncode == 0:
             return True, ""
@@ -304,7 +326,7 @@ def ssh_cmd(host, user, password, command, timeout=30):
     if password:
         cmd = [
             "sshpass", "-p", password,
-            "ssh", "-o", "StrictHostKeyChecking=no",
+            "ssh", "-o", "StrictHostKeyChecking=no", *_PW_AUTH_OPTS,
             f"{user}@{host}", command
         ]
     else:
@@ -348,12 +370,20 @@ def _default_env_text(codebox_ip, searxng_ip=""):
         f"AIDER_WORKER_URL=http://{codebox_ip}:8586",
         f"SEARXNG_URL={searxng_url}",
         "HYPRCHAT_OUTBOUND_PROXY=",
+        "COMFYUI_URL=",
+        "STT_URL=",
+        "TTS_URL=",
+        "TTS_VOICE=af_heart",
         "DATABASE_PATH=/opt/hyprchat/data/hyprchat.db",
         "UPLOAD_DIR=/opt/hyprchat/data/uploads",
         "TOOLS_DIR=/opt/hyprchat/data/tools",
         "KB_DIR=/opt/hyprchat/data/knowledge_bases",
         "SANDBOX_DIR=/opt/hyprchat/data/sandbox",
         "SETTINGS_PATH=/opt/hyprchat/data/settings.json",
+        "CONNECTOR_SECRETS_PATH=/opt/hyprchat/data/connector_secrets.json",
+        "QUICK_SEARCH_MODE=balanced",
+        "AIDER_ENABLED=true",
+        "AIDER_AUTO_TEST=true",
         "",
     ])
 
@@ -370,6 +400,23 @@ def _hyprchat_host_ready(hypr):
     return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], cmd, timeout=20)
 
 
+def _hyprchat_data_permissions_cmd():
+    return (
+        "mkdir -p /opt/hyprchat/data/uploads/avatars /opt/hyprchat/data/tools "
+        "/opt/hyprchat/data/knowledge_bases /opt/hyprchat/data/chroma_db "
+        "/opt/hyprchat/data/comfy_workflows /opt/hyprchat/data/sandbox/outputs "
+        "/opt/hyprchat/data/sandbox/workspace /opt/hyprchat/data/sandbox/venv\n"
+        "if id -u hyprchat >/dev/null 2>&1; then\n"
+        "  chown -R hyprchat:hyprchat /opt/hyprchat/data 2>/dev/null || chown -R hyprchat /opt/hyprchat/data 2>/dev/null || true\n"
+        "  chmod -R u+rwX /opt/hyprchat/data 2>/dev/null || true\n"
+        "fi\n"
+    )
+
+
+def _repair_hyprchat_data_permissions(hypr):
+    return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], _hyprchat_data_permissions_cmd(), timeout=90)
+
+
 def _bootstrap_hyprchat_host(hypr, codebox_ip, searxng_ip=""):
     env_text = shlex.quote(_default_env_text(codebox_ip, searxng_ip))
     cmd = (
@@ -383,10 +430,13 @@ def _bootstrap_hyprchat_host(hypr, codebox_ip, searxng_ip=""):
         "fi\n"
         "mkdir -p /opt/hyprchat/backend/agents /opt/hyprchat/frontend/dist "
         "/opt/hyprchat/data/uploads/avatars /opt/hyprchat/data/tools "
-        "/opt/hyprchat/data/knowledge_bases /opt/hyprchat/data/sandbox\n"
+        "/opt/hyprchat/data/knowledge_bases /opt/hyprchat/data/chroma_db "
+        "/opt/hyprchat/data/comfy_workflows /opt/hyprchat/data/sandbox/outputs "
+        "/opt/hyprchat/data/sandbox/workspace /opt/hyprchat/data/sandbox/venv\n"
         f"if [ ! -f /opt/hyprchat/.env ]; then printf %s {env_text} > /opt/hyprchat/.env; fi\n"
         "chmod 640 /opt/hyprchat/.env 2>/dev/null || true\n"
         "chown -R hyprchat:hyprchat /opt/hyprchat/data 2>/dev/null || chown -R hyprchat /opt/hyprchat/data\n"
+        "chmod -R u+rwX /opt/hyprchat/data 2>/dev/null || true\n"
     )
     return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], cmd, timeout=180)
 
@@ -412,6 +462,7 @@ def _set_hyprchat_env(hypr, key, value):
 
 
 def _restart_hyprchat(hypr):
+    _repair_hyprchat_data_permissions(hypr)
     ok, out, err = ssh_cmd(
         hypr["ip"], hypr["user"], hypr["pass"],
         "systemctl restart hyprchat 2>&1", timeout=150,
@@ -756,6 +807,14 @@ def deploy_changes(changed, cfg):
             print(f"  {R}\u2717{RST} daemon-reload failed: {err}")
 
     if needs_restart:
+        print()
+        print(f"  {Y}\u25b6{RST} Repairing HyprChat data permissions...")
+        ok_perm, _, err_perm = _repair_hyprchat_data_permissions(hypr)
+        if ok_perm:
+            print(f"  {G}\u2713{RST} Data directory writable for hyprchat")
+        else:
+            print(f"  {Y}!{RST} Data permission repair may have failed: {err_perm}")
+
         print()
         print(f"  {Y}\u25b6{RST} Restarting hyprchat service...")
         ok, out, err = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],

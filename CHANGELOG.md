@@ -1,3 +1,97 @@
+# Alpha v17.3.0 — June 22, 2026
+
+> Adds the local media stack, persona-aware image generation, voice input/output,
+> hybrid RAG citations, storage diagnostics, and token analytics.
+> Adds SSH-based remote Ollama HyprFit hardware scanning and clearer rescan status.
+
+## Highlights
+- Local image generation is now available from chat and the new Image Studio.
+- Voice STT/TTS is proxied through HyprChat, keeping browser traffic pointed at the main server.
+- Knowledge-base answers now use hybrid retrieval and render clickable inline citations.
+- Persona chats can generate rating-aware character photos from appearance/context.
+- Settings now exposes token analytics, health history, cleanup, media controls, and service connection status.
+- Chat list polish improves the sidebar styling and adds marquee hover behavior for long chat titles.
+
+## Image Generation
+- New `generate_image` chat tool renders ComfyUI images inline with seed, size, steps, and artifact metadata.
+- Image Studio adds prompt controls, model/VAE/workflow selectors, queue progress, Stop, gallery, reuse, delete, and full purge tools.
+- Settings → Model & Generation now includes chat image defaults: checkpoint, saved workflow, resolution, VAE, prompt defaults, negative prompt, and compose model.
+- Prompt enhancement is available through `/api/images/enhance-prompt`, using the configured local compose/workspace model and rejecting unusable empty JSON output.
+- Saved workflows can be uploaded from API JSON or workflow-bearing PNGs; KSampler and Flux-family graphs are patched by node class.
+- Per-checkpoint presets now include sampler, scheduler, CFG, steps, model type, and prompt prefixes.
+- Generated images are tracked as `kind=image` artifacts and appear in Artifact Studio.
+- Image cleanup is trace-aware: completed jobs forget ComfyUI history/output copies when the optional control node is installed, and Delete all purges HyprChat artifacts, chat image references, ComfyUI traces, and logs where available.
+- New unload/restart/memory controls and optional ComfyUI custom routes: `/hyprchat/free`, `/hyprchat/memory`, `/hyprchat/restart`, `/hyprchat/cleanup`, plus idle model unload.
+- Hardening pass: in-flight job guards, prompt redaction, safer tool-call parsing, purge pagination fixes, chat attachment cleanup, and stricter persona/photo prompt validation.
+
+## Persona Photos
+- Personas now have an Appearance field used for selfie and character-photo requests.
+- Photo prompts are composed from appearance, current scene, user request, prior images, and optional per-persona image profiles.
+- Persona image profiles live in `persona_image_profiles.json` and can route intents to profile-specific workflow/default settings.
+- Persona content ratings gate image prompts: PG/PG-13 stays conservative, while adult-rated personas can use the configured compose model for allowed requests.
+- Selfie rescue forces `generate_image` when a persona describes a requested photo in text instead of calling the tool.
+
+## Voice
+- Composer mic button records audio and transcribes it through an OpenAI-compatible STT service such as Speaches.
+- Assistant reply Speak button and optional autoplay synthesize audio through an OpenAI-compatible TTS service such as Kokoro.
+- Deferred speech playback is available through `/api/audio/speech/request` and `/api/audio/speech/{request_id}` so the UI can create expiring TTS URLs.
+- Markdown, code fences, links, and citations are stripped before TTS.
+- Settings → Connections adds Voice STT/TTS URLs, health status, and a voice picker.
+- Plain HTTP installs still need a browser secure-context exception for microphone capture.
+
+## HyprFit
+- Rescan Hardware can now scan remote Ollama hosts over SSH with `nvidia-smi`, RAM, OS, and architecture probes.
+- Remote scans persist detected accelerator profiles only when SSH hardware detection succeeds.
+- Remote Ollama hosts without SSH scan settings now show setup-required status instead of treating saved profiles as scanned hardware.
+- Remote SSH/auth/command failures keep the saved profile for recommendations and surface a scan-failed status.
+- Local Ollama hosts continue to support automatic accelerator detection.
+
+## UI
+- Settings → Connections now includes local-only Ollama hardware scan SSH settings with write-only password storage.
+- New HyprFit rescan toasts distinguish local detection, remote scanned, setup-required, scan-failed, and CPU fallback states.
+- New hardware profile chips show rescan mode, detected backend, Ollama reachability, and the sanitized Ollama origin.
+
+## RAG + Citations
+- KB search now fuses Chroma vector results with SQLite FTS5 keyword results using Reciprocal Rank Fusion.
+- Exact tokens such as part numbers, IDs, and error strings rank more reliably.
+- Retrieval falls back to keyword-only if embeddings are unavailable.
+- Answers cite numbered excerpts with `[n]`; citations render as chips and persist in saved events.
+- Existing KBs backfill into FTS automatically; Reindex rebuilds both stores.
+- Added `POST /api/knowledge-bases/query` for retrieval testing.
+
+## Analytics, Storage, and Cleanup
+- Token usage is recorded per conversation/model/persona and exposed through `/api/analytics/tokens` and `/api/analytics/tokens/summary`.
+- Runtime storage diagnostics check SQLite and Chroma writeability so readonly data-dir failures surface as actionable errors instead of opaque RAG crashes.
+- Settings cleanup tools cover local sandbox outputs and Codebox project cleanup through `/api/settings/cleanup-now` and `/api/settings/cleanup-codebox`.
+- Danger Zone cleanup now covers chats, memories, artifacts, statistics, local Ollama models, other users, and a full fresh-install reset.
+- Health history persists dependency checks in `service_health_log` and is shown in Settings.
+
+## Bug fixes
+- Fixed `conspiracy_research` depth parsing so malformed values fall back safely instead of crashing the tool call.
+- Fixed Image Studio artifact hashing to use a closed, non-blocking metadata path during job polling.
+- Fixed ComfyUI v-prediction/flow sampling injection so unrelated sampling nodes no longer suppress the required mode-specific node.
+- Fixed ComfyUI cleanup races by tracking pending prompt submissions before ComfyUI returns a prompt id.
+- Fixed empty SSE subscriber lists lingering after the last client unsubscribes.
+- Long chat titles now fade at the edge and marquee on hover instead of ending with hard ellipses.
+- Removed the remaining runtime v1 CodeAgent planning path; `plan_project` now always routes through the structured Architect path.
+- Fixed KB reindex failures from readonly RAG/Chroma SQLite storage with clearer diagnostics and deploy-time data-directory permission repair.
+- Hardened `/api/img-proxy` so proxied chat images use the same safe-fetch path as URL previewing, blocking loopback/private targets and unsafe redirects before any private URL is fetched.
+- Kept image proxy behavior intact while enforcing the existing 5 MB cap, image-only content check, cache header, and domain-matched Referer.
+- Fixed dependency-light backend test collection by replacing fragile optional-dependency stubs with proper module stubs and centralized `aiosqlite`/`chromadb` availability checks.
+
+## Setup, Ops, and Tests
+- `.env.example`, deploy scripts, `create-lxc.sh`, and `deploy_monitor.py` were updated for the media services, connector secrets, sandbox paths, Quick Search, and Aider/OpenHands settings used by this release.
+- `create-lxc.sh` can optionally hand off to the ComfyUI/Voice LXC installer.
+- `create-comfyui-lxc.sh` documents the HyprChat ComfyUI control node, idle unload env vars, restart route, and verification commands.
+- `deploy_monitor.py` now watches the Vite source/package files plus `image_prompt_enhancer.py`, `persona_images.py`, and `storage_diagnostics.py`.
+- New and expanded tests cover workflow patching, persona image prompts, prompt enhancement normalization, ComfyUI control endpoints, hybrid RAG, audio routes, storage diagnostics, and token analytics.
+- Live media tests skip cleanly when the configured services are unavailable.
+
+## Deployment
+- `deploy_monitor.py` now includes the HyprFit backend module in watched deploy files.
+
+---
+
 # Alpha v17.2.1 - June 14, 2026
 > This update focuses on the first series to migrate a single file react **no build step** app into a built app versus having all built at runtime on the users browser. Load times should be faster and it should be easier to maintain the code base in the future.
 

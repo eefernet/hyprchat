@@ -5,7 +5,7 @@
 <h1 align="center">HyprChat</h1>
 
 <p align="center">
-  <strong>Self-hosted AI chat platform</strong> — tool calling, Daedalus agentic coding, deep research, multi-model councils, n8n automation integration, and full model management. All running on your own hardware.
+  <strong>Self-hosted AI chat platform</strong> — tool calling, Daedalus agentic coding, deep research, image generation, voice, multi-model councils, n8n automation integration, and full model management. All running on your own hardware.
 </p>
 
 <p align="center">
@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <code>FastAPI</code> · <code>React 18</code> · <code>Vite</code> · <code>Ollama</code> · <code>SQLite</code> · <code>SearXNG</code> · <code>Codebox</code>
+  <code>FastAPI</code> · <code>React 18</code> · <code>Vite</code> · <code>Ollama</code> · <code>SQLite</code> · <code>SearXNG</code> · <code>ComfyUI</code> · <code>Codebox</code>
 </p>
 
 > ⚠️ Alpha software — actively developed, expect rough edges. Check [releases](https://github.com/eefernet/hyprchat/releases) for stable builds.
@@ -28,7 +28,7 @@ HyprChat can execute code, upload files, call local services, and drive coding a
 
 ## What It Is
 
-HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-style dashboards. It combines normal chat, model management, web research, RAG, agent profiles, project workspaces, and a coding-agent workflow into one FastAPI service and one Vite-built React component file.
+HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-style dashboards. It combines normal chat, model management, web research, RAG, image generation, voice input/output, agent profiles, project workspaces, and a coding-agent workflow into one FastAPI service and one Vite-built React component file.
 
 <p align="center">
   <img src="docs/images/mainScreen.png" alt="HyprChat main chat screen" width="900">
@@ -42,12 +42,14 @@ HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-styl
 | 🏛️ Daedalus | Architect → Builder → Reviewer → Acceptance workflow for building and fixing projects |
 | 🔎 Research | Quick Search, deep research reports, source cards, page reading, durable report history |
 | 🧰 Tools | Code execution, shell/file tools, URL fetch, custom Python tools, uploaded project awareness |
+| 🎨 Images | Local ComfyUI image generation from chat or Image Studio, saved workflows, persona selfies, prompt enhancement |
+| 🎙️ Voice | Browser microphone transcription and assistant reply playback through proxied STT/TTS services |
 | 🔌 Connectors | MCP servers and OpenAPI specs discovered into chat-usable tools, with credential placeholders and private-URL guards |
 | 📚 Knowledge | RAG knowledge bases, ChromaDB retrieval, workspace memory, project indexing |
 | 🧠 Memory | Global user memory plus workspace memory with reviewed suggestions, pinned blocks, and Ghost Mode for unsaved chats |
-| 📁 Artifacts | Artifact Studio tracks delivered files/projects with previews, versions, revisions, bundles, and timelines |
+| 📁 Artifacts | Artifact Studio tracks delivered files, projects, and generated images with previews, versions, revisions, bundles, and timelines |
 | 🗳️ Councils | Run multiple models in parallel, debate answers, vote, and synthesize the result |
-| 📦 Models | Ollama model browser, HuggingFace GGUF search/downloads, capability badges, optional OpenAI/Anthropic cloud models |
+| 📦 Models | Ollama model browser, HuggingFace GGUF search/downloads, HyprFit hardware-fit recommendations, capability badges, optional OpenAI/Anthropic cloud models |
 | 🧩 Profiles | Agents for tasks, Personas for style/roleplay, per-profile tools and knowledge bases |
 
 ## Feature Tour
@@ -63,9 +65,34 @@ Use HyprChat like a normal chat app, then turn on heavier tools only when needed
   <img src="docs/images/calloutsExample.png" alt="Callout rendering support" width="215">
 </p>
 
+### 🎨 Image Generation & Image Studio
+
+Generate pictures directly in chat with the `generate_image` tool, or use Image Studio for a full ComfyUI control surface. Chat images render inline, are stored as artifacts, and can use global defaults for checkpoint, workflow, resolution, VAE, prompt prefix, negative prompt, and compose model.
+
+Image Studio supports local Stable Diffusion and Flux-style ComfyUI workflows, checkpoint/VAE selection, sampler and scheduler defaults, model-sampling presets, saved API workflows from JSON or workflow-bearing PNG uploads, prompt enhancement, thumbnail galleries, lightbox preview, artifact reuse, full-trace purge, and ComfyUI memory controls. HyprChat injects v-prediction or flow sampling nodes only when the workflow does not already contain the matching mode, and defers ComfyUI cleanup while any generation or prompt submission is still in flight.
+
+<p align="center">
+  <img src="docs/images/image%20studio.png" alt="HyprChat Image Studio" width="900">
+</p>
+
+<p align="center">
+  <img src="docs/images/photogeninchatExample.png" alt="Generated image rendered inline in chat" width="440">
+  <img src="docs/images/personaselfieExample.png" alt="Persona selfie generated in chat" width="440">
+</p>
+
+<p align="center">
+  <img src="docs/images/globalcomfyUIDefaultsforchat.png" alt="Global ComfyUI defaults for chat image generation" width="900">
+</p>
+
+### 🎙️ Voice
+
+Voice is optional and local-service friendly. The composer can record from the browser microphone and send audio to HyprChat for speech-to-text, while assistant messages can be read aloud through text-to-speech with per-voice selection and optional auto-play.
+
+The browser only talks to HyprChat. The backend proxies OpenAI-compatible STT and TTS services such as Speaches/Whisper and kokoro-fastapi, which avoids CORS issues and keeps those LAN services off the public browser surface.
+
 ### 🏛️ Daedalus Agentic Coding
 
-Daedalus is the coding workflow. It plans, builds, reviews, fixes, and acceptance-checks projects instead of sending a single giant prompt and hoping for the best.
+Daedalus is the coding workflow. It plans, builds, reviews, fixes, and acceptance-checks projects instead of sending a single giant prompt and hoping for the best. `plan_project` always uses the structured Architect path, so Builder and Reviewer receive the same manifest contract across coding profiles.
 
 <p align="center">
   <img src="docs/images/daedalus%20Prompt.png" alt="Daedalus coding prompt result" width="440">
@@ -119,7 +146,7 @@ Upload documents, attach knowledge bases to profiles, index uploaded code projec
 
 ### 🧩 Agents & Personas
 
-Agents are task profiles for coding, research, automation, and tool-heavy work. Personas are voice and scenario profiles with their own model, prompt, avatar, tools, knowledge bases, and generation settings.
+Agents are task profiles for coding, research, automation, and tool-heavy work. Personas are voice and scenario profiles with their own model, prompt, avatar, tools, knowledge bases, generation settings, and optional image appearance context for in-character photos. Photos sent by the persona are restricted based on their age rating. Yes, you can have nsfw conversations and images sent from your persona 😉.
 
 <p align="center">
   <img src="docs/images/agents.png" alt="HyprChat agents manager" width="440">
@@ -128,7 +155,9 @@ Agents are task profiles for coding, research, automation, and tool-heavy work. 
 
 ### 📦 Models, Activity, Settings
 
-Manage installed Ollama models, browse HuggingFace GGUF files, watch active downloads and long jobs, and tune appearance, generation, RAG, Daedalus, and service connections from the Settings overlay. Optional OpenAI and Anthropic API keys (Settings → Connections) add cloud models alongside local Ollama models in the picker.
+Manage installed Ollama models, browse HuggingFace GGUF files, use HyprFit to rank pull candidates against the saved or detected hardware profile, watch active downloads and long jobs, and tune appearance, generation, chat image defaults, RAG, Daedalus, voice, and service connections from the Settings overlay. Optional OpenAI and Anthropic API keys (Settings → Connections) add cloud models alongside local Ollama models in the picker.
+
+HyprFit's hardware-fit ranking model is adapted from the MIT-licensed llmfit/Pewdiepie Odysseus Cookbook approach; see [docs/licenses/llmfit-MIT-LICENSE.txt](docs/licenses/llmfit-MIT-LICENSE.txt).
 
 <p align="center">
   <img src="docs/images/modelManager.png" alt="HyprChat model manager" width="440">
@@ -151,6 +180,8 @@ User → HyprChat (:8000)
          │    ├── Research + Quick Search
          │    ├── RAG + ChromaDB
          │    ├── MCP/OpenAPI connector tools
+         │    ├── Image generation proxy + artifact-backed gallery
+         │    ├── Voice STT/TTS proxy
          │    ├── Artifact Studio + global/workspace memory
          │    └── Model, profile, workspace, council APIs
          ├── Ollama (:11434) - local LLM inference
@@ -158,6 +189,9 @@ User → HyprChat (:8000)
          ├── Codebox (:8585) - sandboxed execution
          ├── OpenHands Worker (:8586) - OpenHands + Aider bridge
          ├── SearXNG (:8888) - private web search
+         ├── ComfyUI (:8188) - local Stable Diffusion / Flux image generation
+         ├── Speaches STT (:8001) - OpenAI-compatible speech-to-text
+         ├── Kokoro TTS (:8880) - OpenAI-compatible speech synthesis
          └── n8n (:5678) - external automation integration
 ```
 
@@ -174,39 +208,49 @@ User → HyprChat (:8000)
 | `backend/connectors.py` | MCP/OpenAPI connector discovery, credential placeholders, execution guardrails |
 | `backend/research.py` | Deep research and safe URL fetch pipeline |
 | `backend/quick_search.py` / `backend/search_agent.py` | Per-turn SearXNG search planning, ranking, page fetch, result cards |
+| `backend/comfyui.py` | ComfyUI workflow patching, image generation client, saved workflow library, model defaults, cleanup hooks |
+| `backend/voice.py` | Speech-to-text and text-to-speech proxy helpers for OpenAI-compatible local services |
 | `frontend/src/main.jsx` | The entire React frontend (Vite-built to `frontend/dist/`, which the backend serves) |
 | `deploy_monitor.py` | File watcher that deploys local changes to the homelab host |
 
-## Quick Start
+## Fresh Install
 
-HyprChat expects Python 3.11+, Ollama, and at least one pulled model. Codebox, OpenHands, SearXNG, and n8n are optional but unlock the heavier workflows.
+HyprChat expects Python 3.11+, Ollama, and at least one pulled model. Codebox, OpenHands, SearXNG, ComfyUI, Speaches/Whisper, Kokoro TTS, and n8n are optional but unlock the heavier workflows.
 
-### Local Run
+### Track A: Local Dev Clone
+
+Use this when you are running directly from a checkout. Backend storage defaults to repo-local `./data`, so a fresh clone does not need write access to `/opt/hyprchat`.
 
 ```bash
-# Build the frontend first (requires Node.js + npm; dist/ is not committed)
-cd frontend
-npm install
-npm run build
-cd ..
+git clone <repo-url> hyprchat
+cd hyprchat
 
-cd backend
-python3 -m pip install -r requirements.txt
-HOST=127.0.0.1 PORT=8000 python3 main.py
+( cd frontend && npm install && npm run build )
+python3 -m pip install -r backend/requirements.txt
+
+( cd backend && HOST=127.0.0.1 PORT=8000 python3 main.py )
 ```
 
 Open `http://127.0.0.1:8000`.
 
-### LXC / Server Install
+Override storage with `HYPRCHAT_DATA_DIR=/path/to/data` or the individual `DATABASE_PATH`, `UPLOAD_DIR`, `KB_DIR`, `TOOLS_DIR`, `SANDBOX_DIR`, `SETTINGS_PATH`, and `CONNECTOR_SECRETS_PATH` variables when needed.
 
-Run as root inside the target container after copying or cloning this repo to `/opt/hyprchat`:
+### Track B: Server Install (`/opt/hyprchat`)
+
+Use this for a service install on a VM/LXC/bare-metal server. The systemd unit uses `/opt/hyprchat/.env`, and `scripts/deploy.sh` creates that file from `.env.example` if it is missing.
 
 ```bash
+# Build the frontend before deploy. frontend/dist/ is generated and not committed.
+( cd frontend && npm install && npm run build )
+
+# Copy or clone the project to /opt/hyprchat, including frontend/dist/.
 cd /opt/hyprchat
-bash scripts/deploy.sh
+sudo bash scripts/deploy.sh
 ```
 
-The service runs one Uvicorn worker by default. Keep that unless you have reviewed SQLite write behavior.
+The deploy script verifies required files, creates the `hyprchat` system user/group, creates `/opt/hyprchat/data`, seeds `/opt/hyprchat/.env`, fixes ownership, installs Python dependencies, installs the systemd unit, and starts the service. The service runs one Uvicorn worker by default; keep that unless you have reviewed SQLite write behavior.
+
+The Proxmox scripts in `scripts/create-lxc.sh` and `scripts/create-comfyui-lxc.sh` are homelab helpers for this repo's reference setup. They are not required for a normal VM or bare-metal install.
 
 ## Configuration
 
@@ -219,7 +263,32 @@ OLLAMA_URL=http://127.0.0.1:11434
 CODEBOX_URL=http://127.0.0.1:8585
 OPENHANDS_URL=http://127.0.0.1:8586
 SEARXNG_URL=http://127.0.0.1:8888
+COMFYUI_URL=
+COMFYUI_WORKFLOW_PATH=
+STT_URL=
+STT_MODEL=Systran/faster-distil-whisper-large-v3
+TTS_URL=
+TTS_VOICE=af_heart
 HYPRCHAT_OUTBOUND_PROXY=
+
+# Storage. These are server-install defaults; local dev can omit them.
+# To use HYPRCHAT_DATA_DIR as one custom base directory, remove/comment the
+# specific path overrides below.
+DATABASE_PATH=/opt/hyprchat/data/hyprchat.db
+UPLOAD_DIR=/opt/hyprchat/data/uploads
+TOOLS_DIR=/opt/hyprchat/data/tools
+KB_DIR=/opt/hyprchat/data/knowledge_bases
+SANDBOX_DIR=/opt/hyprchat/data/sandbox
+SETTINGS_PATH=/opt/hyprchat/data/settings.json
+CONNECTOR_SECRETS_PATH=/opt/hyprchat/data/connector_secrets.json
+
+IMAGE_CHAT_CHECKPOINT=
+IMAGE_CHAT_WORKFLOW=
+IMAGE_CHAT_RESOLUTION=1024x1024
+IMAGE_CHAT_VAE=
+IMAGE_CHAT_PROMPT_PREFIX=
+IMAGE_CHAT_NEGATIVE=
+IMAGE_CHAT_COMPOSE_MODEL=
 
 DEFAULT_MODEL=qwen3.5:27b
 PLANNING_MODEL=qwen3.5:27b
@@ -235,6 +304,12 @@ to `http://<searxng-host>:8899` after the SearXNG privacy setup verifies that a
 Proton OpenVPN tunnel and host-local proxy are active.
 
 Runtime settings live in the Settings overlay. Source defaults live in `backend/config.py`.
+
+## Optional Image Generation
+
+HyprChat boots cleanly without ComfyUI. When `COMFYUI_URL` is empty and no ComfyUI URL has been saved in Settings, Image Studio and chat `generate_image` are disabled rather than fatal.
+
+For setup details, see [Image Generation Setup](docs/image-generation-setup.md). It covers connecting an existing ComfyUI, the Proxmox companion LXC helper, the required checkpoint/default workflow expectations, the optional HyprChat ComfyUI control node, and the journal scrub helper used by full image-trace purge.
 
 ## Deployment
 
@@ -296,6 +371,21 @@ curl -s http://127.0.0.1:8000/api/health
 
 If you bind HyprChat to a private Tailscale IP, use that IP for health checks and tests.
 
+## Post-Install Verification
+
+Run these against the interface where HyprChat is actually listening:
+
+```bash
+curl -s http://127.0.0.1:8000/api/health | python3 -m json.tool
+curl -s http://127.0.0.1:8000/api/models | python3 -m json.tool
+curl -s http://127.0.0.1:8000/api/images/checkpoints | python3 -m json.tool
+curl -s -X POST http://127.0.0.1:8000/api/images/enhance-prompt \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"a small cabin at dusk"}' | python3 -m json.tool
+```
+
+`/api/images/checkpoints` returns `503` until ComfyUI is configured; after image setup it should return a checkpoint list. Prompt enhancement requires a reachable model provider. Finish the media check in the UI by running one Image Studio generation and one chat request that calls `generate_image`.
+
 ## Testing
 
 Fast syntax check:
@@ -321,6 +411,8 @@ HYPRCHAT_URL=http://127.0.0.1:8000 python3 -m pytest tests/ -v
 | Database | SQLite + ChromaDB |
 | LLM Runtime | Ollama with native tool calling plus text fallback; optional OpenAI/Anthropic cloud models |
 | Search | SearXNG |
+| Image Generation | ComfyUI through backend-proxied Image Studio and chat `generate_image` |
+| Voice | OpenAI-compatible STT/TTS services proxied through HyprChat, e.g. Speaches and Kokoro |
 | Coding Sandbox | Codebox LXC + OpenHands + Aider |
 | Automation | External n8n integration |
 
