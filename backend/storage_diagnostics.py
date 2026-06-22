@@ -23,8 +23,8 @@ def is_readonly_storage_error(error) -> bool:
 
 def readonly_storage_message() -> str:
     return (
-        "RAG storage is not writable. Ensure /opt/hyprchat/data, "
-        "hyprchat.db*, and chroma_db are owned by hyprchat:hyprchat "
+        "RAG storage is not writable. Ensure the configured HyprChat data "
+        "directory, hyprchat.db*, and chroma_db are owned by the service user "
         "and writable, then restart HyprChat."
     )
 

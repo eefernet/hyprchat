@@ -3,9 +3,9 @@
 # HyprChat — Server Deploy Script
 # Run as root INSIDE the LXC container
 # ============================================================
-set -e
+set -euo pipefail
 
-clear
+clear || true
 
 echo ""
 echo "  ╔══════════════════════════════════════════╗"
@@ -23,6 +23,8 @@ RST="\033[0m"
 BLD="\033[1m"
 GRN="\033[32m"
 CYN="\033[36m"
+APP_ROOT="/opt/hyprchat"
+DATA_ROOT="${APP_ROOT}/data"
 
 step() {
     echo -e "${INFO} ${BLD}$1${RST}"
@@ -36,37 +38,88 @@ fail() {
     echo -e "${FAIL} $1"
 }
 
-repair_data_permissions() {
-    if id -u hyprchat > /dev/null 2>&1; then
-        chown -R hyprchat:hyprchat /opt/hyprchat/data 2>/dev/null || chown -R hyprchat /opt/hyprchat/data 2>/dev/null || true
-        chmod -R u+rwX /opt/hyprchat/data 2>/dev/null || true
+die() {
+    fail "$1"
+    exit 1
+}
+
+require_file() {
+    if [ ! -f "$1" ]; then
+        die "Missing required file: $1"
     fi
 }
 
-# ── [1/5] System packages ──
+repair_data_permissions() {
+    if id -u hyprchat > /dev/null 2>&1; then
+        chown -R hyprchat:hyprchat "$DATA_ROOT" 2>/dev/null || chown -R hyprchat "$DATA_ROOT" 2>/dev/null || true
+        chmod -R u+rwX "$DATA_ROOT" 2>/dev/null || true
+    fi
+}
+
+# ── [1/7] Preflight ──
+step "Checking repository layout..."
+[ "$(id -u)" -eq 0 ] || die "Run this script as root inside the target server/container."
+[ -d "$APP_ROOT" ] || die "Expected HyprChat at $APP_ROOT. Clone or copy the repo there first."
+require_file "$APP_ROOT/.env.example"
+require_file "$APP_ROOT/backend/main.py"
+require_file "$APP_ROOT/backend/requirements.txt"
+require_file "$APP_ROOT/backend/hyprchat.service"
+if [ ! -f "$APP_ROOT/frontend/dist/index.html" ]; then
+    fail "Frontend not found at $APP_ROOT/frontend/dist/index.html"
+    echo "     frontend/dist/ is BUILD OUTPUT and is not committed to git."
+    echo "     Build it on your dev machine before packaging/deploying:"
+    echo "         cd frontend && npm install && npm run build"
+    echo "     then include frontend/dist/ in what you copy to this host."
+    echo "     (The server stays Node-free by design — do not install npm here.)"
+    exit 1
+fi
+pass "Required files found"
+
+# ── [2/7] Service user ──
+step "Creating service user..."
+if ! getent group hyprchat > /dev/null 2>&1; then
+    groupadd --system hyprchat
+fi
+if ! id -u hyprchat > /dev/null 2>&1; then
+    useradd --system --gid hyprchat --home-dir "$APP_ROOT" --shell /usr/sbin/nologin hyprchat
+fi
+pass "Service user ready"
+
+# ── [3/7] System packages ──
 step "Installing system packages..."
 apt update -qq > /dev/null 2>&1
 apt install -y -qq python3-pip curl > /dev/null 2>&1
 pass "System packages ready"
 
-# ── [2/5] Create directories ──
+# ── [4/7] Create directories and environment ──
 step "Creating directories..."
-mkdir -p /opt/hyprchat/data/{uploads/avatars,tools,knowledge_bases,chroma_db,comfy_workflows}
-mkdir -p /opt/hyprchat/data/sandbox/{outputs,workspace,venv}
-mkdir -p /opt/hyprchat/backend/agents
+mkdir -p "$DATA_ROOT"/{uploads/avatars,tools,knowledge_bases,chroma_db,comfy_workflows}
+mkdir -p "$DATA_ROOT"/sandbox/{outputs,workspace,venv}
+mkdir -p "$APP_ROOT/backend/agents"
+if [ ! -f "$APP_ROOT/.env" ]; then
+    cp "$APP_ROOT/.env.example" "$APP_ROOT/.env"
+    pass "Created $APP_ROOT/.env from .env.example"
+else
+    pass "Existing $APP_ROOT/.env preserved"
+fi
+chown -R root:hyprchat "$APP_ROOT"
+chmod -R g+rX "$APP_ROOT"
+chmod 750 "$APP_ROOT"
+chown root:hyprchat "$APP_ROOT/.env"
+chmod 640 "$APP_ROOT/.env"
 repair_data_permissions
-pass "Directories created"
+pass "Directories and ownership ready"
 
-# ── [3/5] Install Python deps ──
+# ── [5/7] Install Python deps ──
 step "Installing Python dependencies..."
-cd /opt/hyprchat/backend
+cd "$APP_ROOT/backend"
 pip install -r requirements.txt --break-system-packages -q 2>&1 | tail -1
 pass "Python deps installed (incl. pypdf, chromadb)"
 
-# ── [4/5] Verify frontend ──
+# ── [6/7] Verify frontend ──
 step "Checking frontend..."
-if [ ! -f /opt/hyprchat/frontend/dist/index.html ]; then
-    fail "Frontend not found at /opt/hyprchat/frontend/dist/index.html"
+if [ ! -f "$APP_ROOT/frontend/dist/index.html" ]; then
+    fail "Frontend not found at $APP_ROOT/frontend/dist/index.html"
     echo "     frontend/dist/ is BUILD OUTPUT and is not committed to git."
     echo "     Build it on your dev machine before packaging/deploying:"
     echo "         cd frontend && npm install && npm run build"
@@ -76,9 +129,10 @@ if [ ! -f /opt/hyprchat/frontend/dist/index.html ]; then
 fi
 pass "Frontend found"
 
-# ── [5/5] Install & start service ──
+# ── [7/7] Install & start service ──
 step "Installing systemd service..."
-cp /opt/hyprchat/backend/hyprchat.service /etc/systemd/system/ 2>/dev/null || true
+cp "$APP_ROOT/backend/hyprchat.service" /etc/systemd/system/hyprchat.service
+chmod 644 /etc/systemd/system/hyprchat.service
 systemctl daemon-reload
 systemctl enable hyprchat > /dev/null 2>&1
 repair_data_permissions
