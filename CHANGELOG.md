@@ -1,16 +1,18 @@
 # Alpha v17.3.1 — June 18, 2026
 
-> Adds remote Ollama-aware HyprFit hardware profiling and clearer rescan status.
+> Adds SSH-based remote Ollama HyprFit hardware scanning and clearer rescan status.
 
 ## HyprFit
-- Rescan Hardware can now resolve the configured Ollama host used for model recommendations.
-- Remote Ollama profiles keep saved GPU/RAM capacity as the source of truth for fit estimates.
-- Remote availability checks use Ollama HTTP endpoints such as `/api/version`, `/api/tags`, and runtime state.
+- Rescan Hardware can now scan remote Ollama hosts over SSH with `nvidia-smi`, RAM, OS, and architecture probes.
+- Remote scans persist detected accelerator profiles only when SSH hardware detection succeeds.
+- Remote Ollama hosts without SSH scan settings now show setup-required status instead of treating saved profiles as scanned hardware.
+- Remote SSH/auth/command failures keep the saved profile for recommendations and surface a scan-failed status.
 - Local Ollama hosts continue to support automatic accelerator detection.
 
 ## UI
-- New HyprFit rescan toasts distinguish local detection, remote verification, unreachable Ollama, and missing profile data.
-- New hardware profile chips show rescan mode, Ollama reachability, and the sanitized Ollama origin.
+- Settings → Connections now includes local-only Ollama hardware scan SSH settings with write-only password storage.
+- New HyprFit rescan toasts distinguish local detection, remote scanned, setup-required, scan-failed, and CPU fallback states.
+- New hardware profile chips show rescan mode, detected backend, Ollama reachability, and the sanitized Ollama origin.
 
 ## Deployment
 - `deploy_monitor.py` now includes the HyprFit backend module in watched deploy files.

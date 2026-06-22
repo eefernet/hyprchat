@@ -76,6 +76,12 @@ def save_settings(settings: dict):
         json.dump(settings, f, indent=2)
 
 
+def _public_settings_payload(settings: dict) -> dict:
+    public = {k: v for k, v in settings.items() if k != "ollama_scan_ssh_password"}
+    public.update(hyprfit.clean_ollama_scan_ssh_settings(settings, config.OLLAMA_URL, include_password=False))
+    return public
+
+
 def _coerce_service_url(value: str, env_key: str, default: str) -> str:
     """Return a runtime service URL, accepting bare host:port input from Settings."""
     raw = (value or "").strip()
@@ -1583,6 +1589,7 @@ async def hyprfit_rescan_hardware():
         settings.get("model_hardware_profile"),
         config.OLLAMA_URL,
         http,
+        hyprfit.clean_ollama_scan_ssh_settings(settings, config.OLLAMA_URL, include_password=True),
     )
     if result.get("persisted"):
         settings["model_hardware_profile"] = result["profile"]
@@ -6097,7 +6104,7 @@ async def get_app_settings():
     except Exception:
         file_count = 0
     return {
-        **settings,
+        **_public_settings_payload(settings),
         "current_ollama_url": config.OLLAMA_URL,
         "current_codebox_url": config.CODEBOX_URL,
         "current_searxng_url": config.SEARXNG_URL,
@@ -6158,10 +6165,21 @@ async def update_app_settings(body: dict = Body(...)):
                "default_num_ctx", "research_num_ctx", "quick_search_mode",
                "image_chat_checkpoint", "image_chat_workflow", "image_chat_resolution", "image_chat_vae",
                "image_chat_prompt_prefix", "image_chat_negative", "image_chat_compose_model",
+               "ollama_scan_ssh_host", "ollama_scan_ssh_port", "ollama_scan_ssh_user",
+               "ollama_scan_ssh_auth_mode", "ollama_scan_ssh_key_path", "ollama_scan_ssh_password",
                "model_hardware_profile"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
+    if any(k.startswith("ollama_scan_ssh_") for k in body):
+        ssh_cfg = hyprfit.clean_ollama_scan_ssh_settings(settings, config.OLLAMA_URL, include_password=True)
+        settings["ollama_scan_ssh_host"] = ssh_cfg["ollama_scan_ssh_host"]
+        settings["ollama_scan_ssh_port"] = ssh_cfg["ollama_scan_ssh_port"]
+        settings["ollama_scan_ssh_user"] = ssh_cfg["ollama_scan_ssh_user"]
+        settings["ollama_scan_ssh_auth_mode"] = ssh_cfg["ollama_scan_ssh_auth_mode"]
+        settings["ollama_scan_ssh_key_path"] = ssh_cfg["ollama_scan_ssh_key_path"]
+        if "ollama_scan_ssh_password" in body:
+            settings["ollama_scan_ssh_password"] = ssh_cfg.get("ollama_scan_ssh_password", "")
     # Sanitize + apply RAG settings. The clamped values are what get PERSISTED
     # (settings["rag"]), not the raw body — a junk PATCH (e.g. chunk_size -5)
     # used to be saved verbatim and re-poison the chunker on every restart.
@@ -6365,7 +6383,7 @@ async def update_app_settings(body: dict = Body(...)):
         print(f"[Config] Photo prompt model: {config.IMAGE_CHAT_COMPOSE_MODEL or '(conversation chat model)'}")
     save_settings(settings)
     return {
-        **settings,
+        **_public_settings_payload(settings),
         "current_ollama_url": config.OLLAMA_URL,
         "current_codebox_url": config.CODEBOX_URL,
         "current_searxng_url": config.SEARXNG_URL,

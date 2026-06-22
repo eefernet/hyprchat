@@ -93,6 +93,12 @@ DEFAULT_SETTINGS = {
     "stt_url": "",  # empty = use STT_URL from env (voice input disabled when both empty)
     "tts_url": "",  # empty = use TTS_URL from env (voice output disabled when both empty)
     "tts_voice": "af_heart",
+    "ollama_scan_ssh_host": "",  # empty = derive host from the configured Ollama URL
+    "ollama_scan_ssh_port": 22,
+    "ollama_scan_ssh_user": "root",
+    "ollama_scan_ssh_auth_mode": "key",  # key | password
+    "ollama_scan_ssh_key_path": "",
+    "ollama_scan_ssh_password": "",  # local settings only; never returned by /api/settings
     "rag": {
         "embed_model": "nomic-embed-text",
         "chunk_size": 500,

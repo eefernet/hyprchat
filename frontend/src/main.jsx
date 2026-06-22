@@ -3681,6 +3681,14 @@ function HyprChat(){
   const [ttsVoice,setTtsVoice]=useState("");
   const [ttsVoices,setTtsVoices]=useState([]);
   const [ttsAutoplay,setTtsAutoplay]=useState(()=>localStorage.getItem("hc-tts-autoplay")==="1");
+  const [ollamaScanSshHost,setOllamaScanSshHost]=useState("");
+  const [ollamaScanSshPort,setOllamaScanSshPort]=useState(22);
+  const [ollamaScanSshUser,setOllamaScanSshUser]=useState("root");
+  const [ollamaScanSshAuthMode,setOllamaScanSshAuthMode]=useState("key");
+  const [ollamaScanSshKeyPath,setOllamaScanSshKeyPath]=useState("");
+  const [ollamaScanSshPassword,setOllamaScanSshPassword]=useState("");
+  const [ollamaScanSshHasPassword,setOllamaScanSshHasPassword]=useState(false);
+  const [ollamaScanSshClearPassword,setOllamaScanSshClearPassword]=useState(false);
   const [modelProviders,setModelProviders]=useState({});
   const [providerKeys,setProviderKeys]=useState({openai:"",anthropic:""});
   const [providerBusy,setProviderBusy]=useState({});
@@ -4741,6 +4749,14 @@ function HyprChat(){
       if(d.current_tts_url!==undefined)setTtsUrl(d.current_tts_url||"");
       if(d.current_tts_voice)setTtsVoice(d.current_tts_voice);
       if(d.current_tts_url)fetch(`${API}/api/audio/voices`).then(r=>r.json()).then(v=>setTtsVoices(v.voices||[])).catch(()=>{});
+      if(d.ollama_scan_ssh_host!==undefined)setOllamaScanSshHost(d.ollama_scan_ssh_host||"");
+      if(d.ollama_scan_ssh_port!=null)setOllamaScanSshPort(Number(d.ollama_scan_ssh_port)||22);
+      if(d.ollama_scan_ssh_user!==undefined)setOllamaScanSshUser(d.ollama_scan_ssh_user||"root");
+      if(d.ollama_scan_ssh_auth_mode)setOllamaScanSshAuthMode(d.ollama_scan_ssh_auth_mode==="password"?"password":"key");
+      if(d.ollama_scan_ssh_key_path!==undefined)setOllamaScanSshKeyPath(d.ollama_scan_ssh_key_path||"");
+      setOllamaScanSshHasPassword(!!d.ollama_scan_ssh_has_password);
+      setOllamaScanSshPassword("");
+      setOllamaScanSshClearPassword(false);
       if(d.rag)setRagSettings(p=>({...p,...d.rag}));
       if(d.default_num_ctx!=null)hydrateServerSetting("default_num_ctx",setNumCtx,d.default_num_ctx,numCtx);
       if(d.current_planning_model!=null)hydrateServerSetting("planning_model",setPlanningModel,d.current_planning_model,planningModel);
@@ -6707,12 +6723,14 @@ function HyprChat(){
   const hyprfitRescanCopy=(d={})=>{
     const mode=d?.detection_mode||"";
     if(mode==="local_detector")return{type:"success",text:"Local accelerator detected",chip:"local detector",color:t.ok};
-    if(mode==="remote_ollama_saved_profile")return{type:"info",text:"Remote Ollama verified",chip:"remote verified",color:t.acc};
+    if(mode==="remote_ssh_detector")return{type:"success",text:"Remote hardware scanned",chip:"remote scanned",color:t.ok};
+    if(mode==="remote_ssh_unconfigured")return{type:"warning",text:"Scan setup required",chip:"scan setup required",color:t.warm};
+    if(mode==="remote_ssh_failed")return{type:"error",text:"Hardware scan failed",chip:"scan failed",color:t.err};
     if(mode==="remote_ollama_unreachable"){
       const hasHardware=hyprfitProfileHasHardware(d?.profile);
       return{type:"warning",text:hasHardware?"Ollama unreachable":"No saved hardware profile",chip:hasHardware?"remote unreachable":"no saved profile",color:t.warm};
     }
-    if(mode==="cpu_fallback")return{type:"warning",text:d?.target==="ollama"?"No saved hardware profile":"No accelerator detected",chip:"CPU fallback",color:t.warm};
+    if(mode==="cpu_fallback")return{type:"warning",text:"No accelerator detected",chip:"CPU fallback",color:t.warm};
     return{type:d?.persisted?"success":"info",text:d?.persisted?"HyprFit hardware detected":"HyprFit kept saved profile",chip:d?.persisted?"detected":"saved profile",color:d?.persisted?t.ok:t.mut};
   };
   const rescanHyprfitHardware=async()=>{
@@ -9547,6 +9565,7 @@ function HyprChat(){
               const copy=hyprfitRescanCopy(hyprfitRescanStatus);
               return <>
                 <span style={mmChipS(copy.color)}>{copy.chip}</span>
+                {hyprfitRescanStatus.detection_mode==="remote_ssh_detector"&&hyprfitRescanStatus.detected_profile?.backend&&<span style={mmChipS(t.ok)}>{hyprfitRescanStatus.detected_profile.backend}</span>}
                 {hyprfitRescanStatus.target==="ollama"&&<span style={mmChipS(hyprfitRescanStatus.ollama_reachable?t.ok:t.warm)}>{hyprfitRescanStatus.ollama_reachable?"Ollama reachable":"Ollama unreachable"}</span>}
                 {hyprfitRescanStatus.target==="ollama"&&hyprfitRescanStatus.ollama_url&&<span title={hyprfitRescanStatus.ollama_url} style={{...mmChipS(t.mut,`${t.surface}66`),maxWidth:180,overflow:"hidden",textOverflow:"ellipsis"}}>{hyprfitRescanStatus.ollama_url.replace(/^https?:\/\//,"")}</span>}
               </>;
@@ -9932,6 +9951,48 @@ function HyprChat(){
               </div>
             </label>)}
           </div>
+          <div style={{marginTop:14,padding:"12px 13px",background:`${t.surface}44`,border:`1px solid ${t.brd}33`,borderRadius:8}}>
+            <div style={{display:"flex",justifyContent:"space-between",gap:10,alignItems:"center",marginBottom:10}}>
+              <div>
+                <div style={{fontSize:11,fontWeight:900,color:t.warm,textTransform:"uppercase",letterSpacing:.7}}>Ollama Hardware Scan SSH</div>
+                <div style={{fontSize:9,color:t.mut,marginTop:3}}>Used only by HyprFit Rescan Hardware for remote Ollama hosts.</div>
+              </div>
+              <span style={mmChipS(ollamaScanSshAuthMode==="password"&&ollamaScanSshHasPassword?t.ok:ollamaScanSshAuthMode==="key"&&ollamaScanSshKeyPath?t.ok:t.mut,`${t.bgDeep}AA`)}>
+                {ollamaScanSshAuthMode==="password"?(ollamaScanSshHasPassword?"password saved":"password needed"):(ollamaScanSshKeyPath?"key configured":"key needed")}
+              </span>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(130px,1fr) 90px minmax(100px,.8fr) 120px",gap:9,alignItems:"end"}}>
+              <label>
+                <span style={{display:"block",fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:800,marginBottom:4}}>Host</span>
+                <input value={ollamaScanSshHost} onChange={e=>setOllamaScanSshHost(e.target.value)} placeholder="derived from Ollama URL" style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
+              </label>
+              <label>
+                <span style={{display:"block",fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:800,marginBottom:4}}>Port</span>
+                <input type="number" min={1} max={65535} value={ollamaScanSshPort} onChange={e=>setOllamaScanSshPort(e.target.value)} style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
+              </label>
+              <label>
+                <span style={{display:"block",fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:800,marginBottom:4}}>User</span>
+                <input value={ollamaScanSshUser} onChange={e=>setOllamaScanSshUser(e.target.value)} placeholder="root" style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
+              </label>
+              <label>
+                <span style={{display:"block",fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:800,marginBottom:4}}>Auth</span>
+                <select value={ollamaScanSshAuthMode} onChange={e=>setOllamaScanSshAuthMode(e.target.value)} style={{...inputS,fontSize:12,padding:"8px 10px"}}>
+                  <option value="key">SSH key</option>
+                  <option value="password">Password</option>
+                </select>
+              </label>
+            </div>
+            {ollamaScanSshAuthMode==="key"?<label style={{display:"block",marginTop:9}}>
+              <span style={{display:"block",fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:800,marginBottom:4}}>Key path</span>
+              <input value={ollamaScanSshKeyPath} onChange={e=>setOllamaScanSshKeyPath(e.target.value)} placeholder="/root/.ssh/id_ed25519" style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
+            </label>:<div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:8,alignItems:"end",marginTop:9}}>
+              <label>
+                <span style={{display:"block",fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:800,marginBottom:4}}>Password</span>
+                <input type="password" value={ollamaScanSshPassword} onChange={e=>{setOllamaScanSshPassword(e.target.value);setOllamaScanSshClearPassword(false);}} placeholder={ollamaScanSshHasPassword?"Saved password":"SSH password"} style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
+              </label>
+              <button type="button" onClick={()=>{setOllamaScanSshPassword("");setOllamaScanSshHasPassword(false);setOllamaScanSshClearPassword(true);}} disabled={!ollamaScanSshHasPassword&&!ollamaScanSshPassword} style={{...btnS(t.err),fontSize:10,padding:"7px 10px",opacity:(!ollamaScanSshHasPassword&&!ollamaScanSshPassword)?0.45:1}}>Clear</button>
+            </div>}
+          </div>
           {(ttsUrl||sttUrl)&&<div style={{marginTop:12,padding:"10px 12px",background:`${t.surface}44`,border:`1px solid ${t.brd}33`,borderRadius:8,display:"flex",gap:16,alignItems:"center",flexWrap:"wrap"}}>
             <span style={{fontSize:11,fontWeight:700,color:t.dim}}>🎙 Voice</span>
             {ttsUrl&&<label style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:t.dim}}>
@@ -9952,7 +10013,9 @@ function HyprChat(){
             <button disabled={connectionsSaving} onClick={async()=>{
               setConnectionsSaving(true);setConnectionsSaveState("saving");
               try{
-                const r=await fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({ollama_url:ollamaUrl,codebox_url:codeboxUrl,searxng_url:searxngUrl,n8n_url:n8nUrl,comfyui_url:comfyuiUrl,stt_url:sttUrl,tts_url:ttsUrl,tts_voice:ttsVoice})});
+                const payload={ollama_url:ollamaUrl,codebox_url:codeboxUrl,searxng_url:searxngUrl,n8n_url:n8nUrl,comfyui_url:comfyuiUrl,stt_url:sttUrl,tts_url:ttsUrl,tts_voice:ttsVoice,ollama_scan_ssh_host:ollamaScanSshHost,ollama_scan_ssh_port:Number(ollamaScanSshPort)||22,ollama_scan_ssh_user:ollamaScanSshUser,ollama_scan_ssh_auth_mode:ollamaScanSshAuthMode,ollama_scan_ssh_key_path:ollamaScanSshKeyPath};
+                if(ollamaScanSshPassword||ollamaScanSshClearPassword)payload.ollama_scan_ssh_password=ollamaScanSshPassword;
+                const r=await fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
                 if(!r.ok)throw new Error(`HTTP ${r.status}`);
                 const d=await r.json().catch(()=>({}));
                 if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);
@@ -9963,6 +10026,14 @@ function HyprChat(){
                 if(d.current_stt_url!==undefined)setSttUrl(d.current_stt_url||"");
                 if(d.current_tts_url!==undefined)setTtsUrl(d.current_tts_url||"");
                 if(d.current_tts_url)fetch(`${API}/api/audio/voices`).then(rv=>rv.json()).then(v=>setTtsVoices(v.voices||[])).catch(()=>{});
+                if(d.ollama_scan_ssh_host!==undefined)setOllamaScanSshHost(d.ollama_scan_ssh_host||"");
+                if(d.ollama_scan_ssh_port!=null)setOllamaScanSshPort(Number(d.ollama_scan_ssh_port)||22);
+                if(d.ollama_scan_ssh_user!==undefined)setOllamaScanSshUser(d.ollama_scan_ssh_user||"root");
+                if(d.ollama_scan_ssh_auth_mode)setOllamaScanSshAuthMode(d.ollama_scan_ssh_auth_mode==="password"?"password":"key");
+                if(d.ollama_scan_ssh_key_path!==undefined)setOllamaScanSshKeyPath(d.ollama_scan_ssh_key_path||"");
+                setOllamaScanSshHasPassword(!!d.ollama_scan_ssh_has_password);
+                setOllamaScanSshPassword("");
+                setOllamaScanSshClearPassword(false);
                 await refreshModels();
                 try{const h=await fetch(`${API}/api/health`);const hd=await h.json();setHealth(hd.services||{});}catch{}
                 setConnectionsSaveState("saved");notify({type:"success",text:"Connections saved"});

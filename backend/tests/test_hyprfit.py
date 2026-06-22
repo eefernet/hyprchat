@@ -141,34 +141,56 @@ def test_no_gpu_and_unified_memory_fallbacks_are_rankable():
     assert unified_card["score"] >= cpu_card["score"]
 
 
-def test_remote_rescan_keeps_saved_gpu_profile(monkeypatch):
+def test_remote_rescan_with_ssh_persists_detected_cuda(monkeypatch):
     def fail_detector():
         raise AssertionError("remote Ollama rescan must not probe backend hardware")
 
     monkeypatch.setattr(hyprfit, "detect_hardware_profile", fail_detector)
+    ssh_calls = []
+
+    def fake_ssh(_settings, command, **_kwargs):
+        ssh_calls.append(command)
+        if "uname -s" in command:
+            return 0, "os=Linux\narch=x86_64\nmem_kb=67108864", ""
+        if "nvidia-smi" in command:
+            return 0, "NVIDIA RTX 3090, 24576\nNVIDIA RTX 3090, 24576", ""
+        raise AssertionError(f"unexpected SSH command: {command}")
+
+    monkeypatch.setattr(hyprfit, "_run_remote_ssh_command", fake_ssh)
     saved = {
         "name": "Ollama host",
-        "gpu_name": "2x RTX 3090",
-        "gpu_count": 2,
-        "total_vram_gb": 48,
-        "system_ram_gb": 32,
-        "backend": "cuda",
+        "gpu_name": "CPU only",
+        "gpu_count": 0,
+        "total_vram_gb": 0,
+        "system_ram_gb": 16,
+        "backend": "cpu",
         "kv_cache_type": "q8_0",
         "max_loaded_models": 3,
         "sched_spread": True,
     }
+    ssh = {
+        "ollama_scan_ssh_host": "192.168.1.110",
+        "ollama_scan_ssh_port": 22,
+        "ollama_scan_ssh_user": "root",
+        "ollama_scan_ssh_auth_mode": "key",
+        "ollama_scan_ssh_key_path": "/root/.ssh/id_ed25519",
+    }
     client = _FakeOllamaClient()
 
-    result = _run(hyprfit.resolve_hardware_rescan(saved, "http://192.168.1.110:11434", client))
+    result = _run(hyprfit.resolve_hardware_rescan(saved, "http://192.168.1.110:11434", client, ssh))
 
     assert result["target"] == "ollama"
     assert result["ollama_url"] == "http://192.168.1.110:11434"
     assert result["ollama_reachable"] is True
-    assert result["detection_mode"] == "remote_ollama_saved_profile"
-    assert result["persisted"] is False
+    assert result["detection_mode"] == "remote_ssh_detector"
+    assert result["persisted"] is True
+    assert result["profile"]["detected"] is True
+    assert result["profile"]["source"] == "remote-nvidia-smi"
+    assert result["profile"]["backend"] == "cuda"
     assert result["profile"]["total_vram_gb"] == 48
     assert result["profile"]["gpu_count"] == 2
-    assert result["detected_profile"]["detected"] is False
+    assert result["profile"]["system_ram_gb"] == 64
+    assert any("nvidia-smi" in call for call in ssh_calls)
     assert client.urls == [
         "http://192.168.1.110:11434/api/version",
         "http://192.168.1.110:11434/api/tags",
@@ -200,7 +222,7 @@ def test_local_rescan_uses_local_detector(monkeypatch):
     assert result["profile"]["total_vram_gb"] == 24
 
 
-def test_unreachable_remote_rescan_returns_saved_profile_warning(monkeypatch):
+def test_remote_rescan_without_ssh_config_requires_scan_setup(monkeypatch):
     monkeypatch.setattr(hyprfit, "detect_hardware_profile", lambda: (_ for _ in ()).throw(AssertionError("should not run")))
     saved = {
         "name": "Remote Ollama",
@@ -211,18 +233,59 @@ def test_unreachable_remote_rescan_returns_saved_profile_warning(monkeypatch):
         "backend": "cuda",
     }
 
-    result = _run(hyprfit.resolve_hardware_rescan(saved, "http://192.168.1.110:11434", _FakeOllamaClient(fail=True)))
+    result = _run(hyprfit.resolve_hardware_rescan(saved, "http://192.168.1.110:11434", _FakeOllamaClient()))
+
+    assert result["target"] == "ollama"
+    assert result["ollama_reachable"] is True
+    assert result["detection_mode"] == "remote_ssh_unconfigured"
+    assert result["persisted"] is False
+    assert result["profile"]["total_vram_gb"] == 48
+    assert result["detected_profile"]["detected"] is False
+    assert "requires SSH settings" in result["message"]
+
+
+def test_remote_rescan_ssh_failure_keeps_saved_profile(monkeypatch):
+    monkeypatch.setattr(hyprfit, "detect_hardware_profile", lambda: (_ for _ in ()).throw(AssertionError("should not run")))
+    saved = {
+        "name": "Remote Ollama",
+        "gpu_name": "2x RTX 3090",
+        "gpu_count": 2,
+        "total_vram_gb": 48,
+        "system_ram_gb": 32,
+        "backend": "cuda",
+    }
+    ssh = {
+        "ollama_scan_ssh_host": "192.168.1.110",
+        "ollama_scan_ssh_port": 22,
+        "ollama_scan_ssh_user": "root",
+        "ollama_scan_ssh_auth_mode": "key",
+        "ollama_scan_ssh_key_path": "/root/.ssh/id_ed25519",
+    }
+    monkeypatch.setattr(hyprfit, "detect_remote_hardware_profile", lambda _settings: (_ for _ in ()).throw(hyprfit.RemoteHardwareScanError("Permission denied")))
+
+    result = _run(hyprfit.resolve_hardware_rescan(saved, "http://192.168.1.110:11434", _FakeOllamaClient(fail=True), ssh))
 
     assert result["target"] == "ollama"
     assert result["ollama_reachable"] is False
-    assert result["detection_mode"] == "remote_ollama_unreachable"
+    assert result["detection_mode"] == "remote_ssh_failed"
     assert result["persisted"] is False
     assert result["profile"]["total_vram_gb"] == 48
-    assert "using saved Ollama hardware profile" in result["message"]
+    assert result["detected_profile"]["detected"] is False
+    assert result["detected_profile"]["source"] == "remote-ssh-failed"
+    assert "Permission denied" in result["message"]
 
 
-def test_remote_rescan_without_saved_hardware_uses_cpu_fallback(monkeypatch):
+def test_remote_rescan_ssh_cpu_fallback_does_not_persist(monkeypatch):
     monkeypatch.setattr(hyprfit, "detect_hardware_profile", lambda: (_ for _ in ()).throw(AssertionError("should not run")))
+
+    def fake_ssh(_settings, command, **_kwargs):
+        if "uname -s" in command:
+            return 0, "os=Linux\narch=x86_64\nmem_kb=33554432", ""
+        if "nvidia-smi" in command or "rocm-smi" in command:
+            return 1, "", "command not found"
+        raise AssertionError(f"unexpected SSH command: {command}")
+
+    monkeypatch.setattr(hyprfit, "_run_remote_ssh_command", fake_ssh)
     saved = {
         "name": "Unknown host",
         "gpu_name": "CPU only",
@@ -234,14 +297,39 @@ def test_remote_rescan_without_saved_hardware_uses_cpu_fallback(monkeypatch):
         "accelerator": "cpu",
         "unified_memory": False,
     }
+    ssh = {
+        "ollama_scan_ssh_host": "192.168.1.110",
+        "ollama_scan_ssh_port": 22,
+        "ollama_scan_ssh_user": "root",
+        "ollama_scan_ssh_auth_mode": "key",
+        "ollama_scan_ssh_key_path": "/root/.ssh/id_ed25519",
+    }
 
-    result = _run(hyprfit.resolve_hardware_rescan(saved, "http://192.168.1.110:11434", _FakeOllamaClient()))
+    result = _run(hyprfit.resolve_hardware_rescan(saved, "http://192.168.1.110:11434", _FakeOllamaClient(), ssh))
 
     assert result["target"] == "ollama"
     assert result["ollama_reachable"] is True
     assert result["detection_mode"] == "cpu_fallback"
     assert result["persisted"] is False
     assert result["profile"]["backend"] == "cpu"
-    assert result["profile"]["total_vram_gb"] == 0
-    assert result["detected_profile"]["detected"] is False
-    assert "no saved hardware profile" in result["message"]
+    assert result["detected_profile"]["source"] == "remote-cpu-fallback"
+    assert result["detected_profile"]["system_ram_gb"] == 32
+    assert "no accelerator was detected" in result["message"]
+
+
+def test_ollama_scan_ssh_settings_masks_password_and_derives_host():
+    raw = {
+        "ollama_scan_ssh_port": "2222",
+        "ollama_scan_ssh_user": "root",
+        "ollama_scan_ssh_auth_mode": "password",
+        "ollama_scan_ssh_password": "secret",
+    }
+
+    public = hyprfit.clean_ollama_scan_ssh_settings(raw, "http://192.168.1.110:11434")
+    private = hyprfit.clean_ollama_scan_ssh_settings(raw, "http://192.168.1.110:11434", include_password=True)
+
+    assert public["ollama_scan_ssh_host"] == "192.168.1.110"
+    assert public["ollama_scan_ssh_port"] == 2222
+    assert public["ollama_scan_ssh_has_password"] is True
+    assert "ollama_scan_ssh_password" not in public
+    assert private["ollama_scan_ssh_password"] == "secret"

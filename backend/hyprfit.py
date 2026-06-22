@@ -30,6 +30,10 @@ except ImportError:  # pragma: no cover - package import path during some tests
 FitSearch = Callable[..., Any]
 
 
+class RemoteHardwareScanError(RuntimeError):
+    """Raised when the remote SSH detector cannot complete a hardware scan."""
+
+
 HYPRFIT_CATEGORIES: list[dict[str, str]] = [
     {"id": "for_you", "label": "For You", "summary": "Best fit for the saved hardware profile."},
     {"id": "popular", "label": "Popular", "summary": "High-interest local model families and live HF download leaders."},
@@ -557,12 +561,9 @@ def _gpu_groups(devices: list[dict[str, Any]], backend: str) -> list[dict[str, A
     return list(groups.values())
 
 
-def _detect_nvidia() -> dict[str, Any] | None:
-    if not shutil.which("nvidia-smi"):
-        return None
-    out = _run_probe(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
+def _parse_nvidia_smi_devices(out: str) -> list[dict[str, Any]]:
     devices: list[dict[str, Any]] = []
-    for line in out.splitlines():
+    for line in (out or "").splitlines():
         parts = [p.strip() for p in line.split(",")]
         if len(parts) < 2:
             continue
@@ -571,21 +572,37 @@ def _detect_nvidia() -> dict[str, Any] | None:
         except ValueError:
             continue
         devices.append({"name": ",".join(parts[:-1]).strip() or "NVIDIA GPU", "vram_gb": vram_gb})
+    return devices
+
+
+def _profile_from_devices(
+    devices: list[dict[str, Any]],
+    backend: str,
+    accelerator: str,
+    source: str,
+) -> dict[str, Any] | None:
     if not devices:
         return None
     total = round(sum(float(d["vram_gb"]) for d in devices), 1)
-    groups = _gpu_groups(devices, "cuda")
+    groups = _gpu_groups(devices, backend)
     return {
         "detected": True,
-        "source": "nvidia-smi",
-        "backend": "cuda",
-        "accelerator": "nvidia",
+        "source": source,
+        "backend": backend,
+        "accelerator": accelerator,
         "gpu_name": " + ".join(f'{g["count"]}x {g["name"]}' for g in groups),
         "gpu_count": len(devices),
         "total_vram_gb": total,
         "per_gpu_vram_gb": max(float(d["vram_gb"]) for d in devices),
         "gpu_groups": groups,
     }
+
+
+def _detect_nvidia() -> dict[str, Any] | None:
+    if not shutil.which("nvidia-smi"):
+        return None
+    out = _run_probe(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
+    return _profile_from_devices(_parse_nvidia_smi_devices(out), "cuda", "nvidia", "nvidia-smi")
 
 
 def _detect_rocm() -> dict[str, Any] | None:
@@ -611,21 +628,7 @@ def _detect_rocm() -> dict[str, Any] | None:
                     devices.append({"name": name, "vram_gb": round(vram_gb, 1)})
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
-    if not devices:
-        return None
-    total = round(sum(float(d["vram_gb"]) for d in devices), 1)
-    groups = _gpu_groups(devices, "rocm")
-    return {
-        "detected": True,
-        "source": "rocm-smi",
-        "backend": "rocm",
-        "accelerator": "amd",
-        "gpu_name": " + ".join(f'{g["count"]}x {g["name"]}' for g in groups),
-        "gpu_count": len(devices),
-        "total_vram_gb": total,
-        "per_gpu_vram_gb": max(float(d["vram_gb"]) for d in devices),
-        "gpu_groups": groups,
-    }
+    return _profile_from_devices(devices, "rocm", "amd", "rocm-smi")
 
 
 def _detect_apple(system_ram_gb: float) -> dict[str, Any] | None:
@@ -766,6 +769,14 @@ def ollama_origin(ollama_url: str) -> str:
         return ""
 
 
+def ollama_host(ollama_url: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(str(ollama_url or "").strip())
+        return (parsed.hostname or "").strip()
+    except Exception:
+        return ""
+
+
 def ollama_url_is_local(ollama_url: str) -> bool:
     try:
         parsed = urllib.parse.urlsplit(str(ollama_url or "").strip())
@@ -779,6 +790,202 @@ def ollama_url_is_local(ollama_url: str) -> bool:
     if host.startswith("127."):
         return True
     return False
+
+
+def clean_ollama_scan_ssh_settings(
+    raw: Any | None = None,
+    ollama_url: str = "",
+    *,
+    include_password: bool = False,
+) -> dict[str, Any]:
+    src = raw if isinstance(raw, dict) else {}
+    prior = config.DEFAULT_SETTINGS
+    host = str(src.get("ollama_scan_ssh_host") or ollama_host(ollama_url) or "").strip()[:255]
+    user = str(src.get("ollama_scan_ssh_user") or prior.get("ollama_scan_ssh_user") or "root").strip()[:80]
+    key_path = str(src.get("ollama_scan_ssh_key_path") or "").strip()[:500]
+    auth_mode = str(src.get("ollama_scan_ssh_auth_mode") or prior.get("ollama_scan_ssh_auth_mode") or "key").strip().lower()
+    if auth_mode not in {"key", "password"}:
+        auth_mode = "key"
+    port = _int(src, "ollama_scan_ssh_port", int(prior.get("ollama_scan_ssh_port", 22)), 1, 65535)
+    password = str(src.get("ollama_scan_ssh_password") or "")
+    cleaned = {
+        "ollama_scan_ssh_host": host,
+        "ollama_scan_ssh_port": port,
+        "ollama_scan_ssh_user": user,
+        "ollama_scan_ssh_auth_mode": auth_mode,
+        "ollama_scan_ssh_key_path": key_path,
+        "ollama_scan_ssh_has_password": bool(password),
+    }
+    if include_password:
+        cleaned["ollama_scan_ssh_password"] = password
+    return cleaned
+
+
+def remote_scan_ssh_configured(ssh_settings: Any | None) -> bool:
+    cfg = clean_ollama_scan_ssh_settings(ssh_settings, include_password=True)
+    if not cfg.get("ollama_scan_ssh_host") or not cfg.get("ollama_scan_ssh_user"):
+        return False
+    if cfg.get("ollama_scan_ssh_auth_mode") == "password":
+        return bool(cfg.get("ollama_scan_ssh_password"))
+    return bool(cfg.get("ollama_scan_ssh_key_path"))
+
+
+def _ssh_error_message(proc: subprocess.CompletedProcess[str]) -> str:
+    text = (proc.stderr or proc.stdout or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    if not text:
+        text = f"ssh exited with status {proc.returncode}"
+    return text[:300]
+
+
+def _run_remote_ssh_command(
+    ssh_settings: dict[str, Any],
+    remote_command: str,
+    *,
+    timeout: float = 8.0,
+    check: bool = True,
+) -> tuple[int, str, str]:
+    cfg = clean_ollama_scan_ssh_settings(ssh_settings, include_password=True)
+    host = str(cfg.get("ollama_scan_ssh_host") or "").strip()
+    user = str(cfg.get("ollama_scan_ssh_user") or "").strip()
+    port = int(cfg.get("ollama_scan_ssh_port") or 22)
+    if not host or not user:
+        raise RemoteHardwareScanError("SSH host and user are required.")
+    if any(ch.isspace() for ch in host + user):
+        raise RemoteHardwareScanError("SSH host and user cannot contain whitespace.")
+    target = f"{user}@{host}"
+    cmd = [
+        "ssh",
+        "-p", str(port),
+        "-o", "ConnectTimeout=5",
+        "-o", "ServerAliveInterval=5",
+        "-o", "ServerAliveCountMax=1",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "LogLevel=ERROR",
+    ]
+    env = None
+    if cfg.get("ollama_scan_ssh_auth_mode") == "password":
+        password = str(cfg.get("ollama_scan_ssh_password") or "")
+        if not password:
+            raise RemoteHardwareScanError("SSH password is required for password auth mode.")
+        if not shutil.which("sshpass"):
+            raise RemoteHardwareScanError("sshpass is required for SSH password auth mode.")
+        cmd = [
+            "sshpass",
+            "-e",
+            *cmd,
+            "-o", "PreferredAuthentications=password,keyboard-interactive",
+            "-o", "PubkeyAuthentication=no",
+            "-o", "NumberOfPasswordPrompts=1",
+        ]
+        env = {**os.environ, "SSHPASS": password}
+    else:
+        key_path = str(cfg.get("ollama_scan_ssh_key_path") or "").strip()
+        if not key_path:
+            raise RemoteHardwareScanError("SSH key path is required for key auth mode.")
+        cmd.extend(["-o", "BatchMode=yes", "-i", os.path.expanduser(key_path)])
+    cmd.extend([target, remote_command])
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False, env=env)
+    except subprocess.TimeoutExpired as exc:
+        raise RemoteHardwareScanError(f"SSH command timed out after {timeout:.0f}s.") from exc
+    except Exception as exc:
+        raise RemoteHardwareScanError(str(exc)) from exc
+    if proc.returncode == 255 or (check and proc.returncode != 0):
+        raise RemoteHardwareScanError(_ssh_error_message(proc))
+    return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+
+
+def _remote_meta(ssh_settings: dict[str, Any]) -> dict[str, Any]:
+    _, out, _ = _run_remote_ssh_command(
+        ssh_settings,
+        "printf 'os='; uname -s; printf 'arch='; uname -m; awk '/^MemTotal:/ {print \"mem_kb=\" $2; exit}' /proc/meminfo 2>/dev/null || true",
+        timeout=8.0,
+        check=True,
+    )
+    meta = {"os": "unknown", "arch": "unknown", "system_ram_gb": _system_ram_gb()}
+    for line in out.splitlines():
+        key, _, value = line.partition("=")
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "os" and value:
+            meta["os"] = value.lower()
+        elif key == "arch" and value:
+            meta["arch"] = value
+        elif key == "mem_kb" and value:
+            try:
+                meta["system_ram_gb"] = round(float(value) / (1024 * 1024), 1)
+            except ValueError:
+                pass
+    return meta
+
+
+def _parse_remote_rocm_devices(out: str) -> list[dict[str, Any]]:
+    devices: list[dict[str, Any]] = []
+    if not out:
+        return devices
+    try:
+        data = json.loads(out)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return devices
+    for value in data.values():
+        if not isinstance(value, dict):
+            continue
+        name = str(value.get("Card series") or value.get("Card model") or value.get("Product Name") or "AMD GPU")
+        raw_vram = value.get("VRAM Total Memory (B)") or value.get("VRAM Total Memory")
+        if not raw_vram:
+            continue
+        match = re.search(r"([\d.]+)", str(raw_vram))
+        if not match:
+            continue
+        try:
+            number = float(match.group(1))
+        except ValueError:
+            continue
+        vram_gb = number / (1024**3) if number > 100000 else number / 1024 if number > 256 else number
+        if vram_gb > 0:
+            devices.append({"name": name, "vram_gb": round(vram_gb, 1)})
+    return devices
+
+
+def detect_remote_hardware_profile(ssh_settings: dict[str, Any]) -> dict[str, Any]:
+    """Best-effort hardware detector for the configured remote Ollama host."""
+    cfg = clean_ollama_scan_ssh_settings(ssh_settings, include_password=True)
+    meta = _remote_meta(cfg)
+    base = {
+        "name": f"Remote Ollama ({cfg.get('ollama_scan_ssh_host')})",
+        **meta,
+        "detected": False,
+        "source": "remote-cpu-fallback",
+    }
+    _, nvidia_out, _ = _run_remote_ssh_command(
+        cfg,
+        "command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits",
+        timeout=10.0,
+        check=False,
+    )
+    detected = _profile_from_devices(_parse_nvidia_smi_devices(nvidia_out), "cuda", "nvidia", "remote-nvidia-smi")
+    if not detected:
+        _, rocm_out, _ = _run_remote_ssh_command(
+            cfg,
+            "command -v rocm-smi >/dev/null 2>&1 && rocm-smi --showproductname --showmeminfo vram --json",
+            timeout=10.0,
+            check=False,
+        )
+        detected = _profile_from_devices(_parse_remote_rocm_devices(rocm_out), "rocm", "amd", "remote-rocm-smi")
+    if detected:
+        return clean_hardware_profile({**base, **detected})
+    return clean_hardware_profile({
+        **base,
+        "backend": "cpu",
+        "accelerator": "cpu",
+        "gpu_name": "CPU only",
+        "gpu_count": 0,
+        "total_vram_gb": 0,
+        "per_gpu_vram_gb": 0,
+        "unified_memory": False,
+    })
 
 
 def _remote_detected_profile(profile: dict[str, Any], *, reachable: bool) -> dict[str, Any]:
@@ -812,7 +1019,12 @@ async def probe_remote_ollama(http_client: Any, ollama_url: str) -> tuple[bool, 
     return reachable, "" if reachable else first_error or "Ollama did not respond"
 
 
-async def resolve_hardware_rescan(settings_profile: Any, ollama_url: str, http_client: Any) -> dict[str, Any]:
+async def resolve_hardware_rescan(
+    settings_profile: Any,
+    ollama_url: str,
+    http_client: Any,
+    ssh_settings: Any | None = None,
+) -> dict[str, Any]:
     saved = clean_hardware_profile(settings_profile)
     sanitized_origin = ollama_origin(ollama_url)
     if ollama_url_is_local(ollama_url):
@@ -831,31 +1043,57 @@ async def resolve_hardware_rescan(settings_profile: Any, ollama_url: str, http_c
         }
 
     reachable, error = await probe_remote_ollama(http_client, ollama_url)
-    has_saved_hardware = saved_profile_has_hardware(saved)
+    cfg = clean_ollama_scan_ssh_settings(ssh_settings, ollama_url, include_password=True)
     detected = _remote_detected_profile(saved, reachable=reachable)
-    if reachable and has_saved_hardware:
-        mode = "remote_ollama_saved_profile"
-        message = "Ollama is remote and reachable; using saved Ollama hardware profile."
-    elif reachable:
-        mode = "cpu_fallback"
-        message = "Ollama is remote and reachable, but no saved hardware profile is available; using CPU fallback profile."
-    elif has_saved_hardware:
-        mode = "remote_ollama_unreachable"
-        detail = f" ({error})" if error else ""
-        message = f"Ollama is remote but unreachable{detail}; using saved Ollama hardware profile."
-    else:
-        mode = "remote_ollama_unreachable"
-        detail = f" ({error})" if error else ""
-        message = f"Ollama is remote and unreachable{detail}, and no saved hardware profile is available."
+    if not remote_scan_ssh_configured(cfg):
+        return {
+            "profile": saved,
+            "detected_profile": detected,
+            "persisted": False,
+            "target": "ollama",
+            "ollama_url": sanitized_origin,
+            "ollama_reachable": reachable,
+            "detection_mode": "remote_ssh_unconfigured",
+            "message": "Remote Ollama hardware scan requires SSH settings before Rescan Hardware can detect GPUs and RAM.",
+        }
+    try:
+        remote_detected = await asyncio.to_thread(detect_remote_hardware_profile, cfg)
+    except Exception as exc:
+        detail = str(exc) or "remote SSH scan failed"
+        if not reachable and error:
+            detail = f"{detail}; Ollama HTTP check also failed: {error}"
+        return {
+            "profile": saved,
+            "detected_profile": {**detected, "source": "remote-ssh-failed"},
+            "persisted": False,
+            "target": "ollama",
+            "ollama_url": sanitized_origin,
+            "ollama_reachable": reachable,
+            "detection_mode": "remote_ssh_failed",
+            "message": f"Remote Ollama hardware scan failed: {detail}",
+        }
+    persisted = detected_profile_is_meaningful(remote_detected)
+    if persisted:
+        return {
+            "profile": remote_detected,
+            "detected_profile": remote_detected,
+            "persisted": True,
+            "target": "ollama",
+            "ollama_url": sanitized_origin,
+            "ollama_reachable": reachable,
+            "detection_mode": "remote_ssh_detector",
+            "message": "Detected remote Ollama accelerator hardware over SSH and saved the hardware profile.",
+        }
+    detail = f" Ollama HTTP check failed: {error}" if not reachable and error else ""
     return {
         "profile": saved,
-        "detected_profile": detected,
+        "detected_profile": remote_detected,
         "persisted": False,
         "target": "ollama",
         "ollama_url": sanitized_origin,
         "ollama_reachable": reachable,
-        "detection_mode": mode,
-        "message": message,
+        "detection_mode": "cpu_fallback",
+        "message": f"Remote SSH scan completed, but no accelerator was detected; keeping the saved hardware profile.{detail}",
     }
 
 
