@@ -40,6 +40,7 @@ import quick_search as qs_module
 from agents.chat import chat_stream_generate, TOOL_TEMPLATES, detect_template_family
 from agents.personas import seed_coder_bot as _seed_coder_bot, seed_coder_bot_v2 as _seed_coder_bot_v2, seed_conspiracy_bot as _seed_conspiracy_bot, seed_based_bot as _seed_based_bot, seed_all_defaults as _seed_all_defaults
 import hf as hf_module
+import hyprfit
 from hf import parse_ollama_progress
 import rag
 import storage_diagnostics
@@ -73,6 +74,12 @@ def save_settings(settings: dict):
     os.makedirs(os.path.dirname(config.SETTINGS_PATH), exist_ok=True)
     with open(config.SETTINGS_PATH, "w") as f:
         json.dump(settings, f, indent=2)
+
+
+def _public_settings_payload(settings: dict) -> dict:
+    public = {k: v for k, v in settings.items() if k != "ollama_scan_ssh_password"}
+    public.update(hyprfit.clean_ollama_scan_ssh_settings(settings, config.OLLAMA_URL, include_password=False))
+    return public
 
 
 def _coerce_service_url(value: str, env_key: str, default: str) -> str:
@@ -1540,6 +1547,54 @@ async def _local_ollama_model_names() -> list[str]:
         return [m.get("name", "") for m in data.get("models", []) if m.get("name")]
     except Exception as e:
         raise HTTPException(502, f"Failed to reach Ollama: {e}")
+
+
+
+@app.get("/api/models/hyprfit")
+async def hyprfit_recommendations(refresh: bool = False, live: bool = True):
+    settings = load_settings()
+    installed_details: dict[str, Any] = {}
+    ollama_error = ""
+    try:
+        r = await http.get(f"{config.OLLAMA_URL}/api/tags")
+        r.raise_for_status()
+        raw = r.json().get("models", [])
+        installed_details = {
+            m.get("name", ""): {
+                "size": m.get("size", 0),
+                "details": m.get("details", {}),
+                "modified_at": m.get("modified_at", ""),
+            }
+            for m in raw
+            if m.get("name")
+        }
+    except Exception as e:
+        ollama_error = str(e)
+    response = await hyprfit.build_response(
+        settings.get("model_hardware_profile"),
+        installed_details,
+        refresh=refresh,
+        live=live,
+        http_client=http,
+        hf_search_func=hf_module.hf_search,
+    )
+    response["ollama_error"] = ollama_error
+    return response
+
+
+@app.post("/api/models/hyprfit/rescan")
+async def hyprfit_rescan_hardware():
+    settings = load_settings()
+    result = await hyprfit.resolve_hardware_rescan(
+        settings.get("model_hardware_profile"),
+        config.OLLAMA_URL,
+        http,
+        hyprfit.clean_ollama_scan_ssh_settings(settings, config.OLLAMA_URL, include_password=True),
+    )
+    if result.get("persisted"):
+        settings["model_hardware_profile"] = result["profile"]
+        save_settings(settings)
+    return result
 
 
 async def _delete_ollama_model(model_name: str) -> dict:
@@ -6049,7 +6104,7 @@ async def get_app_settings():
     except Exception:
         file_count = 0
     return {
-        **settings,
+        **_public_settings_payload(settings),
         "current_ollama_url": config.OLLAMA_URL,
         "current_codebox_url": config.CODEBOX_URL,
         "current_searxng_url": config.SEARXNG_URL,
@@ -6087,6 +6142,7 @@ async def get_app_settings():
         "image_chat_prompt_prefix": config.IMAGE_CHAT_PROMPT_PREFIX,
         "image_chat_negative": config.IMAGE_CHAT_NEGATIVE,
         "image_chat_compose_model": config.IMAGE_CHAT_COMPOSE_MODEL,
+        "model_hardware_profile": hyprfit.clean_hardware_profile(settings.get("model_hardware_profile")),
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
         "sandbox_size_bytes": size,
@@ -6108,10 +6164,22 @@ async def update_app_settings(body: dict = Body(...)):
                "aider_enabled", "aider_model", "aider_num_ctx", "aider_auto_test", "aider_worker_url",
                "default_num_ctx", "research_num_ctx", "quick_search_mode",
                "image_chat_checkpoint", "image_chat_workflow", "image_chat_resolution", "image_chat_vae",
-               "image_chat_prompt_prefix", "image_chat_negative", "image_chat_compose_model"}
+               "image_chat_prompt_prefix", "image_chat_negative", "image_chat_compose_model",
+               "ollama_scan_ssh_host", "ollama_scan_ssh_port", "ollama_scan_ssh_user",
+               "ollama_scan_ssh_auth_mode", "ollama_scan_ssh_key_path", "ollama_scan_ssh_password",
+               "model_hardware_profile"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
+    if any(k.startswith("ollama_scan_ssh_") for k in body):
+        ssh_cfg = hyprfit.clean_ollama_scan_ssh_settings(settings, config.OLLAMA_URL, include_password=True)
+        settings["ollama_scan_ssh_host"] = ssh_cfg["ollama_scan_ssh_host"]
+        settings["ollama_scan_ssh_port"] = ssh_cfg["ollama_scan_ssh_port"]
+        settings["ollama_scan_ssh_user"] = ssh_cfg["ollama_scan_ssh_user"]
+        settings["ollama_scan_ssh_auth_mode"] = ssh_cfg["ollama_scan_ssh_auth_mode"]
+        settings["ollama_scan_ssh_key_path"] = ssh_cfg["ollama_scan_ssh_key_path"]
+        if "ollama_scan_ssh_password" in body:
+            settings["ollama_scan_ssh_password"] = ssh_cfg.get("ollama_scan_ssh_password", "")
     # Sanitize + apply RAG settings. The clamped values are what get PERSISTED
     # (settings["rag"]), not the raw body — a junk PATCH (e.g. chunk_size -5)
     # used to be saved verbatim and re-poison the chunker on every restart.
@@ -6275,6 +6343,8 @@ async def update_app_settings(body: dict = Body(...)):
         config.QUICK_SEARCH_MODE = _qsm
         settings["quick_search_mode"] = _qsm
         print(f"[Config] Quick Search mode: {config.QUICK_SEARCH_MODE}")
+    if "model_hardware_profile" in body:
+        settings["model_hardware_profile"] = hyprfit.clean_hardware_profile(body.get("model_hardware_profile"))
     # Chat image generation defaults. Checkpoint/VAE values come from the live
     # ComfyUI dropdowns in the UI; stored as-is (a stale name surfaces as a
     # tool_error at generation time, never a crash here).
@@ -6313,7 +6383,7 @@ async def update_app_settings(body: dict = Body(...)):
         print(f"[Config] Photo prompt model: {config.IMAGE_CHAT_COMPOSE_MODEL or '(conversation chat model)'}")
     save_settings(settings)
     return {
-        **settings,
+        **_public_settings_payload(settings),
         "current_ollama_url": config.OLLAMA_URL,
         "current_codebox_url": config.CODEBOX_URL,
         "current_searxng_url": config.SEARXNG_URL,
@@ -6585,8 +6655,8 @@ async def get_token_summary():
 # HUGGINGFACE MODEL BROWSER (delegated to hf module)
 # ============================================================
 @app.get("/api/hf/search")
-async def hf_search_ep(q: str = "", limit: int = 20, gguf_only: bool = True):
-    return await hf_module.hf_search(http, q, limit, gguf_only)
+async def hf_search_ep(q: str = "", limit: int = 20, gguf_only: bool = True, sort: str = "downloads", direction: int = -1):
+    return await hf_module.hf_search(http, q, limit, gguf_only, sort, direction)
 
 @app.get("/api/hf/model")
 async def hf_model_info_ep(repo_id: str):

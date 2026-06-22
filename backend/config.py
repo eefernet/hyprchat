@@ -4,6 +4,13 @@ Edit these values to match your homelab setup.
 """
 import os
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DATA_DIR = os.path.abspath(os.getenv("HYPRCHAT_DATA_DIR") or os.path.join(PROJECT_ROOT, "data"))
+
+
+def data_path(*parts: str) -> str:
+    return os.path.join(DATA_DIR, *parts)
+
 # ============================================================
 # INFRASTRUCTURE IPs
 # ============================================================
@@ -53,20 +60,20 @@ DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 # ============================================================
 # DATABASE
 # ============================================================
-DATABASE_PATH = os.getenv("DATABASE_PATH", "/opt/hyprchat/data/hyprchat.db")
+DATABASE_PATH = os.getenv("DATABASE_PATH", data_path("hyprchat.db"))
 
 # ============================================================
 # FILE STORAGE
 # ============================================================
-UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/opt/hyprchat/data/uploads")
-TOOLS_DIR = os.getenv("TOOLS_DIR", "/opt/hyprchat/data/tools")
-KB_DIR = os.getenv("KB_DIR", "/opt/hyprchat/data/knowledge_bases")
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", data_path("uploads"))
+TOOLS_DIR = os.getenv("TOOLS_DIR", data_path("tools"))
+KB_DIR = os.getenv("KB_DIR", data_path("knowledge_bases"))
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "250"))
 
 # ============================================================
 # SANDBOX — isolated dir for all tool-generated output files
 # ============================================================
-SANDBOX_DIR = os.getenv("SANDBOX_DIR", "/opt/hyprchat/data/sandbox")
+SANDBOX_DIR = os.getenv("SANDBOX_DIR", data_path("sandbox"))
 SANDBOX_OUTPUTS_DIR = os.path.join(SANDBOX_DIR, "outputs")   # tool downloads/outputs → cleaned up
 SANDBOX_VENV_DIR    = os.path.join(SANDBOX_DIR, "venv")      # Python venv for local tool execution
 SANDBOX_WORKSPACE_DIR = os.path.join(SANDBOX_DIR, "workspace")  # temp working dir
@@ -74,8 +81,8 @@ SANDBOX_WORKSPACE_DIR = os.path.join(SANDBOX_DIR, "workspace")  # temp working d
 # ============================================================
 # SETTINGS FILE (persistent JSON for runtime-editable options)
 # ============================================================
-SETTINGS_PATH = os.getenv("SETTINGS_PATH", "/opt/hyprchat/data/settings.json")
-CONNECTOR_SECRETS_PATH = os.getenv("CONNECTOR_SECRETS_PATH", "/opt/hyprchat/data/connector_secrets.json")
+SETTINGS_PATH = os.getenv("SETTINGS_PATH", data_path("settings.json"))
+CONNECTOR_SECRETS_PATH = os.getenv("CONNECTOR_SECRETS_PATH", data_path("connector_secrets.json"))
 DEFAULT_SETTINGS = {
     "file_cleanup_days": 30,  # 0 = never clean
     "ollama_url": "",  # empty = use OLLAMA_URL from env/default
@@ -93,6 +100,12 @@ DEFAULT_SETTINGS = {
     "stt_url": "",  # empty = use STT_URL from env (voice input disabled when both empty)
     "tts_url": "",  # empty = use TTS_URL from env (voice output disabled when both empty)
     "tts_voice": "af_heart",
+    "ollama_scan_ssh_host": "",  # empty = derive host from the configured Ollama URL
+    "ollama_scan_ssh_port": 22,
+    "ollama_scan_ssh_user": "root",
+    "ollama_scan_ssh_auth_mode": "key",  # key | password
+    "ollama_scan_ssh_key_path": "",
+    "ollama_scan_ssh_password": "",  # local settings only; never returned by /api/settings
     "rag": {
         "embed_model": "nomic-embed-text",
         "chunk_size": 500,
@@ -101,6 +114,17 @@ DEFAULT_SETTINGS = {
         "max_context_chars": 6000,
         "research_top_k": 4,
         "research_max_chars": 3000,
+    },
+    "model_hardware_profile": {
+        "name": "Ollama host",
+        "gpu_name": "2x RTX 3090",
+        "gpu_count": 2,
+        "total_vram_gb": 48,
+        "system_ram_gb": 32,
+        "kv_cache_type": "q8_0",
+        "num_parallel": 1,
+        "max_loaded_models": 3,
+        "sched_spread": True,
     },
 }
 
