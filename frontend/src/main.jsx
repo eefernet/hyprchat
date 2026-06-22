@@ -5975,7 +5975,8 @@ function HyprChat(){
     // User message persistence is handled server-side by chat_stream_generate's defensive save —
     // doing it from the client too would race and create duplicates.
     try{
-      const cv=convs.find(c=>c.id===cid)||{tool_ids:pendingToolIds,system_prompt:pendingPersona?.system_prompt||"",model_config_id:pendingPersona?.model_config_id||null,persona_name:pendingPersona?.persona_name||null,persona_avatar:pendingPersona?.persona_avatar||null,model:pendingPersona?.model};
+      const stateConv=convs.find(c=>c.id===cid);
+      const cv=overrides.conversation||stateConv||{tool_ids:pendingToolIds,system_prompt:pendingPersona?.system_prompt||"",model_config_id:pendingPersona?.model_config_id||null,persona_name:pendingPersona?.persona_name||null,persona_avatar:pendingPersona?.persona_avatar||null,model:pendingPersona?.model,use_memories:overrides.freshChat&&pendingUseMemories?"1":"0"};
       const isGhostSend=!!overrides.ephemeral||ghostMode||isGhostConv(cv)||String(cid||"").startsWith("ghost-");
       let am = messagesToSend.map(m=>{
         let baseContent=m._fullContent||m.content||"";
@@ -6187,7 +6188,10 @@ function HyprChat(){
     setInp("");setAttachments([]);if(inpRef.current){inpRef.current.style.height="auto";}
     setTimeout(()=>{if(chatScrollRef.current)chatScrollRef.current.scrollTop=chatScrollRef.current.scrollHeight;},0);
     const am=[...(cv?.messages||[]),um];
-    await sendMessages(cid, am, um._fullContent||um.content, pendingEffortForSend!==undefined?{effort:pendingEffortForSend}:undefined);
+    const sendOverrides={};
+    if(pendingEffortForSend!==undefined)sendOverrides.effort=pendingEffortForSend;
+    if(createdConv){sendOverrides.conversation=createdConv;sendOverrides.freshChat=true;}
+    await sendMessages(cid, am, um._fullContent||um.content, Object.keys(sendOverrides).length?sendOverrides:undefined);
   };
 
   const regenerate=async(msgIndex, overrides)=>{
