@@ -685,6 +685,7 @@ const _ROLE_VISUALS = {
   "builder.feature":   {icon: "✨", label: "Adding feature"},
   "builder.bugfix":    {icon: "🩹", label: "Bug fix build"},
   "reviewer":          {icon: "🔍", label: "Reviewing"},
+  "acceptance":        {icon: "✅", label: "Acceptance"},
   "fixer":             {icon: "🛠", label: "Fixing issues"},
   "qa":                {icon: "❓", label: "Investigating"},
   "indexer":           {icon: "📚", label: "Indexing project"},
@@ -1863,6 +1864,43 @@ const _runIdsFromEvents = (evts)=>{
     if(rid && !seen.has(rid)){seen.add(rid); out.push(rid);}
   }
   return out;
+};
+const _metaObj = (meta)=>{
+  if(!meta)return{};
+  if(typeof meta==="string"){try{return JSON.parse(meta)||{};}catch{return{};}}
+  return meta||{};
+};
+const _DAEDALUS_TOOLS = new Set([
+  "plan_project","generate_code","run_review","run_acceptance_review",
+  "run_fixer","run_aider_fix","ask_project","download_project","download_file",
+  "list_files","read_file","write_file","run_shell",
+]);
+const _DAEDALUS_ACTIVE_WORKFLOW_STATES = new Set(["queued","pending","running","planning","reviewing","fixing","accepting"]);
+const _eventsHaveDaedalus = (evts)=>{
+  if(!Array.isArray(evts))return false;
+  return evts.some(e=>{
+    const tool=e?.data?.tool||"";
+    return _DAEDALUS_TOOLS.has(tool) || !!(e?.data?.run_id||e?.run_id);
+  });
+};
+const _daedalusRunIdsForMessage = (meta,isLast,liveEvts)=>{
+  const saved=Array.isArray(meta?.saved_events)?meta.saved_events:[];
+  const ridsFromMeta=Array.isArray(meta?.run_ids)?meta.run_ids:[];
+  const ridsFromEvts=_runIdsFromEvents(isLast&&liveEvts?.length?liveEvts:saved);
+  const seen=new Set(),out=[];
+  for(const rid of [...ridsFromMeta,...ridsFromEvts]){
+    if(rid&&!seen.has(rid)){seen.add(rid);out.push(rid);}
+  }
+  return out;
+};
+const _isDaedalusOutput = ({meta={},savedEvents=[],liveEvents=[],runIds=[],workflows=[]}={})=>{
+  return !!(
+    runIds.length ||
+    (Array.isArray(workflows)&&workflows.some(w=>_DAEDALUS_ACTIVE_WORKFLOW_STATES.has(String(w?.state||"").toLowerCase()))) ||
+    _eventsHaveDaedalus(savedEvents) ||
+    _eventsHaveDaedalus(liveEvents) ||
+    (Array.isArray(meta.run_ids)&&meta.run_ids.length)
+  );
 };
 
 const _activityIsTerminal = (status)=>["done","complete","completed","success","succeeded","error","failed","cancelled","canceled"].includes(String(status||"").toLowerCase());
@@ -3465,6 +3503,153 @@ function Collapsible({summary,children,theme,font,defaultOpen}){
       <span>{summary||"Details"}</span>
     </div>
     {open&&<div style={{padding:"8px 12px",fontSize:13,lineHeight:1.6,color:theme.dim,borderTop:`1px solid ${theme.brd}28`}}>{children}</div>}
+  </div>;
+}
+
+const _artifactEventsFromDaedalus = (evts)=>{
+  const map=new Map();
+  for(const e of evts||[]){
+    if(e?.type!=="file_ready")continue;
+    const d=e.data||{};
+    const key=d.artifact_id||d.url||d.filename;
+    if(key)map.set(key,d);
+  }
+  return [...map.values()];
+};
+const _runEnv = (run)=>run&&typeof run.result_envelope==="object"&&run.result_envelope?run.result_envelope:{};
+const _baseRole = (role)=>String(role||"").split(".")[0];
+const _basename = (path)=>String(path||"").split("/").filter(Boolean).pop()||"";
+
+function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,font,md,msgContent="",live=false,onOpenArtifact,onPreview}){
+  const [runs,setRuns]=useState([]);
+  const [loadErr,setLoadErr]=useState("");
+  const [rawPill,setRawPill]=useState(null);
+  const runIdsKey=runIds.join("|");
+  useEffect(()=>{
+    let stop=false;
+    const load=async()=>{
+      if(!runIds.length){setRuns([]);return;}
+      try{
+        const rows=await Promise.all(runIds.map(async rid=>{
+          try{
+            const r=await fetch(`${API}/api/runs/${encodeURIComponent(rid)}`);
+            return r.ok?await r.json():null;
+          }catch{return null;}
+        }));
+        if(!stop){setRuns(rows.filter(Boolean));setLoadErr("");}
+      }catch(e){if(!stop)setLoadErr(e.message||"run load failed");}
+    };
+    load();
+    const id=live&&runIds.length?setInterval(load,4000):null;
+    return()=>{stop=true;if(id)clearInterval(id);};
+  },[runIdsKey,live]);
+
+  const events=useMemo(()=>{
+    const seen=new Set(),out=[];
+    for(const e of [...(savedEvents||[]),...(liveEvts||[])]){
+      const key=`${e?.type||""}:${e?.timestamp||""}:${e?.data?.tool||""}:${e?.data?.run_id||e?.run_id||""}:${e?.data?.status||""}`;
+      if(!seen.has(key)){seen.add(key);out.push(e);}
+    }
+    return out;
+  },[savedEvents,liveEvts]);
+  const tools=new Set(events.map(e=>e?.data?.tool).filter(Boolean));
+  const files=_artifactEventsFromDaedalus(events);
+  const latestArtifact=files[files.length-1]||null;
+  const wf=Array.isArray(workflows)&&workflows.length?workflows[0]:null;
+  const wfAccepted=(workflows||[]).some(w=>w.state==="accepted"||w.artifact_status==="delivered"||w.artifact_status==="partial_delivered");
+  const activeStates=new Set(["queued","pending","running","planning","reviewing","fixing","accepting"]);
+  const active=live||runs.some(r=>activeStates.has(r.status))||(workflows||[]).some(w=>activeStates.has(w.state));
+  const delivered=wfAccepted||tools.has("download_project")||tools.has("download_file")||files.length>0;
+  const problemRuns=runs.filter(r=>{
+    const env=_runEnv(r);
+    const status=String(r.status||"").toLowerCase();
+    if(["failed","partial","cancelled","canceled"].includes(status))return true;
+    if(["reviewer","acceptance"].includes(_baseRole(r.role))&&["issues","error","failed"].includes(String(env.status||"").toLowerCase()))return true;
+    return false;
+  });
+  const needsAttention=!delivered&&!active&&(problemRuns.length||(workflows||[]).some(w=>["blocked","cancelled","canceled"].includes(String(w.state||"").toLowerCase())));
+  const colour=active?t.acc:needsAttention?t.err:t.ok;
+  const title=active?"Daedalus is working":needsAttention?"Daedalus needs attention":"Project ready";
+  const latestProblem=problemRuns[problemRuns.length-1];
+  const latestEnv=_runEnv(latestProblem);
+  const statusLine=active
+    ?"Building, reviewing, or packaging is still in progress."
+    :needsAttention
+      ?(latestEnv.error||latestEnv.summary||"The latest Daedalus workflow needs a follow-up.")
+      :(delivered?"Accepted and packaged.":"Workflow complete.");
+  const projectName=wf?.project_id
+    || runs.map(r=>r.project_id||_runEnv(r).project_id||_basename(_runEnv(r).project_dir)).find(Boolean)
+    || (latestArtifact?.filename||"").replace(/(\.tar\.gz|\.tgz|\.zip|\.gz)$/i,"")
+    || "Project";
+  const filesTouched=new Set();
+  runs.forEach(r=>{
+    const env=_runEnv(r);
+    for(const f of [...(env.files_written||[]),...(env.files_touched||[])])if(f)filesTouched.add(f);
+  });
+  const roleCount=(role)=>runs.filter(r=>_baseRole(r.role)===role).length;
+  const reviewCount=roleCount("reviewer");
+  const fixCount=roleCount("fixer");
+  const acceptanceCount=roleCount("acceptance")+(tools.has("run_acceptance_review")&&!roleCount("acceptance")?1:0);
+  const phases=[
+    ["Plan",tools.has("plan_project")||roleCount("architect")],
+    ["Build",tools.has("generate_code")||roleCount("builder")],
+    ["Review",tools.has("run_review")||reviewCount],
+    [fixCount===1?"Fix":"Fixes",tools.has("run_fixer")||tools.has("run_aider_fix")||fixCount,fixCount],
+    ["Acceptance",tools.has("run_acceptance_review")||acceptanceCount],
+    ["Package",delivered],
+  ].filter(p=>p[1]);
+  const runRows=runs.map(r=>{
+    const env=_runEnv(r),visual=_roleVisual(r.role);
+    const status=String(r.status||"loading");
+    const c=status==="succeeded"?t.ok:["failed","partial","cancelled","canceled"].includes(status)?t.err:t.acc;
+    return {id:r.id,icon:visual.icon,label:visual.label,role:r.role,status,c,summary:env.summary||env.error||""};
+  });
+
+  const artifactHref=latestArtifact?(latestArtifact.artifact_id?`${API}/api/artifacts/${latestArtifact.artifact_id}/download`:`${API}${latestArtifact.url||""}`):"";
+  return <div style={{margin:"8px 0 10px",border:`1px solid ${colour}44`,background:`${colour}0c`,borderRadius:10,overflow:"hidden",maxWidth:"100%"}}>
+    <div style={{padding:"10px 12px",display:"flex",gap:10,alignItems:"flex-start"}}>
+      <div style={{width:34,height:34,borderRadius:8,background:`${colour}16`,border:`1px solid ${colour}35`,display:"flex",alignItems:"center",justifyContent:"center",color:colour,flexShrink:0,fontSize:17}}>{active?"⏳":needsAttention?"⚠":"✓"}</div>
+      <div style={{minWidth:0,flex:1}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+          <div style={{fontSize:13,fontWeight:900,color:colour,letterSpacing:.2}}>{title}</div>
+          <span style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:280}}>{projectName}</span>
+        </div>
+        <div style={{fontSize:11,color:t.dim,lineHeight:1.45,marginTop:3,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{statusLine}</div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:8}}>
+          {phases.map(([label,done,count])=><span key={label} style={{fontSize:9,fontWeight:800,color:done?colour:t.mut,border:`1px solid ${done?colour:t.brd}35`,background:`${done?colour:t.surface}10`,borderRadius:999,padding:"2px 7px",lineHeight:1.4}}>{label}{count?` ×${count}`:""}</span>)}
+          {filesTouched.size>0&&<span style={{fontSize:9,fontWeight:800,color:t.mut,border:`1px solid ${t.brd}35`,background:`${t.surface}55`,borderRadius:999,padding:"2px 7px",lineHeight:1.4}}>{filesTouched.size} file{filesTouched.size===1?"":"s"}</span>}
+          {reviewCount>1&&<span style={{fontSize:9,fontWeight:800,color:t.mut,border:`1px solid ${t.brd}35`,background:`${t.surface}55`,borderRadius:999,padding:"2px 7px",lineHeight:1.4}}>{reviewCount} reviews</span>}
+          {loadErr&&<span style={{fontSize:9,fontWeight:800,color:t.err,border:`1px solid ${t.err}35`,background:`${t.err}10`,borderRadius:999,padding:"2px 7px",lineHeight:1.4}}>{loadErr}</span>}
+        </div>
+      </div>
+      {latestArtifact&&<div style={{display:"flex",gap:5,alignItems:"center",flexShrink:0}}>
+        <a href={artifactHref} download={latestArtifact.filename} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"6px 10px",background:`${t.ok}16`,border:`1px solid ${t.ok}40`,borderRadius:7,color:t.ok,textDecoration:"none",fontSize:11,fontWeight:900}}>
+          <span>📦</span><span style={{maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{latestArtifact.filename||"Artifact"}</span>
+        </a>
+        {latestArtifact.artifact_id&&onOpenArtifact&&<button onClick={()=>onOpenArtifact(latestArtifact.artifact_id)} title="Open artifact details" style={{padding:"6px 8px",borderRadius:7,border:`1px solid ${t.acc}35`,background:`${t.acc}12`,color:t.acc,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:900}}>details</button>}
+      </div>}
+    </div>
+
+    <div style={{borderTop:`1px solid ${colour}20`,padding:"0 10px 8px"}}>
+      <Collapsible summary="Build Details" theme={t} font={font} defaultOpen={needsAttention}>
+        <div style={{display:"flex",flexDirection:"column",gap:6}}>
+          {runRows.length?runRows.map(r=><div key={r.id} style={{display:"flex",alignItems:"baseline",gap:7,fontSize:11,color:t.dim,borderBottom:`1px solid ${t.brd}14`,paddingBottom:5}}>
+            <span style={{width:18,textAlign:"center"}}>{r.icon}</span>
+            <span style={{fontWeight:800,color:r.c,minWidth:96}}>{r.label}</span>
+            <span style={{fontSize:10,color:t.mut,minWidth:82}}>{r.status}</span>
+            <span style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{r.summary||r.role}</span>
+          </div>):<div style={{fontSize:11,color:t.mut}}>Run details will appear here when Daedalus starts writing run records.</div>}
+        </div>
+      </Collapsible>
+      {msgContent&&<Collapsible summary="Assistant Message" theme={t} font={font}>
+        {md?<MDWrap>{md(msgContent)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:font}}>{msgContent}</pre>}
+      </Collapsible>}
+      <Collapsible summary="Raw Events" theme={t} font={font}>
+        <ToolStatus evts={events.filter(e=>(e.data?.tool||"")!=="processing")} savedEvts={[]} msgContent={msgContent} historical={true} t={t} expandedPill={rawPill} setExpandedPill={setRawPill} onPreview={onPreview} onOpenArtifact={onOpenArtifact} md={md}/>
+        {(workflows||[]).slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={onOpenArtifact}/>)}
+        {runIds.map(rid=><RunCard key={rid} runId={rid} liveEvts={live?liveEvts:[]} t={t} font={font} md={md} onOpenArtifact={onOpenArtifact}/>)}
+      </Collapsible>
+    </div>
   </div>;
 }
 
@@ -11016,6 +11201,13 @@ function HyprChat(){
               const msgProfileType=personaName?getConversationProfileType(act):null;
               const personaColor=!isU&&personaName?(msgProfileType==="persona"?t.pink:t.acc):t.acc;
               const renderedContent=!isU?replacePersonaPlaceholdersForConversation(msg.content||"",act):msg.content;
+              const meta=_metaObj(msg.metadata);
+              const savedEvents=Array.isArray(meta.saved_events)?meta.saved_events:[];
+              const isLastAssistant=!isU&&i===lastAssistantFilteredIdx;
+              const liveEventsForMsg=isLastAssistant?evts:[];
+              const messageWorkflows=isLastAssistant&&Array.isArray(coderWorkflows)?coderWorkflows.slice(0,3):[];
+              const daedalusRunIds=!isU?_daedalusRunIdsForMessage(meta,isLastAssistant,evts):[];
+              const isDaedalusOutput=!isU&&_isDaedalusOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
               return <React.Fragment key={i}>
               {showQS&&<div style={{marginBottom:16,animation:"fadeIn .3s"}}>
                 <div style={{fontSize:10,fontWeight:700,color:t.f1,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,display:"flex",alignItems:"center",gap:4}}>
@@ -11073,7 +11265,7 @@ function HyprChat(){
                         <button onClick={()=>setEditingMsg(null)} style={btnS(t.mut)}>Cancel</button>
                       </div>
                     </div>
-                    :msg.isS?mdStream(renderedContent):<MemoMD content={renderedContent} md={md} opts={citeOptsFor(msg)}/>}
+                    :isDaedalusOutput?null:msg.isS?mdStream(renderedContent):<MemoMD content={renderedContent} md={md} opts={citeOptsFor(msg)}/>}
                     {isU&&msg.metadata?.images?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:msg.content?10:0}}>
                       {msg.metadata.images.map((img,ii)=><div key={ii} title={img.name} style={{display:"inline-flex",flexDirection:"column",gap:4,alignItems:"flex-start",maxWidth:260}}>
                         <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:8,border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:"none"}}/>
@@ -11088,18 +11280,19 @@ function HyprChat(){
                       </span>)}
                     </div>}
                     {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                    {msg.isS&&!msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
+                    {msg.isS&&!msg.content&&!isDaedalusOutput&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
                   </div>
-                  {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
-                  {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
-                  {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>;})()}
-                  {(()=>{if(isU)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;if(i!==lastAI||!coderWorkflows.length)return null;return coderWorkflows.slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
+                  {isDaedalusOutput&&<DaedalusSummary runIds={daedalusRunIds} savedEvents={savedEvents} liveEvts={liveEventsForMsg} workflows={messageWorkflows} t={t} font={font} md={md} msgContent={renderedContent} live={!!msg.isS} onPreview={openPreview} onOpenArtifact={openArtifact}/>}
+                  {msg.isS&&msg.content&&!isDaedalusOutput&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
+                  {!msg.isS&&!isDaedalusOutput&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
+                  {(()=>{if(isU||isDaedalusOutput||msg.isS||!savedEvents.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={savedEvents.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>;})()}
+                  {(()=>{if(isU||isDaedalusOutput)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;if(i!==lastAI||!coderWorkflows.length)return null;return coderWorkflows.slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
                   {/* Coder Bot v2 — durable run cards. Render one card per unique run_id.
                       Sources, in priority: explicit metadata.run_ids (written server-side at
                       each round boundary — survives mid-stream reload), then live events
                       (current message), then saved_events (history). */}
                   {(()=>{
-                    if(isU) return null;
+                    if(isU||isDaedalusOutput) return null;
                     const msgs = act.messages||[];
                     const lastAI = msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;
                     const isLast = i===lastAI;
@@ -11117,7 +11310,7 @@ function HyprChat(){
                     );
                   })()}
                   {/* Inline code execution output */}
-                  {(()=>{if(isU)return null;const savedEvts=msg.metadata?.saved_events||[];const codeOuts=savedEvts.filter(e=>e.type==="code_output");if(!codeOuts.length)return null;return codeOuts.map((e,ci)=>{const d=e.data||{};const ckey=`${i}-${ci}`;const collapsed=collapsedOutputs.has(ckey);const toggleCollapsed=()=>setCollapsedOutputs(s=>{const n=new Set(s);if(n.has(ckey))n.delete(ckey);else n.add(ckey);return n;});return <div key={ci} style={{margin:"8px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${d.success?`${t.ok}33`:`${t.err}33`}`,background:t.bgDeep}}>
+                  {(()=>{if(isU||isDaedalusOutput)return null;const savedEvts=savedEvents;const codeOuts=savedEvts.filter(e=>e.type==="code_output");if(!codeOuts.length)return null;return codeOuts.map((e,ci)=>{const d=e.data||{};const ckey=`${i}-${ci}`;const collapsed=collapsedOutputs.has(ckey);const toggleCollapsed=()=>setCollapsedOutputs(s=>{const n=new Set(s);if(n.has(ckey))n.delete(ckey);else n.add(ckey);return n;});return <div key={ci} style={{margin:"8px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${d.success?`${t.ok}33`:`${t.err}33`}`,background:t.bgDeep}}>
                     <div onClick={toggleCollapsed} title={collapsed?"Show output":"Hide output"} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${d.success?t.ok:t.err}10`,borderBottom:collapsed?"none":`1px solid ${d.success?t.ok:t.err}22`,cursor:"pointer",userSelect:"none"}}>
                       <span style={{display:"inline-block",transition:"transform .15s",transform:collapsed?"rotate(-90deg)":"rotate(0)",color:d.success?t.ok:t.err,fontSize:10}}>{"\u25BE"}</span>
                       <span>{d.success?"\u2705":"\u274C"}</span>
@@ -11129,7 +11322,7 @@ function HyprChat(){
                   </div>;});})()}
                   {/* KB sources strip — numbered citation sources for this reply */}
                   {(()=>{
-                    if(isU||msg.isS)return null;
+                    if(isU||msg.isS||isDaedalusOutput)return null;
                     const co=citeOptsFor(msg);
                     if(!co?.citations?.length)return null;
                     return <Collapsible theme={t} font={font} summary={`Sources (${co.citations.length})`}>
