@@ -29,7 +29,7 @@ import database as db
 import cancel_registry
 import model_providers
 
-from agents.acceptance import _configured_num_ctx, _ollama_response_text
+from agents.acceptance import _configured_num_ctx
 
 
 # Common English "stopwords" that aren't useful as grep targets. Keep small —

@@ -1,20 +1,29 @@
 import asyncio
 import importlib
-import importlib.util
 import sys
 import types
 from pathlib import Path
 
 import pytest
 
+from .optional_deps import (
+    HAS_AIOSQLITE,
+    HAS_CHROMADB,
+    HAS_FASTAPI,
+    HAS_PYDANTIC,
+    install_aiosqlite_stub,
+    install_rag_stub,
+    module_stub,
+)
+
 
 BACKEND = Path(__file__).resolve().parent.parent
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-_HAS_AIOSQLITE = importlib.util.find_spec("aiosqlite") is not None
+_HAS_AIOSQLITE = HAS_AIOSQLITE
 if not _HAS_AIOSQLITE:
-    sys.modules.setdefault("aiosqlite", types.SimpleNamespace(Connection=object, Row=object))
+    install_aiosqlite_stub()
 
 from agents import aider_fixer, language_adapters, reviewer
 from tools import CODEAGENT_TOOLS
@@ -191,7 +200,7 @@ def test_reviewer_sanitizes_nonexistent_storage_guess_to_real_db_file():
 
 
 def _import_openhands_worker_for_prompt_tests(monkeypatch):
-    if importlib.util.find_spec("fastapi") is None:
+    if not HAS_FASTAPI:
         class DummyFastAPI:
             def get(self, *args, **kwargs):
                 return lambda fn: fn
@@ -199,9 +208,9 @@ def _import_openhands_worker_for_prompt_tests(monkeypatch):
             def post(self, *args, **kwargs):
                 return lambda fn: fn
 
-        monkeypatch.setitem(sys.modules, "fastapi", types.SimpleNamespace(FastAPI=lambda *a, **k: DummyFastAPI()))
-        monkeypatch.setitem(sys.modules, "fastapi.responses", types.SimpleNamespace(StreamingResponse=object))
-    if importlib.util.find_spec("pydantic") is None:
+        monkeypatch.setitem(sys.modules, "fastapi", module_stub("fastapi", FastAPI=lambda *a, **k: DummyFastAPI()))
+        monkeypatch.setitem(sys.modules, "fastapi.responses", module_stub("fastapi.responses", StreamingResponse=object))
+    if not HAS_PYDANTIC:
         class DummyBaseModel:
             def __init__(self, **kwargs):
                 annotations = getattr(self.__class__, "__annotations__", {})
@@ -214,7 +223,7 @@ def _import_openhands_worker_for_prompt_tests(monkeypatch):
                 for key, val in kwargs.items():
                     setattr(self, key, val)
 
-        monkeypatch.setitem(sys.modules, "pydantic", types.SimpleNamespace(BaseModel=DummyBaseModel))
+        monkeypatch.setitem(sys.modules, "pydantic", module_stub("pydantic", BaseModel=DummyBaseModel))
     sys.modules.pop("openhands_worker", None)
     return importlib.import_module("openhands_worker")
 
@@ -286,15 +295,8 @@ def test_aider_scope_and_prompt_include_test_state_isolation(tmp_path, monkeypat
 
 
 def _import_chat_with_optional_stubs(monkeypatch):
-    if importlib.util.find_spec("chromadb") is None:
-        async def _noop_index(*args, **kwargs):
-            return None
-
-        monkeypatch.setitem(
-            sys.modules,
-            "rag",
-            types.SimpleNamespace(RESEARCH_TOOLS=set(), index_research=_noop_index),
-        )
+    if not HAS_CHROMADB:
+        install_rag_stub(monkeypatch)
     async def _noop_quick_search(*args, **kwargs):
         return None
 
@@ -885,6 +887,35 @@ def test_v2_name_match_word_boundary():
     assert not tools._v2_name_match("v2ray helper")
     assert not tools._v2_name_match("levi2000")
     assert not tools._v2_name_match("")
+
+
+def test_event_bus_unsubscribe_deletes_empty_conversation_key():
+    from events import EventBus
+
+    bus = EventBus()
+    q = _run(bus.subscribe("conv-events"))
+
+    assert "conv-events" in bus._subscribers
+
+    _run(bus.unsubscribe("conv-events", q))
+
+    assert "conv-events" not in bus._subscribers
+
+
+def test_seed_coder_kb_targets_daedalus_not_generic_coder_profile():
+    if not HAS_CHROMADB:
+        install_rag_stub()
+    from seed_kb import seed_coder_kb
+
+    picked = seed_coder_kb._find_daedalus_config([
+        {"id": "mc-coder", "name": "Personal Coder Helper", "kb_ids": []},
+        {"id": "mc-daedalus", "name": "🏛️ Daedalus", "kb_ids": []},
+    ])
+
+    assert picked["id"] == "mc-daedalus"
+    assert seed_coder_kb._find_daedalus_config([
+        {"id": "mc-coder", "name": "Personal Coder Helper", "kb_ids": []},
+    ]) is None
 
 
 def test_blocked_counter_ignores_tool_name_and_interleaved_success(monkeypatch):

@@ -1,10 +1,10 @@
 """Memory suggester model selection — cloud chat models must not be POSTed to Ollama."""
 import asyncio
-import importlib.util
 import sys
-import types
 from pathlib import Path
 from types import SimpleNamespace
+
+from .optional_deps import HAS_AIOSQLITE, HAS_CHROMADB, install_aiosqlite_stub, install_rag_stub
 
 _BACKEND = Path(__file__).resolve().parent.parent
 _AGENTS = _BACKEND / "agents"
@@ -12,10 +12,10 @@ for _p in (_BACKEND, _AGENTS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-import importlib
-_HAS_AIO = importlib.util.find_spec("aiosqlite") is not None
-if not _HAS_AIO:
-    sys.modules.setdefault("aiosqlite", types.SimpleNamespace(Connection=object, Row=object))
+if not HAS_AIOSQLITE:
+    install_aiosqlite_stub()
+if not HAS_CHROMADB:
+    install_rag_stub()
 
 from agents import chat as chat_mod
 

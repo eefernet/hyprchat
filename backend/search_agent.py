@@ -12,61 +12,12 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any
-
 import config
 import quick_search as _qs
 
 
 _VALID_CATEGORIES = ("news", "code", "recipe", "general")
 _REFINE_THRESHOLD_DEFAULT = 0.30
-
-# Time-cues that indicate the user wants current news, not background.
-# Strict "today"/"yesterday" cues use day-level SearXNG filtering; softer
-# recency cues use week/month filters.
-_NEWS_TIME_CUE_RE = re.compile(
-    r"\b(today|now|latest|current|currently|breaking|recent|recently|"
-    r"this\s+(?:week|month)|"
-    r"yesterday|last\s+(?:week|month)|"
-    r"happening|going\s+on|update|updates)\b",
-    re.IGNORECASE,
-)
-_BROAD_SEARCH_CUE_RE = re.compile(
-    r"\b(latest|current|currently|today|recent|recently|news|updates?|"
-    r"compare|comparison|vs|versus|difference|differences|best|top|"
-    r"reviews?|alternatives?)\b",
-    re.IGNORECASE,
-)
-
-
-def _news_time_range(category: str, latest: str) -> str | None:
-    """Return SearXNG time_range when the query is news + has a recency cue."""
-    if category != "news":
-        return None
-    if re.search(r"\btoday|tonight|this morning|this afternoon|this evening\b", latest, re.I):
-        return "day"
-    if re.search(r"\byesterday\b", latest, re.I):
-        return "day"
-    if re.search(r"\bthis\s+week\b", latest, re.I):
-        return "week"
-    if _NEWS_TIME_CUE_RE.search(latest):
-        return "month"
-    # Bare-year mentions of the current/recent year imply recency
-    yr = datetime.now().year
-    if str(yr) in latest or str(yr - 1) in latest:
-        return "month"
-    return None
-
-
-def _search_count_for_round(category: str, latest: str, queries: list[str]) -> int:
-    """Choose per-query SearXNG count for chat Quick Search."""
-    haystack = " ".join([latest, *queries])
-    if category == "news" or len(queries) > 1 or _BROAD_SEARCH_CUE_RE.search(haystack):
-        return _qs.CHAT_SEARCH_COUNT_BROAD
-    if any(len(_qs._content_tokens(q)) <= 2 for q in queries):
-        return _qs.CHAT_SEARCH_COUNT_BROAD
-    return _qs.CHAT_SEARCH_COUNT_DEFAULT
-
 
 @dataclass
 class SearchModeConfig:
@@ -508,152 +459,6 @@ async def _ask_ollama_json(
         return None
 
 
-# ── Triage ──
-def _build_triage_prompt(turns: list[str], latest: str) -> str:
-    history_block = "\n".join(turns[-6:]) if turns else "(no prior turns — this is the first message)"
-    return (
-        "You are a search planner. Given the conversation and the user's LATEST "
-        "message, decide whether to search the web and what to search for.\n\n"
-        "Output a single JSON object with EXACTLY these fields:\n"
-        '  "needs_search":     boolean\n'
-        '  "standalone_query": string — the LATEST message rephrased as a '
-        'context-independent question, with all pronouns/anaphora resolved '
-        'using prior turns. Empty string if needs_search=false.\n'
-        '  "queries":          array of 1-3 self-contained search query strings\n'
-        '  "category":         one of "news" | "code" | "recipe" | "general"\n'
-        '  "reason":           short string, ≤80 chars (telemetry only)\n\n'
-        "RULES:\n"
-        "1. The latest message continues the conversation. Resolve pronouns "
-        "(she/he/it/they/this/that), vague references (\"the one\", \"the issue\"), "
-        "and definite-article anaphora (\"the X\" referring to a prior-mentioned "
-        "topic) using the SPECIFIC noun from prior turns. Both standalone_query "
-        "AND each search query MUST contain the resolved noun.\n"
-        "2. Bare follow-ups — short messages without their own subject "
-        "('whos winning?', 'any updates?', 'what next?') — inherit the topic "
-        "from prior turns.\n"
-        "3. Default to ONE query. Output TWO queries ONLY when the latest "
-        "message explicitly compares two subjects with a comparison word "
-        "('compare', 'vs', 'versus', 'difference between'). Mentioning two "
-        "subjects without explicitly comparing them is still ONE query.\n"
-        "4. Topic shifts — when the latest message clearly introduces a NEW "
-        "subject unrelated to prior turns — ignore the prior turns and search "
-        "only the new topic.\n"
-        "5. Set needs_search=false for: greetings, pure arithmetic, requests "
-        "to rewrite/translate/summarize/proofread attached text, and pure-"
-        "opinion questions ('what do you think of X').\n"
-        "6. Each query: ≤12 words, no quotes, no URLs, no 'site:', no booleans.\n"
-        "7. standalone_query may be longer than a search query — it should read "
-        "like a complete, self-contained question.\n\n"
-        "EXAMPLES BELOW ARE TEMPLATES showing the rule pattern. The entities "
-        "(sourdough, Rust, Brazil, etc.) are placeholders — DO NOT copy them "
-        "into your output unless they actually appear in the user's conversation. "
-        "Adapt the structure to the user's actual topic.\n\n"
-        '  Pattern: pronoun anaphora\n'
-        '    Prior: user asked about sourdough bread\n'
-        '    Latest: "how do I store it?"\n'
-        '    → {"needs_search":true,'
-        '"standalone_query":"how do I store sourdough bread?",'
-        '"queries":["sourdough bread storage"],'
-        '"category":"recipe","reason":"pronoun it → sourdough bread"}\n\n'
-        '  Pattern: bare follow-up inherits topic\n'
-        '    Prior: user asked about Rust borrow checker\n'
-        '    Latest: "any examples?"\n'
-        '    → {"needs_search":true,'
-        '"standalone_query":"examples of the Rust borrow checker",'
-        '"queries":["Rust borrow checker examples"],'
-        '"category":"code","reason":"bare follow-up"}\n\n'
-        '  Pattern: topic shift — ignore prior\n'
-        '    Prior: extended discussion about Python async\n'
-        '    Latest: "what is the capital of Brazil?"\n'
-        '    → {"needs_search":true,'
-        '"standalone_query":"what is the capital of Brazil?",'
-        '"queries":["capital of Brazil"],'
-        '"category":"general","reason":"topic shift"}\n\n'
-        '  Pattern: skip greeting\n'
-        '    Prior: (none)\n'
-        '    Latest: "hi"\n'
-        '    → {"needs_search":false,"standalone_query":"",'
-        '"queries":[],"category":"general","reason":"greeting"}\n\n'
-        '  Pattern: skip operate-on-attached\n'
-        '    Prior: discussing FastAPI deployment\n'
-        '    Latest: "rewrite this paragraph: <paste>"\n'
-        '    → {"needs_search":false,"standalone_query":"",'
-        '"queries":[],"category":"general","reason":"operate on attached"}\n\n'
-        f"Recent conversation:\n{history_block}\n\n"
-        f"Latest message: {latest}\n\n"
-        "Output JSON only:"
-    )
-
-
-def _validate_triage(out: Any, latest: str, prior_tokens: set[str]) -> dict | None:
-    """Return a sanitized triage dict or None if validation fails."""
-    if not isinstance(out, dict):
-        return None
-    needs = out.get("needs_search")
-    if not isinstance(needs, bool):
-        return None
-    raw_queries = out.get("queries")
-    if not isinstance(raw_queries, list):
-        return None
-    queries: list[str] = []
-    for q in raw_queries[:3]:
-        if not isinstance(q, str):
-            continue
-        q = q.strip().strip('"').strip("'")
-        if not q or len(q) > 200:
-            continue
-        if "http://" in q.lower() or "https://" in q.lower():
-            continue
-        if not _qs._content_tokens(q):
-            # No real content — likely 'yes' or 'okay' hallucinated as a query
-            continue
-        queries.append(q)
-
-    if needs and not queries:
-        return None  # claimed needs_search but produced no usable queries
-    if not needs:
-        queries = []  # consistency: skip → empty
-
-    # Follow-up validation: if latest message is anaphora / pronoun / very short,
-    # at least one query must share a content token with prior turns. This is the
-    # "carry topic forward" guarantee — matches today's _good() check.
-    if needs and prior_tokens and _qs._needs_context(latest, prior_tokens):
-        if not any(_qs._content_tokens(q) & prior_tokens for q in queries):
-            print(f"[SA]   triage queries dropped prior topic: {queries!r}")
-            return None
-
-    cat = out.get("category", "general")
-    if cat not in _VALID_CATEGORIES:
-        cat = "general"
-
-    reason = out.get("reason", "")
-    if not isinstance(reason, str):
-        reason = ""
-
-    # standalone_query: pronoun-resolved, context-independent rephrasing of
-    # the latest message. Used as the canonical query for ranking + carousel.
-    # Falls back to queries[0] if missing/empty/unsafe.
-    sq = out.get("standalone_query", "")
-    if not isinstance(sq, str):
-        sq = ""
-    sq = sq.strip().strip('"').strip("'")
-    if (
-        not sq
-        or len(sq) > 400
-        or "http://" in sq.lower()
-        or "https://" in sq.lower()
-    ):
-        sq = queries[0] if queries else ""
-
-    return {
-        "needs_search": needs,
-        "standalone_query": sq,
-        "queries": queries,
-        "category": cat,
-        "reason": reason[:120],
-    }
-
-
 def _build_prior_tokens(messages: list, latest: str) -> tuple[list[str], set[str]]:
     """Extract recent conversation turns and the union of their content tokens.
 
@@ -674,20 +479,6 @@ def _build_prior_tokens(messages: list, latest: str) -> tuple[list[str], set[str
         body = t.split(":", 1)[-1] if ":" in t else t
         prior_tokens |= _qs._content_tokens(body)
     return turns, prior_tokens
-
-
-async def triage(
-    http, ollama_url: str, model: str, messages: list, latest: str,
-) -> dict | None:
-    """Run the triage LLM call. Returns validated dict or None on any failure."""
-    if not model:
-        return None
-    turns, prior_tokens = _build_prior_tokens(messages, latest)
-    prompt = _build_triage_prompt(turns, latest)
-    raw = await _ask_ollama_json(http, ollama_url, prompt, model, max_tokens=240, timeout=45.0)
-    if raw is None:
-        return None
-    return _validate_triage(raw, latest, prior_tokens)
 
 
 # ── Relevance scoring (cheap heuristic) ──
@@ -769,7 +560,7 @@ async def refine_query(
 
 # ── Orchestrator ──
 async def run_search_agent(
-    http, ollama_url: str, triage_model: str, refine_model: str,
+    http, ollama_url: str, refine_model: str,
     events, conv_id: str, messages: list,
     *, default_model: str = "",
     max_rounds: int = 2,

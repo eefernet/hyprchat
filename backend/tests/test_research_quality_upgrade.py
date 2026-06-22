@@ -287,8 +287,73 @@ $$E = mc^2$$
     assert renderables["has_display_equation"] is True
 
 
+def test_research_markdown_cleaner_strips_thinking_leaks():
+    leaked = "Okay, I need to think this through.\n</think>\n\n# Clean Report\n\nBody [S1]."
+    assert research._clean_research_model_text(leaked) == "# Clean Report\n\nBody [S1]."
+    assert research._streamable_report_text(leaked) == "# Clean Report\n\nBody [S1]."
+    assert research._streamable_report_text("Okay, still reasoning") == ""
+
+
+def test_cloud_research_completion_routes_through_provider_adapter(monkeypatch):
+    calls = []
+
+    async def fake_complete_chat(http, model_id, prompt, **kwargs):
+        calls.append((model_id, prompt, kwargs))
+        return "<think>hidden</think>{\"ok\": true}"
+
+    monkeypatch.setattr(research, "is_cloud_model", lambda m: str(m).startswith("openai:"))
+    monkeypatch.setattr(research, "complete_chat", fake_complete_chat)
+
+    text = _run(research._ask_ollama(None, "http://ollama", "Prompt", model="openai:gpt-test", max_tokens=123))
+    assert text == '{"ok": true}'
+    assert calls[0][0] == "openai:gpt-test"
+    assert calls[0][2]["num_predict"] == 123
+
+    obj = _run(research._ask_ollama_json(
+        None, "http://ollama", "Return JSON", model="openai:gpt-test",
+        fallback={}, expected_type=dict,
+    ))
+    assert obj == {"ok": True}
+    assert calls[-1][2]["format_json"] is True
+
+
+def test_streamed_report_output_filters_thinking_before_live_emit(monkeypatch):
+    emitted = []
+
+    async def fake_emit_report_event(events, report_id, event_type, data):
+        emitted.append((report_id, event_type, data))
+
+    monkeypatch.setattr(research, "_emit_report_event", fake_emit_report_event)
+
+    class _FakeStream:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_lines(self):
+            import json
+            yield json.dumps({"response": "Reasoning text that should stay hidden. "})
+            yield json.dumps({"response": "</think>\n\n# Clean Report\n\nVisible body."})
+            yield json.dumps({"done": True})
+
+    class _FakeHTTP:
+        def stream(self, *_args, **_kwargs):
+            return _FakeStream()
+
+    text = _run(research._ask_report_streamed(
+        _FakeHTTP(), "http://ollama", object(), "report-live", "prompt", model="qwen3moe:test",
+    ))
+    token_text = "".join(e[2].get("content", "") for e in emitted if e[1] == "research_token")
+    assert text == "# Clean Report\n\nVisible body."
+    assert token_text == text
+    assert "reasoning" not in token_text.lower()
+    assert "</think>" not in token_text
+
+
 def test_pdf_export_uses_react_markdown_renderer_and_pygraph_alias():
-    index = (_BACKEND.parent / "frontend" / "dist" / "index.html").read_text()
+    index = (_BACKEND.parent / "frontend" / "src" / "main.jsx").read_text()
     assert "ResearchPrintPage" in index
     # PDF export wraps the report markdown through the React renderer with
     # print-mode + theme args (repinned after the renderer gained options).
@@ -301,12 +366,16 @@ def test_pdf_export_uses_react_markdown_renderer_and_pygraph_alias():
 
 
 def test_deep_research_panel_state_contracts_are_guarded_in_frontend():
-    index = (_BACKEND.parent / "frontend" / "dist" / "index.html").read_text()
+    index = (_BACKEND.parent / "frontend" / "src" / "main.jsx").read_text()
 
     # Live SSE appends token chunks, while polling replaces from durable
     # report_markdown. That keeps the two paths from duplicating the body.
     assert "setResearchLiveMarkdown(p=>p+ev.data.content)" in index
-    assert "if(d.report_markdown)setResearchLiveMarkdown(d.report_markdown||\"\")" in index
+    assert "if(d.report_markdown)setResearchLiveMarkdown(cleanResearchMarkdown(d.report_markdown||\"\"))" in index
+    assert "cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||\"\")" in index
+    assert "isMoeModelName" in index
+    assert "Cloud Research" in index
+    assert "researchModelOptions" in index
 
     # All terminal states release the running flag.
     assert "if(ev.type===\"research_done\"||ev.type===\"research_error\")" in index

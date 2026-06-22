@@ -1,16 +1,15 @@
 import asyncio
 import os
 import sys
-import types
 
 import httpx
 import pytest
 
+from .optional_deps import HAS_AIOSQLITE, install_aiosqlite_stub
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-try:
-    import aiosqlite  # noqa: F401
-except ModuleNotFoundError:
-    sys.modules.setdefault("database", types.SimpleNamespace())
+if not HAS_AIOSQLITE:
+    install_aiosqlite_stub()
 
 import connectors
 
@@ -63,7 +62,7 @@ def test_openapi_operation_to_connector_maps_parameters_and_body():
 
 def test_private_openapi_url_is_blocked():
     with pytest.raises(connectors.ConnectorError):
-        connectors.assert_url_allowed("http://127.0.0.1:8000/openapi.json", allow_private=False)
+        asyncio.run(connectors.assert_url_allowed("http://127.0.0.1:8000/openapi.json", allow_private=False))
 
 
 def test_plain_env_placeholder_resolution(monkeypatch):

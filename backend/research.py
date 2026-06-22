@@ -17,6 +17,25 @@ import httpx
 
 import config
 
+# model_providers transitively imports database (aiosqlite). research is
+# imported by quick_search/search_agent, whose tests run without aiosqlite —
+# keep this module importable there with a pass-through fallback.
+try:
+    from model_providers import complete_chat, is_cloud_model, stream_provider_chat, strip_leaked_cot
+except ModuleNotFoundError:  # test envs without aiosqlite
+    async def complete_chat(*_args, **_kwargs):
+        return ""
+
+    def is_cloud_model(_model_id):
+        return False
+
+    async def stream_provider_chat(*_args, **_kwargs):
+        if False:
+            yield {}
+
+    def strip_leaked_cot(text):
+        return text, ""
+
 
 _WEB_FETCH_CLIENT = None
 _WEB_FETCH_CLIENT_PROXY = None
@@ -33,6 +52,13 @@ def _web_fetch_client(http):
         return http
     global _WEB_FETCH_CLIENT, _WEB_FETCH_CLIENT_PROXY
     if _WEB_FETCH_CLIENT is None or _WEB_FETCH_CLIENT_PROXY != proxy:
+        if _WEB_FETCH_CLIENT is not None:
+            # Proxy setting changed — close the old client instead of leaking
+            # its connection pool.
+            try:
+                asyncio.get_running_loop().create_task(_WEB_FETCH_CLIENT.aclose())
+            except RuntimeError:
+                pass
         _WEB_FETCH_CLIENT = httpx.AsyncClient(
             timeout=httpx.Timeout(300.0, connect=10.0),
             verify=getattr(config, "HTTP_VERIFY_SSL", True),
@@ -148,6 +174,59 @@ def _effective_context_chars(budget: dict, *, reserve_tokens: int = 5200, overhe
     + instructions/outline scaffolding around the evidence block."""
     avail = (_research_num_ctx() - reserve_tokens) * 3 - overhead_chars
     return max(8000, min(int(budget.get("context_chars", 52000)), avail))
+
+
+_THINK_BLOCK_RE = re.compile(r"(?is)<think\b[^>]*>.*?</think\s*>")
+_THINK_OPEN_RE = re.compile(r"(?is)<think\b[^>]*>")
+_THINK_CLOSE_RE = re.compile(r"(?is)</think\s*>")
+_REPORT_HEADING_RE = re.compile(r"(?m)^[ \t]*#{1,2}[ \t]+\S")
+
+
+def _clean_research_model_text(text: str, *, allow_empty: bool = False) -> str:
+    """Remove reasoning leaks before report text is persisted or rendered."""
+    raw = text or ""
+    if not raw:
+        return ""
+    cleaned = _THINK_BLOCK_RE.sub("", raw)
+    # Some local reasoning models leak the opening tag, then stream a bare
+    # closer after the reasoning preamble. If a closer remains, discard the
+    # leading preamble and keep the answer after the last closer.
+    last_close = None
+    for m in _THINK_CLOSE_RE.finditer(cleaned):
+        last_close = m
+    if last_close:
+        cleaned = cleaned[last_close.end():]
+    cleaned = _THINK_OPEN_RE.sub("", cleaned)
+    cleaned = _THINK_CLOSE_RE.sub("", cleaned)
+    cot_clean, leaked = strip_leaked_cot(cleaned.strip())
+    if leaked:
+        cleaned = cot_clean
+    cleaned = (cleaned or "").strip()
+    if cleaned or allow_empty:
+        return cleaned
+    return raw.strip()
+
+
+def _streamable_report_text(raw: str, *, final: bool = False) -> str:
+    """Return only content that is safe to show while final report streams.
+
+    Before the report's first markdown heading is visible, keep buffering so a
+    delayed </think> cannot expose a reasoning preamble in the live panel.
+    """
+    text = raw or ""
+    if not text:
+        return ""
+    close = None
+    for m in _THINK_CLOSE_RE.finditer(text):
+        close = m
+    if close:
+        return _clean_research_model_text(text[close.end():], allow_empty=True)
+    heading = _REPORT_HEADING_RE.search(text)
+    if heading:
+        return _clean_research_model_text(text[heading.start():], allow_empty=True)
+    if final:
+        return _clean_research_model_text(text, allow_empty=True)
+    return ""
 
 
 # ── URL safety, source credibility, and report evidence cache ──
@@ -716,7 +795,7 @@ def _github_file_score(path: str, size: int) -> int:
         score += 105
     if name in {"vite.config.js", "vite.config.ts", "tsconfig.json", "webpack.config.js"}:
         score += 95
-    if p in {"frontend/dist/index.html", "backend/main.py", "backend/research.py", "backend/database.py", "deploy_monitor.py"}:
+    if p in {"frontend/src/main.jsx", "backend/main.py", "backend/research.py", "backend/database.py", "deploy_monitor.py"}:
         score += 90
     if p.startswith(("frontend/", "backend/", "src/", "app/", "components/")):
         score += 35
@@ -1043,14 +1122,25 @@ def _rank_urls(findings: list, exclude: set = None) -> list:
 async def _ask_ollama(http, ollama_url: str, prompt: str, model: str = None, default_model: str = "qwen3.5:27b", max_tokens: int = 4096) -> str:
     """Call Ollama for AI synthesis."""
     _num_ctx = _research_num_ctx()
+    model_id = model or default_model
+    if is_cloud_model(model_id):
+        text = await complete_chat(
+            http, model_id, prompt,
+            temperature=0.3,
+            num_predict=max_tokens,
+            timeout=300,
+        )
+        return _clean_research_model_text(text)
     try:
         r = await http.post(f"{ollama_url}/api/generate", json={
-            "model": model or default_model,
+            "model": model_id,
             "prompt": prompt, "stream": False,
+            "think": False,
             "options": {"temperature": 0.3, "num_predict": max_tokens, "num_ctx": _num_ctx},
         }, timeout=180)
         data = r.json()
-        return (data.get("response", "") or "").strip()
+        text = (data.get("response", "") or "").strip()
+        return _clean_research_model_text(text)
     except Exception as e:
         return f"[AI synthesis failed: {e}]"
 
@@ -1062,10 +1152,19 @@ async def _ask_ollama_json(
 ):
     """Call Ollama in JSON mode and make one compact repair attempt."""
     _num_ctx = _research_num_ctx()
+    model_id = model or default_model
 
     async def call_once(call_prompt: str) -> str:
+        if is_cloud_model(model_id):
+            return _clean_research_model_text(await complete_chat(
+                http, model_id, call_prompt,
+                temperature=0.1,
+                num_predict=max_tokens,
+                format_json=True,
+                timeout=300,
+            ))
         r = await http.post(f"{ollama_url}/api/generate", json={
-            "model": model or default_model,
+            "model": model_id,
             "prompt": call_prompt,
             "stream": False,
             "format": "json",
@@ -1077,7 +1176,7 @@ async def _ask_ollama_json(
             },
         }, timeout=180)
         data = r.json()
-        return (data.get("response", "") or "").strip()
+        return _clean_research_model_text(data.get("response", "") or "")
 
     def expected(obj) -> bool:
         if obj is None:
@@ -1133,6 +1232,7 @@ async def _ask_ollama_streamed(
         async with http.stream("POST", f"{ollama_url}/api/generate", json={
             "model": model or default_model,
             "prompt": prompt, "stream": True,
+            "think": False,
             "options": {"temperature": 0.3, "num_predict": max_tokens, "num_ctx": _num_ctx},
         }, timeout=300) as stream:
             async for line in stream.aiter_lines():
@@ -1152,7 +1252,9 @@ async def _ask_ollama_streamed(
                     })
                 if chunk.get("done"):
                     break
-        return accumulated.strip()
+        text = accumulated.strip()
+        clean, leaked = strip_leaked_cot(text)
+        return (clean or text) if leaked else text
     except Exception as e:
         return f"[AI synthesis failed: {e}]"
 
@@ -2106,13 +2208,50 @@ async def _ask_report_streamed(
     import cancel_registry
 
     _num_ctx = _research_num_ctx()
+    model_id = model or default_model
     accumulated = ""
+    emitted_len = 0
     token_buf = ""
+
+    async def emit_safe(final: bool = False) -> None:
+        nonlocal emitted_len, token_buf
+        safe_text = _streamable_report_text(accumulated, final=final)
+        if len(safe_text) < emitted_len:
+            emitted_len = 0
+            token_buf = ""
+        delta = safe_text[emitted_len:]
+        if not delta:
+            if final and token_buf:
+                await _emit_report_event(events, report_id, "research_token", {"content": token_buf})
+                token_buf = ""
+            return
+        emitted_len = len(safe_text)
+        token_buf += delta
+        if final or len(token_buf) >= 240:
+            await _emit_report_event(events, report_id, "research_token", {"content": token_buf})
+            token_buf = ""
+
     try:
+        if is_cloud_model(model_id):
+            async for ev in stream_provider_chat(
+                http,
+                model_id,
+                [{"role": "user", "content": prompt}],
+                options={"temperature": 0.25, "num_predict": max_tokens},
+            ):
+                if cancel_registry.is_cancelled(report_id):
+                    raise cancel_registry.RunCancelled(report_id)
+                if ev.get("type") == "token" and ev.get("content"):
+                    accumulated += ev.get("content", "")
+                    await emit_safe()
+            await emit_safe(final=True)
+            return _clean_research_model_text(accumulated)
+
         async with http.stream("POST", f"{ollama_url}/api/generate", json={
-            "model": model or default_model,
+            "model": model_id,
             "prompt": prompt,
             "stream": True,
+            "think": False,
             "options": {"temperature": 0.25, "num_predict": max_tokens, "num_ctx": _num_ctx},
         }, timeout=420) as stream:
             async for line in stream.aiter_lines():
@@ -2127,15 +2266,11 @@ async def _ask_report_streamed(
                 piece = chunk.get("response", "") or ""
                 if piece:
                     accumulated += piece
-                    token_buf += piece
-                if len(token_buf) >= 240:
-                    await _emit_report_event(events, report_id, "research_token", {"content": token_buf})
-                    token_buf = ""
+                    await emit_safe()
                 if chunk.get("done"):
                     break
-        if token_buf:
-            await _emit_report_event(events, report_id, "research_token", {"content": token_buf})
-        return accumulated.strip()
+        await emit_safe(final=True)
+        return _clean_research_model_text(accumulated)
     except cancel_registry.RunCancelled:
         raise
     except Exception as e:

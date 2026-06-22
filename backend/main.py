@@ -34,24 +34,27 @@ from pydantic import BaseModel
 
 import config
 import database as db
-from tools import CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls, strip_tool_calls
 from council import stream_council_chat
-from events import EventBus, parse_tool_params
+from events import EventBus
 import quick_search as qs_module
 from agents.chat import chat_stream_generate, TOOL_TEMPLATES, detect_template_family
 from agents.personas import seed_coder_bot as _seed_coder_bot, seed_coder_bot_v2 as _seed_coder_bot_v2, seed_conspiracy_bot as _seed_conspiracy_bot, seed_based_bot as _seed_based_bot, seed_all_defaults as _seed_all_defaults
 import hf as hf_module
+import hyprfit
 from hf import parse_ollama_progress
 import rag
+import storage_diagnostics
 import connectors
+import comfyui
+import voice
 import model_providers
+from image_prompt_enhancer import normalize_enhancer_response
 from research import (
     REPORT_TEMPLATES,
     REPORT_TEMPLATE_MAP,
     close_web_fetch_client,
     fetch_bytes_safely,
     run_research_report,
-    web_get,
 )
 
 # ============================================================
@@ -71,6 +74,12 @@ def save_settings(settings: dict):
     os.makedirs(os.path.dirname(config.SETTINGS_PATH), exist_ok=True)
     with open(config.SETTINGS_PATH, "w") as f:
         json.dump(settings, f, indent=2)
+
+
+def _public_settings_payload(settings: dict) -> dict:
+    public = {k: v for k, v in settings.items() if k != "ollama_scan_ssh_password"}
+    public.update(hyprfit.clean_ollama_scan_ssh_settings(settings, config.OLLAMA_URL, include_password=False))
+    return public
 
 
 def _coerce_service_url(value: str, env_key: str, default: str) -> str:
@@ -590,6 +599,69 @@ def _track_bg(coro):
     return t
 
 
+def _runtime_storage_dirs() -> list[str]:
+    data_dir = os.path.dirname(config.DATABASE_PATH)
+    settings_dir = os.path.dirname(config.SETTINGS_PATH)
+    connector_dir = os.path.dirname(config.CONNECTOR_SECRETS_PATH)
+    dirs = [
+        data_dir,
+        config.UPLOAD_DIR,
+        os.path.join(config.UPLOAD_DIR, "avatars"),
+        config.TOOLS_DIR,
+        config.KB_DIR,
+        rag.CHROMA_DIR,
+        settings_dir,
+        os.path.join(settings_dir, "comfy_workflows"),
+        config.SANDBOX_DIR,
+        config.SANDBOX_OUTPUTS_DIR,
+        config.SANDBOX_WORKSPACE_DIR,
+        config.SANDBOX_VENV_DIR,
+        connector_dir,
+    ]
+    seen = set()
+    out = []
+    for path in dirs:
+        if path and path not in seen:
+            seen.add(path)
+            out.append(path)
+    return out
+
+
+def _ensure_runtime_storage_dirs() -> None:
+    for path in _runtime_storage_dirs():
+        os.makedirs(path, exist_ok=True)
+
+
+def _storage_health_check() -> dict:
+    started = time.time()
+    try:
+        _ensure_runtime_storage_dirs()
+        result = storage_diagnostics.runtime_storage_status(config.DATABASE_PATH, rag.CHROMA_DIR)
+    except Exception as exc:
+        result = {"status": "error", "error": str(exc)}
+    result["response_ms"] = round((time.time() - started) * 1000)
+    return result
+
+
+def _raise_if_rag_storage_unwritable() -> None:
+    try:
+        _ensure_runtime_storage_dirs()
+    except Exception as exc:
+        print(f"[RAG] Storage directory setup failed: {exc}")
+        raise HTTPException(500, storage_diagnostics.readonly_storage_message())
+    status = storage_diagnostics.directory_storage_status(rag.CHROMA_DIR, "rag_chroma", scan_children=True)
+    if status.get("status") != "ok":
+        err = status.get("write_error") or status.get("error") or "RAG Chroma storage is not writable"
+        print(f"[RAG] Storage preflight failed: {err}")
+        raise HTTPException(500, storage_diagnostics.readonly_storage_message())
+
+
+def _format_reindex_error(kb_name: str, error: Exception) -> str:
+    if storage_diagnostics.is_readonly_storage_error(error):
+        return f"{kb_name}: {storage_diagnostics.readonly_storage_message()}"
+    return f"{kb_name}: {error}"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _cleanup_task_ref, _health_task_ref
@@ -600,9 +672,10 @@ async def lifespan(app: FastAPI):
             print(f"[Startup] Reaped stale runs: {_reaped}")
     except Exception as _re:
         print(f"[Startup] Stale-run reaper failed (non-fatal): {_re}")
-    os.makedirs(config.UPLOAD_DIR, exist_ok=True)
-    os.makedirs(config.TOOLS_DIR, exist_ok=True)
-    os.makedirs(config.KB_DIR, exist_ok=True)
+    try:
+        _ensure_runtime_storage_dirs()
+    except Exception as exc:
+        print(f"[Startup] Runtime storage setup failed: {exc}")
     # Init sandbox dirs + venv
     _init_sandbox()
     # Override service URLs from persistent settings if set. Empty values inherit
@@ -620,6 +693,17 @@ async def lifespan(app: FastAPI):
     if _settings.get("n8n_url"):
         config.N8N_URL = _coerce_service_url(_settings["n8n_url"], "N8N_URL", "http://127.0.0.1:5678")
         print(f"[Config] Loaded N8N URL from settings: {config.N8N_URL}")
+    if _settings.get("comfyui_url"):
+        config.COMFYUI_URL = _coerce_service_url(_settings["comfyui_url"], "COMFYUI_URL", "")
+        print(f"[Config] Loaded ComfyUI URL from settings: {config.COMFYUI_URL}")
+    if _settings.get("stt_url"):
+        config.STT_URL = _coerce_service_url(_settings["stt_url"], "STT_URL", "")
+        print(f"[Config] Loaded STT URL from settings: {config.STT_URL}")
+    if _settings.get("tts_url"):
+        config.TTS_URL = _coerce_service_url(_settings["tts_url"], "TTS_URL", "")
+        print(f"[Config] Loaded TTS URL from settings: {config.TTS_URL}")
+    if _settings.get("tts_voice"):
+        config.TTS_VOICE = str(_settings["tts_voice"])
     # Use `in _settings` (not `.get(...)` truthy check) so an explicitly-saved
     # empty string — meaning "inherit from chat model" in the UI — is honored
     # on startup. Otherwise the env default (e.g. PLANNING_MODEL=qwen3.5:27b
@@ -706,6 +790,25 @@ async def lifespan(app: FastAPI):
             _qsm = "balanced"
         config.QUICK_SEARCH_MODE = _qsm
         print(f"[Config] Loaded Quick Search mode: {config.QUICK_SEARCH_MODE}")
+    if "image_chat_checkpoint" in _settings:
+        config.IMAGE_CHAT_CHECKPOINT = str(_settings["image_chat_checkpoint"] or "").strip()[:200]
+        if config.IMAGE_CHAT_CHECKPOINT:
+            print(f"[Config] Loaded chat image checkpoint: {config.IMAGE_CHAT_CHECKPOINT}")
+    if "image_chat_workflow" in _settings:
+        config.IMAGE_CHAT_WORKFLOW = str(_settings["image_chat_workflow"] or "").strip()[:200]
+        if config.IMAGE_CHAT_WORKFLOW:
+            print(f"[Config] Loaded chat image workflow: {config.IMAGE_CHAT_WORKFLOW}")
+    if "image_chat_resolution" in _settings:
+        _res = str(_settings["image_chat_resolution"] or "").strip()
+        config.IMAGE_CHAT_RESOLUTION = _res if re.fullmatch(r"\d{3,4}x\d{3,4}", _res) else "1024x1024"
+    if "image_chat_vae" in _settings:
+        config.IMAGE_CHAT_VAE = str(_settings["image_chat_vae"] or "").strip()[:200]
+    if "image_chat_prompt_prefix" in _settings:
+        config.IMAGE_CHAT_PROMPT_PREFIX = str(_settings["image_chat_prompt_prefix"] or "").strip()[:500]
+    if "image_chat_negative" in _settings:
+        config.IMAGE_CHAT_NEGATIVE = str(_settings["image_chat_negative"] or "").strip()[:500]
+    if "image_chat_compose_model" in _settings:
+        config.IMAGE_CHAT_COMPOSE_MODEL = str(_settings["image_chat_compose_model"] or "").strip()[:200]
     # Run cleanup once on startup to clear any stale files
     _run_cleanup_sync()
     # Start background cleanup loop
@@ -724,6 +827,9 @@ async def lifespan(app: FastAPI):
         rag.CHUNK_OVERLAP = config.coerce_int(_rag_cfg["chunk_overlap"], rag.CHUNK_OVERLAP, minimum=0, maximum=2000)
     # Ensure RAG embedding model is available (non-blocking pull)
     _track_bg(rag.ensure_embed_model())
+    # Backfill the kb_chunks_fts keyword index from existing Chroma documents
+    # (no-op once populated; non-blocking)
+    _track_bg(rag.backfill_fts())
     yield
     for task in [_cleanup_task_ref, _health_task_ref]:
         if task:
@@ -763,6 +869,7 @@ _USER_SCOPED_PREFIXES = (
     "/api/research/reports",
     "/api/councils",
     "/api/analytics",
+    "/api/danger-zone",
     "/api/events",
 )
 
@@ -1164,6 +1271,57 @@ async def delete_user_ep(user_id: str, request: Request):
     return {"ok": True}
 
 
+async def _user_ids(exclude_user_id: str | None = None) -> list[str]:
+    conn = await db.get_db()
+    try:
+        if exclude_user_id:
+            rows = await conn.execute_fetchall("SELECT id FROM users WHERE id != ?", (exclude_user_id,))
+        else:
+            rows = await conn.execute_fetchall("SELECT id FROM users")
+        return [r["id"] for r in rows]
+    finally:
+        await conn.close()
+
+
+@app.delete("/api/users")
+async def delete_other_users_ep(request: Request):
+    current = await _validated_request_user(request)
+    other_user_ids = await _user_ids(exclude_user_id=current["id"])
+    deleted_files = await _delete_artifact_files_for_user_ids(other_user_ids)
+    result = await db.delete_users_except(current["id"])
+    try:
+        await db.vacuum_database()
+    except Exception as e:
+        print(f"[USERS] vacuum after delete-other-users failed: {e}")
+    return {"ok": True, **result, "deleted_files": deleted_files}
+
+
+@app.post("/api/danger-zone/fresh-install")
+async def fresh_install_reset_ep(request: Request):
+    await _validated_request_user(request)
+    user_ids = await _user_ids()
+    deleted_files = await _delete_artifact_files_for_user_ids(user_ids)
+    try:
+        model_result = await delete_all_models()
+    except HTTPException as e:
+        model_result = {"status": "failed", "error": str(e.detail), "deleted": 0, "models": [], "failed": []}
+    except Exception as e:
+        model_result = {"status": "failed", "error": str(e), "deleted": 0, "models": [], "failed": []}
+    user_result = await db.delete_all_users_and_data()
+    try:
+        await db.vacuum_database()
+    except Exception as e:
+        print(f"[DANGER] fresh-install vacuum failed: {e}")
+    return {
+        "ok": True,
+        "status": "reset",
+        "requires_user_setup": True,
+        "users_deleted": user_result.get("deleted", 0),
+        "artifact_files_deleted": deleted_files,
+        "models": model_result,
+    }
+
+
 # ============================================================
 # HEALTH & INFO
 # ============================================================
@@ -1178,6 +1336,9 @@ async def _check_service(name: str, url: str, timeout: float = 8) -> dict:
             status = "degraded" if ms > 3000 else "ok"
             return {"status": status, "response_ms": ms}
         return {"status": "error", "response_ms": ms, "error": f"HTTP {r.status_code}"}
+    except httpx.TimeoutException:
+        ms = int((time.time() - t0) * 1000)
+        return {"status": "error", "response_ms": ms, "error": f"timed out after {timeout}s"}
     except Exception as e:
         ms = int((time.time() - t0) * 1000)
         return {"status": "error", "response_ms": ms, "error": str(e)[:200]}
@@ -1235,12 +1396,19 @@ _HEALTH_ENDPOINTS = {
 
 async def _run_health_checks() -> dict:
     """Run all health checks and log to DB."""
-    checks = {}
+    checks = {"storage": _storage_health_check()}
     for name, url_fn in _HEALTH_ENDPOINTS.items():
         result = await _check_service(name, url_fn())
         checks[name] = result
     # SearXNG gets its own special check (rate-limit detection)
     checks["searxng"] = await _check_searxng()
+    # Optional services — only checked (and reported) when configured
+    if config.COMFYUI_URL:
+        checks["comfyui"] = await comfyui.check_health(http)
+    if config.STT_URL:
+        checks["stt"] = await _check_service("stt", f"{config.STT_URL}/v1/models")
+    if config.TTS_URL:
+        checks["tts"] = await _check_service("tts", f"{config.TTS_URL}/v1/models", timeout=12)
     # Log to DB (non-blocking)
     try:
         conn = await db.get_db()
@@ -1368,6 +1536,109 @@ async def list_models():
         "models": models,
         "model_details": model_details,
         **({"provider_errors": cloud_errors} if cloud_errors else {}),
+    }
+
+
+async def _local_ollama_model_names() -> list[str]:
+    try:
+        r = await http.get(f"{config.OLLAMA_URL}/api/tags")
+        r.raise_for_status()
+        data = r.json()
+        return [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+    except Exception as e:
+        raise HTTPException(502, f"Failed to reach Ollama: {e}")
+
+
+
+@app.get("/api/models/hyprfit")
+async def hyprfit_recommendations(refresh: bool = False, live: bool = True):
+    settings = load_settings()
+    installed_details: dict[str, Any] = {}
+    ollama_error = ""
+    try:
+        r = await http.get(f"{config.OLLAMA_URL}/api/tags")
+        r.raise_for_status()
+        raw = r.json().get("models", [])
+        installed_details = {
+            m.get("name", ""): {
+                "size": m.get("size", 0),
+                "details": m.get("details", {}),
+                "modified_at": m.get("modified_at", ""),
+            }
+            for m in raw
+            if m.get("name")
+        }
+    except Exception as e:
+        ollama_error = str(e)
+    response = await hyprfit.build_response(
+        settings.get("model_hardware_profile"),
+        installed_details,
+        refresh=refresh,
+        live=live,
+        http_client=http,
+        hf_search_func=hf_module.hf_search,
+    )
+    response["ollama_error"] = ollama_error
+    return response
+
+
+@app.post("/api/models/hyprfit/rescan")
+async def hyprfit_rescan_hardware():
+    settings = load_settings()
+    result = await hyprfit.resolve_hardware_rescan(
+        settings.get("model_hardware_profile"),
+        config.OLLAMA_URL,
+        http,
+        hyprfit.clean_ollama_scan_ssh_settings(settings, config.OLLAMA_URL, include_password=True),
+    )
+    if result.get("persisted"):
+        settings["model_hardware_profile"] = result["profile"]
+        save_settings(settings)
+    return result
+
+
+async def _delete_ollama_model(model_name: str) -> dict:
+    """Delete a local Ollama model. Tries alternate HF name formats if needed."""
+    names_to_try = [model_name]
+    if not model_name.startswith("hf.co/") and "/" in model_name:
+        names_to_try.append(f"hf.co/{model_name}")
+    if model_name.startswith("hf.co/"):
+        names_to_try.append(model_name[len("hf.co/"):])
+    last_err = None
+    for name in names_to_try:
+        try:
+            r = await http.request("DELETE", f"{config.OLLAMA_URL}/api/delete", json={"name": name})
+            if r.status_code in (200, 204):
+                return {"status": "deleted", "model": model_name}
+            err_text = r.text[:400]
+            if "not found" in err_text.lower() and name != names_to_try[-1]:
+                continue
+            last_err = err_text
+        except Exception as e:
+            last_err = str(e)
+    if last_err and "not found" in last_err.lower():
+        return {"status": "deleted", "model": model_name, "note": "already removed from Ollama"}
+    raise HTTPException(502, f"Failed to delete model: {last_err}")
+
+
+@app.delete("/api/models")
+async def delete_all_models():
+    names = await _local_ollama_model_names()
+    deleted: list[str] = []
+    failed: list[dict] = []
+    for name in names:
+        try:
+            await _delete_ollama_model(name)
+            deleted.append(name)
+        except HTTPException as e:
+            failed.append({"model": name, "error": str(e.detail)})
+        except Exception as e:
+            failed.append({"model": name, "error": str(e)})
+    return {
+        "status": "deleted" if not failed else "partial",
+        "deleted": len(deleted),
+        "models": deleted,
+        "failed": failed,
     }
 
 
@@ -1544,12 +1815,115 @@ async def update_artifact_ep(artifact_id: str, req: ArtifactUpdate):
     return artifact
 
 
-@app.delete("/api/artifacts/{artifact_id}")
-async def delete_artifact_ep(artifact_id: str):
+async def _delete_artifact_row_and_file(artifact: dict) -> dict:
+    """Delete an artifact row and (when safe) its on-disk file.
+
+    File removal only happens for sandbox-output files (never KB/upload
+    paths) and only when no other artifact row still references the path.
+    Returns {"deleted": bool, "deleted_file": bool}.
+    """
+    artifact_id = artifact.get("id") or ""
+    # Resolve the on-disk file BEFORE the row disappears
+    filepath, _ = _artifact_path_for_row(artifact)
     ok = await db.delete_artifact(artifact_id)
     if not ok:
+        return {"deleted": False, "deleted_file": False}
+    deleted_file = False
+    if filepath:
+        outputs_root = os.path.abspath(config.SANDBOX_OUTPUTS_DIR) + os.sep
+        in_outputs = os.path.abspath(filepath).startswith(outputs_root)
+        refs = await db.count_artifacts_with_storage_path(artifact.get("storage_path") or "", exclude_id=artifact_id)
+        if in_outputs and refs == 0:
+            try:
+                os.remove(filepath)
+                deleted_file = True
+            except OSError as e:
+                print(f"[ARTIFACT] file delete failed for {filepath}: {e}")
+    return {"deleted": True, "deleted_file": deleted_file}
+
+
+async def _delete_artifact_files_for_user_ids(user_ids: list[str]) -> int:
+    """Remove sandbox-output artifact files owned only by the given users."""
+    user_set = {u for u in user_ids if u}
+    if not user_set:
+        return 0
+    conn = await db.get_db()
+    try:
+        rows = [dict(r) for r in await conn.execute_fetchall("SELECT * FROM artifacts")]
+    finally:
+        await conn.close()
+    outputs_root = os.path.abspath(config.SANDBOX_OUTPUTS_DIR) + os.sep
+    keep_paths: set[str] = set()
+    target_paths: set[str] = set()
+    for artifact in rows:
+        filepath, _ = _artifact_path_for_row(artifact)
+        if not filepath:
+            continue
+        abs_path = os.path.abspath(filepath)
+        if not abs_path.startswith(outputs_root):
+            continue
+        if artifact.get("user_id") in user_set:
+            target_paths.add(abs_path)
+        else:
+            keep_paths.add(abs_path)
+    deleted = 0
+    for filepath in target_paths - keep_paths:
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+                deleted += 1
+        except OSError as e:
+            print(f"[ARTIFACT] bulk file delete failed for {filepath}: {e}")
+    return deleted
+
+
+@app.delete("/api/artifacts")
+async def delete_all_artifacts_ep():
+    targets: list[dict] = []
+    offset = 0
+    while True:
+        page = await db.list_artifacts(limit=200, offset=offset)
+        targets.extend(page)
+        if len(page) < 200:
+            break
+        offset += 200
+    deleted_artifacts = 0
+    deleted_files = 0
+    removed_attachments = 0
+    for artifact in targets:
+        result = await _delete_artifact_row_and_file(artifact)
+        if result["deleted"]:
+            deleted_artifacts += 1
+        if result["deleted_file"]:
+            deleted_files += 1
+        try:
+            cf_id = (artifact.get("metadata") or {}).get("conversation_file_id") or ""
+            if cf_id and await db.delete_conversation_file(cf_id):
+                removed_attachments += 1
+        except Exception:
+            pass
+    if deleted_artifacts:
+        try:
+            await db.vacuum_database()
+        except Exception as e:
+            print(f"[ARTIFACT] bulk vacuum failed: {e}")
+    return {
+        "status": "deleted",
+        "deleted": deleted_artifacts,
+        "deleted_files": deleted_files,
+        "removed_attachments": removed_attachments,
+    }
+
+
+@app.delete("/api/artifacts/{artifact_id}")
+async def delete_artifact_ep(artifact_id: str):
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
         raise HTTPException(404, "Artifact not found")
-    return {"status": "deleted", "deleted_file": False}
+    result = await _delete_artifact_row_and_file(artifact)
+    if not result["deleted"]:
+        raise HTTPException(404, "Artifact not found")
+    return {"status": "deleted", "deleted_file": result["deleted_file"]}
 
 
 @app.get("/api/artifacts/{artifact_id}/preview")
@@ -3347,10 +3721,11 @@ async def reindex_kb(kb_id: str):
     files = kb.get("files", [])
     if not files:
         return {"status": "no files to index"}
+    _raise_if_rag_storage_unwritable()
     try:
         results = await rag.reindex_kb(kb_id, files)
     except Exception as e:
-        raise HTTPException(500, f"Reindex failed for {kb.get('name', kb_id)}: {e}")
+        raise HTTPException(500, f"Reindex failed: {_format_reindex_error(kb.get('name', kb_id), e)}")
     return {"status": "reindexed", "results": results}
 
 
@@ -3365,14 +3740,622 @@ async def reindex_all_kbs():
         if not files:
             continue
         try:
+            _raise_if_rag_storage_unwritable()
             results = await rag.reindex_kb(kb["id"], files)
             all_results.append({"kb_id": kb["id"], "name": kb["name"], "results": results})
         except Exception as e:
             # One broken KB shouldn't abort the rest of the sweep.
-            errors.append({"kb_id": kb["id"], "name": kb["name"], "error": str(e)[:300]})
+            if isinstance(e, HTTPException):
+                err = str(e.detail)
+            else:
+                err = _format_reindex_error(kb["name"], e)
+            errors.append({"kb_id": kb["id"], "name": kb["name"], "error": err[:300]})
     if errors and not all_results:
-        raise HTTPException(500, f"Reindex failed: {errors[0]['name']}: {errors[0]['error']}")
+        raise HTTPException(500, f"Reindex failed: {errors[0]['error']}")
     return {"status": "reindexed", "kbs": all_results, "errors": errors}
+
+
+@app.post("/api/knowledge-bases/query")
+async def query_knowledge_bases(body: dict):
+    """Hybrid retrieval probe (vector + keyword, RRF-fused). Used by tests/UI."""
+    kb_ids = body.get("kb_ids") or []
+    query = (body.get("query") or "").strip()
+    if not kb_ids or not isinstance(kb_ids, list):
+        raise HTTPException(400, "kb_ids list is required")
+    if not query:
+        raise HTTPException(400, "query is required")
+    top_k = config.coerce_int(body.get("top_k"), 6, minimum=1, maximum=30)
+    # Restrict to KBs the current user owns
+    owned = {k["id"] for k in await db.get_kbs()}
+    kb_ids = [k for k in kb_ids if k in owned]
+    if not kb_ids:
+        raise HTTPException(404, "No accessible KBs in kb_ids")
+    chunks = await rag.hybrid_query(kb_ids, query, top_k=top_k)
+    return {"chunks": chunks, "count": len(chunks)}
+
+
+# ============================================================
+# IMAGE STUDIO — ComfyUI job proxy
+# ============================================================
+# In-process job registry (restart-lossy, same posture as cancel_registry).
+# On a cache miss after restart, GET falls back to ComfyUI history directly.
+_image_jobs: dict[str, dict] = {}
+_image_checkpoints_cache: dict = {"ts": 0.0, "checkpoints": []}
+
+
+@app.post("/api/images/generate")
+async def generate_image_job(body: dict = Body(...)):
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured. Set the URL in Settings → Connections.")
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(400, "prompt is required")
+    checkpoint = (body.get("checkpoint") or "").strip()
+    if checkpoint:
+        valid = await comfyui.list_checkpoints()
+        if valid and checkpoint not in valid:
+            raise HTTPException(400, f"Unknown checkpoint: {checkpoint}")
+    vae = (body.get("vae") or "").strip()
+    if vae:
+        valid_vaes = await comfyui.list_vaes()
+        if valid_vaes and vae not in valid_vaes:
+            raise HTTPException(400, f"Unknown VAE: {vae}")
+    count = config.coerce_int(body.get("count"), 1, minimum=1, maximum=4)
+    wf_name = (body.get("workflow") or "").strip()
+    template = None
+    if wf_name:
+        template = comfyui.load_workflow(wf_name)
+        if template is None:
+            raise HTTPException(404, f"Workflow not found: {wf_name}")
+    try:
+        workflow, seed = comfyui.build_workflow(
+            template or comfyui.load_template(),
+            prompt=prompt,
+            negative_prompt=(body.get("negative_prompt") or ""),
+            width=body.get("width") or 1024,
+            height=body.get("height") or 1024,
+            steps=body.get("steps") or 25,
+            cfg=body.get("cfg") or 7.0,
+            seed=body.get("seed"),
+            checkpoint=checkpoint,
+            batch_size=count,
+            sampler_name=(body.get("sampler") or "").strip(),
+            scheduler=(body.get("scheduler") or "").strip(),
+            v_prediction=bool(body.get("v_prediction")),
+            model_sampling=(body.get("model_sampling") or "").strip(),
+            vae=vae,
+        )
+        prompt_id = await comfyui.submit(workflow)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"ComfyUI submit failed: {str(e)[:300]}")
+    params = {
+        "prompt": prompt, "negative_prompt": (body.get("negative_prompt") or ""),
+        "width": body.get("width") or 1024, "height": body.get("height") or 1024,
+        "steps": body.get("steps") or 25, "cfg": body.get("cfg") or 7.0,
+        "seed": seed, "checkpoint": checkpoint, "count": count,
+        "sampler": (body.get("sampler") or "").strip(),
+        "scheduler": (body.get("scheduler") or "").strip(),
+        "v_prediction": bool(body.get("v_prediction")),
+        "model_sampling": (body.get("model_sampling") or "").strip(),
+        "vae": vae,
+        "workflow": wf_name,
+    }
+    _image_jobs[prompt_id] = {"status": "queued", "params": params, "created": time.time()}
+    return {"job_id": prompt_id, "seed": seed, "params": params}
+
+
+@app.get("/api/images/jobs/{job_id}")
+async def get_image_job(job_id: str):
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured")
+    job = _image_jobs.get(job_id) or {"status": "queued", "params": {}, "created": time.time()}
+    if job.get("status") == "done":
+        return {"status": "done", "images": job.get("images", []), "params": job.get("params", {})}
+    if job.get("status") == "error":
+        return {"status": "error", "error": job.get("error", ""), "params": job.get("params", {})}
+    try:
+        history = await comfyui.get_history(job_id)
+    except Exception as e:
+        raise HTTPException(502, f"ComfyUI unreachable: {str(e)[:200]}")
+    if not history:
+        qpos = await comfyui.queue_position(job_id)
+        status = "running" if qpos == 0 else "queued"
+        out = {"status": status, "params": job.get("params", {})}
+        if qpos and qpos > 0:
+            out["queue_position"] = qpos
+        _image_jobs[job_id] = {**job, "status": status}
+        return out
+    if history.get("status", {}).get("status_str") == "error":
+        job.update(status="error", error="ComfyUI workflow error (check checkpoint and VRAM)")
+        _image_jobs[job_id] = job
+        comfyui.finish_job(job_id)
+        return {"status": "error", "error": job["error"], "params": job.get("params", {})}
+    outputs = comfyui.outputs_from_history(history)
+    if not outputs:
+        return {"status": "running", "params": job.get("params", {})}
+    # First completed poll: persist files + artifacts, cache so repeats are idempotent
+    os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
+    images = []
+    params = job.get("params", {})
+    for i, img in enumerate(outputs):
+        filename = f"comfy_{job_id[:8]}_{i}.png"
+        filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, filename)
+        try:
+            if not os.path.exists(filepath):
+                data = await comfyui.fetch_image(img)
+                with open(filepath, "wb") as f:
+                    f.write(data)
+        except Exception as e:
+            print(f"[IMAGE STUDIO] fetch failed: {e}")
+            continue
+        url = f"/api/downloads/{filename}"
+        artifact_id = None
+        try:
+            file_meta = await asyncio.to_thread(_artifact_file_metadata, filepath)
+            artifact = await db.add_artifact(
+                filename=filename,
+                url=url,
+                kind="image",
+                mime_type="image/png",
+                storage_path=filepath,
+                size_bytes=file_meta["size_bytes"],
+                sha256=file_meta["sha256"],
+                exists_status="present",
+                status="draft",
+                metadata={"source_tool": "image_studio", **params},
+            )
+            artifact_id = (artifact or {}).get("id")
+        except Exception as e:
+            print(f"[IMAGE STUDIO] artifact create failed: {e}")
+        images.append({"filename": filename, "url": url, "artifact_id": artifact_id})
+    job.update(status="done", images=images)
+    _image_jobs[job_id] = job
+    # First completed poll only (cached afterwards): release VRAM back to Ollama
+    _track_bg(comfyui.free_memory())
+    # HyprChat now holds the only needed copy — erase ComfyUI's traces of this
+    # job (history entry + hyprchat-prefixed file copies, when the cleanup
+    # node is installed).
+    _track_bg(comfyui.forget_job(job_id))
+    return {"status": "done", "images": images, "params": params}
+
+
+@app.post("/api/images/jobs/{job_id}/cancel")
+async def cancel_image_job(job_id: str):
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured")
+    await comfyui.cancel(job_id)
+    comfyui.finish_job(job_id)
+    if job_id in _image_jobs:
+        _image_jobs[job_id]["status"] = "error"
+        _image_jobs[job_id]["error"] = "cancelled"
+    return {"status": "cancelled"}
+
+
+@app.post("/api/images/free-memory")
+async def free_image_memory():
+    """Unload cached ComfyUI models from RAM/VRAM on demand."""
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured")
+    try:
+        result = await comfyui.hyprchat_free()
+    except Exception as e:
+        raise HTTPException(502, f"ComfyUI model unload failed: {str(e)[:200]}")
+    if result.get("status") == "busy" or result.get("ok") is False:
+        detail = result.get("error") or "ComfyUI queue is active"
+        raise HTTPException(409, detail)
+    return result
+
+
+@app.post("/api/images/restart-comfyui")
+async def restart_comfyui_image_service():
+    """Restart ComfyUI to release system RAM held by the Python process."""
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured")
+    try:
+        result = await comfyui.hyprchat_restart()
+    except Exception as e:
+        raise HTTPException(502, f"ComfyUI restart failed: {str(e)[:200]}")
+    if result.get("status") == "busy" or result.get("ok") is False:
+        status = 409 if result.get("status") == "busy" else 502
+        detail = result.get("error") or "ComfyUI restart was not accepted"
+        raise HTTPException(status, detail)
+    return result
+
+
+@app.get("/api/images/memory-status")
+async def get_image_memory_status():
+    """Optional status from the HyprChat ComfyUI control node."""
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured")
+    status = await comfyui.hyprchat_memory()
+    if status is None:
+        raise HTTPException(404, "HyprChat ComfyUI control node is not installed")
+    return status
+
+
+@app.get("/api/images/workflows")
+async def list_image_workflows():
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured")
+    out = []
+    for name in comfyui.list_workflows():
+        wf = comfyui.load_workflow(name)
+        if wf:
+            out.append({"name": name, **comfyui.describe_workflow(wf)})
+    return {"workflows": out}
+
+
+@app.post("/api/images/workflows")
+async def upload_image_workflow(body: dict = Body(...)):
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured")
+    name = (body.get("name") or "").strip()
+    wf = body.get("workflow")
+    if not name:
+        raise HTTPException(400, "name is required")
+    # PNG path: a ComfyUI-generated image carries its API workflow in metadata
+    if body.get("png_base64"):
+        try:
+            png_bytes = base64.b64decode(body["png_base64"], validate=True)
+        except Exception:
+            raise HTTPException(400, "Invalid PNG upload")
+        if len(png_bytes) > 50 * 1024 * 1024:
+            raise HTTPException(413, "PNG too large (50MB max)")
+        wf = comfyui.workflow_from_png(png_bytes)
+        if not wf:
+            raise HTTPException(400, "No workflow metadata in this image. The host may have "
+                                     "stripped it — download the original file, or get the .json.")
+    if not isinstance(wf, dict) or not wf:
+        raise HTTPException(400, "workflow must be a JSON object")
+    # UI-format saves have a top-level "nodes" array; only API exports run via the API.
+    if isinstance(wf.get("nodes"), list):
+        raise HTTPException(400, "This is a UI-format workflow. In ComfyUI enable Dev mode "
+                                 "(Settings) and use 'Export (API)' — that file works here.")
+    try:
+        saved = comfyui.save_workflow(name, wf)
+    except ValueError as e:
+        raise HTTPException(400, f"Workflow not usable for text-to-image: {e}")
+    return {"status": "saved", "name": saved, **comfyui.describe_workflow(wf)}
+
+
+@app.delete("/api/images/workflows/{name}")
+async def delete_image_workflow(name: str):
+    if not comfyui.delete_workflow(name):
+        raise HTTPException(404, "Workflow not found")
+    return {"status": "deleted"}
+
+
+@app.get("/api/images/checkpoints")
+async def list_image_checkpoints():
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured. Set the URL in Settings → Connections.")
+    if time.time() - _image_checkpoints_cache["ts"] > 60:
+        _image_checkpoints_cache["checkpoints"] = await comfyui.list_checkpoints()
+        _image_checkpoints_cache["vaes"] = await comfyui.list_vaes()
+        _image_checkpoints_cache["ts"] = time.time()
+    cks = _image_checkpoints_cache["checkpoints"]
+    return {
+        "checkpoints": cks,
+        "default": cks[0] if cks else "",
+        "vaes": _image_checkpoints_cache.get("vaes", []),
+        # Resolved per-model generation settings (built-in family defaults
+        # merged with user-saved overrides) so the UI can auto-configure.
+        "settings": {c: comfyui.settings_for_checkpoint(c) for c in cks},
+    }
+
+
+@app.put("/api/images/model-settings/{checkpoint}")
+async def save_model_settings_ep(checkpoint: str, body: dict = Body(...)):
+    if not config.COMFYUI_URL:
+        raise HTTPException(503, "ComfyUI is not configured")
+    clean = {}
+    ms = (body.get("model_sampling") or "").strip()
+    if ms in ("", "vpred", "flow"):
+        clean["model_sampling"] = ms
+    if (body.get("sampler") or "") in comfyui.ALLOWED_SAMPLERS:
+        clean["sampler"] = body["sampler"]
+    if (body.get("scheduler") or "") in comfyui.ALLOWED_SCHEDULERS:
+        clean["scheduler"] = body["scheduler"]
+    try:
+        if body.get("cfg") is not None:
+            clean["cfg"] = max(1.0, min(20.0, float(body["cfg"])))
+        if body.get("steps") is not None:
+            clean["steps"] = config.coerce_int(body["steps"], 25, minimum=1, maximum=60)
+    except (TypeError, ValueError):
+        pass
+    # Per-model chat prompt prefixes. Key-present-with-"" is an intentional
+    # clear (overrides any builtin family prefix like pony score tags).
+    for _pk in ("prompt_prefix", "negative_prefix"):
+        if _pk in body:
+            clean[_pk] = str(body[_pk] or "").strip()[:500]
+    settings = comfyui.load_model_settings()
+    # Merge, don't replace: Image Studio's Save defaults sends only sampling
+    # keys and the Settings prompt fields send only prefix keys — each must
+    # not wipe the other's saved values.
+    settings[checkpoint] = {**(settings.get(checkpoint) or {}), **clean}
+    comfyui.save_model_settings(settings)
+    return {"status": "saved", "checkpoint": checkpoint, "settings": comfyui.settings_for_checkpoint(checkpoint)}
+
+
+@app.delete("/api/images/model-settings/{checkpoint}")
+async def clear_model_settings_ep(checkpoint: str):
+    settings = comfyui.load_model_settings()
+    if checkpoint not in settings:
+        raise HTTPException(404, "No saved defaults for this model")
+    settings.pop(checkpoint)
+    comfyui.save_model_settings(settings)
+    return {"status": "cleared", "settings": comfyui.settings_for_checkpoint(checkpoint)}
+
+
+# NOTE: uses <IDEA> token replacement, not str.format — the JSON example's
+# braces would otherwise need escaping and a stray { breaks .format at runtime.
+_ENHANCE_PROMPT_TEMPLATE = """You are an expert Stable Diffusion XL prompt writer. Expand the user's idea into a high-quality SDXL generation prompt that stays tightly focused on the user's request.
+
+Rules:
+- Keep the user's subject and intent exactly — never replace or reinterpret the subject, and do not add people unless the user asked for them.
+- Add concrete details that clarify the requested subject, pose, orientation, action, setting, materials, expression, lighting, color palette, and composition/camera. Prioritize details directly implied by the user's idea over generic style filler.
+- If the user requests a specific pose, viewpoint, location, or activity, preserve it explicitly in the prompt. Do not turn a specific request into a generic portrait.
+- Do not add unrelated props, phones, selfie framing, mirror framing, extra people, or extra actions unless the user asked for them.
+- Write the positive prompt as comma-separated descriptive tags/phrases (roughly 40-90 words): request-specific subject details first, then scene/composition/lighting, then a few quality tags.
+- Write a negative prompt of 5-15 short comma-separated tags: standard SDXL negatives plus anything that contradicts the user's idea. Never more than 15 tags, never prose.
+- Both fields must be non-empty. No prose, no explanations. No Midjourney-style parameters (--ar, --v, --style) — SDXL does not understand them.
+
+Example:
+Idea: a fox in snow
+{"prompt": "a red fox standing in deep fresh snow, winter forest clearing, fluffy orange fur with frost details, soft overcast daylight, gentle falling snowflakes, shallow depth of field, photorealistic wildlife photography, muted cool palette with warm orange accent, masterpiece, best quality, highly detailed, sharp focus", "negative_prompt": "lowres, bad anatomy, blurry, watermark, text, jpeg artifacts, worst quality, deformed, oversaturated"}
+
+Now expand this idea. Respond with ONLY the JSON object, nothing else.
+Idea: <IDEA>"""
+
+
+@app.post("/api/images/enhance-prompt")
+async def enhance_image_prompt(body: dict = Body(...)):
+    """Expand a short user prompt into a detailed SDXL-style prompt via the
+    local LLM. Pure LLM call — works even when ComfyUI is unconfigured."""
+    idea = (body.get("prompt") or "").strip()[:600]
+    if not idea:
+        raise HTTPException(400, "prompt is required")
+    model = (model_providers.reject_cloud((body.get("model") or "").strip())
+             or model_providers.reject_cloud(config.IMAGE_CHAT_COMPOSE_MODEL or "")
+             or model_providers.reject_cloud(config.WORKSPACE_MODEL or "")
+             or config.DEFAULT_MODEL)
+    raw = await model_providers.complete_chat(
+        http, model, _ENHANCE_PROMPT_TEMPLATE.replace("<IDEA>", idea),
+        temperature=0.7, num_ctx=2048, num_predict=400,
+        format_json=True, timeout=45, ollama_url=config.OLLAMA_URL,
+    )
+    raw = (raw or "").strip()
+    if not raw:
+        raise HTTPException(502, "Prompt enhancer unavailable — check that Ollama is reachable")
+    enhanced, negative = normalize_enhancer_response(raw)
+    # Small models sometimes echo the schema with empty/placeholder values or
+    # ignore JSON instructions entirely. Never fall back to raw text here,
+    # because assistant reasoning becomes literal SDXL prompt tokens.
+    if enhanced in ("", "...", "…"):
+        raise HTTPException(502, "Prompt enhancer returned no usable prompt — try again")
+    return {"prompt": enhanced[:1500], "negative_prompt": negative[:1500], "model": model}
+
+
+@app.post("/api/images/purge")
+async def purge_image_studio():
+    """Delete ALL traces of the current user's generated images — Image Studio
+    AND chat-tool generations: artifact rows, on-disk PNGs, chat file
+    references, ComfyUI's job history and file copies (via the optional
+    cleanup node), and the server's journald logs (which contain prompts)."""
+    deleted_artifacts = 0
+    deleted_files = 0
+    purged_filenames: list[str] = []
+    # Two-pass: gather every target first (offset pagination — the LIKE-based
+    # `source` filter can fill a page with non-exact matches, so breaking on
+    # an empty-target page would silently skip rows past it), then delete.
+    targets: list[dict] = []
+    for _src in ("image_studio", "generate_image"):
+        offset = 0
+        while True:
+            page = await db.list_artifacts(kind="image", source=_src, limit=200, offset=offset)
+            # The `source` filter is a metadata LIKE — re-check the exact tag.
+            targets.extend(a for a in page if (a.get("metadata") or {}).get("source_tool") == _src)
+            if len(page) < 200:
+                break
+            offset += 200
+    for a in targets:
+        result = await _delete_artifact_row_and_file(a)
+        if result["deleted"]:
+            deleted_artifacts += 1
+            if a.get("filename"):
+                purged_filenames.append(a["filename"])
+        if result["deleted_file"]:
+            deleted_files += 1
+        # Chat-tool images also leave a conversation_files attachment row —
+        # keyed by its own cf- id (in metadata), NOT the artifact id
+        try:
+            _cf_id = (a.get("metadata") or {}).get("conversation_file_id") or ""
+            if _cf_id:
+                await db.delete_conversation_file(_cf_id)
+        except Exception:
+            pass
+    # Rewrite chat messages that embedded the deleted images (inline markdown,
+    # download links, seed footers, saved generate_image tool events).
+    scrubbed_messages = 0
+    try:
+        scrubbed_messages = await db.scrub_image_traces(purged_filenames)
+    except Exception as e:
+        print(f"[IMAGE PURGE] message scrub failed: {e}")
+    # Compact the DB so deleted rows leave no residual bytes in the file/WAL.
+    if deleted_artifacts or scrubbed_messages:
+        try:
+            await db.vacuum_database()
+        except Exception as e:
+            print(f"[IMAGE PURGE] vacuum failed: {e}")
+    # Drop finished jobs from the in-process registry so a stale poll can't
+    # resurrect deleted image URLs. In-flight jobs stay.
+    active = False
+    for jid in list(_image_jobs.keys()):
+        status = _image_jobs[jid].get("status")
+        if status in ("done", "error"):
+            _image_jobs.pop(jid, None)
+        else:
+            active = True
+    # Chat-tool generations aren't in _image_jobs — comfyui._ACTIVE_JOBS
+    # tracks every in-flight submit regardless of caller.
+    if comfyui._ACTIVE_JOBS:
+        active = True
+    history_cleared = False
+    comfyui_files = None
+    cleanup_skipped = ""
+    if not config.COMFYUI_URL:
+        cleanup_skipped = "ComfyUI not configured"
+    elif active:
+        cleanup_skipped = "a generation is in flight"
+    else:
+        # Skip while a job is queued/running — clearing history mid-job would
+        # lose the result before HyprChat's done-poll picks it up.
+        history_cleared = bool(await comfyui.clear_history())
+        comfyui_files = await comfyui.cleanup_outputs()
+    # Scrub journald — historical backend log lines include generation
+    # prompts. The service is unprivileged (User=hyprchat, NoNewPrivileges),
+    # so the actual rotate+vacuum is done by a root path-unit helper
+    # (scripts/install-journal-scrub.sh) watching for this trigger file.
+    journal_cleared = False
+    try:
+        _trigger = os.path.join(os.path.dirname(config.SETTINGS_PATH), ".journal-scrub-request")
+        with open(_trigger, "w") as f:
+            f.write(datetime.utcnow().isoformat())
+        for _ in range(20):  # helper consumes the trigger when done (~3s)
+            await asyncio.sleep(0.5)
+            if not os.path.exists(_trigger):
+                journal_cleared = True
+                break
+        if not journal_cleared:
+            # Helper not installed — don't leave a stale trigger behind
+            try:
+                os.remove(_trigger)
+            except OSError:
+                pass
+    except Exception as e:
+        print(f"[IMAGE PURGE] journal scrub request failed: {e}")
+    notes = []
+    if cleanup_skipped:
+        notes.append(f"ComfyUI cleanup skipped ({cleanup_skipped}) — run Delete all again to clear its history/copies.")
+    elif comfyui_files is None:
+        notes.append("ComfyUI cleanup node not installed — its file copies remain "
+                     "until the daily cron (install scripts/comfyui_hyprchat_cleanup.py).")
+    if not journal_cleared:
+        notes.append("Journal scrub helper not installed — old server log lines remain "
+                     "(run scripts/install-journal-scrub.sh on the server once).")
+    note = " ".join(notes) or "All traces removed."
+    return {
+        "status": "purged",
+        "deleted_artifacts": deleted_artifacts,
+        "deleted_files": deleted_files,
+        "scrubbed_messages": scrubbed_messages,
+        "comfyui_history_cleared": history_cleared,
+        "comfyui_files_deleted": (comfyui_files or {}).get("deleted") if comfyui_files is not None else None,
+        "journal_cleared": journal_cleared,
+        "note": note,
+    }
+
+
+_TTS_REQUEST_TTL = 300
+_tts_requests: dict[str, dict] = {}
+
+
+def _cleanup_tts_requests():
+    now = time.time()
+    expired = [rid for rid, req in _tts_requests.items() if req.get("expires_at", 0) <= now]
+    for rid in expired:
+        _tts_requests.pop(rid, None)
+    if len(_tts_requests) > 500:
+        for rid, _ in sorted(_tts_requests.items(), key=lambda kv: kv[1].get("expires_at", 0))[:100]:
+            _tts_requests.pop(rid, None)
+
+
+async def _tts_streaming_response(text: str, voice_name: str, request_id: str = ""):
+    try:
+        stream = await voice.open_speech_stream(text, voice_name)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, f"TTS service error: HTTP {e.response.status_code}")
+    except httpx.TimeoutException:
+        raise HTTPException(504, "TTS service timed out before audio could start")
+    except Exception as e:
+        raise HTTPException(502, f"TTS service unreachable: {str(e)[:200]}")
+    headers = {"Cache-Control": "no-store"}
+    if request_id:
+        headers["X-Hyprchat-TTS-Request"] = request_id
+    return StreamingResponse(stream.aiter_bytes(), media_type="audio/mpeg", headers=headers)
+
+
+# ============================================================
+# AUDIO — voice STT/TTS proxy
+# ============================================================
+@app.post("/api/audio/transcribe")
+async def transcribe_audio(file: UploadFile = File(...)):
+    if not config.STT_URL:
+        raise HTTPException(503, "Speech-to-text is not configured. Set the STT URL in Settings → Connections.")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Empty audio upload")
+    if len(data) > 25 * 1024 * 1024:
+        raise HTTPException(413, "Audio upload too large (25MB max)")
+    try:
+        return await voice.transcribe(data, file.filename or "recording.webm", file.content_type or "")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, f"STT service error: HTTP {e.response.status_code}")
+    except Exception as e:
+        raise HTTPException(502, f"STT service unreachable: {str(e)[:200]}")
+
+
+@app.post("/api/audio/speech")
+async def synthesize_speech(body: dict = Body(...)):
+    if not config.TTS_URL:
+        raise HTTPException(503, "Text-to-speech is not configured. Set the TTS URL in Settings → Connections.")
+    text = voice.strip_for_tts(body.get("text") or "")
+    if not text:
+        raise HTTPException(400, "Nothing speakable in the provided text")
+    voice_name = (body.get("voice") or "").strip()
+    return await _tts_streaming_response(text, voice_name)
+
+
+@app.post("/api/audio/speech/request")
+async def create_speech_request(body: dict = Body(...)):
+    if not config.TTS_URL:
+        raise HTTPException(503, "Text-to-speech is not configured. Set the TTS URL in Settings → Connections.")
+    text = voice.strip_for_tts(body.get("text") or "")
+    if not text:
+        raise HTTPException(400, "Nothing speakable in the provided text")
+    _cleanup_tts_requests()
+    request_id = uuid.uuid4().hex
+    _tts_requests[request_id] = {
+        "text": text,
+        "voice": (body.get("voice") or "").strip(),
+        "expires_at": time.time() + _TTS_REQUEST_TTL,
+    }
+    return {
+        "id": request_id,
+        "url": f"/api/audio/speech/{request_id}",
+        "expires_in": _TTS_REQUEST_TTL,
+        "chars": len(text),
+    }
+
+
+@app.get("/api/audio/speech/{request_id}")
+async def stream_speech_request(request_id: str):
+    if not config.TTS_URL:
+        raise HTTPException(503, "Text-to-speech is not configured. Set the TTS URL in Settings → Connections.")
+    _cleanup_tts_requests()
+    req = _tts_requests.get(request_id)
+    if not req:
+        raise HTTPException(404, "Speech request expired or was not found")
+    return await _tts_streaming_response(req["text"], req.get("voice", ""), request_id=request_id)
+
+
+@app.get("/api/audio/voices")
+async def list_tts_voices():
+    if not config.TTS_URL:
+        return {"voices": [], "default": config.TTS_VOICE}
+    return {"voices": await voice.list_voices(), "default": config.TTS_VOICE}
 
 
 # ============================================================
@@ -3681,30 +4664,7 @@ async def pull_model(request: Request):
 
 @app.delete("/api/models/{model_name:path}")
 async def delete_model(model_name: str):
-    """Delete a model from Ollama. Tries alternate name formats if not found."""
-    # Build list of name variants to try
-    names_to_try = [model_name]
-    if not model_name.startswith("hf.co/") and "/" in model_name:
-        names_to_try.append(f"hf.co/{model_name}")
-    if model_name.startswith("hf.co/"):
-        names_to_try.append(model_name[len("hf.co/"):])
-    last_err = None
-    for name in names_to_try:
-        try:
-            r = await http.request("DELETE", f"{config.OLLAMA_URL}/api/delete",
-                                   json={"name": name})
-            if r.status_code in (200, 204):
-                return {"status": "deleted", "model": model_name}
-            err_text = r.text[:400]
-            if "not found" in err_text.lower() and name != names_to_try[-1]:
-                continue  # Try next variant
-            last_err = err_text
-        except Exception as e:
-            last_err = str(e)
-    # If all variants returned "not found", the model is already gone — treat as success
-    if last_err and "not found" in last_err.lower():
-        return {"status": "deleted", "model": model_name, "note": "already removed from Ollama"}
-    raise HTTPException(502, f"Failed to delete model: {last_err}")
+    return await _delete_ollama_model(model_name)
 
 
 @app.post("/api/models/{model_name:path}/create-tool-model")
@@ -4042,6 +5002,12 @@ async def update_global_memory_ep(memory_id: str, body: dict = Body(...)):
     if not mem:
         raise HTTPException(404, "Memory not found")
     return mem
+
+
+@app.delete("/api/memory/memories")
+async def clear_all_memories_ep():
+    deleted = await db.clear_user_memories()
+    return {"ok": True, "deleted": deleted}
 
 
 @app.delete("/api/memory/memories/{memory_id}")
@@ -5037,25 +6003,29 @@ async def img_proxy(u: str):
     parsed = urllib.parse.urlparse(u)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="bad url")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; image-proxy)",
+        "Accept": "image/*",
+        "Referer": f"{parsed.scheme}://{parsed.netloc}/",
+    }
     try:
-        r = await web_get(
-            http,
-            u, timeout=8, follow_redirects=True,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; image-proxy)",
-                "Accept": "image/*",
-                "Referer": f"{parsed.scheme}://{parsed.netloc}/",
-            },
+        status, resp_headers, _final_url, content = await fetch_bytes_safely(
+            http, u, timeout=8, headers=headers, max_bytes=5 * 1024 * 1024
         )
+    except ValueError as e:
+        detail = str(e)
+        if "too large" in detail.lower():
+            raise HTTPException(status_code=413, detail="too large")
+        raise HTTPException(status_code=400, detail=detail)
     except Exception:
         raise HTTPException(status_code=502, detail="fetch failed")
-    ct = r.headers.get("content-type", "")
-    if r.status_code != 200 or not ct.lower().startswith("image/"):
+    ct = resp_headers.get("content-type", "")
+    if status != 200 or not ct.lower().startswith("image/"):
         raise HTTPException(status_code=404, detail="not found")
-    if len(r.content) > 5 * 1024 * 1024:
+    if len(content) > 5 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="too large")
     return Response(
-        content=r.content, media_type=ct,
+        content=content, media_type=ct,
         headers={"Cache-Control": "public, max-age=86400"},
     )
 
@@ -5134,11 +6104,15 @@ async def get_app_settings():
     except Exception:
         file_count = 0
     return {
-        **settings,
+        **_public_settings_payload(settings),
         "current_ollama_url": config.OLLAMA_URL,
         "current_codebox_url": config.CODEBOX_URL,
         "current_searxng_url": config.SEARXNG_URL,
         "current_n8n_url": config.N8N_URL,
+        "current_comfyui_url": config.COMFYUI_URL,
+        "current_stt_url": config.STT_URL,
+        "current_tts_url": config.TTS_URL,
+        "current_tts_voice": config.TTS_VOICE,
         "current_planning_model": config.PLANNING_MODEL,
         "current_coder_model": config.CODER_MODEL,
         "current_workspace_model": config.WORKSPACE_MODEL,
@@ -5161,6 +6135,14 @@ async def get_app_settings():
         "default_num_ctx": config.DEFAULT_NUM_CTX,
         "research_num_ctx": config.RESEARCH_NUM_CTX,
         "quick_search_mode": config.QUICK_SEARCH_MODE,
+        "image_chat_checkpoint": config.IMAGE_CHAT_CHECKPOINT,
+        "image_chat_workflow": config.IMAGE_CHAT_WORKFLOW,
+        "image_chat_resolution": config.IMAGE_CHAT_RESOLUTION,
+        "image_chat_vae": config.IMAGE_CHAT_VAE,
+        "image_chat_prompt_prefix": config.IMAGE_CHAT_PROMPT_PREFIX,
+        "image_chat_negative": config.IMAGE_CHAT_NEGATIVE,
+        "image_chat_compose_model": config.IMAGE_CHAT_COMPOSE_MODEL,
+        "model_hardware_profile": hyprfit.clean_hardware_profile(settings.get("model_hardware_profile")),
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
         "sandbox_size_bytes": size,
@@ -5173,16 +6155,31 @@ async def get_app_settings():
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
     allowed = {"file_cleanup_days", "ollama_url", "codebox_url", "searxng_url", "n8n_url",
+               "comfyui_url", "stt_url", "tts_url", "tts_voice",
                "rag", "planning_model", "coder_model",
                "workspace_model",
                "architect_model", "reviewer_model", "acceptance_model", "builder_model", "fixer_model", "qa_model",
                "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
                "openhands_reasoning_effort",
                "aider_enabled", "aider_model", "aider_num_ctx", "aider_auto_test", "aider_worker_url",
-               "default_num_ctx", "research_num_ctx", "quick_search_mode"}
+               "default_num_ctx", "research_num_ctx", "quick_search_mode",
+               "image_chat_checkpoint", "image_chat_workflow", "image_chat_resolution", "image_chat_vae",
+               "image_chat_prompt_prefix", "image_chat_negative", "image_chat_compose_model",
+               "ollama_scan_ssh_host", "ollama_scan_ssh_port", "ollama_scan_ssh_user",
+               "ollama_scan_ssh_auth_mode", "ollama_scan_ssh_key_path", "ollama_scan_ssh_password",
+               "model_hardware_profile"}
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
+    if any(k.startswith("ollama_scan_ssh_") for k in body):
+        ssh_cfg = hyprfit.clean_ollama_scan_ssh_settings(settings, config.OLLAMA_URL, include_password=True)
+        settings["ollama_scan_ssh_host"] = ssh_cfg["ollama_scan_ssh_host"]
+        settings["ollama_scan_ssh_port"] = ssh_cfg["ollama_scan_ssh_port"]
+        settings["ollama_scan_ssh_user"] = ssh_cfg["ollama_scan_ssh_user"]
+        settings["ollama_scan_ssh_auth_mode"] = ssh_cfg["ollama_scan_ssh_auth_mode"]
+        settings["ollama_scan_ssh_key_path"] = ssh_cfg["ollama_scan_ssh_key_path"]
+        if "ollama_scan_ssh_password" in body:
+            settings["ollama_scan_ssh_password"] = ssh_cfg.get("ollama_scan_ssh_password", "")
     # Sanitize + apply RAG settings. The clamped values are what get PERSISTED
     # (settings["rag"]), not the raw body — a junk PATCH (e.g. chunk_size -5)
     # used to be saved verbatim and re-poison the chunker on every restart.
@@ -5237,6 +6234,32 @@ async def update_app_settings(body: dict = Body(...)):
     elif "n8n_url" in body and not body["n8n_url"]:
         settings["n8n_url"] = ""
         config.N8N_URL = os.getenv("N8N_URL", "http://127.0.0.1:5678")
+    if "comfyui_url" in body and body["comfyui_url"]:
+        config.COMFYUI_URL = _coerce_service_url(body["comfyui_url"], "COMFYUI_URL", "")
+        settings["comfyui_url"] = config.COMFYUI_URL
+        print(f"[Config] Updated ComfyUI URL to: {config.COMFYUI_URL}")
+    elif "comfyui_url" in body and not body["comfyui_url"]:
+        settings["comfyui_url"] = ""
+        config.COMFYUI_URL = os.getenv("COMFYUI_URL", "")
+    if "stt_url" in body and body["stt_url"]:
+        config.STT_URL = _coerce_service_url(body["stt_url"], "STT_URL", "")
+        settings["stt_url"] = config.STT_URL
+        print(f"[Config] Updated STT URL to: {config.STT_URL}")
+    elif "stt_url" in body and not body["stt_url"]:
+        settings["stt_url"] = ""
+        config.STT_URL = os.getenv("STT_URL", "")
+    if "tts_url" in body and body["tts_url"]:
+        config.TTS_URL = _coerce_service_url(body["tts_url"], "TTS_URL", "")
+        settings["tts_url"] = config.TTS_URL
+        voice.clear_voice_cache()
+        print(f"[Config] Updated TTS URL to: {config.TTS_URL}")
+    elif "tts_url" in body and not body["tts_url"]:
+        settings["tts_url"] = ""
+        config.TTS_URL = os.getenv("TTS_URL", "")
+        voice.clear_voice_cache()
+    if "tts_voice" in body:
+        config.TTS_VOICE = str(body["tts_voice"] or os.getenv("TTS_VOICE", "af_heart"))
+        settings["tts_voice"] = config.TTS_VOICE
     if "planning_model" in body:
         config.PLANNING_MODEL = body["planning_model"] or ""
         print(f"[Config] Updated Planning Model to: {config.PLANNING_MODEL or '(use chat model)'}")
@@ -5320,13 +6343,55 @@ async def update_app_settings(body: dict = Body(...)):
         config.QUICK_SEARCH_MODE = _qsm
         settings["quick_search_mode"] = _qsm
         print(f"[Config] Quick Search mode: {config.QUICK_SEARCH_MODE}")
+    if "model_hardware_profile" in body:
+        settings["model_hardware_profile"] = hyprfit.clean_hardware_profile(body.get("model_hardware_profile"))
+    # Chat image generation defaults. Checkpoint/VAE values come from the live
+    # ComfyUI dropdowns in the UI; stored as-is (a stale name surfaces as a
+    # tool_error at generation time, never a crash here).
+    if "image_chat_checkpoint" in body:
+        config.IMAGE_CHAT_CHECKPOINT = str(body["image_chat_checkpoint"] or "").strip()[:200]
+        settings["image_chat_checkpoint"] = config.IMAGE_CHAT_CHECKPOINT
+        print(f"[Config] Chat image checkpoint: {config.IMAGE_CHAT_CHECKPOINT or '(built-in template)'}")
+    if "image_chat_workflow" in body:
+        _wf = str(body["image_chat_workflow"] or "").strip()[:200]
+        # Only accept a workflow that actually exists; blank an unknown/deleted
+        # name so chat image gen can't be stranded pointing at a missing graph.
+        if _wf and _wf not in comfyui.list_workflows():
+            print(f"[Config] Ignoring unknown chat image workflow: {_wf}")
+            _wf = ""
+        config.IMAGE_CHAT_WORKFLOW = _wf
+        settings["image_chat_workflow"] = _wf
+        print(f"[Config] Chat image workflow: {_wf or '(built-in template)'}")
+    if "image_chat_resolution" in body:
+        _res = str(body["image_chat_resolution"] or "").strip()
+        if not re.fullmatch(r"\d{3,4}x\d{3,4}", _res):
+            _res = "1024x1024"
+        config.IMAGE_CHAT_RESOLUTION = _res
+        settings["image_chat_resolution"] = _res
+    if "image_chat_vae" in body:
+        config.IMAGE_CHAT_VAE = str(body["image_chat_vae"] or "").strip()[:200]
+        settings["image_chat_vae"] = config.IMAGE_CHAT_VAE
+    if "image_chat_prompt_prefix" in body:
+        config.IMAGE_CHAT_PROMPT_PREFIX = str(body["image_chat_prompt_prefix"] or "").strip()[:500]
+        settings["image_chat_prompt_prefix"] = config.IMAGE_CHAT_PROMPT_PREFIX
+    if "image_chat_negative" in body:
+        config.IMAGE_CHAT_NEGATIVE = str(body["image_chat_negative"] or "").strip()[:500]
+        settings["image_chat_negative"] = config.IMAGE_CHAT_NEGATIVE
+    if "image_chat_compose_model" in body:
+        config.IMAGE_CHAT_COMPOSE_MODEL = str(body["image_chat_compose_model"] or "").strip()[:200]
+        settings["image_chat_compose_model"] = config.IMAGE_CHAT_COMPOSE_MODEL
+        print(f"[Config] Photo prompt model: {config.IMAGE_CHAT_COMPOSE_MODEL or '(conversation chat model)'}")
     save_settings(settings)
     return {
-        **settings,
+        **_public_settings_payload(settings),
         "current_ollama_url": config.OLLAMA_URL,
         "current_codebox_url": config.CODEBOX_URL,
         "current_searxng_url": config.SEARXNG_URL,
         "current_n8n_url": config.N8N_URL,
+        "current_comfyui_url": config.COMFYUI_URL,
+        "current_stt_url": config.STT_URL,
+        "current_tts_url": config.TTS_URL,
+        "current_tts_voice": config.TTS_VOICE,
         "current_planning_model": config.PLANNING_MODEL,
         "current_coder_model": config.CODER_MODEL,
         "current_workspace_model": config.WORKSPACE_MODEL,
@@ -5562,20 +6627,36 @@ async def get_token_analytics(days: int = Query(30), group_by: str = Query("day"
     return await db.get_token_usage(days, group_by)
 
 
+@app.delete("/api/analytics/tokens")
+async def clear_token_analytics():
+    deleted = await db.clear_token_usage()
+    return {"ok": True, "deleted": deleted}
+
+
 @app.get("/api/analytics/tokens/summary")
 async def get_token_summary():
     today = await db.get_token_usage(1, "day")
     week = await db.get_token_usage(7, "model")
     month = await db.get_token_usage(30, "day")
-    return {"today": today, "by_model_7d": week, "daily_30d": month}
+    all_time = await db.get_token_usage(0, "day")
+    by_model_all = await db.get_token_usage(0, "model")
+    by_persona_all = await db.get_token_usage(0, "persona")
+    return {
+        "today": today,
+        "by_model_7d": week,
+        "daily_30d": month,
+        "all_time": all_time,
+        "by_model_all": by_model_all,
+        "by_persona_all": by_persona_all,
+    }
 
 
 # ============================================================
 # HUGGINGFACE MODEL BROWSER (delegated to hf module)
 # ============================================================
 @app.get("/api/hf/search")
-async def hf_search_ep(q: str = "", limit: int = 20, gguf_only: bool = True):
-    return await hf_module.hf_search(http, q, limit, gguf_only)
+async def hf_search_ep(q: str = "", limit: int = 20, gguf_only: bool = True, sort: str = "downloads", direction: int = -1):
+    return await hf_module.hf_search(http, q, limit, gguf_only, sort, direction)
 
 @app.get("/api/hf/model")
 async def hf_model_info_ep(repo_id: str):
@@ -5593,9 +6674,32 @@ async def hf_download_ep(request: Request):
 # ============================================================
 # SERVE FRONTEND (production)
 # ============================================================
+class _FrontendStaticFiles(StaticFiles):
+    """StaticFiles with deploy-safe cache headers.
+
+    Vite assets are content-hashed, so they can be cached forever — but
+    index.html must NOT be cached: deploys delete the old hashed assets, and a
+    browser holding a stale cached index.html would request chunks that no
+    longer exist (blank app until hard refresh).
+    """
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        path = str(getattr(resp, "path", "") or "")
+        if "/assets/" in path.replace(os.sep, "/"):
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
 frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
-if os.path.exists(frontend_dir):
-    app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
+if os.path.isfile(os.path.join(frontend_dir, "index.html")):
+    app.mount("/", _FrontendStaticFiles(directory=frontend_dir, html=True), name="frontend")
+else:
+    print("[STARTUP] WARNING: frontend/dist/index.html not found — the UI will not be served.")
+    print("[STARTUP]          frontend/dist/ is build output (not committed). Build it with:")
+    print("[STARTUP]              cd frontend && npm install && npm run build")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Seed the Coder Bot knowledge base by fetching real docs from the internet.
+Seed the Daedalus knowledge base by fetching real docs from the internet.
 Run: python3 seed_coder_kb.py
 Re-run anytime to update with latest docs.
 """
@@ -478,9 +478,20 @@ async def fetch_source(client: httpx.AsyncClient, filename: str, url: str, desc:
         return None
 
 
+def _find_daedalus_config(configs: list[dict]) -> dict | None:
+    """Return the maintained coding persona, not arbitrary "Coder" profiles."""
+    return next(
+        (
+            c for c in configs
+            if "daedalus" in (c.get("name") or "").strip().lower()
+        ),
+        None,
+    )
+
+
 async def main():
     print()
-    print(f"  {B}{C}Coder KB Seeder{RST}")
+    print(f"  {B}{C}Daedalus KB Seeder{RST}")
     print(f"  {D}Fetching docs from the internet...{RST}")
     print()
 
@@ -556,19 +567,19 @@ async def main():
     print(f"  {D}KB ID: {kb_id}{RST}")
     print()
 
-    # Attach to Coder Bot if it exists
+    # Attach to Daedalus if it exists
     configs = await db.get_model_configs()
-    coder = next((c for c in configs if "Coder" in c.get("name", "")), None)
-    if coder:
-        current_kbs = coder.get("kb_ids", [])
+    daedalus = _find_daedalus_config(configs)
+    if daedalus:
+        current_kbs = daedalus.get("kb_ids", [])
         if kb_id not in current_kbs:
             current_kbs.append(kb_id)
-            await db.update_model_config(coder["id"], kb_ids=current_kbs)
-            print(f"  {G}+{RST} Attached KB to '{coder['name']}'")
+            await db.update_model_config(daedalus["id"], kb_ids=current_kbs)
+            print(f"  {G}+{RST} Attached KB to '{daedalus['name']}'")
         else:
-            print(f"  {D}KB already attached to '{coder['name']}'{RST}")
+            print(f"  {D}KB already attached to '{daedalus['name']}'{RST}")
     else:
-        print(f"  {Y}!{RST} No Coder Bot found — create one and attach KB ID: {kb_id}")
+        print(f"  {Y}!{RST} No Daedalus persona found — create one and attach KB ID: {kb_id}")
 
     print()
 

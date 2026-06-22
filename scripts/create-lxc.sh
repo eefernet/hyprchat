@@ -9,6 +9,7 @@
 # ============================================================
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CTID=${1:-120}
 IP=${2:-"192.168.1.120"}
 GW="192.168.1.1"
@@ -87,8 +88,25 @@ pct exec $CTID -- bash -c "
 
 echo "[5/5] Creating project directory structure..."
 pct exec $CTID -- bash -c "
-    mkdir -p /opt/hyprchat/{backend,frontend/dist,scripts,data/{uploads/avatars,tools,knowledge_bases}}
+    mkdir -p /opt/hyprchat/{backend,frontend/dist,scripts,data/{uploads/avatars,tools,knowledge_bases,chroma_db,comfy_workflows}}
+    mkdir -p /opt/hyprchat/data/sandbox/{outputs,workspace,venv}
 "
+
+echo ""
+read -r -p "Create companion ComfyUI + Voice LXC now? [y/N] " CREATE_COMFY
+if [[ "$CREATE_COMFY" =~ ^[Yy]$ ]]; then
+    read -r -p "ComfyUI CTID [115]: " COMFY_CTID
+    read -r -p "ComfyUI IP [192.168.1.115]: " COMFY_IP
+    COMFY_CTID=${COMFY_CTID:-115}
+    COMFY_IP=${COMFY_IP:-192.168.1.115}
+    if [ -x "$SCRIPT_DIR/create-comfyui-lxc.sh" ] || [ -f "$SCRIPT_DIR/create-comfyui-lxc.sh" ]; then
+        bash "$SCRIPT_DIR/create-comfyui-lxc.sh" "$COMFY_CTID" "$COMFY_IP"
+    else
+        echo "[!] scripts/create-comfyui-lxc.sh not found. Run it later from this repo to create the companion media LXC."
+    fi
+else
+    echo "[*] Skipping companion ComfyUI + Voice LXC."
+fi
 
 echo ""
 echo "════════════════════════════════════════════════"
@@ -96,15 +114,19 @@ echo "  LXC $CTID created and ready!"
 echo ""
 echo "  Next steps:"
 echo ""
-echo "  1. Copy the project files to the container:"
-echo "     From your local machine (where you have the tar.gz):"
+echo "  1. Build the frontend, then copy the project files to the container."
+echo "     frontend/dist/ is build output (gitignored) — build it on your dev"
+echo "     machine BEFORE creating the tarball, or deploy.sh will abort:"
+echo ""
+echo "     ( cd frontend && npm install && npm run build )"
+echo "     tar czf hyprchat-project.tar.gz --exclude node_modules ."
 echo ""
 echo "     # Upload tar to Proxmox host first"
-echo "     scp hyprchat-project-v4.tar.gz root@<PROXMOX_IP>:/tmp/"
+echo "     scp hyprchat-project.tar.gz root@<PROXMOX_IP>:/tmp/"
 echo ""
 echo "     # Then from Proxmox host, push into the LXC:"
-echo "     pct push $CTID /tmp/hyprchat-project-v4.tar.gz /tmp/hyprchat-project-v4.tar.gz"
-echo "     pct exec $CTID -- bash -c 'cd /opt && tar xzf /tmp/hyprchat-project-v4.tar.gz --strip-components=1 -C /opt/hyprchat'"
+echo "     pct push $CTID /tmp/hyprchat-project.tar.gz /tmp/hyprchat-project.tar.gz"
+echo "     pct exec $CTID -- bash -c 'cd /opt && tar xzf /tmp/hyprchat-project.tar.gz -C /opt/hyprchat'"
 echo ""
 echo "  2. Run the deploy script inside the container:"
 echo "     pct exec $CTID -- bash /opt/hyprchat/scripts/deploy.sh"

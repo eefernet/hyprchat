@@ -41,10 +41,6 @@ def register(run_id: str) -> asyncio.Event:
     return ev
 
 
-def get_event(run_id: str) -> Optional[asyncio.Event]:
-    return _events.get(run_id) if run_id else None
-
-
 def is_cancelled(run_id: str) -> bool:
     ev = _events.get(run_id) if run_id else None
     return bool(ev and ev.is_set())
@@ -69,11 +65,6 @@ def cleanup(run_id: str) -> None:
     """Remove the event for a finished run. Safe on unknown ids."""
     if run_id:
         _events.pop(run_id, None)
-
-
-def active_run_ids() -> list[str]:
-    """All run_ids with a registered event. Useful for diagnostics."""
-    return list(_events.keys())
 
 
 async def await_cancellable(coro: Awaitable, run_id: str):

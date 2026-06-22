@@ -54,12 +54,18 @@ WATCHED = {
     "backend/model_providers.py":   ("Model Providers",  REMOTE_BACKEND,            True),
     "backend/cancel_registry.py":   ("Cancel Registry",  REMOTE_BACKEND,            True),
     "backend/rag.py":               ("RAG Pipeline",     REMOTE_BACKEND,            True),
+    "backend/comfyui.py":           ("ComfyUI Client",   REMOTE_BACKEND,            True),
+    "backend/image_prompt_enhancer.py": ("Image Prompt Enhancer", REMOTE_BACKEND,   True),
+    "backend/persona_images.py":    ("Persona Images",   REMOTE_BACKEND,            True),
+    "backend/voice.py":             ("Voice",            REMOTE_BACKEND,            True),
     "backend/research.py":          ("Research",         REMOTE_BACKEND,            True),
     "backend/quick_search.py":      ("Quick Search",     REMOTE_BACKEND,            True),
     "backend/search_agent.py":      ("Search Agent",     REMOTE_BACKEND,            True),
+    "backend/storage_diagnostics.py": ("Storage Diagnostics", REMOTE_BACKEND,        True),
     "backend/events.py":            ("Events",           REMOTE_BACKEND,            True),
     "backend/council.py":           ("Council",          REMOTE_BACKEND,            True),
     "backend/hf.py":                ("HuggingFace",      REMOTE_BACKEND,            True),
+    "backend/hyprfit.py":           ("HyprFit",          REMOTE_BACKEND,            True),
     "backend/openhands_worker.py":  ("OpenHands Worker", REMOTE_OPENHANDS_WORKER,   False),
     "backend/agents/chat.py":           ("Chat Agent",         REMOTE_AGENTS, True),
     "backend/agents/personas.py":       ("Personas",           REMOTE_AGENTS, True),
@@ -74,9 +80,32 @@ WATCHED = {
     "backend/agents/__init__.py":       ("Agents Init",        REMOTE_AGENTS, True),
     "backend/requirements.txt":     ("Requirements",     REMOTE_BACKEND,            True),
     "backend/hyprchat.service":     ("Systemd Service",  "/etc/systemd/system/",    True),
-    "frontend/dist/index.html":     ("Frontend",         REMOTE_FRONTEND,           False),
+    # Frontend has a Vite build step now. Watch the SOURCE — a change here runs
+    # `npm run build` locally and ships the whole dist/ (see FRONTEND_SRC_FILES
+    # and _build_and_deploy_frontend). The built dist/index.html is no longer
+    # hand-edited or watched directly.
+    "frontend/src/main.jsx":        ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/vendor.js":       ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/prism-setup.js":  ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/index.html":          ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/vite.config.js":      ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/package.json":        ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/package-lock.json":   ("Frontend (build)", REMOTE_FRONTEND,           False),
     "CHANGELOG.md":                 ("Changelog",        "/opt/hyprchat/",          False),
     "README.md":                    ("README",           "/opt/hyprchat/",          False),
+}
+
+# Frontend source files: a change to any of these triggers ONE `npm run build`
+# + full dist/ sync (not a per-file scp). Keep in sync with the WATCHED entries
+# labelled "Frontend (build)".
+FRONTEND_SRC_FILES = {
+    "frontend/src/main.jsx",
+    "frontend/src/vendor.js",
+    "frontend/src/prism-setup.js",
+    "frontend/index.html",
+    "frontend/vite.config.js",
+    "frontend/package.json",
+    "frontend/package-lock.json",
 }
 
 CHECK_INTERVAL = 1
@@ -225,13 +254,27 @@ def setup_servers():
 
 # ── SCP / SSH with sshpass ──
 
+# When a password is supplied we MUST stop ssh/scp from offering ssh-agent
+# keys first: every offered key counts against the server's MaxAuthTries
+# (default 6), so on a host without our key installed a loaded agent can burn
+# all attempts on pubkeys and get "Permission denied (publickey,password)"
+# before the password is ever tried — intermittently, depending on agent
+# state and how many connections a deploy made just before. Forcing
+# password-only auth makes the configured password the first and only method.
+_PW_AUTH_OPTS = [
+    "-o", "PubkeyAuthentication=no",
+    "-o", "PreferredAuthentications=password",
+    "-o", "NumberOfPasswordPrompts=1",
+]
+
+
 def scp(local, remote_host, remote_path, user, password):
     """Copy a file to remote via scp. Returns (ok, msg)."""
     dest = f"{user}@{remote_host}:{remote_path}"
     if password:
         cmd = [
             "sshpass", "-p", password,
-            "scp", "-o", "StrictHostKeyChecking=no", "-q",
+            "scp", "-o", "StrictHostKeyChecking=no", *_PW_AUTH_OPTS, "-q",
             local, dest
         ]
     else:
@@ -252,12 +295,38 @@ def scp(local, remote_host, remote_path, user, password):
         return False, str(e)
 
 
+def scp_recursive(local, remote_host, remote_path, user, password, timeout=120):
+    """Recursively copy a directory's contents to remote via `scp -r`.
+
+    `local` should be a directory (use a trailing '/.' to copy its contents
+    into remote_path). Returns (ok, msg). Used to ship the built frontend
+    dist/ tree (index.html + hashed assets/) in one shot.
+    """
+    dest = f"{user}@{remote_host}:{remote_path}"
+    base = ["scp", "-o", "StrictHostKeyChecking=no", "-q", "-r", local, dest]
+    try:
+        cmd = (["sshpass", "-p", password,
+                "scp", "-o", "StrictHostKeyChecking=no", *_PW_AUTH_OPTS,
+                "-q", "-r", local, dest]) if password else base
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if r.returncode == 0:
+            return True, ""
+        return False, r.stderr.strip()
+    except FileNotFoundError:
+        r = subprocess.run(base, capture_output=True, text=True, timeout=timeout)
+        if r.returncode == 0:
+            return True, ""
+        return False, r.stderr.strip()
+    except Exception as e:
+        return False, str(e)
+
+
 def ssh_cmd(host, user, password, command, timeout=30):
     """Run a command on remote via ssh. Returns (ok, stdout, stderr)."""
     if password:
         cmd = [
             "sshpass", "-p", password,
-            "ssh", "-o", "StrictHostKeyChecking=no",
+            "ssh", "-o", "StrictHostKeyChecking=no", *_PW_AUTH_OPTS,
             f"{user}@{host}", command
         ]
     else:
@@ -301,12 +370,20 @@ def _default_env_text(codebox_ip, searxng_ip=""):
         f"AIDER_WORKER_URL=http://{codebox_ip}:8586",
         f"SEARXNG_URL={searxng_url}",
         "HYPRCHAT_OUTBOUND_PROXY=",
+        "COMFYUI_URL=",
+        "STT_URL=",
+        "TTS_URL=",
+        "TTS_VOICE=af_heart",
         "DATABASE_PATH=/opt/hyprchat/data/hyprchat.db",
         "UPLOAD_DIR=/opt/hyprchat/data/uploads",
         "TOOLS_DIR=/opt/hyprchat/data/tools",
         "KB_DIR=/opt/hyprchat/data/knowledge_bases",
         "SANDBOX_DIR=/opt/hyprchat/data/sandbox",
         "SETTINGS_PATH=/opt/hyprchat/data/settings.json",
+        "CONNECTOR_SECRETS_PATH=/opt/hyprchat/data/connector_secrets.json",
+        "QUICK_SEARCH_MODE=balanced",
+        "AIDER_ENABLED=true",
+        "AIDER_AUTO_TEST=true",
         "",
     ])
 
@@ -323,6 +400,23 @@ def _hyprchat_host_ready(hypr):
     return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], cmd, timeout=20)
 
 
+def _hyprchat_data_permissions_cmd():
+    return (
+        "mkdir -p /opt/hyprchat/data/uploads/avatars /opt/hyprchat/data/tools "
+        "/opt/hyprchat/data/knowledge_bases /opt/hyprchat/data/chroma_db "
+        "/opt/hyprchat/data/comfy_workflows /opt/hyprchat/data/sandbox/outputs "
+        "/opt/hyprchat/data/sandbox/workspace /opt/hyprchat/data/sandbox/venv\n"
+        "if id -u hyprchat >/dev/null 2>&1; then\n"
+        "  chown -R hyprchat:hyprchat /opt/hyprchat/data 2>/dev/null || chown -R hyprchat /opt/hyprchat/data 2>/dev/null || true\n"
+        "  chmod -R u+rwX /opt/hyprchat/data 2>/dev/null || true\n"
+        "fi\n"
+    )
+
+
+def _repair_hyprchat_data_permissions(hypr):
+    return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], _hyprchat_data_permissions_cmd(), timeout=90)
+
+
 def _bootstrap_hyprchat_host(hypr, codebox_ip, searxng_ip=""):
     env_text = shlex.quote(_default_env_text(codebox_ip, searxng_ip))
     cmd = (
@@ -336,10 +430,13 @@ def _bootstrap_hyprchat_host(hypr, codebox_ip, searxng_ip=""):
         "fi\n"
         "mkdir -p /opt/hyprchat/backend/agents /opt/hyprchat/frontend/dist "
         "/opt/hyprchat/data/uploads/avatars /opt/hyprchat/data/tools "
-        "/opt/hyprchat/data/knowledge_bases /opt/hyprchat/data/sandbox\n"
+        "/opt/hyprchat/data/knowledge_bases /opt/hyprchat/data/chroma_db "
+        "/opt/hyprchat/data/comfy_workflows /opt/hyprchat/data/sandbox/outputs "
+        "/opt/hyprchat/data/sandbox/workspace /opt/hyprchat/data/sandbox/venv\n"
         f"if [ ! -f /opt/hyprchat/.env ]; then printf %s {env_text} > /opt/hyprchat/.env; fi\n"
         "chmod 640 /opt/hyprchat/.env 2>/dev/null || true\n"
         "chown -R hyprchat:hyprchat /opt/hyprchat/data 2>/dev/null || chown -R hyprchat /opt/hyprchat/data\n"
+        "chmod -R u+rwX /opt/hyprchat/data 2>/dev/null || true\n"
     )
     return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], cmd, timeout=180)
 
@@ -365,6 +462,7 @@ def _set_hyprchat_env(hypr, key, value):
 
 
 def _restart_hyprchat(hypr):
+    _repair_hyprchat_data_permissions(hypr)
     ok, out, err = ssh_cmd(
         hypr["ip"], hypr["user"], hypr["pass"],
         "systemctl restart hyprchat 2>&1", timeout=150,
@@ -564,6 +662,55 @@ def _aider_worker_ready(cb):
     return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=20)
 
 
+def _build_and_deploy_frontend(target):
+    """Build the Vite frontend locally, then sync the whole dist/ to the server.
+
+    The frontend now has a build step: editing files under frontend/src/ (or the
+    Vite config/entry) requires `npm run build`, which emits index.html plus
+    content-hashed assets/. The hashes change every build, so stale remote assets
+    are wiped first to avoid accumulation. The HyprChat host stays dumb — it just
+    serves frontend/dist/ as static files; no Node is installed there.
+    """
+    fe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
+    npm = shutil.which("npm")
+    if not npm:
+        return False, "npm not found on the dev machine — cannot build frontend"
+    try:
+        build = subprocess.run(
+            [npm, "run", "build"], cwd=fe,
+            capture_output=True, text=True, timeout=600,
+        )
+    except Exception as e:
+        return False, f"npm run build failed to launch: {e}"
+    if build.returncode != 0:
+        return False, "npm run build failed:\n" + (build.stderr or build.stdout or "")[-1000:]
+
+    dist = os.path.join(fe, "dist")
+    if not os.path.isdir(dist):
+        return False, "build produced no dist/ directory"
+
+    # Upload to a staging dir, then swap. Wiping the live assets/ BEFORE the
+    # copy meant a failed scp left the server with no frontend at all (and the
+    # wipe→copy window served index.html with missing chunks).
+    remote_dist = REMOTE_FRONTEND.rstrip("/")
+    staging = remote_dist + ".new"
+    ssh_cmd(
+        target["ip"], target["user"], target["pass"],
+        f"rm -rf {shlex.quote(staging)} && mkdir -p {shlex.quote(staging)}",
+        timeout=30,
+    )
+    ok, err = scp_recursive(dist + "/.", target["ip"], staging + "/",
+                            target["user"], target["pass"])
+    if not ok:
+        return False, err
+    swap_ok, _out, swap_err = ssh_cmd(
+        target["ip"], target["user"], target["pass"],
+        f"rm -rf {shlex.quote(remote_dist)} && mv {shlex.quote(staging)} {shlex.quote(remote_dist)}",
+        timeout=30,
+    )
+    return swap_ok, swap_err
+
+
 def deploy_changes(changed, cfg):
     """Deploy changed files and restart service only if needed."""
     hypr = cfg["hyprchat"]
@@ -597,7 +744,18 @@ def deploy_changes(changed, cfg):
     else:
         print(f"  {G}\u2713{RST} Codebox host ready")
 
+    frontend_built = False
     for filepath, (label, remote_dir, restart_flag) in changed:
+        # Frontend source changes are handled by a single build + dist/ sync,
+        # regardless of how many src files changed in this batch.
+        if filepath in FRONTEND_SRC_FILES:
+            if frontend_built:
+                continue
+            frontend_built = True
+            ok, err = _build_and_deploy_frontend(hypr)
+            results.append(("Frontend (build)", filepath, ok, err, hypr))
+            continue
+
         target, remote_dir = _deploy_target(filepath, remote_dir, hypr, cb)
 
         dir_key = (target["ip"], remote_dir)
@@ -649,6 +807,14 @@ def deploy_changes(changed, cfg):
             print(f"  {R}\u2717{RST} daemon-reload failed: {err}")
 
     if needs_restart:
+        print()
+        print(f"  {Y}\u25b6{RST} Repairing HyprChat data permissions...")
+        ok_perm, _, err_perm = _repair_hyprchat_data_permissions(hypr)
+        if ok_perm:
+            print(f"  {G}\u2713{RST} Data directory writable for hyprchat")
+        else:
+            print(f"  {Y}!{RST} Data permission repair may have failed: {err_perm}")
+
         print()
         print(f"  {Y}\u25b6{RST} Restarting hyprchat service...")
         ok, out, err = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],

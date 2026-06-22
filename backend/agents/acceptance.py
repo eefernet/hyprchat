@@ -57,19 +57,6 @@ _SOURCE_CONTEXT_BYTES = 128000
 _SOURCE_SECTION_CAP_MAX = 220000
 
 
-def is_docs_only_paths(paths: list[str]) -> bool:
-    """Return True if every touched path is documentation-only."""
-    if not paths:
-        return False
-    for path in paths:
-        name = os.path.basename(path)
-        ext = os.path.splitext(name)[1].lower()
-        if name in _README_NAMES or ext in _DOC_EXTS:
-            continue
-        return False
-    return True
-
-
 async def _run_command(http, command: str, timeout: int = 15,
                        run_id: str = "") -> dict:
     """Run one allowed static-inspection command in Codebox."""
@@ -262,25 +249,6 @@ def _try_parse_json(text: str) -> dict | None:
     return None
 
 
-def _ollama_response_text(body: dict) -> str:
-    """Extract structured output from Ollama chat responses.
-
-    Reasoning models can put JSON in a thinking field even when the request
-    asks for message content. Prefer content, then fall back to thinking.
-    """
-    if not isinstance(body, dict):
-        return ""
-    message = body.get("message") if isinstance(body.get("message"), dict) else {}
-    for val in (
-        message.get("content"),
-        message.get("thinking"),
-        body.get("thinking"),
-    ):
-        if isinstance(val, str) and val.strip():
-            return val.strip()
-    return ""
-
-
 def _configured_num_ctx() -> int:
     """Use HyprChat's configured context window, never Ollama's model default."""
     try:
@@ -301,12 +269,7 @@ def _section_budgets(num_ctx: int) -> dict:
     a 16K-token window several times over and Ollama silently truncated the
     prompt — usually dropping the instructions at one end.
     """
-    try:
-        n = int(num_ctx)
-    except Exception:
-        n = 16384
-    if n <= 0:
-        n = 16384
+    n = config.coerce_num_ctx(num_ctx, fallback=16384)
     budget = n * 3
     return {
         "readme": max(4000, int(budget * 0.10)),

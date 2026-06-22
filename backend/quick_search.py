@@ -31,7 +31,7 @@ from datetime import date, datetime
 from email.utils import parsedate_to_datetime
 
 import config
-from research import _search_searxng, _rank_urls, web_get
+from research import _search_searxng, _rank_urls, fetch_bytes_safely
 
 
 # ── 10-min TTL cache, keyed by (query, time_range, categories, engines), bounded LRU ──
@@ -332,43 +332,6 @@ def _classify_query(q: str) -> str:
     return "general"
 
 
-def _apply_domain_bias(results: list, category: str) -> list:
-    """Push downranked-for-category domains to the bottom; keep order otherwise."""
-    bad = _DOWNRANK_DOMAINS.get(category) or frozenset()
-    if not bad:
-        return results
-    keep, defer = [], []
-    for r in results:
-        d = _registrable_domain(r.get("url", ""))
-        (defer if d in bad else keep).append(r)
-    return keep + defer
-
-
-def _rank_and_filter_for_chat(
-    results: list, query: str = "", category: str | None = None,
-    *, limit: int = CHAT_MAX_RESULTS,
-) -> list:
-    """For model context: drop YouTube/image, rank by quality, dedup, apply
-    category bias against off-fit domains, keep up to `limit`.
-
-    `category` should come from triage when available — it has full
-    conversation context. Falls back to regex query-classification when
-    not supplied (triage-failure path).
-    """
-    limit = max(1, int(limit or CHAT_MAX_RESULTS))
-    text_only = [r for r in results if r.get("type", "web") not in ("youtube", "image")]
-    ranked_urls = _rank_urls(text_only)
-    by_url = {r.get("url"): r for r in text_only if r.get("url")}
-    ranked = [by_url[u] for u in ranked_urls if u in by_url]
-    seen = {r.get("url") for r in ranked}
-    leftover = [r for r in text_only if r.get("url") not in seen]
-    deduped = _dedupe_by_domain(ranked + leftover, max_per_domain=2)
-    cat = category if category in _DOWNRANK_DOMAINS else _classify_query(query)
-    biased = _apply_domain_bias(deduped, cat)
-    return biased[:limit]
-
-
-# ── Deterministic answer-grounding ranker ──
 _MAJOR_SOURCE_DOMAINS = frozenset({
     "apnews.com", "reuters.com", "bbc.com", "bbc.co.uk", "npr.org", "pbs.org",
     "nytimes.com", "washingtonpost.com", "theguardian.com", "bloomberg.com",
@@ -813,22 +776,23 @@ async def _fetch_clean_page(http, url: str) -> dict | None:
         return None
     try:
         async with _FETCH_SEMA:
-            r = await web_get(
+            status, headers, _final_url, body = await fetch_bytes_safely(
                 http,
-                url, timeout=15, follow_redirects=True,
+                url, timeout=15, max_bytes=2 * 1024 * 1024,
                 headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                                        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"},
             )
-        if r.status_code >= 400:
+        if status >= 400:
             return None
-        # SSRF: re-check the FINAL URL after redirects — the initial _url_safe
-        # gate ran on the pre-redirect URL; a result can 302 to an internal host.
-        if not _url_safe(str(r.url)):
-            return None
-        ct = r.headers.get("content-type", "")
+        ct = headers.get("content-type", "")
         if "text" not in ct and "html" not in ct and "json" not in ct:
             return None
-        html = r.text
+        m = re.search(r"charset=([^;\s]+)", ct, re.I)
+        enc = (m.group(1) if m else "utf-8").strip("\"'")
+        try:
+            html = body.decode(enc, errors="replace")
+        except LookupError:
+            html = body.decode("utf-8", errors="replace")
     except Exception:
         return None
 
@@ -854,8 +818,8 @@ async def _enrich_with_pages(http, results: list, top_n: int = 3) -> dict[str, s
     targets: list[str] = []
     seen: set[str] = set()
 
-    def _add(url: str) -> None:
-        if not url or url in seen or not _url_safe(url):
+    async def _add(url: str) -> None:
+        if not url or url in seen or not await _url_safe(url):
             return
         targets.append(url)
         seen.add(url)
@@ -863,12 +827,12 @@ async def _enrich_with_pages(http, results: list, top_n: int = 3) -> dict[str, s
     # Always read the first few text pages, then spend the rest of the budget
     # on thin snippets where page text is most likely to change answer quality.
     for r in results[:min(3, top_n)]:
-        _add(r.get("url") or "")
+        await _add(r.get("url") or "")
     for r in results[:max(top_n * 2, top_n)]:
         if len(targets) >= top_n:
             break
         if _looks_thin(r.get("content") or r.get("snippet", "")):
-            _add(r.get("url") or "")
+            await _add(r.get("url") or "")
     if not targets:
         return {}
 
@@ -894,12 +858,19 @@ _DNS_CACHE: dict[str, tuple[float, bool]] = {}
 _DNS_CACHE_TTL = 300  # 5 min — DNS rarely flips faster than that for our use
 
 
-def _url_safe(url: str) -> bool:
-    """True if URL hostname resolves to public, routable IPs only."""
+async def _url_safe(url: str) -> bool:
+    """True if URL hostname resolves to public, routable IPs only.
+
+    Async: getaddrinfo runs in a thread so a slow/unresponsive DNS server
+    can't stall the (single-worker) event loop.
+    """
     try:
-        host = urllib.parse.urlparse(url).hostname
+        parsed = urllib.parse.urlparse(url)
     except Exception:
         return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = parsed.hostname
     if not host:
         return False
     host = host.lower()
@@ -916,7 +887,8 @@ def _url_safe(url: str) -> bool:
     if cached and (now - cached[0]) < _DNS_CACHE_TTL:
         return cached[1]
     try:
-        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        infos = await asyncio.to_thread(
+            socket.getaddrinfo, host, None, type=socket.SOCK_STREAM)
     except (socket.gaierror, socket.herror, OSError):
         _DNS_CACHE[host] = (now, False)
         return False
@@ -1154,13 +1126,13 @@ _OG_SKIP = ["youtube.com", "twitter.com", "x.com", "facebook.com", "instagram.co
 async def _fetch_og_image(http, page_url: str) -> str:
     if any(s in page_url.lower() for s in _OG_SKIP):
         return ""
-    if not _url_safe(page_url):
+    if not await _url_safe(page_url):
         return ""
     try:
         async with _FETCH_SEMA:
-            resp = await web_get(
+            status, _headers, _final_url, body = await fetch_bytes_safely(
                 http,
-                page_url, timeout=6, follow_redirects=True,
+                page_url, timeout=6, max_bytes=256 * 1024,
                 headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                                   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -1168,10 +1140,9 @@ async def _fetch_og_image(http, page_url: str) -> str:
                     "Accept-Language": "en-US,en;q=0.5",
                 },
             )
-        # SSRF: re-check the final URL after redirects.
-        if not _url_safe(str(resp.url)):
+        if status >= 400:
             return ""
-        html = resp.text[:30000]
+        html = body.decode("utf-8", errors="replace")[:30000]
         for pattern in _OG_PATTERNS:
             m = re.search(pattern, html, re.IGNORECASE)
             if not m:
@@ -1230,7 +1201,7 @@ async def run_quick_search_for_chat(
         or model_providers.reject_cloud(default_model)
     )
     return await run_search_agent(
-        http, ollama_url, refine_model, refine_model,
+        http, ollama_url, refine_model,
         events, conv_id, messages,
         default_model=default_model or workspace_model,
     )

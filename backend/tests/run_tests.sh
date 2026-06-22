@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BACKEND_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Default server URL (override with HYPRCHAT_URL env var)
-export HYPRCHAT_URL="${HYPRCHAT_URL:-http://100.122.119.50:8000}"
+export HYPRCHAT_URL="${HYPRCHAT_URL:-http://127.0.0.1:8000}"
 
 echo "============================================"
 echo "  HyprChat Test Suite"
