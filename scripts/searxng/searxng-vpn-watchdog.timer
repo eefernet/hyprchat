@@ -1,0 +1,11 @@
+[Unit]
+Description=Run SearXNG VPN watchdog every 3 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=3min
+AccuracySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
