@@ -1,28 +1,8 @@
-# Alpha v17.3.1 — June 18, 2026
-
-> Adds SSH-based remote Ollama HyprFit hardware scanning and clearer rescan status.
-
-## HyprFit
-- Rescan Hardware can now scan remote Ollama hosts over SSH with `nvidia-smi`, RAM, OS, and architecture probes.
-- Remote scans persist detected accelerator profiles only when SSH hardware detection succeeds.
-- Remote Ollama hosts without SSH scan settings now show setup-required status instead of treating saved profiles as scanned hardware.
-- Remote SSH/auth/command failures keep the saved profile for recommendations and surface a scan-failed status.
-- Local Ollama hosts continue to support automatic accelerator detection.
-
-## UI
-- Settings → Connections now includes local-only Ollama hardware scan SSH settings with write-only password storage.
-- New HyprFit rescan toasts distinguish local detection, remote scanned, setup-required, scan-failed, and CPU fallback states.
-- New hardware profile chips show rescan mode, detected backend, Ollama reachability, and the sanitized Ollama origin.
-
-## Deployment
-- `deploy_monitor.py` now includes the HyprFit backend module in watched deploy files.
-
----
-
 # Alpha v17.3.0 — June 17, 2026
 
 > Adds the local media stack, persona-aware image generation, voice input/output,
 > hybrid RAG citations, storage diagnostics, and token analytics.
+> Adds SSH-based remote Ollama HyprFit hardware scanning and clearer rescan status.
 
 ## Highlights
 - Local image generation is now available from chat and the new Image Studio.
@@ -59,6 +39,18 @@
 - Settings → Connections adds Voice STT/TTS URLs, health status, and a voice picker.
 - Plain HTTP installs still need a browser secure-context exception for microphone capture.
 
+## HyprFit
+- Rescan Hardware can now scan remote Ollama hosts over SSH with `nvidia-smi`, RAM, OS, and architecture probes.
+- Remote scans persist detected accelerator profiles only when SSH hardware detection succeeds.
+- Remote Ollama hosts without SSH scan settings now show setup-required status instead of treating saved profiles as scanned hardware.
+- Remote SSH/auth/command failures keep the saved profile for recommendations and surface a scan-failed status.
+- Local Ollama hosts continue to support automatic accelerator detection.
+
+## UI
+- Settings → Connections now includes local-only Ollama hardware scan SSH settings with write-only password storage.
+- New HyprFit rescan toasts distinguish local detection, remote scanned, setup-required, scan-failed, and CPU fallback states.
+- New hardware profile chips show rescan mode, detected backend, Ollama reachability, and the sanitized Ollama origin.
+
 ## RAG + Citations
 - KB search now fuses Chroma vector results with SQLite FTS5 keyword results using Reciprocal Rank Fusion.
 - Exact tokens such as part numbers, IDs, and error strings rank more reliably.
@@ -94,6 +86,9 @@
 - `deploy_monitor.py` now watches the Vite source/package files plus `image_prompt_enhancer.py`, `persona_images.py`, and `storage_diagnostics.py`.
 - New and expanded tests cover workflow patching, persona image prompts, prompt enhancement normalization, ComfyUI control endpoints, hybrid RAG, audio routes, storage diagnostics, and token analytics.
 - Live media tests skip cleanly when the configured services are unavailable.
+
+## Deployment
+- `deploy_monitor.py` now includes the HyprFit backend module in watched deploy files.
 
 ---
 
