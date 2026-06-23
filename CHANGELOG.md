@@ -1,3 +1,28 @@
+# Alpha v17.3.1 — June 23, 2026
+
+> UI/readability polish and behavior hardening for Quick Search, Daedalus output
+> rendering, and Council sessions.
+
+## Quick Search
+- Refreshed Quick Search source and result rendering for clearer scanability in chat.
+- Search status, source titles, and result metadata now present with less visual noise.
+- Result cards better match the current HyprChat theme and spacing.
+
+## Daedalus UI Rendering
+- Daedalus workflow output now renders as a summarized project status view instead of raw tool/event-heavy transcript blocks.
+- Project states make it easier to distinguish ready, working, and needs-attention runs.
+- Phase chips cover plan, build, review, fix, acceptance, and package progress.
+- Artifact and download actions are more visible, while build details and raw events stay available in collapsible sections.
+
+## Council of AI
+- Council setup has been refreshed with cleaner organization, presets, host settings, member cards, and analytics presentation.
+- Council members can now be linked to personas through `model_config_id`, using the latest persona model, prompt, and name at runtime.
+- Council chat sessions now render with an address panel, round sections, member cards, peer ballot, and moderator verdict.
+- New council metadata tracks round labels, who a response is addressing, vote winners, and round counts.
+- Council prompts now push members to respond directly to one another and vote comparatively.
+
+---
+
 # Alpha v17.3.0 — June 22, 2026
 
 > Adds the local media stack, persona-aware image generation, voice input/output,

@@ -1033,11 +1033,13 @@ class CouncilUpdate(BaseModel):
 
 class CouncilMemberCreate(BaseModel):
     model: str
+    model_config_id: Optional[str] = None
     system_prompt: str = ""
     persona_name: str = ""
 
 class CouncilMemberUpdate(BaseModel):
     model: Optional[str] = None
+    model_config_id: Optional[str] = None
     system_prompt: Optional[str] = None
     persona_name: Optional[str] = None
     points: Optional[int] = None
@@ -5494,9 +5496,10 @@ async def delete_council(council_id: str):
 @app.post("/api/councils/{council_id}/members")
 async def add_council_member(council_id: str, req: CouncilMemberCreate):
     member_id = f"cm-{uuid.uuid4().hex[:8]}"
-    await db.add_council_member(member_id, council_id, req.model, req.system_prompt, req.persona_name)
+    await db.add_council_member(member_id, council_id, req.model, req.system_prompt, req.persona_name, req.model_config_id)
     return {"id": member_id, "council_id": council_id, "model": req.model,
-            "system_prompt": req.system_prompt, "persona_name": req.persona_name, "points": 0}
+            "model_config_id": req.model_config_id, "system_prompt": req.system_prompt,
+            "persona_name": req.persona_name, "points": 0}
 
 
 @app.patch("/api/councils/members/{member_id}")

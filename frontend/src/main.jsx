@@ -3726,9 +3726,13 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
   });
 
   const artifactHref=latestArtifact?(latestArtifact.artifact_id?`${API}/api/artifacts/${latestArtifact.artifact_id}/download`:`${API}${latestArtifact.url||""}`):"";
-  return <div style={{margin:"8px 0 10px",border:`1px solid ${colour}44`,background:`${colour}0c`,borderRadius:10,overflow:"hidden",maxWidth:"100%"}}>
-    <div style={{padding:"10px 12px",display:"flex",gap:10,alignItems:"flex-start"}}>
-      <div style={{width:34,height:34,borderRadius:8,background:`${colour}16`,border:`1px solid ${colour}35`,display:"flex",alignItems:"center",justifyContent:"center",color:colour,flexShrink:0,fontSize:17}}>{active?"⏳":needsAttention?"⚠":"✓"}</div>
+  return <div style={{margin:"0 0 12px",maxWidth:"100%"}}>
+    {msgContent&&<div style={{margin:"0 0 14px",color:t.dim,lineHeight:1.68}}>
+      {md?<MDWrap>{md(msgContent)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:font}}>{msgContent}</pre>}
+    </div>}
+
+    <div style={{display:"flex",gap:10,alignItems:"flex-start",padding:"2px 0 12px",borderBottom:`1px solid ${t.brd}24`,maxWidth:"100%"}}>
+      <div style={{width:28,height:28,borderRadius:7,background:`${colour}14`,border:`1px solid ${colour}35`,display:"flex",alignItems:"center",justifyContent:"center",color:colour,flexShrink:0,fontSize:15}}>{active?"⏳":needsAttention?"⚠":"✓"}</div>
       <div style={{minWidth:0,flex:1}}>
         <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
           <div style={{fontSize:13,fontWeight:900,color:colour,letterSpacing:.2}}>{title}</div>
@@ -3742,28 +3746,35 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
           {loadErr&&<span style={{fontSize:9,fontWeight:800,color:t.err,border:`1px solid ${t.err}35`,background:`${t.err}10`,borderRadius:999,padding:"2px 7px",lineHeight:1.4}}>{loadErr}</span>}
         </div>
       </div>
-      {latestArtifact&&<div style={{display:"flex",gap:5,alignItems:"center",flexShrink:0}}>
-        <a href={artifactHref} download={latestArtifact.filename} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"6px 10px",background:`${t.ok}16`,border:`1px solid ${t.ok}40`,borderRadius:7,color:t.ok,textDecoration:"none",fontSize:11,fontWeight:900}}>
-          <span>📦</span><span style={{maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{latestArtifact.filename||"Artifact"}</span>
+      {latestArtifact&&<div style={{display:"flex",gap:5,alignItems:"center",flexShrink:0,flexWrap:"wrap",justifyContent:"flex-end"}}>
+        <a href={artifactHref} download={latestArtifact.filename} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"6px 10px",background:`${t.ok}16`,border:`1px solid ${t.ok}40`,borderRadius:7,color:t.ok,textDecoration:"none",fontSize:11,fontWeight:900,maxWidth:260}}>
+          <span>📦</span><span style={{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{latestArtifact.filename||"Artifact"}</span>
         </a>
         {latestArtifact.artifact_id&&onOpenArtifact&&<button onClick={()=>onOpenArtifact(latestArtifact.artifact_id)} title="Open artifact details" style={{padding:"6px 8px",borderRadius:7,border:`1px solid ${t.acc}35`,background:`${t.acc}12`,color:t.acc,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:900}}>details</button>}
       </div>}
     </div>
 
-    <div style={{borderTop:`1px solid ${colour}20`,padding:"0 10px 8px"}}>
-      <Collapsible summary="Build Details" theme={t} font={font} defaultOpen={needsAttention}>
-        <div style={{display:"flex",flexDirection:"column",gap:6}}>
-          {runRows.length?runRows.map(r=><div key={r.id} style={{display:"flex",alignItems:"baseline",gap:7,fontSize:11,color:t.dim,borderBottom:`1px solid ${t.brd}14`,paddingBottom:5}}>
-            <span style={{width:18,textAlign:"center"}}>{r.icon}</span>
-            <span style={{fontWeight:800,color:r.c,minWidth:96}}>{r.label}</span>
-            <span style={{fontSize:10,color:t.mut,minWidth:82}}>{r.status}</span>
-            <span style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{r.summary||r.role}</span>
-          </div>):<div style={{fontSize:11,color:t.mut}}>Run details will appear here when Daedalus starts writing run records.</div>}
-        </div>
-      </Collapsible>
-      {msgContent&&<Collapsible summary="Assistant Message" theme={t} font={font}>
-        {md?<MDWrap>{md(msgContent)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:font}}>{msgContent}</pre>}
-      </Collapsible>}
+    <div style={{marginTop:12}}>
+      <div style={{fontSize:11,fontWeight:900,color:t.dim,letterSpacing:.35,marginBottom:9}}>Build Timeline</div>
+      {runRows.length?<div style={{display:"flex",flexDirection:"column"}}>
+        {runRows.map((r,idx)=><div key={r.id} style={{display:"grid",gridTemplateColumns:"28px minmax(0,1fr)",gap:10,position:"relative"}}>
+          <div style={{position:"relative",display:"flex",justifyContent:"center"}}>
+            {idx<runRows.length-1&&<span style={{position:"absolute",top:24,bottom:-2,width:1,background:`${t.brd}33`}}/>}
+            <span style={{width:24,height:24,borderRadius:7,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,color:r.c,background:`${r.c}12`,border:`1px solid ${r.c}32`,zIndex:1}}>{r.icon}</span>
+          </div>
+          <div style={{minWidth:0,padding:"1px 0 12px",borderBottom:idx<runRows.length-1?`1px solid ${t.brd}16`:"none"}}>
+            <div style={{display:"flex",alignItems:"baseline",gap:8,flexWrap:"wrap"}}>
+              <span style={{fontWeight:900,color:r.c,fontSize:11}}>{r.label}</span>
+              <span style={{fontSize:10,color:t.mut}}>{r.status}</span>
+              <span style={{fontSize:10,color:t.mut,opacity:.72}}>{r.role}</span>
+            </div>
+            <div style={{fontSize:10,color:t.mut,lineHeight:1.45,marginTop:3,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",wordBreak:"break-word"}}>{r.summary||"No summary recorded for this run."}</div>
+          </div>
+        </div>)}
+      </div>:<div style={{fontSize:11,color:t.mut,padding:"2px 0 4px"}}>Run details will appear here when Daedalus starts writing run records.</div>}
+    </div>
+
+    <div style={{marginTop:8,opacity:.86}}>
       <Collapsible summary="Raw Events" theme={t} font={font}>
         <ToolStatus evts={events.filter(e=>(e.data?.tool||"")!=="processing")} savedEvts={[]} msgContent={msgContent} historical={true} t={t} expandedPill={rawPill} setExpandedPill={setRawPill} onPreview={onPreview} onOpenArtifact={onOpenArtifact} md={md}/>
         {(workflows||[]).slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={onOpenArtifact}/>)}
@@ -4384,7 +4395,7 @@ function HyprChat(){
   const [councilSuggestions,setCouncilSuggestions]=useState([]); // suggested prompts for council
   const [councilSugLoading,setCouncilSugLoading]=useState(false);
   const [editMember,setEditMember]=useState(null); // member id being edited
-  const [editMemberForm,setEditMemberForm]=useState({system_prompt:"",persona_name:""});
+  const [editMemberForm,setEditMemberForm]=useState({model:"",model_config_id:"",system_prompt:"",persona_name:""});
 
   const [quickResults,setQuickResults]=useState([]); // per send
   const [searchLoading,setSearchLoading]=useState(false);
@@ -6220,9 +6231,9 @@ function HyprChat(){
                 }).catch(()=>{});
               }
             }else if(d.type==="council_token"){
-              setCouncilResponses(p=>{const n={...p,[d.member_id]:{model:d.model,content:(p[d.member_id]?.content||"")+d.content,done:false,round:d.round}};sRef.responses=n;return n;});
+              setCouncilResponses(p=>{const n={...p,[d.member_id]:{model:d.model,member_name:d.member_name,content:(p[d.member_id]?.content||"")+d.content,done:false,round:d.round,round_label:d.round_label,responding_to:d.responding_to||[]}};sRef.responses=n;return n;});
             }else if(d.type==="council_done"){
-              setCouncilResponses(p=>{const n={...p,[d.member_id]:{...(p[d.member_id]||{model:d.model,content:""}),done:true,round:d.round}};sRef.responses=n;return n;});
+              setCouncilResponses(p=>{const n={...p,[d.member_id]:{...(p[d.member_id]||{model:d.model,content:""}),model:d.model,member_name:d.member_name,done:true,round:d.round,round_label:d.round_label,responding_to:d.responding_to||p[d.member_id]?.responding_to||[]}};sRef.responses=n;return n;});
             }else if(d.type==="council_voting"){
               setCouncilVoting(true);sRef.voting=true;
               setCouncilResponses({});sRef.responses={};
@@ -8779,186 +8790,187 @@ function HyprChat(){
     </div>
   </div>;})()
 
-      :panel==="council"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Council/><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.pink}}>Council of AI</span></div>
+      :panel==="council"?(()=>{const personaProfiles=mcs.filter(isPersonaProfile);const panelS={flex:1,display:"flex",flexDirection:"column",overflow:"hidden"};const headerS={padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,background:`${t.surface}36`};const sectionS={background:`${t.surface}5C`,border:`1px solid ${t.brd}26`,borderRadius:8,padding:12};const kickerS={fontSize:10,fontWeight:900,color:t.mut,textTransform:"uppercase",letterSpacing:.7};const metaS={fontSize:10,color:t.mut,lineHeight:1.45};const chipS=(c=t.acc)=>({display:"inline-flex",alignItems:"center",gap:4,padding:"2px 7px",borderRadius:6,background:`${c}12`,border:`1px solid ${c}32`,color:c,fontSize:9,fontWeight:800,whiteSpace:"nowrap"});const segmentS=(on,c)=>({padding:"5px 9px",borderRadius:7,border:`1px solid ${on?c:t.brd}38`,background:on?`${c}16`:`${t.surface}55`,color:on?c:t.mut,cursor:"pointer",fontFamily:font,fontSize:10,fontWeight:800});const nativeSelectS={...inputS,fontSize:11,padding:"8px 10px",background:t.bgDeep,color:t.text};const memberProfile=m=>m?.model_config_id?personaProfiles.find(mc=>mc.id===m.model_config_id):null;const memberView=m=>{const mc=memberProfile(m);return{profile:mc,missing:!!m?.model_config_id&&!mc,name:mc?.name||m.persona_name||m.model?.split(":")[0]||"Council member",model:mc?.base_model||m.model||"",prompt:mc?.system_prompt||m.system_prompt||"",avatar:mc?profileAvatar(mc):"",linked:!!mc};};const updateMemberLocal=(cid,mid,patch)=>setCouncils(p=>p.map(c=>c.id===cid?{...c,members:(c.members||[]).map(m=>m.id===mid?{...m,...patch}:m)}:c));const saveMember=async(council,member)=>{const linked=editMemberForm.model_config_id?personaProfiles.find(mc=>mc.id===editMemberForm.model_config_id):null;const up={model:linked?.base_model||editMemberForm.model||member.model||models[0]||"",model_config_id:editMemberForm.model_config_id||"",system_prompt:linked?.system_prompt??editMemberForm.system_prompt??"",persona_name:linked?.name??editMemberForm.persona_name??""};await fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)}).catch(()=>{});updateMemberLocal(council.id,member.id,up);setEditMember(null);};const addCustomMember=async(council)=>{if(!models.length)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:models[0],model_config_id:"",system_prompt:"",persona_name:""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:m.model||models[0]||"",model_config_id:"",system_prompt:"",persona_name:""});};const addPersonaMember=async(council)=>{const mc=personaProfiles[0];if(!mc)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""});};return <div style={panelS}>
+    <div style={headerS}>
+      <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0}}>
+        <span style={{width:30,height:30,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.pink}14`,border:`1px solid ${t.pink}32`,color:t.pink}}><IC.Council/></span>
+        <div style={{minWidth:0}}>
+          <div style={{fontSize:14,fontWeight:900,letterSpacing:.8,textTransform:"uppercase",color:t.text}}>Council of AI</div>
+          <div style={{fontSize:10,color:t.mut,marginTop:2}}>Run moderated multi-model discussions with custom or persona-backed members.</div>
+        </div>
+      </div>
       <button onClick={async()=>{
         const r=await fetch(`${API}/api/councils`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New Council",host_model:models[0]||"qwen3.5:27b",host_system_prompt:""})});
-        const c=await r.json();setCouncils(p=>[...p,c]);setActiveCouncilId(c.id);
-      }} style={btnS(t.pink)}><IC.Plus/> New Council</button>
+        const c=await r.json();setCouncils(p=>[c,...p]);setActiveCouncilId(c.id);
+      }} style={{...btnS(t.pink),padding:"8px 12px",fontWeight:900}}><IC.Plus/> New Council</button>
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
-      {/* Preset council buttons */}
-      {councilPresets.length>0&&<div style={{marginBottom:16,padding:14,background:`${t.surface}66`,border:`1px solid ${t.brd}28`,borderRadius:14}}>
-        <div style={{fontSize:10,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:10}}>Quick Start Presets</div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:8}}>
+      {councilPresets.length>0&&<div style={{...sectionS,marginBottom:14,padding:12}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:10}}>
+          <div style={kickerS}>Quick Start Presets</div>
+          <span style={metaS}>{councilPresets.length} templates</span>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(190px,1fr))",gap:8}}>
           {councilPresets.map(p=><button key={p.id} onClick={async()=>{
-            try{const r=await fetch(`${API}/api/seed/council-preset/${p.id}`,{method:"POST"});if(!r.ok)throw new Error(`HTTP ${r.status}`);const c=await r.json();setCouncils(prev=>[...prev,c]);setActiveCouncilId(c.id);notify({type:"success",text:"Council preset added",detail:p.name});}catch(e){console.error("Preset error:",e);notify({type:"error",text:"Preset failed",detail:e.message||String(e)});}
-          }} style={{...cardS,cursor:"pointer",padding:"10px 12px",border:`1px solid ${t.pink}28`,background:`${t.pink}06`,textAlign:"left",transition:"all .2s",display:"flex",flexDirection:"column",gap:4}} onMouseOver={e=>e.currentTarget.style.borderColor=t.pink+"66"} onMouseOut={e=>e.currentTarget.style.borderColor=t.pink+"28"}>
-            <span style={{fontSize:13,fontWeight:700,color:t.text}}>{p.name}</span>
-            <span style={{fontSize:10,color:t.mut}}>{p.members.join(" · ")}</span>
+            try{const r=await fetch(`${API}/api/seed/council-preset/${p.id}`,{method:"POST"});if(!r.ok)throw new Error(`HTTP ${r.status}`);const c=await r.json();setCouncils(prev=>[c,...prev]);setActiveCouncilId(c.id);notify({type:"success",text:"Council preset added",detail:p.name});}catch(e){console.error("Preset error:",e);notify({type:"error",text:"Preset failed",detail:e.message||String(e)});}
+          }} style={{cursor:"pointer",padding:"10px 12px",border:`1px solid ${t.brd}34`,borderRadius:8,background:`${t.bgDeep}72`,textAlign:"left",display:"flex",flexDirection:"column",gap:4,fontFamily:font}}>
+            <span style={{fontSize:12,fontWeight:900,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</span>
+            <span style={{fontSize:10,color:t.mut,lineHeight:1.35,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{p.members.join(" · ")}</span>
           </button>)}
         </div>
       </div>}
-      {!councils.length&&!councilPresets.length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No councils yet.<br/>Create one to debate with multiple AIs.</div>}
-      {councils.map(council=>{
-        const isActive=activeCouncilId===council.id;
-        return <div key={council.id} style={{...cardS,border:`1px solid ${isActive?t.pink:t.brd}33`,background:isActive?`${t.pink}08`:`${t.surface}88`}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
-            <div style={{flex:1}}>
-              <input value={council.name} onChange={e=>setCouncils(p=>p.map(c=>c.id===council.id?{...c,name:e.target.value}:c))}
-                onBlur={()=>fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:council.name})}).catch(()=>{})}
-                style={{...inputS,fontSize:14,fontWeight:600,background:"transparent",border:"none",padding:"0 0 4px 0",color:t.text}}/>
+      {!councils.length&&!councilPresets.length&&<div style={{...sectionS,textAlign:"center",padding:34,color:t.mut,fontSize:12}}>No councils yet. Create one to debate with multiple AIs.</div>}
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      {councils.map(council=>{const isActive=activeCouncilId===council.id;const memberCount=(council.members||[]).length;const linkedCount=(council.members||[]).filter(m=>!!memberProfile(m)).length;return <div key={council.id} style={{background:isActive?`${t.pink}0B`:`${t.surface}72`,border:`1px solid ${isActive?t.pink:t.brd}${isActive?"52":"30"}`,borderRadius:8,overflow:"hidden",boxShadow:"none"}}>
+          <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:12,alignItems:"center",padding:"12px 14px",background:isActive?`${t.pink}08`:`${t.bgDeep}38`,borderBottom:isActive?`1px solid ${t.brd}24`:"none"}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0}}>
+              <span style={{display:"flex",color:isActive?t.pink:t.mut}}><IC.Council/></span>
+              <div style={{minWidth:0,flex:1}}>
+                <input value={council.name} onChange={e=>setCouncils(p=>p.map(c=>c.id===council.id?{...c,name:e.target.value}:c))}
+                  onBlur={()=>fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:council.name})}).catch(()=>{})}
+                  style={{...inputS,fontSize:14,fontWeight:900,background:"transparent",border:"none",padding:0,color:t.text}}/>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:5}}>
+                  <span style={chipS(t.acc)}>{memberCount} member{memberCount===1?"":"s"}</span>
+                  {linkedCount>0&&<span style={chipS(t.pink)}>{linkedCount} persona-linked</span>}
+                  <span style={chipS(t.warm)}>{(council.debate_rounds||0)===0?"single round":`${council.debate_rounds} rebuttal`}</span>
+                </div>
+              </div>
             </div>
-            <div style={{display:"flex",gap:4}}>
-              <button onClick={()=>setActiveCouncilId(isActive?null:council.id)} style={btnS(isActive?t.pink:t.mut)}>{isActive?"▲ Collapse":"▼ Expand"}</button>
+            <div style={{display:"flex",gap:5,alignItems:"center",justifyContent:"flex-end"}}>
+              <button onClick={()=>setActiveCouncilId(isActive?null:council.id)} style={btnS(isActive?t.pink:t.mut)}>{isActive?<><IC.ChevDown/> Collapse</>:<><IC.ChevDown/> Expand</>}</button>
               <button onClick={async()=>{await fetch(`${API}/api/councils/${council.id}`,{method:"DELETE"}).catch(()=>{});setCouncils(p=>p.filter(c=>c.id!==council.id));if(activeCouncilId===council.id)setActiveCouncilId(null);}} style={btnS(t.err)}><IC.Trash/></button>
             </div>
           </div>
-          {isActive&&<>
-            {/* Host model section */}
-            <div style={{marginBottom:14,padding:12,background:`${t.warm}08`,border:`1px solid ${t.warm}28`,borderRadius:10}}>
-              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8}}>
-                <IC.Crown/><span style={{fontSize:11,fontWeight:700,color:t.warm,textTransform:"uppercase",letterSpacing:.5}}>Host / Moderator</span>
+          {isActive&&<div style={{padding:14,display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12,alignItems:"stretch"}}>
+              <div style={sectionS}>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:9,color:t.warm}}><IC.Crown/><span style={kickerS}>Host / Moderator</span></div>
+                <ModelPicker value={council.host_model||models[0]||""} onChange={v=>{setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_model:v}:c));fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_model:v})}).catch(()=>{});}} models={models} modelDetails={modelDetails} t={t} font={font} style={{marginBottom:8}}/>
+                <textarea value={council.host_system_prompt||""} onChange={e=>{const v=e.target.value;setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_system_prompt:v}:c));}}
+                  onBlur={()=>fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_system_prompt:council.host_system_prompt||""})}).catch(()=>{})}
+                  placeholder="Moderator system prompt (optional)" rows={4}
+                  style={{...inputS,resize:"vertical",fontSize:11,color:t.dim,lineHeight:1.45,minHeight:88}}/>
               </div>
-              <ModelPicker value={council.host_model||models[0]||""} onChange={v=>{setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_model:v}:c));fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_model:v})}).catch(()=>{});}} models={models} modelDetails={modelDetails} t={t} font={font} style={{marginBottom:6}}/>
-              <textarea value={council.host_system_prompt||""} onChange={e=>{const v=e.target.value;setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_system_prompt:v}:c));}}
-                onBlur={()=>fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_system_prompt:council.host_system_prompt||""})}).catch(()=>{})}
-                placeholder="Host system prompt (optional)..." rows={2}
-                style={{...inputS,resize:"vertical",fontSize:11,color:t.mut}}/>
-            </div>
-            {/* Debate rounds setting */}
-            <div style={{marginBottom:14,padding:"10px 12px",background:`${t.pink}06`,border:`1px solid ${t.pink}22`,borderRadius:10,display:"flex",alignItems:"center",gap:10}}>
-              <span style={{fontSize:11,fontWeight:700,color:t.pink,whiteSpace:"nowrap"}}>⚔️ Debate Rounds</span>
-              <input type="range" min={0} max={5} value={council.debate_rounds||0}
-                onChange={e=>{const v=parseInt(e.target.value);setCouncils(p=>p.map(c=>c.id===council.id?{...c,debate_rounds:v}:c));}}
-                onMouseUp={e=>{const v=parseInt(e.target.value);fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({debate_rounds:v})}).catch(()=>{});}}
-                onTouchEnd={e=>{const v=council.debate_rounds||0;fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({debate_rounds:v})}).catch(()=>{});}}
-                style={{flex:1,accentColor:t.pink}}/>
-              <span style={{fontSize:13,fontWeight:800,color:t.text,minWidth:20,textAlign:"center"}}>{council.debate_rounds||0}</span>
-              <span style={{fontSize:9,color:t.mut}}>{(council.debate_rounds||0)===0?"No debate — single round":(council.debate_rounds||0)===1?"1 rebuttal round":`${council.debate_rounds} rebuttal rounds`}</span>
-            </div>
-            {/* Council members grid */}
-            <div style={{marginBottom:10}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                <span style={{fontSize:10,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Council Members</span>
-                <button onClick={async()=>{
-                  if(!models.length)return;
-                  const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:models[0],system_prompt:"",persona_name:""})});
-                  const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));
-                }} style={btnS(t.acc)}><IC.Plus/> Add Model</button>
+              <div style={{...sectionS,display:"flex",flexDirection:"column",justifyContent:"center",gap:10}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+                  <div>
+                    <div style={kickerS}>Debate Rounds</div>
+                    <div style={metaS}>{(council.debate_rounds||0)===0?"Members answer once, then the host synthesizes.":(council.debate_rounds||0)===1?"One rebuttal pass before synthesis.":`${council.debate_rounds} rebuttal passes before synthesis.`}</div>
+                  </div>
+                  <div style={{fontSize:26,fontWeight:900,color:t.pink,lineHeight:1,minWidth:36,textAlign:"right"}}>{council.debate_rounds||0}</div>
+                </div>
+                <input type="range" min={0} max={5} value={council.debate_rounds||0}
+                  onChange={e=>{const v=parseInt(e.target.value);setCouncils(p=>p.map(c=>c.id===council.id?{...c,debate_rounds:v}:c));}}
+                  onMouseUp={e=>{const v=parseInt(e.target.value);fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({debate_rounds:v})}).catch(()=>{});}}
+                  onTouchEnd={()=>{const v=council.debate_rounds||0;fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({debate_rounds:v})}).catch(()=>{});}}
+                  style={{width:"100%",accentColor:t.pink}}/>
               </div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:8}}>
-                {(council.members||[]).map(member=>{
-                  const isEditing=editMember===member.id;
-                  const pts=member.points||0;
-                  const ptsColor=pts>0?t.ok:pts<0?t.err:t.mut;
-                  return <div key={member.id} style={{background:`${t.surface}AA`,border:`1px solid ${t.brd}33`,borderRadius:14,padding:12,display:"flex",flexDirection:"column",gap:6,transition:"all .2s",position:"relative"}}>
-                    {/* Points badge */}
-                    <div style={{position:"absolute",top:8,right:8,background:pts>0?`${t.ok}20`:pts<0?`${t.err}20`:`${t.mut}10`,border:`1px solid ${ptsColor}40`,borderRadius:10,padding:"2px 7px",fontSize:10,fontWeight:700,color:ptsColor}}>
-                      {pts>0?"+":""}{pts} pts
+            </div>
+            <div style={sectionS}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,marginBottom:10}}>
+                <div>
+                  <div style={kickerS}>Council Members</div>
+                  <div style={metaS}>Use custom prompts or link members to Personas. Linked members use the latest Persona profile when the council runs.</div>
+                </div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
+                  <button onClick={()=>addCustomMember(council)} disabled={!models.length} style={{...btnS(t.acc),opacity:models.length?1:.45}}><IC.Plus/> Custom</button>
+                  <button onClick={()=>addPersonaMember(council)} disabled={!personaProfiles.length} title={personaProfiles.length?"Add a Persona member":"Create a Persona first"} style={{...btnS(t.pink),opacity:personaProfiles.length?1:.45}}><IC.User/> Persona</button>
+                </div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:9}}>
+                {(council.members||[]).map(member=>{const isEditing=editMember===member.id;const pts=member.points||0;const ptsColor=pts>0?t.ok:pts<0?t.err:t.mut;const view=memberView(member);const selectedProfile=editMemberForm.model_config_id?personaProfiles.find(mc=>mc.id===editMemberForm.model_config_id):null;return <div key={member.id} style={{background:`${t.bgDeep}78`,border:`1px solid ${view.linked?t.pink:t.brd}${view.linked?"40":"30"}`,borderRadius:8,padding:12,display:"flex",flexDirection:"column",gap:8,minHeight:isEditing?260:148}}>
+                  <div style={{display:"flex",alignItems:"flex-start",gap:9,minWidth:0}}>
+                    <div style={{width:34,height:34,borderRadius:8,background:`${view.linked?t.pink:t.acc}12`,border:`1px solid ${view.linked?t.pink:t.acc}35`,color:view.linked?t.pink:t.acc,display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",flexShrink:0}}>
+                      {view.avatar?<img src={avatarSrc(view.avatar)} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>:view.linked?<IC.User/>:<IC.Bot/>}
                     </div>
-                    <div style={{fontSize:10,color:t.mut,display:"flex",alignItems:"center",gap:4,marginBottom:2}}>
-                      <IC.Bot/>{member.persona_name||member.model.split(":")[0]}
+                    <div style={{minWidth:0,flex:1}}>
+                      <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+                        <span style={{fontSize:12,fontWeight:900,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{view.name}</span>
+                        {view.linked&&<span style={chipS(t.pink)}>Persona</span>}
+                        {view.missing&&<span style={chipS(t.err)}>Missing</span>}
+                      </div>
+                      <div style={{fontSize:10,color:view.missing?t.err:t.mut,marginTop:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{view.missing?"Persona profile not found":view.model||"No model selected"}</div>
                     </div>
-                    {isEditing?<>
-                      <ModelPicker value={member.model} onChange={v=>{setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.map(m=>m.id===member.id?{...m,model:v}:m)}:c));fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:v})}).catch(()=>{});}} models={models} modelDetails={modelDetails} t={t} font={font}/>
-                      <input value={editMemberForm.persona_name||""} onChange={e=>setEditMemberForm(p=>({...p,persona_name:e.target.value}))} placeholder="Display name (optional)" style={{...inputS,fontSize:11}}/>
-                      <textarea value={editMemberForm.system_prompt||""} onChange={e=>setEditMemberForm(p=>({...p,system_prompt:e.target.value}))} placeholder="System prompt..." rows={3} style={{...inputS,resize:"vertical",fontSize:11}}/>
-                      <div style={{display:"flex",gap:4}}>
-                        <button onClick={()=>{
-                          const up={system_prompt:editMemberForm.system_prompt,persona_name:editMemberForm.persona_name};
-                          fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)}).catch(()=>{});
-                          setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.map(m=>m.id===member.id?{...m,...up}:m)}:c));
-                          setEditMember(null);
-                        }} style={btnS(t.ok)}>Save</button>
-                        <button onClick={()=>setEditMember(null)} style={btnS(t.mut)}>Cancel</button>
+                    <span style={{...chipS(ptsColor),background:pts>0?`${t.ok}12`:pts<0?`${t.err}12`:`${t.mut}0D`}}>{pts>0?"+":""}{pts} pts</span>
+                  </div>
+                  {isEditing?<>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>{const v=memberView(member);setEditMemberForm({model:v.model||models[0]||"",model_config_id:"",system_prompt:v.prompt||"",persona_name:v.name||""});}} style={segmentS(!editMemberForm.model_config_id,t.acc)}><IC.Bot/> Custom</button>
+                      <button onClick={()=>{const mc=selectedProfile||memberProfile(member)||personaProfiles[0];if(mc)setEditMemberForm({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""});}} disabled={!personaProfiles.length} style={{...segmentS(!!editMemberForm.model_config_id,t.pink),opacity:personaProfiles.length?1:.45}}><IC.User/> Persona</button>
+                    </div>
+                    {editMemberForm.model_config_id?<>
+                      <select value={editMemberForm.model_config_id} onChange={e=>{const mc=personaProfiles.find(x=>x.id===e.target.value);setEditMemberForm({model:mc?.base_model||models[0]||"",model_config_id:mc?.id||"",system_prompt:mc?.system_prompt||"",persona_name:mc?.name||""});}} style={nativeSelectS}>
+                        {personaProfiles.map(mc=><option key={mc.id} value={mc.id}>{mc.name} · {mc.base_model||"no model"}</option>)}
+                      </select>
+                      <div style={{padding:9,borderRadius:8,border:`1px solid ${t.pink}24`,background:`${t.pink}08`,display:"flex",flexDirection:"column",gap:4}}>
+                        <div style={{fontSize:11,fontWeight:900,color:t.text}}>{selectedProfile?.name||"Persona"}</div>
+                        <div style={metaS}>Linked to Persona. This member will use the Persona's latest model and prompt each run.</div>
+                        <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                          <button onClick={()=>{if(selectedProfile){setPanel("personas");setProfileTab("personas");setEditMc(selectedProfile.id);}}} style={btnS(t.pink)}><IC.Pencil/> Edit Persona</button>
+                          <button onClick={()=>{const mc=selectedProfile||memberProfile(member);setEditMemberForm({model:mc?.base_model||member.model||models[0]||"",model_config_id:"",system_prompt:mc?.system_prompt||member.system_prompt||"",persona_name:mc?.name||member.persona_name||""});}} style={btnS(t.mut)}><IC.X/> Detach</button>
+                        </div>
                       </div>
                     </>:<>
-                      <div style={{fontSize:12,fontWeight:600,color:t.acc,wordBreak:"break-word"}}>{member.model}</div>
-                      {member.system_prompt&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={member.system_prompt}>{member.system_prompt.slice(0,60)}...</div>}
-                      <div style={{display:"flex",gap:4,marginTop:"auto"}}>
-                        <button onClick={()=>{setEditMember(member.id);setEditMemberForm({system_prompt:member.system_prompt||"",persona_name:member.persona_name||""});}} style={{...btnS(t.acc),flex:1,justifyContent:"center",fontSize:10}}><IC.Pencil/> Edit</button>
-                        <button onClick={async()=>{await fetch(`${API}/api/councils/members/${member.id}`,{method:"DELETE"}).catch(()=>{});setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.filter(m=>m.id!==member.id)}:c));}} style={btnS(t.err)}><IC.Trash/></button>
-                      </div>
+                      <ModelPicker value={editMemberForm.model||member.model||models[0]||""} onChange={v=>setEditMemberForm(p=>({...p,model:v}))} models={models} modelDetails={modelDetails} t={t} font={font}/>
+                      <input value={editMemberForm.persona_name||""} onChange={e=>setEditMemberForm(p=>({...p,persona_name:e.target.value}))} placeholder="Display name" style={{...inputS,fontSize:11}}/>
+                      <textarea value={editMemberForm.system_prompt||""} onChange={e=>setEditMemberForm(p=>({...p,system_prompt:e.target.value}))} placeholder="Member system prompt" rows={5} style={{...inputS,resize:"vertical",fontSize:11,lineHeight:1.45,minHeight:104}}/>
                     </>}
-                  </div>;
-                })}
-                {!(council.members||[]).length&&<div style={{gridColumn:"1/-1",textAlign:"center",padding:"20px 0",color:t.mut,fontSize:11,fontStyle:"italic"}}>Add models to the council to debate your questions.</div>}
+                    <div style={{display:"flex",gap:6,marginTop:"auto"}}>
+                      <button onClick={()=>saveMember(council,member)} style={{...btnS(t.ok),flex:1,justifyContent:"center",fontWeight:900}}>Save</button>
+                      <button onClick={()=>setEditMember(null)} style={btnS(t.mut)}>Cancel</button>
+                    </div>
+                  </>:<>
+                    <div style={{fontSize:10,color:t.dim,lineHeight:1.45,display:"-webkit-box",WebkitLineClamp:3,WebkitBoxOrient:"vertical",overflow:"hidden",minHeight:42}}>{view.prompt||"No member prompt set."}</div>
+                    <div style={{display:"flex",gap:5,marginTop:"auto"}}>
+                      <button onClick={()=>{const v=memberView(member);setEditMember(member.id);setEditMemberForm({model:v.model||member.model||models[0]||"",model_config_id:member.model_config_id||"",system_prompt:v.prompt||"",persona_name:v.name||""});}} style={{...btnS(t.acc),flex:1,justifyContent:"center",fontSize:10}}><IC.Pencil/> Edit</button>
+                      <button onClick={async()=>{await fetch(`${API}/api/councils/members/${member.id}`,{method:"DELETE"}).catch(()=>{});setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.filter(m=>m.id!==member.id)}:c));}} style={btnS(t.err)}><IC.Trash/></button>
+                    </div>
+                  </>}
+                </div>;})}
+                {!(council.members||[]).length&&<div style={{gridColumn:"1/-1",border:`1px dashed ${t.brd}45`,borderRadius:8,padding:"24px 12px",textAlign:"center",color:t.mut,fontSize:11}}>Add a custom member or link a Persona to start.</div>}
               </div>
             </div>
-            {/* Analyze + Start buttons */}
-            <div style={{display:"flex",gap:8,marginBottom:councilReport?.council_id===council.id?10:0}}>
-              <button onClick={async()=>{
-                if(councilReport?.council_id===council.id){setCouncilReport(null);return;}
-                setCouncilReportLoading(true);
-                try{const r=await fetch(`${API}/api/councils/${council.id}/analyze`);if(!r.ok)throw new Error(`HTTP ${r.status}`);const d=await r.json();setCouncilReport(d);}catch(e){console.error(e);notify({type:"error",text:"Council analysis failed",detail:e.message||String(e)});}
-                setCouncilReportLoading(false);
-              }} style={{...btnS(t.acc),flex:1,justifyContent:"center",padding:"9px 14px",fontSize:12,fontWeight:700}}>
-                {councilReportLoading?"Analyzing...":councilReport?.council_id===council.id?"▲ Hide Report":"📊 Analyze Performance"}
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8}}>
+              <button onClick={async()=>{if(councilReport?.council_id===council.id){setCouncilReport(null);return;}setCouncilReportLoading(true);try{const r=await fetch(`${API}/api/councils/${council.id}/analyze`);if(!r.ok)throw new Error(`HTTP ${r.status}`);const d=await r.json();setCouncilReport(d);}catch(e){console.error(e);notify({type:"error",text:"Council analysis failed",detail:e.message||String(e)});}setCouncilReportLoading(false);}} style={{...btnS(t.acc),justifyContent:"center",padding:"10px 14px",fontSize:12,fontWeight:900}}>
+                <IC.BarChart/> {councilReportLoading?"Analyzing...":councilReport?.council_id===council.id?"Hide Report":"Analyze Performance"}
               </button>
-              <button onClick={()=>startCouncilChat(council.id)} disabled={!(council.members||[]).length}
-                style={{...btnS(t.pink),flex:1,justifyContent:"center",padding:"9px 14px",fontSize:12,fontWeight:700,opacity:!(council.members||[]).length?0.4:1}}>
+              <button onClick={()=>startCouncilChat(council.id)} disabled={!memberCount} style={{...btnS(t.pink),justifyContent:"center",padding:"10px 14px",fontSize:12,fontWeight:900,opacity:memberCount?1:.4}}>
                 <IC.Council/> Start Council Chat
               </button>
             </div>
-            {/* Performance Report */}
-            {councilReport?.council_id===council.id&&<div style={{background:`${t.surface}88`,border:`1px solid ${t.acc}33`,borderRadius:12,padding:16,animation:"fadeIn .3s"}}>
-              <div style={{fontSize:12,fontWeight:700,color:t.acc,marginBottom:12,display:"flex",alignItems:"center",gap:6}}>📊 Performance Report</div>
-              <div style={{display:"flex",gap:12,marginBottom:14,alignItems:"stretch"}}>
-                <div style={{display:"flex",gap:1,background:`${t.bg}`,border:`1px solid ${t.brd}33`,borderRadius:10,overflow:"hidden",flexShrink:0}}>
-                  <div style={{padding:"12px 18px",textAlign:"center",borderRight:`1px solid ${t.brd}22`}}>
-                    <div style={{fontSize:22,fontWeight:800,color:t.pink,lineHeight:1}}>{councilReport.total_debates}</div>
-                    <div style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:1,marginTop:4}}>Debates</div>
-                  </div>
-                  <div style={{padding:"12px 18px",textAlign:"center"}}>
-                    <div style={{fontSize:22,fontWeight:800,color:t.acc,lineHeight:1}}>{councilReport.total_conversations}</div>
-                    <div style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:1,marginTop:4}}>Sessions</div>
-                  </div>
-                </div>
-                {(councilReport.recommendations||[]).length>0&&<div style={{flex:1,background:`${t.warm}06`,border:`1px solid ${t.warm}22`,borderRadius:10,padding:"8px 12px",display:"flex",flexDirection:"column",gap:3,overflow:"hidden"}}>
-                  <div style={{fontSize:9,fontWeight:700,color:t.warm,textTransform:"uppercase",letterSpacing:.5}}>Recommendations</div>
-                  {councilReport.recommendations.map((r,ri)=><div key={ri} style={{fontSize:10,color:t.dim,display:"flex",gap:5,alignItems:"baseline",lineHeight:1.4}}>
-                    <span style={{color:t.warm,flexShrink:0}}>→</span><span>{r}</span>
-                  </div>)}
+            {councilReport?.council_id===council.id&&<div style={{...sectionS,animation:"fadeIn .3s"}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:12,color:t.acc}}><IC.BarChart/><span style={kickerS}>Performance Report</span></div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:8,marginBottom:12}}>
+                <div style={{padding:12,borderRadius:8,border:`1px solid ${t.brd}24`,background:`${t.bgDeep}66`}}><div style={{fontSize:24,fontWeight:900,color:t.pink,lineHeight:1}}>{councilReport.total_debates}</div><div style={metaS}>Debates</div></div>
+                <div style={{padding:12,borderRadius:8,border:`1px solid ${t.brd}24`,background:`${t.bgDeep}66`}}><div style={{fontSize:24,fontWeight:900,color:t.acc,lineHeight:1}}>{councilReport.total_conversations}</div><div style={metaS}>Sessions</div></div>
+                {(councilReport.recommendations||[]).length>0&&<div style={{padding:12,borderRadius:8,border:`1px solid ${t.warm}24`,background:`${t.warm}08`,gridColumn:"span 2"}}>
+                  <div style={{...kickerS,color:t.warm,marginBottom:6}}>Recommendations</div>
+                  {councilReport.recommendations.map((r,ri)=><div key={ri} style={{fontSize:10,color:t.dim,lineHeight:1.45,marginBottom:3}}>{r}</div>)}
                 </div>}
               </div>
-              {/* Member rankings */}
-              <div style={{fontSize:10,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>Member Rankings</div>
-              <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:14}}>
-                {(councilReport.members||[]).map((m,i)=>{
-                  const barWidth=councilReport.total_debates>0?Math.max(m.votes_received/councilReport.total_debates*100,4):4;
-                  const medal=i===0?"🥇":i===1?"🥈":i===2?"🥉":"";
-                  return <div key={m.id} style={{background:`${t.bg}`,border:`1px solid ${t.brd}33`,borderRadius:10,padding:"10px 12px"}}>
-                    <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
-                      <span style={{fontSize:14}}>{medal||`#${i+1}`}</span>
-                      <span style={{fontSize:12,fontWeight:700,color:t.text,flex:1}}>{m.persona_name}</span>
-                      <span style={{fontSize:10,color:t.mut}}>{m.model}</span>
-                    </div>
-                    {/* Vote bar */}
-                    <div style={{background:`${t.brd}22`,borderRadius:6,height:14,marginBottom:6,overflow:"hidden",position:"relative"}}>
-                      <div style={{background:i===0?t.ok:i===1?t.acc:t.mut,height:"100%",width:`${barWidth}%`,borderRadius:6,transition:"width .5s",minWidth:20}}/>
-                      <span style={{position:"absolute",left:6,top:0,fontSize:9,fontWeight:700,color:"#fff",lineHeight:"14px"}}>{m.win_rate}% win rate</span>
-                    </div>
-                    <div style={{display:"flex",gap:10,flexWrap:"wrap",fontSize:10,color:t.dim}}>
-                      <span>🗳 <b style={{color:t.text}}>{m.votes_received}</b> votes received</span>
-                      <span>💬 <b style={{color:t.text}}>{m.responses}</b> responses</span>
-                      <span>📏 <b style={{color:t.text}}>{m.avg_response_length}</b> avg chars</span>
-                      <span style={{color:m.points>0?t.ok:m.points<0?t.err:t.mut}}>⭐ <b>{m.points>0?"+":""}{m.points}</b> pts</span>
-                    </div>
-                    {/* Who voted for this member */}
-                    {Object.keys(m.vote_sources||{}).length>0&&<div style={{marginTop:6,fontSize:10,color:t.mut}}>
-                      Voted by: {Object.entries(m.vote_sources).map(([name,count],vi)=><span key={vi} style={{background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:8,padding:"1px 6px",marginLeft:vi?4:0,fontSize:9,color:t.pink}}>{name} ({count})</span>)}
-                    </div>}
-                  </div>;
-                })}
+              <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                {(councilReport.members||[]).map((m,i)=>{const barWidth=councilReport.total_debates>0?Math.max(m.votes_received/councilReport.total_debates*100,4):4;return <div key={m.id} style={{background:`${t.bgDeep}66`,border:`1px solid ${t.brd}28`,borderRadius:8,padding:"9px 10px"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                    <span style={chipS(i===0?t.ok:i===1?t.acc:t.mut)}>#{i+1}</span>
+                    <span style={{fontSize:12,fontWeight:900,color:t.text,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.persona_name}</span>
+                    <span style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:260}}>{m.model}</span>
+                  </div>
+                  <div style={{background:`${t.brd}22`,borderRadius:6,height:14,overflow:"hidden",position:"relative",marginBottom:6}}>
+                    <div style={{background:i===0?t.ok:i===1?t.acc:t.mut,height:"100%",width:`${barWidth}%`,borderRadius:6,transition:"width .5s",minWidth:20}}/>
+                    <span style={{position:"absolute",left:6,top:0,fontSize:9,fontWeight:900,color:"#fff",lineHeight:"14px"}}>{m.win_rate}% win rate</span>
+                  </div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap",fontSize:10,color:t.dim}}>
+                    <span>{m.votes_received} votes</span><span>{m.responses} responses</span><span>{m.avg_response_length} avg chars</span><span style={{color:m.points>0?t.ok:m.points<0?t.err:t.mut}}>{m.points>0?"+":""}{m.points} pts</span>
+                  </div>
+                  {Object.keys(m.vote_sources||{}).length>0&&<div style={{marginTop:6,display:"flex",gap:4,flexWrap:"wrap"}}>{Object.entries(m.vote_sources).map(([name,count],vi)=><span key={vi} style={chipS(t.pink)}>{name} ({count})</span>)}</div>}
+                </div>;})}
               </div>
             </div>}
-          </>}
-        </div>;
-      })}
+          </div>}
+        </div>;})}
+      </div>
     </div>
-  </div>
+  </div>;})()
       :panel==="personas"?(()=>{const profiles=mcs.map(mc=>({...mc,parameters:normalizeProfileParams(mc)}));const agentProfiles=profiles.filter(isAgentProfile);const personaProfiles=profiles.filter(isPersonaProfile);const activeProfiles=profileTab==="personas"?personaProfiles:agentProfiles;const activeColor=profileTab==="personas"?t.pink:t.acc;const activeLabel=profileTab==="personas"?"Personas":"Agents";const activeEmpty=profileTab==="personas"?"Create a persona for roleplay, character chat, writing voice, or companion-style conversations.":"Create an agent for coding, research, automation, or specialized work.";const setName=(mc,value)=>updateProfileLocal(mc.id,x=>{const next={...x,name:value};if(getProfileType(x)==="persona"){const params=normalizeProfileParams(next);next.system_prompt=buildPersonaPrompt({name:value,...params.persona});}return next;});const setNumberParam=(id,key,value)=>setProfileParam(id,key,value===""?null:(key==="num_ctx"?parseInt(value)||null:parseFloat(value)));const modelWarning=(mc)=>{const missing=mc.base_model&&models.length&&!models.includes(mc.base_model);if(!mc.base_model||missing)return <div style={{display:"inline-flex",alignItems:"center",gap:5,marginTop:5,padding:"3px 7px",borderRadius:7,background:`${t.warm}12`,border:`1px solid ${t.warm}35`,color:t.warm,fontSize:9,fontWeight:700}}>{!mc.base_model?"No base model selected":`Missing model: ${mc.base_model}`}</div>;return null;};const avatarBox=(mc,isE,color,kind)=>{const avatar=profileAvatar(mc);return <label style={{cursor:isE?"pointer":"default",position:"relative",flexShrink:0}}>
         <div style={{width:44,height:44,borderRadius:kind==="persona"?12:9,background:`${color}18`,border:`1px solid ${color}40`,display:"flex",alignItems:"center",justifyContent:"center",color,overflow:"hidden",fontSize:20}}>
           {avatar?<img src={avatarSrc(avatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:kind==="persona"?<IC.User/>:<IC.Bot/>}
@@ -11126,10 +11138,9 @@ function HyprChat(){
               </div>
             </div>}
           </div>:act?.is_council?(()=>{
-            // ── COUNCIL CHAT VIEW ──
             const councilCfg=councils.find(c=>c.id===act.council_config_id);
             const getMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
-            // Group historical messages into turns, with rounds
+            const members=councilCfg?.members||[];
             const turns=[];let curTurn=null;
             for(const msg of(act.messages||[])){
               const meta=getMeta(msg);
@@ -11145,147 +11156,177 @@ function HyprChat(){
                 }
               }
             }
-            // Compat: flatten all rounds into .responses for voting display
-            for(const turn of turns){turn.responses=Object.values(turn.rounds).flat();}
-            const isLastTurn=(ti)=>ti===turns.length-1;
-              return <div key={actId||"empty"} style={{maxWidth:"100%",padding:"2px 20px 0",overflowY:"auto"}}>
-              {turns.map((turn,ti)=><div key={ti} style={{marginBottom:28,animation:`fadeIn .3s both`}}>
-                {/* User message */}
-                <div style={{display:"flex",gap:9,alignItems:"flex-start",marginBottom:12}}>
-                  <div style={{width:28,height:28,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:t.bgDeep,border:`1px solid ${t.f4}40`,color:t.f4,flexShrink:0,marginTop:2}}><IC.User/></div>
-                  <div style={{flex:1}}>
-                    <div style={{fontSize:10,color:t.mut,marginBottom:2,fontWeight:600,letterSpacing:.5}}>you</div>
-                    <div style={{background:`${t.surface}F0`,padding:"9px 13px",borderRadius:8,border:`1px solid ${t.brd}44`,lineHeight:1.65,fontSize:fontSize,color:t.text}}><MDWrap>{md(turn.user.content)}</MDWrap></div>
+            const isLastTurn=ti=>ti===turns.length-1;
+            const memberProfile=m=>m?.model_config_id?mcs.find(mc=>mc.id===m.model_config_id):null;
+            const memberById=id=>members.find(m=>m.id===id)||{};
+            const memberView=(id,meta={},live={})=>{
+              const member=memberById(id);
+              const mc=memberProfile(member);
+              const model=meta.council_model||live.model||mc?.base_model||member.model||"";
+              const name=meta.council_persona||live.member_name||mc?.name||member.persona_name||model.split(":")[0]||"Council member";
+              const avatar=mc?profileAvatar(mc):"";
+              const pts=member.points||0;
+              return {member,mc,model,name,avatar,pts};
+            };
+            const chip=(color,children,extra={})=><span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 7px",borderRadius:7,background:`${color}12`,border:`1px solid ${color}30`,color,fontSize:10,fontWeight:800,whiteSpace:"nowrap",...extra}}>{children}</span>;
+            const avatarNode=(view,size=34,color=t.acc)=><div style={{width:size,height:size,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",background:`${color}10`,border:`1px solid ${color}38`,color,overflow:"hidden",flexShrink:0}}>
+              {view.avatar?<img src={avatarSrc(view.avatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
+            </div>;
+            const tallyFromVotes=votes=>votes.reduce((a,v)=>({...a,[v.voted_for]:(a[v.voted_for]||0)+1}),{});
+            const sortedTally=tally=>Object.entries(tally).sort((a,b)=>b[1]-a[1]).map(([id,votes])=>({id,votes,view:memberView(id)}));
+            const livePhase=councilRunning?(councilVoting?"Peer vote":councilRound?.label||"Deliberating"):"Session history";
+            const responseCard=(resp,ri,roundKey,tally,live=false)=>{
+              const meta=live?resp.metadata:getMeta(resp);
+              const memberId=meta.council_member_id;
+              const view=memberView(memberId,meta,live?resp.live:{});
+              const votes=tally[memberId]||0;
+              const ptsColor=view.pts>0?t.ok:view.pts<0?t.err:t.mut;
+              const ckey=`council-card-${roundKey}-${ri}`;
+              const expanded=expandedRounds[ckey]===true;
+              const respondingTo=Array.isArray(meta.responding_to)?meta.responding_to:[];
+              const activeBorder=votes>0?t.ok:(roundKey===0?t.acc:t.pink);
+              return <div key={ckey} style={{background:`linear-gradient(180deg,${t.surface}E8,${t.bgDeep}D8)`,border:`1px solid ${activeBorder}${votes>0?"66":"30"}`,borderRadius:10,overflow:"hidden",boxShadow:votes>0?`0 0 0 1px ${activeBorder}18, 0 10px 30px #0002`:"0 10px 24px #0001",minWidth:0}}>
+                <div style={{padding:11,borderBottom:`1px solid ${t.brd}22`,display:"flex",gap:9,alignItems:"center"}}>
+                  {avatarNode(view,34,roundKey===0?t.acc:t.pink)}
+                  <div style={{minWidth:0,flex:1}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+                      <span style={{fontSize:12,fontWeight:900,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{view.name}</span>
+                      {view.mc&&chip(t.pink,"Persona",{fontSize:9,padding:"2px 6px"})}
+                    </div>
+                    <div style={{fontSize:9,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:2}}>{view.model||"model unavailable"}</div>
+                  </div>
+                  <div style={{display:"flex",gap:5,alignItems:"center",flexShrink:0}}>
+                    {votes>0&&chip(t.ok,<><IC.Trophy/>{votes}</>,{fontSize:9})}
+                    {chip(ptsColor,`${view.pts>0?"+":""}${view.pts} pt`,{fontSize:9})}
                   </div>
                 </div>
-                {/* Council response cards — grouped by round */}
-                <div style={{marginLeft:36}}>
-                  {(()=>{
-                    const hostMeta=turn.host?getMeta(turn.host):{};
-                    const isLive=councilRunning&&isLastTurn(ti);
-                    const turnVotes=isLive?councilVotes:(hostMeta.votes||[]);
-                    const turnTally=turnVotes.reduce((a,v)=>({...a,[v.voted_for]:(a[v.voted_for]||0)+1}),{});
-                    const roundNums=Object.keys(turn.rounds).map(Number).sort((a,b)=>a-b);
-                    const hasMultipleRounds=roundNums.length>1;
-                    const renderCard=(resp,ri,roundKey)=>{
-                      const meta=getMeta(resp);
-                      const model=meta.council_model||act.model||"";
-                      const memberId=meta.council_member_id;
-                      const member=councilCfg?.members?.find(m=>m.id===memberId)||{};
-                      const pts=member.points||0;
-                      const ptsColor=pts>0?t.ok:pts<0?t.err:t.mut;
-                      const votesReceived=turnTally[memberId]||0;
-                      const cid2=`cr${ti}-${roundKey}-${ri}`;
-                      return <div key={ri} style={{background:`${t.surface}AA`,border:`1px solid ${votesReceived>0?t.pink:t.brd}${votesReceived>0?"55":"33"}`,borderRadius:14,overflow:"hidden",transition:"all .2s"}}>
-                        <div style={{padding:"8px 12px",background:`${t.acc}08`,borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:6}}>
-                          <IC.Bot/>
-                          <span style={{fontSize:11,fontWeight:700,color:t.acc,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{meta.council_persona||model.split(":")[0]}</span>
-                          <span style={{fontSize:9,color:t.mut,flexShrink:0}}>{model.split(":")[1]||""}</span>
-                          {votesReceived>0&&<span style={{background:`${t.pink}20`,border:`1px solid ${t.pink}44`,borderRadius:10,padding:"2px 7px",fontSize:10,fontWeight:700,color:t.pink,flexShrink:0}}>{"🗳 ".repeat(Math.min(votesReceived,3))}{votesReceived}</span>}
-                          <span style={{background:pts>0?`${t.ok}20`:pts<0?`${t.err}20`:`${t.mut}10`,border:`1px solid ${ptsColor}40`,borderRadius:10,padding:"2px 7px",fontSize:10,fontWeight:700,color:ptsColor,flexShrink:0}}>{pts>0?"+":""}{pts}pt</span>
-                        </div>
-                        <div style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:320,overflowY:"auto"}}><MDWrap>{md(resp.content)}</MDWrap></div>
-                        {memberId&&<div style={{padding:"6px 10px",borderTop:`1px solid ${t.brd}18`,display:"flex",gap:4}}>
-                          <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,5)} title="Best answer (+5)" style={{...btnS(t.ok),flex:1,justifyContent:"center",padding:"4px 6px",fontSize:9}}><IC.Star/> Best</button>
-                          <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,2)} title="Good answer (+2)" style={{...btnS(t.acc),padding:"4px 6px",fontSize:9}}>👍</button>
-                          <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,-2)} title="Poor answer (-2)" style={{...btnS(t.err),padding:"4px 6px",fontSize:9}}>👎</button>
-                          <button onClick={()=>cp(resp.content,cid2)} style={{...btnS(t.mut),padding:"4px 6px",fontSize:9}}>{copied===cid2?<IC.Check/>:<IC.Copy/>}</button>
+                {respondingTo.length>0&&<div style={{padding:"8px 11px 0",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                  <span style={{fontSize:9,textTransform:"uppercase",letterSpacing:.7,color:t.mut,fontWeight:900}}>Responding to</span>
+                  {respondingTo.slice(0,4).map(r=>chip(t.acc,r.name||r.id,{fontSize:9,padding:"2px 6px"}))}
+                </div>}
+                <div ref={el=>{if(live&&!resp.live.done&&el)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.7,color:t.dim,maxHeight:expanded?760:300,overflowY:"auto"}}>
+                  <MDWrap>{md(resp.content||"")}</MDWrap>
+                  {live&&!resp.live.done&&<span style={{display:"inline-block",width:2,height:13,background:t.acc,marginLeft:2,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
+                </div>
+                <div style={{padding:"7px 10px",borderTop:`1px solid ${t.brd}18`,display:"flex",gap:6,alignItems:"center"}}>
+                  <button onClick={()=>setExpandedRounds(p=>({...p,[ckey]:!expanded}))} style={{...btnS(t.mut),padding:"5px 7px",fontSize:9}}>{expanded?"Compact":"Expand"}</button>
+                  {memberId&&<>
+                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,5)} title="Mark best answer (+5)" style={{...btnS(t.ok),padding:"5px 7px",fontSize:9}}><IC.Star/> Best</button>
+                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,2)} title="Add points (+2)" style={{...btnS(t.acc),padding:"5px 7px",fontSize:9}}><IC.ChevDown style={{transform:"rotate(180deg)"}}/> Good</button>
+                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,-2)} title="Subtract points (-2)" style={{...btnS(t.err),padding:"5px 7px",fontSize:9}}><IC.ChevDown/> Weak</button>
+                  </>}
+                  <button onClick={()=>cp(resp.content,ckey)} style={{...btnS(t.mut),padding:"5px 7px",fontSize:9,marginLeft:"auto"}}>{copied===ckey?<IC.Check/>:<IC.Copy/>}</button>
+                </div>
+              </div>;
+            };
+            const ballotPanel=(votes,hostMeta={})=>{
+              if(!votes.length&&!councilVoting)return null;
+              const tally=tallyFromVotes(votes);
+              const leaders=hostMeta.winners||sortedTally(tally).map(x=>({id:x.id,name:x.view.name,votes:x.votes}));
+              return <div style={{background:`${t.surface}92`,border:`1px solid ${t.pink}32`,borderRadius:10,padding:12,margin:"12px 0",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
+                <div>
+                  <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8,color:t.pink,fontSize:11,fontWeight:900,textTransform:"uppercase",letterSpacing:.7}}><IC.Trophy/> Peer Ballot</div>
+                  {leaders.length?<div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {leaders.map((l,i)=><div key={l.id||i} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 8px",borderRadius:8,background:i===0?`${t.ok}12`:`${t.bgDeep}72`,border:`1px solid ${i===0?t.ok:t.brd}30`}}>
+                      <span style={{fontSize:10,color:i===0?t.ok:t.mut,fontWeight:900,width:18}}>{i+1}</span>
+                      <span style={{fontSize:11,color:t.text,fontWeight:800,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.name}</span>
+                      {chip(i===0?t.ok:t.mut,`${l.votes} vote${l.votes===1?"":"s"}`,{fontSize:9})}
+                    </div>)}
+                  </div>:<div style={{fontSize:11,color:t.mut,lineHeight:1.5}}>Waiting for council members to cast their peer votes.</div>}
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                  {votes.length?votes.map((v,vi)=><div key={vi} style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center",padding:"7px 8px",borderRadius:8,background:`${t.bgDeep}72`,border:`1px solid ${t.brd}22`}}>
+                    <span style={{fontSize:11,color:t.acc,fontWeight:800,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:90,maxWidth:150}}>{v.voter_name}</span>
+                    <span style={{height:1,background:`linear-gradient(90deg,${t.acc}55,${t.ok}55)`,width:28,flexShrink:0}}/>
+                    <span style={{fontSize:11,color:t.ok,fontWeight:900,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:100,maxWidth:170}}>{v.voted_for_name}</span>
+                    <span style={{fontSize:10,color:t.mut,lineHeight:1.45,flex:"1 1 220px",minWidth:0}}>{v.reason||"No reason supplied."}</span>
+                  </div>):<div style={{display:"flex",alignItems:"center",gap:5,color:t.pink,fontSize:11,fontWeight:800}}>
+                    {[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)} Voting in progress
+                  </div>}
+                </div>
+              </div>;
+            };
+            return <div key={actId||"empty"} style={{maxWidth:1540,margin:"0 auto",padding:"0 20px 8px",overflowY:"auto"}}>
+              <div style={{position:"sticky",top:0,zIndex:8,margin:"0 0 16px",padding:"10px 0 8px",background:`linear-gradient(180deg,${t.bg}F8,${t.bg}D8 70%,transparent)`,backdropFilter:"blur(8px)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10,background:`${t.surface}B8`,border:`1px solid ${t.brd}30`,borderRadius:10,padding:"10px 12px"}}>
+                  <div style={{width:34,height:34,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.pink}12`,border:`1px solid ${t.pink}35`,color:t.pink}}><IC.Council/></div>
+                  <div style={{minWidth:0,flex:1}}>
+                    <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                      <span style={{fontSize:13,fontWeight:900,color:t.text,letterSpacing:.4}}>{councilCfg?.name||"Council Session"}</span>
+                      {chip(t.pink,`${members.length} members`)}
+                      {chip(councilRunning?t.ok:t.mut,livePhase)}
+                      {councilRound?.total_rounds>1&&chip(t.acc,`Round ${(councilRound.round||0)+1}/${councilRound.total_rounds}`)}
+                    </div>
+                    <div style={{fontSize:10,color:t.mut,marginTop:3,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{members.map(m=>memberView(m.id).name).join(" / ")||"No council members configured"}</div>
+                  </div>
+                  {councilCfg?.host_model&&chip(t.warm,<><IC.Crown/>{councilCfg.host_model}</>)}
+                </div>
+              </div>
+              {turns.map((turn,ti)=>{
+                const hostMeta=turn.host?getMeta(turn.host):{};
+                const isLive=councilRunning&&isLastTurn(ti);
+                const turnVotes=isLive?councilVotes:(hostMeta.votes||[]);
+                const turnTally=tallyFromVotes(turnVotes);
+                const roundNums=Object.keys(turn.rounds).map(Number).sort((a,b)=>a-b);
+                return <div key={ti} style={{display:"grid",gridTemplateColumns:"26px minmax(0,1fr)",gap:12,marginBottom:28,animation:"fadeIn .3s both"}}>
+                  <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
+                    <div style={{width:26,height:26,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.f4}10`,border:`1px solid ${t.f4}35`,color:t.f4}}><IC.User/></div>
+                    <div style={{width:1,flex:1,minHeight:30,background:`linear-gradient(${t.f4}45,${t.pink}33,${t.warm}35)`}}/>
+                  </div>
+                  <div>
+                    <div style={{background:`${t.surface}D8`,border:`1px solid ${t.brd}38`,borderRadius:10,padding:"12px 14px",marginBottom:14}}>
+                      <div style={{fontSize:10,color:t.f4,fontWeight:900,textTransform:"uppercase",letterSpacing:.8,marginBottom:6}}>Address to the council</div>
+                      <div style={{fontSize:fontSize,lineHeight:1.65,color:t.text}}><MDWrap>{md(turn.user.content)}</MDWrap></div>
+                    </div>
+                    {roundNums.map(rnd=>{
+                      const rKey=`${ti}-${rnd}`;
+                      const resps=turn.rounds[rnd]||[];
+                      const label=getMeta(resps[0]||{}).round_label||(rnd===0?"Opening Statements":`Rebuttal Round ${rnd}`);
+                      const isExpanded=expandedRounds[rKey]!==undefined?expandedRounds[rKey]:true;
+                      return <div key={rnd} style={{marginBottom:14}}>
+                        <button onClick={()=>setExpandedRounds(p=>({...p,[rKey]:!isExpanded}))} style={{width:"100%",border:`1px solid ${rnd===0?t.acc:t.pink}28`,background:`${rnd===0?t.acc:t.pink}08`,borderRadius:9,padding:"8px 10px",display:"flex",alignItems:"center",gap:8,cursor:"pointer",color:rnd===0?t.acc:t.pink,fontFamily:font}}>
+                          <span style={{transform:isExpanded?"rotate(0deg)":"rotate(-90deg)",transition:"transform .15s"}}><IC.ChevDown/></span>
+                          {rnd===0?<IC.Council/>:<IC.GitBranch/>}
+                          <span style={{fontSize:11,fontWeight:900,textTransform:"uppercase",letterSpacing:.8}}>{label}</span>
+                          <span style={{fontSize:10,color:t.mut,marginLeft:"auto"}}>{resps.length} response{resps.length===1?"":"s"}</span>
+                        </button>
+                        {isExpanded&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12,marginTop:10}}>
+                          {resps.map((resp,ri)=>responseCard(resp,ri,rnd,turnTally,false))}
                         </div>}
                       </div>;
-                    };
-                    return <>
-                  {roundNums.map(rnd=>{
-                    const roundLabel=rnd===0?"Opening Statements":`⚔️ Rebuttal Round ${rnd}`;
-                    const rKey=`${ti}-${rnd}`;
-                    const isExpanded=expandedRounds[rKey]!==undefined?expandedRounds[rKey]:(rnd===roundNums[roundNums.length-1]);
-                    const resps=turn.rounds[rnd]||[];
-                    return <div key={rnd} style={{marginBottom:10}}>
-                      {/* Round header — always clickable when multiple rounds */}
-                      <button onClick={()=>setExpandedRounds(p=>({...p,[rKey]:!isExpanded}))}
-                        style={{background:"none",border:"none",cursor:"pointer",width:"100%",display:"flex",alignItems:"center",gap:8,padding:"6px 0",marginBottom:isExpanded?6:0}}>
-                        <div style={{flex:1,height:1,background:rnd===0?`${t.acc}33`:`${t.pink}33`}}/>
-                        <span style={{fontSize:10,fontWeight:700,color:rnd===0?t.acc:t.pink,textTransform:"uppercase",letterSpacing:1,whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:5}}>
-                          {hasMultipleRounds&&<span style={{fontSize:11,transition:"transform .2s",display:"inline-block",transform:isExpanded?"rotate(90deg)":"rotate(0deg)"}}>▶</span>}
-                          {roundLabel}
-                          <span style={{fontSize:9,color:t.mut,fontWeight:400,textTransform:"none",letterSpacing:0}}>({resps.length} responses)</span>
-                        </span>
-                        <div style={{flex:1,height:1,background:rnd===0?`${t.acc}33`:`${t.pink}33`}}/>
-                      </button>
-                      {isExpanded&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:10}}>
-                        {resps.map((resp,ri)=>renderCard(resp,ri,rnd))}
-                      </div>}
-                    </div>;
-                  })}
-                  {/* Live streaming round header + cards */}
-                  {isLive&&councilRound&&<div style={{marginBottom:10}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0",marginBottom:6}}>
-                      <div style={{flex:1,height:1,background:`${t.pink}33`}}/>
-                      <span style={{fontSize:10,fontWeight:700,color:t.pink,textTransform:"uppercase",letterSpacing:1,whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:5}}>
-                        ⚔️ {councilRound.label}{councilRound.total_rounds>1?` (${councilRound.round+1}/${councilRound.total_rounds})`:""}
-                      </span>
-                      <div style={{flex:1,height:1,background:`${t.pink}33`}}/>
-                    </div>
-                    {councilKbStatus&&<div style={{fontSize:10,color:t.dim,textAlign:"center",marginBottom:6}}>📚 {councilKbStatus}</div>}
-                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:10}}>
-                      {Object.entries(councilResponses).map(([mid,resp])=>{
-                        const member=councilCfg?.members?.find(m=>m.id===mid)||{};
-                        return <div key={mid} style={{background:`${t.surface}AA`,border:`1px solid ${t.acc}44`,borderRadius:14,overflow:"hidden"}}>
-                          <div style={{padding:"8px 12px",background:`${t.acc}10`,borderBottom:`1px solid ${t.acc}22`,display:"flex",alignItems:"center",gap:6}}>
-                            <span style={{display:"inline-block",animation:"bop 2s ease-in-out infinite"}}><IC.Bot/></span>
-                            <span style={{fontSize:11,fontWeight:700,color:t.acc,flex:1}}>{member.persona_name||resp.model?.split(":")[0]||mid}</span>
-                            {!resp.done?<div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>:<span style={{color:t.ok,fontSize:11}}>✓</span>}
-                          </div>
-                          <div ref={el=>{if(el&&!resp.done)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:320,overflowY:"auto"}}>
-                            <MDWrap>{md(resp.content||"")}</MDWrap>
-                            {!resp.done&&<span style={{display:"inline-block",width:2,height:13,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                          </div>
-                        </div>;
-                      })}
-                    </div>
-                  </div>}
-                  {/* Voting phase indicator */}
-                  {isLive&&councilVoting&&turnVotes.length===0&&<div style={{background:`${t.pink}08`,border:`1px solid ${t.pink}28`,borderRadius:12,padding:"10px 14px",marginBottom:10,animation:"fadeIn .3s",display:"flex",alignItems:"center",gap:8}}>
-                    <div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
-                    <span style={{fontSize:11,color:t.pink,fontWeight:600}}>🗳 AI members are voting...</span>
-                  </div>}
-                  {/* AI Peer Votes */}
-                  {turnVotes.length>0&&<div style={{background:`${t.pink}08`,border:`1px solid ${t.pink}28`,borderRadius:12,padding:"10px 14px",marginBottom:10,animation:"fadeIn .3s"}}>
-                    <div style={{fontSize:10,fontWeight:700,color:t.pink,textTransform:"uppercase",letterSpacing:.5,marginBottom:6,display:"flex",alignItems:"center",gap:4}}>
-                      🗳 AI Peer Votes
-                    </div>
-                    {turnVotes.map((v,vi)=><div key={vi} style={{fontSize:11,color:t.dim,padding:"3px 0",display:"flex",gap:5,alignItems:"baseline",flexWrap:"wrap",animation:"fadeIn .3s"}}>
-                      <span style={{color:t.acc,fontWeight:600,flexShrink:0}}>{v.voter_name}</span>
-                      <span style={{color:t.mut,fontSize:10}}>voted for</span>
-                      <span style={{color:t.ok,fontWeight:600,flexShrink:0}}>{v.voted_for_name}</span>
-                      {v.reason&&<span style={{color:t.mut,fontSize:10,flex:1}}>— {v.reason}</span>}
-                    </div>)}
-                  </div>}
-                  </>;})()}
-                  {/* Host synthesis */}
-                  {(turn.host||(councilRunning&&isLastTurn(ti)&&councilHostContent))&&<div style={{background:`${t.warm}08`,border:`1px solid ${t.warm}28`,borderRadius:14,padding:"12px 16px",marginTop:4,animation:"fadeIn .3s"}}>
-                    <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8}}>
-                      <IC.Crown/><span style={{fontSize:11,fontWeight:700,color:t.warm}}>Host Synthesis</span>
-                      {councilCfg?.host_model&&<span style={{fontSize:9,color:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:4}}>{councilCfg.host_model}</span>}
-                      {councilRunning&&isLastTurn(ti)&&!turn.host&&<div style={{display:"flex",gap:3,marginLeft:"auto"}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.warm,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
-                    </div>
-                    <div ref={el=>{if(el&&councilRunning&&isLastTurn(ti)&&!turn.host)el.scrollTop=el.scrollHeight;}} style={{fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:400,overflowY:"auto"}}>
-                      <MDWrap>{md(turn.host?.content||councilHostContent)}</MDWrap>
-                      {councilRunning&&isLastTurn(ti)&&councilHostContent&&!turn.host&&<span style={{display:"inline-block",width:2,height:13,background:t.warm,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                    </div>
-                  </div>}
-                  {quickResults.length>0&&isLastTurn(ti)&&<QuickSearchSourcesPanel payload={_quickSearchPayloadFromEvents(evts,quickResults)} t={t} font={font}/>}
-                </div>
-              </div>)}
-              {/* Initial streaming before first user message turn is built */}
-              {councilRunning&&!turns.length&&Object.keys(councilResponses).length>0&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:10}}>
-                {Object.entries(councilResponses).map(([mid,resp])=><div key={mid} style={{background:`${t.surface}AA`,border:`1px solid ${t.acc}44`,borderRadius:14,overflow:"hidden"}}>
-                  <div style={{padding:"8px 12px",background:`${t.acc}10`,borderBottom:`1px solid ${t.acc}22`,display:"flex",alignItems:"center",gap:6}}>
-                    <span style={{display:"inline-block",animation:"bop 2s ease-in-out infinite"}}><IC.Bot/></span>
-                    <span style={{fontSize:11,fontWeight:700,color:t.acc}}>{resp.model?.split(":")[0]||mid}</span>
-                    {!resp.done&&<div style={{display:"flex",gap:3,marginLeft:"auto"}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
+                    })}
+                    {isLive&&councilRound&&<div style={{marginBottom:14}}>
+                      <div style={{border:`1px solid ${t.pink}28`,background:`${t.pink}08`,borderRadius:9,padding:"8px 10px",display:"flex",alignItems:"center",gap:8,color:t.pink}}>
+                        <IC.GitBranch/><span style={{fontSize:11,fontWeight:900,textTransform:"uppercase",letterSpacing:.8}}>{councilRound.label}</span>
+                        <div style={{display:"flex",gap:4,marginLeft:"auto"}}>{[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
+                      </div>
+                      {councilKbStatus&&<div style={{fontSize:10,color:t.dim,margin:"7px 2px 0"}}>{councilKbStatus}</div>}
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12,marginTop:10}}>
+                        {Object.entries(councilResponses).map(([mid,resp],ri)=>responseCard({content:resp.content||"",metadata:{council_member_id:mid,council_model:resp.model,council_persona:resp.member_name,debate_round:resp.round,round_label:resp.round_label,responding_to:resp.responding_to||[]},live:resp},ri,`live-${resp.round||0}`,turnTally,true))}
+                      </div>
+                    </div>}
+                    {ballotPanel(turnVotes,hostMeta)}
+                    {(turn.host||(isLive&&councilHostContent))&&<div style={{background:`linear-gradient(180deg,${t.warm}10,${t.surface}C8)`,border:`1px solid ${t.warm}34`,borderRadius:10,padding:14,marginTop:12,animation:"fadeIn .3s"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+                        <div style={{width:28,height:28,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.warm}12`,border:`1px solid ${t.warm}34`,color:t.warm}}><IC.Crown/></div>
+                        <div style={{minWidth:0,flex:1}}>
+                          <div style={{fontSize:12,fontWeight:900,color:t.warm,textTransform:"uppercase",letterSpacing:.8}}>Moderator Verdict</div>
+                          <div style={{fontSize:10,color:t.mut}}>{councilCfg?.host_model||act.model||"host model"}</div>
+                        </div>
+                        {(hostMeta.winner||hostMeta.winners?.[0])&&chip(t.ok,<><IC.Trophy/>{(hostMeta.winner||hostMeta.winners[0]).name}</>)}
+                        {isLive&&!turn.host&&<div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.warm,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
+                      </div>
+                      <div ref={el=>{if(el&&isLive&&!turn.host)el.scrollTop=el.scrollHeight;}} style={{fontSize:fontSize-1,lineHeight:1.75,color:t.dim,maxHeight:520,overflowY:"auto"}}>
+                        <MDWrap>{md(turn.host?.content||councilHostContent)}</MDWrap>
+                        {isLive&&councilHostContent&&!turn.host&&<span style={{display:"inline-block",width:2,height:13,background:t.warm,marginLeft:2,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
+                      </div>
+                    </div>}
+                    {quickResults.length>0&&isLastTurn(ti)&&<QuickSearchSourcesPanel payload={_quickSearchPayloadFromEvents(evts,quickResults)} t={t} font={font}/>}
                   </div>
-                  <div ref={el=>{if(el&&!resp.done)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:320,overflowY:"auto"}}><MDWrap>{md(resp.content||"")}</MDWrap></div>
-                </div>)}
+                </div>;
+              })}
+              {councilRunning&&!turns.length&&Object.keys(councilResponses).length>0&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12}}>
+                {Object.entries(councilResponses).map(([mid,resp],ri)=>responseCard({content:resp.content||"",metadata:{council_member_id:mid,council_model:resp.model,council_persona:resp.member_name,debate_round:resp.round,round_label:resp.round_label,responding_to:resp.responding_to||[]},live:resp},ri,`initial-${resp.round||0}`,{},true))}
               </div>}
               <div ref={chatEnd}/>
             </div>;

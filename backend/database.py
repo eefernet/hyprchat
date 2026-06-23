@@ -325,6 +325,7 @@ CREATE TABLE IF NOT EXISTS council_members (
     id TEXT PRIMARY KEY,
     council_id TEXT NOT NULL,
     model TEXT NOT NULL,
+    model_config_id TEXT DEFAULT NULL,
     system_prompt TEXT DEFAULT '',
     persona_name TEXT DEFAULT '',
     points INTEGER DEFAULT 0,
@@ -1438,6 +1439,12 @@ async def init_db():
             except Exception as e:
                 if "duplicate column" not in str(e).lower():
                     print(f"[DB MIGRATION] Warning: {e}")
+        # Migrate council_members: linked persona profile support
+        try:
+            await db.execute("ALTER TABLE council_members ADD COLUMN model_config_id TEXT DEFAULT NULL")
+        except Exception as e:
+            if "duplicate column" not in str(e).lower():
+                print(f"[DB MIGRATION] Warning: {e}")
         # Migrate conversations: add fork columns
         for col, default in [("forked_from", "NULL"), ("fork_point_msg_id", "NULL")]:
             try:
@@ -4495,7 +4502,7 @@ async def delete_council(council_id: str):
         await db.close()
 
 
-async def add_council_member(id: str, council_id: str, model: str, system_prompt: str = "", persona_name: str = ""):
+async def add_council_member(id: str, council_id: str, model: str, system_prompt: str = "", persona_name: str = "", model_config_id: str = None):
     user_id = _scope_user()
     db = await get_db()
     try:
@@ -4503,8 +4510,8 @@ async def add_council_member(id: str, council_id: str, model: str, system_prompt
         if not rows:
             return
         await db.execute(
-            "INSERT INTO council_members(id,council_id,model,system_prompt,persona_name,points) VALUES(?,?,?,?,?,0)",
-            (id, council_id, model, system_prompt, persona_name)
+            "INSERT INTO council_members(id,council_id,model,model_config_id,system_prompt,persona_name,points) VALUES(?,?,?,?,?,?,0)",
+            (id, council_id, model, model_config_id, system_prompt, persona_name)
         )
         await db.execute("UPDATE council_configs SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (council_id,))
         await db.commit()
@@ -4513,7 +4520,7 @@ async def add_council_member(id: str, council_id: str, model: str, system_prompt
 
 
 async def update_council_member(member_id: str, **kwargs):
-    allowed = {"model", "system_prompt", "persona_name", "points"}
+    allowed = {"model", "model_config_id", "system_prompt", "persona_name", "points"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return
