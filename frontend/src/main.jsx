@@ -1870,6 +1870,126 @@ const _metaObj = (meta)=>{
   if(typeof meta==="string"){try{return JSON.parse(meta)||{};}catch{return{};}}
   return meta||{};
 };
+const _qsHref = (url)=>{
+  const raw=String(url||"").trim();
+  if(!raw)return "";
+  return /^https?:\/\//i.test(raw)?raw:`https://${raw}`;
+};
+const _qsHost = (url)=>{
+  try{return new URL(_qsHref(url)).hostname.replace(/^www\./,"");}catch{return "";}
+};
+const _qsUrlKey = (url)=>{
+  try{
+    const u=new URL(_qsHref(url));
+    u.hash="";
+    u.hostname=u.hostname.replace(/^www\./,"");
+    u.pathname=u.pathname.replace(/\/+$/,"")||"/";
+    return u.toString().replace(/\/$/,"").toLowerCase();
+  }catch{return String(url||"").trim().replace(/\/+$/,"").toLowerCase();}
+};
+const _qsFaviconUrl = (urlOrHost, size=32)=>{
+  const host=_qsHost(urlOrHost)||String(urlOrHost||"").replace(/^www\./,"");
+  return host?`https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=${size}`:"";
+};
+const _quickSearchPayloadFromEvents = (evts, fallbackResults=[])=>{
+  const qs=(Array.isArray(evts)?evts:[]).filter(e=>e?.type==="search_results"&&e?.data?.source==="quick_search").pop()?.data;
+  if(qs?.results?.length)return qs;
+  return fallbackResults?.length?{source:"quick_search",results:fallbackResults}:null;
+};
+const _quickSearchResults = (payload)=>{
+  const seen=new Set();
+  const out=[];
+  for(const r of payload?.results||[]){
+    const href=_qsHref(r?.url);
+    const key=_qsUrlKey(href);
+    if(!href||seen.has(key))continue;
+    seen.add(key);
+    out.push({...r,url:href,domain:_qsHost(href)});
+  }
+  return out;
+};
+const _quickSourceForUrl = (url, results=[])=>{
+  const key=_qsUrlKey(url);
+  if(!key)return null;
+  return _quickSearchResults({results}).find(r=>_qsUrlKey(r.url)===key)||null;
+};
+function SourceFavicon({url,domain,size=18,theme,title}){
+  const [failed,setFailed]=useState(false);
+  const host=domain||_qsHost(url);
+  const initial=(host||"?").slice(0,1).toUpperCase();
+  const bg=theme?`${theme.surface}DD`:"#111";
+  const border=theme?`1px solid ${theme.brd}55`:"1px solid rgba(255,255,255,.18)";
+  const box={width:size,height:size,borderRadius:Math.max(4,Math.floor(size*.22)),border,background:bg,display:"inline-flex",alignItems:"center",justifyContent:"center",flexShrink:0,overflow:"hidden",boxSizing:"border-box"};
+  if(!host||failed)return <span title={title||host} style={{...box,color:theme?.acc||"currentColor",fontSize:Math.max(8,Math.floor(size*.52)),fontWeight:800}}>{initial}</span>;
+  return <span title={title||host} style={box}>
+    <img src={_qsFaviconUrl(host,size>=24?64:32)} alt="" style={{width:"100%",height:"100%",display:"block"}} onError={()=>setFailed(true)}/>
+  </span>;
+}
+function QuickSourceInlineChip({href,label,source,t,font,onPreview}){
+  const host=source?.domain||_qsHost(href);
+  const text=String(label||host||"source").replace(/\s+/g," ").trim();
+  const short=text.length>34?`${text.slice(0,31)}...`:text;
+  const title=[source?.title||text,host,source?.snippet].filter(Boolean).join("\n");
+  return <span style={{display:"inline-flex",alignItems:"center",gap:0,margin:"2px 1px",verticalAlign:"middle",maxWidth:"100%"}}>
+    <a href={href} target="_blank" rel="noopener" title={title} style={{display:"inline-flex",alignItems:"center",gap:5,padding:"3px 8px",background:`${t.f1}12`,border:`1px solid ${t.f1}38`,borderRadius:onPreview?"7px 0 0 7px":7,color:t.f1,textDecoration:"none",fontSize:11,fontWeight:750,maxWidth:260,overflow:"hidden",whiteSpace:"nowrap",boxSizing:"border-box"}}>
+      <SourceFavicon url={href} domain={host} size={14} theme={t}/>
+      <span style={{overflow:"hidden",textOverflow:"ellipsis"}}>{short}</span>
+      <span style={{fontSize:8,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.4}}>{host}</span>
+    </a>
+    {onPreview&&<button type="button" onClick={()=>onPreview(source?.title||text,href)} title="Preview source" style={{display:"inline-flex",alignItems:"center",justifyContent:"center",height:24,padding:"0 7px",background:`${t.acc}10`,border:`1px solid ${t.f1}38`,borderLeft:"none",borderRadius:"0 7px 7px 0",color:t.acc,cursor:"pointer",fontFamily:font,fontSize:10}}>
+      <IC.Search/>
+    </button>}
+  </span>;
+}
+function QuickSearchSourcesPanel({payload,t,font,defaultOpen=false}){
+  const [open,setOpen]=useState(!!defaultOpen);
+  const results=useMemo(()=>_quickSearchResults(payload),[payload]);
+  if(!results.length)return null;
+  const domains=[];
+  for(const r of results){if(r.domain&&!domains.includes(r.domain))domains.push(r.domain);}
+  const query=payload?.query||"Quick Search";
+  const freshness=payload?.freshness_mode||payload?.resolved_date||"";
+  const shown=results.slice(0,18);
+  const meta=[freshness,domains.slice(0,3).join(", ")].filter(Boolean).join(" - ");
+  return <div style={{margin:"12px 0 4px",border:`1px solid ${t.brd}44`,borderRadius:8,background:`${t.surface}42`,overflow:"hidden",boxShadow:"none"}}>
+    <button type="button" aria-expanded={open} onClick={()=>setOpen(o=>!o)} style={{width:"100%",border:"none",background:`${t.surface}58`,color:t.dim,cursor:"pointer",fontFamily:font,padding:"7px 10px",display:"grid",gridTemplateColumns:"auto 1fr auto",alignItems:"center",gap:9,textAlign:"left"}}>
+      <span style={{display:"inline-flex",alignItems:"center",gap:6,color:t.f1,fontSize:10,fontWeight:900,textTransform:"uppercase",letterSpacing:.6,whiteSpace:"nowrap"}}>
+        <span style={{transition:"transform .16s",transform:open?"rotate(90deg)":"rotate(0)",display:"inline-block",fontSize:9}}>▶</span>
+        <IC.Search/> Sources
+        <span style={{color:t.mut,fontWeight:800,letterSpacing:0}}>({results.length})</span>
+      </span>
+      <span style={{minWidth:0,display:"flex",flexDirection:"column",gap:1}}>
+        <span style={{fontSize:11,color:t.text,fontWeight:750,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{query}</span>
+        {meta&&<span style={{fontSize:9,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{meta}</span>}
+      </span>
+      <span style={{display:"flex",alignItems:"center",justifyContent:"flex-end",minWidth:0,paddingLeft:4}}>
+        {results.slice(0,6).map((r,i)=><span key={`${r.url}-${i}`} style={{marginLeft:i?-5:0,position:"relative",zIndex:10-i}}>
+          <SourceFavicon url={r.url} domain={r.domain} size={20} theme={t} title={r.domain}/>
+        </span>)}
+      </span>
+    </button>
+    {open&&<div style={{padding:9,borderTop:`1px solid ${t.brd}28`,display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:7}}>
+      {shown.map((r,i)=>{
+        const isMedia=r.type==="youtube"||r.type==="image";
+        const thumb=r.thumbnail&&isMedia;
+        const badges=[r.published_date,r.freshness,r.source_tier].filter(Boolean).join(" - ");
+        return <a key={`${r.url}-${i}`} href={r.url} target="_blank" rel="noreferrer" title={r.score_reason||r.title||r.url} style={{textDecoration:"none",display:"grid",gridTemplateColumns:thumb?"24px minmax(0,1fr) 54px":"24px minmax(0,1fr)",gap:8,alignItems:"start",minWidth:0,padding:"8px 9px",borderRadius:7,border:`1px solid ${t.brd}32`,background:`${t.bgDeep}55`,color:t.dim,boxSizing:"border-box"}}>
+          <SourceFavicon url={r.url} domain={r.domain} size={22} theme={t} title={r.domain}/>
+          <span style={{minWidth:0,display:"flex",flexDirection:"column",gap:3}}>
+            <span style={{fontSize:11,fontWeight:800,color:t.text,lineHeight:1.35,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{r.title||r.domain||"Source"}</span>
+            {r.snippet&&<span style={{fontSize:10,color:t.mut,lineHeight:1.4,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{r.snippet}</span>}
+            <span style={{display:"flex",alignItems:"center",gap:5,minWidth:0,fontSize:9,color:t.dim}}>
+              <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:750,color:r.type==="youtube"?t.err:r.type==="image"?t.acc:t.f1}}>{r.domain||"web"}</span>
+              {badges&&<span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:t.mut}}>{badges}</span>}
+              {typeof r.score==="number"&&<span style={{marginLeft:"auto",color:t.mut,flexShrink:0}}>{Math.round(r.score)}</span>}
+            </span>
+          </span>
+          {thumb&&<img src={proxiedImageUrl(r.thumbnail)} alt="" loading="lazy" referrerPolicy="no-referrer" style={{width:54,height:42,objectFit:"cover",borderRadius:6,border:`1px solid ${t.brd}33`,background:t.bgDeep}} onError={e=>{e.currentTarget.style.display="none";}}/>}
+        </a>;
+      })}
+    </div>}
+  </div>;
+}
 const _DAEDALUS_TOOLS = new Set([
   "plan_project","generate_code","run_review","run_acceptance_review",
   "run_fixer","run_aider_fix","ask_project","download_project","download_file",
@@ -2076,9 +2196,9 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
   const fileReadyEvts = evts.filter(e=>e.type==="file_ready");
   const kbSourceEvts = evts.filter(e=>e.type==="kb_sources");
   const codeAgentNoteEvts = evts.filter(e=>e.type==="codeagent_note");
-  // Skip search_agent's events here — those render in the QUICK SEARCH RESULTS
-  // carousel above the message via quickResults state. SearchResultCards is
-  // for the `research` tool's mid-message results, which don't carry source.
+  // Skip search_agent's events here — Quick Search sources render as the
+  // per-answer drawer. SearchResultCards is for the `research` tool's
+  // mid-message results, which don't carry source="quick_search".
   const searchResultEvts = evts.filter(e=>e.type==="search_results"&&e.data?.source!=="quick_search");
   const sourceLinkEvts = evts.filter(e=>e.type==="source_links");
 
@@ -3668,15 +3788,20 @@ const MemoMD = React.memo(
 // object each render would re-parse every message on every token. Cache keyed on
 // the metadata object (or the msg itself when metadata is a serialized string).
 const _citeOptsCache=new WeakMap();
-function citeOptsFor(msg){
+function citeOptsFor(msg, liveQuickSearch=null){
   if(!msg||typeof msg!=="object")return undefined;
   const key=(msg.metadata&&typeof msg.metadata==="object")?msg.metadata:msg;
-  if(_citeOptsCache.has(key))return _citeOptsCache.get(key);
+  const liveQuick=liveQuickSearch?.results?.length?liveQuickSearch:null;
+  if(!liveQuick&&_citeOptsCache.has(key))return _citeOptsCache.get(key);
   let meta=msg.metadata;
   if(typeof meta==="string"){try{meta=JSON.parse(meta);}catch{meta=null;}}
   const ev=(meta?.saved_events||[]).filter(e=>e.type==="kb_sources").pop();
-  const v=(ev?.data?.sources?.length)?{citations:ev.data.sources}:undefined;
-  _citeOptsCache.set(key,v);
+  const quick=liveQuick||_quickSearchPayloadFromEvents(meta?.saved_events||[]);
+  const v=(ev?.data?.sources?.length||quick?.results?.length)?{
+    ...(ev?.data?.sources?.length?{citations:ev.data.sources}:{}),
+    ...(quick?.results?.length?{quickSearch:quick}:{}),
+  }:undefined;
+  if(!liveQuick)_citeOptsCache.set(key,v);
   return v;
 }
 
@@ -7316,6 +7441,8 @@ function HyprChat(){
           </span>;
         }
         if(lu.startsWith("http://") || lu.startsWith("https://")){
+          const qsSrc=_quickSourceForUrl(lu,opts.quickSearch?.results);
+          if(qsSrc)return <QuickSourceInlineChip key={k} href={lu} label={lt} source={qsSrc} t={t} font={font} onPreview={openPreview}/>;
           const hn=(()=>{try{return new URL(lu).hostname.replace("www.","");}catch{return "";}})();
           return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"2px 0",verticalAlign:"middle"}}>
             <a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:11,fontWeight:700,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
@@ -7343,6 +7470,8 @@ function HyprChat(){
           </span>;
         }
         if(lu.startsWith("http://") || lu.startsWith("https://")){
+          const qsSrc=_quickSourceForUrl(lu,opts.quickSearch?.results);
+          if(qsSrc)return <QuickSourceInlineChip key={k} href={lu} label={lt} source={qsSrc} t={t} font={font} onPreview={openPreview}/>;
           const hn=(()=>{try{return new URL(lu).hostname.replace("www.","");}catch{return "";}})();
           return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"2px 0",verticalAlign:"middle"}}>
             <a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:11,fontWeight:600,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
@@ -7357,6 +7486,8 @@ function HyprChat(){
       // Bare URL — render as clickable link with favicon
       if(s.match(/^https?:\/\//)){
         const lu=s.replace(/[.,;:!?)]+$/,"");const trail=s.slice(lu.length);
+        const qsSrc=_quickSourceForUrl(lu,opts.quickSearch?.results);
+        if(qsSrc)return <span key={k}><QuickSourceInlineChip href={lu} label={_qsHost(lu)||lu} source={qsSrc} t={t} font={font} onPreview={openPreview}/>{trail}</span>;
         const hn=(()=>{try{return new URL(lu).hostname.replace("www.","");}catch{return "";}})();
         const display=lu.length>60?lu.slice(0,57)+"...":lu;
         return <span key={k}><a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 8px",background:`${t.warm}10`,border:`1px solid ${t.warm}28`,borderRadius:6,color:t.warm,textDecoration:"none",fontSize:11,maxWidth:340,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",verticalAlign:"middle"}}>
@@ -7381,7 +7512,7 @@ function HyprChat(){
   };
 
   // Streaming markdown sanitizer — closes unclosed fences/backticks before rendering
-  const mdStream=(text)=>{
+  const mdStream=(text,opts={})=>{
     if(!text)return null;
     let t2=text;
     // Only line-start ``` (allowing up to 3 spaces of CommonMark indent) counts as a fence delimiter.
@@ -7391,7 +7522,7 @@ function HyprChat(){
     const stripped=t2.replace(/```/g,"");
     const ticks=(stripped.match(/`/g)||[]).length;
     if(ticks%2!==0)t2+="`";
-    return md(t2,{streaming:true});
+    return md(t2,{...opts,streaming:true});
   };
 
   const md=(text,opts={})=>{
@@ -11027,37 +11158,6 @@ function HyprChat(){
                     <div style={{background:`${t.surface}F0`,padding:"9px 13px",borderRadius:8,border:`1px solid ${t.brd}44`,lineHeight:1.65,fontSize:fontSize,color:t.text}}><MDWrap>{md(turn.user.content)}</MDWrap></div>
                   </div>
                 </div>
-                {/* Quick search results — show before last turn's responses */}
-                {quickResults.length>0&&isLastTurn(ti)&&<div style={{marginBottom:16,marginLeft:36,animation:"fadeIn .3s"}}>
-                  <div style={{fontSize:10,fontWeight:700,color:t.f1,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,display:"flex",alignItems:"center",gap:4}}>
-                    <IC.Flash/> Quick Search Results
-                    <button onClick={()=>setQuickResults([])} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"0 4px",fontSize:10,marginLeft:"auto"}}>✕</button>
-                  </div>
-                  <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:10}}>
-                    {quickResults.map((r,ri)=>{const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();const isYT=r.type==="youtube";const isImg=r.type==="image";const hasTh=!!r.thumbnail;const domLetter=(hn||"?")[0].toUpperCase();
-                      return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}F2`,border:`1px solid ${t.brd}55`,borderRadius:8,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}
-                        onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
-                        <div style={{width:"100%",height:110,background:hasTh?(isYT?"#0a0a0a":t.bgDeep):t.bgDeep,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                          {hasTh?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";e.target.nextSibling&&(e.target.nextSibling.style.display="flex");}}/>:null}
-                          {!hasTh&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-                            <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:32,height:32,borderRadius:4,display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
-                            <span style={{fontSize:10,color:t.mut,opacity:.6,letterSpacing:.5}}>{hn}</span>
-                          </div>}
-                          {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
-                            <div style={{width:34,height:34,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#fff",boxShadow:"0 2px 10px rgba(0,0,0,.5)"}}>▶</div>
-                          </div>}
-                          {hasTh&&hn&&<div style={{position:"absolute",top:6,right:6,background:`${t.bg}CC`,backdropFilter:"blur(6px)",borderRadius:6,padding:3,display:"flex",alignItems:"center",justifyContent:"center",border:`1px solid ${t.brd}33`}}>
-                            <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=32`} style={{width:18,height:18,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
-                          </div>}
-                        </div>
-                        <div style={{padding:"8px 10px",display:"flex",flexDirection:"column",gap:3}}>
-                          <div style={{fontSize:11,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.title}</div>
-                          {r.snippet&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
-                          <div style={{fontSize:9,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
-                        </div>
-                      </a>;})}
-                  </div>
-                </div>}
                 {/* Council response cards — grouped by round */}
                 <div style={{marginLeft:36}}>
                   {(()=>{
@@ -11173,6 +11273,7 @@ function HyprChat(){
                       {councilRunning&&isLastTurn(ti)&&councilHostContent&&!turn.host&&<span style={{display:"inline-block",width:2,height:13,background:t.warm,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
                     </div>
                   </div>}
+                  {quickResults.length>0&&isLastTurn(ti)&&<QuickSearchSourcesPanel payload={_quickSearchPayloadFromEvents(evts,quickResults)} t={t} font={font}/>}
                 </div>
               </div>)}
               {/* Initial streaming before first user message turn is built */}
@@ -11190,11 +11291,10 @@ function HyprChat(){
             </div>;
           })():<div key={actId||"empty"} style={{maxWidth:chatWidth,margin:"0 auto",padding:"2px 18px 0"}}>
             {(()=>{const filteredMsgs=(act.messages||[]).filter(msg=>msg.role==="user"||msg.role==="assistant");
-              // Find the index of the last assistant message to place quick search results before it
+              // Find the last assistant message so live search/tool events attach to the active answer.
               let lastAssistantFilteredIdx=-1;
               filteredMsgs.forEach((m,idx)=>{if(m.role==="assistant")lastAssistantFilteredIdx=idx;});
               return filteredMsgs.map((msg,i)=>{const isU=msg.role==="user";const mid=`m${i}`;const isEditing=editingMsg?.index===i;
-              const showQS=quickResults.length>0&&i===lastAssistantFilteredIdx&&!isU;
               const activeProfile=!isU?getProfileForConversation(act):null;
               const personaAvatar=!isU&&(act?.persona_avatar||profileAvatar(activeProfile));
               const personaName=!isU&&act?.persona_name;
@@ -11208,37 +11308,10 @@ function HyprChat(){
               const messageWorkflows=isLastAssistant&&Array.isArray(coderWorkflows)?coderWorkflows.slice(0,3):[];
               const daedalusRunIds=!isU?_daedalusRunIdsForMessage(meta,isLastAssistant,evts):[];
               const isDaedalusOutput=!isU&&_isDaedalusOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
+              const liveQuickSearchPayload=isLastAssistant?_quickSearchPayloadFromEvents(evts,quickResults):null;
+              const renderOpts=citeOptsFor(msg,liveQuickSearchPayload);
+              const quickSearchPayload=renderOpts?.quickSearch;
               return <React.Fragment key={i}>
-              {showQS&&<div style={{marginBottom:16,animation:"fadeIn .3s"}}>
-                <div style={{fontSize:10,fontWeight:700,color:t.f1,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,display:"flex",alignItems:"center",gap:4}}>
-                  <IC.Flash/> Quick Search Results
-                  <button onClick={()=>setQuickResults([])} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"0 4px",fontSize:10,marginLeft:"auto"}}>✕</button>
-                </div>
-                <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:10}}>
-                  {quickResults.map((r,ri)=>{const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();const isYT=r.type==="youtube";const isImg=r.type==="image";const hasTh=!!r.thumbnail;const domLetter=(hn||"?")[0].toUpperCase();
-                    return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}F2`,border:`1px solid ${t.brd}55`,borderRadius:8,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}
-                      onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
-                      <div style={{width:"100%",height:110,background:hasTh?(isYT?"#0a0a0a":t.bgDeep):t.bgDeep,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                        {hasTh?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";e.target.nextSibling&&(e.target.nextSibling.style.display="flex");}}/>:null}
-                        {!hasTh&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-                          <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:32,height:32,borderRadius:4,display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
-                          <span style={{fontSize:10,color:t.mut,opacity:.6,letterSpacing:.5}}>{hn}</span>
-                        </div>}
-                        {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
-                          <div style={{width:34,height:34,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#fff",boxShadow:"0 2px 10px rgba(0,0,0,.5)"}}>▶</div>
-                        </div>}
-                        {hasTh&&hn&&<div style={{position:"absolute",top:6,right:6,background:`${t.bg}CC`,backdropFilter:"blur(6px)",borderRadius:6,padding:3,display:"flex",alignItems:"center",justifyContent:"center",border:`1px solid ${t.brd}33`}}>
-                          <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=32`} style={{width:18,height:18,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
-                        </div>}
-                      </div>
-                      <div style={{padding:"8px 10px",display:"flex",flexDirection:"column",gap:3}}>
-                        <div style={{fontSize:11,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.title}</div>
-                        {r.snippet&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
-                        <div style={{fontSize:9,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
-                      </div>
-                    </a>;})}
-                </div>
-              </div>}
               <div style={{marginBottom:compactMode?7:18,display:"flex",gap:9,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(i*.04,.2)}s both`}}>
                 <div style={{width:isU?28:40,height:isU?28:40,borderRadius:isU?7:10,display:"flex",alignItems:"center",justifyContent:"center",background:isU?t.bgDeep:`${personaColor}10`,border:`1px solid ${isU?t.f4:personaColor}38`,color:isU?t.f4:personaColor,flexShrink:0,marginTop:isU?3:1,overflow:"hidden",boxShadow:"none"}}>
                   {isU?<IC.User/>:personaAvatar?<img src={avatarSrc(personaAvatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
@@ -11265,7 +11338,7 @@ function HyprChat(){
                         <button onClick={()=>setEditingMsg(null)} style={btnS(t.mut)}>Cancel</button>
                       </div>
                     </div>
-                    :isDaedalusOutput?null:msg.isS?mdStream(renderedContent):<MemoMD content={renderedContent} md={md} opts={citeOptsFor(msg)}/>}
+                    :isDaedalusOutput?null:msg.isS?mdStream(renderedContent,renderOpts):<MemoMD content={renderedContent} md={md} opts={renderOpts}/>}
                     {isU&&msg.metadata?.images?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:msg.content?10:0}}>
                       {msg.metadata.images.map((img,ii)=><div key={ii} title={img.name} style={{display:"inline-flex",flexDirection:"column",gap:4,alignItems:"flex-start",maxWidth:260}}>
                         <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:8,border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:"none"}}/>
@@ -11323,7 +11396,7 @@ function HyprChat(){
                   {/* KB sources strip — numbered citation sources for this reply */}
                   {(()=>{
                     if(isU||msg.isS||isDaedalusOutput)return null;
-                    const co=citeOptsFor(msg);
+                    const co=renderOpts;
                     if(!co?.citations?.length)return null;
                     return <Collapsible theme={t} font={font} summary={`Sources (${co.citations.length})`}>
                       <div style={{display:"flex",flexDirection:"column",gap:6}}>
@@ -11337,6 +11410,7 @@ function HyprChat(){
                       </div>
                     </Collapsible>;
                   })()}
+                  {!isU&&!isDaedalusOutput&&quickSearchPayload&&<QuickSearchSourcesPanel payload={quickSearchPayload} t={t} font={font}/>}
                   {!msg.isS&&!isEditing&&<div style={msgToolbarS}>
                     {!isU&&msg.content&&<button onClick={()=>cp(renderedContent,mid)} style={msgActionS(copied===mid?t.ok:t.mut)}>
                       {copied===mid?<><IC.Check/> copied</>:<><IC.Copy/> copy</>}
