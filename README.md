@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Built with FastAPI + a single-file React SPA compiled with Vite. Local-first with no required cloud dependencies — optional OpenAI/Anthropic models via your own API keys.
+  Built with FastAPI + a Vite-compiled React SPA. Local-first with no required cloud dependencies — optional OpenAI/Anthropic models via your own API keys.
 </p>
 
 <p align="center">
@@ -28,7 +28,7 @@ HyprChat can execute code, upload files, call local services, and drive coding a
 
 ## What It Is
 
-HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-style dashboards. It combines normal chat, model management, web research, RAG, image generation, voice input/output, agent profiles, project workspaces, and a coding-agent workflow into one FastAPI service and one Vite-built React component file.
+HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-style dashboards. It combines normal chat, model management, web research, RAG, image generation, voice input/output, agent profiles, project workspaces, and a coding-agent workflow into one FastAPI service and one Vite-built React app.
 
 <p align="center">
   <img src="docs/images/mainScreen.png" alt="HyprChat main chat screen" width="900">
@@ -172,9 +172,10 @@ HyprFit's hardware-fit ranking model is adapted from the MIT-licensed llmfit/Pew
 
 ```text
 User → HyprChat (:8000)
-         ├── Frontend: single-component React SPA, Vite build
-         │    (source frontend/src/main.jsx → built frontend/dist/)
+         ├── Frontend: React SPA, Vite build
+         │    (source frontend/src/ → built frontend/dist/)
          ├── Backend: FastAPI + SSE streaming + SQLite
+         │    ├── backend.main:app entrypoint + extracted routers in backend/routes/
          │    ├── Chat/tool loop
          │    ├── Daedalus workflow router
          │    ├── Research + Quick Search
@@ -199,7 +200,11 @@ User → HyprChat (:8000)
 
 | Path | Purpose |
 |---|---|
-| `backend/main.py` | FastAPI routes, SSE endpoints, frontend serving, model/workflow/settings APIs |
+| `backend/main.py` | FastAPI app setup, lifespan, middleware/static serving, SSE/chat endpoints, and remaining unextracted API groups |
+| `backend/routes/` | Extracted FastAPI routers for health, settings/analytics, users, audio, cloud provider settings, HF, tools/connectors, model configs/personas, and Ollama model actions |
+| `backend/model_management.py` | Shared local Ollama model-management helpers used by bulk and single-model delete paths |
+| `backend/db/schema.py` | Extracted SQLite schema/startup migration helpers behind the `database.py` facade |
+| `backend/tooling/parser.py` | Extracted text/native tool-call parser helpers behind the `tools.py` facade |
 | `backend/agents/chat.py` | Streaming chat loop, tool calling, quick search injection, project-aware chat |
 | `backend/tools.py` | Tool execution, Daedalus routing/gates, OpenHands/Aider dispatch |
 | `backend/agents/*.py` | Daedalus agents, personas, reviewer, acceptance, project QA, indexer |
@@ -210,7 +215,9 @@ User → HyprChat (:8000)
 | `backend/quick_search.py` / `backend/search_agent.py` | Per-turn SearXNG search planning, ranking, page fetch, result cards |
 | `backend/comfyui.py` | ComfyUI workflow patching, image generation client, saved workflow library, model defaults, cleanup hooks |
 | `backend/voice.py` | Speech-to-text and text-to-speech proxy helpers for OpenAI-compatible local services |
-| `frontend/src/main.jsx` | The entire React frontend (Vite-built to `frontend/dist/`, which the backend serves) |
+| `frontend/src/main.jsx` | React root app, root state, and chat flow |
+| `frontend/src/session.js`, `theme.js`, `modelHelpers.js` | Extracted API/session, theme, and model/render helper modules |
+| `frontend/src/ModelPicker.jsx`, `frontend/src/components/`, `frontend/src/panels/` | Extracted model picker, leaf widgets/render blocks, Artifact/Image Studio panels, Analytics, and Prompt Library UI |
 | `deploy_monitor.py` | File watcher that deploys local changes to the homelab host |
 
 ## Fresh Install
@@ -319,7 +326,7 @@ For this homelab setup, `deploy_monitor.py` is the fastest edit/deploy loop:
 python3 deploy_monitor.py
 ```
 
-It reads `.deploy_config.json`, pushes changed backend/frontend files, restarts HyprChat after backend changes, and deploys `backend/openhands_worker.py` to Codebox when needed.
+It reads `.deploy_config.json`, pushes changed backend/frontend files, restarts HyprChat after backend changes, and deploys `backend/openhands_worker.py` to Codebox when needed. The monitor includes the extracted backend route modules, `backend/model_management.py`, `backend/db/schema.py`, `backend/tooling/parser.py`, and the extracted frontend source modules in `FRONTEND_SRC_FILES`.
 
 Optional `.deploy_config.json` SearXNG entry:
 
@@ -350,6 +357,9 @@ Manual deploy:
 ```bash
 scp backend/*.py root@<SERVER_IP>:/opt/hyprchat/backend/
 scp backend/agents/*.py root@<SERVER_IP>:/opt/hyprchat/backend/agents/
+scp backend/routes/*.py root@<SERVER_IP>:/opt/hyprchat/backend/routes/
+scp backend/db/*.py root@<SERVER_IP>:/opt/hyprchat/backend/db/
+scp backend/tooling/*.py root@<SERVER_IP>:/opt/hyprchat/backend/tooling/
 
 # Frontend: build on the dev machine, then ship the WHOLE dist/ (the hashed
 # asset names change every build, so clear the old ones first).
@@ -391,7 +401,7 @@ curl -s -X POST http://127.0.0.1:8000/api/images/enhance-prompt \
 Fast syntax check:
 
 ```bash
-python3 -m py_compile backend/*.py backend/agents/*.py
+python3 -m py_compile backend/*.py backend/agents/*.py backend/routes/*.py backend/db/*.py backend/tooling/*.py
 ```
 
 Integration tests expect a live HyprChat instance:
@@ -407,7 +417,7 @@ HYPRCHAT_URL=http://127.0.0.1:8000 python3 -m pytest tests/ -v
 | Layer | Tech |
 |---|---|
 | Backend | Python 3.11+, FastAPI, httpx, aiosqlite |
-| Frontend | React 18, single component file (`frontend/src/main.jsx`), Vite build with npm-bundled libs |
+| Frontend | React 18, Vite build with npm-bundled libs; `frontend/src/main.jsx` root plus extracted helper/component/panel modules |
 | Database | SQLite + ChromaDB |
 | LLM Runtime | Ollama with native tool calling plus text fallback; optional OpenAI/Anthropic cloud models |
 | Search | SearXNG |
@@ -418,7 +428,7 @@ HYPRCHAT_URL=http://127.0.0.1:8000 python3 -m pytest tests/ -v
 
 ## Project Notes
 
-- The frontend is one large component file built with Vite. Build on the dev machine (`cd frontend && npm run build`); the server just serves `frontend/dist/` and stays Node-free.
+- The frontend is a Vite app. Build on the dev machine (`cd frontend && npm run build`); the server just serves `frontend/dist/` and stays Node-free.
 - SQLite is the default database.
 - Tool-call fallback stays because not every Ollama model supports native tools.
 - Keep secrets out of Git: `.deploy_config.json`, `.env*`, keys, tokens, databases, and uploaded data.

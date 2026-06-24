@@ -38,6 +38,9 @@ CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".deploy_
 # ── Remote paths ──
 REMOTE_BACKEND = "/opt/hyprchat/backend/"
 REMOTE_AGENTS = REMOTE_BACKEND + "agents/"
+REMOTE_DB = REMOTE_BACKEND + "db/"
+REMOTE_ROUTES = REMOTE_BACKEND + "routes/"
+REMOTE_TOOLING = REMOTE_BACKEND + "tooling/"
 REMOTE_FRONTEND = "/opt/hyprchat/frontend/dist/"
 REMOTE_OPENHANDS_WORKER = "/opt/openhands-worker/"
 REMOTE_AIDER_VENV = REMOTE_OPENHANDS_WORKER + "aider-venv"
@@ -50,6 +53,22 @@ WATCHED = {
     "backend/config.py":            ("Config",           REMOTE_BACKEND,            True),
     "backend/database.py":          ("Database",         REMOTE_BACKEND,            True),
     "backend/tools.py":             ("Tools",            REMOTE_BACKEND,            True),
+    "backend/model_management.py":  ("Model Management", REMOTE_BACKEND,            True),
+    "backend/db/__init__.py":       ("Database Package", REMOTE_DB,                 True),
+    "backend/db/schema.py":         ("Database Schema",  REMOTE_DB,                 True),
+    "backend/routes/__init__.py":   ("Routes Package",   REMOTE_ROUTES,             True),
+    "backend/routes/context.py":    ("Route Context",    REMOTE_ROUTES,             True),
+    "backend/routes/health.py":     ("Health Routes",    REMOTE_ROUTES,             True),
+    "backend/routes/settings.py":   ("Settings Routes",  REMOTE_ROUTES,             True),
+    "backend/routes/users.py":      ("User Routes",      REMOTE_ROUTES,             True),
+    "backend/routes/audio.py":      ("Audio Routes",     REMOTE_ROUTES,             True),
+    "backend/routes/model_providers.py": ("Provider Routes", REMOTE_ROUTES,          True),
+    "backend/routes/hf.py":         ("HF Routes",        REMOTE_ROUTES,             True),
+    "backend/routes/tools_connectors.py": ("Tools/Connector Routes", REMOTE_ROUTES,  True),
+    "backend/routes/model_configs.py": ("Model Config Routes", REMOTE_ROUTES,        True),
+    "backend/routes/ollama_models.py": ("Ollama Model Routes", REMOTE_ROUTES,        True),
+    "backend/tooling/__init__.py":  ("Tooling Package",  REMOTE_TOOLING,            True),
+    "backend/tooling/parser.py":    ("Tool Parser",      REMOTE_TOOLING,            True),
     "backend/connectors.py":        ("Connectors",       REMOTE_BACKEND,            True),
     "backend/model_providers.py":   ("Model Providers",  REMOTE_BACKEND,            True),
     "backend/cancel_registry.py":   ("Cancel Registry",  REMOTE_BACKEND,            True),
@@ -85,6 +104,17 @@ WATCHED = {
     # and _build_and_deploy_frontend). The built dist/index.html is no longer
     # hand-edited or watched directly.
     "frontend/src/main.jsx":        ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/session.js":      ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/theme.js":        ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/modelHelpers.js": ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/ModelPicker.jsx": ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/components/BackgroundCanvas.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/artifactComponents.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/hyprChatWidgets.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/icons.jsx": ("Frontend (build)", REMOTE_FRONTEND,      False),
+    "frontend/src/components/markdownBlocks.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/panels/AnalyticsPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/panels/PromptLibraryPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/vendor.js":       ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/src/prism-setup.js":  ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/index.html":          ("Frontend (build)", REMOTE_FRONTEND,           False),
@@ -100,6 +130,17 @@ WATCHED = {
 # labelled "Frontend (build)".
 FRONTEND_SRC_FILES = {
     "frontend/src/main.jsx",
+    "frontend/src/session.js",
+    "frontend/src/theme.js",
+    "frontend/src/modelHelpers.js",
+    "frontend/src/ModelPicker.jsx",
+    "frontend/src/components/BackgroundCanvas.jsx",
+    "frontend/src/components/artifactComponents.jsx",
+    "frontend/src/components/hyprChatWidgets.jsx",
+    "frontend/src/components/icons.jsx",
+    "frontend/src/components/markdownBlocks.jsx",
+    "frontend/src/panels/AnalyticsPanel.jsx",
+    "frontend/src/panels/PromptLibraryPanel.jsx",
     "frontend/src/vendor.js",
     "frontend/src/prism-setup.js",
     "frontend/index.html",
