@@ -1240,6 +1240,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             "Supported types: `bar`, `line`, `pie`, `doughnut`, `scatter`, `radar`, `polarArea`. "
             "Simple form: `{\"type\":\"bar\",\"labels\":[\"A\",\"B\",\"C\"],\"data\":[4,7,2],\"title\":\"optional\"}`. "
             "Multi-series: use `\"datasets\":[{\"label\":\"X\",\"data\":[...]},{\"label\":\"Y\",\"data\":[...]}]` instead of `\"data\"`. "
+            "Start every ```chart / ```pygraph / ```mermaid fence on its own new line, and put a newline after the closing fence. "
             "Colors auto-pick from the active theme palette. Use charts for quantitative comparisons or trends "
             "instead of dumping raw numbers or ASCII art.\n"
             "- **Callouts**: start a blockquote with `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, "

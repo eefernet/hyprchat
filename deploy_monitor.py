@@ -267,6 +267,18 @@ _PW_AUTH_OPTS = [
     "-o", "NumberOfPasswordPrompts=1",
 ]
 
+_SSH_RETRYABLE_ERRORS = (
+    "Permission denied (publickey,password)",
+    "Connection reset by",
+    "Connection closed by",
+    "kex_exchange_identification",
+)
+
+
+def _ssh_retryable_failure(stdout, stderr):
+    msg = f"{stdout or ''}\n{stderr or ''}"
+    return any(token in msg for token in _SSH_RETRYABLE_ERRORS)
+
 
 def scp(local, remote_host, remote_path, user, password):
     """Copy a file to remote via scp. Returns (ok, msg)."""
@@ -321,7 +333,7 @@ def scp_recursive(local, remote_host, remote_path, user, password, timeout=120):
         return False, str(e)
 
 
-def ssh_cmd(host, user, password, command, timeout=30):
+def ssh_cmd(host, user, password, command, timeout=30, attempts=3):
     """Run a command on remote via ssh. Returns (ok, stdout, stderr)."""
     if password:
         cmd = [
@@ -332,9 +344,22 @@ def ssh_cmd(host, user, password, command, timeout=30):
     else:
         cmd = ["ssh", "-o", "StrictHostKeyChecking=no", f"{user}@{host}", command]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return r.returncode == 0, r.stdout.strip(), r.stderr.strip()
+        last = None
+        for attempt in range(max(1, attempts)):
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            out = r.stdout.strip()
+            err = r.stderr.strip()
+            if r.returncode == 0:
+                return True, out, err
+            last = (out, err)
+            if not password or attempt >= attempts - 1 or not _ssh_retryable_failure(out, err):
+                break
+            time.sleep(1 + attempt)
+        out, err = last or ("", "")
+        return False, out, err
     except FileNotFoundError:
+        if password:
+            return False, "", "sshpass not installed; install sshpass or configure SSH keys and remove the password for this host"
         cmd2 = ["ssh", "-o", "StrictHostKeyChecking=no", f"{user}@{host}", command]
         r = subprocess.run(cmd2, capture_output=True, text=True, timeout=timeout)
         return r.returncode == 0, r.stdout.strip(), r.stderr.strip()

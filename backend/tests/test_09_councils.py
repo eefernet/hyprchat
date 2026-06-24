@@ -205,6 +205,28 @@ class TestCouncilPresets:
         if council_id:
             client.delete(f"/api/councils/{council_id}")
 
+    def test_seed_philosophers_preset_links_persona_configs(self, client):
+        r = client.post("/api/seed/council-preset/philosophers")
+        assert r.status_code == 200
+        data = r.json()
+        members = data.get("members") or []
+        assert len(members) == 5
+
+        configs = {mc["id"]: mc for mc in client.get("/api/model-configs").json()}
+        for member in members:
+            mc_id = member.get("model_config_id")
+            assert mc_id
+            mc = configs.get(mc_id)
+            assert mc, f"missing linked persona config {mc_id}"
+            assert (mc.get("parameters") or {}).get("profile_type") == "persona"
+            assert member["model"] == mc["base_model"]
+            assert member["system_prompt"] == mc["system_prompt"]
+            assert member["persona_name"] == mc["name"]
+
+        council_id = data.get("id") or data.get("council_id")
+        if council_id:
+            client.delete(f"/api/councils/{council_id}")
+
 
 class TestCouncilSuggestions:
     def test_suggestions_with_members(self, long_client, created_council):

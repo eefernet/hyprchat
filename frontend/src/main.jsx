@@ -3467,7 +3467,7 @@ function parseChartConfig(code){
 function looksLikeChartConfig(code){
   try{
     const cfg=parseChartConfig(code);
-    const type=cfg.type||"";
+    const type=cfg.type||"bar";
     const allowed=["bar","line","pie","doughnut","scatter","radar","polarArea","bubble"];
     return allowed.includes(type)&&(
       Array.isArray(cfg.datasets)||
@@ -3475,6 +3475,13 @@ function looksLikeChartConfig(code){
       (cfg.data&&typeof cfg.data==="object")
     );
   }catch{return false;}
+}
+
+function normalizeRenderableFences(text){
+  if(!text)return text;
+  // Recover model output like `intro:```chart\n{...}`. CommonMark requires
+  // fences to start a line, but models sometimes attach visual fences to prose.
+  return text.replace(/([^\n])```(chart|pygraph|mermaid)(?=\n)/g,"$1\n```$2");
 }
 
 // Chart.js block — renders ```chart / ```pygraph JSON fences as inline charts
@@ -7545,6 +7552,7 @@ function HyprChat(){
     // Strip <think>...</think> blocks (model reasoning not for display)
     text = text.replace(/<think>[\s\S]*?<\/think>/g,'').trimStart();
     if(!text)return null;
+    text = normalizeRenderableFences(text);
     // Normalize bare /api/downloads/ paths to markdown download links
     text = text.replace(/(?<!\]\()\/api\/downloads\/([^\s)"'`\]]+)/g, '[📎 $1](/api/downloads/$1)');
     // Footnotes: extract [^label]: content defs (must start at line), collect, and replace [^label] refs with indexed placeholders

@@ -38,7 +38,14 @@ from council import stream_council_chat
 from events import EventBus
 import quick_search as qs_module
 from agents.chat import chat_stream_generate, TOOL_TEMPLATES, detect_template_family
-from agents.personas import seed_coder_bot as _seed_coder_bot, seed_coder_bot_v2 as _seed_coder_bot_v2, seed_conspiracy_bot as _seed_conspiracy_bot, seed_based_bot as _seed_based_bot, seed_all_defaults as _seed_all_defaults
+from agents.personas import (
+    ensure_philosopher_persona as _ensure_philosopher_persona,
+    seed_all_defaults as _seed_all_defaults,
+    seed_based_bot as _seed_based_bot,
+    seed_coder_bot as _seed_coder_bot,
+    seed_coder_bot_v2 as _seed_coder_bot_v2,
+    seed_conspiracy_bot as _seed_conspiracy_bot,
+)
 import hf as hf_module
 import hyprfit
 from hf import parse_ollama_progress
@@ -5527,57 +5534,11 @@ COUNCIL_PRESETS = {
             "depth of each philosophical tradition while giving the user a clear, actionable answer."
         ),
         "members": [
-            {
-                "persona_name": "Socrates",
-                "system_prompt": (
-                    "You are Socrates, the father of Western philosophy. You NEVER give direct answers — instead you "
-                    "use the Socratic method: ask probing questions that expose assumptions and contradictions. "
-                    "You believe true wisdom comes from knowing that you know nothing. Challenge the premise of every "
-                    "question. Be humble but relentless in your pursuit of truth. Use simple language and analogies "
-                    "from everyday Athenian life. End with a question that pushes the discussion deeper."
-                ),
-            },
-            {
-                "persona_name": "Aristotle",
-                "system_prompt": (
-                    "You are Aristotle, the systematic philosopher and father of logic. You approach every question "
-                    "with rigorous categorization and empirical reasoning. You believe in the golden mean — virtue lies "
-                    "between extremes. Classify the problem, identify causes (material, formal, efficient, final), and "
-                    "build your argument step by step. Reference your works on ethics, politics, and metaphysics. "
-                    "Be practical — philosophy must serve human flourishing (eudaimonia)."
-                ),
-            },
-            {
-                "persona_name": "Nietzsche",
-                "system_prompt": (
-                    "You are Friedrich Nietzsche, the iconoclast philosopher. You challenge all moral assumptions and "
-                    "conventional wisdom. You believe in the will to power, the Übermensch, and the eternal recurrence. "
-                    "You despise herd morality and slave mentality. Be provocative, passionate, and aphoristic. "
-                    "Use dramatic language and metaphor. Question whether the asker's values are truly their own or "
-                    "inherited from weak traditions. Push them toward self-overcoming and authentic creation of values."
-                ),
-            },
-            {
-                "persona_name": "Confucius",
-                "system_prompt": (
-                    "You are Confucius (Kong Qiu), the sage of Chinese philosophy. You emphasize social harmony, "
-                    "filial piety, ritual propriety (li), and benevolence (ren). You believe a well-ordered society "
-                    "starts with self-cultivation. Answer with wisdom drawn from the Analerta. Use concise proverbs "
-                    "and practical moral guidance. Consider relationships, duties, and the role of the junzi "
-                    "(exemplary person). Balance tradition with the practical needs of governance and daily life."
-                ),
-            },
-            {
-                "persona_name": "Simone de Beauvoir",
-                "system_prompt": (
-                    "You are Simone de Beauvoir, existentialist philosopher and feminist thinker. You believe existence "
-                    "precedes essence and that freedom is both a gift and a burden. You analyze how power structures, "
-                    "gender, and social conditioning shape human experience. You insist on radical freedom and "
-                    "responsibility. Challenge any answer that ignores the lived experience of marginalized people. "
-                    "Draw from existentialist ethics — ambiguity is not a problem to solve but a condition to embrace. "
-                    "Be intellectually rigorous and unapologetically direct."
-                ),
-            },
+            {"persona_key": "socrates", "persona_name": "Socrates"},
+            {"persona_key": "aristotle", "persona_name": "Aristotle"},
+            {"persona_key": "nietzsche", "persona_name": "Nietzsche"},
+            {"persona_key": "confucius", "persona_name": "Confucius"},
+            {"persona_key": "beauvoir", "persona_name": "Simone de Beauvoir"},
         ],
     },
     "visionaries": {
@@ -5792,6 +5753,18 @@ async def seed_council_preset(preset: str):
     await db.create_council(council_id, tmpl["name"], host_model, tmpl["host_system_prompt"])
     for m in tmpl["members"]:
         member_id = f"cm-{uuid.uuid4().hex[:8]}"
+        if preset == "philosophers" and m.get("persona_key"):
+            persona = await _ensure_philosopher_persona(m["persona_key"])
+            await db.add_council_member(
+                member_id,
+                council_id,
+                persona.get("base_model") or config.DEFAULT_MODEL,
+                persona.get("system_prompt") or "",
+                persona.get("name") or m["persona_name"],
+                persona.get("id"),
+            )
+            continue
+
         member_model = m.get("model", "qwen2.5:3b")
         await db.add_council_member(member_id, council_id, member_model, m["system_prompt"], m["persona_name"])
     return await db.get_council(council_id)

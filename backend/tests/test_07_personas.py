@@ -66,3 +66,46 @@ class TestSeedPersonas:
     def test_seed_based_bot(self, client):
         r = client.post("/api/seed/based-bot")
         assert r.status_code == 200
+
+    def test_seed_all_defaults_restores_philosopher_personas(self, client):
+        r = client.post("/api/seed/all-defaults")
+        assert r.status_code == 200
+
+        configs = client.get("/api/model-configs").json()
+        by_name = {mc["name"]: mc for mc in configs}
+        expected = [
+            "🏛️ Socrates",
+            "📚 Aristotle",
+            "⚡ Friedrich Nietzsche",
+            "🎋 Confucius",
+            "🖋️ Simone de Beauvoir",
+        ]
+        for name in expected:
+            mc = by_name.get(name)
+            assert mc, f"missing seeded philosopher persona {name}"
+            assert mc["base_model"]
+            assert mc["system_prompt"]
+            params = mc["parameters"]
+            persona = params.get("persona") or {}
+            assert params["profile_type"] == "persona"
+            assert params.get("avatar")
+            assert isinstance(params.get("temperature"), (int, float))
+            assert isinstance(params.get("top_p"), (int, float))
+            for field in [
+                "description",
+                "personality",
+                "appearance",
+                "scenario",
+                "first_message",
+                "example_dialogue",
+                "lore",
+                "rating",
+                "thinking_mode",
+                "advanced_prompt",
+            ]:
+                assert persona.get(field), f"{name} missing persona.{field}"
+            assert persona.get("tags")
+
+        confucius = by_name["🎋 Confucius"]
+        assert "Analects" in confucius["system_prompt"]
+        assert "Analerta" not in confucius["system_prompt"]
