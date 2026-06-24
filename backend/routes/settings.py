@@ -1,6 +1,7 @@
 """Runtime settings, cleanup, RAG stats, changelog, and analytics routes."""
 import os
 import re
+from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException, Query
 
@@ -454,9 +455,9 @@ async def cleanup_codebox():
 @router.get("/api/changelog")
 async def get_changelog():
     """Return the CHANGELOG.md content."""
-    changelog_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "..", "CHANGELOG.md")
+    changelog_path = Path(__file__).resolve().parents[2] / "CHANGELOG.md"
     try:
-        with open(changelog_path, "r") as f:
+        with open(changelog_path, "r", encoding="utf-8") as f:
             content = f.read()
         return {"content": content}
     except FileNotFoundError:
