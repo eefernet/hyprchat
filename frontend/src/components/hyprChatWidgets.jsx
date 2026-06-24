@@ -536,6 +536,23 @@ const _quickSourceForUrl = (url, results=[])=>{
   if(!key)return null;
   return _quickSearchResults({results}).find(r=>_qsUrlKey(r.url)===key)||null;
 };
+const _quickSearchCitationSources = (payload)=>{
+  const out=[];
+  for(const [idx,r] of (payload?.results||[]).entries()){
+    const href=_qsHref(r?.url);
+    const domain=_qsHost(href);
+    out.push({
+      ...r,
+      kind:"quick_search",
+      n:idx+1,
+      url:href,
+      domain,
+      title:r?.title||domain||"Source",
+      snippet:r?.snippet||"",
+    });
+  }
+  return out;
+};
 function SourceFavicon({url,domain,size=18,theme,title}){
   const [failed,setFailed]=useState(false);
   const host=domain||_qsHost(url);
@@ -1849,8 +1866,10 @@ function citeOptsFor(msg, liveQuickSearch=null){
   if(typeof meta==="string"){try{meta=JSON.parse(meta);}catch{meta=null;}}
   const ev=(meta?.saved_events||[]).filter(e=>e.type==="kb_sources").pop();
   const quick=liveQuick||_quickSearchPayloadFromEvents(meta?.saved_events||[]);
+  const kbSources=ev?.data?.sources||[];
+  const quickCitations=kbSources.length?[]:_quickSearchCitationSources(quick);
   const v=(ev?.data?.sources?.length||quick?.results?.length)?{
-    ...(ev?.data?.sources?.length?{citations:ev.data.sources}:{}),
+    ...(kbSources.length?{citations:kbSources}:quickCitations.length?{citations:quickCitations}:{}),
     ...(quick?.results?.length?{quickSearch:quick}:{}),
   }:undefined;
   if(!liveQuick)_citeOptsCache.set(key,v);
@@ -1868,14 +1887,22 @@ function CitationChip({n, src, theme, font}){
     return ()=>document.removeEventListener("mousedown",close);
   },[open]);
   if(!src)return <sup style={{fontSize:"0.75em",margin:"0 1px",color:theme.mut}}>[{n}]</sup>;
+  const isQuick=src.kind==="quick_search";
+  const sourceTitle=isQuick?(src.title||src.domain||src.url||"Source"):(src.filename||"Source");
+  const sourceMeta=isQuick
+    ? [src.domain,src.engine||src.type,src.published_date||src.freshness,typeof src.score==="number"?Math.round(src.score):null].filter(v=>v!==undefined&&v!==null&&v!=="").join(" · ")
+    : `chunk ${src.chunk_index}${typeof src.score==="number"?` · ${Math.round(src.score*100)}%`:""}`;
+  const titleText=isQuick?[sourceTitle,src.domain||src.url].filter(Boolean).join(" - "):`${src.filename} (chunk ${src.chunk_index})`;
   return <sup ref={ref} style={{fontSize:"0.72em",lineHeight:0,margin:"0 1px",position:"relative",display:"inline-block"}}>
-    <button onClick={()=>setOpen(o=>!o)} title={`${src.filename} (chunk ${src.chunk_index})`} style={{background:`${theme.acc}18`,border:"none",color:theme.acc,padding:"0 4px",borderRadius:3,fontWeight:700,cursor:"pointer",fontFamily:font,fontSize:"inherit",lineHeight:1.5}}>{n}</button>
+    <button onClick={()=>setOpen(o=>!o)} title={titleText} style={{background:`${theme.acc}18`,border:"none",color:theme.acc,padding:"0 4px",borderRadius:3,fontWeight:700,cursor:"pointer",fontFamily:font,fontSize:"inherit",lineHeight:1.5}}>{n}</button>
     {open&&<span style={{position:"absolute",bottom:"calc(100% + 6px)",left:"50%",transform:"translateX(-50%)",zIndex:30,width:300,maxWidth:"72vw",background:theme.bgDeep,border:`1px solid ${theme.brd}66`,borderRadius:8,padding:"9px 11px",boxShadow:"0 8px 24px rgba(0,0,0,.45)",textAlign:"left",fontSize:11,lineHeight:1.5,fontWeight:400,display:"block",whiteSpace:"normal"}}>
       <span style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
-        <span style={{fontWeight:700,color:theme.acc,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>📄 {src.filename}</span>
-        <span style={{marginLeft:"auto",fontSize:9,color:theme.mut,flexShrink:0}}>chunk {src.chunk_index}{typeof src.score==="number"?` · ${Math.round(src.score*100)}%`:""}</span>
+        {isQuick?<SourceFavicon url={src.url} domain={src.domain} size={16} theme={theme}/>:<span style={{flexShrink:0}}>📄</span>}
+        <span style={{fontWeight:700,color:theme.acc,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sourceTitle}</span>
+        <span style={{marginLeft:"auto",fontSize:9,color:theme.mut,flexShrink:0}}>{sourceMeta}</span>
       </span>
       <span style={{display:"block",color:theme.dim,maxHeight:120,overflow:"auto"}}>{src.snippet||""}{src.snippet&&src.snippet.length>=300?"…":""}</span>
+      {isQuick&&src.url&&<a href={src.url} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex",marginTop:7,color:theme.acc,textDecoration:"none",fontSize:10,fontWeight:700,borderBottom:`1px solid ${theme.acc}44`}}>Open source</a>}
     </span>}
   </sup>;
 }
@@ -1935,6 +1962,7 @@ export {
   _qsFaviconUrl,
   _quickSearchPayloadFromEvents,
   _quickSearchResults,
+  _quickSearchCitationSources,
   _quickSourceForUrl,
   SourceFavicon,
   QuickSourceInlineChip,
