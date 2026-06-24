@@ -63,6 +63,7 @@ from research import (
     fetch_bytes_safely,
     run_research_report,
 )
+from routes import register_extracted_routes
 
 # ============================================================
 # SETTINGS — persistent JSON file
@@ -933,6 +934,12 @@ async def user_context_middleware(request: Request, call_next):
 
 HTTP_VERIFY_SSL = config.HTTP_VERIFY_SSL
 http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0), verify=HTTP_VERIFY_SSL)
+register_extracted_routes(
+    app,
+    http=http,
+    track_bg=_track_bg,
+    artifact_file_metadata=_artifact_file_metadata,
+)
 
 # Workspace helpers only do short classification/title/suggestion work. Keep
 # their KV cache small even when the user sets chat context to 128K/256K or the
@@ -4267,106 +4274,6 @@ async def purge_image_studio():
     }
 
 
-_TTS_REQUEST_TTL = 300
-_tts_requests: dict[str, dict] = {}
-
-
-def _cleanup_tts_requests():
-    now = time.time()
-    expired = [rid for rid, req in _tts_requests.items() if req.get("expires_at", 0) <= now]
-    for rid in expired:
-        _tts_requests.pop(rid, None)
-    if len(_tts_requests) > 500:
-        for rid, _ in sorted(_tts_requests.items(), key=lambda kv: kv[1].get("expires_at", 0))[:100]:
-            _tts_requests.pop(rid, None)
-
-
-async def _tts_streaming_response(text: str, voice_name: str, request_id: str = ""):
-    try:
-        stream = await voice.open_speech_stream(text, voice_name)
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(502, f"TTS service error: HTTP {e.response.status_code}")
-    except httpx.TimeoutException:
-        raise HTTPException(504, "TTS service timed out before audio could start")
-    except Exception as e:
-        raise HTTPException(502, f"TTS service unreachable: {str(e)[:200]}")
-    headers = {"Cache-Control": "no-store"}
-    if request_id:
-        headers["X-Hyprchat-TTS-Request"] = request_id
-    return StreamingResponse(stream.aiter_bytes(), media_type="audio/mpeg", headers=headers)
-
-
-# ============================================================
-# AUDIO — voice STT/TTS proxy
-# ============================================================
-@app.post("/api/audio/transcribe")
-async def transcribe_audio(file: UploadFile = File(...)):
-    if not config.STT_URL:
-        raise HTTPException(503, "Speech-to-text is not configured. Set the STT URL in Settings → Connections.")
-    data = await file.read()
-    if not data:
-        raise HTTPException(400, "Empty audio upload")
-    if len(data) > 25 * 1024 * 1024:
-        raise HTTPException(413, "Audio upload too large (25MB max)")
-    try:
-        return await voice.transcribe(data, file.filename or "recording.webm", file.content_type or "")
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(502, f"STT service error: HTTP {e.response.status_code}")
-    except Exception as e:
-        raise HTTPException(502, f"STT service unreachable: {str(e)[:200]}")
-
-
-@app.post("/api/audio/speech")
-async def synthesize_speech(body: dict = Body(...)):
-    if not config.TTS_URL:
-        raise HTTPException(503, "Text-to-speech is not configured. Set the TTS URL in Settings → Connections.")
-    text = voice.strip_for_tts(body.get("text") or "")
-    if not text:
-        raise HTTPException(400, "Nothing speakable in the provided text")
-    voice_name = (body.get("voice") or "").strip()
-    return await _tts_streaming_response(text, voice_name)
-
-
-@app.post("/api/audio/speech/request")
-async def create_speech_request(body: dict = Body(...)):
-    if not config.TTS_URL:
-        raise HTTPException(503, "Text-to-speech is not configured. Set the TTS URL in Settings → Connections.")
-    text = voice.strip_for_tts(body.get("text") or "")
-    if not text:
-        raise HTTPException(400, "Nothing speakable in the provided text")
-    _cleanup_tts_requests()
-    request_id = uuid.uuid4().hex
-    _tts_requests[request_id] = {
-        "text": text,
-        "voice": (body.get("voice") or "").strip(),
-        "expires_at": time.time() + _TTS_REQUEST_TTL,
-    }
-    return {
-        "id": request_id,
-        "url": f"/api/audio/speech/{request_id}",
-        "expires_in": _TTS_REQUEST_TTL,
-        "chars": len(text),
-    }
-
-
-@app.get("/api/audio/speech/{request_id}")
-async def stream_speech_request(request_id: str):
-    if not config.TTS_URL:
-        raise HTTPException(503, "Text-to-speech is not configured. Set the TTS URL in Settings → Connections.")
-    _cleanup_tts_requests()
-    req = _tts_requests.get(request_id)
-    if not req:
-        raise HTTPException(404, "Speech request expired or was not found")
-    return await _tts_streaming_response(req["text"], req.get("voice", ""), request_id=request_id)
-
-
-@app.get("/api/audio/voices")
-async def list_tts_voices():
-    if not config.TTS_URL:
-        return {"voices": [], "default": config.TTS_VOICE}
-    return {"voices": await voice.list_voices(), "default": config.TTS_VOICE}
-
-
 # ============================================================
 # TOOLS
 # ============================================================
@@ -6021,53 +5928,6 @@ async def quick_search(req: QuickSearchRequest):
 # ============================================================
 # SETTINGS & SANDBOX API
 # ============================================================
-@app.get("/api/model-providers")
-async def get_model_provider_settings():
-    return {"providers": await model_providers.provider_statuses()}
-
-
-@app.patch("/api/model-providers/{provider}")
-async def update_model_provider_settings(provider: str, body: dict = Body(...)):
-    if provider not in model_providers.CLOUD_PROVIDERS:
-        raise HTTPException(404, "Unsupported model provider")
-    api_key = body.get("api_key")
-    enabled = body.get("enabled") if "enabled" in body else None
-    try:
-        status = await model_providers.save_provider(
-            provider,
-            api_key=api_key if isinstance(api_key, str) and api_key.strip() else None,
-            enabled=bool(enabled) if enabled is not None else None,
-        )
-        return status
-    except model_providers.ProviderError as e:
-        raise HTTPException(400, str(e))
-
-
-@app.delete("/api/model-providers/{provider}")
-async def delete_model_provider_settings(provider: str):
-    if provider not in model_providers.CLOUD_PROVIDERS:
-        raise HTTPException(404, "Unsupported model provider")
-    try:
-        return await model_providers.delete_provider(provider)
-    except model_providers.ProviderError as e:
-        raise HTTPException(400, str(e))
-
-
-@app.post("/api/model-providers/{provider}/test")
-async def test_model_provider_settings(provider: str, body: dict = Body(default={})):
-    if provider not in model_providers.CLOUD_PROVIDERS:
-        raise HTTPException(404, "Unsupported model provider")
-    api_key = body.get("api_key") if isinstance(body, dict) else None
-    try:
-        return await model_providers.test_provider(
-            http,
-            provider,
-            api_key=api_key if isinstance(api_key, str) and api_key.strip() else None,
-        )
-    except model_providers.ProviderError as e:
-        raise HTTPException(e.status_code or 400, str(e))
-    except Exception as e:
-        raise HTTPException(400, str(e))
 
 
 @app.get("/api/settings")
@@ -6625,26 +6485,6 @@ async def get_token_summary():
         "by_model_all": by_model_all,
         "by_persona_all": by_persona_all,
     }
-
-
-# ============================================================
-# HUGGINGFACE MODEL BROWSER (delegated to hf module)
-# ============================================================
-@app.get("/api/hf/search")
-async def hf_search_ep(q: str = "", limit: int = 20, gguf_only: bool = True, sort: str = "downloads", direction: int = -1):
-    return await hf_module.hf_search(http, q, limit, gguf_only, sort, direction)
-
-@app.get("/api/hf/model")
-async def hf_model_info_ep(repo_id: str):
-    return await hf_module.hf_model_info(http, repo_id)
-
-@app.get("/api/hf/readme")
-async def hf_readme_ep(repo_id: str):
-    return await hf_module.hf_readme(http, repo_id)
-
-@app.post("/api/hf/download")
-async def hf_download_ep(request: Request):
-    return await hf_module.hf_download(http, request)
 
 
 # ============================================================
