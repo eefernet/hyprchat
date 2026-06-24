@@ -42,6 +42,7 @@ import {
   modelContextLength,
   researchModelOptions,
 } from './modelHelpers.js';
+import { createSettingsSync } from './settingsSync.js';
 import ModelPicker from './ModelPicker.jsx';
 import AnalyticsPanel from './panels/AnalyticsPanel.jsx';
 import PromptLibraryPanel from './panels/PromptLibraryPanel.jsx';
@@ -310,20 +311,13 @@ function HyprChat(){
     if(settingsPulseTimer.current)clearTimeout(settingsPulseTimer.current);
     settingsPulseTimer.current=setTimeout(()=>setSettingsPulse(null),1800);
   };
-  const hydrateServerSetting=(settingKey,setter,value,current)=>{
-    if(value!==current)skipSettingPatchRef.current[settingKey]=true;
-    setter(value);
-  };
-  const persistServerSetting=(storageKey,settingKey,value,storageValue=String(value))=>{
-    const seen=!!seenSettingEffectRef.current[settingKey];
-    seenSettingEffectRef.current[settingKey]=true;
-    try{localStorage.setItem(storageKey,storageValue);}catch{}
-    if(skipSettingPatchRef.current[settingKey]){delete skipSettingPatchRef.current[settingKey];return;}
-    if(!settingsLoadedRef.current&&!seen)return;
-    fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({[settingKey]:value})})
-      .then(r=>{flashSettingsPulse(r.ok?"Saved":"Failed",r.ok?"success":"error");})
-      .catch(()=>flashSettingsPulse("Failed","error"));
-  };
+  const {hydrateServerSetting,persistServerSetting}=createSettingsSync({
+    api:API,
+    settingsLoadedRef,
+    seenSettingEffectRef,
+    skipSettingPatchRef,
+    flashSettingsPulse,
+  });
 
   // Mermaid init — re-runs when theme/font changes; bumps epoch to force diagram re-render
   const [mermaidEpoch,setMermaidEpoch]=useState(0);

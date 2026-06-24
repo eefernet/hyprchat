@@ -4,7 +4,6 @@ Tool definitions and execution dispatch for HyprChat's integrated CodeAgent.
 import asyncio
 import base64
 import calendar
-import hashlib
 import json
 import os
 import re
@@ -18,8 +17,28 @@ import config
 import database as db
 import persona_images
 import cancel_registry
+from artifact_files import artifact_file_metadata as _artifact_file_metadata
+from artifact_files import extract_indexable_text
 from connectors import execute_connector_tool
 from research import fetch_bytes_safely, run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
+from tooling.workflow_gate import (
+    _WF_EVENT_TRANSITIONS,
+    _apply_workflow_event,
+    _fix_budget_note,
+    _get_recent_research,
+    _latest_user_msg_ts,
+    _parse_ts_loose,
+    _prior_acceptance_issues_context,
+    _prior_fix_attempts_context,
+    _project_id_from_dir,
+    _runs_since,
+    _stash_research_result,
+    _uploaded_project_aider_context,
+    _uploaded_project_bootstrap_block_message,
+    _uploaded_project_manual_gate_state,
+    _uploaded_project_tool_allowed_during_bootstrap,
+    _v2_name_match,
+)
 
 # Strip ANSI escape codes from terminal output before feeding back to the model
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
@@ -27,194 +46,8 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub('', text)
 
 
-def _artifact_file_metadata(path: str) -> dict:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return {"size_bytes": os.path.getsize(path), "sha256": h.hexdigest()}
-
-
 def _artifact_index_text(path: str, filename: str, kind: str, mime_type: str = "", max_chars: int = 500000) -> str:
-    kind = (kind or db.artifact_kind_for_filename(filename, mime_type)).lower()
-    lower = (filename or "").lower()
-    try:
-        if kind in {"image", "pdf"}:
-            meta = _artifact_file_metadata(path)
-            return f"{filename}\n{kind.upper()} artifact\nsize_bytes={meta['size_bytes']}\nsha256={meta['sha256']}"
-        if kind == "archive":
-            import tarfile
-            import zipfile
-            lines = [f"Archive: {filename}"]
-            if tarfile.is_tarfile(path):
-                with tarfile.open(path, "r:*") as tf:
-                    for member in tf.getmembers()[:500]:
-                        lines.append(f"{member.name}{'/' if member.isdir() else ''} {member.size} bytes")
-            elif zipfile.is_zipfile(path):
-                with zipfile.ZipFile(path) as zf:
-                    for info in zf.infolist()[:500]:
-                        lines.append(f"{info.filename}{'/' if info.is_dir() else ''} {info.file_size} bytes")
-            return "\n".join(lines)[:max_chars]
-        text_exts = (
-            ".txt", ".log", ".md", ".markdown", ".html", ".htm", ".py", ".js", ".jsx",
-            ".ts", ".tsx", ".json", ".jsonl", ".csv", ".tsv", ".css", ".sh", ".rs",
-            ".go", ".java", ".c", ".cpp", ".yaml", ".yml", ".toml", ".xml", ".ini",
-            ".conf", ".cfg",
-        )
-        if kind in {"html", "markdown", "code", "data", "text"} or lower.endswith(text_exts):
-            with open(path, "rb") as f:
-                raw = f.read(min(max_chars * 4, 4 * 1024 * 1024))
-            text = raw.decode("utf-8", errors="replace")
-            if kind == "html" or lower.endswith((".html", ".htm")):
-                text = re.sub(r"<script[^>]*>.*?</script>", " ", text, flags=re.I | re.S)
-                text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.I | re.S)
-                text = re.sub(r"<[^>]+>", " ", text)
-                text = re.sub(r"\s+", " ", text).strip()
-            return text[:max_chars]
-    except Exception as e:
-        print(f"[ArtifactIndex] {e}")
-    return ""
-
-
-def _parse_ts_loose(s) -> "datetime | None":
-    """Parse timestamps from either Python isoformat (runs.started_at, has 'T'
-    and microseconds) or SQLite CURRENT_TIMESTAMP (messages.created_at, space
-    separator, no microseconds, sometimes a trailing 'Z'). Returns None on
-    unrecognized input rather than raising — callers treat missing as 'before
-    the current turn' which is the safe default."""
-    if not s:
-        return None
-    s = str(s).strip().rstrip("Z")
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
-                "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
-        try:
-            return datetime.strptime(s, fmt)
-        except ValueError:
-            continue
-    return None
-
-
-async def _latest_user_msg_ts(conv_id: str, conv_row: dict | None = None):
-    """Timestamp of the newest persisted user message, or None.
-
-    The cycle-cap / Q&A-terminal gates scope their counters to runs newer than
-    this so a new user request resets the budget instead of inheriting an
-    exhausted cap from earlier work on the same conversation."""
-    try:
-        conv = conv_row or await db.get_conversation(conv_id)
-        for m in reversed((conv or {}).get("messages") or []):
-            if m.get("role") == "user":
-                return _parse_ts_loose(m.get("created_at"))
-    except Exception as _e:
-        print(f"[v2-gate] latest-user-msg lookup failed (non-fatal): {_e}")
-    return None
-
-
-def _runs_since(runs: list, ts) -> list:
-    """Runs whose started_at >= ts. ts=None keeps all runs (fail-safe: gates
-    fall back to the old whole-conversation behavior, never crash open)."""
-    if ts is None:
-        return runs
-    out = []
-    for r in runs:
-        rts = _parse_ts_loose(r.get("started_at"))
-        if rts is None or rts >= ts:
-            out.append(r)
-    return out
-
-
-def _v2_name_match(name: str) -> bool:
-    """Match v2/Daedalus persona names. Word-boundary 'v2' so unrelated names
-    that merely contain the substring (e.g. 'v2ray helper') don't enable the
-    workflow gate."""
-    n = (name or "").lower()
-    return "daedalus" in n or re.search(r"\bv2\b", n) is not None
-
-
-async def _prior_fix_attempts_context(conv_id: str, *, max_attempts: int = 3) -> str:
-    """Compact history of fix attempts since the latest user message.
-
-    Injected into Fixer/Aider prompts so attempt #2 knows what attempt #1
-    already changed — without it every fix call is stateless and the model's
-    most common failure is re-making the same edit that already didn't work."""
-    if not conv_id:
-        return ""
-    try:
-        runs = await db.get_runs_by_conversation(conv_id, limit=50)
-        uts = await _latest_user_msg_ts(conv_id)
-        attempts = [
-            r for r in _runs_since(runs, uts)
-            if (r.get("role") in {"fixer", "aider.fix"}
-                and r.get("status") in {"succeeded", "partial", "failed"})
-        ]
-        if not attempts:
-            return ""
-        lines = []
-        # runs come newest-first; show oldest attempt first.
-        for r in reversed(attempts[:max_attempts]):
-            env = r.get("result_envelope") or {}
-            files = ", ".join(
-                os.path.basename(f) or f for f in (env.get("files_touched") or [])[:6]
-            ) or "(no files written)"
-            summary = (env.get("summary") or "")[:160]
-            errs = "; ".join(str(e) for e in (env.get("errors") or [])[:2])[:200]
-            lines.append(
-                f"- {r.get('role')} [{env.get('status') or r.get('status')}] "
-                f"touched: {files}. {summary}"
-                + (f" Errors: {errs}" if errs else "")
-            )
-        return "\n".join(lines)
-    except Exception as e:
-        print(f"[v2-gate] prior-attempt context failed (non-fatal): {e}")
-        return ""
-
-
-async def _prior_acceptance_issues_context(conv_id: str) -> str:
-    """Most recent acceptance verdict (issues/error) for this user request —
-    fed back into the next acceptance run so it verifies its own prior
-    findings instead of moving the goalposts with brand-new nitpicks."""
-    if not conv_id:
-        return ""
-    try:
-        runs = await db.get_runs_by_conversation(conv_id, limit=50)
-        uts = await _latest_user_msg_ts(conv_id)
-        for r in _runs_since(runs, uts):
-            if r.get("role") != "acceptance":
-                continue
-            env = r.get("result_envelope") or {}
-            if (env.get("status") or "").lower() not in {"issues", "error"}:
-                return ""
-            lines = []
-            for i in (env.get("issues") or [])[:6]:
-                lines.append(
-                    f"- [{i.get('category', i.get('severity', '?'))}] "
-                    f"{i.get('file', '')}: {(i.get('summary') or '')[:140]}"
-                )
-            return "\n".join(lines)
-        return ""
-    except Exception as e:
-        print(f"[v2-gate] prior-acceptance context failed (non-fatal): {e}")
-        return ""
-
-
-async def _fix_budget_note(conv_id: str, source_role: str) -> str:
-    """One-line budget readout appended to fix results so the model can plan
-    its remaining cycles instead of discovering the cap by hitting it."""
-    try:
-        runs = await db.get_runs_by_conversation(conv_id, limit=50)
-        uts = await _latest_user_msg_ts(conv_id)
-        source_role = source_role or "reviewer"
-        succ = sum(
-            1 for r in _runs_since(runs, uts)
-            if (r.get("role") in {"fixer", "aider.fix"}
-                and r.get("status") == "succeeded"
-                and ((r.get("result_envelope") or {}).get("source_role") or "reviewer") == source_role)
-        )
-        cap = 2 if source_role == "acceptance" else 3
-        return (f"\n\nFix-cycle budget: {min(succ, cap)}/{cap} successful "
-                f"{source_role}-driven fix(es) used for this request.")
-    except Exception:
-        return ""
+    return extract_indexable_text(path, kind, mime_type, max_chars, filename=filename)
 
 
 async def _git_checkpoint(http, project_dir: str, label: str) -> str:
@@ -248,108 +81,6 @@ async def _git_checkpoint(http, project_dir: str, label: str) -> str:
     except Exception as e:
         print(f"[git-checkpoint] failed (non-fatal): {e}")
     return ""
-
-
-# Scoped FSM (#1 of the rebuild list): coder_workflows.state becomes
-# authoritative data driven by explicit events, instead of ad-hoc state
-# writes scattered across dispatchers. The exec_tool gate still derives its
-# blocking decisions from run history (battle-tested); this is the substrate
-# that lets it migrate to reading state directly later.
-_WF_EVENT_TRANSITIONS = {
-    "PLAN_DONE":     ("planning",  "not_ready"),
-    "BUILD_OK":      ("reviewing", "not_ready"),
-    "FIX_APPLIED":   ("reviewing", "not_ready"),
-    "REVIEW_CLEAN":  ("accepting", "not_ready"),
-    "REVIEW_ISSUES": ("fixing",    "not_ready"),
-    "ACCEPT_OK":     ("accepted",  "accepted"),
-    "ACCEPT_ISSUES": ("fixing",    "not_ready"),
-}
-
-
-async def _apply_workflow_event(conv_id: str, event: str, *,
-                                run_id: str = "", project_id: str = "",
-                                mode_hint: str = "build_from_prompt",
-                                user_task: str = "") -> str:
-    """Single transition point for coder_workflows state.
-
-    Ensures a workflow row exists (greenfield builds previously had none, so
-    WorkflowCard showed nothing and state lived only in run-history
-    archaeology). Never overwrites a user cancel. Returns workflow id."""
-    state_artifact = _WF_EVENT_TRANSITIONS.get(event)
-    if not state_artifact or not conv_id:
-        return ""
-    state, artifact = state_artifact
-    try:
-        wf = None
-        if project_id:
-            wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
-        if not wf:
-            wf = await db.get_latest_coder_workflow(conv_id)
-        if not wf:
-            wf_id = f"cw-{uuid.uuid4().hex[:12]}"
-            await db.create_coder_workflow(
-                wf_id, conv_id, project_id=project_id or "",
-                mode=mode_hint, state=state,
-                user_task=(user_task or "")[:500],
-                active_run_id=run_id, artifact_status=artifact,
-            )
-            print(f"[wf-fsm] {event}: created {wf_id} state={state}", flush=True)
-            return wf_id
-        if wf.get("state") == "cancelled":
-            return wf.get("id", "")
-        kwargs = dict(state=state, artifact_status=artifact)
-        if run_id:
-            kwargs["active_run_id"] = run_id
-        if project_id:
-            kwargs["project_id"] = project_id
-        await db.update_coder_workflow(wf["id"], **kwargs)
-        print(f"[wf-fsm] {event}: {wf.get('id')} {wf.get('state')}->{state}", flush=True)
-        return wf.get("id", "")
-    except Exception as e:
-        print(f"[wf-fsm] {event} failed (non-fatal): {e}")
-        return ""
-
-
-# In-process cache of the most recent deep_research result per conversation.
-# The full research report only exists in the orchestrator's in-memory tool
-# history for the current turn — saved_events keeps a summary but not the
-# body. Caching it here lets the Fixer dispatcher pick it up across the
-# orchestrator/fixer boundary without persisting research bodies to SQLite
-# or breaking the Fixer's network-free contract. Bounded to 32 entries with
-# LRU eviction (move-to-end on read); freshness window enforced at read time.
-from collections import OrderedDict
-_RECENT_RESEARCH: OrderedDict[str, dict] = OrderedDict()
-_RECENT_RESEARCH_MAX = 32
-_RESEARCH_FRESH_SECONDS = 600  # 10 min — drop on next read past this
-
-
-def _stash_research_result(conv_id: str, topic: str, report: str) -> None:
-    """Record the most recent deep_research result for this conv. LRU-bounded:
-    accessed entries move to the end; eviction drops the least-recently-used."""
-    if not conv_id or not report:
-        return
-    _RECENT_RESEARCH[conv_id] = {
-        "topic": topic or "",
-        "report": report,
-        "ts": time.time(),
-    }
-    _RECENT_RESEARCH.move_to_end(conv_id)
-    while len(_RECENT_RESEARCH) > _RECENT_RESEARCH_MAX:
-        _RECENT_RESEARCH.popitem(last=False)
-
-
-def _get_recent_research(conv_id: str) -> "dict | None":
-    """Return the cached research entry for conv_id if it's still within the
-    freshness window, else None. Stale entries are dropped on read. Accessed
-    entries are promoted (LRU)."""
-    entry = _RECENT_RESEARCH.get(conv_id)
-    if not entry:
-        return None
-    if (time.time() - entry.get("ts", 0)) > _RESEARCH_FRESH_SECONDS:
-        _RECENT_RESEARCH.pop(conv_id, None)
-        return None
-    _RECENT_RESEARCH.move_to_end(conv_id)
-    return entry
 
 
 def _issue_signatures(envelope: dict) -> set:
@@ -480,14 +211,6 @@ async def _latest_user_requested_ship_anyway(conv_id: str) -> bool:
         return False
 
 
-def _project_id_from_dir(project_dir: str) -> str:
-    """Best-effort project id from a Codebox project path."""
-    if not project_dir:
-        return ""
-    name = os.path.basename(project_dir.rstrip("/"))
-    return name if name.startswith("proj-") else ""
-
-
 async def _latest_user_task_text(conv_id: str) -> str:
     if not conv_id:
         return ""
@@ -547,132 +270,6 @@ def _task_from_issue_run(user_task: str, issue_run: dict | None) -> str:
     if issue_lines:
         parts.append("Reviewer issues:\n" + "\n".join(issue_lines))
     return "\n\n".join(parts).strip() or "Fix the uploaded project reviewer issues."
-
-
-async def _uploaded_project_aider_context(conv_id: str, *,
-                                          issue_run: dict | None = None,
-                                          project_dir: str = "",
-                                          project_id: str = "") -> dict | None:
-    """Return routing context when this conversation is an uploaded-project fix.
-
-    This intentionally does not classify all active coding projects as uploads:
-    greenfield OpenHands builds also create coding_projects rows. Uploaded
-    projects are identified by their workflow mode or upload-time description.
-    """
-    if not conv_id or not getattr(config, "AIDER_ENABLED", True):
-        return None
-    env = (issue_run or {}).get("result_envelope") or {}
-    project_dir = (project_dir or env.get("project_dir") or "").strip()
-    project_id = (project_id or (issue_run or {}).get("project_id") or "").strip()
-    project_id = project_id or _project_id_from_dir(project_dir)
-
-    try:
-        wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id) if project_id else None
-        if not wf:
-            wf = await db.get_latest_coder_workflow(conv_id)
-        if wf and wf.get("mode") == "fix_uploaded_project" and not wf.get("cancel_requested"):
-            project_id = project_id or wf.get("project_id") or ""
-            project_dir = project_dir or (f"/root/projects/{project_id}" if project_id else "")
-            return {"workflow": wf, "project_id": project_id, "project_dir": project_dir}
-    except Exception as _e:
-        print(f"[v2-gate] uploaded workflow lookup failed (non-fatal): {_e}")
-
-    try:
-        active = await db.get_coding_project_by_conv(conv_id)
-        if active:
-            active_pid = active.get("openhands_project_id") or active.get("id") or ""
-            desc = active.get("description") or ""
-            if desc.startswith("Uploaded project:") and (not project_id or project_id == active_pid):
-                project_id = project_id or active_pid
-                project_dir = project_dir or (f"/root/projects/{project_id}" if project_id else "")
-                return {"workflow": None, "project_id": project_id, "project_dir": project_dir}
-    except Exception as _e:
-        print(f"[v2-gate] uploaded project lookup failed (non-fatal): {_e}")
-    return None
-
-
-_UPLOADED_PROJECT_BOOTSTRAP_ALLOWED_TOOLS = {
-    "run_aider_fix",
-    "run_review",
-    "run_acceptance_review",
-    "get_coder_workflow",
-    "cancel_coder_workflow",
-}
-_UPLOADED_PROJECT_TERMINAL_STATES = {
-    "accepted", "delivered", "complete", "completed", "cancelled", "blocked",
-}
-_UPLOADED_PROJECT_TERMINAL_ARTIFACTS = {
-    "accepted", "delivered", "partial_delivered", "cancelled",
-}
-_UPLOADED_PROJECT_ACTIVE_RUN_STATUSES = {"queued", "running", "pending"}
-_UPLOADED_PROJECT_AGENT_ROLES = {"aider.fix", "reviewer", "acceptance", "fixer"}
-
-
-def _uploaded_project_tool_allowed_during_bootstrap(name: str) -> bool:
-    return name in _UPLOADED_PROJECT_BOOTSTRAP_ALLOWED_TOOLS
-
-
-def _uploaded_project_manual_gate_state(workflow: dict | None,
-                                        runs: list[dict] | None = None) -> str:
-    """Return bootstrap/inflight when an uploaded fix must not use manual tools."""
-    if not workflow or workflow.get("mode") != "fix_uploaded_project":
-        return ""
-    if workflow.get("cancel_requested"):
-        return ""
-    state = (workflow.get("state") or "").lower()
-    artifact = (workflow.get("artifact_status") or "").lower()
-    if state in _UPLOADED_PROJECT_TERMINAL_STATES:
-        return ""
-    if artifact in _UPLOADED_PROJECT_TERMINAL_ARTIFACTS:
-        return ""
-
-    runs = runs or []
-    active_run_id = workflow.get("active_run_id") or ""
-    for run in runs:
-        if active_run_id and run.get("id") == active_run_id:
-            if (run.get("status") or "").lower() in _UPLOADED_PROJECT_ACTIVE_RUN_STATUSES:
-                return "inflight"
-            break
-
-    for run in runs:
-        role = run.get("role") or ""
-        if role in _UPLOADED_PROJECT_AGENT_ROLES or role.startswith("builder"):
-            return ""
-    return "bootstrap"
-
-
-def _uploaded_project_bootstrap_block_message(name: str, workflow: dict,
-                                              project_dir: str,
-                                              task: str,
-                                              gate_state: str = "bootstrap") -> str:
-    project_id = (workflow or {}).get("project_id") or _project_id_from_dir(project_dir)
-    project_dir = project_dir or (f"/root/projects/{project_id}" if project_id else "/root/projects/<active-project>")
-    task_hint = (task or (workflow or {}).get("user_task") or "latest user request").strip()
-    task_hint = re.sub(r"\s+", " ", task_hint)[:700].replace("\\", "\\\\").replace("'", "\\'")
-    if gate_state == "inflight":
-        reason = (
-            "an uploaded-project Aider/Reviewer run is already in progress. "
-            "Wait for that run or inspect workflow status."
-        )
-        next_call = "get_coder_workflow(workflow_id='<workflow_id>')"
-    else:
-        reason = (
-            "uploaded-project fixes must start with Aider or Reviewer from the active "
-            "project root, not manual file tools."
-        )
-        next_call = (
-            f"run_aider_fix(project_dir='{project_dir}', task='{task_hint}')"
-        )
-    return (
-        f"BLOCKED — {reason}\n\n"
-        f"Active project path: `{project_dir}`"
-        + (f"\nProject id: `{project_id}`" if project_id else "")
-        + "\n\n"
-        f"Your VERY NEXT tool call MUST be:\n  {next_call}\n\n"
-        f"Do NOT call {name}, read_file, write_file, run_shell, execute_code, "
-        f"generate_code, run_fixer, list_files, or search_files for this uploaded-project "
-        f"fix. Aider owns the edit; Reviewer verifies it."
-    )
 
 
 # Pytest "FAILED tests/foo.py::test_x - reason" line, plus a fallback for
