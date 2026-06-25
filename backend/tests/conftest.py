@@ -23,10 +23,19 @@ def base_url():
     return BASE_URL
 
 
+def _ensure_server_available(client):
+    """Skip live endpoint tests cleanly when no HyprChat server is running."""
+    try:
+        client.get("/", timeout=2.0)
+    except (httpx.TimeoutException, httpx.TransportError) as e:
+        pytest.skip(f"HyprChat test server is not reachable at {BASE_URL}: {e}")
+
+
 @pytest.fixture(scope="session")
 def client():
     """Shared httpx client for the entire test session."""
     with httpx.Client(base_url=BASE_URL, timeout=30.0, verify=False) as c:
+        _ensure_server_available(c)
         yield c
 
 
@@ -34,6 +43,7 @@ def client():
 def long_client():
     """Client with longer timeout for AI operations."""
     with httpx.Client(base_url=BASE_URL, timeout=300.0, verify=False) as c:
+        _ensure_server_available(c)
         yield c
 
 

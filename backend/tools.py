@@ -23,6 +23,9 @@ from connectors import execute_connector_tool
 from research import fetch_bytes_safely, run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
 from tooling.codebox_tools import CODEBOX_TOOL_NAMES, run_codebox_tool
 from tooling.workflow_gate import (
+    _RECENT_RESEARCH,
+    _RECENT_RESEARCH_MAX,
+    _RESEARCH_FRESH_SECONDS,
     _WF_EVENT_TRANSITIONS,
     _apply_workflow_event,
     _fix_budget_note,
