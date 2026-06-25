@@ -25,7 +25,7 @@ _HAS_AIOSQLITE = HAS_AIOSQLITE
 if not _HAS_AIOSQLITE:
     install_aiosqlite_stub()
 
-from agents import aider_fixer, language_adapters, reviewer
+from agents import aider_fixer, fixer, language_adapters, reviewer
 from tools import CODEAGENT_TOOLS
 
 
@@ -199,6 +199,44 @@ def test_reviewer_sanitizes_nonexistent_storage_guess_to_real_db_file():
     assert "tests/test_cli.py" in issue["suggested_fix_scope"]
 
 
+def test_fixer_repairs_neon_pong_method_name_swap():
+    issues = [{
+        "file": "main.py",
+        "summary": (
+            "Runtime method-name mismatch: main.py calls "
+            "particle_system.create_explosion(...), but effects/particle_system.py "
+            "only defines add_explosion(...), so collisions raise AttributeError."
+        ),
+        "suggested_fix_scope": ["main.py", "effects/particle_system.py"],
+    }]
+    contents = {
+        "/root/projects/neon-pong-game/main.py": "\n".join([
+            "from effects.particle_system import ParticleSystem",
+            "",
+            "particle_system = ParticleSystem()",
+            "particle_system.create_explosion(ball.x, ball.y, (0, 255, 255))",
+            "",
+        ]),
+        "/root/projects/neon-pong-game/effects/particle_system.py": "\n".join([
+            "class ParticleSystem:",
+            "    def add_explosion(self, x, y, color, count=20):",
+            "        return []",
+            "",
+        ]),
+    }
+
+    before = fixer._python_symbol_mismatch_errors(contents, issues)
+    notes, touched = fixer._repair_python_symbol_mismatches(contents, issues)
+    after = fixer._python_symbol_mismatch_errors(contents, issues)
+
+    assert before
+    assert "/root/projects/neon-pong-game/main.py" in touched
+    assert notes
+    assert "particle_system.add_explosion" in contents["/root/projects/neon-pong-game/main.py"]
+    assert "particle_system.create_explosion" not in contents["/root/projects/neon-pong-game/main.py"]
+    assert after == []
+
+
 def _import_openhands_worker_for_prompt_tests(monkeypatch):
     if not HAS_FASTAPI:
         class DummyFastAPI:
@@ -294,6 +332,52 @@ def test_aider_scope_and_prompt_include_test_state_isolation(tmp_path, monkeypat
     sys.modules.pop("openhands_worker", None)
 
 
+def test_openhands_worker_uses_requested_project_id_for_new_workspace(tmp_path, monkeypatch):
+    worker = _import_openhands_worker_for_prompt_tests(monkeypatch)
+    monkeypatch.setattr(worker, "PROJECTS_DIR", tmp_path)
+    req = worker.RunRequest(
+        task="Build the project from the completed Architect plan for `neon-pong-game`.",
+        language="python",
+        project_id="neon-pong-game",
+    )
+
+    work_dir, project_name, reusing = worker._workspace_for_request(req)
+
+    assert project_name == "neon-pong-game"
+    assert work_dir == tmp_path / "neon-pong-game"
+    assert work_dir.is_dir()
+    assert reusing is False
+    sys.modules.pop("openhands_worker", None)
+
+
+def test_openhands_worker_prompt_and_status_use_required_files(tmp_path, monkeypatch):
+    worker = _import_openhands_worker_for_prompt_tests(monkeypatch)
+    req = worker.RunRequest(
+        task="Build neon pong",
+        language="python",
+        required_files=["main.py", "game_objects/paddle.py", "/root/projects/neon-pong-game/ui/scoreboard.py"],
+        build_cmd="pip install -q pygame",
+    )
+
+    prompt = worker._build_task_prompt(req, str(tmp_path), continuing=False)
+
+    assert "## REQUIRED FILE MANIFEST" in prompt
+    assert "- main.py" in prompt
+    assert "- game_objects/paddle.py" in prompt
+    assert "- ui/scoreboard.py" in prompt
+    assert "Build: `pip install -q pygame`" in prompt
+
+    (tmp_path / "main.py").write_text("print('ok')\n")
+    (tmp_path / "game_objects").mkdir()
+    (tmp_path / "game_objects" / "paddle.py").write_text("class Paddle: pass\n")
+    all_files = [str(p) for p in tmp_path.rglob("*") if p.is_file()]
+    present, missing = worker._required_file_status(tmp_path, all_files, req.required_files)
+
+    assert present == ["main.py", "game_objects/paddle.py"]
+    assert missing == ["ui/scoreboard.py"]
+    sys.modules.pop("openhands_worker", None)
+
+
 def _import_chat_with_optional_stubs(monkeypatch):
     if not HAS_CHROMADB:
         install_rag_stub(monkeypatch)
@@ -325,6 +409,46 @@ def test_chat_repeated_blocked_tool_state_stops_on_second_duplicate(monkeypatch)
     # A successful result no longer resets the counter — an OK sibling tool in
     # the same batch must not defeat the duplicate-BLOCKED detection.
     assert state["count"] == 2
+    sys.modules.pop("agents.chat", None)
+
+
+def test_chat_plain_plan_project_result_gets_generate_code_nudge(monkeypatch):
+    chat = _import_chat_with_optional_stubs(monkeypatch)
+    plain_plan = "\n".join([
+        "Plan ready for a large project.",
+        "Create these files:",
+        "- app.py",
+        "- server.py",
+        "- frontend/src/main.jsx",
+        "- frontend/src/state.js",
+        "Use tests/test_app.py for verification.",
+        "Details: " + ("implement routing, state, persistence, and tests. " * 40),
+    ])
+
+    assert len(plain_plan) > 1000
+    assert chat._plan_project_file_ref_count(plain_plan) >= 3
+    assert chat._plan_project_should_nudge_generate_code(plain_plan) is True
+    sys.modules.pop("agents.chat", None)
+
+
+def test_chat_daedalus_auto_plan_project_result_skips_generate_code_nudge(monkeypatch):
+    chat = _import_chat_with_optional_stubs(monkeypatch)
+    auto_result = "\n".join([
+        "Plan ready for a large project.",
+        "- app.py",
+        "- server.py",
+        "- frontend/src/main.jsx",
+        "- frontend/src/state.js",
+        "Details: " + ("implement routing, state, persistence, and tests. " * 40),
+        "=== DAEDALUS BUILD - Builder invoked automatically from the Architect plan ===",
+        "PROJECT COMPLETE. OpenHands agent built the project in /root/projects/demo.",
+        "=== AUTOMATIC VERIFICATION - run_review already ran; do NOT call it again ===",
+        "REVIEW CLEAN.",
+    ])
+
+    assert len(auto_result) > 1000
+    assert chat._plan_project_file_ref_count(auto_result) >= 3
+    assert chat._plan_project_should_nudge_generate_code(auto_result) is False
     sys.modules.pop("agents.chat", None)
 
 
@@ -523,6 +647,86 @@ def test_uploaded_project_bootstrap_gate_releases_after_agent_run():
     runs = [{"id": "run-aider", "role": "aider.fix", "status": "succeeded"}]
 
     assert tools._uploaded_project_manual_gate_state(workflow, runs) == ""
+
+
+def test_acceptance_cap_does_not_release_download_project(monkeypatch):
+    import tools
+
+    class Events:
+        def __init__(self):
+            self.items = []
+
+        async def emit(self, conv_id, event_type, data):
+            self.items.append((conv_id, event_type, data))
+
+    runs = [
+        {
+            "id": "run-acceptance",
+            "role": "acceptance",
+            "status": "succeeded",
+            "started_at": "2026-06-24T10:03:00",
+            "result_envelope": {
+                "status": "issues",
+                "project_dir": "/root/projects/neon-pong-game",
+                "issues": [{
+                    "category": "runtime",
+                    "file": "main.py",
+                    "summary": "main.py calls create_explosion but ParticleSystem defines add_explosion.",
+                    "suggested_fix_scope": ["main.py", "effects/particle_system.py"],
+                }],
+            },
+        },
+        {
+            "id": "run-fix-2",
+            "role": "fixer",
+            "status": "succeeded",
+            "parent_run_id": "run-acceptance",
+            "started_at": "2026-06-24T10:02:00",
+            "result_envelope": {"status": "applied", "source_role": "acceptance"},
+        },
+        {
+            "id": "run-fix-1",
+            "role": "fixer",
+            "status": "succeeded",
+            "parent_run_id": "run-acceptance",
+            "started_at": "2026-06-24T10:01:00",
+            "result_envelope": {"status": "applied", "source_role": "acceptance"},
+        },
+    ]
+
+    async def get_runs_by_conversation(_conv_id, limit=20):
+        return runs
+
+    async def get_latest_coder_workflow(_conv_id, project_id=None):
+        return None
+
+    async def is_v2(_conv_id, conv_row=None):
+        return True
+
+    async def no_user_ts(_conv_id):
+        return None
+
+    async def no_ship_anyway(_conv_id):
+        return False
+
+    monkeypatch.setattr(tools.db, "get_runs_by_conversation", get_runs_by_conversation)
+    monkeypatch.setattr(tools.db, "get_latest_coder_workflow", get_latest_coder_workflow)
+    monkeypatch.setattr(tools, "_is_v2_persona", is_v2)
+    monkeypatch.setattr(tools, "_latest_user_msg_ts", no_user_ts)
+    monkeypatch.setattr(tools, "_latest_user_requested_ship_anyway", no_ship_anyway)
+
+    result = _run(tools.exec_tool(
+        None,
+        Events(),
+        "download_project",
+        {"directory": "/root/projects/neon-pong-game"},
+        "conv-neon",
+    ))
+
+    assert result.startswith("BLOCKED")
+    assert "run_fixer(reviewer_run_id='run-acceptance')" in result
+    assert tools._fix_cap_releases_tool("read_file") is True
+    assert tools._fix_cap_releases_tool("download_project") is False
 
 
 def test_new_coder_tools_are_registered():

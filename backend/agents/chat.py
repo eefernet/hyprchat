@@ -700,6 +700,35 @@ def _record_blocked_tool_result(state: dict, tool_name: str, tool_result: str) -
     return state["count"] >= 2
 
 
+_PLAN_PROJECT_AUTO_BUILD_MARKERS = (
+    "Builder invoked automatically from the Architect plan",
+    "AUTOMATIC BUILD CONTINUATION",
+    "AUTOMATIC VERIFICATION",
+    "AUTOMATIC ACCEPTANCE",
+    "PROJECT COMPLETE",
+    "BUILD PAUSED",
+)
+
+
+def _plan_project_file_ref_count(tool_result: str) -> int:
+    text = tool_result or ""
+    return sum(
+        text.count(ext)
+        for ext in (".py", ".js", ".ts", ".html", ".go", ".rs")
+    )
+
+
+def _plan_project_should_nudge_generate_code(tool_result: str) -> bool:
+    """Only legacy/plain Architect plans need the chat-loop generate_code nudge."""
+    text = tool_result or ""
+    if len(text) <= 1000:
+        return False
+    lower = text.lower()
+    if any(marker.lower() in lower for marker in _PLAN_PROJECT_AUTO_BUILD_MARKERS):
+        return False
+    return _plan_project_file_ref_count(text) >= 3
+
+
 def _qa_run_qualifies(run: dict, stream_started_at: str) -> bool:
     """True when a qa run can be streamed verbatim as this turn's answer:
     succeeded, not a change request, has an answer, and was created by THIS
@@ -1606,11 +1635,13 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     # the frontend sees on reload.
     _assistant_msg_id = None
     _stream_started_at = datetime.utcnow().isoformat()
+    _stream_has_full_product_build = False
     if not ephemeral:
         try:
             _assistant_msg_id = await db.add_message(conv_id, "assistant", "", metadata={
                 "stream_started_at": _stream_started_at,
                 "in_progress": True,
+                "has_full_product_build": False,
             })
             # Tell the frontend the message_id so it can PATCH the final state on
             # stream-complete instead of POSTing a duplicate.
@@ -2423,8 +2454,20 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         if _assistant_msg_id is not None:
             try:
                 _runs_now = await db.get_runs_by_conversation(conv_id, limit=20)
-                _stream_run_ids = [r["id"] for r in _runs_now
-                                    if r.get("started_at", "") >= _stream_started_at]
+                _stream_runs_now = [
+                    r for r in _runs_now
+                    if r.get("started_at", "") >= _stream_started_at
+                ]
+                _stream_run_ids = [r["id"] for r in _stream_runs_now]
+                _stream_run_roles = [
+                    r.get("role", "") for r in _stream_runs_now
+                    if r.get("role")
+                ]
+                if any(
+                    role == "architect" or str(role).startswith("builder")
+                    for role in _stream_run_roles
+                ):
+                    _stream_has_full_product_build = True
                 await db.update_message(_assistant_msg_id,
                     content=(_turn_text + content) if _turn_text else content,
                     metadata={
@@ -2432,6 +2475,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         "in_progress": True,
                         "round": round_num,
                         "run_ids": _stream_run_ids,
+                        "run_roles": _stream_run_roles,
+                        "has_full_product_build": _stream_has_full_product_build,
                     })
             except Exception as _use:
                 print(f"[CHAT]   round-save failed (non-fatal): {_use}")
@@ -2511,6 +2556,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                             "blocked_loop": True,
                                             "blocked_tool": ",".join(_tc_names_dup),
                                             "round": round_num,
+                                            "has_full_product_build": _stream_has_full_product_build,
                                         },
                                     )
                                 except Exception as _de:
@@ -2622,6 +2668,9 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         print(f"[CHAT]   Blocked unauthorized tool: {tool_name} (allowed: {sorted(available_tool_names)})")
                         messages.append({"role": "tool", "content": f"Error: tool '{tool_name}' is not available in this session."})
                         continue
+
+                    if tool_name in {"plan_project", "generate_code"}:
+                        _stream_has_full_product_build = True
 
                     if ephemeral:
                         print(f"[CHAT]   Executing tool: {tool_name}(args redacted for ghost mode)")
@@ -2810,6 +2859,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                         "blocked_loop": True,
                                         "blocked_tool": tool_name,
                                         "round": round_num,
+                                        "has_full_product_build": _stream_has_full_product_build,
                                     },
                                 )
                             except Exception as _be:
@@ -2818,18 +2868,18 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         yield f"data: {json.dumps({'type': 'done', 'model': req.model, 'message_id': _assistant_msg_id, 'blocked': True})}\n\n"
                         return
 
-                    # After plan_project: nudge model to use generate_code for large projects
-                    if tool_name == "plan_project" and len(tool_result) > 1000:
-                        # Count file references in the plan to gauge project size
-                        _file_refs = tool_result.count(".py") + tool_result.count(".js") + tool_result.count(".ts") + tool_result.count(".html") + tool_result.count(".go") + tool_result.count(".rs")
-                        if _file_refs >= 3:
-                            messages.append({"role": "tool", "content": (
-                                "SYSTEM: This is a large project with multiple files. "
-                                "Use generate_code to build it — the coding agent will implement "
-                                "the entire plan autonomously. Pass the full task description and "
-                                "language. After it finishes, review the output, run tests, and deliver."
-                            )})
-                            print(f"[CHAT]   plan_project returned large plan ({_file_refs} file refs) — nudging to generate_code")
+                    # After legacy/plain plan_project: nudge model to use generate_code
+                    # for large projects. Daedalus plan_project already hands off to
+                    # Builder/Review/Acceptance, so a second nudge would duplicate work.
+                    if tool_name == "plan_project" and _plan_project_should_nudge_generate_code(tool_result):
+                        _file_refs = _plan_project_file_ref_count(tool_result)
+                        messages.append({"role": "tool", "content": (
+                            "SYSTEM: This is a large project with multiple files. "
+                            "Use generate_code to build it — the coding agent will implement "
+                            "the entire plan autonomously. Pass the full task description and "
+                            "language. After it finishes, review the output, run tests, and deliver."
+                        )})
+                        print(f"[CHAT]   plan_project returned large plain plan ({_file_refs} file refs) — nudging to generate_code")
 
                     # Track generate_code failures — temporarily disable code-block-rescue
                     if tool_name == "generate_code" and tool_result.startswith("ERROR"):
@@ -2951,6 +3001,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                             "in_progress": False,
                                             "qa_short_circuit": True,
                                             "qa_run_id": _qr.get("id"),
+                                            "has_full_product_build": False,
                                         },
                                     )
                                 except Exception as _pe:
@@ -3115,7 +3166,11 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         await db.update_message(
                             _assistant_msg_id,
                             content="_[the model produced no text response]_",
-                            metadata={"in_progress": False, "empty_response": True},
+                            metadata={
+                                "in_progress": False,
+                                "empty_response": True,
+                                "has_full_product_build": _stream_has_full_product_build,
+                            },
                         )
                     except Exception:
                         pass
@@ -3227,6 +3282,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     "in_progress": False,
                     "max_rounds_reached": True,
                     "round": MAX_ROUNDS,
+                    "has_full_product_build": _stream_has_full_product_build,
                 },
             )
         except Exception as _pe:

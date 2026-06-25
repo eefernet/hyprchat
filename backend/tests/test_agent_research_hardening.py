@@ -13,7 +13,10 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 if not HAS_AIOSQLITE:
-    pytest.skip("aiosqlite not installed", allow_module_level=True)
+    pytest.skip(
+        "aiosqlite not installed; install backend/requirements.txt to run required Daedalus hardening coverage",
+        allow_module_level=True,
+    )
 
 import database as db  # noqa: E402
 import tools  # noqa: E402
@@ -368,6 +371,150 @@ def test_plan_project_uses_architect_for_non_daedalus_codeagent(tmp_path, monkey
     assert workflow is not None
     assert workflow["state"] == "planning"
     assert workflow["active_run_id"] == "run-architect"
+
+
+def _fake_architect_plan(run_id="run-architect", project_id="proj-architect"):
+    return {
+        "status": "ok",
+        "run_id": run_id,
+        "project_id": project_id,
+        "language": "python",
+        "build_system": "none",
+        "build_cmd": "python -m py_compile app.py",
+        "test_cmd": "python -m pytest -q",
+        "lint_cmd": "",
+        "manifest": [{"path": "app.py", "purpose": "App entrypoint", "estimated_loc": 80}],
+        "tests_required": [{"path": "tests/test_app.py", "covers": "basic behavior"}],
+        "external_deps": [],
+        "risk_notes": ["Keep the app self-contained."],
+        "success_criteria": ["python -m py_compile app.py exits 0"],
+        "summary": "Plan ready: python project, 1 file",
+    }
+
+
+def test_daedalus_plan_project_invokes_builder_from_architect_plan(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_model_config(
+        "mc-daedalus", "Daedalus Coder v2", "test-model",
+        tool_ids=["plan_project", "generate_code"],
+    ))
+    _run(db.create_conversation(
+        "conv-daedalus-plan", "Daedalus Plan", model_config_id="mc-daedalus",
+    ))
+
+    from agents import architect
+
+    async def fake_run_architect(http, events, conv_id, *, task, language_hint,
+                                 kb_chunks=None, conv_model=""):
+        await db.create_run("run-architect", conv_id, role="architect", status="succeeded")
+        plan = _fake_architect_plan()
+        await db.update_run("run-architect", status="succeeded", result_envelope=plan, ended=True)
+        return plan
+
+    original_exec_tool = tools.exec_tool
+    builder_calls = []
+
+    async def wrapped_exec_tool(http, events, name, args, conv_id, **kwargs):
+        if name == "generate_code":
+            builder_calls.append(args)
+            workflow = await db.get_latest_coder_workflow(conv_id, "proj-architect")
+            assert workflow["state"] == "building"
+            await db.create_run("run-builder", conv_id, role="builder.scaffold",
+                                project_id=args.get("project_id", ""), status="running")
+            await tools._apply_workflow_event(
+                conv_id, "BUILD_STARTED", run_id="run-builder",
+                project_id=args.get("project_id", ""),
+            )
+            return "PROJECT COMPLETE (fake builder)"
+        return await original_exec_tool(http, events, name, args, conv_id, **kwargs)
+
+    monkeypatch.setattr(architect, "run_architect", fake_run_architect)
+    monkeypatch.setattr(architect, "format_plan_for_chat", lambda plan: "ARCHITECT PLAN")
+    monkeypatch.setattr(tools, "exec_tool", wrapped_exec_tool)
+
+    result = _run(tools.exec_tool(
+        http=_NoPostHTTP(), events=_FakeEvents(),
+        name="plan_project",
+        args={"task": "build a tiny app", "language": "python"},
+        conv_id="conv-daedalus-plan",
+        conv_model="plain-model",
+    ))
+
+    assert "ARCHITECT PLAN" in result
+    assert "PROJECT COMPLETE (fake builder)" in result
+    assert len(builder_calls) == 1
+    assert builder_calls[0]["project_id"] == "proj-architect"
+    assert builder_calls[0]["language"] == "python"
+    assert builder_calls[0]["required_files"] == ["app.py"]
+    assert builder_calls[0]["build_cmd"] == "python -m py_compile app.py"
+    assert builder_calls[0]["architect_run_id"] == "run-architect"
+    assert "Architect Plan Contract" in builder_calls[0]["context"]
+    workflow = _run(db.get_latest_coder_workflow("conv-daedalus-plan", "proj-architect"))
+    assert workflow["state"] == "building"
+    assert workflow["active_run_id"] == "run-builder"
+
+
+def test_daedalus_plan_project_recovers_stranded_architect_workflow(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_model_config(
+        "mc-daedalus-recover", "Daedalus Coder v2", "test-model",
+        tool_ids=["plan_project", "generate_code"],
+    ))
+    _run(db.create_conversation(
+        "conv-daedalus-recover", "Daedalus Recover", model_config_id="mc-daedalus-recover",
+    ))
+    plan = _fake_architect_plan(run_id="run-architect-done", project_id="proj-recover")
+    _run(db.create_run("run-architect-done", "conv-daedalus-recover",
+                       role="architect", project_id="proj-recover", status="succeeded"))
+    _run(db.update_run("run-architect-done", status="succeeded", result_envelope=plan, ended=True))
+    _run(db.create_coder_workflow(
+        "cw-stranded", "conv-daedalus-recover", project_id="proj-recover",
+        mode="build_from_prompt", state="planning",
+        user_task="build a recoverable app", active_run_id="run-architect-done",
+    ))
+
+    from agents import architect
+
+    async def should_not_replan(*_args, **_kwargs):
+        raise AssertionError("stranded workflow should resume without calling Architect")
+
+    original_exec_tool = tools.exec_tool
+    builder_calls = []
+
+    async def wrapped_exec_tool(http, events, name, args, conv_id, **kwargs):
+        if name == "generate_code":
+            builder_calls.append(args)
+            await db.create_run("run-builder-recovered", conv_id, role="builder.scaffold",
+                                project_id=args.get("project_id", ""), status="running")
+            await tools._apply_workflow_event(
+                conv_id, "BUILD_STARTED", run_id="run-builder-recovered",
+                project_id=args.get("project_id", ""),
+            )
+            return "PROJECT COMPLETE (recovered builder)"
+        return await original_exec_tool(http, events, name, args, conv_id, **kwargs)
+
+    monkeypatch.setattr(architect, "run_architect", should_not_replan)
+    monkeypatch.setattr(architect, "format_plan_for_chat", lambda _plan: "ARCHITECT PLAN")
+    monkeypatch.setattr(tools, "exec_tool", wrapped_exec_tool)
+
+    result = _run(tools.exec_tool(
+        http=_NoPostHTTP(), events=_FakeEvents(),
+        name="plan_project",
+        args={"task": "continue", "language": "python"},
+        conv_id="conv-daedalus-recover",
+        conv_model="plain-model",
+    ))
+
+    assert "DAEDALUS RECOVERY" in result
+    assert "PROJECT COMPLETE (recovered builder)" in result
+    assert len(builder_calls) == 1
+    assert builder_calls[0]["project_id"] == "proj-recover"
+    assert builder_calls[0]["required_files"] == ["app.py"]
+    workflow = _run(db.get_coder_workflow("cw-stranded"))
+    assert workflow["state"] == "building"
+    assert workflow["active_run_id"] == "run-builder-recovered"
 
 
 # ---------------------------------------------------------------------------
@@ -725,6 +872,11 @@ def test_workflow_fsm_creates_and_transitions(tmp_path):
     assert wf_id
     wf = _run(db.get_coder_workflow(wf_id))
     assert wf["state"] == "planning"
+
+    _run(tools._apply_workflow_event("conv-fsm", "BUILD_STARTED", run_id="run-b0", project_id="proj-fsm"))
+    wf = _run(db.get_coder_workflow(wf_id))
+    assert wf["state"] == "building"
+    assert wf["active_run_id"] == "run-b0"
 
     _run(tools._apply_workflow_event("conv-fsm", "BUILD_OK", run_id="run-b1", project_id="proj-fsm"))
     assert _run(db.get_coder_workflow(wf_id))["state"] == "reviewing"

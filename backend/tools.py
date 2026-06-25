@@ -185,6 +185,13 @@ _SHIP_ANYWAY_DIRECT_RE = re.compile(
     r"|give\s+me\s+(?:a\s+)?download",
     re.I,
 )
+_DELIVERY_SHIP_TOOLS = {"download_project", "download_file"}
+_CAP_RELEASE_DIAGNOSTIC_TOOLS = {"read_file", "list_files"}
+
+
+def _fix_cap_releases_tool(name: str) -> bool:
+    """After the fix cap, allow inspection but not delivery."""
+    return name in _CAP_RELEASE_DIAGNOSTIC_TOOLS
 
 
 async def _latest_user_requested_ship_anyway(conv_id: str) -> bool:
@@ -274,6 +281,299 @@ def _task_from_issue_run(user_task: str, issue_run: dict | None) -> str:
     if issue_lines:
         parts.append("Reviewer issues:\n" + "\n".join(issue_lines))
     return "\n\n".join(parts).strip() or "Fix the uploaded project reviewer issues."
+
+
+def _normalize_manifest_path(path: str) -> str:
+    path = str(path or "").replace("\\", "/").strip()
+    if not path:
+        return ""
+    path = re.sub(r"^/+", "", path)
+    if path.startswith("root/projects/"):
+        parts = path.split("/")
+        path = "/".join(parts[3:]) if len(parts) > 3 else ""
+    path = re.sub(r"/+", "/", path).strip("/")
+    if not path or path.endswith("/"):
+        return ""
+    return path
+
+
+def _required_files_from_manifest(manifest: list) -> list[str]:
+    required: list[str] = []
+    seen: set[str] = set()
+    for entry in manifest or []:
+        raw = entry.get("path") if isinstance(entry, dict) else entry
+        path = _normalize_manifest_path(raw)
+        if path and path not in seen:
+            seen.add(path)
+            required.append(path)
+    return required
+
+
+def _manifest_presence(files: list[str], project_dir: str,
+                       required_files: list[str]) -> tuple[list[str], list[str]]:
+    required = _required_files_from_manifest(required_files)
+    actual: set[str] = set()
+    project_prefix = (project_dir or "").rstrip("/") + "/" if project_dir else ""
+    for file_path in files or []:
+        path = str(file_path or "").replace("\\", "/").strip()
+        if not path:
+            continue
+        rel = ""
+        if project_prefix and path.startswith(project_prefix):
+            rel = path[len(project_prefix):]
+        elif "/root/projects/" in path:
+            parts = path.split("/")
+            rel = "/".join(parts[4:]) if len(parts) > 4 else ""
+        else:
+            rel = path.rsplit("/", 1)[-1]
+        rel = _normalize_manifest_path(rel)
+        if rel:
+            actual.add(rel)
+    present = [path for path in required if path in actual]
+    missing = [path for path in required if path not in actual]
+    return present, missing
+
+
+async def _scan_project_files(http, project_dir: str) -> list[str]:
+    if not project_dir or not project_dir.startswith("/root/projects/"):
+        return []
+    try:
+        qd = shlex.quote(project_dir)
+        cmd = (
+            f"find {qd} -type f "
+            "! -path '*/.git/*' ! -path '*/__pycache__/*' "
+            "! -path '*/node_modules/*' ! -path '*/venv/*' ! -path '*/.venv/*' "
+            "! -path '*/.pytest_cache/*' ! -name '*.pyc' "
+            "2>/dev/null | sort"
+        )
+        r = await http.post(
+            f"{config.CODEBOX_URL}/command",
+            json={"command": cmd, "timeout": 10},
+            timeout=15,
+        )
+        out = r.json().get("stdout", "").strip()
+        return [line.strip() for line in out.splitlines() if line.strip()]
+    except Exception as e:
+        print(f"[CODEGEN:OH] Project file scan failed (non-fatal): {e}")
+        return []
+
+
+def _architect_plan_to_builder_args(plan: dict, *,
+                                    fallback_task: str = "",
+                                    fallback_language: str = "python") -> dict:
+    """Convert a persisted Architect envelope into generate_code arguments."""
+    plan = plan or {}
+    project_id = (plan.get("project_id") or "").strip()
+    language = (plan.get("language") or fallback_language or "python").strip() or "python"
+    manifest = plan.get("manifest") if isinstance(plan.get("manifest"), list) else []
+    required_files = _required_files_from_manifest(manifest)
+    tests_required = plan.get("tests_required") if isinstance(plan.get("tests_required"), list) else []
+    deps = plan.get("external_deps") if isinstance(plan.get("external_deps"), list) else []
+    risks = plan.get("risk_notes") if isinstance(plan.get("risk_notes"), list) else []
+    criteria = plan.get("success_criteria") if isinstance(plan.get("success_criteria"), list) else []
+
+    task_lines = [
+        f"Build the project from the completed Architect plan{f' for `{project_id}`' if project_id else ''}.",
+    ]
+    if fallback_task:
+        task_lines.append("\nOriginal user task:\n" + fallback_task.strip())
+    task_lines.extend([
+        "\nUse the Architect plan as the source of truth. Create every manifest file, "
+        "honor the dependency choices, and make the listed build/test/lint commands pass.",
+    ])
+
+    context = [
+        "--- Architect Plan Contract (source of truth) ---",
+        f"Project ID: {project_id or '(unspecified)'}",
+        f"Language: {language}",
+        f"Build system: {plan.get('build_system') or '(none)'}",
+        f"Build command: {plan.get('build_cmd') or '(none)'}",
+        f"Test command: {plan.get('test_cmd') or '(none)'}",
+        f"Lint command: {plan.get('lint_cmd') or '(none)'}",
+        "",
+        f"Manifest ({len(manifest)} files):",
+    ]
+    for entry in manifest[:40]:
+        if isinstance(entry, dict):
+            loc = f" (~{entry.get('estimated_loc')} LOC)" if entry.get("estimated_loc") else ""
+            context.append(f"  - {entry.get('path', '?')}: {entry.get('purpose', '')}{loc}")
+        else:
+            context.append(f"  - {entry}")
+    if len(manifest) > 40:
+        context.append(f"  ... ({len(manifest) - 40} more files)")
+    if tests_required:
+        context.append("\nTests required:")
+        for item in tests_required[:12]:
+            if isinstance(item, dict):
+                context.append(f"  - {item.get('path', '?')}: {item.get('covers', '')}")
+            else:
+                context.append(f"  - {item}")
+    if deps:
+        context.append("\nExternal dependencies:")
+        for dep in deps[:12]:
+            if isinstance(dep, dict):
+                context.append(f"  - {dep.get('name', '?')} {dep.get('version', '')}".rstrip())
+            else:
+                context.append(f"  - {dep}")
+    if risks:
+        context.append("\nRisks to handle:")
+        for risk in risks[:8]:
+            context.append(f"  - {risk}")
+    if criteria:
+        context.append("\nSuccess criteria:")
+        for criterion in criteria[:12]:
+            context.append(f"  - {criterion}")
+
+    return {
+        "task": "\n".join(task_lines).strip(),
+        "language": language,
+        "project_id": project_id,
+        "context": "\n".join(context).strip(),
+        "required_files": required_files,
+        "build_cmd": plan.get("build_cmd") or "",
+        "test_cmd": plan.get("test_cmd") or "",
+        "lint_cmd": plan.get("lint_cmd") or "",
+        "architect_run_id": plan.get("run_id") or "",
+    }
+
+
+async def _store_architect_plan_contract(conv_id: str, plan: dict,
+                                         workflow_id: str = "") -> str:
+    """Persist the Architect contract on the active greenfield workflow."""
+    if not conv_id or not isinstance(plan, dict):
+        return ""
+    project_id = (plan.get("project_id") or "").strip()
+    try:
+        wf = await db.get_coder_workflow(workflow_id) if workflow_id else None
+        if not wf and project_id:
+            wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
+        if not wf:
+            wf = await db.get_latest_coder_workflow(conv_id)
+        if not wf:
+            return ""
+        contract = {
+            "architect_plan": plan,
+            "project_id": project_id,
+            "language": plan.get("language", ""),
+            "build_system": plan.get("build_system", ""),
+            "build_cmd": plan.get("build_cmd", ""),
+            "test_cmd": plan.get("test_cmd", ""),
+            "lint_cmd": plan.get("lint_cmd", ""),
+            "manifest": plan.get("manifest") or [],
+            "tests_required": plan.get("tests_required") or [],
+            "external_deps": plan.get("external_deps") or [],
+            "success_criteria": plan.get("success_criteria") or [],
+            "risk_notes": plan.get("risk_notes") or [],
+            "architect_run_id": plan.get("run_id", ""),
+        }
+        await db.update_coder_workflow(
+            wf["id"], contract=contract,
+            project_id=project_id or None,
+        )
+        return wf["id"]
+    except Exception as e:
+        print(f"[plan_project] store plan contract failed (non-fatal): {e}")
+        return ""
+
+
+async def _find_stranded_architect_workflow(conv_id: str) -> tuple[dict, dict] | None:
+    """Latest greenfield workflow whose completed plan never reached Builder."""
+    if not conv_id:
+        return None
+    try:
+        wf = await db.get_latest_coder_workflow(conv_id)
+        if not wf or wf.get("mode") != "build_from_prompt":
+            return None
+        if wf.get("cancel_requested") or (wf.get("state") or "").lower() != "planning":
+            return None
+        active_run_id = wf.get("active_run_id") or ""
+        if not active_run_id:
+            return None
+        arch_run = await db.get_run(active_run_id)
+        if not arch_run or arch_run.get("role") != "architect":
+            return None
+        if (arch_run.get("status") or "").lower() != "succeeded":
+            return None
+        arch_env = arch_run.get("result_envelope") or {}
+        if (arch_env.get("status") or "").lower() not in {"ok", "succeeded", ""}:
+            return None
+        arch_started = _parse_ts_loose(arch_run.get("started_at"))
+        runs = await db.get_runs_by_conversation(conv_id, limit=50)
+        for run in runs:
+            if not (run.get("role") or "").startswith("builder"):
+                continue
+            run_started = _parse_ts_loose(run.get("started_at"))
+            if not arch_started or not run_started or run_started >= arch_started:
+                return None
+        return wf, arch_run
+    except Exception as e:
+        print(f"[plan_project] stranded workflow lookup failed (non-fatal): {e}")
+        return None
+
+
+async def _run_builder_from_architect_plan(http, events, conv_id: str, plan: dict, *,
+                                           workflow_id: str = "",
+                                           fallback_task: str = "",
+                                           fallback_language: str = "python",
+                                           custom_tool_map: dict | None = None,
+                                           connector_tool_name_map: dict | None = None,
+                                           conv_model: str = "",
+                                           kb_ids: list | None = None,
+                                           artifact_message_id: int | None = None,
+                                           recovery: bool = False) -> str:
+    """Continue a Daedalus greenfield workflow from Architect to Builder."""
+    from agents import architect
+
+    builder_args = _architect_plan_to_builder_args(
+        plan, fallback_task=fallback_task, fallback_language=fallback_language,
+    )
+    project_id = builder_args.get("project_id", "")
+    try:
+        wf = await db.get_coder_workflow(workflow_id) if workflow_id else None
+        if not wf and project_id:
+            wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
+        if not wf:
+            wf = await db.get_latest_coder_workflow(conv_id)
+        if wf:
+            await db.update_coder_workflow(
+                wf["id"], state="building", artifact_status="not_ready",
+                active_run_id="", project_id=project_id or None,
+            )
+            workflow_id = wf["id"]
+    except Exception as e:
+        print(f"[plan_project] workflow BUILD_STARTED pre-update failed (non-fatal): {e}")
+
+    await events.emit(conv_id, "tool_progress", {
+        "tool": "plan_project", "icon": "compass",
+        "status": ("↩ Resuming completed plan with Builder..."
+                   if recovery else "➡ Plan complete — starting Builder..."),
+        "workflow_id": workflow_id,
+        "project_id": project_id,
+    })
+    builder_result = await exec_tool(
+        http, events, "generate_code", builder_args, conv_id,
+        custom_tool_map=custom_tool_map,
+        connector_tool_name_map=connector_tool_name_map,
+        conv_model=conv_model,
+        kb_ids=kb_ids,
+        artifact_message_id=artifact_message_id,
+    )
+    if workflow_id and isinstance(builder_result, str) and builder_result.startswith("ERROR:"):
+        try:
+            wf = await db.get_coder_workflow(workflow_id)
+            if wf and not (wf.get("active_run_id") or ""):
+                await db.update_coder_workflow(
+                    workflow_id, state="blocked", artifact_status="not_ready",
+                )
+        except Exception as e:
+            print(f"[plan_project] builder handoff failure state update failed (non-fatal): {e}")
+    plan_text = architect.format_plan_for_chat(plan)
+    heading = "DAEDALUS RECOVERY" if recovery else "DAEDALUS BUILD"
+    return (
+        f"{plan_text}\n\n"
+        f"=== {heading} — Builder invoked automatically from the Architect plan ===\n"
+        f"{builder_result}"
+    )
 
 
 # Pytest "FAILED tests/foo.py::test_x - reason" line, plus a fallback for
@@ -1520,9 +1820,9 @@ async def exec_tool(
                             + "\n  3. Asks the user for guidance — what behavior they actually "
                             f"want, or whether to skip this issue and ship anyway.\n\n"
                             f"Do NOT call run_fixer, run_aider_fix, run_review, generate_code, "
-                            f"write_file, run_shell, or plan_project. You MAY call download_project / "
-                            f"download_file to deliver what was built so far if the user wants "
-                            f"to ship as-is. Otherwise, respond to the user with text."
+                            f"write_file, run_shell, download_project, download_file, or plan_project. "
+                            f"You MAY inspect with read_file/list_files if needed. Otherwise, respond "
+                            f"to the user with text and ask whether they want to ship as-is."
                         )
             except Exception as _ce:
                 print(f"[v2-gate] cycle cap check failed (non-fatal): {_ce}")
@@ -1721,6 +2021,9 @@ async def exec_tool(
             try:
                 _conv_full = await db.get_conversation(conv_id)
                 if await _check_v2(cr=_conv_full):
+                    if args.get("manifest_completion_retry"):
+                        print("[v2-gate] allowing manifest completion retry through anti-rebuild guard", flush=True)
+                        raise StopAsyncIteration("manifest completion retry allowed")
                     _latest_user_ts = await _latest_user_msg_ts(conv_id, conv_row=_conv_full)
 
                     if _latest_user_ts is not None:
@@ -1771,7 +2074,8 @@ async def exec_tool(
                                 f"don't silently rebuild what's already there."
                             )
             except Exception as _rbe:
-                print(f"[v2-gate] anti-rebuild check failed (non-fatal): {_rbe}")
+                if not isinstance(_rbe, StopAsyncIteration):
+                    print(f"[v2-gate] anti-rebuild check failed (non-fatal): {_rbe}")
 
         if conv_id and name not in ("run_review", "run_acceptance_review", "run_fixer",
                                     "run_aider_fix", "ask_project", "get_coder_workflow",
@@ -1816,6 +2120,12 @@ async def exec_tool(
                             _pending_review = _r
                         break
                     if _role.startswith("builder") and _r.get("status") in _BUILDER_GATING:
+                        _env_b = _r.get("result_envelope") or {}
+                        if (name == "generate_code"
+                                and args.get("manifest_completion_retry")
+                                and _r.get("status") in {"partial", "stuck"}
+                                and (_env_b.get("manifest_missing") or [])):
+                            continue
                         _pending_run = _r
                         _pending_kind = "builder"
                         break
@@ -1893,12 +2203,10 @@ async def exec_tool(
                     _pending_role = _pending_review.get("role", "reviewer")
                     _pending_env = _pending_review.get("result_envelope") or {}
                     _rstatus_disp = _pending_env.get("status", "?")
-                    # Cap-aware release: once the fixer cycle budget is
-                    # exhausted, the same review issues will keep blocking
-                    # the conversation forever. Allow the model to deliver
-                    # what was built (download_project / download_file) and
-                    # inspect the tree (read_file / list_files) so the user
-                    # gets the partial result instead of a dead session.
+                    # Cap-aware diagnostic release: once the fixer cycle budget
+                    # is exhausted, allow read-only inspection so the model can
+                    # explain the remaining issue. Delivery still requires an
+                    # explicit latest-user ship-as-is request.
                     # Count total fixer attempts (succeeded + failed/no_op)
                     # for the release — a fixer that declined still represents
                     # an exhausted attempt. The cycle-cap check (which gates
@@ -1924,11 +2232,6 @@ async def exec_tool(
                         if (_r.get("role") in {"fixer", "aider.fix"} and _r.get("status") == "succeeded"
                             and _fixer_source_role(_r) == _pending_role)
                     )
-                    _DELIVERY_OK_AFTER_CAP = {
-                        "download_project", "download_file",
-                        "read_file", "list_files",
-                    }
-                    _DELIVERY_SHIP_TOOLS = {"download_project", "download_file"}
                     _ship_anyway_gate = (
                         name in _DELIVERY_SHIP_TOOLS
                         and await _latest_user_requested_ship_anyway(conv_id)
@@ -1965,7 +2268,7 @@ async def exec_tool(
                         print(f"[v2-gate] ship-anyway: allowing {name} despite "
                               f"fix-needed because latest user requested delivery", flush=True)
                         # Skip _gate_msg entirely → delivery tool runs normally.
-                    elif _fixer_attempts_gate >= _cap_limit_gate and name in _DELIVERY_OK_AFTER_CAP:
+                    elif _fixer_attempts_gate >= _cap_limit_gate and _fix_cap_releases_tool(name):
                         print(f"[v2-gate] cap-release: allowing {name} despite "
                               f"fix-needed (attempts={_fixer_attempts_gate}, "
                               f"succ={_fixer_succ_gate})", flush=True)
@@ -2411,25 +2714,6 @@ async def exec_tool(
             if conv_id:
                 try:
                     _runs_for_gate = await db.get_runs_by_conversation(conv_id, limit=20)
-                    _FIXER_TERMINAL_FOR_DELIVERY = {"succeeded", "failed", "partial", "no_op"}
-                    _run_role_by_id_for_delivery = {
-                        r.get("id"): r.get("role") for r in _runs_for_gate
-                    }
-
-                    def _fixer_source_role_for_delivery(_fr):
-                        _fenv = _fr.get("result_envelope") or {}
-                        return (_fenv.get("source_role")
-                                or _run_role_by_id_for_delivery.get(_fr.get("parent_run_id"))
-                                or "reviewer")
-
-                    def _fixer_attempts_for_delivery(_role: str) -> int:
-                        return sum(
-                            1 for _r in _runs_for_gate
-                            if (_r.get("role") in {"fixer", "aider.fix"}
-                                and _r.get("status") in _FIXER_TERMINAL_FOR_DELIVERY
-                                and _fixer_source_role_for_delivery(_r) == _role)
-                        )
-
                     _latest_reviewer = None
                     _latest_acceptance = None
                     for _r in _runs_for_gate:
@@ -2445,10 +2729,7 @@ async def exec_tool(
                         if _astatus != "accepted":
                             issues = _env.get("issues") or []
                             n = len(issues)
-                            _acceptance_cap_exhausted = (
-                                _fixer_attempts_for_delivery("acceptance") >= 2
-                            )
-                            if _ship_anyway_requested or _acceptance_cap_exhausted:
+                            if _ship_anyway_requested:
                                 _download_warning_lines = [
                                     "WARNING: Shipped despite unresolved acceptance issues.",
                                     f"Acceptance status: {_astatus or '?'}; issue count: {n}.",
@@ -2456,8 +2737,7 @@ async def exec_tool(
                                 print(f"[CHAT] download_project allowing ship-anyway "
                                       f"despite acceptance={_latest_acceptance.get('id')} "
                                       f"status={_astatus} issues={n} "
-                                      f"requested={_ship_anyway_requested} "
-                                      f"cap={_acceptance_cap_exhausted}")
+                                      f"requested={_ship_anyway_requested}")
                             else:
                                 lines = [
                                     f"BLOCKED — last run_acceptance_review returned status='{_astatus}'.",
@@ -2491,10 +2771,7 @@ async def exec_tool(
                         if _rstatus in ("issues", "error"):
                             issues = _env.get("issues") or []
                             n = len(issues)
-                            _reviewer_cap_exhausted = (
-                                _fixer_attempts_for_delivery("reviewer") >= 3
-                            )
-                            if _ship_anyway_requested or _reviewer_cap_exhausted:
+                            if _ship_anyway_requested:
                                 _download_warning_lines = [
                                     "WARNING: Shipped despite unresolved review/test issues.",
                                     f"Review status: {_rstatus}; issue count: {n}.",
@@ -2510,8 +2787,7 @@ async def exec_tool(
                                 print(f"[CHAT] download_project allowing ship-anyway "
                                       f"despite reviewer={_latest_reviewer.get('id')} "
                                       f"status={_rstatus} issues={n} "
-                                      f"requested={_ship_anyway_requested} "
-                                      f"cap={_reviewer_cap_exhausted}")
+                                      f"requested={_ship_anyway_requested}")
                             else:
                                 lines = [
                                     f"BLOCKED — last run_review on this project returned status='{_rstatus}'.",
@@ -2989,6 +3265,25 @@ async def exec_tool(
                 return "ERROR: start_coder_workflow requires task"
             if mode not in {"build_from_prompt", "fix_uploaded_project", "ask_uploaded_project"}:
                 return "ERROR: mode must be build_from_prompt, fix_uploaded_project, or ask_uploaded_project"
+            if mode == "build_from_prompt" and await _check_v2():
+                stranded = await _find_stranded_architect_workflow(conv_id)
+                if stranded:
+                    wf, arch_run = stranded
+                    plan_env = arch_run.get("result_envelope") or {}
+                    await _store_architect_plan_contract(conv_id, plan_env, wf.get("id", ""))
+                    result = await _run_builder_from_architect_plan(
+                        http, events, conv_id, plan_env,
+                        workflow_id=wf.get("id", ""),
+                        fallback_task=wf.get("user_task") or task,
+                        fallback_language=plan_env.get("language") or language,
+                        custom_tool_map=custom_tool_map,
+                        connector_tool_name_map=connector_tool_name_map,
+                        conv_model=conv_model,
+                        kb_ids=kb_ids,
+                        artifact_message_id=artifact_message_id,
+                        recovery=True,
+                    )
+                    return f"workflow_id: {wf.get('id', '')}\n\n{result}"
 
             if not project_id and mode != "build_from_prompt" and conv_id:
                 active = await db.get_coding_project_by_conv(conv_id)
@@ -3057,7 +3352,11 @@ async def exec_tool(
                 kb_ids=kb_ids,
                 artifact_message_id=artifact_message_id,
             )
-            await db.update_coder_workflow(workflow_id, state="planning", artifact_status="not_ready")
+            if await _check_v2():
+                return f"workflow_id: {workflow_id}\n\n{plan}"
+            latest_wf = await db.get_coder_workflow(workflow_id)
+            if latest_wf and (latest_wf.get("state") or "") != "building":
+                await db.update_coder_workflow(workflow_id, state="planning", artifact_status="not_ready")
             return (
                 f"workflow_id: {workflow_id}\n\n"
                 f"{plan}\n\n"
@@ -3828,6 +4127,24 @@ async def exec_tool(
             constraints = args.get("constraints", "")
             if not task:
                 return "ERROR: task is required"
+            if await _check_v2():
+                stranded = await _find_stranded_architect_workflow(conv_id)
+                if stranded:
+                    wf, arch_run = stranded
+                    plan_env = arch_run.get("result_envelope") or {}
+                    await _store_architect_plan_contract(conv_id, plan_env, wf.get("id", ""))
+                    return await _run_builder_from_architect_plan(
+                        http, events, conv_id, plan_env,
+                        workflow_id=wf.get("id", ""),
+                        fallback_task=wf.get("user_task") or task,
+                        fallback_language=plan_env.get("language") or language,
+                        custom_tool_map=custom_tool_map,
+                        connector_tool_name_map=connector_tool_name_map,
+                        conv_model=conv_model,
+                        kb_ids=kb_ids,
+                        artifact_message_id=artifact_message_id,
+                        recovery=True,
+                    )
             architect_task = task
             if constraints:
                 architect_task = f"{task}\n\nConstraints:\n{constraints}"
@@ -3869,12 +4186,31 @@ async def exec_tool(
                 conv_model=conv_model,
             )
             if (plan.get("status") or "") == "ok":
-                await _apply_workflow_event(
+                plan_project_id = (
+                    (plan.get("project_id") or "")
+                    if isinstance(plan, dict) else ""
+                )
+                if not plan_project_id and isinstance(plan.get("plan"), dict):
+                    plan_project_id = plan.get("plan", {}).get("project_id", "")
+                workflow_id = await _apply_workflow_event(
                     conv_id, "PLAN_DONE",
                     run_id=plan.get("run_id", ""),
-                    project_id=plan.get("plan", {}).get("project_id", "") if isinstance(plan.get("plan"), dict) else "",
+                    project_id=plan_project_id,
                     user_task=architect_task,
                 )
+                await _store_architect_plan_contract(conv_id, plan, workflow_id)
+                if await _check_v2():
+                    return await _run_builder_from_architect_plan(
+                        http, events, conv_id, plan,
+                        workflow_id=workflow_id,
+                        fallback_task=architect_task,
+                        fallback_language=language,
+                        custom_tool_map=custom_tool_map,
+                        connector_tool_name_map=connector_tool_name_map,
+                        conv_model=conv_model,
+                        kb_ids=kb_ids,
+                        artifact_message_id=artifact_message_id,
+                    )
             return architect.format_plan_for_chat(plan)
 
         elif name == "deep_research":
@@ -3988,6 +4324,12 @@ async def exec_tool(
             task = args.get("task", "") or args.get("description", "") or args.get("prompt", "")
             language = args.get("language", "python")
             context = args.get("context", "")
+            required_files = _required_files_from_manifest(args.get("required_files") or [])
+            build_cmd_arg = (args.get("build_cmd") or "").strip()
+            test_cmd_arg = (args.get("test_cmd") or "").strip()
+            lint_cmd_arg = (args.get("lint_cmd") or "").strip()
+            architect_run_id = (args.get("architect_run_id") or "").strip()
+            manifest_completion_retry = bool(args.get("manifest_completion_retry"))
             # If model stuffed actual code into args, append it as context
             if not task and args.get("code"):
                 task = "Review, fix, and complete this code"
@@ -4158,10 +4500,29 @@ async def exec_tool(
             _has_active_project = bool(_oh_project_id)
             _builder_profile = "scaffold"
             _profile_continue_missing: list[str] = []
+            _latest_arch_env: dict = {}
 
             if conv_id:
                 try:
                     _runs_for_profile = await db.get_runs_by_conversation(conv_id, limit=30)
+                    _latest_arch_run = next(
+                        (r for r in _runs_for_profile
+                         if r.get("role") == "architect" and r.get("status") == "succeeded"),
+                        None,
+                    )
+                    if _latest_arch_run:
+                        _latest_arch_env = _latest_arch_run.get("result_envelope") or {}
+                        if not _oh_project_id and (_latest_arch_env.get("project_id") or "").strip():
+                            _oh_project_id = (_latest_arch_env.get("project_id") or "").strip()
+                            _has_active_project = True
+                        if not required_files:
+                            required_files = _required_files_from_manifest(
+                                _latest_arch_env.get("manifest") or []
+                            )
+                        build_cmd_arg = build_cmd_arg or (_latest_arch_env.get("build_cmd") or "")
+                        test_cmd_arg = test_cmd_arg or (_latest_arch_env.get("test_cmd") or "")
+                        lint_cmd_arg = lint_cmd_arg or (_latest_arch_env.get("lint_cmd") or "")
+                        architect_run_id = architect_run_id or _latest_arch_run.get("id", "")
                     # Find the most recent builder run with a MEANINGFUL state.
                     # Skip running/queued (in-flight, has no envelope yet),
                     # cancelled (operator killed before it produced anything),
@@ -4281,6 +4642,11 @@ async def exec_tool(
                                     project_id=_oh_project_id or "",
                                     status="running")
                 _run_row_created = True
+                await _apply_workflow_event(
+                    conv_id, "BUILD_STARTED",
+                    run_id=_run_id, project_id=_oh_project_id or "",
+                    user_task=task,
+                )
             except Exception as _re:
                 print(f"[RUN] create_run failed (non-fatal): {_re}")
                 _run_id = ""
@@ -4305,6 +4671,12 @@ async def exec_tool(
                         _build_cmd = _arch_env.get("build_cmd", "")
                         _test_cmd = _arch_env.get("test_cmd", "")
                         if _manifest:
+                            if not required_files:
+                                required_files = _required_files_from_manifest(_manifest)
+                            build_cmd_arg = build_cmd_arg or _build_cmd
+                            test_cmd_arg = test_cmd_arg or _test_cmd
+                            lint_cmd_arg = lint_cmd_arg or (_arch_env.get("lint_cmd", "") or "")
+                            architect_run_id = architect_run_id or _arch_run.get("id", "")
                             _arch_section = ["\n\n--- Architect Manifest (FOLLOW THIS PLAN) ---"]
                             _arch_section.append(
                                 f"Project: {_arch_env.get('project_id','?')} "
@@ -4369,6 +4741,11 @@ async def exec_tool(
                 # other profiles ignore it.
                 "profile": _builder_profile,
                 "manifest_missing": _profile_continue_missing,
+                "required_files": required_files,
+                "build_cmd": build_cmd_arg,
+                "test_cmd": test_cmd_arg,
+                "lint_cmd": lint_cmd_arg,
+                "architect_run_id": architect_run_id,
                 # User-tunable reasoning_effort — drops think-token overhead
                 # significantly on slow local models when set to "low".
                 "reasoning_effort": getattr(config, "OPENHANDS_REASONING_EFFORT", "medium"),
@@ -4591,7 +4968,17 @@ async def exec_tool(
                     elif len(dirs) == 1:
                         project_dir = dirs.pop()
 
-                _project_id = result.get("project_id", "")
+                _project_id = _oh_project_id or result.get("project_id", "")
+                if required_files and project_dir and project_dir.startswith("/root/projects/"):
+                    scanned_files = await _scan_project_files(http, project_dir)
+                    if scanned_files:
+                        files = scanned_files
+                elif required_files and _project_id:
+                    planned_dir = f"/root/projects/{_project_id}"
+                    scanned_files = await _scan_project_files(http, planned_dir)
+                    if scanned_files:
+                        project_dir = planned_dir
+                        files = scanned_files
                 file_list = "\n".join(f"  - {f}" for f in files) if files else "  (no files detected)"
                 await events.emit(conv_id, "tool_end", {
                     "tool": "generate_code", "icon": "wand",
@@ -4670,44 +5057,60 @@ async def exec_tool(
                 # significantly fewer, flag the result as INCOMPLETE so the chat agent
                 # fixes it before delivering. Catches coder models that call `finish` early.
                 undershoot_warning = ""
-                _expected_files = []
-                try:
-                    # Parse task body for filenames in "File structure:" / "- foo.java" / "├── foo.java" patterns
-                    _task_text = task or ""
-                    # Match basenames with common code extensions in list-like positions.
-                    _ext_re = r"\.(?:java|py|js|ts|tsx|jsx|go|rs|c|cpp|h|hpp|rb|php|cs|kt|swift|html|css|sql|sh|toml|yaml|yml|json|md|xml)"
-                    _name_re = re.compile(
-                        r"(?:^|[\s├└│─\-\*•])([A-Za-z][\w\-]*" + _ext_re + r")\b",
-                        re.MULTILINE,
-                    )
-                    for _m in _name_re.finditer(_task_text):
-                        _fn = _m.group(1)
-                        if _fn not in _expected_files:
-                            _expected_files.append(_fn)
-                except Exception as _ef_e:
-                    print(f"[CODEGEN:OH] Expected-file parse failed (non-fatal): {_ef_e}")
+                _expected_files = list(required_files)
+                _manifest_strict = bool(_expected_files)
+                _missing: list[str] = []
+                _satisfied: list[str] = []
+                if not _expected_files:
+                    try:
+                        # Parse task body for filenames in "File structure:" / "- foo.java" / "├── foo.java" patterns
+                        _task_text = task or ""
+                        # Match basenames with common code extensions in list-like positions.
+                        _ext_re = r"\.(?:java|py|js|ts|tsx|jsx|go|rs|c|cpp|h|hpp|rb|php|cs|kt|swift|html|css|sql|sh|toml|yaml|yml|json|md|xml)"
+                        _name_re = re.compile(
+                            r"(?:^|[\s├└│─\-\*•])([A-Za-z][\w\-]*" + _ext_re + r")\b",
+                            re.MULTILINE,
+                        )
+                        for _m in _name_re.finditer(_task_text):
+                            _fn = _m.group(1)
+                            if _fn not in _expected_files:
+                                _expected_files.append(_fn)
+                    except Exception as _ef_e:
+                        print(f"[CODEGEN:OH] Expected-file parse failed (non-fatal): {_ef_e}")
 
                 if _expected_files:
-                    _actual_basenames = {(f.rsplit("/", 1)[-1] if "/" in f else f) for f in (files or [])}
-                    _missing = [n for n in _expected_files if n not in _actual_basenames]
+                    if _manifest_strict:
+                        _satisfied, _missing = _manifest_presence(
+                            files, project_dir, _expected_files,
+                        )
+                        worker_missing = result.get("missing_required_files") or []
+                        for path in worker_missing:
+                            norm = _normalize_manifest_path(path)
+                            if norm and norm not in _missing and norm in _expected_files:
+                                _missing.append(norm)
+                                if norm in _satisfied:
+                                    _satisfied.remove(norm)
+                    else:
+                        _actual_basenames = {(f.rsplit("/", 1)[-1] if "/" in f else f) for f in (files or [])}
+                        _missing = [n for n in _expected_files if n not in _actual_basenames]
+                        _satisfied = [n for n in _expected_files if n not in _missing]
                     _present = len(_expected_files) - len(_missing)
                     print(f"[CODEGEN:OH] Manifest check: {_present}/{len(_expected_files)} expected files present, missing={_missing[:8]}")
-                    # Trigger if any of: <50% present, or 3+ missing files
-                    if _expected_files and (_present / len(_expected_files) < 0.5 or len(_missing) >= 3):
+                    # Architect manifests are exact: any missing planned file keeps the build partial.
+                    # Fallback task-scraped manifests keep the older broad undershoot heuristic.
+                    _is_incomplete = bool(_missing) if _manifest_strict else (
+                        _expected_files and (_present / len(_expected_files) < 0.5 or len(_missing) >= 3)
+                    )
+                    if _is_incomplete:
                         undershoot_warning = (
                             f"⚠ INCOMPLETE: agent created {_present}/{len(_expected_files)} expected files. "
                             f"Missing: {', '.join(_missing[:12])}{'…' if len(_missing) > 12 else ''}. "
-                            f"DO NOT deliver the project to the user yet. Either: "
-                            f"(a) call generate_code again with project_id='{_project_id}' and a task that "
-                            f"explicitly lists ONLY the missing files to create, or "
-                            f"(b) write each missing file directly with write_file. "
-                            f"After all expected files exist, re-verify with run_shell (e.g. compile/parse) "
-                            f"before download_project. If the user explicitly asks for the incomplete "
-                            f"artifact anyway, disclose the missing files and package the current state."
+                            f"Do not review, accept, or deliver this project until the Build phase "
+                            f"creates every planned file."
                         )
                         await events.emit(conv_id, "tool_progress", {
                             "tool": "generate_code", "icon": "wand",
-                            "status": f"⚠ Agent undershot: {_present}/{len(_expected_files)} files",
+                            "status": f"⚠ Builder missing {_present}/{len(_expected_files)} planned files",
                         })
 
                 # ── Independent critic pass: catch runtime bugs that pass syntax/compile checks ──
@@ -4863,15 +5266,15 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                         except Exception as _rag_e:
                             print(f"[CODEGEN] Code RAG indexing failed (non-fatal): {_rag_e}")
                     # Finalize the durable run with a structured envelope summarising
-                    # what got built. Mark partial when the agent undershot the manifest;
-                    # the build itself can still be considered a success otherwise.
+                    # what got built. A strict Architect manifest makes missing files
+                    # a Build-phase partial, not a review/acceptance issue.
                     _final_status = "partial" if undershoot_warning else "succeeded"
-                    await _finalize_run(_final_status, {
+                    _builder_envelope = {
                         "files_written": files,
-                        "manifest_satisfied": [n for n in _expected_files
-                                                if n in {(f.rsplit("/", 1)[-1] if "/" in f else f)
-                                                         for f in (files or [])}],
+                        "manifest_required": _expected_files if _expected_files else [],
+                        "manifest_satisfied": _satisfied if _expected_files else [],
                         "manifest_missing": _missing if _expected_files else [],
+                        "manifest_strict": _manifest_strict,
                         "build_summary": summary,
                         "project_id": _project_id,
                         "project_dir": project_dir,
@@ -4879,13 +5282,68 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                         "critique": critique,
                         "model": coder_model,
                         "language": language,
-                    })
+                        "architect_run_id": architect_run_id,
+                        "build_cmd": build_cmd_arg,
+                        "test_cmd": test_cmd_arg,
+                        "lint_cmd": lint_cmd_arg,
+                    }
+                    await _finalize_run(_final_status, _builder_envelope)
                     _ckpt = await _git_checkpoint(
                         http, project_dir,
                         f"builder {_final_status}: {task[:60]} ({_run_id})",
                     )
                     if _ckpt:
                         print(f"[git-checkpoint] {_ckpt}")
+                    if undershoot_warning:
+                        if (_manifest_strict and await _check_v2()
+                                and not manifest_completion_retry and _missing):
+                            await events.emit(conv_id, "tool_progress", {
+                                "tool": "generate_code", "icon": "wand",
+                                "status": f"↩ Completing {len(_missing)} missing planned file(s)...",
+                            })
+                            retry_task = (
+                                "Continue the same project and create ONLY the missing files "
+                                "from the Architect manifest. Do not rewrite existing working "
+                                "files except for imports/wiring needed by the missing files.\n\n"
+                                "Missing files:\n" + "\n".join(f"- {p}" for p in _missing)
+                            )
+                            retry_context = (
+                                (context or "")
+                                + "\n\n--- Missing manifest files to complete ---\n"
+                                + "\n".join(f"- {p}" for p in _missing)
+                            ).strip()
+                            retry_result = await exec_tool(
+                                http, events, "generate_code",
+                                {
+                                    "task": retry_task,
+                                    "language": language,
+                                    "project_id": _project_id,
+                                    "context": retry_context,
+                                    "required_files": _expected_files,
+                                    "build_cmd": build_cmd_arg,
+                                    "test_cmd": test_cmd_arg,
+                                    "lint_cmd": lint_cmd_arg,
+                                    "architect_run_id": architect_run_id,
+                                    "manifest_completion_retry": True,
+                                },
+                                conv_id,
+                                custom_tool_map=custom_tool_map,
+                                connector_tool_name_map=connector_tool_name_map,
+                                conv_model=conv_model,
+                                kb_ids=kb_ids,
+                                artifact_message_id=artifact_message_id,
+                            )
+                            return (
+                                resp
+                                + "\n\n=== AUTOMATIC BUILD CONTINUATION — Builder retried missing "
+                                "Architect manifest files ===\n"
+                                + retry_result
+                            )
+                        return (
+                            resp
+                            + "\n\nBUILD PAUSED — required Architect manifest files are still "
+                            "missing. Fix the Build phase before review, acceptance, or delivery."
+                        )
                     await _apply_workflow_event(
                         conv_id, "BUILD_OK",
                         run_id=_run_id, project_id=_project_id,
@@ -4904,6 +5362,23 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                         )
                         resp += ("\n\n=== AUTOMATIC VERIFICATION — run_review already ran; "
                                  "do NOT call it again, act on this result ===\n" + _arv)
+                        if await _check_v2() and _arv.startswith("REVIEW CLEAN"):
+                            try:
+                                _aav = await exec_tool(
+                                    http, events, "run_acceptance_review",
+                                    {"project_dir": project_dir},
+                                    conv_id,
+                                    custom_tool_map=custom_tool_map,
+                                    connector_tool_name_map=connector_tool_name_map,
+                                    conv_model=conv_model,
+                                    kb_ids=kb_ids,
+                                    artifact_message_id=artifact_message_id,
+                                )
+                                resp += ("\n\n=== AUTOMATIC ACCEPTANCE — run_acceptance_review already ran; "
+                                         "do NOT call it again, act on this result ===\n" + _aav)
+                            except Exception as _aae:
+                                resp += (f"\n\n(automatic run_acceptance_review failed: {_aae} — "
+                                         f"call run_acceptance_review manually after clean review)")
                     except Exception as _are:
                         resp += (f"\n\n(automatic run_review failed: {_are} — "
                                  f"call run_review manually)")

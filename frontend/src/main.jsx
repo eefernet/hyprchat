@@ -82,7 +82,9 @@ import {
   _activityIsTerminal,
   _activityStatusKey,
   _daedalusRunIdsForMessage,
+  _eventsHaveDaedalusFullBuild,
   _fmtElapsed,
+  _isDaedalusFullBuildOutput,
   _isDaedalusOutput,
   _metaObj,
   _parseUtcishMs,
@@ -2626,6 +2628,7 @@ function HyprChat(){
       // Prefer the persistent stream-save buffer, which survives chat switches. Fall back to evtsRef for safety.
       const _rawEvts = streamSaveEvtsRef.current.length > 0 ? streamSaveEvtsRef.current : evtsRef.current;
       let _savedEvts = _rawEvts.filter(e=>["source_links","search_results","kb_sources","codeagent_note","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
+      const _streamHasFullProductBuild = _eventsHaveDaedalusFullBuild(_savedEvts);
       // Bound the persisted metadata. `thinking` events are cumulative 3KB tail
       // snapshots emitted every ~100 chars — a long reasoning trace persists
       // ~100 overlapping copies (~300KB on one message, reloaded every fetch).
@@ -2636,13 +2639,14 @@ function HyprChat(){
         if(_lastThinkIdx>=0)_savedEvts=_savedEvts.filter((e,i)=>e.type!=="thinking"||i===_lastThinkIdx);
         if(_savedEvts.length>150)_savedEvts=_savedEvts.slice(-150);
       }
-      // Pluck run_ids out of the saved events so the RunCard component can find them
-      // even after a reload (when live evts are gone).
-      const _streamRunIds = _runIdsFromEvents(_savedEvts);
+      // Pluck run_ids out of the raw event stream so the Daedalus summary can
+      // find every run even when older status events are trimmed.
+      const _streamRunIds = _runIdsFromEvents(_rawEvts);
       const _msgMeta = (_savedEvts.length || refinementsCount > 0 || _streamRunIds.length) ? {
         ...(_savedEvts.length?{saved_events:_savedEvts}:{}),
         ...(refinementsCount>0?{refinements:refinementsCount}:{}),
         ...(_streamRunIds.length?{run_ids:_streamRunIds}:{}),
+        has_full_product_build: _streamHasFullProductBuild,
         in_progress: false,
       } : {in_progress: false};
       const finalFull=replacePersonaPlaceholdersForConversation(full,cv);
@@ -7437,7 +7441,8 @@ function HyprChat(){
               const liveEventsForMsg=isLastAssistant?evts:[];
               const messageWorkflows=isLastAssistant&&Array.isArray(coderWorkflows)?coderWorkflows.slice(0,3):[];
               const daedalusRunIds=!isU?_daedalusRunIdsForMessage(meta,isLastAssistant,evts):[];
-              const isDaedalusOutput=!isU&&_isDaedalusOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
+              const isDaedalusFullBuild=!isU&&_isDaedalusFullBuildOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
+              const isDaedalusOutput=isDaedalusFullBuild&&_isDaedalusOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
               const liveQuickSearchPayload=isLastAssistant?_quickSearchPayloadFromEvents(evts,quickResults):null;
               const renderOpts=citeOptsFor(msg,liveQuickSearchPayload);
               const quickSearchPayload=renderOpts?.quickSearch;
@@ -7489,13 +7494,13 @@ function HyprChat(){
                   {msg.isS&&msg.content&&!isDaedalusOutput&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
                   {!msg.isS&&!isDaedalusOutput&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
                   {(()=>{if(isU||isDaedalusOutput||msg.isS||!savedEvents.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={savedEvents.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>;})()}
-                  {(()=>{if(isU||isDaedalusOutput)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;if(i!==lastAI||!coderWorkflows.length)return null;return coderWorkflows.slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
+                  {(()=>{if(isU||isDaedalusOutput||!isDaedalusFullBuild)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;if(i!==lastAI||!coderWorkflows.length)return null;return coderWorkflows.slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
                   {/* Coder Bot v2 — durable run cards. Render one card per unique run_id.
                       Sources, in priority: explicit metadata.run_ids (written server-side at
                       each round boundary — survives mid-stream reload), then live events
                       (current message), then saved_events (history). */}
                   {(()=>{
-                    if(isU||isDaedalusOutput) return null;
+                    if(isU||isDaedalusOutput||!isDaedalusFullBuild) return null;
                     const msgs = act.messages||[];
                     const lastAI = msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;
                     const isLast = i===lastAI;

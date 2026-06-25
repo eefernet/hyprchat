@@ -143,6 +143,85 @@ def _derive_project_name(task: str, language: str) -> str:
     return f"{language}-project"
 
 
+def _clean_project_name(name: str) -> str:
+    """Return a safe single-directory project name."""
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", (name or "").strip())
+    cleaned = cleaned.strip(".-_")
+    return cleaned[:80]
+
+
+def _workspace_for_request(req: "RunRequest") -> tuple[Path, str, bool]:
+    """Choose the OpenHands workspace.
+
+    A caller-provided project_id is authoritative. Previously a new project
+    with a project_id still used a task-derived folder unless that directory
+    already existed, which split Daedalus' plan id from the actual build dir.
+    """
+    import uuid
+
+    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    requested = _clean_project_name(req.project_id)
+    if requested:
+        work_dir = PROJECTS_DIR / requested
+        reusing = work_dir.is_dir()
+        work_dir.mkdir(parents=True, exist_ok=True)
+        return work_dir, requested, reusing
+
+    project_name = _derive_project_name(req.task, req.language)
+    work_dir = PROJECTS_DIR / project_name
+    if work_dir.exists():
+        work_dir = PROJECTS_DIR / f"{project_name}-{uuid.uuid4().hex[:4]}"
+        project_name = work_dir.name
+    work_dir.mkdir(parents=True, exist_ok=True)
+    return work_dir, project_name, False
+
+
+def _normalize_required_files(paths: list[str]) -> list[str]:
+    """Normalize manifest paths to workspace-relative POSIX paths."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in paths or []:
+        path = str(raw or "").replace("\\", "/").strip()
+        if not path:
+            continue
+        path = re.sub(r"^/+", "", path)
+        if path.startswith("root/projects/"):
+            parts = path.split("/")
+            path = "/".join(parts[3:]) if len(parts) > 3 else ""
+        path = re.sub(r"/+", "/", path).strip("/")
+        if not path or path.endswith("/"):
+            continue
+        if path not in seen:
+            seen.add(path)
+            out.append(path)
+    return out
+
+
+def _required_file_status(work_dir: Path, all_files: list[str],
+                          required_files: list[str]) -> tuple[list[str], list[str]]:
+    """Return (present, missing) required workspace-relative manifest paths."""
+    required = _normalize_required_files(required_files)
+    if not required:
+        return [], []
+
+    actual: set[str] = set()
+    for file_path in all_files or []:
+        try:
+            rel = Path(file_path).resolve().relative_to(work_dir.resolve())
+            actual.add(rel.as_posix())
+        except Exception:
+            path = str(file_path).replace("\\", "/")
+            marker = f"/root/projects/{work_dir.name}/"
+            if marker in path:
+                actual.add(path.split(marker, 1)[1].strip("/"))
+            else:
+                actual.add(path.rsplit("/", 1)[-1])
+
+    present = [path for path in required if path in actual]
+    missing = [path for path in required if path not in actual]
+    return present, missing
+
+
 class RunRequest(BaseModel):
     task: str
     model: str = "qwen2.5:14b"
@@ -162,6 +241,13 @@ class RunRequest(BaseModel):
     # Only meaningful when profile == "continue": list of manifest files the
     # last builder run failed to write. The worker focuses on these.
     manifest_missing: list[str] = []
+    # Authoritative Architect manifest paths. The backend gates Builder
+    # completion from these rather than hoping the model follows prompt text.
+    required_files: list[str] = []
+    build_cmd: str = ""
+    test_cmd: str = ""
+    lint_cmd: str = ""
+    architect_run_id: str = ""
 
 
 class RunResponse(BaseModel):
@@ -172,6 +258,8 @@ class RunResponse(BaseModel):
     duration_seconds: float = 0.0
     steps: list[dict] = []
     project_id: str = ""
+    required_files: list[str] = []
+    missing_required_files: list[str] = []
 
 
 class AiderRunRequest(BaseModel):
@@ -1067,20 +1155,10 @@ def run_task(req: RunRequest):
         agent = _Agent(llm=llm, tools=tools)
 
         # ── Workspace setup ──
-        import uuid
-        PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-        _reusing = False
-        if req.project_id and (PROJECTS_DIR / req.project_id).is_dir():
-            work_dir = PROJECTS_DIR / req.project_id
-            project_name = req.project_id
-            _reusing = True
+        work_dir, project_name, _reusing = _workspace_for_request(req)
+        if _reusing:
             print(f"[OH-Worker] Reusing existing workspace: {work_dir}")
         else:
-            project_name = _derive_project_name(req.task, req.language)
-            work_dir = PROJECTS_DIR / project_name
-            if work_dir.exists():
-                work_dir = PROJECTS_DIR / f"{project_name}-{uuid.uuid4().hex[:4]}"
-            work_dir.mkdir(parents=True, exist_ok=True)
             print(f"[OH-Worker] Workspace: {work_dir} (project: {project_name})")
 
         # ── Build task prompt (concise — SDK provides its own system prompt) ──
@@ -1187,7 +1265,15 @@ def run_task(req: RunRequest):
                     moved.append(str(dest))
                     print(f"[OH-Worker]   Moved: {rf.name}")
                 files_created = moved
+                all_workspace_files = _list_all_files(work_dir)
 
+        required_present, required_missing = _required_file_status(
+            work_dir, all_workspace_files, req.required_files,
+        )
+        if req.required_files:
+            print(f"[OH-Worker] Required-file check: "
+                  f"{len(required_present)}/{len(_normalize_required_files(req.required_files))} present; "
+                  f"missing={required_missing[:8]}")
         summary = _extract_summary(conversation)
         duration = time.time() - start
         print(f"[OH-Worker] Done in {duration:.1f}s — {len(files_created)} files, "
@@ -1201,6 +1287,8 @@ def run_task(req: RunRequest):
             duration_seconds=round(duration, 1),
             steps=progress_log[-20:],
             project_id=project_name,
+            required_files=_normalize_required_files(req.required_files),
+            missing_required_files=required_missing,
         )
 
     except _RunCancelled:
@@ -1314,19 +1402,7 @@ async def run_task_stream(req: RunRequest):
             ]
             agent = _Agent(llm=llm, tools=tools)
 
-            import uuid
-            PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-            _reusing = False
-            if req.project_id and (PROJECTS_DIR / req.project_id).is_dir():
-                work_dir = PROJECTS_DIR / req.project_id
-                project_name = req.project_id
-                _reusing = True
-            else:
-                project_name = _derive_project_name(req.task, req.language)
-                work_dir = PROJECTS_DIR / project_name
-                if work_dir.exists():
-                    work_dir = PROJECTS_DIR / f"{project_name}-{uuid.uuid4().hex[:4]}"
-                work_dir.mkdir(parents=True, exist_ok=True)
+            work_dir, project_name, _reusing = _workspace_for_request(req)
 
             full_task = _build_task_prompt(req, str(work_dir), continuing=_reusing)
             pre_snapshot = _snapshot_workspace(work_dir)
@@ -1416,9 +1492,17 @@ async def run_task_stream(req: RunRequest):
                         shutil.move(str(rf), str(dest))
                         moved.append(str(dest))
                     files_created = moved
+                    all_workspace_files = _list_all_files(work_dir)
 
             summary = _extract_summary(conversation)
             duration = time.time() - start
+            required_present, required_missing = _required_file_status(
+                work_dir, all_workspace_files, req.required_files,
+            )
+            if req.required_files:
+                print(f"[OH-Worker] Required-file check: "
+                      f"{len(required_present)}/{len(_normalize_required_files(req.required_files))} present; "
+                      f"missing={required_missing[:8]}")
 
             result_holder[0] = {
                 "type": "done",
@@ -1429,6 +1513,8 @@ async def run_task_stream(req: RunRequest):
                 "duration_seconds": round(duration, 1),
                 "steps": progress_log[-20:],
                 "project_id": project_name,
+                "required_files": _normalize_required_files(req.required_files),
+                "missing_required_files": required_missing,
             }
 
         except _RunCancelled:
@@ -1586,6 +1672,28 @@ IMPORTANT: ALL files MUST live inside `{work_dir}`. Do NOT create files in /root
     if req.context:
         prompt += f"\n## CONTEXT\n{req.context}\n"
 
+    required_files = _normalize_required_files(req.required_files)
+    if required_files:
+        prompt += "\n## REQUIRED FILE MANIFEST\n"
+        prompt += (
+            "These workspace-relative paths are mandatory. Create every one "
+            "before calling `finish`; missing any of them fails the build.\n"
+        )
+        for path in required_files[:80]:
+            prompt += f"- {path}\n"
+        if len(required_files) > 80:
+            prompt += f"- ... ({len(required_files) - 80} more)\n"
+
+    command_lines = []
+    if req.build_cmd:
+        command_lines.append(f"- Build: `{req.build_cmd}`")
+    if req.test_cmd:
+        command_lines.append(f"- Test: `{req.test_cmd}`")
+    if req.lint_cmd:
+        command_lines.append(f"- Lint: `{req.lint_cmd}`")
+    if command_lines:
+        prompt += "\n## PROJECT COMMANDS FROM ARCHITECT\n" + "\n".join(command_lines) + "\n"
+
     git_step = (
         "5. **Git**: `git init && git add -A && git commit -m 'Initial commit'` "
         "after the project compiles."
@@ -1599,7 +1707,7 @@ IMPORTANT: ALL files MUST live inside `{work_dir}`. Do NOT create files in /root
 ## VERIFICATION (REQUIRED BEFORE finish)
 You MUST complete every step before calling `finish`. `finish` is a gate, not a goal.
 
-1. **Inventory**: Run `ls -R {work_dir}` and confirm every file mentioned in the TASK above exists. If the TASK lists a file structure, EVERY file in that list must be present. Missing any → you are not done.
+1. **Inventory**: Run `ls -R {work_dir}` and confirm every required file exists. If a REQUIRED FILE MANIFEST is present, EVERY listed path must exist. Missing any → you are not done.
 2. **Compile / parse**: {verify_cmd}
 3. **Resolve missing references**: If step 2 fails because a referenced class, module, function, type, or import does not exist, you MUST create the missing file(s) with their full contents and re-run step 2. Do NOT stub them out, do NOT call `finish` with unresolved references.
 4. **Dependencies**: Make sure imports reference real libraries (declared in pom.xml/package.json/requirements.txt etc.) or files you created.

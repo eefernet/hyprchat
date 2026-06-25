@@ -1,6 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { API, proxiedImageUrl } from '../session.js';
+import {
+  _eventsHaveDaedalus,
+  _eventsHaveDaedalusFullBuild,
+  _daedalusRunIdsForMessage as _daedalusRunIdsForMessageBase,
+  _isDaedalusFullBuildOutput,
+  _isDaedalusOutput,
+} from '../daedalusTimeline.js';
 import { ArtifactCard } from './artifactComponents.jsx';
 import { IC } from './icons.jsx';
 import { Collapsible } from './markdownBlocks.jsx';
@@ -810,37 +817,8 @@ function QuickSearchSourcesPanel({payload,t,font,defaultOpen=false}){
     </div>}
   </div>;
 }
-const _DAEDALUS_TOOLS = new Set([
-  "plan_project","generate_code","run_review","run_acceptance_review",
-  "run_fixer","run_aider_fix","ask_project","download_project","download_file",
-  "list_files","read_file","write_file","run_shell",
-]);
-const _DAEDALUS_ACTIVE_WORKFLOW_STATES = new Set(["queued","pending","running","planning","reviewing","fixing","accepting"]);
-const _eventsHaveDaedalus = (evts)=>{
-  if(!Array.isArray(evts))return false;
-  return evts.some(e=>{
-    const tool=e?.data?.tool||"";
-    return _DAEDALUS_TOOLS.has(tool) || !!(e?.data?.run_id||e?.run_id);
-  });
-};
 const _daedalusRunIdsForMessage = (meta,isLast,liveEvts)=>{
-  const saved=Array.isArray(meta?.saved_events)?meta.saved_events:[];
-  const ridsFromMeta=Array.isArray(meta?.run_ids)?meta.run_ids:[];
-  const ridsFromEvts=_runIdsFromEvents(isLast&&liveEvts?.length?liveEvts:saved);
-  const seen=new Set(),out=[];
-  for(const rid of [...ridsFromMeta,...ridsFromEvts]){
-    if(rid&&!seen.has(rid)){seen.add(rid);out.push(rid);}
-  }
-  return out;
-};
-const _isDaedalusOutput = ({meta={},savedEvents=[],liveEvents=[],runIds=[],workflows=[]}={})=>{
-  return !!(
-    runIds.length ||
-    (Array.isArray(workflows)&&workflows.some(w=>_DAEDALUS_ACTIVE_WORKFLOW_STATES.has(String(w?.state||"").toLowerCase()))) ||
-    _eventsHaveDaedalus(savedEvents) ||
-    _eventsHaveDaedalus(liveEvents) ||
-    (Array.isArray(meta.run_ids)&&meta.run_ids.length)
-  );
+  return _daedalusRunIdsForMessageBase(meta,isLast,liveEvts,_runIdsFromEvents);
 };
 
 const _activityIsTerminal = (status)=>["done","complete","completed","success","succeeded","error","failed","cancelled","canceled"].includes(String(status||"").toLowerCase());
@@ -1922,8 +1900,9 @@ const _phaseKeyForRun = (run)=>{
 const _lastRun = (runs=[])=>runs[runs.length-1]||null;
 const _phaseState = (runs=[], fallback="queued")=>{
   if(runs.some(_runIsActive))return"running";
-  if(runs.some(_runHasProblem))return"attention";
-  if(runs.length&&runs.every(r=>["succeeded","skipped"].includes(String(r.status||"").toLowerCase())))return"succeeded";
+  const latest=_lastRun(runs);
+  if(latest&&_runHasProblem(latest))return"attention";
+  if(latest&&["succeeded","skipped"].includes(String(latest.status||"").toLowerCase()))return"succeeded";
   if(runs.length)return"complete";
   return fallback;
 };
@@ -1990,6 +1969,8 @@ const _eventPlanDetail = (events=[])=>{
   return plans.length?plans[plans.length-1].plan:"";
 };
 
+// Disabled legacy prototype from the Daedalus timeline refactor. The active
+// renderer is DaedalusSummary below, and only that implementation is exported.
 function DaedalusSummaryTabbed({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,font,md,msgContent="",live=false,onOpenArtifact,onPreview}){
   const [runs,setRuns]=useState([]);
   const [loadErr,setLoadErr]=useState("");
@@ -2304,7 +2285,7 @@ function DaedalusSummaryTabbed({runIds=[],savedEvents=[],liveEvts=[],workflows=[
 function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,font,md,msgContent="",live=false,onOpenArtifact,onPreview}){
   const [runs,setRuns]=useState([]);
   const [loadErr,setLoadErr]=useState("");
-  const [expandedPhase,setExpandedPhase]=useState(null);
+  const [expandedPhase,setExpandedPhase]=useState("");
   const [rawPill,setRawPill]=useState(null);
   const runIdsKey=runIds.join("|");
   useEffect(()=>{
@@ -2341,9 +2322,6 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
   const wf=Array.isArray(workflows)&&workflows.length?workflows[0]:null;
   const wfAccepted=(workflows||[]).some(w=>w.state==="accepted"||w.artifact_status==="delivered"||w.artifact_status==="partial_delivered");
   const delivered=wfAccepted||tools.has("download_project")||tools.has("download_file")||artifactEvents.length>0;
-  const active=live||runs.some(_runIsActive)||(workflows||[]).some(w=>["queued","pending","running","planning","reviewing","fixing","accepting"].includes(String(w.state||"").toLowerCase()));
-  const problemRuns=runs.filter(_runHasProblem);
-  const needsAttention=!delivered&&!active&&(problemRuns.length||(workflows||[]).some(w=>["blocked","cancelled","canceled"].includes(String(w.state||"").toLowerCase())));
   const projectName=wf?.project_id
     || runs.map(r=>r.project_id||_runEnv(r).project_id||_basename(_runEnv(r).project_dir)).find(Boolean)
     || (latestArtifact?.filename||"").replace(/(\.tar\.gz|\.tgz|\.zip|\.gz)$/i,"")
@@ -2351,14 +2329,14 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
   const phaseRuns={plan:[],build:[],review:[],fixes:[],acceptance:[],work:[]};
   runs.forEach(r=>{const k=_phaseKeyForRun(r);(phaseRuns[k]||(phaseRuns[k]=[])).push(r);});
   const phaseDefs=[
-    ["plan","Plan","📐",tools.has("plan_project")||phaseRuns.plan.length],
-    ["build","Build","🏗",tools.has("generate_code")||phaseRuns.build.length],
-    ["review","Review","🔍",tools.has("run_review")||phaseRuns.review.length],
-    ["fixes",phaseRuns.fixes.length===1?"Fix":"Fixes","🛠",tools.has("run_fixer")||tools.has("run_aider_fix")||phaseRuns.fixes.length],
-    ["acceptance","Acceptance","✅",tools.has("run_acceptance_review")||phaseRuns.acceptance.length],
-    ["package","Package","📦",delivered],
+    ["plan","Plan","📐"],
+    ["build","Build","🏗"],
+    ["review","Review","🔍"],
+    ["fixes","Fixes","🛠"],
+    ["acceptance","Acceptance","✅"],
+    ["package","Package","📦"],
   ];
-  const phases=phaseDefs.filter(([, , ,present])=>present).map(([key,label,icon])=>{
+  const phases=phaseDefs.map(([key,label,icon])=>{
     const rs=phaseRuns[key]||[];
     const fallback=key==="package"&&delivered?"succeeded":"queued";
     const state=key==="package"?fallback:_phaseState(rs,fallback);
@@ -2378,23 +2356,11 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
   const planRun=phaseRuns.plan[phaseRuns.plan.length-1]||null;
   const planEnv=_runEnv(planRun);
   const planText=_eventPlanDetail(events);
-  const defaultPhaseKey=(phases.find(p=>p.state==="running")||phases.find(p=>p.state==="attention")||phases.find(p=>p.key==="package"&&delivered)||phases.find(p=>p.key==="acceptance")||phases[phases.length-1]||{key:"plan"}).key;
   const phaseKeys=phases.map(p=>p.key).join("|");
   useEffect(()=>{
-    if(!phases.length)return;
-    if(expandedPhase===null||(expandedPhase&&!phases.some(p=>p.key===expandedPhase)))setExpandedPhase(defaultPhaseKey);
-  },[phaseKeys,defaultPhaseKey,expandedPhase]);
+    if(expandedPhase&&!phases.some(p=>p.key===expandedPhase))setExpandedPhase("");
+  },[phaseKeys,expandedPhase]);
 
-  const totalDuration=_runsSpanLabel(runs)||_runsDurationLabel(runs);
-  const title=active?"Working":needsAttention?"Needs attention":delivered?"Project ready":"Complete";
-  const accent=active?t.acc:needsAttention?t.err:delivered?t.ok:t.mut;
-  const statusLine=active
-    ?`Currently working on ${projectName}.`
-    :needsAttention
-      ?(problemRuns.map(r=>_runEnv(r).error||_runEnv(r).summary).find(Boolean)||"A Daedalus phase needs attention.")
-      :(delivered?"Accepted and packaged.":"Workflow finished without a delivered artifact.");
-  const artifactHref=latestArtifact?(latestArtifact.artifact_id?`${API}/api/artifacts/${latestArtifact.artifact_id}/download`:`${API}${latestArtifact.url||""}`):"";
-  const pillS=(color)=>({fontSize:9,fontWeight:850,color,border:`1px solid ${color}33`,background:`${color}0f`,borderRadius:999,padding:"3px 8px",lineHeight:1.35,whiteSpace:"nowrap"});
   const sectionTitle=(label,color=t.acc)=><div style={{fontSize:9,color,textTransform:"uppercase",letterSpacing:.7,fontWeight:900,marginBottom:8}}>{label}</div>;
   const renderMd=(content,preStyle={})=>md?<MDWrap>{md(content)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit",...preStyle}}>{content}</pre>;
   const runModel=(run)=>{
@@ -2445,6 +2411,45 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
       return issues.length?[env.summary,issues.map((issue,i)=>`${i+1}. ${issue.file||issue.path||issue.category||"Issue"}: ${issue.summary||issue.message||""}`).join("\n")].filter(Boolean).join("\n\n"):env.summary||"";
     }
     return "";
+  };
+  const recentUpdates=p=>{
+    const rows=[];
+    (p.key==="package"?runs:p.runs||[]).forEach(run=>{
+      _compactSteps(_runSteps(run)).forEach(step=>{
+        const detail=(step.detail||step.action||"").trim();
+        if(detail)rows.push(detail);
+      });
+    });
+    return rows.slice(-3);
+  };
+  const phaseMetaLine=p=>{
+    const last=_lastRun(p.runs);
+    const env=_runEnv(last);
+    const parts=[];
+    if(p.duration)parts.push(p.duration);
+    if(p.runs?.length)parts.push(`${p.runs.length} run${p.runs.length===1?"":"s"}`);
+    if(p.key==="plan"){
+      if(Array.isArray(env.manifest))parts.push(`${env.manifest.length} file${env.manifest.length===1?"":"s"}`);
+      if(Array.isArray(env.success_criteria))parts.push(`${env.success_criteria.length} criteria`);
+    }
+    if(p.key==="build"){
+      const files=new Set();
+      p.runs.forEach(r=>{const e=_runEnv(r);[...(e.files_written||[]),...(e.files_touched||[])].forEach(f=>f&&files.add(f));});
+      if(files.size)parts.push(`${files.size} file${files.size===1?"":"s"}`);
+    }
+    if(p.key==="review"){
+      if(env.build_exit!==undefined)parts.push(`build ${env.build_exit}`);
+      if(env.test_exit!==undefined)parts.push(`tests ${env.test_exit}`);
+      if(env.lint_exit!==undefined)parts.push(`lint ${env.lint_exit}`);
+    }
+    if(p.key==="fixes"&&p.runs?.length){
+      const files=new Set();
+      p.runs.forEach(r=>{const e=_runEnv(r);[...(e.files_touched||[]),...(e.files_written||[])].forEach(f=>f&&files.add(f));});
+      if(files.size)parts.push(`${files.size} touched`);
+    }
+    if(p.key==="acceptance"&&env.status)parts.push(env.status);
+    if(p.key==="package"&&latestArtifact?.filename)parts.push(latestArtifact.filename);
+    return parts.join(" · ")||"pending";
   };
   const phaseFiles=(key)=>{
     if(key==="package")return [...filesTouched.entries()];
@@ -2563,12 +2568,13 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
       <summary style={{fontSize:10,color:t.mut,cursor:"pointer",fontWeight:900}}>{run.role} · {run.status} · {run.id}</summary>
       <pre style={{margin:"8px 0 0",whiteSpace:"pre-wrap",wordBreak:"break-word",fontSize:10,lineHeight:1.45,color:t.dim,maxHeight:260,overflow:"auto"}}>{JSON.stringify({id:run.id,role:run.role,status:run.status,started_at:run.started_at,ended_at:run.ended_at,result_envelope:run.result_envelope,events_log:run.events_log},null,2)}</pre>
     </details>)}
-    {(p.key==="package"?workflows:[]).slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={onOpenArtifact}/>)}
   </div>;
   const renderPhaseDetails=p=>{
     const last=_lastRun(p.runs);
     const env=_runEnv(last);
     const chips=phaseChips(p);
+    const updates=recentUpdates(p);
+    const note=phaseNoteText(p);
     return <div style={{padding:"12px 14px 14px",borderTop:`1px solid ${p.color}28`,display:"flex",flexDirection:"column",gap:13}}>
       {chips.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
         {chips.map(([label,value,color],i)=><span key={`${label}-${i}`} title={value} style={{fontSize:9,color:color||t.mut,border:`1px solid ${(color||t.mut)}2e`,background:`${color||t.surface}10`,borderRadius:999,padding:"2px 7px",maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
@@ -2594,6 +2600,16 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
           </div>)}
         </div>
       </div>
+      {updates.length>0&&<div>
+        {sectionTitle("Recent updates",p.color)}
+        <div style={{display:"flex",flexDirection:"column",gap:5}}>
+          {updates.map((u,i)=><div key={`${p.key}-update-${i}`} style={{fontSize:11,color:t.dim,lineHeight:1.45,borderTop:i?`1px solid ${t.brd}14`:"none",paddingTop:i?5:0}}>{u}</div>)}
+        </div>
+      </div>}
+      {note&&p.key!=="plan"&&<div>
+        {sectionTitle("Agent output",p.color)}
+        <div style={{fontSize:11,color:t.dim,lineHeight:1.55,maxHeight:220,overflow:"auto"}}>{renderMd(note,{color:t.dim})}</div>
+      </div>}
       {p.key==="plan"&&renderPlanDetails()}
       {renderIssues(p.runs||[])}
       {p.key==="package"&&<div>{sectionTitle("Artifacts",t.ok)}{renderArtifacts()}</div>}
@@ -2609,73 +2625,35 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
       </details>
     </div>;
   };
-  const noteBox=(p,text)=>{
-    if(!text)return null;
-    const isPlan=p.key==="plan";
-    return <div style={{margin:"0 0 7px",border:`1px solid ${p.color}24`,background:`${p.color}09`,borderRadius:8,padding:isPlan?"10px 12px":"8px 10px",color:t.dim,fontSize:isPlan?12:11,lineHeight:1.6,maxHeight:isPlan?360:180,overflow:"auto"}}>
-      <div style={{fontSize:9,color:p.color,textTransform:"uppercase",letterSpacing:.65,fontWeight:900,marginBottom:6}}>{isPlan?"Planner output":"Agent output"}</div>
-      {renderMd(text,{color:t.dim})}
-    </div>;
-  };
-
   return <div style={{margin:"0 0 12px",maxWidth:"100%"}}>
     {msgContent&&<div style={{margin:"0 0 12px",color:t.dim,lineHeight:1.68,fontSize:13}}>
       {renderMd(msgContent,{color:t.dim})}
     </div>}
-    <div style={{border:`1px solid ${accent}24`,background:`${t.surface}32`,borderRadius:8,overflow:"hidden",boxShadow:active?`0 0 18px ${accent}10`:"none"}}>
-      <div style={{padding:"12px 14px",borderBottom:`1px solid ${t.brd}20`,display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:12,alignItems:"start"}}>
-        <div style={{minWidth:0}}>
-          <div style={{display:"flex",alignItems:"center",gap:9,flexWrap:"wrap"}}>
-            <span style={{width:28,height:28,borderRadius:7,display:"inline-flex",alignItems:"center",justifyContent:"center",background:`${accent}13`,border:`1px solid ${accent}36`,color:accent,fontSize:15}}>✦</span>
-            <div style={{fontSize:13,fontWeight:950,color:accent,letterSpacing:.3}}>Build Timeline</div>
-            <span style={{fontSize:12,fontWeight:850,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:360}}>{projectName}</span>
-            <span style={pillS(accent)}>{title}</span>
-          </div>
-          <div style={{fontSize:11,color:t.dim,lineHeight:1.45,marginTop:7,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{statusLine}</div>
-          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:9}}>
-            {totalDuration&&<span style={pillS(t.mut)}>total {totalDuration}</span>}
-            {filesTouched.size>0&&<span style={pillS(t.acc)}>{filesTouched.size} file{filesTouched.size===1?"":"s"}</span>}
-            {runs.length>0&&<span style={pillS(t.mut)}>{runs.length} run{runs.length===1?"":"s"}</span>}
-            {loadErr&&<span style={pillS(t.err)}>{loadErr}</span>}
-          </div>
-        </div>
-        {latestArtifact&&<div style={{display:"flex",gap:6,alignItems:"center",justifyContent:"flex-end",flexWrap:"wrap"}}>
-          <a href={artifactHref} download={latestArtifact.filename} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"7px 10px",background:`${t.ok}13`,border:`1px solid ${t.ok}40`,borderRadius:7,color:t.ok,textDecoration:"none",fontSize:11,fontWeight:900,maxWidth:260}}>
-            <span>📦</span><span style={{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{latestArtifact.filename||"Artifact"}</span>
-          </a>
-          {latestArtifact.artifact_id&&onOpenArtifact&&<button onClick={()=>onOpenArtifact(latestArtifact.artifact_id)} title="Open artifact details" style={{padding:"7px 9px",borderRadius:7,border:`1px solid ${t.acc}35`,background:`${t.acc}10`,color:t.acc,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:900}}>details</button>}
-        </div>}
-      </div>
-      <div style={{padding:"13px 12px 4px"}}>
-        {phases.length?phases.map((p,i)=>{
-          const expanded=expandedPhase===p.key;
-          const isLast=i===phases.length-1;
-          const note=phaseNoteText(p);
-          return <div key={p.key} style={{display:"grid",gridTemplateColumns:"28px minmax(0,1fr)",gap:10,position:"relative"}}>
-            <div style={{position:"relative",display:"flex",justifyContent:"center"}}>
-              {!isLast&&<span style={{position:"absolute",top:36,bottom:-10,width:1,background:`${t.brd}33`}}/>}
-              <span style={{width:28,height:28,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,color:p.color,background:`${p.color}13`,border:`1px solid ${p.color}38`,zIndex:1,boxShadow:p.state==="running"?`0 0 12px ${p.color}24`:"none"}}>{p.icon}</span>
-            </div>
-            <div style={{minWidth:0,padding:"0 0 12px"}}>
-              {noteBox(p,note)}
-              <div style={{border:`1px solid ${expanded?p.color:`${t.brd}28`}`,background:expanded?`${p.color}0d`:`${t.bgDeep}42`,borderRadius:8,overflow:"hidden",boxShadow:expanded?`0 0 0 1px ${p.color}18 inset`:"none"}}>
-                <button onClick={()=>setExpandedPhase(cur=>cur===p.key?"":p.key)} style={{width:"100%",textAlign:"left",border:"none",background:"transparent",padding:"10px 12px",cursor:"pointer",fontFamily:font,color:t.text,display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:8,alignItems:"start"}}>
-                  <div style={{minWidth:0}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",minWidth:0}}>
-                      <span style={{fontSize:12,fontWeight:950,color:p.color,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.label}</span>
-                      <span style={{fontSize:8,color:p.color,textTransform:"uppercase",letterSpacing:.55,fontWeight:900,marginLeft:"auto"}}>{_phaseStatusLabel(p.state)}</span>
-                    </div>
-                    <div style={{marginTop:5,fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{[p.duration,p.runs?.length?`${p.runs.length} run${p.runs.length===1?"":"s"}`:""].filter(Boolean).join(" · ")||"ready"}</div>
-                    <div style={{marginTop:5,fontSize:11,color:t.dim,lineHeight:1.4,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:expanded?3:2,WebkitBoxOrient:"vertical"}}>{p.outcome}</div>
-                  </div>
-                  <span style={{fontSize:10,color:p.color,opacity:.55,paddingTop:2}}>{expanded?"▴":"▾"}</span>
-                </button>
-                {expanded&&renderPhaseDetails(p)}
-              </div>
-            </div>
-          </div>;
-        }):<div style={{fontSize:12,color:t.mut,padding:"6px 2px 14px"}}>Waiting for Daedalus workflow events.</div>}
-      </div>
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {loadErr&&<div style={{fontSize:11,color:t.err,border:`1px solid ${t.err}30`,background:`${t.err}08`,borderRadius:8,padding:"7px 9px"}}>{loadErr}</div>}
+      {phases.length?phases.map(p=>{
+        const expanded=expandedPhase===p.key;
+        const updates=recentUpdates(p);
+        const latestUpdate=updates[updates.length-1]||"";
+        const metaLine=phaseMetaLine(p);
+        const statusLabel=_phaseStatusLabel(p.state);
+        return <div key={p.key} style={{border:`1px solid ${expanded?p.color:`${p.color}34`}`,background:expanded?`${p.color}0d`:`${t.bgDeep}42`,borderRadius:8,overflow:"hidden",boxShadow:p.state==="running"?`0 0 14px ${p.color}14`:"none"}}>
+          <button onClick={()=>setExpandedPhase(cur=>cur===p.key?"":p.key)} style={{width:"100%",border:"none",background:"transparent",padding:"10px 12px",cursor:"pointer",fontFamily:font,color:t.text,textAlign:"left",display:"grid",gridTemplateColumns:"30px minmax(0,1fr) auto",gap:10,alignItems:"start"}}>
+            <span style={{width:28,height:28,borderRadius:7,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:14,color:p.color,background:`${p.color}13`,border:`1px solid ${p.color}38`,boxSizing:"border-box"}}>{p.icon}</span>
+            <span style={{minWidth:0}}>
+              <span style={{display:"flex",gap:8,alignItems:"center",minWidth:0,flexWrap:"wrap"}}>
+                <span style={{fontSize:12,fontWeight:950,color:p.color,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.label}</span>
+                <span style={{fontSize:8,color:p.color,textTransform:"uppercase",letterSpacing:.55,fontWeight:900}}>{statusLabel}</span>
+              </span>
+              <span style={{display:"block",marginTop:4,fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{metaLine}</span>
+              <span style={{display:"-webkit-box",marginTop:5,fontSize:11,color:t.dim,lineHeight:1.4,overflow:"hidden",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{p.outcome}</span>
+              {latestUpdate&&<span style={{display:"block",marginTop:5,fontSize:10,color:t.mut,lineHeight:1.35,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{latestUpdate}</span>}
+            </span>
+            <span style={{fontSize:10,color:p.color,opacity:.6,paddingTop:2}}>{expanded?"▴":"▾"}</span>
+          </button>
+          {expanded&&renderPhaseDetails(p)}
+        </div>;
+      }):<div style={{fontSize:12,color:t.mut,padding:"6px 2px"}}>Waiting for Daedalus workflow events.</div>}
     </div>
   </div>;
 }
@@ -2806,7 +2784,9 @@ export {
   QuickSourceInlineChip,
   QuickSearchSourcesPanel,
   _eventsHaveDaedalus,
+  _eventsHaveDaedalusFullBuild,
   _daedalusRunIdsForMessage,
+  _isDaedalusFullBuildOutput,
   _isDaedalusOutput,
   _activityIsTerminal,
   _activityStatusKey,

@@ -20,6 +20,7 @@ other's job.
 from __future__ import annotations
 
 import asyncio
+import ast
 import base64
 import json
 import os
@@ -94,6 +95,7 @@ If you genuinely cannot fix any issue (ambiguous, need info not provided, etc.),
 4. If a file in allowed_paths needs no change, simply do not include a section for it.
 5. Address ALL listed issues in a single pass. If two issues touch the same file, put all its SEARCH/REPLACE blocks in ONE EDIT section.
 6. "This file should not be in the project" issues are fixed with `### DELETE:` — editing .gitignore or README does NOT remove the file and the issue will come back.
+7. For method/function mismatch issues, choose ONE canonical symbol name and make callers and definitions agree. Do not rename both sides in opposite directions. Before output, verify that every edited call still resolves to a matching definition in the scoped files.
 
 Output your sections now:"""
 
@@ -314,6 +316,209 @@ def _paths_are_docs_only(paths: list[str]) -> bool:
             continue
         return False
     return True
+
+
+def _issue_text(issues: list[dict]) -> str:
+    chunks: list[str] = []
+    for issue in issues or []:
+        for key in ("summary", "detail", "details", "message", "description"):
+            val = issue.get(key)
+            if val:
+                chunks.append(str(val))
+        for key in ("category", "severity", "file"):
+            val = issue.get(key)
+            if val:
+                chunks.append(str(val))
+    return "\n".join(chunks)
+
+
+def _issue_needs_python_symbol_guard(issues: list[dict]) -> bool:
+    """Return True for acceptance/reviewer issues that describe a symbol mismatch.
+
+    The guard is intentionally narrow. It only runs the AST consistency check
+    for issue text that already points at AttributeError/name mismatch style
+    failures, so dynamic Python projects are not broadly linted by Fixer.
+    """
+    text = _issue_text(issues).lower()
+    if not text:
+        return False
+    return (
+        "attributeerror" in text
+        or "has no attribute" in text
+        or ("mismatch" in text and any(w in text for w in ("method", "function", "symbol", "name")))
+        or ("calls" in text and "defines" in text)
+        or ("call" in text and "defined" in text)
+    )
+
+
+_DEFINED_NAME_PATTERNS = [
+    re.compile(r"\b(?:only\s+)?defines?\s+[`'\"]?([A-Za-z_][A-Za-z0-9_]*)[`'\"]?\s*\(", re.I),
+    re.compile(r"\b(?:only\s+)?defines?\s+[`'\"]?([A-Za-z_][A-Za-z0-9_]*)[`'\"]?", re.I),
+    re.compile(r"\bactual\s+(?:method|function|symbol|name)\s+is\s+(?:named\s+)?[`'\"]?([A-Za-z_][A-Za-z0-9_]*)[`'\"]?", re.I),
+    re.compile(r"\b(?:method|function|symbol)\s+(?:is\s+)?(?:named|called)\s+[`'\"]?([A-Za-z_][A-Za-z0-9_]*)[`'\"]?", re.I),
+]
+
+
+def _defined_symbol_hints_from_issues(issues: list[dict]) -> list[str]:
+    text = _issue_text(issues)
+    hints: list[str] = []
+    seen: set[str] = set()
+    for pattern in _DEFINED_NAME_PATTERNS:
+        for match in pattern.finditer(text):
+            name = match.group(1)
+            if name and name not in seen:
+                seen.add(name)
+                hints.append(name)
+    return hints
+
+
+def _expr_key(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _expr_key(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    return ""
+
+
+def _call_class_name(node: ast.AST, known_classes: set[str]) -> str:
+    if not isinstance(node, ast.Call):
+        return ""
+    func = node.func
+    if isinstance(func, ast.Name) and func.id in known_classes:
+        return func.id
+    if isinstance(func, ast.Attribute) and func.attr in known_classes:
+        return func.attr
+    return ""
+
+
+def _python_symbol_findings(file_contents: dict[str, str],
+                            issues: list[dict]) -> list[dict]:
+    if not _issue_needs_python_symbol_guard(issues):
+        return []
+
+    parsed: dict[str, ast.AST] = {}
+    class_methods: dict[str, set[str]] = {}
+    for path, content in file_contents.items():
+        if not path.endswith(".py") or not isinstance(content, str):
+            continue
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            continue
+        parsed[path] = tree
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            methods = {
+                child.name
+                for child in node.body
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            if methods:
+                class_methods.setdefault(node.name, set()).update(methods)
+
+    if not class_methods:
+        return []
+
+    known_classes = set(class_methods)
+    hints = _defined_symbol_hints_from_issues(issues)
+    findings: list[dict] = []
+
+    for path, tree in parsed.items():
+        var_classes: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                cls = _call_class_name(node.value, known_classes)
+                if not cls:
+                    continue
+                for target in node.targets:
+                    key = _expr_key(target)
+                    if key:
+                        var_classes[key] = cls
+            elif isinstance(node, ast.AnnAssign):
+                cls = _call_class_name(node.value, known_classes) if node.value else ""
+                key = _expr_key(node.target)
+                if cls and key:
+                    var_classes[key] = cls
+
+        if not var_classes:
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            receiver = _expr_key(node.func.value)
+            cls = var_classes.get(receiver)
+            if not cls:
+                continue
+            called = node.func.attr
+            methods = class_methods.get(cls, set())
+            if called in methods:
+                continue
+            canonical = ""
+            for hint in hints:
+                if hint in methods:
+                    canonical = hint
+                    break
+            if not canonical and len(methods) == 1:
+                canonical = next(iter(methods))
+            findings.append({
+                "file": path,
+                "line": getattr(node, "lineno", 0) or 0,
+                "receiver": receiver,
+                "class": cls,
+                "called": called,
+                "canonical": canonical,
+                "methods": sorted(methods),
+            })
+    return findings
+
+
+def _python_symbol_mismatch_errors(file_contents: dict[str, str],
+                                   issues: list[dict]) -> list[str]:
+    errors: list[str] = []
+    for finding in _python_symbol_findings(file_contents, issues):
+        methods = ", ".join(finding.get("methods") or [])
+        canonical = finding.get("canonical") or "(no unambiguous repair target)"
+        errors.append(
+            "Symbol consistency guard: "
+            f"{finding['file']}:{finding['line']} calls "
+            f"{finding['receiver']}.{finding['called']}(), but "
+            f"{finding['class']} does not define {finding['called']}() "
+            f"(defined: {methods}; suggested canonical: {canonical})."
+        )
+    return errors
+
+
+def _repair_python_symbol_mismatches(file_contents: dict[str, str],
+                                     issues: list[dict]) -> tuple[list[str], set[str]]:
+    """Apply a narrow deterministic repair for obvious Python method mismatches.
+
+    If a scoped file calls an object method that is absent from the class
+    instantiated for that object, and the issue text/class definition gives an
+    unambiguous canonical method, normalize the call sites to that method.
+    """
+    notes: list[str] = []
+    touched: set[str] = set()
+    for finding in _python_symbol_findings(file_contents, issues):
+        canonical = finding.get("canonical") or ""
+        called = finding.get("called") or ""
+        path = finding.get("file") or ""
+        if not canonical or not called or canonical == called or path not in file_contents:
+            continue
+        old = f".{called}("
+        new = f".{canonical}("
+        content = file_contents[path]
+        if old not in content:
+            continue
+        file_contents[path] = content.replace(old, new)
+        touched.add(path)
+        notes.append(
+            f"Deterministic symbol repair: normalized {called}() call(s) "
+            f"to {canonical}() in {path}."
+        )
+    return notes, touched
 
 
 def _parse_fixer_output(text: str) -> dict:
@@ -618,14 +823,17 @@ async def run_fixer(http, events, conv_id: str, *,
     _read_tasks = [_read_file_sandbox(http, path) for path in capped_scope]
     _read_results = await asyncio.gather(*_read_tasks, return_exceptions=True)
 
+    full_scope_contents: dict[str, str] = {}
     files_section_lines = []
     for path, content in zip(capped_scope, _read_results):
         if isinstance(content, str) and content:
+            full_scope_contents[path] = content
             snippet = content[:_per_file_cap]
             if len(content) > _per_file_cap:
                 snippet += f"\n\n... [truncated; full file is {len(content)} chars]"
             files_section_lines.append(f"### {path}\n```\n{snippet}\n```")
         else:
+            full_scope_contents[path] = "" if isinstance(content, str) else ""
             files_section_lines.append(f"### {path}\n(file is empty or unreadable)")
 
     prompt = _FIXER_PROMPT.format(
@@ -707,6 +915,11 @@ async def run_fixer(http, events, conv_id: str, *,
                 f"({len(text)} chars). Sample: {sample!r}"
             )
         else:
+            pending_contents: dict[str, str] = {}
+            pending_deletes: set[str] = set()
+            pending_summaries: dict[str, str] = {}
+            semantic_guard_failed = False
+
             for edit in edits[:20]:  # safety cap
                 path = (edit.get("path") or "").strip()
                 if not path:
@@ -716,18 +929,19 @@ async def run_fixer(http, events, conv_id: str, *,
                     continue
                 rel = path[len(project_dir) + 1:] if path.startswith(project_dir + "/") else path
                 if edit.get("mode") == "delete":
-                    await _step("deleting", rel)
-                    ok, err_detail = await _delete_file_sandbox(http, path)
-                    if ok:
-                        files_touched.add(path)
-                        diffs.append({"path": path, "summary": f"deleted {rel}"})
-                    else:
-                        errors.append(f"Delete failed for {path} — {err_detail}")
+                    pending_deletes.add(path)
+                    pending_contents.pop(path, None)
+                    pending_summaries[path] = f"deleted {rel}"
                     continue
                 if edit.get("mode") == "replace":
                     # Re-read the FULL file as the apply base — the prompt view
                     # may have been truncated, and S/R must never lose the rest.
-                    original = await _read_file_sandbox(http, path)
+                    original = pending_contents.get(path)
+                    if original is None:
+                        original = full_scope_contents.get(path)
+                    if original is None:
+                        original = await _read_file_sandbox(http, path)
+                        full_scope_contents[path] = original
                     if not original:
                         errors.append(f"{rel}: could not read file to apply search/replace — skipped")
                         continue
@@ -743,11 +957,57 @@ async def run_fixer(http, events, conv_id: str, *,
                     content = edit.get("content")
                     if content is None:
                         continue
+                pending_deletes.discard(path)
+                pending_contents[path] = content
+                pending_summaries[path] = edit_summary or "(no summary)"
+
+            if pending_contents or pending_deletes:
+                lang_l = (language or "").lower()
+                if lang_l == "python" or any(p.endswith(".py") for p in capped_scope):
+                    validation_contents = {
+                        path: pending_contents.get(path, full_scope_contents.get(path, ""))
+                        for path in capped_scope
+                        if path.endswith(".py") and path not in pending_deletes
+                    }
+                    if validation_contents and _issue_needs_python_symbol_guard(issues):
+                        await _step("validating", "python symbol consistency")
+                        repair_notes, repaired_paths = _repair_python_symbol_mismatches(
+                            validation_contents, issues,
+                        )
+                        for note in repair_notes:
+                            notes.append(note)
+                        for repaired_path in repaired_paths:
+                            if repaired_path in _allowed_set and repaired_path not in pending_deletes:
+                                pending_contents[repaired_path] = validation_contents[repaired_path]
+                                pending_summaries[repaired_path] = (
+                                    "deterministic Python symbol consistency repair"
+                                )
+                        symbol_errors = _python_symbol_mismatch_errors(validation_contents, issues)
+                        if symbol_errors:
+                            errors.extend(symbol_errors[:5])
+                            semantic_guard_failed = True
+
+            if semantic_guard_failed:
+                pending_contents.clear()
+                pending_deletes.clear()
+
+            for path in sorted(pending_deletes):
+                rel = path[len(project_dir) + 1:] if path.startswith(project_dir + "/") else path
+                await _step("deleting", rel)
+                ok, err_detail = await _delete_file_sandbox(http, path)
+                if ok:
+                    files_touched.add(path)
+                    diffs.append({"path": path, "summary": pending_summaries.get(path) or f"deleted {rel}"})
+                else:
+                    errors.append(f"Delete failed for {path} — {err_detail}")
+
+            for path, content in pending_contents.items():
+                rel = path[len(project_dir) + 1:] if path.startswith(project_dir + "/") else path
                 await _step("writing", rel)
                 ok, err_detail = await _write_file_sandbox(http, path, content)
                 if ok:
                     files_touched.add(path)
-                    diffs.append({"path": path, "summary": edit_summary or "(no summary)"})
+                    diffs.append({"path": path, "summary": pending_summaries.get(path) or "(no summary)"})
                 else:
                     errors.append(f"Write failed for {path} — {err_detail}")
 
@@ -789,6 +1049,7 @@ async def run_fixer(http, events, conv_id: str, *,
         "docs_only": _paths_are_docs_only(sorted(files_touched)),
         "research_used": bool(research_context),
         "attempt_history_used": bool(attempt_history),
+        "run_id": run_id,
     }
 
     await events.emit(conv_id, "tool_end", {

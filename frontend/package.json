@@ -6,6 +6,7 @@
   "description": "HyprChat single-page React frontend (Vite build).",
   "scripts": {
     "dev": "vite",
+    "test": "node --test src/*.test.js",
     "build": "vite build",
     "preview": "vite preview"
   },

@@ -408,9 +408,13 @@ Integration tests expect a live HyprChat instance:
 
 ```bash
 cd backend
-python3 -m pip install pytest httpx
+python3 -m pip install -r requirements.txt pytest
 HYPRCHAT_URL=http://127.0.0.1:8000 python3 -m pytest tests/ -v
 ```
+
+Daedalus research/fixer hardening coverage requires `aiosqlite` from
+`backend/requirements.txt`; `backend/tests/test_agent_research_hardening.py`
+is a required CI check and will skip in incomplete local test environments.
 
 ## Stack
 

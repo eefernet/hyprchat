@@ -141,6 +141,7 @@ async def fix_budget_note(conv_id: str, source_role: str) -> str:
 
 WF_EVENT_TRANSITIONS = {
     "PLAN_DONE":     ("planning",  "not_ready"),
+    "BUILD_STARTED": ("building",  "not_ready"),
     "BUILD_OK":      ("reviewing", "not_ready"),
     "FIX_APPLIED":   ("reviewing", "not_ready"),
     "REVIEW_CLEAN":  ("accepting", "not_ready"),
