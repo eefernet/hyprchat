@@ -151,21 +151,22 @@ def _clean_project_name(name: str) -> str:
 
 
 def _workspace_for_request(req: "RunRequest") -> tuple[Path, str, bool]:
-    """Choose the OpenHands workspace.
+    """Choose the OpenHands workspace (pre-refactor behavior).
 
-    A caller-provided project_id is authoritative. Previously a new project
-    with a project_id still used a task-derived folder unless that directory
-    already existed, which split Daedalus' plan id from the actual build dir.
+    A provided project_id is honored only as a genuine RESUME — i.e. when that
+    directory already exists. A fresh build always lands in a new task-derived,
+    uuid-uniquified directory so it can never inherit "continue working on the
+    existing files" semantics from a colliding or stale project id (which is
+    what made the Builder write a single file into a pre-existing dir).
     """
     import uuid
 
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
     requested = _clean_project_name(req.project_id)
-    if requested:
+    if requested and (PROJECTS_DIR / requested).is_dir():
         work_dir = PROJECTS_DIR / requested
-        reusing = work_dir.is_dir()
         work_dir.mkdir(parents=True, exist_ok=True)
-        return work_dir, requested, reusing
+        return work_dir, requested, True
 
     project_name = _derive_project_name(req.task, req.language)
     work_dir = PROJECTS_DIR / project_name
@@ -176,50 +177,20 @@ def _workspace_for_request(req: "RunRequest") -> tuple[Path, str, bool]:
     return work_dir, project_name, False
 
 
-def _normalize_required_files(paths: list[str]) -> list[str]:
-    """Normalize manifest paths to workspace-relative POSIX paths."""
-    out: list[str] = []
-    seen: set[str] = set()
-    for raw in paths or []:
-        path = str(raw or "").replace("\\", "/").strip()
-        if not path:
-            continue
-        path = re.sub(r"^/+", "", path)
-        if path.startswith("root/projects/"):
-            parts = path.split("/")
-            path = "/".join(parts[3:]) if len(parts) > 3 else ""
-        path = re.sub(r"/+", "/", path).strip("/")
-        if not path or path.endswith("/"):
-            continue
-        if path not in seen:
-            seen.add(path)
-            out.append(path)
-    return out
+def _agent_finished(status_str: str, progress_log: list[dict]) -> bool:
+    """True if the build agent reached a proper `finish`, not a truncation.
 
-
-def _required_file_status(work_dir: Path, all_files: list[str],
-                          required_files: list[str]) -> tuple[list[str], list[str]]:
-    """Return (present, missing) required workspace-relative manifest paths."""
-    required = _normalize_required_files(required_files)
-    if not required:
-        return [], []
-
-    actual: set[str] = set()
-    for file_path in all_files or []:
-        try:
-            rel = Path(file_path).resolve().relative_to(work_dir.resolve())
-            actual.add(rel.as_posix())
-        except Exception:
-            path = str(file_path).replace("\\", "/")
-            marker = f"/root/projects/{work_dir.name}/"
-            if marker in path:
-                actual.add(path.split(marker, 1)[1].strip("/"))
-            else:
-                actual.add(path.rsplit("/", 1)[-1])
-
-    present = [path for path in required if path in actual]
-    missing = [path for path in required if path not in actual]
-    return present, missing
+    A run that stops without finishing (model truncated mid-build, hit the round
+    cap, errored) must not be reported as a complete success. Conservative:
+    only returns False when NEITHER a FINISHED execution status NOR a finish
+    action was observed, so genuinely-finished builds are never false-flagged.
+    """
+    if "finish" in (status_str or "").lower():
+        return True
+    for step in progress_log or []:
+        if "finish" in str(step.get("action") or "").lower():
+            return True
+    return False
 
 
 class RunRequest(BaseModel):
@@ -241,13 +212,6 @@ class RunRequest(BaseModel):
     # Only meaningful when profile == "continue": list of manifest files the
     # last builder run failed to write. The worker focuses on these.
     manifest_missing: list[str] = []
-    # Authoritative Architect manifest paths. The backend gates Builder
-    # completion from these rather than hoping the model follows prompt text.
-    required_files: list[str] = []
-    build_cmd: str = ""
-    test_cmd: str = ""
-    lint_cmd: str = ""
-    architect_run_id: str = ""
 
 
 class RunResponse(BaseModel):
@@ -258,8 +222,9 @@ class RunResponse(BaseModel):
     duration_seconds: float = 0.0
     steps: list[dict] = []
     project_id: str = ""
-    required_files: list[str] = []
-    missing_required_files: list[str] = []
+    # False when the agent stopped without a proper `finish` (truncated /
+    # hit the round cap). Lets the backend flag a one-file build incomplete.
+    agent_finished: bool = True
 
 
 class AiderRunRequest(BaseModel):
@@ -1267,17 +1232,11 @@ def run_task(req: RunRequest):
                 files_created = moved
                 all_workspace_files = _list_all_files(work_dir)
 
-        required_present, required_missing = _required_file_status(
-            work_dir, all_workspace_files, req.required_files,
-        )
-        if req.required_files:
-            print(f"[OH-Worker] Required-file check: "
-                  f"{len(required_present)}/{len(_normalize_required_files(req.required_files))} present; "
-                  f"missing={required_missing[:8]}")
         summary = _extract_summary(conversation)
         duration = time.time() - start
+        agent_finished = _agent_finished(status_str, progress_log)
         print(f"[OH-Worker] Done in {duration:.1f}s — {len(files_created)} files, "
-              f"{len(progress_log)} steps, stuck={stuck}")
+              f"{len(progress_log)} steps, stuck={stuck}, finished={agent_finished}")
 
         return RunResponse(
             status="stuck" if stuck and not files_created else "ok",
@@ -1287,8 +1246,7 @@ def run_task(req: RunRequest):
             duration_seconds=round(duration, 1),
             steps=progress_log[-20:],
             project_id=project_name,
-            required_files=_normalize_required_files(req.required_files),
-            missing_required_files=required_missing,
+            agent_finished=agent_finished,
         )
 
     except _RunCancelled:
@@ -1456,6 +1414,7 @@ async def run_task_stream(req: RunRequest):
 
             print(f"[OH-Worker] Starting streamed run (run_id={req.run_id or '-'}, max_rounds={req.max_rounds}, num_ctx={req.num_ctx})...")
             conversation.run()
+            _stream_status_str = str(conversation.state.execution_status)
 
             # Post-run processing
             stuck = False
@@ -1496,13 +1455,9 @@ async def run_task_stream(req: RunRequest):
 
             summary = _extract_summary(conversation)
             duration = time.time() - start
-            required_present, required_missing = _required_file_status(
-                work_dir, all_workspace_files, req.required_files,
-            )
-            if req.required_files:
-                print(f"[OH-Worker] Required-file check: "
-                      f"{len(required_present)}/{len(_normalize_required_files(req.required_files))} present; "
-                      f"missing={required_missing[:8]}")
+            agent_finished = _agent_finished(_stream_status_str, progress_log)
+            print(f"[OH-Worker] Streamed run done in {duration:.1f}s — {len(files_created)} files, "
+                  f"stuck={stuck}, finished={agent_finished}")
 
             result_holder[0] = {
                 "type": "done",
@@ -1513,8 +1468,7 @@ async def run_task_stream(req: RunRequest):
                 "duration_seconds": round(duration, 1),
                 "steps": progress_log[-20:],
                 "project_id": project_name,
-                "required_files": _normalize_required_files(req.required_files),
-                "missing_required_files": required_missing,
+                "agent_finished": agent_finished,
             }
 
         except _RunCancelled:
@@ -1672,28 +1626,6 @@ IMPORTANT: ALL files MUST live inside `{work_dir}`. Do NOT create files in /root
     if req.context:
         prompt += f"\n## CONTEXT\n{req.context}\n"
 
-    required_files = _normalize_required_files(req.required_files)
-    if required_files:
-        prompt += "\n## REQUIRED FILE MANIFEST\n"
-        prompt += (
-            "These workspace-relative paths are mandatory. Create every one "
-            "before calling `finish`; missing any of them fails the build.\n"
-        )
-        for path in required_files[:80]:
-            prompt += f"- {path}\n"
-        if len(required_files) > 80:
-            prompt += f"- ... ({len(required_files) - 80} more)\n"
-
-    command_lines = []
-    if req.build_cmd:
-        command_lines.append(f"- Build: `{req.build_cmd}`")
-    if req.test_cmd:
-        command_lines.append(f"- Test: `{req.test_cmd}`")
-    if req.lint_cmd:
-        command_lines.append(f"- Lint: `{req.lint_cmd}`")
-    if command_lines:
-        prompt += "\n## PROJECT COMMANDS FROM ARCHITECT\n" + "\n".join(command_lines) + "\n"
-
     git_step = (
         "5. **Git**: `git init && git add -A && git commit -m 'Initial commit'` "
         "after the project compiles."
@@ -1707,7 +1639,7 @@ IMPORTANT: ALL files MUST live inside `{work_dir}`. Do NOT create files in /root
 ## VERIFICATION (REQUIRED BEFORE finish)
 You MUST complete every step before calling `finish`. `finish` is a gate, not a goal.
 
-1. **Inventory**: Run `ls -R {work_dir}` and confirm every required file exists. If a REQUIRED FILE MANIFEST is present, EVERY listed path must exist. Missing any → you are not done.
+1. **Inventory**: Run `ls -R {work_dir}` and confirm every file the TASK calls for exists. Missing any → you are not done.
 2. **Compile / parse**: {verify_cmd}
 3. **Resolve missing references**: If step 2 fails because a referenced class, module, function, type, or import does not exist, you MUST create the missing file(s) with their full contents and re-run step 2. Do NOT stub them out, do NOT call `finish` with unresolved references.
 4. **Dependencies**: Make sure imports reference real libraries (declared in pom.xml/package.json/requirements.txt etc.) or files you created.

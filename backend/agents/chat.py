@@ -749,11 +749,20 @@ def _next_action_from_blocked_result(tool_result: str) -> str:
     m = re.search(r"REQUIRED NEXT TOOL CALL:\s*([^\n]+)", text, re.I)
     if m:
         return m.group(1).strip()
+    low = text.lower()
+    # Fixer budget exhausted after research → the model must hand-fix; never
+    # recommend run_fixer here (it is cap-blocked).
+    if ("full budget" in low or "fix the remaining issue" in low
+            or "hand-fix" in low or "directly yourself" in low):
+        return "edit the files directly with write_file + run_shell, then run_acceptance_review(...)"
+    # Hard cap reached → summarize for the user instead of looping a tool.
+    if "hard cap" in low or "ship as-is" in low or "ship anyway" in low:
+        return "respond to the user: summarize changes, state the remaining issue, and ask whether to ship as-is"
     if "run_aider_fix" in text:
         return "run_aider_fix(...)"
     if "run_review" in text:
         return "run_review(...)"
-    if "run_fixer" in text:
+    if "run_fixer" in text and "do not call run_fixer" not in low:
         return "run_fixer(...)"
     return "respond to the user with the blocked state and ask for guidance"
 
@@ -829,8 +838,10 @@ async def _blocked_tool_summary(conv_id: str, tool_name: str, tool_result: str) 
     project_dir = ""
     issue_lines: list[str] = []
     reviewer_summary = ""
+    wf_mode = ""
     try:
         wf = await db.get_latest_coder_workflow(conv_id) if conv_id else None
+        wf_mode = (wf or {}).get("mode") or ""
         if wf and wf.get("project_id"):
             project_dir = f"/root/projects/{wf.get('project_id')}"
         runs = await db.get_runs_by_conversation(conv_id, limit=20) if conv_id else []
@@ -865,7 +876,10 @@ async def _blocked_tool_summary(conv_id: str, tool_name: str, tool_result: str) 
         lines.append("\nLatest reviewer issue(s):")
         lines.extend(issue_lines)
     lines.append(f"\nNext valid action: `{next_action}`")
-    lines.append("\nI marked the uploaded-project workflow blocked so it does not keep burning rounds on the same rejected action.")
+    if wf_mode == "fix_uploaded_project":
+        lines.append("\nI marked the uploaded-project workflow blocked so it does not keep burning rounds on the same rejected action.")
+    else:
+        lines.append("\nI stopped this turn so it does not keep burning rounds on the same rejected action.")
     return "\n".join(lines)
 
 
@@ -1582,17 +1596,29 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         tool_sys = "\n\n## CODING AGENT PROTOCOL (MANDATORY)\n"
 
         if "generate_code" in available_tool_names:
-            tool_sys += (
-                "### PRIMARY WORKFLOW: plan_project or generate_code\n"
-                "For simple, self-contained builds, you may skip plan_project and call "
-                "generate_code directly with a COMPLETE task description. When you do "
-                "that, include exactly one short visible sentence before the tool call: "
-                "\"This is simple enough to build directly, so I'll skip a separate plan "
-                "and start CodeAgent.\" For larger, ambiguous, multi-screen, or "
-                "architecture-sensitive builds, call plan_project first, then "
-                "generate_code. generate_code builds entire projects autonomously. "
-                "Call it ONCE. If it fails, use write_file + run_shell.\n\n"
-            )
+            if _is_v2_persona:
+                # Daedalus discipline: the Architect always runs first. Do NOT
+                # offer the "skip planning for simple builds" shortcut — the
+                # tools.py gate also blocks a fresh generate_code with no plan.
+                tool_sys += (
+                    "### PRIMARY WORKFLOW: plan_project THEN generate_code\n"
+                    "ALWAYS call plan_project first to produce the structured plan, then "
+                    "call generate_code to build it. Do NOT skip planning, even for builds "
+                    "that look simple. generate_code builds entire projects autonomously. "
+                    "Call it ONCE. If it fails, use write_file + run_shell.\n\n"
+                )
+            else:
+                tool_sys += (
+                    "### PRIMARY WORKFLOW: plan_project or generate_code\n"
+                    "For simple, self-contained builds, you may skip plan_project and call "
+                    "generate_code directly with a COMPLETE task description. When you do "
+                    "that, include exactly one short visible sentence before the tool call: "
+                    "\"This is simple enough to build directly, so I'll skip a separate plan "
+                    "and start CodeAgent.\" For larger, ambiguous, multi-screen, or "
+                    "architecture-sensitive builds, call plan_project first, then "
+                    "generate_code. generate_code builds entire projects autonomously. "
+                    "Call it ONCE. If it fails, use write_file + run_shell.\n\n"
+                )
 
         tool_sys += (
             "### RULES\n"

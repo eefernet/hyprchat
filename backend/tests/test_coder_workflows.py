@@ -199,7 +199,11 @@ def test_reviewer_sanitizes_nonexistent_storage_guess_to_real_db_file():
     assert "tests/test_cli.py" in issue["suggested_fix_scope"]
 
 
-def test_fixer_repairs_neon_pong_method_name_swap():
+def test_fixer_detects_method_mismatch_without_mutating():
+    # Detect, don't mutate: the Fixer no longer auto-rewrites call names (a
+    # blanket string-replace can't express a bidirectional swap and produced
+    # wrong-but-passing edits). It detects the mismatch and surfaces the
+    # actual class methods to the coder LLM instead.
     issues = [{
         "file": "main.py",
         "summary": (
@@ -209,14 +213,15 @@ def test_fixer_repairs_neon_pong_method_name_swap():
         ),
         "suggested_fix_scope": ["main.py", "effects/particle_system.py"],
     }]
+    main_src = "\n".join([
+        "from effects.particle_system import ParticleSystem",
+        "",
+        "particle_system = ParticleSystem()",
+        "particle_system.create_explosion(ball.x, ball.y, (0, 255, 255))",
+        "",
+    ])
     contents = {
-        "/root/projects/neon-pong-game/main.py": "\n".join([
-            "from effects.particle_system import ParticleSystem",
-            "",
-            "particle_system = ParticleSystem()",
-            "particle_system.create_explosion(ball.x, ball.y, (0, 255, 255))",
-            "",
-        ]),
+        "/root/projects/neon-pong-game/main.py": main_src,
         "/root/projects/neon-pong-game/effects/particle_system.py": "\n".join([
             "class ParticleSystem:",
             "    def add_explosion(self, x, y, color, count=20):",
@@ -225,16 +230,15 @@ def test_fixer_repairs_neon_pong_method_name_swap():
         ]),
     }
 
-    before = fixer._python_symbol_mismatch_errors(contents, issues)
-    notes, touched = fixer._repair_python_symbol_mismatches(contents, issues)
-    after = fixer._python_symbol_mismatch_errors(contents, issues)
-
-    assert before
-    assert "/root/projects/neon-pong-game/main.py" in touched
-    assert notes
-    assert "particle_system.add_explosion" in contents["/root/projects/neon-pong-game/main.py"]
-    assert "particle_system.create_explosion" not in contents["/root/projects/neon-pong-game/main.py"]
-    assert after == []
+    # Detection fires on the mismatch.
+    assert fixer._python_symbol_mismatch_errors(contents, issues)
+    # The symbol reference exposes the ACTUAL methods for the prompt hint.
+    defined = fixer._python_defined_methods(contents, issues)
+    assert defined.get("ParticleSystem") == ["add_explosion"]
+    # Detection is non-mutating — the source is untouched.
+    assert contents["/root/projects/neon-pong-game/main.py"] == main_src
+    # And it no longer exposes the old blanket-replace repair.
+    assert not hasattr(fixer, "_repair_python_symbol_mismatches")
 
 
 def _import_openhands_worker_for_prompt_tests(monkeypatch):
@@ -332,11 +336,33 @@ def test_aider_scope_and_prompt_include_test_state_isolation(tmp_path, monkeypat
     sys.modules.pop("openhands_worker", None)
 
 
-def test_openhands_worker_uses_requested_project_id_for_new_workspace(tmp_path, monkeypatch):
+def test_openhands_worker_fresh_build_ignores_nonexistent_project_id(tmp_path, monkeypatch):
+    # Pre-refactor behavior: a NEW build never adopts a non-existing project_id;
+    # it lands in a fresh task-derived dir so it can't inherit continue-mode and
+    # write a single file into a colliding/stale project directory.
     worker = _import_openhands_worker_for_prompt_tests(monkeypatch)
     monkeypatch.setattr(worker, "PROJECTS_DIR", tmp_path)
     req = worker.RunRequest(
-        task="Build the project from the completed Architect plan for `neon-pong-game`.",
+        task="Build a neon pong game",
+        language="python",
+        project_id="neon-pong-game",  # does not exist yet
+    )
+
+    work_dir, project_name, reusing = worker._workspace_for_request(req)
+
+    assert reusing is False
+    assert work_dir.is_dir()
+    assert work_dir.parent == tmp_path
+    sys.modules.pop("openhands_worker", None)
+
+
+def test_openhands_worker_reuses_existing_project_id(tmp_path, monkeypatch):
+    # A provided project_id is honored only as a genuine resume (the dir exists).
+    worker = _import_openhands_worker_for_prompt_tests(monkeypatch)
+    monkeypatch.setattr(worker, "PROJECTS_DIR", tmp_path)
+    (tmp_path / "neon-pong-game").mkdir()
+    req = worker.RunRequest(
+        task="Add a scoreboard",
         language="python",
         project_id="neon-pong-game",
     )
@@ -345,36 +371,32 @@ def test_openhands_worker_uses_requested_project_id_for_new_workspace(tmp_path, 
 
     assert project_name == "neon-pong-game"
     assert work_dir == tmp_path / "neon-pong-game"
-    assert work_dir.is_dir()
-    assert reusing is False
+    assert reusing is True
     sys.modules.pop("openhands_worker", None)
 
 
-def test_openhands_worker_prompt_and_status_use_required_files(tmp_path, monkeypatch):
+def test_openhands_worker_prompt_has_no_required_file_manifest(tmp_path, monkeypatch):
+    # Reverted builder prompt: the Architect manifest rides in plan CONTEXT, not
+    # a separate REQUIRED FILE MANIFEST / PROJECT COMMANDS gate.
     worker = _import_openhands_worker_for_prompt_tests(monkeypatch)
-    req = worker.RunRequest(
-        task="Build neon pong",
-        language="python",
-        required_files=["main.py", "game_objects/paddle.py", "/root/projects/neon-pong-game/ui/scoreboard.py"],
-        build_cmd="pip install -q pygame",
-    )
+    req = worker.RunRequest(task="Build neon pong", language="python")
 
     prompt = worker._build_task_prompt(req, str(tmp_path), continuing=False)
 
-    assert "## REQUIRED FILE MANIFEST" in prompt
-    assert "- main.py" in prompt
-    assert "- game_objects/paddle.py" in prompt
-    assert "- ui/scoreboard.py" in prompt
-    assert "Build: `pip install -q pygame`" in prompt
+    assert "## REQUIRED FILE MANIFEST" not in prompt
+    assert "## PROJECT COMMANDS FROM ARCHITECT" not in prompt
+    assert "create ALL files" in prompt  # scaffold still builds everything
+    sys.modules.pop("openhands_worker", None)
 
-    (tmp_path / "main.py").write_text("print('ok')\n")
-    (tmp_path / "game_objects").mkdir()
-    (tmp_path / "game_objects" / "paddle.py").write_text("class Paddle: pass\n")
-    all_files = [str(p) for p in tmp_path.rglob("*") if p.is_file()]
-    present, missing = worker._required_file_status(tmp_path, all_files, req.required_files)
 
-    assert present == ["main.py", "game_objects/paddle.py"]
-    assert missing == ["ui/scoreboard.py"]
+def test_openhands_worker_agent_finished_flags_no_finish(monkeypatch):
+    # A run with no FINISHED status and no finish action is flagged incomplete so
+    # a truncated one-file build is never reported as a success.
+    worker = _import_openhands_worker_for_prompt_tests(monkeypatch)
+    assert worker._agent_finished("AgentExecutionStatus.FINISHED", []) is True
+    assert worker._agent_finished("running", [{"action": "finish"}]) is True
+    assert worker._agent_finished("running", [{"action": "file_create"}]) is False
+    assert worker._agent_finished("", []) is False
     sys.modules.pop("openhands_worker", None)
 
 

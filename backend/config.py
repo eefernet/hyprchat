@@ -180,7 +180,7 @@ FIXER_MODEL     = os.getenv("FIXER_MODEL",     "")  # Empty = use CODER_MODEL
 QA_MODEL        = os.getenv("QA_MODEL",        "")  # Empty = use chat / persona model
 OPENHANDS_ENABLED = os.getenv("OPENHANDS_ENABLED", "true").lower() == "true"  # Toggle OpenHands for generate_code tool
 OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "20"))
-OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", "16384"))
+OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", "32768"))
 AIDER_ENABLED = os.getenv("AIDER_ENABLED", "true").lower() == "true"
 AIDER_MODEL = os.getenv("AIDER_MODEL", "")  # Empty = use FIXER_MODEL, then CODER_MODEL
 AIDER_NUM_CTX = int(os.getenv("AIDER_NUM_CTX", os.getenv("OPENHANDS_NUM_CTX", "16384")))

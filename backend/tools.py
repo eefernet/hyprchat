@@ -358,222 +358,10 @@ async def _scan_project_files(http, project_dir: str) -> list[str]:
         return []
 
 
-def _architect_plan_to_builder_args(plan: dict, *,
-                                    fallback_task: str = "",
-                                    fallback_language: str = "python") -> dict:
-    """Convert a persisted Architect envelope into generate_code arguments."""
-    plan = plan or {}
-    project_id = (plan.get("project_id") or "").strip()
-    language = (plan.get("language") or fallback_language or "python").strip() or "python"
-    manifest = plan.get("manifest") if isinstance(plan.get("manifest"), list) else []
-    required_files = _required_files_from_manifest(manifest)
-    tests_required = plan.get("tests_required") if isinstance(plan.get("tests_required"), list) else []
-    deps = plan.get("external_deps") if isinstance(plan.get("external_deps"), list) else []
-    risks = plan.get("risk_notes") if isinstance(plan.get("risk_notes"), list) else []
-    criteria = plan.get("success_criteria") if isinstance(plan.get("success_criteria"), list) else []
-
-    task_lines = [
-        f"Build the project from the completed Architect plan{f' for `{project_id}`' if project_id else ''}.",
-    ]
-    if fallback_task:
-        task_lines.append("\nOriginal user task:\n" + fallback_task.strip())
-    task_lines.extend([
-        "\nUse the Architect plan as the source of truth. Create every manifest file, "
-        "honor the dependency choices, and make the listed build/test/lint commands pass.",
-    ])
-
-    context = [
-        "--- Architect Plan Contract (source of truth) ---",
-        f"Project ID: {project_id or '(unspecified)'}",
-        f"Language: {language}",
-        f"Build system: {plan.get('build_system') or '(none)'}",
-        f"Build command: {plan.get('build_cmd') or '(none)'}",
-        f"Test command: {plan.get('test_cmd') or '(none)'}",
-        f"Lint command: {plan.get('lint_cmd') or '(none)'}",
-        "",
-        f"Manifest ({len(manifest)} files):",
-    ]
-    for entry in manifest[:40]:
-        if isinstance(entry, dict):
-            loc = f" (~{entry.get('estimated_loc')} LOC)" if entry.get("estimated_loc") else ""
-            context.append(f"  - {entry.get('path', '?')}: {entry.get('purpose', '')}{loc}")
-        else:
-            context.append(f"  - {entry}")
-    if len(manifest) > 40:
-        context.append(f"  ... ({len(manifest) - 40} more files)")
-    if tests_required:
-        context.append("\nTests required:")
-        for item in tests_required[:12]:
-            if isinstance(item, dict):
-                context.append(f"  - {item.get('path', '?')}: {item.get('covers', '')}")
-            else:
-                context.append(f"  - {item}")
-    if deps:
-        context.append("\nExternal dependencies:")
-        for dep in deps[:12]:
-            if isinstance(dep, dict):
-                context.append(f"  - {dep.get('name', '?')} {dep.get('version', '')}".rstrip())
-            else:
-                context.append(f"  - {dep}")
-    if risks:
-        context.append("\nRisks to handle:")
-        for risk in risks[:8]:
-            context.append(f"  - {risk}")
-    if criteria:
-        context.append("\nSuccess criteria:")
-        for criterion in criteria[:12]:
-            context.append(f"  - {criterion}")
-
-    return {
-        "task": "\n".join(task_lines).strip(),
-        "language": language,
-        "project_id": project_id,
-        "context": "\n".join(context).strip(),
-        "required_files": required_files,
-        "build_cmd": plan.get("build_cmd") or "",
-        "test_cmd": plan.get("test_cmd") or "",
-        "lint_cmd": plan.get("lint_cmd") or "",
-        "architect_run_id": plan.get("run_id") or "",
-    }
-
-
-async def _store_architect_plan_contract(conv_id: str, plan: dict,
-                                         workflow_id: str = "") -> str:
-    """Persist the Architect contract on the active greenfield workflow."""
-    if not conv_id or not isinstance(plan, dict):
-        return ""
-    project_id = (plan.get("project_id") or "").strip()
-    try:
-        wf = await db.get_coder_workflow(workflow_id) if workflow_id else None
-        if not wf and project_id:
-            wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
-        if not wf:
-            wf = await db.get_latest_coder_workflow(conv_id)
-        if not wf:
-            return ""
-        contract = {
-            "architect_plan": plan,
-            "project_id": project_id,
-            "language": plan.get("language", ""),
-            "build_system": plan.get("build_system", ""),
-            "build_cmd": plan.get("build_cmd", ""),
-            "test_cmd": plan.get("test_cmd", ""),
-            "lint_cmd": plan.get("lint_cmd", ""),
-            "manifest": plan.get("manifest") or [],
-            "tests_required": plan.get("tests_required") or [],
-            "external_deps": plan.get("external_deps") or [],
-            "success_criteria": plan.get("success_criteria") or [],
-            "risk_notes": plan.get("risk_notes") or [],
-            "architect_run_id": plan.get("run_id", ""),
-        }
-        await db.update_coder_workflow(
-            wf["id"], contract=contract,
-            project_id=project_id or None,
-        )
-        return wf["id"]
-    except Exception as e:
-        print(f"[plan_project] store plan contract failed (non-fatal): {e}")
-        return ""
-
-
-async def _find_stranded_architect_workflow(conv_id: str) -> tuple[dict, dict] | None:
-    """Latest greenfield workflow whose completed plan never reached Builder."""
-    if not conv_id:
-        return None
-    try:
-        wf = await db.get_latest_coder_workflow(conv_id)
-        if not wf or wf.get("mode") != "build_from_prompt":
-            return None
-        if wf.get("cancel_requested") or (wf.get("state") or "").lower() != "planning":
-            return None
-        active_run_id = wf.get("active_run_id") or ""
-        if not active_run_id:
-            return None
-        arch_run = await db.get_run(active_run_id)
-        if not arch_run or arch_run.get("role") != "architect":
-            return None
-        if (arch_run.get("status") or "").lower() != "succeeded":
-            return None
-        arch_env = arch_run.get("result_envelope") or {}
-        if (arch_env.get("status") or "").lower() not in {"ok", "succeeded", ""}:
-            return None
-        arch_started = _parse_ts_loose(arch_run.get("started_at"))
-        runs = await db.get_runs_by_conversation(conv_id, limit=50)
-        for run in runs:
-            if not (run.get("role") or "").startswith("builder"):
-                continue
-            run_started = _parse_ts_loose(run.get("started_at"))
-            if not arch_started or not run_started or run_started >= arch_started:
-                return None
-        return wf, arch_run
-    except Exception as e:
-        print(f"[plan_project] stranded workflow lookup failed (non-fatal): {e}")
-        return None
-
-
-async def _run_builder_from_architect_plan(http, events, conv_id: str, plan: dict, *,
-                                           workflow_id: str = "",
-                                           fallback_task: str = "",
-                                           fallback_language: str = "python",
-                                           custom_tool_map: dict | None = None,
-                                           connector_tool_name_map: dict | None = None,
-                                           conv_model: str = "",
-                                           kb_ids: list | None = None,
-                                           artifact_message_id: int | None = None,
-                                           recovery: bool = False) -> str:
-    """Continue a Daedalus greenfield workflow from Architect to Builder."""
-    from agents import architect
-
-    builder_args = _architect_plan_to_builder_args(
-        plan, fallback_task=fallback_task, fallback_language=fallback_language,
-    )
-    project_id = builder_args.get("project_id", "")
-    try:
-        wf = await db.get_coder_workflow(workflow_id) if workflow_id else None
-        if not wf and project_id:
-            wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
-        if not wf:
-            wf = await db.get_latest_coder_workflow(conv_id)
-        if wf:
-            await db.update_coder_workflow(
-                wf["id"], state="building", artifact_status="not_ready",
-                active_run_id="", project_id=project_id or None,
-            )
-            workflow_id = wf["id"]
-    except Exception as e:
-        print(f"[plan_project] workflow BUILD_STARTED pre-update failed (non-fatal): {e}")
-
-    await events.emit(conv_id, "tool_progress", {
-        "tool": "plan_project", "icon": "compass",
-        "status": ("↩ Resuming completed plan with Builder..."
-                   if recovery else "➡ Plan complete — starting Builder..."),
-        "workflow_id": workflow_id,
-        "project_id": project_id,
-    })
-    builder_result = await exec_tool(
-        http, events, "generate_code", builder_args, conv_id,
-        custom_tool_map=custom_tool_map,
-        connector_tool_name_map=connector_tool_name_map,
-        conv_model=conv_model,
-        kb_ids=kb_ids,
-        artifact_message_id=artifact_message_id,
-    )
-    if workflow_id and isinstance(builder_result, str) and builder_result.startswith("ERROR:"):
-        try:
-            wf = await db.get_coder_workflow(workflow_id)
-            if wf and not (wf.get("active_run_id") or ""):
-                await db.update_coder_workflow(
-                    workflow_id, state="blocked", artifact_status="not_ready",
-                )
-        except Exception as e:
-            print(f"[plan_project] builder handoff failure state update failed (non-fatal): {e}")
-    plan_text = architect.format_plan_for_chat(plan)
-    heading = "DAEDALUS RECOVERY" if recovery else "DAEDALUS BUILD"
-    return (
-        f"{plan_text}\n\n"
-        f"=== {heading} — Builder invoked automatically from the Architect plan ===\n"
-        f"{builder_result}"
-    )
+# NOTE: the Architect→Builder single-turn auto-handoff helpers were removed.
+# Daedalus uses the pre-refactor two-turn flow: plan_project runs the Architect
+# and returns the plan; the model then calls generate_code, which injects the
+# most recent succeeded Architect manifest from the DB on its own.
 
 
 # Pytest "FAILED tests/foo.py::test_x - reason" line, plus a fallback for
@@ -1775,7 +1563,18 @@ async def exec_tool(
                         and r.get("status") == "succeeded"
                         and _fixer_source_role_cap(r) == _parent_role_for_cap)
                 )
-                _cap_limit = 2 if _parent_role_for_cap == "acceptance" else 3
+                # Acceptance escalation ladder: the base acceptance cap is 2,
+                # but once the model has spent a round on deep_research in this
+                # budget window the cap extends to 4 (research-informed retries).
+                # Reviewer-driven stays at 3.
+                _accept_research_done = (
+                    _parent_role_for_cap == "acceptance"
+                    and await _deep_research_called_since(conv_id, _uts_cap)
+                )
+                if _parent_role_for_cap == "acceptance":
+                    _cap_limit = 4 if _accept_research_done else 2
+                else:
+                    _cap_limit = 3
                 if _fixer_succ >= _cap_limit:
                     # v1 doesn't run this loop, so cap only applies to v2.
                     if await _check_v2():
@@ -1798,6 +1597,28 @@ async def exec_tool(
                                 f"{_iss.get('file','?')}"
                                 + (f":{','.join(str(x) for x in _iss.get('lines') or [])}" if _iss.get('lines') else "")
                                 + f" — {(_iss.get('summary','') or '')[:160]}"
+                            )
+                        # Terminal acceptance escalation: the fixer budget was
+                        # extended after research and is now exhausted. Rather
+                        # than dead-end, release manual hand-fix so the model can
+                        # edit the remaining issues directly, then re-verify.
+                        if _accept_research_done:
+                            await events.emit(conv_id, "tool_end", {
+                                "tool": name, "icon": "wrench",
+                                "status": f"⛔ Fixer budget exhausted ({_fixer_succ}/{_cap_limit}) after research — hand-fix",
+                            })
+                            print(f"[v2-gate] CYCLE CAP (acceptance, post-research): "
+                                  f"blocking {name}, releasing manual hand-fix", flush=True)
+                            return (
+                                f"BLOCKED — the Fixer has used its full budget of {_cap_limit} "
+                                f"acceptance-driven cycles (after web research) and the issue "
+                                f"persists.\n\n"
+                                f"Do NOT call run_fixer or run_aider_fix again. Fix the remaining "
+                                f"issue(s) DIRECTLY yourself: use read_file to inspect, write_file "
+                                f"to edit, and run_shell to verify, then call run_acceptance_review "
+                                f"when the fix is in place."
+                                + (f"\n\nLatest acceptance summary: \"{_rev_sum}\"" if _rev_sum else "")
+                                + (("\nRemaining issue(s):\n" + "\n".join(_issue_lines)) if _issue_lines else "")
                             )
                         await events.emit(conv_id, "tool_end", {
                             "tool": name, "icon": "wrench",
@@ -1842,24 +1663,31 @@ async def exec_tool(
                 _runs_sf = _runs_for_cap
                 if _runs_sf is None:
                     _runs_sf = await db.get_runs_by_conversation(conv_id, limit=50)
-                if _parent_role_for_cap == "acceptance":
-                    raise StopAsyncIteration("acceptance fixes do not use research nudge")
+                # Role-aware: reviewer-driven and acceptance-driven loops both
+                # get the "same error twice → research first" nudge. For
+                # acceptance, once research has run in this budget window the
+                # cap-bump path (2→4) governs, so suppress further nudges.
+                _track_role = (_parent_role_for_cap
+                               if _parent_role_for_cap in {"reviewer", "acceptance"}
+                               else "reviewer")
+                _accept_skip_sf = (_track_role == "acceptance" and _accept_research_done)
                 # Same turn-scoped window as the cycle cap, counting both fix
-                # paths — the gates must agree on how many cycles happened.
+                # paths for THIS role — the gates must agree on cycle counts.
                 _fsucc_sf = sum(
                     1 for r in _runs_since(_runs_sf, _uts_cap)
                     if (r.get("role") in {"fixer", "aider.fix"}
                         and r.get("status") == "succeeded"
                         and ((r.get("result_envelope") or {}).get("source_role")
-                             or "reviewer") != "acceptance")
+                             or "reviewer") == _track_role)
                 )
                 # 1 ≤ fixer_succ ≤ 2: between first failure and final cycle.
                 # 0 = first attempt, no gate. ≥3 = cap (handled above).
                 # Research nudge text is fixer-specific; Aider already requires
                 # a follow-up run_review, so only run_fixer is gated here.
-                if name == "run_fixer" and 1 <= _fsucc_sf <= 2 and await _check_v2():
+                if (name == "run_fixer" and 1 <= _fsucc_sf <= 2
+                        and await _check_v2() and not _accept_skip_sf):
                     _latest_rev_sf = next(
-                        (r for r in _runs_sf if r.get("role") == "reviewer"),
+                        (r for r in _runs_sf if r.get("role") == _track_role),
                         None,
                     )
                     if _latest_rev_sf:
@@ -1869,12 +1697,12 @@ async def exec_tool(
                         )
 
                         # State 5 — STUCK: same issue signature seen in a prior
-                        # reviewer run AND no research call since.
+                        # run of this role AND no research call since.
                         _is_stuck = False
                         if _cur_iss:
                             _prior_revs_sf = [
                                 r for r in _runs_sf
-                                if r.get("role") == "reviewer"
+                                if r.get("role") == _track_role
                                 and r.get("id") != _latest_rev_sf.get("id")
                             ]
                             if _prior_revs_sf:
@@ -1885,9 +1713,9 @@ async def exec_tool(
                                 if _cur_iss & _prior_iss:
                                     _is_stuck = True
 
-                        # State 6 — FINAL CYCLE: about to use the last fixer
-                        # slot (3rd attempt). Research before the last shot.
-                        _is_final = (_fsucc_sf == 2)
+                        # State 6 — FINAL CYCLE: reviewer-only (cap 3, last shot).
+                        # Acceptance uses the research cap-bump, not a fixed slot.
+                        _is_final = (_track_role == "reviewer" and _fsucc_sf == 2)
 
                         if (_is_stuck or _is_final) and not _research_done:
                             _why_label = ("STUCK" if _is_stuck else "FINAL_CYCLE")
@@ -2251,12 +2079,29 @@ async def exec_tool(
                     # the research-first requirement and then retry run_fixer on
                     # the next round. Below 1 fixer attempt the model should
                     # actually try fixing before researching.
-                    _cap_limit_gate = 2 if _pending_role == "acceptance" else 3
+                    # Acceptance escalation: once deep_research has run in this
+                    # budget window the acceptance fix cap extends 2→4 (mirrors
+                    # the CYCLE_LIMIT bump), and at the bumped cap manual
+                    # hand-fix is released so the loop can't dead-end.
+                    _accept_research_done_gate = (
+                        _pending_role == "acceptance"
+                        and await _deep_research_called_since(conv_id, _uts_gate)
+                    )
+                    if _pending_role == "acceptance":
+                        _cap_limit_gate = 4 if _accept_research_done_gate else 2
+                    else:
+                        _cap_limit_gate = 3
+                    _accept_handfix_release = (
+                        _accept_research_done_gate
+                        and _fixer_attempts_gate >= _cap_limit_gate
+                        and name in {"write_file", "run_shell", "execute_code",
+                                     "read_file", "list_files"}
+                    )
                     # Anchor on started_at to match the STUCK/FINAL gates —
                     # research stashed while the review was still running must
-                    # satisfy both, or the gates disagree and loop.
+                    # satisfy both, or the gates disagree and loop. Both
+                    # reviewer- and acceptance-driven loops may research now.
                     if (name == "deep_research"
-                            and _pending_role != "acceptance"
                             and _fixer_attempts_gate >= 1
                             and not await _deep_research_called_since(
                                 conv_id, _pending_review.get("started_at"))):
@@ -2268,6 +2113,11 @@ async def exec_tool(
                         print(f"[v2-gate] ship-anyway: allowing {name} despite "
                               f"fix-needed because latest user requested delivery", flush=True)
                         # Skip _gate_msg entirely → delivery tool runs normally.
+                    elif _accept_handfix_release:
+                        print(f"[v2-gate] handfix-release: allowing {name} despite "
+                              f"fix-needed (acceptance cap {_fixer_attempts_gate}/"
+                              f"{_cap_limit_gate} exhausted after research)", flush=True)
+                        # Skip _gate_msg → model hand-fixes directly.
                     elif _fixer_attempts_gate >= _cap_limit_gate and _fix_cap_releases_tool(name):
                         print(f"[v2-gate] cap-release: allowing {name} despite "
                               f"fix-needed (attempts={_fixer_attempts_gate}, "
@@ -3265,26 +3115,6 @@ async def exec_tool(
                 return "ERROR: start_coder_workflow requires task"
             if mode not in {"build_from_prompt", "fix_uploaded_project", "ask_uploaded_project"}:
                 return "ERROR: mode must be build_from_prompt, fix_uploaded_project, or ask_uploaded_project"
-            if mode == "build_from_prompt" and await _check_v2():
-                stranded = await _find_stranded_architect_workflow(conv_id)
-                if stranded:
-                    wf, arch_run = stranded
-                    plan_env = arch_run.get("result_envelope") or {}
-                    await _store_architect_plan_contract(conv_id, plan_env, wf.get("id", ""))
-                    result = await _run_builder_from_architect_plan(
-                        http, events, conv_id, plan_env,
-                        workflow_id=wf.get("id", ""),
-                        fallback_task=wf.get("user_task") or task,
-                        fallback_language=plan_env.get("language") or language,
-                        custom_tool_map=custom_tool_map,
-                        connector_tool_name_map=connector_tool_name_map,
-                        conv_model=conv_model,
-                        kb_ids=kb_ids,
-                        artifact_message_id=artifact_message_id,
-                        recovery=True,
-                    )
-                    return f"workflow_id: {wf.get('id', '')}\n\n{result}"
-
             if not project_id and mode != "build_from_prompt" and conv_id:
                 active = await db.get_coding_project_by_conv(conv_id)
                 if active:
@@ -4127,24 +3957,6 @@ async def exec_tool(
             constraints = args.get("constraints", "")
             if not task:
                 return "ERROR: task is required"
-            if await _check_v2():
-                stranded = await _find_stranded_architect_workflow(conv_id)
-                if stranded:
-                    wf, arch_run = stranded
-                    plan_env = arch_run.get("result_envelope") or {}
-                    await _store_architect_plan_contract(conv_id, plan_env, wf.get("id", ""))
-                    return await _run_builder_from_architect_plan(
-                        http, events, conv_id, plan_env,
-                        workflow_id=wf.get("id", ""),
-                        fallback_task=wf.get("user_task") or task,
-                        fallback_language=plan_env.get("language") or language,
-                        custom_tool_map=custom_tool_map,
-                        connector_tool_name_map=connector_tool_name_map,
-                        conv_model=conv_model,
-                        kb_ids=kb_ids,
-                        artifact_message_id=artifact_message_id,
-                        recovery=True,
-                    )
             architect_task = task
             if constraints:
                 architect_task = f"{task}\n\nConstraints:\n{constraints}"
@@ -4198,19 +4010,6 @@ async def exec_tool(
                     project_id=plan_project_id,
                     user_task=architect_task,
                 )
-                await _store_architect_plan_contract(conv_id, plan, workflow_id)
-                if await _check_v2():
-                    return await _run_builder_from_architect_plan(
-                        http, events, conv_id, plan,
-                        workflow_id=workflow_id,
-                        fallback_task=architect_task,
-                        fallback_language=language,
-                        custom_tool_map=custom_tool_map,
-                        connector_tool_name_map=connector_tool_name_map,
-                        conv_model=conv_model,
-                        kb_ids=kb_ids,
-                        artifact_message_id=artifact_message_id,
-                    )
             return architect.format_plan_for_chat(plan)
 
         elif name == "deep_research":
@@ -4320,6 +4119,35 @@ async def exec_tool(
             return await run_conspiracy_research(http, config.OLLAMA_URL, config.DEFAULT_MODEL, config.SEARXNG_URL, events, topic, angle, depth, conv_id, kb_context=kb_prior)
 
         elif name == "generate_code":
+            # Daedalus discipline: a fresh greenfield build must start with the
+            # Architect. Block a v2 persona that jumped straight to generate_code
+            # with no completed plan and no existing project to build on.
+            if conv_id and await _check_v2():
+                _gc_project_id = (args.get("project_id") or "").strip()
+                _gc_has_project = bool(_gc_project_id)
+                _gc_has_arch = False
+                try:
+                    _gc_runs = await db.get_runs_by_conversation(conv_id, limit=30)
+                    _gc_has_arch = any(
+                        r.get("role") == "architect" and r.get("status") == "succeeded"
+                        for r in _gc_runs
+                    )
+                    if not _gc_has_project:
+                        _gc_active = await db.get_coding_project_by_conv(conv_id)
+                        _gc_has_project = bool(_gc_active)
+                except Exception as _gce:
+                    print(f"[v2-gate] plan-first check failed (non-fatal): {_gce}")
+                    _gc_has_arch = True  # fail open — never block on a lookup error
+                if not _gc_has_arch and not _gc_has_project:
+                    await events.emit(conv_id, "tool_end", {
+                        "tool": "generate_code", "icon": "wand",
+                        "status": "Blocked: call plan_project first",
+                    })
+                    return (
+                        "BLOCKED: Daedalus builds must start with the Architect. Call "
+                        "plan_project(task='...', language='...') first to produce the structured "
+                        "plan, then call generate_code to build it."
+                    )
             # Models sometimes use wrong arg names (description/code instead of task)
             task = args.get("task", "") or args.get("description", "") or args.get("prompt", "")
             language = args.get("language", "python")
@@ -4329,7 +4157,6 @@ async def exec_tool(
             test_cmd_arg = (args.get("test_cmd") or "").strip()
             lint_cmd_arg = (args.get("lint_cmd") or "").strip()
             architect_run_id = (args.get("architect_run_id") or "").strip()
-            manifest_completion_retry = bool(args.get("manifest_completion_retry"))
             # If model stuffed actual code into args, append it as context
             if not task and args.get("code"):
                 task = "Review, fix, and complete this code"
@@ -4512,17 +4339,6 @@ async def exec_tool(
                     )
                     if _latest_arch_run:
                         _latest_arch_env = _latest_arch_run.get("result_envelope") or {}
-                        if not _oh_project_id and (_latest_arch_env.get("project_id") or "").strip():
-                            _oh_project_id = (_latest_arch_env.get("project_id") or "").strip()
-                            _has_active_project = True
-                        if not required_files:
-                            required_files = _required_files_from_manifest(
-                                _latest_arch_env.get("manifest") or []
-                            )
-                        build_cmd_arg = build_cmd_arg or (_latest_arch_env.get("build_cmd") or "")
-                        test_cmd_arg = test_cmd_arg or (_latest_arch_env.get("test_cmd") or "")
-                        lint_cmd_arg = lint_cmd_arg or (_latest_arch_env.get("lint_cmd") or "")
-                        architect_run_id = architect_run_id or _latest_arch_run.get("id", "")
                     # Find the most recent builder run with a MEANINGFUL state.
                     # Skip running/queued (in-flight, has no envelope yet),
                     # cancelled (operator killed before it produced anything),
@@ -4671,12 +4487,6 @@ async def exec_tool(
                         _build_cmd = _arch_env.get("build_cmd", "")
                         _test_cmd = _arch_env.get("test_cmd", "")
                         if _manifest:
-                            if not required_files:
-                                required_files = _required_files_from_manifest(_manifest)
-                            build_cmd_arg = build_cmd_arg or _build_cmd
-                            test_cmd_arg = test_cmd_arg or _test_cmd
-                            lint_cmd_arg = lint_cmd_arg or (_arch_env.get("lint_cmd", "") or "")
-                            architect_run_id = architect_run_id or _arch_run.get("id", "")
                             _arch_section = ["\n\n--- Architect Manifest (FOLLOW THIS PLAN) ---"]
                             _arch_section.append(
                                 f"Project: {_arch_env.get('project_id','?')} "
@@ -4741,11 +4551,6 @@ async def exec_tool(
                 # other profiles ignore it.
                 "profile": _builder_profile,
                 "manifest_missing": _profile_continue_missing,
-                "required_files": required_files,
-                "build_cmd": build_cmd_arg,
-                "test_cmd": test_cmd_arg,
-                "lint_cmd": lint_cmd_arg,
-                "architect_run_id": architect_run_id,
                 # User-tunable reasoning_effort — drops think-token overhead
                 # significantly on slow local models when set to "low".
                 "reasoning_effort": getattr(config, "OPENHANDS_REASONING_EFFORT", "medium"),
@@ -5113,6 +4918,20 @@ async def exec_tool(
                             "status": f"⚠ Builder missing {_present}/{len(_expected_files)} planned files",
                         })
 
+                # Guard: a build that never reached a proper `finish` (truncated
+                # mid-generation, hit the round cap, etc.) must not be reported as
+                # a complete success even if it wrote a file or two.
+                if not undershoot_warning and not result.get("agent_finished", True):
+                    undershoot_warning = (
+                        "⚠ INCOMPLETE: the build agent stopped without finishing (it was "
+                        "likely truncated or hit the round limit), so the project is probably "
+                        "partial. Continue the build before review, acceptance, or delivery."
+                    )
+                    await events.emit(conv_id, "tool_progress", {
+                        "tool": "generate_code", "icon": "wand",
+                        "status": "⚠ Builder stopped without finishing — build incomplete",
+                    })
+
                 # ── Independent critic pass: catch runtime bugs that pass syntax/compile checks ──
                 # Uses a separate model from the coder so it can't rationalize its own mistakes.
                 critique = ""
@@ -5295,54 +5114,12 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                     if _ckpt:
                         print(f"[git-checkpoint] {_ckpt}")
                     if undershoot_warning:
-                        if (_manifest_strict and await _check_v2()
-                                and not manifest_completion_retry and _missing):
-                            await events.emit(conv_id, "tool_progress", {
-                                "tool": "generate_code", "icon": "wand",
-                                "status": f"↩ Completing {len(_missing)} missing planned file(s)...",
-                            })
-                            retry_task = (
-                                "Continue the same project and create ONLY the missing files "
-                                "from the Architect manifest. Do not rewrite existing working "
-                                "files except for imports/wiring needed by the missing files.\n\n"
-                                "Missing files:\n" + "\n".join(f"- {p}" for p in _missing)
-                            )
-                            retry_context = (
-                                (context or "")
-                                + "\n\n--- Missing manifest files to complete ---\n"
-                                + "\n".join(f"- {p}" for p in _missing)
-                            ).strip()
-                            retry_result = await exec_tool(
-                                http, events, "generate_code",
-                                {
-                                    "task": retry_task,
-                                    "language": language,
-                                    "project_id": _project_id,
-                                    "context": retry_context,
-                                    "required_files": _expected_files,
-                                    "build_cmd": build_cmd_arg,
-                                    "test_cmd": test_cmd_arg,
-                                    "lint_cmd": lint_cmd_arg,
-                                    "architect_run_id": architect_run_id,
-                                    "manifest_completion_retry": True,
-                                },
-                                conv_id,
-                                custom_tool_map=custom_tool_map,
-                                connector_tool_name_map=connector_tool_name_map,
-                                conv_model=conv_model,
-                                kb_ids=kb_ids,
-                                artifact_message_id=artifact_message_id,
-                            )
-                            return (
-                                resp
-                                + "\n\n=== AUTOMATIC BUILD CONTINUATION — Builder retried missing "
-                                "Architect manifest files ===\n"
-                                + retry_result
-                            )
                         return (
                             resp
-                            + "\n\nBUILD PAUSED — required Architect manifest files are still "
-                            "missing. Fix the Build phase before review, acceptance, or delivery."
+                            + "\n\nBUILD INCOMPLETE — the build did not finish or is missing "
+                            "expected files. Continue the build (call generate_code again with "
+                            f"project_id='{_project_id}' and a detailed task describing what is "
+                            "still missing) before review, acceptance, or delivery."
                         )
                     await _apply_workflow_event(
                         conv_id, "BUILD_OK",

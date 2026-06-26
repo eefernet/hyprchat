@@ -392,7 +392,7 @@ def _fake_architect_plan(run_id="run-architect", project_id="proj-architect"):
     }
 
 
-def test_daedalus_plan_project_invokes_builder_from_architect_plan(tmp_path, monkeypatch):
+def test_daedalus_plan_project_returns_plan_without_invoking_builder(tmp_path, monkeypatch):
     db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
     _run(db.init_db())
     _run(db.create_model_config(
@@ -441,80 +441,17 @@ def test_daedalus_plan_project_invokes_builder_from_architect_plan(tmp_path, mon
         conv_model="plain-model",
     ))
 
+    # Pre-refactor two-turn flow: plan_project runs the Architect and returns
+    # the plan only. It does NOT auto-invoke the Builder — the model calls
+    # generate_code on a later turn (which injects the manifest from the DB).
     assert "ARCHITECT PLAN" in result
-    assert "PROJECT COMPLETE (fake builder)" in result
-    assert len(builder_calls) == 1
-    assert builder_calls[0]["project_id"] == "proj-architect"
-    assert builder_calls[0]["language"] == "python"
-    assert builder_calls[0]["required_files"] == ["app.py"]
-    assert builder_calls[0]["build_cmd"] == "python -m py_compile app.py"
-    assert builder_calls[0]["architect_run_id"] == "run-architect"
-    assert "Architect Plan Contract" in builder_calls[0]["context"]
-    workflow = _run(db.get_latest_coder_workflow("conv-daedalus-plan", "proj-architect"))
-    assert workflow["state"] == "building"
-    assert workflow["active_run_id"] == "run-builder"
+    assert "PROJECT COMPLETE (fake builder)" not in result
+    assert builder_calls == []
 
 
-def test_daedalus_plan_project_recovers_stranded_architect_workflow(tmp_path, monkeypatch):
-    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
-    _run(db.init_db())
-    _run(db.create_model_config(
-        "mc-daedalus-recover", "Daedalus Coder v2", "test-model",
-        tool_ids=["plan_project", "generate_code"],
-    ))
-    _run(db.create_conversation(
-        "conv-daedalus-recover", "Daedalus Recover", model_config_id="mc-daedalus-recover",
-    ))
-    plan = _fake_architect_plan(run_id="run-architect-done", project_id="proj-recover")
-    _run(db.create_run("run-architect-done", "conv-daedalus-recover",
-                       role="architect", project_id="proj-recover", status="succeeded"))
-    _run(db.update_run("run-architect-done", status="succeeded", result_envelope=plan, ended=True))
-    _run(db.create_coder_workflow(
-        "cw-stranded", "conv-daedalus-recover", project_id="proj-recover",
-        mode="build_from_prompt", state="planning",
-        user_task="build a recoverable app", active_run_id="run-architect-done",
-    ))
-
-    from agents import architect
-
-    async def should_not_replan(*_args, **_kwargs):
-        raise AssertionError("stranded workflow should resume without calling Architect")
-
-    original_exec_tool = tools.exec_tool
-    builder_calls = []
-
-    async def wrapped_exec_tool(http, events, name, args, conv_id, **kwargs):
-        if name == "generate_code":
-            builder_calls.append(args)
-            await db.create_run("run-builder-recovered", conv_id, role="builder.scaffold",
-                                project_id=args.get("project_id", ""), status="running")
-            await tools._apply_workflow_event(
-                conv_id, "BUILD_STARTED", run_id="run-builder-recovered",
-                project_id=args.get("project_id", ""),
-            )
-            return "PROJECT COMPLETE (recovered builder)"
-        return await original_exec_tool(http, events, name, args, conv_id, **kwargs)
-
-    monkeypatch.setattr(architect, "run_architect", should_not_replan)
-    monkeypatch.setattr(architect, "format_plan_for_chat", lambda _plan: "ARCHITECT PLAN")
-    monkeypatch.setattr(tools, "exec_tool", wrapped_exec_tool)
-
-    result = _run(tools.exec_tool(
-        http=_NoPostHTTP(), events=_FakeEvents(),
-        name="plan_project",
-        args={"task": "continue", "language": "python"},
-        conv_id="conv-daedalus-recover",
-        conv_model="plain-model",
-    ))
-
-    assert "DAEDALUS RECOVERY" in result
-    assert "PROJECT COMPLETE (recovered builder)" in result
-    assert len(builder_calls) == 1
-    assert builder_calls[0]["project_id"] == "proj-recover"
-    assert builder_calls[0]["required_files"] == ["app.py"]
-    workflow = _run(db.get_coder_workflow("cw-stranded"))
-    assert workflow["state"] == "building"
-    assert workflow["active_run_id"] == "run-builder-recovered"
+# NOTE: the stranded-architect auto-recovery test was removed with the
+# Architect→Builder auto-handoff. Daedalus no longer auto-resumes a completed
+# plan into the Builder; the model calls generate_code on a later turn.
 
 
 # ---------------------------------------------------------------------------
@@ -620,6 +557,133 @@ def test_aider_success_counts_toward_cap(tmp_path, monkeypatch):
     ))
 
     assert "BLOCKED" in result and "Hard cap" in result
+
+
+# ---------------------------------------------------------------------------
+# Acceptance-driven escalation ladder: same-error → research → cap-bump → hand-fix
+# ---------------------------------------------------------------------------
+
+def _seed_acceptance_conversation(conv_id: str, mc_id: str, *,
+                                  fix_success: int, accept_runs: int,
+                                  sig: str = "boom"):
+    """`accept_runs` acceptance runs (same issue sig) + `fix_success`
+    acceptance-driven fixer successes. Returns the latest acceptance run id."""
+    _run(db.create_model_config(mc_id, "Daedalus Coder v2", "test-model",
+                                tool_ids=["run_fixer", "write_file"]))
+    _run(db.create_conversation(conv_id, "Accept Test", model_config_id=mc_id))
+    last_acc = ""
+    for j in range(accept_runs):
+        aid = f"run-acc-{conv_id}-{j}"
+        _run(db.create_run(aid, conv_id, role="acceptance", status="succeeded"))
+        _run(db.update_run(aid, status="succeeded", result_envelope={
+            "status": "issues", "summary": "still broken",
+            "project_dir": "/root/projects/demo",
+            "issues": [{"file": "app.py", "summary": sig,
+                        "suggested_fix_scope": ["app.py"]}],
+        }, ended=True))
+        _run(_set_run_times(aid, f"2026-01-01T00:00:1{j}", f"2026-01-01T00:00:1{j}"))
+        last_acc = aid
+    for i in range(fix_success):
+        rid = f"run-fx-{conv_id}-{i}"
+        _run(db.create_run(rid, conv_id, role="fixer", status="succeeded"))
+        _run(db.update_run(rid, status="succeeded", result_envelope={
+            "status": "applied", "source_role": "acceptance",
+        }, ended=True))
+        _run(_set_run_times(rid, f"2026-01-01T00:00:2{i}", f"2026-01-01T00:00:2{i}"))
+    return last_acc
+
+
+def test_acceptance_stuck_forces_research_first(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    tools._RECENT_RESEARCH.clear()
+    # Two acceptance runs with the SAME issue + one acceptance-driven fix → the
+    # error recurred, so the gate must force deep_research before another fixer.
+    last_acc = _seed_acceptance_conversation(
+        "conv-accs", "mc-accs", fix_success=1, accept_runs=2)
+    _run(db.add_message("conv-accs", "user", "build my app"))
+    _run(_set_message_times("conv-accs", "2025-12-31 00:00:00"))
+    _patch_fixer_config(monkeypatch)
+
+    result = _run(tools.exec_tool(
+        http=_FixerHTTP(), events=_FakeEvents(),
+        name="run_fixer", args={"reviewer_run_id": last_acc},
+        conv_id="conv-accs",
+    ))
+
+    assert "BLOCKED" in result and "deep_research" in result
+
+
+def test_acceptance_cap_is_two_without_research(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    tools._RECENT_RESEARCH.clear()
+    last_acc = _seed_acceptance_conversation(
+        "conv-accc", "mc-accc", fix_success=2, accept_runs=1)
+    _run(db.add_message("conv-accc", "user", "build my app"))
+    _run(_set_message_times("conv-accc", "2025-12-31 00:00:00"))
+    _patch_fixer_config(monkeypatch)
+
+    result = _run(tools.exec_tool(
+        http=_FixerHTTP(), events=_FakeEvents(),
+        name="run_fixer", args={"reviewer_run_id": last_acc},
+        conv_id="conv-accc",
+    ))
+
+    # Base cap (2) hit, no research yet → summarize-and-stop, not hand-fix.
+    assert "BLOCKED" in result and "Hard cap" in result
+    assert "full budget" not in result
+
+
+def test_acceptance_cap_bumps_to_four_after_research(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    tools._RECENT_RESEARCH.clear()
+    last_acc = _seed_acceptance_conversation(
+        "conv-accb", "mc-accb", fix_success=2, accept_runs=1)
+    _run(db.add_message("conv-accb", "user", "build my app"))
+    _run(_set_message_times("conv-accb", "2025-12-31 00:00:00"))
+    # Research happened this budget window → cap extends 2→4, fixer allowed.
+    tools._stash_research_result("conv-accb", "pygame collision", "report body")
+    _patch_fixer_config(monkeypatch)
+
+    result = _run(tools.exec_tool(
+        http=_FixerHTTP(), events=_FakeEvents(),
+        name="run_fixer", args={"reviewer_run_id": last_acc},
+        conv_id="conv-accb",
+    ))
+
+    # succ=2 < bumped cap 4 → run_fixer runs instead of being cap-blocked.
+    assert "Hard cap" not in result
+
+
+def test_acceptance_terminal_releases_hand_fix(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    tools._RECENT_RESEARCH.clear()
+    last_acc = _seed_acceptance_conversation(
+        "conv-acct", "mc-acct", fix_success=4, accept_runs=1)
+    _run(db.add_message("conv-acct", "user", "build my app"))
+    _run(_set_message_times("conv-acct", "2025-12-31 00:00:00"))
+    tools._stash_research_result("conv-acct", "pygame collision", "report body")
+    _patch_fixer_config(monkeypatch)
+
+    # run_fixer is now budget-exhausted (4/4 after research) → hand-fix message.
+    blocked = _run(tools.exec_tool(
+        http=_FixerHTTP(), events=_FakeEvents(),
+        name="run_fixer", args={"reviewer_run_id": last_acc},
+        conv_id="conv-acct",
+    ))
+    assert "BLOCKED" in blocked and "full budget" in blocked
+
+    # write_file is RELEASED in this terminal state (no "call run_fixer first").
+    released = _run(tools.exec_tool(
+        http=_FixerHTTP(), events=_FakeEvents(),
+        name="write_file",
+        args={"path": "/root/projects/demo/app.py", "content": "print('ok')\n"},
+        conv_id="conv-acct",
+    ))
+    assert "call run_fixer first" not in released
 
 
 def _seed_qa_conversation(conv_id: str, mc_id: str):

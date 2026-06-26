@@ -42,7 +42,7 @@ _FIXER_PROMPT = """You are the Fixer — a focused code-editing agent. You MUST 
 - Build command: {build_cmd}
 - Test command: {test_cmd}
 - Issue source: {source_role}
-{research_section}{attempts_section}
+{research_section}{attempts_section}{symbol_section}
 ## Issues to fix
 {issue_block}
 
@@ -491,34 +491,36 @@ def _python_symbol_mismatch_errors(file_contents: dict[str, str],
     return errors
 
 
-def _repair_python_symbol_mismatches(file_contents: dict[str, str],
-                                     issues: list[dict]) -> tuple[list[str], set[str]]:
-    """Apply a narrow deterministic repair for obvious Python method mismatches.
+def _python_defined_methods(file_contents: dict[str, str],
+                            issues: list[dict]) -> dict[str, list[str]]:
+    """Class → sorted method names across scoped .py files (guard issues only).
 
-    If a scoped file calls an object method that is absent from the class
-    instantiated for that object, and the issue text/class definition gives an
-    unambiguous canonical method, normalize the call sites to that method.
+    Used to give the coder model the ground-truth set of methods each class
+    actually defines, so it can fix call-site mismatches itself. We deliberately
+    do NOT auto-rewrite call sites here: a deterministic global string replace
+    cannot express a bidirectional swap (e.g. wall→horizontal AND
+    paddle→vertical) and silently produced wrong-but-passing edits.
     """
-    notes: list[str] = []
-    touched: set[str] = set()
-    for finding in _python_symbol_findings(file_contents, issues):
-        canonical = finding.get("canonical") or ""
-        called = finding.get("called") or ""
-        path = finding.get("file") or ""
-        if not canonical or not called or canonical == called or path not in file_contents:
+    if not _issue_needs_python_symbol_guard(issues):
+        return {}
+    class_methods: dict[str, set[str]] = {}
+    for path, content in file_contents.items():
+        if not path.endswith(".py") or not isinstance(content, str):
             continue
-        old = f".{called}("
-        new = f".{canonical}("
-        content = file_contents[path]
-        if old not in content:
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
             continue
-        file_contents[path] = content.replace(old, new)
-        touched.add(path)
-        notes.append(
-            f"Deterministic symbol repair: normalized {called}() call(s) "
-            f"to {canonical}() in {path}."
-        )
-    return notes, touched
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                methods = {
+                    child.name
+                    for child in node.body
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                }
+                if methods:
+                    class_methods.setdefault(node.name, set()).update(methods)
+    return {cls: sorted(m) for cls, m in class_methods.items()}
 
 
 def _parse_fixer_output(text: str) -> dict:
@@ -836,6 +838,26 @@ async def run_fixer(http, events, conv_id: str, *,
             full_scope_contents[path] = "" if isinstance(content, str) else ""
             files_section_lines.append(f"### {path}\n(file is empty or unreadable)")
 
+    # Symbol reference — for method/attribute-mismatch issues, give the model
+    # the ACTUAL methods each scoped class defines so it can correct call sites
+    # itself (the Fixer no longer auto-rewrites names; see _python_defined_methods).
+    symbol_section = ""
+    _defined_methods = _python_defined_methods(full_scope_contents, issues)
+    if _defined_methods:
+        _sym_lines = [
+            f"- `{cls}` defines: {', '.join(methods)}"
+            for cls, methods in sorted(_defined_methods.items())
+        ]
+        symbol_section = (
+            "\n## Symbol reference (actual definitions in the scoped files)\n"
+            "An issue describes a method/attribute mismatch. These are the methods "
+            "each class ACTUALLY defines. Make every call site use a name that exists "
+            "here. Pick ONE canonical name per behavior and fix the CALL SITES to match "
+            "the definitions — do not rename both sides in opposite directions.\n\n"
+            + "\n".join(_sym_lines) + "\n"
+        )
+        await _step("symbol-reference-injected", f"{len(_defined_methods)} class(es)")
+
     prompt = _FIXER_PROMPT.format(
         project_dir=project_dir,
         language=language or "(unknown)",
@@ -844,6 +866,7 @@ async def run_fixer(http, events, conv_id: str, *,
         source_role=source_role,
         research_section=research_section,
         attempts_section=attempts_section,
+        symbol_section=symbol_section,
         issue_block=issue_block,
         allowed_paths_list="\n".join(f"  - {p}" for p in capped_scope),
         files_section="\n\n".join(files_section_lines),
@@ -918,7 +941,6 @@ async def run_fixer(http, events, conv_id: str, *,
             pending_contents: dict[str, str] = {}
             pending_deletes: set[str] = set()
             pending_summaries: dict[str, str] = {}
-            semantic_guard_failed = False
 
             for edit in edits[:20]:  # safety cap
                 path = (edit.get("path") or "").strip()
@@ -971,25 +993,29 @@ async def run_fixer(http, events, conv_id: str, *,
                     }
                     if validation_contents and _issue_needs_python_symbol_guard(issues):
                         await _step("validating", "python symbol consistency")
-                        repair_notes, repaired_paths = _repair_python_symbol_mismatches(
-                            validation_contents, issues,
-                        )
-                        for note in repair_notes:
-                            notes.append(note)
-                        for repaired_path in repaired_paths:
-                            if repaired_path in _allowed_set and repaired_path not in pending_deletes:
-                                pending_contents[repaired_path] = validation_contents[repaired_path]
-                                pending_summaries[repaired_path] = (
-                                    "deterministic Python symbol consistency repair"
-                                )
-                        symbol_errors = _python_symbol_mismatch_errors(validation_contents, issues)
-                        if symbol_errors:
+                        # Detect, don't mutate. If a method/attribute mismatch
+                        # REMAINS after the model's edits, the call-site file is
+                        # not actually fixed — drop ONLY that file's pending edit
+                        # so a still-broken file is never written (and never
+                        # falsely reported as `applied`, which would burn a cap
+                        # slot). Unrelated fixes in other files still land.
+                        _bad_findings = _python_symbol_findings(validation_contents, issues)
+                        _bad_files = {
+                            f.get("file") for f in _bad_findings if f.get("file")
+                        }
+                        for _bf in sorted(_bad_files):
+                            pending_contents.pop(_bf, None)
+                            pending_summaries.pop(_bf, None)
+                        if _bad_files:
+                            symbol_errors = _python_symbol_mismatch_errors(
+                                validation_contents, issues,
+                            )
                             errors.extend(symbol_errors[:5])
-                            semantic_guard_failed = True
-
-            if semantic_guard_failed:
-                pending_contents.clear()
-                pending_deletes.clear()
+                            notes.append(
+                                "Symbol guard: dropped unresolved edits for "
+                                + ", ".join(sorted(_bad_files))
+                                + " (method mismatch still present); kept other edits."
+                            )
 
             for path in sorted(pending_deletes):
                 rel = path[len(project_dir) + 1:] if path.startswith(project_dir + "/") else path
