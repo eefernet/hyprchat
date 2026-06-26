@@ -3805,7 +3805,7 @@ function HyprChat(){
           .trim();
         const open=/^<details[^>]*\bopen\b/i.test(p);
         if(printMode)return <div key={i} className="print-details"><div className="print-details-summary">{summary}</div>{md(body,opts)}</div>;
-        return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open}>{md(body,opts)}</Collapsible>;
+        return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open} variant={opts.changelog?"changelog":""}>{md(body,opts)}</Collapsible>;
       }
       if(/^[ \t]{0,3}```/.test(p)){
         const m=p.match(/^[ \t]*```(\w*)\n?([\s\S]*?)\n?[ \t]*```[ \t]*$/);
@@ -7123,12 +7123,12 @@ function HyprChat(){
 	      </div>
 
       {/* TILE: Changelog */}
-      <div style={{...settingsCardS,display:settingsTab==="changelog"?"block":"none",padding:0,overflow:"hidden"}}>
-        <div style={{maxHeight:"calc(85vh - 120px)",overflowY:"auto",padding:"20px 24px",lineHeight:1.7,fontSize:13,color:t.text}}>
+      <div style={{display:settingsTab==="changelog"?"block":"none",padding:0,overflow:"hidden",background:"transparent",border:"none",borderRadius:0,marginBottom:0}}>
+        <div style={{maxHeight:"calc(85vh - 120px)",overflowY:"auto",padding:"6px 4px 20px",lineHeight:1.7,fontSize:13,color:t.text}}>
           {!changelogContent?<div style={{textAlign:"center",padding:40,color:t.mut,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
             <div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
             Loading changelog...
-          </div>:<MDWrap>{md(changelogContent)}</MDWrap>}
+          </div>:<div className="changelog-markdown"><MDWrap>{md(changelogContent,{changelog:true})}</MDWrap></div>}
         </div>
       </div>
 

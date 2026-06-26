@@ -1,4 +1,5 @@
-# Alpha v17.3.1 — June 23, 2026
+<details open>
+<summary>Alpha v17.3.1 — June 23, 2026</summary>
 
 > UI/readability polish and behavior hardening for Quick Search, Daedalus output
 > rendering, and Council sessions.
@@ -21,9 +22,31 @@
 - New council metadata tracks round labels, who a response is addressing, vote winners, and round counts.
 - Council prompts now push members to respond directly to one another and vote comparatively.
 
+## UI
+- Changelog release sections now render as collapsible version cards, with the latest version expanded and version labels styled as larger title headers.
+
+## Bug fixes
+- Restored Daedalus to the intended two-turn Architect → Builder flow: fresh v2 builds now block `generate_code` until `plan_project` has produced a structured plan.
+- Removed the reverted single-turn Architect→Builder auto-handoff, strict manifest retry, and `BUILD PAUSED` gate that could cause one-file builds or duplicate build work.
+- Builder completion now depends on OpenHands reaching a real finish signal; truncated or round-limited builds are marked incomplete instead of being treated as successful.
+- Fresh OpenHands builds now use a task-derived workspace unless an existing project directory is truly being resumed, avoiding stale or colliding project reuse.
+- Blocked Daedalus tool summaries now recommend valid next actions after hard caps, hand-fix releases, or upload-workflow blocks instead of nudging another rejected tool call.
+- Reviewer and acceptance fix-cycle gates now track role-specific budgets, allow deep-research-backed acceptance retries, and release direct hand-fixing when the acceptance cap is exhausted after research.
+- Fixer symbol-mismatch handling now gives the model actual class method references and drops unresolved broken edits instead of auto-rewriting call sites incorrectly.
+- Daedalus message rendering now detects all Daedalus outputs, preserves run ids from raw events, and shows workflow/run cards for non-full-build Daedalus actions.
+- Live endpoint tests now skip cleanly when no HyprChat server is reachable, and connector tests mock the async URL-safety checks introduced by the refactor.
+
+## Refactor follow-up
+- Backend route, artifact, database schema, research-config, workflow-gate, parser, model-management, and Codebox tool helpers were split into focused modules while keeping the public API behavior stable.
+- Frontend model picker, markdown blocks, artifact widgets, HyprChat widgets, Daedalus timeline helpers, theme/session/settings helpers, and panels were extracted from `main.jsx` without changing the Vite app architecture.
+- Deploy monitor and README deploy notes now include the extracted backend and frontend modules so homelab deploys ship the refactored source tree.
+
+</details>
+
 ---
 
-# Alpha v17.3.0 — June 22, 2026
+<details>
+<summary>Alpha v17.3.0 — June 22, 2026</summary>
 
 > Adds the local media stack, persona-aware image generation, voice input/output,
 > hybrid RAG citations, storage diagnostics, and token analytics.
@@ -115,9 +138,13 @@
 ## Deployment
 - `deploy_monitor.py` now includes the HyprFit backend module in watched deploy files.
 
+</details>
+
 ---
 
-# Alpha v17.2.1 - June 14, 2026
+<details>
+<summary>Alpha v17.2.1 - June 14, 2026</summary>
+
 > This update focuses on the first series to migrate a single file react **no build step** app into a built app versus having all built at runtime on the users browser. Load times should be faster and it should be easier to maintain the code base in the future.
 
 ## Vite Migration
@@ -151,9 +178,12 @@
 - Removed dead code across `database.py`, `cancel_registry.py`, `acceptance.py`, and `connectors.py`.
 - `create-lxc.sh` and `deploy.sh` updated for the built-`dist/` layout.
 
+</details>
+
 ---
 
-# Alpha v17.2.0 — June 12, 2026
+<details>
+<summary>Alpha v17.2.0 — June 12, 2026</summary>
 
 > This update focuses on existing system hardening and and improving existing features.
 
@@ -216,9 +246,12 @@
 
 **Migration:** Run `POST /api/seed/coder-bot-v2` after deploy for updated persona prompts.
 
+</details>
+
 ---
 
-## Alpha v17.1.2 — June 10, 2026
+<details>
+<summary>Alpha v17.1.2 — June 10, 2026</summary>
 
 ### HyprChat Memory & Navigation
 - Added global HyprChat memory that can persist across chats when memory is enabled for a conversation.
@@ -252,9 +285,12 @@
 ### Bug Fixes
 - Fixed a fresh empty-chat race where selecting a model in the top-left picker and immediately sending could create the chat with the selected model but stream the first response through a stale/default model before React state caught up.
 
+</details>
+
 ---
 
-## Alpha v17.1.1 — June 8, 2026
+<details>
+<summary>Alpha v17.1.1 — June 8, 2026</summary>
 
 >Deep Research overhaul update. This update focued on making sure deep research got the love it deserved. Daedalus will still use deep research but for the user front end it has been renamed to Agent Research (the togglable tool above the composer). A backend code rename could break a lot of things and that is something ill do at a later date.
 
@@ -290,9 +326,12 @@
 - Added regression coverage for Agent Research cache handoff, Daedalus stuck-fix research gating, and durable Deep Research report persistence.
 - Updated backend test defaults to the Tailscale HTTP endpoint the service actually listens on.
 
+</details>
+
 ---
 
-## Alpha v17.1 — June 3, 2026
+<details>
+<summary>Alpha v17.1 — June 3, 2026</summary>
 
 ## UI Overhaul Update
 ### Developer Note 
@@ -376,9 +415,12 @@
 ### Bug Fixes
 - Fixed Acceptance falsely reporting long source files as truncated or syntactically incomplete when its static source excerpt ended mid-statement. Acceptance now reads much larger source excerpts, marks any remaining excerpt truncation explicitly, and treats the clean Reviewer build/lint result as authoritative for syntax status.
 
+</details>
+
 ---
 
-## Alpha v17.0.2 — June 2, 2026
+<details>
+<summary>Alpha v17.0.2 — June 2, 2026</summary>
 
 ### Coder Bot v2 — uploaded-project repair hardening
 
@@ -430,9 +472,12 @@
 
 - Added focused Acceptance structured-output tests, frontend settings hydration guard tests, Workspace Model context-cap tests, and a Quick Search recency test for `time_range="month"`.
 
+</details>
+
 ---
 
-## Alpha v17.0.1 — May 26, 2026
+<details>
+<summary>Alpha v17.0.1 — May 26, 2026</summary>
 
 ### Coder Bot v2 — workflow gate hardening
 
@@ -484,9 +529,12 @@ Pulled the highest-ROI patterns from Perplexica (24k★), Khoj (18k★), and Ope
 - **Removed** — `_fetch_page` import in `quick_search.py` (replaced by `_fetch_clean_page`); stale `_rewrite_query` references in docstrings.
 - **New dep** — `trafilatura>=1.10.0` in `requirements.txt`.
 
+</details>
+
 ---
 
-## Alpha v17 — May 7, 2026
+<details>
+<summary>Alpha v17 — May 7, 2026</summary>
 
 ### Coder Bot v2 — Multi-Agent Rebuild
 
@@ -675,9 +723,12 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Fixed Bash render error where `$VAR` and command-substitution `$(cmd)` inside a `bash` code fence prematurely terminated rendering.
 - Fixed `num_ctx` from user settings being silently ignored by OpenHands runs after the first model load — now evict-and-reload guarantees the runtime context matches the requested value.
 
+</details>
+
 ---
 
-## Alpha v16.2 — April 22, 2026
+<details>
+<summary>Alpha v16.2 — April 22, 2026</summary>
 
 ### Rich Rendering Polish
 - **GitHub-style callouts** — `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]` render as coloured admonition boxes (blue / green / warm / orange / red) with icon and label header. Subsequent `> ` lines are collected as body. Models pick these up from the updated backend RENDERING system message and use them for caveats, tips, and warnings without prompting.
@@ -704,9 +755,12 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - **New SSE event** — `refinement_start` `{round, total}` signals each review pass to the frontend. The `done` payload now carries `refinements: N` which is persisted to the message metadata so the badge survives reload.
 - **Storage** — `localStorage["hc-effort-level"]` for the global default; `localStorage["hc-effort-per-chat"] = {convId: level}` for per-chat overrides. No DB migration needed.
 
+</details>
+
 ---
 
-## Alpha v16.1.1 — April 22, 2026
+<details>
+<summary>Alpha v16.1.1 — April 22, 2026</summary>
 
 ### Rich Rendering
 - **Mermaid.js diagrams** — ` ```mermaid ` code fences render inline as live SVG: flowcharts, sequence, class, state, ER, gantt, mindmap, pie. Theme-synced (34 mapped variables) and re-render when the user switches themes mid-conversation.
@@ -752,9 +806,12 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Reduced chat-loop allocations — the per-round `_PARALLEL_SAFE` set and 22-entry `_TOOL_ICONS` dict are now module-level constants instead of being rebuilt every tool-calling round.
 - Minor: avatar upload no longer evaluates `file.filename or ""` three times in one expression.
 
+</details>
+
 ---
 
-## Alpha v16.1 — April 2026
+<details>
+<summary>Alpha v16.1 — April 2026</summary>
 
 ### New Features
 - **PDF Chat Attachments** — Drag-and-drop or paste PDF files into chat; text is extracted server-side via `pypdf` and injected as readable content with page markers. Dedicated PDF chip with page count and loading state.
@@ -807,9 +864,12 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Fixed auto-title not firing reliably — stale React closure caused message count check to miss; now triggers based on conversation title instead
 - Fixed workspace file preview panel not showing when Workspace tab is active — preview panel moved outside panel ternary so it renders alongside any active panel
 
+</details>
+
 ---
 
-## Alpha v16 — March 2026
+<details>
+<summary>Alpha v16 — March 2026</summary>
 
 ### New Features
 - **Legacy internal automation runner** — Added in this release and removed in Alpha v17.0.2 in favor of external n8n automation.
@@ -850,9 +910,12 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - New columns: `forked_from`, `fork_point_msg_id`, `pinned` on conversations
 - 17 new API endpoints; 3 new nav rail icons
 
+</details>
+
 ---
 
-## Alpha v15.1 — March 2026
+<details>
+<summary>Alpha v15.1 — March 2026</summary>
 
 ### New Features
 - **KB PDF Text Preview** — First 10 pages extracted and displayed; toggle to embedded PDF viewer
@@ -884,9 +947,12 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - New chats no longer default to CodeAgent system prompt
 - Orphaned tags cleaned up on conversation deletion
 
+</details>
+
 ---
 
-## Alpha v15 — March 2026
+<details>
+<summary>Alpha v15 — March 2026</summary>
 
 ### New Features
 - **Quick Search** — Lightweight search injection (no tool calling needed)
@@ -911,9 +977,12 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Persona ID properly cleared on Leave Persona
 - Page fetch returns None on HTTP 4xx/5xx
 
+</details>
+
 ---
 
-## Alpha v14 — March 2026
+<details>
+<summary>Alpha v14 — March 2026</summary>
 
 ### Coder Bot Overhaul
 - Streamlined system prompt (95 -> 30 lines)
@@ -936,9 +1005,12 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Smart routing (worker -> Codebox server, backend -> HyprChat server)
 - Watches CHANGELOG.md and README.md
 
+</details>
+
 ---
 
-## Alpha v13 — March 2026
+<details>
+<summary>Alpha v13 — March 2026</summary>
 
 ### New Features
 - **RAG Pipeline** — Semantic retrieval replacing raw file injection
@@ -956,9 +1028,12 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Non-blocking Quick Search (fires in parallel with chat request)
 - Search results positioned directly above the AI response
 
+</details>
+
 ---
 
-## Alpha v12 — March 2026
+<details>
+<summary>Alpha v12 — March 2026</summary>
 
 ### New Features
 - **Council Presets** — Philosophers, Visionaries, Scientists, Debaters (one-click setup)
@@ -973,9 +1048,12 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Leave Persona / Leave Council buttons in header
 - Sidebar labels: pink border for councils, warm border for personas
 
+</details>
+
 ---
 
-## Alpha v11 — March 2026
+<details>
+<summary>Alpha v11 — March 2026</summary>
 
 ### New Features
 - **OpenHands Integration** — `generate_code` tool runs a full agentic coding loop (plan -> write -> test -> fix -> iterate) inside CodeBox sandbox
@@ -987,9 +1065,12 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Repetition detector skips whitespace-only patterns
 - Coder Bot English-only rule
 
+</details>
+
 ---
 
-## Alpha v10 — March 2026
+<details>
+<summary>Alpha v10 — March 2026</summary>
 
 ### New Features
 - **Model Manager** — Dedicated panel with Ollama and HuggingFace tabs
@@ -1004,9 +1085,13 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - Empty response recovery with tool-use nudge and plain-text fallback
 - Model dropdown z-index fix via React portal
 
+</details>
+
 ---
 
-## Alpha v9 — March 2026
+<details>
+<summary>Alpha v9 — March 2026</summary>
+
 - **Prompt Library** — Save and quick-insert reusable prompts
 - **Conversation Tags** — Custom labels with sidebar filtering
 - **Per-Model Parameters** — temperature, num_ctx, top_p, top_k, repeat_penalty per model
@@ -1014,62 +1099,95 @@ Each gate state's tool result tells the model exactly what to call next, with th
 - **Changelog Viewer** — Access from Settings
 - Live token counter during generation
 
+</details>
+
 ---
 
-## Alpha v8 — March 2026
+<details>
+<summary>Alpha v8 — March 2026</summary>
+
 - **Based Bot** — Edgy/uncensored Grok-inspired persona
 - **Persona avatars in chat** — Messages show avatar and styled name pill
 - **UI Font Size slider** (10-16px)
 - Conspiracy research: always runs second wave across gov sources
 
+</details>
+
 ---
 
-## Alpha v7 — March 2026
+<details>
+<summary>Alpha v7 — March 2026</summary>
+
 - **Conspiracy Bot** — `conspiracy_research` tool searching FOIA vaults, whistleblower sites, CIA/FBI archives
 - **6 new themes** — Terminal, Cyberpunk, Solarized Dark/Light, Material Ocean, Ayu Dark (14 total)
 - **3 new fonts** — Cascadia Code, Space Mono, Geist Mono (9 total)
 - Model list grouped by family with emoji icons and size tags
 - Streaming: removed artificial delay, 8-char chunks
 
+</details>
+
 ---
 
-## Alpha v6 — March 2026
+<details>
+<summary>Alpha v6 — March 2026</summary>
+
 - **AI Peer Voting** — Council members vote for the best answer; host includes vote summary
 - **Improved markdown** — Lists, blockquotes, HR, italic, headings
 
+</details>
+
 ---
 
-## Alpha v5 — March 2026
+<details>
+<summary>Alpha v5 — March 2026</summary>
+
 - **3 new themes** — Dracula, One Light, Midnight
 - **Animated tool pills** — spin, swing, bounce per tool type
 - **Workspace system** — Group chats, file tracking, topic analysis, create personas from KB
 - Font size slider, chat width slider, workspace model selector
 
+</details>
+
 ---
 
-## Alpha v4 — March 2026
+<details>
+<summary>Alpha v4 — March 2026</summary>
+
 - **KB injection** — Files injected into system prompt when persona is active
 - **Model parameters** — temperature, num_ctx, top_p, top_k applied to Ollama
 - **Export conversation** as Markdown
 
+</details>
+
 ---
 
-## Alpha v3 — February 2026
+<details>
+<summary>Alpha v3 — February 2026</summary>
+
 - **Council of AI** — Multi-model parallel debates
 - **Deep Research** — Multi-source parallel research with AI synthesis
 - **Custom tools** — Upload Python tools the AI can call
 
+</details>
+
 ---
 
-## Alpha v2 — February 2026
+<details>
+<summary>Alpha v2 — February 2026</summary>
+
 - **Knowledge Bases** — Upload and attach documents to personas
 - **Personas** — Custom AI configs with system prompts, models, avatars
 - **SSE Event Bus** — Real-time tool status events
 
+</details>
+
 ---
 
-## Alpha v1 — January 2026
+<details>
+<summary>Alpha v1 — January 2026</summary>
+
 - Initial release: FastAPI + single-file React SPA
 - Ollama streaming chat with tool calling
 - CodeAgent with sandboxed code execution (Codebox)
 - SearXNG web search integration
+</details>
