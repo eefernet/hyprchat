@@ -435,7 +435,7 @@ This workflow is language-agnostic. Reviewer detects the build/test commands; yo
         "profile_type": "agent",
         "temperature": 0.3,
         "avatar": DAEDALUS_AVATAR,
-        "description": "Agentic coding workflow for uploaded projects: plans, patches, reviews, and iterates toward a verified fix.",
+        "description": "Agentic coding workflow for greenfield builds and existing projects: plans, builds, repairs, reviews, and delivers verified code.",
     }
 
     # The overseer/orchestrator runs the chat-side loop — it picks tools, reads

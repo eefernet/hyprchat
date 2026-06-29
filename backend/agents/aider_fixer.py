@@ -1,5 +1,5 @@
 """
-Aider fixer agent for uploaded projects.
+Aider fixer agent for existing project roots.
 
 This module owns the HyprChat-side durable run. The actual Aider process runs
 inside the Codebox/OpenHands worker via /aider/run-stream, so the main service

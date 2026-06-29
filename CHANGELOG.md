@@ -15,6 +15,14 @@
 - Phase chips cover plan, build, review, fix, acceptance, and package progress.
 - Artifact and download actions are more visible, while build details and raw events stay available in collapsible sections.
 
+## Daedalus Builder and Repair Hardening
+- Architect plans can now include an advisory interface contract for entrypoints, dependency policy, shared constants, public signatures, and cross-file rules so Builder has stronger cross-file guidance without adding a hard gate.
+- OpenHands Builder rounds now scale with the planned file count, and missing manifest files trigger bounded backend-owned continue passes before Reviewer runs.
+- Builder results that stop without an OpenHands finish signal are marked incomplete/partial instead of flowing to review, acceptance, or delivery as successful.
+- Aider is now the preferred repair editor for existing project roots, including uploaded projects and greenfield projects after Builder creates them; the marker-format Fixer remains the fallback when Aider is disabled, unhealthy, missing a project dir, or produces no usable patch.
+- Reviewer and acceptance repair caps now force `deep_research` at the base cap, retry Aider/Fixer with research context, and stop to ask the user after extended exhaustion instead of silently releasing manual `write_file`.
+- Delivered project archives now exclude Aider runtime metadata such as `.aider.chat.history.md` and `.aider.tags.cache.v4/` while keeping user-authored files like `.gitignore`.
+
 ## Council of AI
 - Council setup has been refreshed with cleaner organization, presets, host settings, member cards, and analytics presentation.
 - Council members can now be linked to personas through `model_config_id`, using the latest persona model, prompt, and name at runtime.

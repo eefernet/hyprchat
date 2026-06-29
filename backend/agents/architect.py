@@ -1,9 +1,9 @@
 """
-Architect agent — structured planning for Daedalus and CodeAgent profiles.
+Architect agent — structured planning for Daedalus.
 
 Implements `plan_project` as a stateless single-shot LLM call that produces a
 STRUCTURED PLAN as JSON. The plan is consumed directly by downstream agents
-(Builder/Reviewer/Overseer) instead of being re-parsed from markdown each step.
+(Builder/Reviewer/Acceptance) instead of being re-parsed from markdown each step.
 
 Responsibilities:
   1. Single LLM call to PLANNING_MODEL (or fallback) with strict JSON schema.

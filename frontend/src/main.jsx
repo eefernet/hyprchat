@@ -928,7 +928,7 @@ function HyprChat(){
       return "Roleplay persona focused on identity, voice, tone, scenario, and conversational style.";
     }
     if(n.includes("deep researcher"))return "Research-first agent for multi-source investigations, citations, and synthesized reports.";
-    if(n.includes("daedalus"))return "Agentic coding workflow for uploaded projects: plans, patches, reviews, and iterates toward a verified fix.";
+    if(n.includes("daedalus"))return "Agentic coding workflow for greenfield builds and existing projects: plans, builds, repairs, reviews, and delivers verified code.";
     if(n.includes("coder"))return "General coding agent for shell work, file edits, debugging, and implementation help.";
     if(n.includes("conspiracy"))return "Investigative research agent for hidden narratives, disputed claims, source comparison, and deep-dive synthesis.";
     const tools=(mc.tool_ids||[]);
