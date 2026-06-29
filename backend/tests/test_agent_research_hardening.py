@@ -539,7 +539,7 @@ def test_cycle_cap_blocks_within_same_user_turn(tmp_path, monkeypatch):
         conv_id="conv-capb",
     ))
 
-    assert "BLOCKED" in result and "Hard cap" in result
+    assert "BLOCKED" in result and "deep_research(" in result
 
 
 def test_aider_success_counts_toward_cap(tmp_path, monkeypatch):
@@ -556,11 +556,11 @@ def test_aider_success_counts_toward_cap(tmp_path, monkeypatch):
         conv_id="conv-capa",
     ))
 
-    assert "BLOCKED" in result and "Hard cap" in result
+    assert "BLOCKED" in result and "deep_research(" in result
 
 
 # ---------------------------------------------------------------------------
-# Acceptance-driven escalation ladder: same-error → research → cap-bump → hand-fix
+# Acceptance-driven escalation ladder: same-error → research → cap-bump → stop/ask
 # ---------------------------------------------------------------------------
 
 def _seed_acceptance_conversation(conv_id: str, mc_id: str, *,
@@ -630,9 +630,9 @@ def test_acceptance_cap_is_two_without_research(tmp_path, monkeypatch):
         conv_id="conv-accc",
     ))
 
-    # Base cap (2) hit, no research yet → summarize-and-stop, not hand-fix.
-    assert "BLOCKED" in result and "Hard cap" in result
-    assert "full budget" not in result
+    # Base cap (2) hit, no research yet → force deep_research, not hand-fix.
+    assert "BLOCKED" in result and "deep_research(" in result
+    assert "authorize manual intervention" not in result
 
 
 def test_acceptance_cap_bumps_to_four_after_research(tmp_path, monkeypatch):
@@ -657,7 +657,7 @@ def test_acceptance_cap_bumps_to_four_after_research(tmp_path, monkeypatch):
     assert "Hard cap" not in result
 
 
-def test_acceptance_terminal_releases_hand_fix(tmp_path, monkeypatch):
+def test_acceptance_terminal_stops_and_asks_after_research(tmp_path, monkeypatch):
     db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
     _run(db.init_db())
     tools._RECENT_RESEARCH.clear()
@@ -668,22 +668,24 @@ def test_acceptance_terminal_releases_hand_fix(tmp_path, monkeypatch):
     tools._stash_research_result("conv-acct", "pygame collision", "report body")
     _patch_fixer_config(monkeypatch)
 
-    # run_fixer is now budget-exhausted (4/4 after research) → hand-fix message.
+    # run_fixer is now budget-exhausted (4/4 after research) → stop-and-ask.
     blocked = _run(tools.exec_tool(
         http=_FixerHTTP(), events=_FakeEvents(),
         name="run_fixer", args={"reviewer_run_id": last_acc},
         conv_id="conv-acct",
     ))
-    assert "BLOCKED" in blocked and "full budget" in blocked
+    assert "BLOCKED" in blocked and "automated repair" in blocked
+    assert "authorize manual intervention" in blocked
 
-    # write_file is RELEASED in this terminal state (no "call run_fixer first").
+    # write_file stays blocked; manual intervention requires explicit user approval.
     released = _run(tools.exec_tool(
         http=_FixerHTTP(), events=_FakeEvents(),
         name="write_file",
         args={"path": "/root/projects/demo/app.py", "content": "print('ok')\n"},
         conv_id="conv-acct",
     ))
-    assert "call run_fixer first" not in released
+    assert "BLOCKED" in released
+    assert "write_file" not in released or "Your VERY NEXT tool call MUST be" in released
 
 
 def _seed_qa_conversation(conv_id: str, mc_id: str):

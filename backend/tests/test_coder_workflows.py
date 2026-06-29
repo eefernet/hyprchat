@@ -290,6 +290,7 @@ def test_aider_prompt_includes_known_test_root(tmp_path, monkeypatch):
 
     prompt = worker._write_aider_prompt(req, tmp_path).read_text()
 
+    assert "You are editing an existing project" in prompt
     assert "## Known Test Root" in prompt
     assert "Active project root: `/root/projects/proj-abc`" in prompt
     assert "/root/projects/taskforge-5ddd" in prompt
@@ -431,6 +432,21 @@ def test_chat_repeated_blocked_tool_state_stops_on_second_duplicate(monkeypatch)
     # A successful result no longer resets the counter — an OK sibling tool in
     # the same batch must not defeat the duplicate-BLOCKED detection.
     assert state["count"] == 2
+    sys.modules.pop("agents.chat", None)
+
+
+def test_chat_budget_exhausted_next_action_asks_user(monkeypatch):
+    chat = _import_chat_with_optional_stubs(monkeypatch)
+    blocked = (
+        "BLOCKED - acceptance still has issues after deep_research and the full "
+        "automated repair budget is exhausted.\n\n"
+        "Ask whether to ship as-is or authorize manual intervention."
+    )
+
+    action = chat._next_action_from_blocked_result(blocked)
+
+    assert "ask whether to ship as-is" in action
+    assert "write_file" not in action
     sys.modules.pop("agents.chat", None)
 
 
@@ -627,6 +643,80 @@ def test_uploaded_workflow_resolves_aider_context(tmp_path):
     assert ctx["project_dir"] == "/root/projects/proj-upload"
 
 
+def test_greenfield_aider_context_accepts_issue_project_dir(monkeypatch):
+    import tools
+
+    async def no_uploaded(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(tools, "_uploaded_project_aider_context", no_uploaded)
+    monkeypatch.setattr(tools.config, "AIDER_ENABLED", True)
+    monkeypatch.setattr(tools.config, "AIDER_FOR_GREENFIELD", True)
+    issue_run = {
+        "id": "run-acceptance",
+        "role": "acceptance",
+        "project_id": "",
+        "result_envelope": {
+            "status": "issues",
+            "project_dir": "/root/projects/neon-pong",
+        },
+    }
+
+    ctx = _run(tools._aider_repair_context("conv-neon", issue_run=issue_run))
+
+    assert ctx == {
+        "workflow": None,
+        "project_id": "neon-pong",
+        "project_dir": "/root/projects/neon-pong",
+    }
+
+
+def test_aider_yields_to_fixer_after_same_role_aider_attempt():
+    import tools
+
+    issue_run = {"id": "run-acceptance-2", "role": "acceptance", "result_envelope": {"status": "issues"}}
+    runs = [
+        issue_run,
+        {
+            "id": "run-aider",
+            "role": "aider.fix",
+            "parent_run_id": "run-acceptance-1",
+            "status": "succeeded",
+            "result_envelope": {"source_role": "acceptance", "status": "applied"},
+        },
+        {"id": "run-acceptance-1", "role": "acceptance", "result_envelope": {"status": "issues"}},
+    ]
+
+    assert tools._latest_repair_before_issue_was_aider(runs, issue_run) is True
+    runs[1]["role"] = "fixer"
+    assert tools._latest_repair_before_issue_was_aider(runs, issue_run) is False
+
+
+def test_aider_first_context_requires_worker_health(monkeypatch):
+    import tools
+
+    class Resp:
+        status_code = 200
+
+        def json(self):
+            return {"installed": False}
+
+    class Http:
+        async def get(self, *args, **kwargs):
+            return Resp()
+
+    async def repair_ctx(*args, **kwargs):
+        return {"workflow": None, "project_id": "neon", "project_dir": "/root/projects/neon"}
+
+    monkeypatch.setattr(tools, "_aider_repair_context", repair_ctx)
+    monkeypatch.setattr(tools.config, "AIDER_ENABLED", True)
+    tools._AIDER_HEALTH_CACHE.update({"url": "", "ts": 0.0, "healthy": False})
+
+    ctx = _run(tools._aider_first_context(Http(), "conv-neon"))
+
+    assert ctx is None
+
+
 def test_uploaded_project_bootstrap_gate_blocks_manual_tools():
     import tools
 
@@ -671,7 +761,7 @@ def test_uploaded_project_bootstrap_gate_releases_after_agent_run():
     assert tools._uploaded_project_manual_gate_state(workflow, runs) == ""
 
 
-def test_acceptance_cap_does_not_release_download_project(monkeypatch):
+def test_acceptance_base_cap_forces_research_before_delivery(monkeypatch):
     import tools
 
     class Events:
@@ -746,7 +836,9 @@ def test_acceptance_cap_does_not_release_download_project(monkeypatch):
     ))
 
     assert result.startswith("BLOCKED")
-    assert "run_fixer(reviewer_run_id='run-acceptance')" in result
+    assert "deep_research(" in result
+    assert "run_fixer(reviewer_run_id='run-acceptance')" not in result
+    assert "download_project" in result
     assert tools._fix_cap_releases_tool("read_file") is True
     assert tools._fix_cap_releases_tool("download_project") is False
 
@@ -760,7 +852,7 @@ def test_new_coder_tools_are_registered():
     ):
         assert name in CODEAGENT_TOOLS
 
-    assert "uploaded-project fixes" in CODEAGENT_TOOLS["run_aider_fix"]["function"]["description"]
+    assert "Primary repair editor" in CODEAGENT_TOOLS["run_aider_fix"]["function"]["description"]
     assert "project_id" in CODEAGENT_TOOLS["run_aider_fix"]["function"]["parameters"]["properties"]
 
 
@@ -1351,3 +1443,303 @@ def test_complete_chat_cloud_format_json_nudges_prompt(monkeypatch):
     out = _run(mp.complete_chat(object(), "openai:gpt-x", "plan it", format_json=True))
     assert out == '{"ok": true}'
     assert "ONLY valid JSON" in seen["prompt"]
+
+
+def _base_architect_plan():
+    return {
+        "project_id": "neon-pong",
+        "language": "python",
+        "build_system": "pyproject",
+        "build_cmd": "python -m compileall .",
+        "test_cmd": "",
+        "manifest": [
+            {"path": "main.py", "purpose": "game loop", "estimated_loc": 120},
+            {"path": "config.py", "purpose": "shared constants", "estimated_loc": 40},
+        ],
+        "success_criteria": ["build_cmd exits 0"],
+    }
+
+
+def test_architect_contract_fields_are_optional():
+    from agents import architect
+
+    plan = _base_architect_plan()
+
+    valid, err = architect._validate_plan(plan)
+
+    assert valid, err
+    assert "entrypoint" not in plan
+    assert "shared_constants" not in plan
+    assert "interfaces" not in plan
+    assert "cross_file_contracts" not in plan
+
+
+def test_architect_contract_fields_validate_and_render():
+    from agents import architect
+
+    plan = _base_architect_plan()
+    plan.update({
+        "status": "ok",
+        "entrypoint": {"run_cmd": "python main.py", "module": "main.py"},
+        "dependency_policy": {
+            "runtime": "Python 3.13",
+            "packages": [{
+                "name": "pygame-ce",
+                "version": "latest",
+                "reason": "pygame-compatible wheels for Python 3.13",
+            }],
+            "constraints": ["Do not pin pygame==2.5 on Python 3.13."],
+        },
+        "shared_constants": [{
+            "name": "BALL_BASE_SPEED",
+            "value": "300",
+            "defined_in": "config.py",
+            "used_by": ["game_entities.py", "main.py"],
+        }],
+        "interfaces": [{
+            "file": "game_entities.py",
+            "name": "Paddle.update",
+            "signature": "def update(self, input_handler, keys, mouse_y, is_left) -> None",
+            "notes": "called each frame from main.py",
+        }],
+        "cross_file_contracts": [{
+            "producer": "config.py",
+            "consumer": "game_entities.py",
+            "contract": "Import BALL_BASE_SPEED exactly; do not use BASE_SPEED.",
+        }],
+    })
+
+    valid, err = architect._validate_plan(plan)
+    rendered = architect.format_plan_for_chat(plan)
+
+    assert valid, err
+    assert plan["entrypoint"]["run_cmd"] == "python main.py"
+    assert plan["dependency_policy"]["packages"][0]["name"] == "pygame-ce"
+    assert plan["shared_constants"][0]["name"] == "BALL_BASE_SPEED"
+    assert plan["interfaces"][0]["name"] == "Paddle.update"
+    assert "## Interface Contract" in rendered
+    assert "BALL_BASE_SPEED" in rendered
+    assert "Paddle.update" in rendered
+    assert "config.py" in rendered and "game_entities.py" in rendered
+
+
+def test_architect_contract_malformed_optional_fields_degrade():
+    from agents import architect
+
+    plan = _base_architect_plan()
+    plan.update({
+        "entrypoint": "python main.py",
+        "dependency_policy": 7,
+        "shared_constants": 9,
+        "interfaces": None,
+        "cross_file_contracts": 3.14,
+    })
+
+    valid, err = architect._validate_plan(plan)
+
+    assert valid, err
+    assert "entrypoint" not in plan
+    assert "dependency_policy" not in plan
+    assert "shared_constants" not in plan
+    assert "interfaces" not in plan
+    assert "cross_file_contracts" not in plan
+
+
+def test_builder_context_includes_architect_contract_without_required_file_changes():
+    import tools
+
+    plan = _base_architect_plan()
+    plan.update({
+        "entrypoint": {"run_cmd": "python main.py", "module": "main.py"},
+        "dependency_policy": {
+            "runtime": "Python 3.13",
+            "packages": [{"name": "pygame-ce", "reason": "Python 3.13 compatible"}],
+        },
+        "shared_constants": [{
+            "name": "BALL_BASE_SPEED",
+            "value": "300",
+            "defined_in": "config.py",
+            "used_by": ["game_entities.py"],
+        }],
+        "interfaces": [{
+            "file": "game_entities.py",
+            "name": "Paddle.update",
+            "signature": "def update(self, input_handler, keys, mouse_y, is_left) -> None",
+        }],
+        "cross_file_contracts": [{
+            "producer": "config.py",
+            "consumer": "game_entities.py",
+            "contract": "Use BALL_BASE_SPEED exactly.",
+        }],
+    })
+
+    context = tools._build_architect_context(plan)
+    required = tools._manifest_required_code_files(plan["manifest"])
+
+    assert "Shared Interface Contract" in context
+    assert "Entrypoint run command: python main.py" in context
+    assert "pygame-ce" in context
+    assert "BALL_BASE_SPEED" in context
+    assert "Paddle.update" in context
+    assert "config.py -> game_entities.py" in context
+    assert required == ["main.py", "config.py"]
+
+
+def test_manifest_wired_into_completeness_gate():
+    """Architect manifest → completeness gate, binary assets excluded.
+
+    Regression: a planned 9-file Daedalus build that wrote only 4 files was
+    reported 'succeeded' because the completeness gate (_expected_files) was
+    empty when the model didn't pass required_files. The Architect manifest is
+    now wired in via _manifest_required_code_files, so a short build is caught.
+    """
+    import tools
+
+    manifest = [
+        {"path": "main.py"}, {"path": "game_entities.py"},
+        {"path": "visual_effects.py"}, {"path": "audio_manager.py"},
+        {"path": "ui_renderer.py"}, {"path": "config.py"},
+        {"path": "pyproject.toml"},
+        {"path": "assets/sounds/collision.wav"},
+        {"path": "assets/sounds/score.wav"},
+    ]
+    required = tools._manifest_required_code_files(manifest)
+
+    # Binary/media assets are excluded so they can't falsely flag incomplete.
+    assert "assets/sounds/collision.wav" not in required
+    assert "assets/sounds/score.wav" not in required
+    # Source/config files are required; 9 manifest entries minus 2 wav = 7.
+    assert "main.py" in required and "pyproject.toml" in required
+    assert len(required) == 7
+
+    # Builder wrote only 4 of the 7 required code files → strict manifest
+    # presence reports the 3 missing source files (not the .wav assets).
+    project_dir = "/root/projects/stunning-neon-pong"
+    written = [
+        f"{project_dir}/main.py",
+        f"{project_dir}/game_entities.py",
+        f"{project_dir}/visual_effects.py",
+        f"{project_dir}/audio_manager.py",
+    ]
+    satisfied, missing = tools._manifest_presence(written, project_dir, required)
+    assert set(satisfied) == {
+        "main.py", "game_entities.py", "visual_effects.py", "audio_manager.py",
+    }
+    assert set(missing) == {"ui_renderer.py", "config.py", "pyproject.toml"}
+    # Strict manifest: any missing planned file keeps the build partial (the
+    # undershoot block flags _is_incomplete = bool(_missing) when strict).
+    assert missing
+
+
+def test_manifest_filter_requires_text_deliverables_excludes_binary():
+    """Filter keeps every non-binary deliverable required; only true binaries drop.
+
+    .svg is text the model can author (it was wrongly excluded before), and
+    .json/.toml/.yaml/.md are real deliverables — all must stay required. Only
+    formats the coder model can't produce (audio/raster/fonts/archives/pdf) drop.
+    """
+    import tools
+
+    manifest = [
+        {"path": "app.py"}, {"path": "config.json"}, {"path": "pyproject.toml"},
+        {"path": "data.yaml"}, {"path": "README.md"}, {"path": "logo.svg"},
+        {"path": "assets/click.wav"}, {"path": "sprite.png"}, {"path": "font.ttf"},
+        {"path": "bundle.zip"}, {"path": "manual.pdf"},
+    ]
+    required = set(tools._manifest_required_code_files(manifest))
+    # Required text/data deliverables (incl. .svg now):
+    assert {"app.py", "config.json", "pyproject.toml", "data.yaml",
+            "README.md", "logo.svg"} <= required
+    # Genuinely-binary assets the model can't author are dropped:
+    assert required.isdisjoint(
+        {"assets/click.wav", "sprite.png", "font.ttf", "bundle.zip", "manual.pdf"})
+
+
+def test_scaled_build_rounds_scales_with_file_count():
+    """Round budget grows with the planned file count, floored + capped."""
+    import tools
+    floor = 20  # config.OPENHANDS_MAX_ROUNDS default
+    assert tools._scaled_build_rounds(0, floor) == 30        # base
+    assert tools._scaled_build_rounds(3, floor) == 45
+    assert tools._scaled_build_rounds(5, floor) == 55
+    assert tools._scaled_build_rounds(9, floor) == 75
+    assert tools._scaled_build_rounds(15, floor) == 100      # 105 capped to 100
+    assert tools._scaled_build_rounds(20, floor, cap=140) == 130
+    assert tools._scaled_build_rounds(40, floor, cap=140) == 140
+    assert tools._scaled_build_rounds(40, floor) == 100      # hard cap
+    # Never below the configured floor (raising the env knob raises the floor):
+    assert tools._scaled_build_rounds(1, 90) == 90
+    # Monotonic non-decreasing in file count.
+    seq = [tools._scaled_build_rounds(n, floor) for n in range(0, 25)]
+    assert seq == sorted(seq)
+
+
+def test_builder_continue_pass_budget_scales_for_project_size():
+    """Backend-owned continue attempts scale across 3-20 file projects."""
+    import tools
+
+    assert tools._max_builder_continue_passes(0) == 3
+    assert tools._max_builder_continue_passes(3) == 3
+    assert tools._max_builder_continue_passes(8) == 3
+    assert tools._max_builder_continue_passes(12) == 3
+    assert tools._max_builder_continue_passes(16) == 4
+    assert tools._max_builder_continue_passes(20) == 5
+    assert tools._max_builder_continue_passes(30) == 6
+
+
+def test_blocking_incomplete_builder_gate_logic():
+    """The build-incomplete gate blocks partial+missing until complete or superseded."""
+    import tools
+
+    def builder(status, missing):
+        return {"role": "builder.scaffold", "status": status,
+                "result_envelope": {"manifest_missing": missing, "project_id": "neon"}}
+
+    arch = {"role": "architect", "status": "succeeded", "result_envelope": {}}
+    reviewer = {"role": "reviewer", "status": "succeeded",
+                "result_envelope": {"status": "clean"}}
+
+    # Most-recent builder partial WITH missing files → blocks (returns that run).
+    runs = [builder("partial", ["audio.py"]), arch]
+    assert tools._blocking_incomplete_builder(runs) is runs[0]
+    runs = [builder("stuck", ["audio.py"]), arch]
+    assert tools._blocking_incomplete_builder(runs) is runs[0]
+
+    # Most-recent builder succeeded → no block.
+    assert tools._blocking_incomplete_builder([builder("succeeded", []), arch]) is None
+    # Partial but nothing actually missing → no block.
+    assert tools._blocking_incomplete_builder([builder("partial", []), arch]) is None
+
+    # A newer reviewer/fix run supersedes the raw build state → no block.
+    assert tools._blocking_incomplete_builder(
+        [reviewer, builder("partial", ["audio.py"])]) is None
+
+    # Multiple partial attempts still block: count alone is not a delivery release.
+    runs = [builder("partial", ["audio.py"]), builder("partial", ["audio.py"]), arch]
+    assert tools._blocking_incomplete_builder(runs) is runs[0]
+
+
+def test_generate_code_is_builder_completion_tool_for_partial_manifest():
+    """Plain generate_code is allowed to finish an incomplete manifest build."""
+    import tools
+
+    partial = {
+        "role": "builder.scaffold",
+        "status": "partial",
+        "result_envelope": {"manifest_missing": ["assets/sounds.py"]},
+    }
+    stuck = {
+        "role": "builder.scaffold",
+        "status": "stuck",
+        "result_envelope": {"manifest_missing": ["assets/sounds.py"]},
+    }
+    complete = {
+        "role": "builder.scaffold",
+        "status": "succeeded",
+        "result_envelope": {"manifest_missing": []},
+    }
+
+    assert tools._builder_completion_allowed("generate_code", {}, partial) is True
+    assert tools._builder_completion_allowed("generate_code", {}, stuck) is True
+    assert tools._builder_completion_allowed("run_review", {}, partial) is False
+    assert tools._builder_completion_allowed("generate_code", {}, complete) is False

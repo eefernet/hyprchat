@@ -600,7 +600,7 @@ def _write_aider_prompt(req: AiderRunRequest, prompt_dir: Path) -> Path:
     allowed = "\n".join(f"- {p}" for p in (req.allowed_files or [])[:80]) or "(none specified)"
     known_root = _known_test_root_section(req)
     state_isolation = _test_state_isolation_section(req)
-    content = f"""You are editing an existing uploaded project. Make the smallest coherent patch that satisfies the task.
+    content = f"""You are editing an existing project. Make the smallest coherent patch that satisfies the task.
 
 ## User Task
 {req.task}

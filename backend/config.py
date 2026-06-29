@@ -179,9 +179,15 @@ BUILDER_MODEL   = os.getenv("BUILDER_MODEL",   "")  # Empty = use CODER_MODEL
 FIXER_MODEL     = os.getenv("FIXER_MODEL",     "")  # Empty = use CODER_MODEL
 QA_MODEL        = os.getenv("QA_MODEL",        "")  # Empty = use chat / persona model
 OPENHANDS_ENABLED = os.getenv("OPENHANDS_ENABLED", "true").lower() == "true"  # Toggle OpenHands for generate_code tool
-OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "20"))
+# Floor for the OpenHands agent's per-run iteration budget (max_iteration_per_run).
+# For Architect-planned builds, generate_code scales this UP off the manifest file
+# count (tools._scaled_build_rounds, base 30 + 5/file; first pass cap is higher
+# than continue-pass cap). This floor covers unplanned / no-manifest builds; 20
+# was too low for a multi-file scaffold.
+OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "30"))
 OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", "32768"))
 AIDER_ENABLED = os.getenv("AIDER_ENABLED", "true").lower() == "true"
+AIDER_FOR_GREENFIELD = os.getenv("AIDER_FOR_GREENFIELD", "true").lower() == "true"
 AIDER_MODEL = os.getenv("AIDER_MODEL", "")  # Empty = use FIXER_MODEL, then CODER_MODEL
 AIDER_NUM_CTX = int(os.getenv("AIDER_NUM_CTX", os.getenv("OPENHANDS_NUM_CTX", "16384")))
 AIDER_AUTO_TEST = os.getenv("AIDER_AUTO_TEST", "true").lower() == "true"

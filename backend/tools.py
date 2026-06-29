@@ -187,11 +187,149 @@ _SHIP_ANYWAY_DIRECT_RE = re.compile(
 )
 _DELIVERY_SHIP_TOOLS = {"download_project", "download_file"}
 _CAP_RELEASE_DIAGNOSTIC_TOOLS = {"read_file", "list_files"}
+_AIDER_HEALTH_CACHE = {"url": "", "ts": 0.0, "healthy": False}
+_AIDER_HEALTH_TTL_SECONDS = 30.0
 
 
 def _fix_cap_releases_tool(name: str) -> bool:
     """After the fix cap, allow inspection but not delivery."""
     return name in _CAP_RELEASE_DIAGNOSTIC_TOOLS
+
+
+def _project_id_from_project_dir(project_dir: str) -> str:
+    """Best-effort project id for both uploaded and OpenHands-built projects."""
+    project_dir = (project_dir or "").strip().rstrip("/")
+    if not project_dir:
+        return ""
+    return _project_id_from_dir(project_dir) or project_dir.rsplit("/", 1)[-1]
+
+
+async def _aider_worker_healthy(http, *, force: bool = False) -> bool:
+    """Cheap preflight for routing decisions; run_aider_fix still checks again."""
+    if not getattr(config, "AIDER_ENABLED", True):
+        return False
+    worker_url = (getattr(config, "AIDER_WORKER_URL", "") or config.OPENHANDS_URL).rstrip("/")
+    now = time.time()
+    if (not force and _AIDER_HEALTH_CACHE.get("url") == worker_url
+            and now - float(_AIDER_HEALTH_CACHE.get("ts") or 0) < _AIDER_HEALTH_TTL_SECONDS):
+        return bool(_AIDER_HEALTH_CACHE.get("healthy"))
+    healthy = False
+    try:
+        resp = await http.get(f"{worker_url}/aider/health", timeout=5)
+        healthy = resp.status_code == 200 and bool((resp.json() or {}).get("installed"))
+    except Exception as e:
+        print(f"[v2-gate] Aider health check failed (non-fatal): {e}")
+    _AIDER_HEALTH_CACHE.update({"url": worker_url, "ts": now, "healthy": healthy})
+    return healthy
+
+
+async def _aider_repair_context(conv_id: str, *, issue_run: dict | None = None,
+                                project_dir: str = "", project_id: str = "",
+                                include_greenfield: bool = True) -> dict | None:
+    """Resolve an existing project root for Aider repairs.
+
+    Uploaded projects keep their existing workflow-specific lookup. Greenfield
+    projects use the latest issue/build envelopes or the active coding project.
+    Aider never scaffolds a new project; it only edits an existing /root project.
+    """
+    if not conv_id or not getattr(config, "AIDER_ENABLED", True):
+        return None
+
+    env = (issue_run or {}).get("result_envelope") or {}
+    project_dir = (project_dir or env.get("project_dir") or "").strip()
+    project_id = (project_id or (issue_run or {}).get("project_id") or env.get("project_id") or "").strip()
+    if not project_id and project_dir:
+        project_id = _project_id_from_project_dir(project_dir)
+
+    try:
+        uploaded_ctx = await _uploaded_project_aider_context(
+            conv_id, issue_run=issue_run, project_dir=project_dir, project_id=project_id,
+        )
+        if uploaded_ctx:
+            return uploaded_ctx
+    except Exception as e:
+        print(f"[v2-gate] uploaded Aider context lookup failed (non-fatal): {e}")
+
+    if not include_greenfield or not getattr(config, "AIDER_FOR_GREENFIELD", True):
+        return None
+
+    if project_dir.startswith("/root/projects/"):
+        return {"workflow": None, "project_id": project_id, "project_dir": project_dir}
+
+    try:
+        runs = await db.get_runs_by_conversation(conv_id, limit=30)
+        for run in runs:
+            role = run.get("role") or ""
+            if role not in {"reviewer", "acceptance", "fixer", "aider.fix"} and not role.startswith("builder"):
+                continue
+            run_env = run.get("result_envelope") or {}
+            run_dir = (run_env.get("project_dir") or "").strip()
+            if run_dir.startswith("/root/projects/"):
+                run_pid = (run.get("project_id") or run_env.get("project_id") or
+                           _project_id_from_project_dir(run_dir) or "")
+                return {"workflow": None, "project_id": run_pid, "project_dir": run_dir}
+    except Exception as e:
+        print(f"[v2-gate] greenfield Aider run lookup failed (non-fatal): {e}")
+
+    try:
+        active = await db.get_coding_project_by_conv(conv_id)
+        if active:
+            active_pid = active.get("openhands_project_id") or active.get("id") or ""
+            if active_pid:
+                return {
+                    "workflow": None,
+                    "project_id": active_pid,
+                    "project_dir": f"/root/projects/{active_pid}",
+                }
+    except Exception as e:
+        print(f"[v2-gate] greenfield active project lookup failed (non-fatal): {e}")
+    return None
+
+
+async def _aider_first_context(http, conv_id: str, *, issue_run: dict | None = None,
+                               project_dir: str = "", project_id: str = "") -> dict | None:
+    """Aider repair context only when Aider is enabled and worker-preflight passes."""
+    ctx = await _aider_repair_context(
+        conv_id, issue_run=issue_run, project_dir=project_dir, project_id=project_id,
+    )
+    if not ctx:
+        return None
+    if not await _aider_worker_healthy(http):
+        return None
+    return ctx
+
+
+def _latest_repair_before_issue_was_aider(runs: list[dict], issue_run: dict | None) -> bool:
+    """True when this issue is the result of a just-tried Aider repair.
+
+    Runs are newest-first. For a persisted reviewer/acceptance issue, the first
+    older repair run for the same source role tells us which editor just failed
+    to converge. If it was Aider, route the next pass to the fallback Fixer.
+    """
+    issue_id = (issue_run or {}).get("id") or ""
+    issue_role = (issue_run or {}).get("role") or ""
+    if issue_role not in {"reviewer", "acceptance"}:
+        return False
+    seen_issue = not issue_id
+    run_role_by_id = {r.get("id"): r.get("role") for r in runs or []}
+    for run in runs or []:
+        if not seen_issue:
+            if run.get("id") == issue_id:
+                seen_issue = True
+            continue
+        role = run.get("role") or ""
+        if role not in {"aider.fix", "fixer"}:
+            continue
+        env = run.get("result_envelope") or {}
+        source_role = (
+            env.get("source_role")
+            or run_role_by_id.get(run.get("parent_run_id"))
+            or "reviewer"
+        )
+        if source_role == issue_role:
+            return role == "aider.fix"
+        return False
+    return False
 
 
 async def _latest_user_requested_ship_anyway(conv_id: str) -> bool:
@@ -309,6 +447,156 @@ def _required_files_from_manifest(manifest: list) -> list[str]:
     return required
 
 
+# Manifest entries for binary/generated assets the coder model genuinely cannot
+# author as text (raw audio, raster images, fonts, video, archives/compiled, PDFs).
+# Requiring these in the build-completeness gate would falsely mark every planned
+# build "incomplete", so they're excluded. Everything else — including .svg (XML
+# text), .json, .toml, .yaml, .md, .txt, .cfg, .ini, etc. — is a real deliverable
+# the model can write and MUST stay required.
+_BINARY_MANIFEST_EXTS = frozenset({
+    ".wav", ".mp3", ".ogg", ".flac", ".m4a", ".aac",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".tiff",
+    ".ttf", ".otf", ".woff", ".woff2",
+    ".mp4", ".webm", ".mov", ".avi", ".mkv",
+    ".bin", ".so", ".dll", ".dylib", ".o", ".a", ".class", ".jar",
+    ".zip", ".tar", ".gz", ".tgz", ".7z", ".rar", ".pdf",
+})
+
+
+def _manifest_required_code_files(manifest: list) -> list[str]:
+    """Required-file list from an Architect manifest, minus truly-binary assets.
+
+    Returns every planned NON-binary deliverable, not just code — config/data/text
+    files (.json, .toml, .yaml, .md, .svg, …) the model can author stay required.
+    Only formats the coder model cannot produce as text (see _BINARY_MANIFEST_EXTS:
+    raw audio/images/fonts/video/archives/PDF) are dropped, so requiring the rest
+    doesn't falsely flag a build incomplete. Do NOT narrow this to "code only".
+    """
+    out: list[str] = []
+    for path in _required_files_from_manifest(manifest):
+        ext = ("." + path.rsplit(".", 1)[-1].lower()) if "." in path else ""
+        if ext in _BINARY_MANIFEST_EXTS:
+            continue
+        out.append(path)
+    return out
+
+
+def _arch_text(value, max_len: int = 500) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text[:max_len]
+
+
+def _build_architect_context(arch_env: dict) -> str:
+    """Render the Architect plan for Builder context.
+
+    This is guidance text only. Required-file / completeness behavior is still
+    derived exclusively from the manifest paths via _manifest_required_code_files.
+    """
+    manifest = arch_env.get("manifest") or []
+    if not manifest:
+        return ""
+
+    success = arch_env.get("success_criteria") or []
+    build_cmd = arch_env.get("build_cmd", "")
+    test_cmd = arch_env.get("test_cmd", "")
+    section = ["\n\n--- Architect Manifest (FOLLOW THIS PLAN) ---"]
+    section.append(
+        f"Project: {arch_env.get('project_id','?')} "
+        f"({arch_env.get('language','?')}, "
+        f"build_system={arch_env.get('build_system','?')})"
+    )
+    if build_cmd:
+        section.append(f"Build command: {build_cmd}")
+    if test_cmd:
+        section.append(f"Test command: {test_cmd}")
+    section.append("")
+    section.append(f"Files to create ({len(manifest)}):")
+    for item in manifest[:30]:
+        section.append(
+            f"  - {item.get('path','?')} - {item.get('purpose','')}"
+        )
+    if success:
+        section.append("")
+        section.append("Success criteria (project is done when ALL pass):")
+        for criterion in success[:8]:
+            section.append(f"  - {criterion}")
+    deps = arch_env.get("external_deps") or []
+    if deps:
+        section.append("")
+        section.append("External dependencies:")
+        for dep in deps[:10]:
+            section.append(
+                f"  - {dep.get('name','?')} {dep.get('version','')}"
+            )
+    dep_policy = arch_env.get("dependency_policy") or {}
+    entrypoint = arch_env.get("entrypoint") or {}
+    constants = arch_env.get("shared_constants") or []
+    interfaces = arch_env.get("interfaces") or []
+    contracts = arch_env.get("cross_file_contracts") or []
+    if dep_policy or entrypoint or constants or interfaces or contracts:
+        section.append("")
+        section.append("--- Shared Interface Contract (use these EXACT names/signatures) ---")
+        if entrypoint:
+            if entrypoint.get("run_cmd"):
+                section.append(f"Entrypoint run command: {entrypoint.get('run_cmd')}")
+            if entrypoint.get("module"):
+                section.append(f"Entrypoint module/file: {entrypoint.get('module')}")
+        if dep_policy:
+            section.append("Dependency policy:")
+            if dep_policy.get("runtime"):
+                section.append(f"  - Runtime: {dep_policy.get('runtime')}")
+            for dep in (dep_policy.get("packages") or [])[:10]:
+                detail = dep.get("reason") or dep.get("constraint") or ""
+                spec = f"{dep.get('name','?')} {dep.get('version','')}".strip()
+                section.append(f"  - {spec}" + (f" - {detail}" if detail else ""))
+            for rule in (dep_policy.get("constraints") or [])[:8]:
+                section.append(f"  - {rule}")
+        if constants:
+            section.append("Shared constants:")
+            for const in constants[:15]:
+                used_by = ", ".join(const.get("used_by") or [])
+                details = []
+                if const.get("defined_in"):
+                    details.append(f"defined in {const.get('defined_in')}")
+                if used_by:
+                    details.append(f"used by {used_by}")
+                suffix = f" ({'; '.join(details)})" if details else ""
+                section.append(
+                    f"  - {_arch_text(const.get('name','?'), 120)} = "
+                    f"{_arch_text(const.get('value',''), 160)}{suffix}"
+                )
+        if interfaces:
+            section.append("Interfaces:")
+            for iface in interfaces[:20]:
+                label = iface.get("name") or iface.get("file") or "interface"
+                notes = iface.get("notes") or ""
+                section.append(
+                    f"  - {iface.get('file','?')}: {iface.get('signature','?')} "
+                    f"- {label}" + (f"; {notes}" if notes else "")
+                )
+        if contracts:
+            section.append("Cross-file contracts:")
+            for contract in contracts[:15]:
+                producer = contract.get("producer", "?")
+                consumer = contract.get("consumer", "?")
+                text = contract.get("contract") or contract.get("notes") or ""
+                section.append(f"  - {producer} -> {consumer}: {text}")
+    risks = arch_env.get("risk_notes") or []
+    if risks:
+        section.append("")
+        section.append("Risk notes:")
+        for risk in risks[:5]:
+            section.append(f"  - {risk}")
+    section.append(
+        "\nFollow the manifest exactly — create every listed file, "
+        "use the listed build/test commands, satisfy the success "
+        "criteria, and keep all Shared Interface Contract names/signatures "
+        "consistent across files. The Reviewer will verify against this plan."
+    )
+    return "\n".join(section)
+
+
 def _manifest_presence(files: list[str], project_dir: str,
                        required_files: list[str]) -> tuple[list[str], list[str]]:
     required = _required_files_from_manifest(required_files)
@@ -356,6 +644,108 @@ async def _scan_project_files(http, project_dir: str) -> list[str]:
     except Exception as e:
         print(f"[CODEGEN:OH] Project file scan failed (non-fatal): {e}")
         return []
+
+
+async def _run_builder_continue_pass(http, openhands_url: str, base_payload: dict,
+                                     project_id: str, missing: list[str],
+                                     rounds: int) -> dict | None:
+    """Run ONE blocking OpenHands 'continue' pass to create missing manifest files.
+
+    Narrow by design: derives a continue payload from the original build payload and
+    calls the worker once (blocking /run), returning the raw worker result (or None).
+    Deliberately does NOT create a separate durable run row — the parent
+    generate_code run stays the single authoritative builder run so the workflow
+    gate's most-recent-builder walk sees the true final completeness state. This is
+    builder→builder continuation only, NOT the reverted architect→builder handoff.
+    """
+    _cont_run_id = f"run-{uuid.uuid4().hex[:12]}"
+    payload = dict(base_payload)
+    payload["project_id"] = project_id
+    payload["profile"] = "continue"
+    payload["manifest_missing"] = list(missing)
+    payload["max_rounds"] = rounds
+    payload["run_id"] = _cont_run_id
+    try:
+        resp = await http.post(f"{openhands_url}/run", json=payload, timeout=600)
+        if resp.status_code == 200:
+            return resp.json()
+        print(f"[CODEGEN:OH] continue pass HTTP {resp.status_code}: {resp.text[:200]}")
+        return None
+    except asyncio.CancelledError:
+        # User pressed Stop mid-continue — abort the worker-side run, then re-raise
+        # so the caller finalizes the parent run.
+        try:
+            await http.post(f"{openhands_url}/cancel/{_cont_run_id}", timeout=5)
+        except Exception:
+            pass
+        raise
+    except Exception as _ce:
+        print(f"[CODEGEN:OH] continue pass failed (non-fatal): {_ce}")
+        return None
+
+
+def _blocking_incomplete_builder(runs: list) -> dict | None:
+    """The builder run that should block review/acceptance/delivery, or None.
+
+    Returns the most-recent builder run iff it is `partial`/`stuck` with manifest
+    files still missing (after the backend auto-continue passes) — meaning the
+    project is provably incomplete and must be finished before it can advance.
+
+    Returns None when: a newer reviewer/fix/qa run supersedes the raw build state;
+    or the most recent builder is complete (succeeded, or no missing files).
+    Incomplete manifests do NOT auto-release after N attempts: review and delivery
+    stay blocked until OpenHands creates every planned file, or the latest user
+    message explicitly asks to ship the incomplete project.
+    """
+    blocker = None
+    seen_builder = False
+    for r in runs or []:
+        ro = r.get("role", "")
+        if not seen_builder and ro in {"reviewer", "acceptance", "qa", "fixer", "aider.fix"}:
+            return None  # newer review/fix run supersedes the build state
+        if ro.startswith("builder"):
+            env = r.get("result_envelope") or {}
+            is_partial = (
+                (r.get("status") or "").lower() in {"partial", "stuck"}
+                and bool(env.get("manifest_missing"))
+            )
+            if not seen_builder and not is_partial:
+                return None  # most recent builder is complete → nothing to block
+            seen_builder = True
+            if is_partial:
+                if blocker is None:
+                    blocker = r
+            else:
+                break  # an older complete builder ends the partial streak
+    return blocker
+
+
+def _builder_completion_allowed(name: str, args: dict, run: dict) -> bool:
+    """True when `generate_code` is the valid continuation for a partial build."""
+    env = run.get("result_envelope") or {}
+    return (
+        name == "generate_code"
+        and (run.get("status") or "").lower() in {"partial", "stuck"}
+        and bool(env.get("manifest_missing") or [])
+    )
+
+
+def _scaled_build_rounds(n_files: int, floor: int, cap: int = 100) -> int:
+    """OpenHands iteration ceiling scaled to the planned file count.
+
+    Generous on purpose — this is a CEILING, not a target (the agent stops when it
+    emits `finish`, not when it hits the cap), so a high value never slows a small
+    build. Base 30 + 5/file, never below the configured floor, capped to keep
+    one worker call bounded (higher for the first pass, lower for continue passes).
+    The bounded
+    auto-continue loop mops up anything still missing after the pass.
+    """
+    return min(max(floor, 30 + 5 * max(0, n_files)), cap)
+
+
+def _max_builder_continue_passes(planned_files: int) -> int:
+    """Scale backend-owned OpenHands continue passes for 3-20 file projects."""
+    return min(6, max(3, (max(0, planned_files) + 3) // 4))
 
 
 # NOTE: the Architect→Builder single-turn auto-handoff helpers were removed.
@@ -771,7 +1161,7 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "run_acceptance_review",
-            "description": "Final acceptance gate after run_review is clean. Statically inspects the project against the user's request, README/docs, manifests, tests, entrypoints, and generated artifacts. Normal delivery should wait for acceptance to pass; if it returns issues, call run_fixer with its run_id. If the user explicitly asks to ship/download anyway, disclose the known issues and package the current state.",
+            "description": "Final acceptance gate after run_review is clean. Statically inspects the project against the user's request, README/docs, manifests, tests, entrypoints, and generated artifacts. Normal delivery should wait for acceptance to pass; if it returns issues, call run_aider_fix when available, otherwise run_fixer with its run_id. If the user explicitly asks to ship/download anyway, disclose the known issues and package the current state.",
             "parameters": {"type": "object", "properties": {
                 "project_dir": {"type": "string", "description": "Absolute path to the project root in the sandbox. If omitted, uses the clean reviewer envelope."},
                 "reviewer_run_id": {"type": "string", "description": "Optional run_id from the clean run_review call."},
@@ -783,7 +1173,7 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "run_fixer",
-            "description": "Fallback targeted editor for issues identified by run_review or run_acceptance_review. For uploaded-project fixes, prefer run_aider_fix; run_fixer is mainly for greenfield/OpenHands projects or when Aider is disabled/unavailable. After reviewer-driven fixes, call run_review again. After docs-only acceptance fixes, call run_acceptance_review again; otherwise call run_review. Hard caps per user request: 3 reviewer-driven and 2 acceptance-driven successful fix cycles (run_aider_fix counts toward the same budget); a new user message resets the budget.",
+            "description": "Fallback targeted editor for issues identified by run_review or run_acceptance_review. Prefer run_aider_fix for existing projects when Aider is available; use run_fixer when Aider is disabled/unavailable, has no project_dir, or failed/no-changed a repair. After reviewer-driven fixes, call run_review again. After docs-only acceptance fixes, call run_acceptance_review again; otherwise call run_review. Hard caps per user request: 3 reviewer-driven and 2 acceptance-driven base fix cycles (run_aider_fix counts toward the same budget); a new user message resets the budget.",
             "parameters": {"type": "object", "properties": {
                 "reviewer_run_id": {"type": "string", "description": "The run_id of the run_review or run_acceptance_review call whose issues you want to fix (e.g. 'run-bd6f9dc7b4e3'). If omitted, the most recent actionable review/acceptance run is used."},
             }, "required": []},
@@ -806,12 +1196,12 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "run_aider_fix",
-            "description": "Apply surgical edits to an existing uploaded project using Aider in the Codebox worker. Use this for uploaded-project fixes instead of generate_code/OpenHands. After it returns, call run_review to verify. Counts toward the same per-user-request fix-cycle caps as run_fixer (3 reviewer-driven, 2 acceptance-driven).",
+            "description": "Primary repair editor for existing projects using Aider in the Codebox worker. Use this for reviewer/acceptance fixes on uploaded projects and OpenHands-built greenfield projects instead of generate_code/OpenHands or manual read_file/write_file. If Aider is unavailable or cannot produce a patch, the backend falls back to run_fixer. After it returns, call run_review or run_acceptance_review as appropriate to verify. Counts toward the same per-user-request fix-cycle caps as run_fixer.",
             "parameters": {"type": "object", "properties": {
-                "project_dir": {"type": "string", "description": "Absolute project root in Codebox, e.g. /root/projects/proj-... . If omitted, uses the active uploaded project."},
+                "project_dir": {"type": "string", "description": "Absolute project root in Codebox, e.g. /root/projects/neon-pong or /root/projects/proj-... . If omitted, uses the active/generated project."},
                 "task": {"type": "string", "description": "The user's requested fix/change, verbatim when possible."},
                 "issue_run_id": {"type": "string", "description": "Optional reviewer/acceptance run_id whose issues should guide Aider."},
-                "project_id": {"type": "string", "description": "Optional uploaded project id for workflow linkage."},
+                "project_id": {"type": "string", "description": "Optional project id for workflow linkage."},
                 "allowed_files": {"type": "array", "items": {"type": "string"}, "description": "Optional file scope Aider should focus on."},
             }, "required": ["task"]},
         },
@@ -1507,19 +1897,24 @@ async def exec_tool(
                 if not _parent_role_for_cap:
                     _parent_role_for_cap = "reviewer"
 
-                # Uploaded-project fixes are owned by Aider. This redirect is
+                # Existing-project repairs are owned by Aider first. This redirect is
                 # deliberately before cycle/research gates so stale personas
                 # that still call run_fixer do not get stuck in the old scoped
                 # Fixer loop. v2-only: a v1 persona's run_fixer must not be
-                # silently rerouted.
-                if (name == "run_fixer" and _parent_role_for_cap == "reviewer"
+                # silently rerouted. Internal `_aider_fallback` calls bypass this
+                # so Fixer can be the second editor when Aider can't fix.
+                if (name == "run_fixer" and _parent_role_for_cap in {"reviewer", "acceptance"}
                         and getattr(config, "AIDER_ENABLED", True)
+                        and not args.get("_aider_fallback")
                         and await _check_v2()):
                     _requested_parent_id = (args.get("reviewer_run_id") or "").strip()
                     _issue_run_for_aider = await _latest_actionable_issue_run(conv_id, _requested_parent_id)
-                    _aider_ctx = await _uploaded_project_aider_context(
-                        conv_id, issue_run=_issue_run_for_aider,
-                    )
+                    _aider_ctx = None
+                    if not _latest_repair_before_issue_was_aider(_runs_for_cap, _issue_run_for_aider):
+                        _aider_ctx = await _aider_first_context(
+                            http,
+                            conv_id, issue_run=_issue_run_for_aider,
+                        )
                     if _issue_run_for_aider and _aider_ctx:
                         _issue_run_id = _issue_run_for_aider.get("id", "")
                         _project_dir = _aider_ctx.get("project_dir") or ""
@@ -1529,15 +1924,16 @@ async def exec_tool(
                         )
                         await events.emit(conv_id, "tool_end", {
                             "tool": "run_fixer", "icon": "wrench",
-                            "status": "↪ Routing uploaded-project fix to Aider",
+                            "status": "↪ Routing repair to Aider",
                         })
                         print(f"[v2-gate] redirecting run_fixer to run_aider_fix "
-                              f"for uploaded project issue_run={_issue_run_id}", flush=True)
+                              f"for {_parent_role_for_cap} issue_run={_issue_run_id}", flush=True)
                         return await exec_tool(
                             http, events, "run_aider_fix",
                             {
                                 "task": _task,
                                 "project_dir": _project_dir,
+                                "project_id": _aider_ctx.get("project_id") or "",
                                 "issue_run_id": _issue_run_id,
                             },
                             conv_id,
@@ -1563,18 +1959,17 @@ async def exec_tool(
                         and r.get("status") == "succeeded"
                         and _fixer_source_role_cap(r) == _parent_role_for_cap)
                 )
-                # Acceptance escalation ladder: the base acceptance cap is 2,
-                # but once the model has spent a round on deep_research in this
-                # budget window the cap extends to 4 (research-informed retries).
-                # Reviewer-driven stays at 3.
-                _accept_research_done = (
-                    _parent_role_for_cap == "acceptance"
-                    and await _deep_research_called_since(conv_id, _uts_cap)
-                )
+                # Repair escalation ladder: base caps are reviewer=3 and
+                # acceptance=2. Once the model has spent a round on
+                # deep_research in this budget window, allow one more
+                # research-informed repair window (cap=4). Aider and Fixer
+                # consume the same budget.
+                _research_done_for_cap = await _deep_research_called_since(conv_id, _uts_cap)
                 if _parent_role_for_cap == "acceptance":
-                    _cap_limit = 4 if _accept_research_done else 2
+                    _base_cap_limit = 2
                 else:
-                    _cap_limit = 3
+                    _base_cap_limit = 3
+                _cap_limit = 4 if _research_done_for_cap else _base_cap_limit
                 if _fixer_succ >= _cap_limit:
                     # v1 doesn't run this loop, so cap only applies to v2.
                     if await _check_v2():
@@ -1598,26 +1993,31 @@ async def exec_tool(
                                 + (f":{','.join(str(x) for x in _iss.get('lines') or [])}" if _iss.get('lines') else "")
                                 + f" — {(_iss.get('summary','') or '')[:160]}"
                             )
-                        # Terminal acceptance escalation: the fixer budget was
-                        # extended after research and is now exhausted. Rather
-                        # than dead-end, release manual hand-fix so the model can
-                        # edit the remaining issues directly, then re-verify.
-                        if _accept_research_done:
+                        if not _research_done_for_cap:
+                            _topic_seed = (
+                                _rev_sum
+                                or (_issue_lines[0] if _issue_lines else "project repair loop")
+                            )[:240]
+                            _topic_seed = re.sub(r"\s+", " ", _topic_seed).strip()
+                            _topic_seed = _topic_seed.replace("\\", "\\\\").replace("'", "\\'")
                             await events.emit(conv_id, "tool_end", {
-                                "tool": name, "icon": "wrench",
-                                "status": f"⛔ Fixer budget exhausted ({_fixer_succ}/{_cap_limit}) after research — hand-fix",
+                                "tool": name, "icon": "search",
+                                "status": f"⛔ Repair cap reached ({_fixer_succ}/{_cap_limit}) — call deep_research",
                             })
-                            print(f"[v2-gate] CYCLE CAP (acceptance, post-research): "
-                                  f"blocking {name}, releasing manual hand-fix", flush=True)
+                            print(f"[v2-gate] CYCLE CAP: blocking {name}; "
+                                  f"forcing deep_research before more repair attempts", flush=True)
                             return (
-                                f"BLOCKED — the Fixer has used its full budget of {_cap_limit} "
-                                f"acceptance-driven cycles (after web research) and the issue "
-                                f"persists.\n\n"
-                                f"Do NOT call run_fixer or run_aider_fix again. Fix the remaining "
-                                f"issue(s) DIRECTLY yourself: use read_file to inspect, write_file "
-                                f"to edit, and run_shell to verify, then call run_acceptance_review "
-                                f"when the fix is in place."
-                                + (f"\n\nLatest acceptance summary: \"{_rev_sum}\"" if _rev_sum else "")
+                                f"BLOCKED — {_parent_role_for_cap} repair reached its base cap "
+                                f"({_fixer_succ}/{_cap_limit}) and the issue persists. The next "
+                                f"step must gather outside guidance before another editor runs.\n\n"
+                                f"Your VERY NEXT tool call MUST be:\n"
+                                f"  deep_research(topic='{_parent_role_for_cap} issue still failing: "
+                                f"{_topic_seed}', "
+                                f"depth=2)\n\n"
+                                f"Do NOT call run_fixer, run_aider_fix, read_file, write_file, "
+                                f"run_shell, run_review, run_acceptance_review, download_project, "
+                                f"or download_file until deep_research has completed."
+                                + (f"\n\nLatest issue summary: \"{_rev_sum}\"" if _rev_sum else "")
                                 + (("\nRemaining issue(s):\n" + "\n".join(_issue_lines)) if _issue_lines else "")
                             )
                         await events.emit(conv_id, "tool_end", {
@@ -1629,10 +2029,10 @@ async def exec_tool(
                               f"since the latest user message)", flush=True)
                         return (
                             f"BLOCKED — Hard cap of {_cap_limit} {_parent_role_for_cap}/fix "
-                            f"cycles already attempted for this user request "
-                            f"({_fixer_succ} successful fix runs).\n\n"
-                            f"The same class of issue is persisting and another fixer call "
-                            f"will not help. Your VERY NEXT output MUST be plain text to the "
+                            f"cycles already attempted for this user request after deep_research "
+                            f"({_fixer_succ} successful repair runs; Aider + Fixer combined).\n\n"
+                            f"The same class of issue is persisting and another automated repair "
+                            f"call will not help. Your VERY NEXT output MUST be plain text to the "
                             f"user that:\n"
                             f"  1. Summarizes what was changed across the {_fixer_succ} fix cycles\n"
                             f"  2. States the remaining issue with file:line references"
@@ -1641,9 +2041,9 @@ async def exec_tool(
                             + "\n  3. Asks the user for guidance — what behavior they actually "
                             f"want, or whether to skip this issue and ship anyway.\n\n"
                             f"Do NOT call run_fixer, run_aider_fix, run_review, generate_code, "
-                            f"write_file, run_shell, download_project, download_file, or plan_project. "
-                            f"You MAY inspect with read_file/list_files if needed. Otherwise, respond "
-                            f"to the user with text and ask whether they want to ship as-is."
+                            f"read_file, list_files, write_file, run_shell, download_project, "
+                            f"download_file, or plan_project. Respond to the user with text and "
+                            f"ask whether they want to ship as-is or authorize manual intervention."
                         )
             except Exception as _ce:
                 print(f"[v2-gate] cycle cap check failed (non-fatal): {_ce}")
@@ -1670,7 +2070,7 @@ async def exec_tool(
                 _track_role = (_parent_role_for_cap
                                if _parent_role_for_cap in {"reviewer", "acceptance"}
                                else "reviewer")
-                _accept_skip_sf = (_track_role == "acceptance" and _accept_research_done)
+                _research_skip_sf = await _deep_research_called_since(conv_id, _uts_cap)
                 # Same turn-scoped window as the cycle cap, counting both fix
                 # paths for THIS role — the gates must agree on cycle counts.
                 _fsucc_sf = sum(
@@ -1685,7 +2085,7 @@ async def exec_tool(
                 # Research nudge text is fixer-specific; Aider already requires
                 # a follow-up run_review, so only run_fixer is gated here.
                 if (name == "run_fixer" and 1 <= _fsucc_sf <= 2
-                        and await _check_v2() and not _accept_skip_sf):
+                        and await _check_v2() and not _research_skip_sf):
                     _latest_rev_sf = next(
                         (r for r in _runs_sf if r.get("role") == _track_role),
                         None,
@@ -1852,10 +2252,16 @@ async def exec_tool(
                     if args.get("manifest_completion_retry"):
                         print("[v2-gate] allowing manifest completion retry through anti-rebuild guard", flush=True)
                         raise StopAsyncIteration("manifest completion retry allowed")
+                    _runs_rb = await db.get_runs_by_conversation(conv_id, limit=20)
+                    for _r in _runs_rb:
+                        if _builder_completion_allowed(name, args, _r):
+                            print("[v2-gate] allowing generate_code to complete partial builder", flush=True)
+                            raise StopAsyncIteration("builder completion allowed")
+                        if _r.get("role") in {"reviewer", "acceptance", "qa", "fixer", "aider.fix"}:
+                            break
                     _latest_user_ts = await _latest_user_msg_ts(conv_id, conv_row=_conv_full)
 
                     if _latest_user_ts is not None:
-                        _runs_rb = await db.get_runs_by_conversation(conv_id, limit=20)
                         _builder_succ_this_turn = 0
                         _last_builder_role = ""
                         for _r in _runs_rb:
@@ -1905,6 +2311,45 @@ async def exec_tool(
                 if not isinstance(_rbe, StopAsyncIteration):
                     print(f"[v2-gate] anti-rebuild check failed (non-fatal): {_rbe}")
 
+        # ── Build-incomplete pre-gate (for tools exempt from the main gate) ──
+        # run_review / run_acceptance_review are exempt from the workflow gate
+        # below (they're the normal progression tools). But a partial build with
+        # planned files STILL missing (after the backend auto-continue passes) must
+        # not advance to review or acceptance — every planned deliverable has to
+        # exist first. Delivery (download_*) and manual tools are non-exempt and are
+        # handled by the main gate's build-incomplete branch.
+        if conv_id and name in {"run_review", "run_acceptance_review"}:
+            try:
+                if await _check_v2():
+                    _runs_bi = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _bi = _blocking_incomplete_builder(_runs_bi)
+                    if _bi is not None:
+                        _bi_env = _bi.get("result_envelope") or {}
+                        _bi_missing = _bi_env.get("manifest_missing") or []
+                        _bi_pid = _bi_env.get("project_id") or ""
+                        _bi_disp = ", ".join(_bi_missing[:10]) + (
+                            "…" if len(_bi_missing) > 10 else "")
+                        await events.emit(conv_id, "tool_end", {
+                            "tool": name, "icon": "code",
+                            "status": f"⛔ Blocked — build incomplete, "
+                                      f"{len(_bi_missing)} file(s) missing",
+                        })
+                        print(f"[v2-gate] state=build-incomplete blocked "
+                              f"tool={name} missing={len(_bi_missing)}", flush=True)
+                        return (
+                            f"BLOCKED — the build is INCOMPLETE: {len(_bi_missing)} "
+                            f"planned file(s) were never created — {_bi_disp}.\n\n"
+                            f"Your VERY NEXT tool call MUST be:\n"
+                            f"  generate_code(project_id='{_bi_pid}', task='create the missing "
+                            f"files: {_bi_disp}')\n\n"
+                            f"{name} cannot run until every planned deliverable exists. "
+                            f"If the latest user message explicitly asks to ship the "
+                            f"incomplete project as-is, call download_project (and "
+                            f"disclose the missing files) instead."
+                        )
+            except Exception as _bie:
+                print(f"[v2-gate] build-incomplete pre-gate failed (non-fatal): {_bie}")
+
         if conv_id and name not in ("run_review", "run_acceptance_review", "run_fixer",
                                     "run_aider_fix", "ask_project", "get_coder_workflow",
                                     "cancel_coder_workflow"):
@@ -1948,12 +2393,11 @@ async def exec_tool(
                             _pending_review = _r
                         break
                     if _role.startswith("builder") and _r.get("status") in _BUILDER_GATING:
-                        _env_b = _r.get("result_envelope") or {}
-                        if (name == "generate_code"
-                                and args.get("manifest_completion_retry")
-                                and _r.get("status") in {"partial", "stuck"}
-                                and (_env_b.get("manifest_missing") or [])):
-                            continue
+                        if _builder_completion_allowed(name, args, _r):
+                            # generate_code is the completion path for a partial
+                            # manifest build. Let it through immediately instead
+                            # of walking back to older builder runs and blocking.
+                            break
                         _pending_run = _r
                         _pending_kind = "builder"
                         break
@@ -1974,10 +2418,44 @@ async def exec_tool(
                     _pd = (_env.get("project_dir") or "").strip()
                     _pid = _pending_run.get("id", "?")
                     _why = ("generate_code" if _pending_kind == "builder" else "run_fixer")
+                    # Same logic as the run_review/acceptance pre-gate:
+                    # block delivery/manual tools while the build is genuinely
+                    # incomplete.
+                    _b_missing = _env.get("manifest_missing") or []
+                    _build_incomplete = (
+                        _pending_kind == "builder"
+                        and _blocking_incomplete_builder(_runs_for_v2_gate) is not None
+                    )
                     if (name in {"download_project", "download_file"}
                             and await _latest_user_requested_ship_anyway(conv_id)):
                         print(f"[v2-gate] ship-anyway: allowing {name} before "
-                              f"review because latest user requested delivery", flush=True)
+                              f"{'completion' if _build_incomplete else 'review'} "
+                              f"because latest user requested delivery", flush=True)
+                    elif _build_incomplete:
+                        # The build is provably incomplete — planned files are still
+                        # missing after the backend auto-continue passes. Do NOT route
+                        # to run_review (it checks build/test/lint, not manifest
+                        # completeness): review / acceptance / delivery must wait until
+                        # every planned deliverable exists. The model's forward action
+                        # is another generate_code continue pass.
+                        _cont_pid = _env.get("project_id") or (_pd.rsplit("/", 1)[-1] if _pd else "")
+                        _miss_disp = ", ".join(_b_missing[:10]) + ("…" if len(_b_missing) > 10 else "")
+                        _gate_msg = (
+                            "state", "build-incomplete",
+                            f"BLOCKED — the build is INCOMPLETE: {len(_b_missing)} planned "
+                            f"file(s) were never created — {_miss_disp}.\n\n"
+                            f"Your VERY NEXT tool call MUST be:\n"
+                            f"  generate_code(project_id='{_cont_pid}', task='create the missing files: "
+                            f"{_miss_disp}')\n\n"
+                            f"Do not call {name}, run_review, run_acceptance_review, "
+                            f"download_project, read_file, write_file, or run_shell — the project "
+                            f"is missing required deliverables. Only after EVERY planned file "
+                            f"exists can it be reviewed, accepted, or delivered. If the latest user "
+                            f"message explicitly asks to ship the incomplete project as-is, you may "
+                            f"download_project and disclose the missing files.",
+                            f"⛔ Blocked — build incomplete, {len(_b_missing)} file(s) missing",
+                            _pid,
+                        )
                     else:
                         _gate_msg = (
                             "state", "review-needed",
@@ -2065,9 +2543,10 @@ async def exec_tool(
                         and await _latest_user_requested_ship_anyway(conv_id)
                     )
                     _aider_ctx_gate = None
-                    if _pending_role == "reviewer" and getattr(config, "AIDER_ENABLED", True):
-                        _aider_ctx_gate = await _uploaded_project_aider_context(
-                            conv_id, issue_run=_pending_review,
+                    if (getattr(config, "AIDER_ENABLED", True)
+                            and not _latest_repair_before_issue_was_aider(_runs_for_v2_gate, _pending_review)):
+                        _aider_ctx_gate = await _aider_first_context(
+                            http, conv_id, issue_run=_pending_review,
                         )
                     # Deadlock break: the FINAL_CYCLE gate (2 successful fixers,
                     # no research since the last reviewer) blocks run_fixer with
@@ -2079,23 +2558,22 @@ async def exec_tool(
                     # the research-first requirement and then retry run_fixer on
                     # the next round. Below 1 fixer attempt the model should
                     # actually try fixing before researching.
-                    # Acceptance escalation: once deep_research has run in this
-                    # budget window the acceptance fix cap extends 2→4 (mirrors
-                    # the CYCLE_LIMIT bump), and at the bumped cap manual
-                    # hand-fix is released so the loop can't dead-end.
-                    _accept_research_done_gate = (
-                        _pending_role == "acceptance"
-                        and await _deep_research_called_since(conv_id, _uts_gate)
-                    )
+                    # Repair ladder: force research at the base cap, then allow
+                    # research-informed Aider/Fixer retries until the extended
+                    # cap. Never auto-release manual write_file/run_shell.
+                    _research_done_gate = await _deep_research_called_since(conv_id, _uts_gate)
                     if _pending_role == "acceptance":
-                        _cap_limit_gate = 4 if _accept_research_done_gate else 2
+                        _base_cap_limit_gate = 2
                     else:
-                        _cap_limit_gate = 3
-                    _accept_handfix_release = (
-                        _accept_research_done_gate
+                        _base_cap_limit_gate = 3
+                    _cap_limit_gate = 4 if _research_done_gate else _base_cap_limit_gate
+                    _needs_research_gate = (
+                        _fixer_attempts_gate >= _base_cap_limit_gate
+                        and not _research_done_gate
+                    )
+                    _exhausted_after_research_gate = (
+                        _research_done_gate
                         and _fixer_attempts_gate >= _cap_limit_gate
-                        and name in {"write_file", "run_shell", "execute_code",
-                                     "read_file", "list_files"}
                     )
                     # Anchor on started_at to match the STUCK/FINAL gates —
                     # research stashed while the review was still running must
@@ -2113,29 +2591,60 @@ async def exec_tool(
                         print(f"[v2-gate] ship-anyway: allowing {name} despite "
                               f"fix-needed because latest user requested delivery", flush=True)
                         # Skip _gate_msg entirely → delivery tool runs normally.
-                    elif _accept_handfix_release:
-                        print(f"[v2-gate] handfix-release: allowing {name} despite "
-                              f"fix-needed (acceptance cap {_fixer_attempts_gate}/"
-                              f"{_cap_limit_gate} exhausted after research)", flush=True)
-                        # Skip _gate_msg → model hand-fixes directly.
-                    elif _fixer_attempts_gate >= _cap_limit_gate and _fix_cap_releases_tool(name):
-                        print(f"[v2-gate] cap-release: allowing {name} despite "
-                              f"fix-needed (attempts={_fixer_attempts_gate}, "
-                              f"succ={_fixer_succ_gate})", flush=True)
-                        # Skip _gate_msg entirely → tool runs normally.
+                    elif _needs_research_gate:
+                        _topic_seed = (
+                            _pending_env.get("summary")
+                            or " ".join(
+                                (iss.get("summary") or "")
+                                for iss in (_pending_env.get("issues") or [])[:2]
+                            )
+                            or f"{_pending_role} issue in generated project"
+                        )
+                        _topic_seed = re.sub(r"\s+", " ", _topic_seed).strip()[:260]
+                        _topic_seed = _topic_seed.replace("\\", "\\\\").replace("'", "\\'")
+                        _gate_msg = (
+                            "state", "fix-needed-research",
+                            f"BLOCKED — {_pending_role} ({_rid}) still has issues after "
+                            f"{_fixer_attempts_gate} automated repair attempt(s). Before another "
+                            f"Aider/Fixer pass, gather targeted guidance.\n\n"
+                            f"Your VERY NEXT tool call MUST be:\n"
+                            f"  deep_research(topic='{_pending_role} repair issue: {_topic_seed}', depth=2)\n\n"
+                            f"Do NOT call {name}, read_file, list_files, write_file, run_shell, "
+                            f"run_review, run_acceptance_review, run_fixer, run_aider_fix, "
+                            f"download_project, or download_file until deep_research completes.",
+                            f"⛔ Blocked — call deep_research before more {_pending_role} repairs",
+                            _rid,
+                        )
+                    elif _exhausted_after_research_gate:
+                        _gate_msg = (
+                            "state", "fix-needed-exhausted",
+                            f"BLOCKED — {_pending_role} ({_rid}) still has issues after "
+                            f"deep_research and the full automated repair budget "
+                            f"({_fixer_attempts_gate}/{_cap_limit_gate}, Aider + Fixer combined).\n\n"
+                            f"Your VERY NEXT output MUST be plain text to the user: summarize the "
+                            f"remaining issue, say the automated repair budget is exhausted, and "
+                            f"ask whether to ship as-is or authorize manual intervention.\n\n"
+                            f"Do NOT call {name}, read_file, list_files, write_file, run_shell, "
+                            f"run_review, run_acceptance_review, run_fixer, run_aider_fix, "
+                            f"download_project, or download_file unless the latest user message "
+                            f"explicitly asks to ship/download anyway.",
+                            f"⛔ Blocked — automated repair budget exhausted for {_pending_role}",
+                            _rid,
+                        )
                     elif _aider_ctx_gate:
                         _project_dir = _aider_ctx_gate.get("project_dir") or _pending_env.get("project_dir") or ""
                         _gate_msg = (
                             "state", "fix-needed",
                             f"BLOCKED — {_pending_role} ({_rid}) returned status='{_rstatus_disp}' "
-                            f"for an uploaded project.\n\n"
+                            f"for an existing project.\n\n"
                             f"Your VERY NEXT tool call MUST be:\n"
                             f"  run_aider_fix(issue_run_id='{_rid}', project_dir='{_project_dir}', "
                             f"task='<latest user request + reviewer summary>')\n\n"
-                            f"Uploaded-project fixes are handled by Aider from the project root. "
+                            f"Existing-project repairs are handled by Aider first from the project root. "
                             f"Do NOT call run_fixer, read_file, write_file, generate_code, or "
-                            f"run_shell for this reviewer issue. After Aider returns, call "
-                            f"run_review to verify build/tests.",
+                            f"run_shell for this {_pending_role} issue. If Aider cannot fix it, "
+                            f"the backend will fall back to Fixer. After repair returns, verify "
+                            f"with the appropriate review/acceptance step.",
                             f"⛔ Blocked — call run_aider_fix first ({_pending_role} {_rid[:14]}… has issues)",
                             _rid,
                         )
@@ -3198,11 +3707,18 @@ async def exec_tool(
         elif name == "run_aider_fix":
             from agents import aider_fixer, language_adapters
 
-            if not getattr(config, "AIDER_ENABLED", True):
+            async def _fallback_to_fixer(reason: str) -> str:
                 issue_run_id = (args.get("issue_run_id") or args.get("reviewer_run_id") or "").strip()
+                if not issue_run_id and issue_run:
+                    issue_run_id = issue_run.get("id", "")
+                print(f"[run_aider_fix] falling back to run_fixer: {reason}")
+                await events.emit(conv_id, "tool_progress", {
+                    "tool": "run_aider_fix", "icon": "wrench",
+                    "status": f"Aider unavailable/ineffective — falling back to Fixer ({reason[:80]})",
+                })
                 return await exec_tool(
                     http, events, "run_fixer",
-                    {"reviewer_run_id": issue_run_id} if issue_run_id else {},
+                    {"reviewer_run_id": issue_run_id, "_aider_fallback": True} if issue_run_id else {"_aider_fallback": True},
                     conv_id,
                     custom_tool_map=custom_tool_map,
                     connector_tool_name_map=connector_tool_name_map,
@@ -3210,6 +3726,10 @@ async def exec_tool(
                     kb_ids=kb_ids,
                     artifact_message_id=artifact_message_id,
                 )
+
+            issue_run = None
+            if not getattr(config, "AIDER_ENABLED", True):
+                return await _fallback_to_fixer("Aider disabled")
 
             task = (args.get("task") or args.get("description") or "").strip()
             project_dir = (args.get("project_dir") or "").strip()
@@ -3220,7 +3740,6 @@ async def exec_tool(
             if not task:
                 return "ERROR: run_aider_fix requires task"
 
-            issue_run = None
             if issue_run_id:
                 try:
                     issue_run = await db.get_run(issue_run_id)
@@ -3253,7 +3772,10 @@ async def exec_tool(
                     project_dir = project_dir or (f"/root/projects/{project_id}" if project_id else "")
 
             if not project_dir:
-                return "ERROR: run_aider_fix needs project_dir or an active uploaded project on this conversation."
+                return await _fallback_to_fixer("no project_dir for Aider")
+
+            if not await _aider_worker_healthy(http, force=True):
+                return await _fallback_to_fixer("Aider worker unhealthy")
 
             contract = {}
             workflow_id = ""
@@ -3281,6 +3803,23 @@ async def exec_tool(
 
             # Prior fix attempts this turn — folded into the task text so the
             # Aider prompt (built worker-side) sees them without a worker change.
+            _research_for_aider = ""
+            try:
+                _r_entry = _get_recent_research(conv_id)
+                if _r_entry:
+                    _research_for_aider = (_r_entry.get("report") or "")[:5000]
+                    if _research_for_aider:
+                        task = (
+                            f"{task}\n\n"
+                            f"Recent deep_research context for this repair. Use it as reference, "
+                            f"but still verify against the project files:\n{_research_for_aider}"
+                        )
+                        print(f"[run_aider_fix] injecting research context "
+                              f"({len(_research_for_aider)} chars, "
+                              f"topic={(_r_entry.get('topic') or '')[:60]!r})")
+            except Exception as _re:
+                print(f"[run_aider_fix] research lookup failed (non-fatal): {_re}")
+
             _attempts_for_aider = await _prior_fix_attempts_context(conv_id)
             if _attempts_for_aider:
                 task = (
@@ -3349,16 +3888,14 @@ async def exec_tool(
                     + _auto_redeliver_note
                 )
             if status == "no_changes":
-                return (
-                    f"AIDER MADE NO CHANGES. {envelope.get('summary','')}\n"
-                    "Run review if you need to verify current state, or explain to the user why no patch was produced."
-                )
+                return await _fallback_to_fixer(f"Aider made no changes: {envelope.get('summary','')[:160]}")
+            if status in {"error", "failed"}:
+                return await _fallback_to_fixer(f"Aider failed: {envelope.get('summary','')[:160]}")
             return (
                 f"AIDER FAILED ({status}): {envelope.get('summary','')}\n"
                 f"stderr: {(envelope.get('stderr_tail') or '')[-800:]}\n"
-                "REQUIRED NEXT TOOL CALL: run_review. Do not call read_file/write_file/run_shell "
-                "or run_fixer for uploaded-project fixes; Reviewer must classify the remaining "
-                "failure and then Aider gets the next scoped repair."
+                "REQUIRED NEXT TOOL CALL: run_review. Do not call read_file/write_file/run_shell; "
+                "Reviewer must classify the remaining failure before another scoped repair."
             )
 
         elif name == "run_review":
@@ -3470,23 +4007,32 @@ async def exec_tool(
                 if scope:
                     lines.append(f"   fix scope: {', '.join(scope[:5])}")
             lines.append("")
-            _use_aider_next = False
+            _aider_next_ctx = None
             if getattr(config, "AIDER_ENABLED", True) and conv_id:
                 try:
-                    _wf_next = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
-                    if not _wf_next:
-                        _wf_next = await db.get_latest_coder_workflow(conv_id)
-                    _use_aider_next = bool(_wf_next and _wf_next.get("mode") == "fix_uploaded_project")
-                except Exception as _wf_next_e:
-                    print(f"[run_review] next-fix workflow lookup failed: {_wf_next_e}")
-            if _use_aider_next:
+                    _aider_next_ctx = await _aider_first_context(
+                        http,
+                        conv_id,
+                        issue_run={
+                            "id": reviewer_run_id,
+                            "role": "reviewer",
+                            "project_id": project_id,
+                            "result_envelope": envelope,
+                        },
+                        project_dir=project_dir,
+                        project_id=project_id,
+                    )
+                except Exception as _aider_next_e:
+                    print(f"[run_review] next-fix Aider context lookup failed: {_aider_next_e}")
+            if _aider_next_ctx:
                 lines.append(
                     f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
                     f"  run_aider_fix(issue_run_id='{reviewer_run_id}', project_dir='{project_dir}', "
                     f"task='Fix the reviewer issues from {reviewer_run_id}')\n"
-                    f"This runs Aider from the uploaded project root. AFTER run_aider_fix returns, "
-                    f"call run_review again to verify the project is now CLEAN. Do NOT manually "
-                    f"read_file / write_file or call run_fixer for uploaded-project reviewer issues."
+                    f"This runs Aider from the existing project root. If Aider cannot resolve the "
+                    f"issue, the backend will fall back to Fixer. AFTER repair returns, call "
+                    f"run_review again to verify the project is now CLEAN. Do NOT manually "
+                    f"read_file / write_file for reviewer issues."
                 )
             else:
                 lines.append(
@@ -3625,16 +4171,46 @@ async def exec_tool(
                 if scope:
                     lines.append(f"   fix scope: {', '.join(scope[:5])}")
             lines.append("")
-            lines.append(
-                f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
-                f"  run_fixer(reviewer_run_id='{acceptance_run_id}')\n"
-                f"If the Fixer touches only docs, call run_acceptance_review again. "
-                f"If it touches source, tests, or manifests, call run_review first, "
-                f"then run_acceptance_review again. Do not call download_project until "
-                f"acceptance is accepted unless the latest user message explicitly asks "
-                f"to ship/download anyway; in that case disclose these issues and package "
-                f"the current state."
-            )
+            _aider_accept_ctx = None
+            if getattr(config, "AIDER_ENABLED", True) and conv_id:
+                try:
+                    _aider_accept_ctx = await _aider_first_context(
+                        http,
+                        conv_id,
+                        issue_run={
+                            "id": acceptance_run_id,
+                            "role": "acceptance",
+                            "project_id": project_id,
+                            "result_envelope": envelope,
+                        },
+                        project_dir=project_dir,
+                        project_id=project_id,
+                    )
+                except Exception as _aider_acc_e:
+                    print(f"[run_acceptance_review] next-fix Aider context lookup failed: {_aider_acc_e}")
+            if _aider_accept_ctx:
+                lines.append(
+                    f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
+                    f"  run_aider_fix(issue_run_id='{acceptance_run_id}', project_dir='{project_dir}', "
+                    f"task='Fix the acceptance issues from {acceptance_run_id}')\n"
+                    f"This runs Aider from the existing project root. If Aider cannot resolve the "
+                    f"issue, the backend will fall back to Fixer. If repair touches only docs, "
+                    f"call run_acceptance_review again. If it touches source, tests, or manifests, "
+                    f"call run_review first, then run_acceptance_review again. Do not call "
+                    f"download_project until acceptance is accepted unless the latest user message "
+                    f"explicitly asks to ship/download anyway."
+                )
+            else:
+                lines.append(
+                    f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
+                    f"  run_fixer(reviewer_run_id='{acceptance_run_id}')\n"
+                    f"If the Fixer touches only docs, call run_acceptance_review again. "
+                    f"If it touches source, tests, or manifests, call run_review first, "
+                    f"then run_acceptance_review again. Do not call download_project until "
+                    f"acceptance is accepted unless the latest user message explicitly asks "
+                    f"to ship/download anyway; in that case disclose these issues and package "
+                    f"the current state."
+                )
             return "\n".join(lines)
 
         elif name == "run_fixer":
@@ -4484,56 +5060,44 @@ async def exec_tool(
                         _arch_env = _arch_run.get("result_envelope") or {}
                         _manifest = _arch_env.get("manifest") or []
                         _success = _arch_env.get("success_criteria") or []
-                        _build_cmd = _arch_env.get("build_cmd", "")
-                        _test_cmd = _arch_env.get("test_cmd", "")
                         if _manifest:
-                            _arch_section = ["\n\n--- Architect Manifest (FOLLOW THIS PLAN) ---"]
-                            _arch_section.append(
-                                f"Project: {_arch_env.get('project_id','?')} "
-                                f"({_arch_env.get('language','?')}, "
-                                f"build_system={_arch_env.get('build_system','?')})"
-                            )
-                            if _build_cmd:
-                                _arch_section.append(f"Build command: {_build_cmd}")
-                            if _test_cmd:
-                                _arch_section.append(f"Test command: {_test_cmd}")
-                            _arch_section.append("")
-                            _arch_section.append(f"Files to create ({len(_manifest)}):")
-                            for _m in _manifest[:30]:
-                                _arch_section.append(
-                                    f"  - {_m.get('path','?')} — {_m.get('purpose','')}"
-                                )
-                            if _success:
-                                _arch_section.append("")
-                                _arch_section.append("Success criteria (project is done when ALL pass):")
-                                for _c in _success[:8]:
-                                    _arch_section.append(f"  - {_c}")
-                            _deps = _arch_env.get("external_deps") or []
-                            if _deps:
-                                _arch_section.append("")
-                                _arch_section.append("External dependencies:")
-                                for _d in _deps[:10]:
-                                    _arch_section.append(
-                                        f"  - {_d.get('name','?')} {_d.get('version','')}"
-                                    )
-                            _risks = _arch_env.get("risk_notes") or []
-                            if _risks:
-                                _arch_section.append("")
-                                _arch_section.append("Risk notes:")
-                                for _r in _risks[:5]:
-                                    _arch_section.append(f"  - {_r}")
-                            _arch_section.append(
-                                "\nFollow the manifest exactly — create every listed file, "
-                                "use the listed build/test commands, satisfy the success "
-                                "criteria. The Reviewer will verify against this plan."
-                            )
-                            _arch_text = "\n".join(_arch_section)
+                            _arch_text = _build_architect_context(_arch_env)
                             context = (context + _arch_text) if context else _arch_text.strip()
                             print(f"[CODEGEN] Injected architect manifest from "
                                   f"{_arch_run.get('id')}: {len(_manifest)} files, "
                                   f"{len(_success)} criteria")
+                            # Wire the manifest into the build-completeness gate.
+                            # Without this, the "did it create every planned file?"
+                            # check (_expected_files at the undershoot block below)
+                            # is empty unless the model passed required_files — so a
+                            # partial build (e.g. 4/9 files) sails through as
+                            # "succeeded". The Architect plan is the authoritative
+                            # file list, so treat it as the strict manifest here.
+                            if not required_files:
+                                required_files = _manifest_required_code_files(_manifest)
+                                if required_files:
+                                    print(f"[CODEGEN] Manifest → completeness gate: "
+                                          f"{len(required_files)} required code file(s)")
+                            if not architect_run_id:
+                                architect_run_id = _arch_run.get("id") or ""
                 except Exception as _ame:
                     print(f"[CODEGEN] Architect manifest injection failed (non-fatal): {_ame}")
+
+            # ── Scale the round budget off the plan's file count ──
+            # max_rounds is the agent's per-run iteration CEILING (worker
+            # max_iteration_per_run), not a target — the agent stops when it
+            # emits `finish`. The default 20 was far too low for multi-file
+            # builds (each file ≈ 2 iterations + setup/verify), so the agent
+            # ran out at ~4 files. Scale generously off the planned file count
+            # (floored at the configurable default, capped to keep a single
+            # worker call bounded). The auto-continue loop below mops up any
+            # files still missing after this pass.
+            if required_files:
+                max_rounds = _scaled_build_rounds(
+                    len(required_files), config.OPENHANDS_MAX_ROUNDS, cap=140,
+                )
+                print(f"[CODEGEN:OH] Scaled max_rounds={max_rounds} "
+                      f"for {len(required_files)} planned file(s)")
 
             oh_payload = {
                 "task": task, "model": coder_model,
@@ -4901,6 +5465,76 @@ async def exec_tool(
                         _satisfied = [n for n in _expected_files if n not in _missing]
                     _present = len(_expected_files) - len(_missing)
                     print(f"[CODEGEN:OH] Manifest check: {_present}/{len(_expected_files)} expected files present, missing={_missing[:8]}")
+
+                    # ── Backend-owned bounded auto-continue ──
+                    # The build stopped before writing every planned file. Rather
+                    # than rely on the model to notice and call generate_code again
+                    # (it usually jumps to run_review instead), the BACKEND drives up
+                    # to a manifest-size-scaled number of "continue" passes that
+                    # create ONLY the missing files, re-checking the manifest after
+                    # each. Builder→builder
+                    # continuation on the same project — not the reverted
+                    # architect→builder handoff, and not a blocking gate: it actively
+                    # builds, then the undershoot decision below uses the final state.
+                    _continue_passes = 0
+                    _max_continue_passes = _max_builder_continue_passes(len(_expected_files))
+                    while (_manifest_strict and _missing and _project_id
+                           and _continue_passes < _max_continue_passes):
+                        _continue_passes += 1
+                        _missing_before = set(_missing)
+                        _cont_rounds = _scaled_build_rounds(
+                            len(_missing), config.OPENHANDS_MAX_ROUNDS,
+                        )
+                        await events.emit(conv_id, "tool_progress", {
+                            "tool": "generate_code", "icon": "wand",
+                            "status": (f"🔁 Continue pass {_continue_passes}/"
+                                       f"{_max_continue_passes}: building "
+                                       f"{len(_missing)} missing file(s)…"),
+                        })
+                        print(f"[CODEGEN:OH] Auto-continue pass {_continue_passes}: "
+                              f"{len(_missing)} missing, rounds={_cont_rounds}, "
+                              f"limit={_max_continue_passes}, "
+                              f"missing={_missing[:8]}")
+                        try:
+                            _cont_result = await _run_builder_continue_pass(
+                                http, openhands_url, oh_payload, _project_id,
+                                list(_missing), _cont_rounds,
+                            )
+                        except asyncio.CancelledError:
+                            await _signal_oh_cancel("chat stream cancelled during continue pass")
+                            await _finalize_run("cancelled", {"error": "Run cancelled by user"})
+                            raise
+                        if not (_cont_result and _cont_result.get("status") in ("ok", "stuck")):
+                            print(f"[CODEGEN:OH] Continue pass {_continue_passes} "
+                                  f"produced no usable result; stopping")
+                            break
+                        _rescanned = await _scan_project_files(http, project_dir)
+                        if _rescanned:
+                            files = _rescanned
+                        _satisfied, _missing = _manifest_presence(
+                            files, project_dir, _expected_files,
+                        )
+                        _present = len(_expected_files) - len(_missing)
+                        print(f"[CODEGEN:OH] After continue pass {_continue_passes}: "
+                              f"{_present}/{len(_expected_files)} present, "
+                              f"missing={_missing[:8]}")
+                        if not _missing:
+                            await events.emit(conv_id, "tool_progress", {
+                                "tool": "generate_code", "icon": "wand",
+                                "status": (f"✅ Continue filled all "
+                                           f"{len(_expected_files)} planned files"),
+                            })
+                            break
+                        if set(_missing) == _missing_before:
+                            print(f"[CODEGEN:OH] Continue pass {_continue_passes} "
+                                  f"made no manifest progress; stopping backend loop")
+                            await events.emit(conv_id, "tool_progress", {
+                                "tool": "generate_code", "icon": "wand",
+                                "status": (f"⚠ Continue pass {_continue_passes} made "
+                                           f"no progress on {len(_missing)} missing file(s)"),
+                            })
+                            break
+
                     # Architect manifests are exact: any missing planned file keeps the build partial.
                     # Fallback task-scraped manifests keep the older broad undershoot heuristic.
                     _is_incomplete = bool(_missing) if _manifest_strict else (
@@ -4920,8 +5554,12 @@ async def exec_tool(
 
                 # Guard: a build that never reached a proper `finish` (truncated
                 # mid-generation, hit the round cap, etc.) must not be reported as
-                # a complete success even if it wrote a file or two.
-                if not undershoot_warning and not result.get("agent_finished", True):
+                # a complete success even if it wrote a file or two. Skipped for
+                # manifest-strict builds — there `_missing` (after the auto-continue
+                # loop) is authoritative, so a manifest-complete project isn't
+                # flagged just because the FIRST pass stopped without finishing.
+                if (not undershoot_warning and not _manifest_strict
+                        and not result.get("agent_finished", True)):
                     undershoot_warning = (
                         "⚠ INCOMPLETE: the build agent stopped without finishing (it was "
                         "likely truncated or hit the round limit), so the project is probably "

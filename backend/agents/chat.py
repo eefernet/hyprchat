@@ -621,7 +621,7 @@ _TOOL_ICONS = {
     "run_review": ("search-check", "🔍 Reviewing project"),
     "run_acceptance_review": ("clipboard-check", "✅ Acceptance reviewing project"),
     "run_fixer": ("wrench", "🛠 Fixer applying scoped edits"),
-    "run_aider_fix": ("wrench", "🛠 Aider fixing uploaded project"),
+    "run_aider_fix": ("wrench", "🛠 Aider fixing project"),
     "start_coder_workflow": ("activity", "🧭 Starting Coder workflow"),
     "get_coder_workflow": ("activity", "📊 Checking Coder workflow"),
     "cancel_coder_workflow": ("x-circle", "🛑 Cancelling Coder workflow"),
@@ -750,11 +750,16 @@ def _next_action_from_blocked_result(tool_result: str) -> str:
     if m:
         return m.group(1).strip()
     low = text.lower()
-    # Fixer budget exhausted after research → the model must hand-fix; never
-    # recommend run_fixer here (it is cap-blocked).
+    # Automated repair budget exhausted after research: stop and ask the user.
+    # Manual edits are only allowed after explicit user authorization.
+    if ("full automated repair budget" in low or "automated repair budget is exhausted" in low
+            or "authorize manual intervention" in low):
+        return "respond to the user: summarize the remaining issue and ask whether to ship as-is or authorize manual intervention"
+    # Legacy hand-fix wording may still appear in old saved tool results. Treat
+    # it as stop-and-ask instead of recommending write_file/run_shell.
     if ("full budget" in low or "fix the remaining issue" in low
             or "hand-fix" in low or "directly yourself" in low):
-        return "edit the files directly with write_file + run_shell, then run_acceptance_review(...)"
+        return "respond to the user: summarize the remaining issue and ask whether to ship as-is or authorize manual intervention"
     # Hard cap reached → summarize for the user instead of looping a tool.
     if "hard cap" in low or "ship as-is" in low or "ship anyway" in low:
         return "respond to the user: summarize changes, state the remaining issue, and ask whether to ship as-is"
@@ -1605,7 +1610,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     "ALWAYS call plan_project first to produce the structured plan, then "
                     "call generate_code to build it. Do NOT skip planning, even for builds "
                     "that look simple. generate_code builds entire projects autonomously. "
-                    "Call it ONCE. If it fails, use write_file + run_shell.\n\n"
+                    "For incomplete Builder results, call generate_code again with the "
+                    "same project_id and a task naming the missing files; do NOT switch "
+                    "to manual file tools unless the user explicitly asks for a manual "
+                    "fallback.\n\n"
                 )
             else:
                 tool_sys += (
@@ -1620,20 +1628,36 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     "Call it ONCE. If it fails, use write_file + run_shell.\n\n"
                 )
 
-        tool_sys += (
-            "### RULES\n"
-            "1. FIRST response MUST be a tool call. Exception: for a simple direct "
-            "generate_code build, include the one-sentence skip-plan note and the "
-            "generate_code tool call in the same response.\n"
-            "2. NEVER write code in chat text — use execute_code, write_file, or generate_code.\n"
-            "3. execute_code = run code directly (NO stdin, NO sys.argv). For scripts with args: write_file + run_shell.\n"
-            "4. When code fails: read the error, fix the ROOT CAUSE, try DIFFERENTLY.\n"
-            "5. After success: download_file/download_project, then summarize for user. STOP.\n\n"
-            "### AVOID\n"
-            "- Do NOT start dev servers (npm start, flask run) — they hang forever.\n"
-            "- Do NOT use input() — no stdin available.\n"
-            "- Do NOT repeat failed commands without changing something.\n"
-        )
+        if _is_v2_persona:
+            tool_sys += (
+                "### RULES\n"
+                "1. FIRST response MUST be a tool call: plan_project for a new build, "
+                "or generate_code when continuing a partial Builder result.\n"
+                "2. NEVER write code in chat text — use the Builder via generate_code "
+                "for project creation.\n"
+                "3. execute_code = run code directly (NO stdin, NO sys.argv). For scripts with args: write_file + run_shell.\n"
+                "4. When code fails: read the error, fix the ROOT CAUSE, try DIFFERENTLY.\n"
+                "5. After Builder success: run_review, then acceptance, then delivery. STOP.\n\n"
+                "### AVOID\n"
+                "- Do NOT start dev servers (npm start, flask run) — they hang forever.\n"
+                "- Do NOT use input() — no stdin available.\n"
+                "- Do NOT repeat failed commands without changing something.\n"
+            )
+        else:
+            tool_sys += (
+                "### RULES\n"
+                "1. FIRST response MUST be a tool call. Exception: for a simple direct "
+                "generate_code build, include the one-sentence skip-plan note and the "
+                "generate_code tool call in the same response.\n"
+                "2. NEVER write code in chat text — use execute_code, write_file, or generate_code.\n"
+                "3. execute_code = run code directly (NO stdin, NO sys.argv). For scripts with args: write_file + run_shell.\n"
+                "4. When code fails: read the error, fix the ROOT CAUSE, try DIFFERENTLY.\n"
+                "5. After success: download_file/download_project, then summarize for user. STOP.\n\n"
+                "### AVOID\n"
+                "- Do NOT start dev servers (npm start, flask run) — they hang forever.\n"
+                "- Do NOT use input() — no stdin available.\n"
+                "- Do NOT repeat failed commands without changing something.\n"
+            )
 
         if messages and messages[0]["role"] == "system":
             messages[0]["content"] += tool_sys
@@ -2722,6 +2746,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         tool_name == "generate_code"
                         and not _direct_codegen_note_sent
                         and not ephemeral
+                        and not _is_v2_persona
                         and not (content or "").strip()
                         and not str(tool_args.get("project_id") or "").strip()
                     ):

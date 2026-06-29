@@ -63,6 +63,28 @@ _ARCHITECT_PROMPT = """You are the Architect — a focused project planning agen
   "external_deps": [
     {{"name": "<dependency name>", "version": "<version or 'latest'>"}}
   ],
+  "dependency_policy": {{
+    "runtime": "<runtime/version constraint, e.g. 'Python 3.13'>",
+    "packages": [
+      {{"name": "<dependency>", "version": "<version/latest>", "reason": "<why this package/version is compatible>"}}
+    ],
+    "constraints": [
+      "<dependency rule, e.g. use pygame-ce instead of pygame for Python 3.13 wheels>"
+    ]
+  }},
+  "entrypoint": {{
+    "run_cmd": "<exact command to run the app, e.g. 'python main.py'>",
+    "module": "<main file/module, e.g. 'main.py'>"
+  }},
+  "shared_constants": [
+    {{"name": "<EXACT_CONSTANT_NAME>", "value": "<literal/default value>", "defined_in": "<file path>", "used_by": ["<file path>"]}}
+  ],
+  "interfaces": [
+    {{"file": "<file path>", "name": "<Class.method or function>", "signature": "<exact signature>", "notes": "<how other files call it>"}}
+  ],
+  "cross_file_contracts": [
+    {{"producer": "<file that defines it>", "consumer": "<file that uses it>", "contract": "<exact cross-file rule>"}}
+  ],
   "risk_notes": [
     "<one-line bullet about something that could fail or needs care>"
   ],
@@ -77,8 +99,152 @@ _ARCHITECT_PROMPT = """You are the Architect — a focused project planning agen
 3. `manifest` should list 3-25 source/config files for typical projects. Be concrete (real paths, not placeholders).
 4. `success_criteria` MUST include "build_cmd exits 0" or equivalent — the Reviewer uses these to gate completion.
 5. If the language is uncertain, pick the most likely one and add a `risk_notes` entry.
+6. For any multi-file app, include an interface contract: shared constants used across files, public methods/functions called across files, runtime entrypoint, dependency policy, and cross-file contracts. Use exact names/signatures so Builder can keep files consistent.
 
 Output the JSON now:"""
+
+
+def _contract_text(value, max_len: int = 500) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text[:max_len]
+
+
+def _contract_string_list(value, *, max_items: int = 20,
+                          max_len: int = 300) -> list[str]:
+    raw_items = value if isinstance(value, list) else [value]
+    out: list[str] = []
+    for raw in raw_items:
+        if isinstance(raw, dict):
+            text = "; ".join(
+                f"{_contract_text(k, 60)}: {_contract_text(v, max_len)}"
+                for k, v in raw.items()
+                if _contract_text(v, max_len)
+            )
+        else:
+            text = _contract_text(raw, max_len)
+        if text:
+            out.append(text)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _contract_dict_list(value, keys: tuple[str, ...], *,
+                        list_keys: tuple[str, ...] = (),
+                        max_items: int = 30) -> list[dict]:
+    raw_items = value if isinstance(value, list) else [value]
+    out: list[dict] = []
+    for raw in raw_items:
+        item: dict = {}
+        if isinstance(raw, str):
+            if "contract" in keys:
+                item["contract"] = _contract_text(raw)
+            elif "notes" in keys:
+                item["notes"] = _contract_text(raw)
+            elif "name" in keys:
+                item["name"] = _contract_text(raw)
+        elif isinstance(raw, dict):
+            for key in keys:
+                val = raw.get(key)
+                if key in list_keys:
+                    vals = _contract_string_list(val, max_items=12, max_len=160)
+                    if vals:
+                        item[key] = vals
+                else:
+                    text = _contract_text(val)
+                    if text:
+                        item[key] = text
+        if item:
+            out.append(item)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _normalize_dependency_policy(value) -> dict | None:
+    if not value:
+        return None
+    if isinstance(value, str) or isinstance(value, list):
+        constraints = _contract_string_list(value, max_items=12)
+        return {"constraints": constraints} if constraints else None
+    if not isinstance(value, dict):
+        return None
+    policy: dict = {}
+    runtime = _contract_text(value.get("runtime"))
+    if runtime:
+        policy["runtime"] = runtime
+    packages = _contract_dict_list(
+        value.get("packages") or value.get("dependencies"),
+        ("name", "version", "reason", "constraint"),
+        max_items=15,
+    )
+    if packages:
+        policy["packages"] = packages
+    constraints = _contract_string_list(value.get("constraints") or value.get("rules"),
+                                        max_items=12)
+    if constraints:
+        policy["constraints"] = constraints
+    return policy or None
+
+
+def _normalize_optional_contract(plan: dict) -> None:
+    """Keep Architect contract fields advisory and forgiving.
+
+    Bad optional contract fields should never make plan_project fail. Normalize
+    what is useful and drop anything malformed so older/weak planner output
+    degrades to the pre-contract behavior.
+    """
+    entry = plan.get("entrypoint")
+    if isinstance(entry, dict):
+        clean_entry = {
+            key: _contract_text(entry.get(key))
+            for key in ("run_cmd", "module")
+            if _contract_text(entry.get(key))
+        }
+        if clean_entry:
+            plan["entrypoint"] = clean_entry
+        else:
+            plan.pop("entrypoint", None)
+    else:
+        plan.pop("entrypoint", None)
+
+    dep_policy = _normalize_dependency_policy(plan.get("dependency_policy"))
+    if dep_policy:
+        plan["dependency_policy"] = dep_policy
+    else:
+        plan.pop("dependency_policy", None)
+
+    constants = _contract_dict_list(
+        plan.get("shared_constants"),
+        ("name", "value", "defined_in", "used_by"),
+        list_keys=("used_by",),
+        max_items=25,
+    )
+    if constants:
+        plan["shared_constants"] = constants
+    else:
+        plan.pop("shared_constants", None)
+
+    interfaces = _contract_dict_list(
+        plan.get("interfaces"),
+        ("file", "name", "signature", "notes"),
+        max_items=40,
+    )
+    if interfaces:
+        plan["interfaces"] = interfaces
+    else:
+        plan.pop("interfaces", None)
+
+    contracts = _contract_dict_list(
+        plan.get("cross_file_contracts"),
+        ("producer", "consumer", "contract", "notes"),
+        max_items=30,
+    )
+    if contracts:
+        plan["cross_file_contracts"] = contracts
+    else:
+        plan.pop("cross_file_contracts", None)
 
 
 def _try_parse_architect_json(text: str) -> tuple[dict | None, str]:
@@ -118,6 +284,7 @@ def _validate_plan(plan: dict) -> tuple[bool, str]:
         return False, "success_criteria must be a list of strings"
     if not plan["success_criteria"]:
         return False, "success_criteria cannot be empty"
+    _normalize_optional_contract(plan)
     return True, ""
 
 
@@ -552,6 +719,82 @@ def _render_deps_block(build_system: str, deps: list[dict]) -> str:
     return "\n".join(f"- **{d.get('name','?')}** {d.get('version','')}" for d in deps[:15])
 
 
+def _md_cell(value) -> str:
+    return _contract_text(value, 220).replace("|", "\\|")
+
+
+def _render_interface_contract(plan: dict) -> str:
+    """Render the optional Architect interface contract for the plan card."""
+    sections: list[str] = []
+
+    entry = plan.get("entrypoint") or {}
+    dep_policy = plan.get("dependency_policy") or {}
+    constants = plan.get("shared_constants") or []
+    interfaces = plan.get("interfaces") or []
+    contracts = plan.get("cross_file_contracts") or []
+
+    if entry:
+        sections.append("**Entrypoint**")
+        if entry.get("run_cmd"):
+            sections.append(f"- Run command: `{entry['run_cmd']}`")
+        if entry.get("module"):
+            sections.append(f"- Module/file: `{entry['module']}`")
+
+    if dep_policy:
+        if sections:
+            sections.append("")
+        sections.append("**Dependency Policy**")
+        if dep_policy.get("runtime"):
+            sections.append(f"- Runtime: {dep_policy['runtime']}")
+        for pkg in (dep_policy.get("packages") or [])[:10]:
+            name = pkg.get("name", "?")
+            version = pkg.get("version", "")
+            detail = pkg.get("reason") or pkg.get("constraint") or ""
+            spec = f"`{name}`" + (f" `{version}`" if version else "")
+            sections.append(f"- {spec}" + (f" - {detail}" if detail else ""))
+        for rule in (dep_policy.get("constraints") or [])[:8]:
+            sections.append(f"- {rule}")
+
+    if constants:
+        if sections:
+            sections.append("")
+        sections.append("**Shared Constants**")
+        sections.append("")
+        sections.append("| Name | Value | Defined In | Used By |")
+        sections.append("|---|---:|---|---|")
+        for c in constants[:15]:
+            used_by = ", ".join(c.get("used_by") or [])
+            sections.append(
+                f"| `{_md_cell(c.get('name', '?'))}` | `{_md_cell(c.get('value', ''))}` | "
+                f"`{_md_cell(c.get('defined_in', ''))}` | {_md_cell(used_by)} |"
+            )
+
+    if interfaces:
+        if sections:
+            sections.append("")
+        sections.append("**Interfaces**")
+        sections.append("")
+        sections.append("| File | Name | Signature | Notes |")
+        sections.append("|---|---|---|---|")
+        for iface in interfaces[:20]:
+            sections.append(
+                f"| `{_md_cell(iface.get('file', ''))}` | `{_md_cell(iface.get('name', ''))}` | "
+                f"`{_md_cell(iface.get('signature', ''))}` | {_md_cell(iface.get('notes', ''))} |"
+            )
+
+    if contracts:
+        if sections:
+            sections.append("")
+        sections.append("**Cross-file Contracts**")
+        for contract in contracts[:15]:
+            producer = contract.get("producer", "?")
+            consumer = contract.get("consumer", "?")
+            text = contract.get("contract") or contract.get("notes") or ""
+            sections.append(f"- `{producer}` -> `{consumer}`: {text}")
+
+    return "\n".join(sections)
+
+
 def format_plan_for_chat(plan: dict) -> str:
     """Render a successful Architect plan as rich markdown for the PlanPanel.
 
@@ -616,6 +859,14 @@ def format_plan_for_chat(plan: dict) -> str:
         sections.append(f"## 3. Dependencies ({len(deps)})")
         sections.append("")
         sections.append(_render_deps_block(build_system, deps))
+
+    # Interface contract
+    contract_md = _render_interface_contract(plan)
+    if contract_md:
+        sections.append("")
+        sections.append("## Interface Contract")
+        sections.append("")
+        sections.append(contract_md)
 
     # 4. Tests required
     tests = plan.get("tests_required") or []
