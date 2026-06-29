@@ -1,6 +1,9 @@
 import asyncio
 import importlib
+import shlex
+import subprocess
 import sys
+import tarfile
 import types
 from pathlib import Path
 
@@ -854,6 +857,69 @@ def test_new_coder_tools_are_registered():
 
     assert "Primary repair editor" in CODEAGENT_TOOLS["run_aider_fix"]["function"]["description"]
     assert "project_id" in CODEAGENT_TOOLS["run_aider_fix"]["function"]["parameters"]["properties"]
+
+
+def test_project_archive_excludes_aider_runtime_files(tmp_path):
+    import tools
+
+    project = tmp_path / "project"
+    paths = {
+        "main.py": "print('ok')\n",
+        "README.md": "# Demo\n",
+        "requirements.txt": "pygame-ce>=2.5.0\n",
+        ".gitignore": ".aider*\n",
+        ".aider.chat.history.md": "private repair transcript\n",
+        ".aider.tags.cache.v4/cache.db": "sqlite bytes",
+        "nested/.aider.local.md": "nested aider note\n",
+        "__pycache__/main.cpython-313.pyc": "bytecode",
+        ".git/config": "[core]\n",
+    }
+    for rel, content in paths.items():
+        path = project / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+    qproject = shlex.quote(str(project))
+    included = subprocess.check_output(
+        f"cd {qproject} && find . -type f {tools._project_archive_find_include_filter()} | sort",
+        shell=True,
+        text=True,
+    ).splitlines()
+    excluded = subprocess.check_output(
+        f"cd {qproject} && find . \\( {tools._project_archive_find_exclude_expr()} \\) -print | sort",
+        shell=True,
+        text=True,
+    ).splitlines()
+
+    assert "./main.py" in included
+    assert "./README.md" in included
+    assert "./requirements.txt" in included
+    assert "./.gitignore" in included
+    assert not any(".aider" in item for item in included)
+    assert "./.aider.chat.history.md" in excluded
+    assert "./.aider.tags.cache.v4/cache.db" in excluded
+    assert "./nested/.aider.local.md" in excluded
+    assert "./__pycache__/main.cpython-313.pyc" in excluded
+    assert "./.git/config" in excluded
+
+    archive = tmp_path / "project.tar.gz"
+    subprocess.run(
+        f"cd {qproject} && tar czf {shlex.quote(str(archive))} "
+        f"{tools._project_archive_tar_exclude_args()} .",
+        shell=True,
+        check=True,
+        text=True,
+    )
+    with tarfile.open(archive, "r:gz") as tf:
+        names = set(tf.getnames())
+
+    assert "./main.py" in names
+    assert "./README.md" in names
+    assert "./requirements.txt" in names
+    assert "./.gitignore" in names
+    assert not any(".aider" in name for name in names)
+    assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
+    assert not any(name == "./.git" or name.startswith("./.git/") for name in names)
 
 
 # ---------------------------------------------------------------------------

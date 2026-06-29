@@ -54,6 +54,70 @@ def _artifact_index_text(path: str, filename: str, kind: str, mime_type: str = "
     return extract_indexable_text(path, kind, mime_type, max_chars, filename=filename)
 
 
+_PROJECT_ARCHIVE_TAR_EXCLUDE_PATTERNS = (
+    ".pytest_cache", "*/.pytest_cache/*",
+    "__pycache__", "*/__pycache__/*",
+    "*.pyc",
+    "*.egg-info", "*.egg-info/*",
+    ".mypy_cache", "*/.mypy_cache/*",
+    ".ruff_cache", "*/.ruff_cache/*",
+    ".cache", "*/.cache/*",
+    ".git", "*/.git/*",
+    "node_modules", "*/node_modules/*",
+    "dist", "*/dist/*",
+    "build", "*/build/*",
+    "target", "*/target/*",
+    ".next", "*/.next/*",
+    "venv", "*/venv/*",
+    ".venv", "*/.venv/*",
+    ".npm", "*/.npm/*",
+    # Aider repair metadata is useful for the agent loop but must not ship.
+    ".aider*", "./.aider*", "*/.aider*", "*/.aider*/*",
+)
+
+_PROJECT_ARCHIVE_FIND_EXCLUDE_TESTS = (
+    ("path", "*/.pytest_cache/*"),
+    ("path", "*/__pycache__/*"),
+    ("name", "*.pyc"),
+    ("path", "*.egg-info/*"),
+    ("path", "*/.mypy_cache/*"),
+    ("path", "*/.ruff_cache/*"),
+    ("path", "*/.cache/*"),
+    ("path", "*/.git/*"),
+    ("path", "*/node_modules/*"),
+    ("path", "*/dist/*"),
+    ("path", "*/build/*"),
+    ("path", "*/target/*"),
+    ("path", "*/.next/*"),
+    ("path", "*/venv/*"),
+    ("path", "*/.venv/*"),
+    ("path", "*/.npm/*"),
+    ("path", "*/.aider*"),
+    ("path", "*/.aider*/*"),
+)
+
+
+def _project_archive_tar_exclude_args() -> str:
+    return " ".join(
+        f"--exclude={shlex.quote(pattern)}"
+        for pattern in _PROJECT_ARCHIVE_TAR_EXCLUDE_PATTERNS
+    )
+
+
+def _project_archive_find_include_filter() -> str:
+    return " ".join(
+        f"! -{kind} {shlex.quote(pattern)}"
+        for kind, pattern in _PROJECT_ARCHIVE_FIND_EXCLUDE_TESTS
+    )
+
+
+def _project_archive_find_exclude_expr() -> str:
+    return " -o ".join(
+        f"-{kind} {shlex.quote(pattern)}"
+        for kind, pattern in _PROJECT_ARCHIVE_FIND_EXCLUDE_TESTS
+    )
+
+
 async def _git_checkpoint(http, project_dir: str, label: str) -> str:
     """Commit the project state after a build/fix cycle (best-effort).
 
@@ -3236,46 +3300,14 @@ async def exec_tool(
             tarname = f"{dirname}.tar.gz"
             qdir = shlex.quote(directory)
             qtarname = shlex.quote(f"/tmp/{tarname}")
-            exclude_args = (
-                "--exclude='.pytest_cache' --exclude='*/.pytest_cache/*' "
-                "--exclude='__pycache__' --exclude='*/__pycache__/*' "
-                "--exclude='*.pyc' --exclude='*.egg-info' --exclude='*.egg-info/*' "
-                "--exclude='.mypy_cache' --exclude='*/.mypy_cache/*' "
-                "--exclude='.ruff_cache' --exclude='*/.ruff_cache/*' "
-                "--exclude='.cache' --exclude='*/.cache/*' "
-                "--exclude='.git' --exclude='*/.git/*' "
-                "--exclude='node_modules' --exclude='*/node_modules/*' "
-                "--exclude='dist' --exclude='*/dist/*' "
-                "--exclude='build' --exclude='*/build/*' "
-                "--exclude='target' --exclude='*/target/*' "
-                "--exclude='.next' --exclude='*/.next/*' "
-                "--exclude='venv' --exclude='*/venv/*' "
-                "--exclude='.venv' --exclude='*/.venv/*' "
-                "--exclude='.npm' --exclude='*/.npm/*'"
-            )
+            exclude_args = _project_archive_tar_exclude_args()
+            include_filter = _project_archive_find_include_filter()
+            exclude_expr = _project_archive_find_exclude_expr()
             summary_cmd = (
                 f"cd {qdir} && "
-                "included=$(find . -type f "
-                "! -path '*/.pytest_cache/*' ! -path '*/__pycache__/*' ! -name '*.pyc' "
-                "! -path '*.egg-info/*' ! -path '*/.mypy_cache/*' ! -path '*/.ruff_cache/*' "
-                "! -path '*/.cache/*' ! -path '*/.git/*' ! -path '*/node_modules/*' "
-                "! -path '*/dist/*' ! -path '*/build/*' ! -path '*/target/*' "
-                "! -path '*/.next/*' ! -path '*/venv/*' ! -path '*/.venv/*' "
-                "! -path '*/.npm/*' | wc -l); "
-                "excluded=$(find . \\( "
-                "-path '*/.pytest_cache/*' -o -path '*/__pycache__/*' -o -name '*.pyc' "
-                "-o -path '*.egg-info/*' -o -path '*/.mypy_cache/*' -o -path '*/.ruff_cache/*' "
-                "-o -path '*/.cache/*' -o -path '*/.git/*' -o -path '*/node_modules/*' "
-                "-o -path '*/dist/*' -o -path '*/build/*' -o -path '*/target/*' "
-                "-o -path '*/.next/*' -o -path '*/venv/*' -o -path '*/.venv/*' "
-                "-o -path '*/.npm/*' \\) -print | wc -l); "
-                "excluded_list=$(find . \\( "
-                "-path '*/.pytest_cache/*' -o -path '*/__pycache__/*' -o -name '*.pyc' "
-                "-o -path '*.egg-info/*' -o -path '*/.mypy_cache/*' -o -path '*/.ruff_cache/*' "
-                "-o -path '*/.cache/*' -o -path '*/.git/*' -o -path '*/node_modules/*' "
-                "-o -path '*/dist/*' -o -path '*/build/*' -o -path '*/target/*' "
-                "-o -path '*/.next/*' -o -path '*/venv/*' -o -path '*/.venv/*' "
-                "-o -path '*/.npm/*' \\) -print | sort | head -20); "
+                f"included=$(find . -type f {include_filter} | wc -l); "
+                f"excluded=$(find . \\( {exclude_expr} \\) -print | wc -l); "
+                f"excluded_list=$(find . \\( {exclude_expr} \\) -print | sort | head -20); "
                 "printf 'PACKAGING_SUMMARY:%s:%s\\n' \"$included\" \"$excluded\"; "
                 "printf '%s\n' \"$excluded_list\" | sed '/^$/d' | sed 's/^/EXCLUDED_EXAMPLE:/'"
             )
