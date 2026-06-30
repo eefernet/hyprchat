@@ -55,6 +55,43 @@ def test_python_adapter_catches_cli_package_contract():
     assert "/root/venv/bin/python3 -m taskforge --help" in contract["smoke_cmds"]
     assert contract["safe_lint"] is True
     assert "__main__.py" in " ".join(contract["package_rules"])
+    iso = contract["isolated_verification"]
+    assert iso["applicable"] is True
+    assert iso["required_for_delivery"] is True
+    assert "-m venv" in iso["setup_cmd"]
+    assert any("pip check" in cmd for cmd in iso["verify_cmds"])
+
+
+def test_python_adapter_adds_pygame_isolated_runtime_smoke():
+    manifest = [
+        "pyproject.toml",
+        "main.py",
+        "ui/scoreboard.py",
+    ]
+
+    contract = language_adapters.detect_contract(manifest, "python")
+    runtime_cmds = contract["isolated_verification"]["runtime_smoke_cmds"]
+
+    assert runtime_cmds
+    assert "pygame.font.Font" in runtime_cmds[0]
+    assert "SDL_VIDEODRIVER=dummy" in runtime_cmds[0]
+
+
+def test_manifest_adapters_expose_isolated_verification_contracts():
+    cases = [
+        (["package.json", "src/index.js"], "javascript"),
+        (["Cargo.toml", "src/main.rs"], "rust"),
+        (["go.mod", "main.go"], "go"),
+        (["pom.xml", "src/main/java/App.java"], "java"),
+    ]
+
+    for manifest, language in cases:
+        contract = language_adapters.detect_contract(manifest, language)
+        iso = contract["isolated_verification"]
+        assert iso["applicable"] is True
+        assert iso["required_for_delivery"] is True
+        assert iso["setup_cmd"]
+        assert iso["verify_cmds"]
 
 
 def test_aider_scope_expands_cli_import_mismatch():

@@ -419,6 +419,156 @@ async def _run_in_sandbox(http, project_dir: str, command: str,
         return {"exit_code": -1, "stdout": "", "stderr": f"Exception: {e}"}
 
 
+def _isolated_tmp_path(run_id: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", run_id or uuid.uuid4().hex[:12]).strip("-")
+    return f"/tmp/daedalus-review-{safe or uuid.uuid4().hex[:12]}"
+
+
+def _isolated_scope_for_failure(marker: str, language: str, output: str,
+                                project_files: list[str]) -> tuple[str, list[int], list[str]]:
+    refs = _extract_file_refs(output)
+    resolved = []
+    first_file = ""
+    first_lines: list[int] = []
+    for ref in refs:
+        rel = _resolve_project_file(ref.get("file", ""), project_files)
+        if rel and rel not in resolved:
+            resolved.append(rel)
+            if not first_file:
+                first_file = rel
+                if ref.get("line"):
+                    first_lines = [ref["line"]]
+    if resolved:
+        return first_file, first_lines, resolved[:5]
+    marker = marker if marker and marker != "(none)" else ""
+    if marker in {"pyproject.toml", "requirements.txt", "package.json", "Cargo.toml",
+                  "go.mod", "pom.xml", "build.gradle", "build.gradle.kts", "CMakeLists.txt"}:
+        return marker, [], [marker]
+    if language == "python":
+        fallback = "pyproject.toml" if "pyproject.toml" in project_files else (
+            "requirements.txt" if "requirements.txt" in project_files else "")
+        return fallback, [], [fallback] if fallback else []
+    return "", [], []
+
+
+async def _run_isolated_verification(http, project_dir: str, project_files: list[str],
+                                     language: str, marker: str, run_id: str,
+                                     step_cb) -> dict:
+    """Run adapter-provided clean-environment checks.
+
+    This is intentionally adapter driven: Reviewer only understands the common
+    setup/verify/runtime phases and turns any non-zero exit into a deterministic
+    delivery-blocking issue.
+    """
+    try:
+        from agents import language_adapters as _la
+        contract = _la.detect_contract(project_files, language)
+    except Exception as e:
+        return {
+            "applicable": False,
+            "required": False,
+            "status": "error",
+            "reason": f"adapter detection failed: {e}",
+            "cmds": [],
+            "results": [],
+            "exit": None,
+            "output_tail": "",
+            "cleanup_paths": [],
+        }
+
+    iso = contract.get("isolated_verification") or {}
+    applicable = bool(iso.get("applicable"))
+    required = bool(iso.get("required_for_delivery"))
+    cleanup_paths = list(iso.get("cleanup_paths") or [])
+    summary = {
+        "applicable": applicable,
+        "required": required,
+        "status": "skipped" if not applicable else "pending",
+        "reason": iso.get("reason", ""),
+        "cmds": [],
+        "results": [],
+        "exit": None,
+        "output_tail": "",
+        "cleanup_paths": cleanup_paths,
+    }
+    if not applicable:
+        return summary
+
+    tmp = _isolated_tmp_path(run_id)
+
+    def fmt(cmd: str) -> str:
+        return (cmd or "").replace("{tmp}", tmp)
+
+    commands: list[tuple[str, str, int]] = []
+    setup_cmd = iso.get("setup_cmd") or ""
+    if setup_cmd:
+        commands.append(("setup", setup_cmd, 600))
+    for cmd in iso.get("verify_cmds") or []:
+        if cmd:
+            commands.append(("verify", cmd, 300))
+    for cmd in iso.get("runtime_smoke_cmds") or []:
+        if cmd:
+            commands.append(("runtime", cmd, 120))
+
+    failed: dict | None = None
+    try:
+        for phase, raw_cmd, timeout in commands:
+            command = fmt(raw_cmd)
+            summary["cmds"].append(command)
+            await step_cb(f"isolated_{phase}", command)
+            res = await _run_in_sandbox(http, project_dir, command,
+                                        timeout=timeout, run_id=run_id)
+            exit_code = int(res.get("exit_code", 0) or 0)
+            output = ((res.get("stdout") or "") + ("\n" + res.get("stderr", "") if res.get("stderr") else ""))[-3000:]
+            summary["results"].append({
+                "phase": phase,
+                "cmd": command,
+                "exit": exit_code,
+                "output_tail": output[-1200:],
+            })
+            summary["exit"] = exit_code if summary["exit"] is None else max(summary["exit"], exit_code)
+            summary["output_tail"] = (summary["output_tail"] + "\n" + output)[-3000:]
+            _tf = _transport_failure_detail(res)
+            if _tf:
+                failed = {"phase": phase, "cmd": command, "exit": -1, "output": _tf,
+                          "severity": "infra"}
+                break
+            if exit_code != 0:
+                failed = {"phase": phase, "cmd": command, "exit": exit_code,
+                          "output": output,
+                          "severity": "runtime" if phase == "runtime" else "packaging"}
+                break
+    finally:
+        cleanup_cmds = [fmt(path) for path in cleanup_paths if path]
+        if cleanup_cmds:
+            qpaths = " ".join(shlex.quote(path) for path in cleanup_cmds)
+            await step_cb("isolated_cleanup", qpaths)
+            await _run_in_sandbox(http, project_dir, f"rm -rf -- {qpaths}",
+                                  timeout=30, run_id=run_id)
+
+    if failed:
+        file, lines, scope = _isolated_scope_for_failure(
+            marker, language, failed.get("output", ""), project_files
+        )
+        summary["status"] = "failed"
+        summary["failure_issue"] = {
+            "severity": failed["severity"],
+            "file": file,
+            "lines": lines,
+            "summary": (
+                f"Isolated verification {failed['phase']} phase failed "
+                f"(exit {failed['exit']}): `{failed['cmd']}` — "
+                + ((failed.get("output") or "").strip()[-300:] or "no output")
+            )[:800],
+            "suggested_fix_scope": scope,
+        }
+        return summary
+
+    summary["status"] = "passed"
+    summary["exit"] = 0 if summary["exit"] is None else summary["exit"]
+    return summary
+
+
 # Files referenced in error output (Java, Python, Rust, Go, JS/TS).
 _FILE_REFS_RE = re.compile(
     r"(?:^|[\s\(\[])"
@@ -1240,6 +1390,16 @@ async def run_review(http, events, conv_id: str, project_dir: str,
     _phase_exc = ""
     smoke_results: list[dict] = []
     smoke_new_files: list[str] = []
+    isolated_summary = {
+        "applicable": False,
+        "required": False,
+        "status": "not-run",
+        "cmds": [],
+        "results": [],
+        "exit": None,
+        "output_tail": "",
+        "cleanup_paths": [],
+    }
 
     try:
         if build_cmd:
@@ -1365,6 +1525,57 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                 await events.emit(conv_id, "tool_end", {
                     "tool": "run_review", "icon": "search-check",
                     "status": f"⚠ Review found {len(_sf_issues)} runtime issue{'s' if len(_sf_issues) != 1 else ''}",
+                    "run_id": run_id,
+                })
+                if run_id:
+                    try:
+                        await db.update_run(run_id, status="succeeded",
+                                            result_envelope=envelope, ended=True)
+                    except Exception:
+                        pass
+                    cancel_registry.cleanup(run_id)
+                return envelope
+
+            if not project_files:
+                project_files = _files_before_smoke or await _list_project_files(http, project_dir)
+            isolated_summary = await _run_isolated_verification(
+                http, project_dir, project_files, language, marker, run_id, _step
+            )
+            if isolated_summary.get("status") == "failed":
+                issue = isolated_summary.get("failure_issue") or {
+                    "severity": "packaging",
+                    "file": marker if marker != "(none)" else "",
+                    "lines": [],
+                    "summary": "Isolated verification failed.",
+                    "suggested_fix_scope": [marker] if marker and marker != "(none)" else [],
+                }
+                envelope = {
+                    "status": "issues",
+                    "summary": "Build/tests/lint pass, but isolated delivery verification failed.",
+                    "issues": [issue],
+                    "build_cmd": build_cmd, "test_cmd": test_cmd, "lint_cmd": lint_cmd,
+                    "build_exit": 0, "test_exit": 0, "lint_exit": 0,
+                    "smoke_cmds": [sr["cmd"] for sr in smoke_results],
+                    "smoke_exit": max((sr["exit"] for sr in smoke_results), default=None),
+                    "smoke_new_files": smoke_new_files,
+                    "isolated_required": isolated_summary.get("required", False),
+                    "isolated_status": isolated_summary.get("status"),
+                    "isolated_cmds": isolated_summary.get("cmds", []),
+                    "isolated_exit": isolated_summary.get("exit"),
+                    "isolated_output_tail": isolated_summary.get("output_tail", ""),
+                    "isolated_results": isolated_summary.get("results", []),
+                    "language": language, "marker": marker,
+                    "verification_level": verification_level,
+                    "verification_profile": profile,
+                    "verification_confidence": confidence,
+                    "review_model": "(deterministic isolated verifier)",
+                    "raw_review_chars": 0,
+                    "project_dir": project_dir,
+                    "run_id": run_id,
+                }
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "run_review", "icon": "search-check",
+                    "status": "⚠ Review found isolated verification issue",
                     "run_id": run_id,
                 })
                 if run_id:
@@ -1555,6 +1766,12 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                 "smoke_cmds": [sr["cmd"] for sr in smoke_results],
                 "smoke_exit": max((sr["exit"] for sr in smoke_results), default=None),
                 "smoke_new_files": smoke_new_files,
+                "isolated_required": isolated_summary.get("required", False),
+                "isolated_status": isolated_summary.get("status"),
+                "isolated_cmds": isolated_summary.get("cmds", []),
+                "isolated_exit": isolated_summary.get("exit"),
+                "isolated_output_tail": isolated_summary.get("output_tail", ""),
+                "isolated_results": isolated_summary.get("results", []),
                 "build_cmd": build_cmd, "test_cmd": test_cmd, "lint_cmd": lint_cmd,
                 "build_stdout_tail": (build_result.get("stdout", "") or "")[-3000:],
                 "test_stdout_tail": (test_result.get("stdout", "") or "")[-5000:],

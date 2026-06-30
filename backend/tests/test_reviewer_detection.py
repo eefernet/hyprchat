@@ -266,6 +266,34 @@ def test_smoke_success_records_runtime_state_files():
     assert envelope["smoke_exit"] == 0
     assert envelope["smoke_new_files"] == ["snip.json"]
     assert any("-m snip --help" in c for c in envelope["smoke_cmds"])
+    assert envelope["isolated_status"] == "passed"
+    assert envelope["isolated_required"] is True
+
+
+class _IsolatedFailHTTP(_SmokeHTTP):
+    async def post(self, url, json=None, timeout=None):
+        command = (json or {}).get("command", "")
+        if "pip check" in command:
+            return _FakeResponse({
+                "exit_code": 1,
+                "stdout": "pygame 2.6.1 has broken font imports",
+                "stderr": "",
+            })
+        return await super().post(url, json=json, timeout=timeout)
+
+
+def test_isolated_verification_failure_blocks_clean_review():
+    http = _IsolatedFailHTTP(_SMOKE_FILES, smoke_exit=0)
+
+    envelope = _run(reviewer.run_review(
+        http, _NullEvents(), "conv-smoke", "/root/projects/snip",
+    ))
+
+    assert envelope["status"] == "issues"
+    assert envelope["isolated_status"] == "failed"
+    assert envelope["isolated_exit"] == 1
+    assert envelope["issues"][0]["severity"] == "packaging"
+    assert "Isolated verification verify phase failed" in envelope["issues"][0]["summary"]
 
 
 def test_extract_console_scripts():
