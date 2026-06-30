@@ -57,6 +57,8 @@ _ENTRYPOINT_BASENAME_HINTS = [
     "index.ts", "main.ts", "cli.ts", "commands.ts",
     "main.go", "main.rs", "Main.java",
 ]
+_DOC_BASENAMES = {"readme", "license", "notice", "changelog", "changes"}
+_DOC_EXTS = {".md", ".markdown", ".rst", ".txt", ".adoc"}
 
 
 def _append_unique(paths: list[str], path: str) -> None:
@@ -124,6 +126,19 @@ def _allowed_files_from_task(task: str) -> list[str]:
         for hint in _STORAGE_BASENAME_HINTS + _TEST_BASENAME_HINTS:
             _append_unique(out, hint)
     return out
+
+
+def _paths_are_docs_only(paths: list[str]) -> bool:
+    if not paths:
+        return False
+    for path in paths:
+        rel = (path or "").replace("\\", "/").rstrip("/")
+        base = rel.rsplit("/", 1)[-1].lower()
+        stem = base.rsplit(".", 1)[0]
+        ext = "." + base.rsplit(".", 1)[1] if "." in base else ""
+        if stem not in _DOC_BASENAMES and ext not in _DOC_EXTS:
+            return False
+    return True
 
 
 async def run_aider_fix(http, events, conv_id: str, *,
@@ -360,6 +375,7 @@ async def run_aider_fix(http, events, conv_id: str, *,
             "run_id": run_id,
             "workflow_id": workflow_id,
             "source_role": source_role,
+            "docs_only": _paths_are_docs_only(files),
             "source": "aider",
         }
         run_status = "succeeded" if worker_status == "ok" else ("cancelled" if worker_status == "cancelled" else "failed")

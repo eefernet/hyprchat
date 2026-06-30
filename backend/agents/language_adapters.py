@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 import os
+import shlex
 from collections import Counter
 
 
@@ -50,6 +51,55 @@ COMMON_IGNORES = [
 ]
 
 CODEBOX_PYTHON = "/root/venv/bin/python3"
+
+
+NODE_RUNTIME_SMOKE_CMD = (
+    "if [ ! -f package.json ]; then "
+    "echo '(node runtime smoke skipped: no package.json)'; exit 0; fi; "
+    "kind=$(node -e \"const fs=require('fs'); "
+    "const p=JSON.parse(fs.readFileSync('package.json','utf8')); "
+    "const bin=p.bin; let bp=''; "
+    "if (typeof bin === 'string') bp=bin; "
+    "else if (bin && typeof bin === 'object') bp=Object.values(bin)[0] || ''; "
+    "if (bp) console.log('binpath:' + bp); "
+    "else if (p.scripts && p.scripts.start) console.log('start'); "
+    "else console.log('skip');\") || exit $?; "
+    "case \"$kind\" in "
+    "binpath:*) binpath=${kind#binpath:}; "
+    "if [ ! -f \"$binpath\" ]; then echo \"declared bin target missing: $binpath\"; exit 1; fi; "
+    "timeout 15 node \"$binpath\" --help; rc=$?; "
+    "if [ \"$rc\" = 124 ]; then echo '(node bin smoke stayed up; treating timeout as started-ok)'; exit 0; fi; "
+    "exit $rc ;; "
+    "start) timeout 15 npm start -- --help; rc=$?; "
+    "if [ \"$rc\" = 124 ]; then echo '(node start stayed up; treating timeout as started-ok)'; exit 0; fi; "
+    "exit $rc ;; "
+    "*) echo '(node runtime smoke skipped: no start script or bin)'; exit 0 ;; "
+    "esac"
+)
+
+
+def _bounded_rust_runtime_smoke(run_cmd: str) -> str:
+    return (
+        f"timeout 15 {run_cmd}; rc=$?; "
+        "if [ \"$rc\" = 124 ]; then "
+        "echo '(cargo run stayed up; treating timeout as started-ok)'; exit 0; fi; "
+        "exit $rc"
+    )
+
+
+def _rust_runtime_smoke_cmd(manifest: list[str]) -> str:
+    if _has(manifest, "src/main.rs"):
+        return _bounded_rust_runtime_smoke("cargo run -- --help")
+    bin_paths = sorted(
+        p for p in manifest
+        if p.startswith("src/bin/") and p.endswith(".rs")
+    )
+    if bin_paths:
+        bin_name = os.path.splitext(os.path.basename(bin_paths[0]))[0]
+        return _bounded_rust_runtime_smoke(
+            f"cargo run --bin {shlex.quote(bin_name)} -- --help"
+        )
+    return ""
 
 
 def _isolated_copy_cmd() -> str:
@@ -291,7 +341,7 @@ def node_adapter(manifest: list[str], language: str) -> LanguageAdapter:
             "cd {tmp}/work && npm test --if-present",
         ] if has_pkg else []),
         runtime_smoke_cmds=([
-            "cd {tmp}/work && npm start -- --help"
+            f"cd {{tmp}}/work && {NODE_RUNTIME_SMOKE_CMD}"
         ] if has_pkg else []),
         reason="fresh Node dependency install from package manifest",
     )
@@ -300,7 +350,7 @@ def node_adapter(manifest: list[str], language: str) -> LanguageAdapter:
         build_system="package.json" if has_pkg else "plain-node",
         build_cmd=build_cmd or plain_node_check,
         test_cmd=test_cmd,
-        smoke_cmds=["npm start -- --help"] if has_pkg else [],
+        smoke_cmds=[NODE_RUNTIME_SMOKE_CMD] if has_pkg else [],
         package_rules=["Do not package node_modules, dist, build, .next, or cache directories."],
         source_extensions=[".ts", ".tsx", ".js", ".jsx"] if is_ts else [".js", ".jsx"],
         ignored_dirs=COMMON_IGNORES,
@@ -347,12 +397,13 @@ def html_adapter(manifest: list[str]) -> LanguageAdapter:
 
 def rust_adapter(manifest: list[str]) -> LanguageAdapter:
     has_cargo = _top_level_has(manifest, "Cargo.toml")
+    runtime_smoke_cmd = _rust_runtime_smoke_cmd(manifest)
     return LanguageAdapter(
         language="rust",
         build_system="Cargo.toml" if has_cargo else "plain-rust",
         build_cmd="cargo build --quiet" if has_cargo else "",
         test_cmd="cargo test --quiet" if has_cargo else "",
-        smoke_cmds=["cargo run -- --help"] if has_cargo else [],
+        smoke_cmds=[runtime_smoke_cmd] if has_cargo and runtime_smoke_cmd else [],
         package_rules=["Do not package target/."],
         source_extensions=[".rs"],
         ignored_dirs=COMMON_IGNORES,
@@ -367,8 +418,8 @@ def rust_adapter(manifest: list[str]) -> LanguageAdapter:
                 "cd {tmp}/work && CARGO_TARGET_DIR={tmp}/target cargo test --quiet",
             ] if has_cargo else []),
             runtime_smoke_cmds=([
-                "cd {tmp}/work && CARGO_TARGET_DIR={tmp}/target cargo run -- --help"
-            ] if has_cargo else []),
+                f"cd {{tmp}}/work && CARGO_TARGET_DIR={{tmp}}/target {runtime_smoke_cmd}"
+            ] if has_cargo and runtime_smoke_cmd else []),
             reason="isolated Cargo target directory",
         ),
     )

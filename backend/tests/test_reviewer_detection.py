@@ -296,6 +296,51 @@ def test_isolated_verification_failure_blocks_clean_review():
     assert "Isolated verification verify phase failed" in envelope["issues"][0]["summary"]
 
 
+class _AdvisoryIsolatedFailHTTP(_SmokeHTTP):
+    async def post(self, url, json=None, timeout=None):
+        command = (json or {}).get("command", "")
+        if "advisory-isolated-fail" in command:
+            return _FakeResponse({
+                "exit_code": 1,
+                "stdout": "advisory check failed",
+                "stderr": "",
+            })
+        return await super().post(url, json=json, timeout=timeout)
+
+
+def test_advisory_isolated_verification_failure_does_not_block_clean_review(monkeypatch):
+    from agents import language_adapters as agent_language_adapters
+
+    def advisory_contract(_project_files, _language=""):
+        return {
+            "language": "python",
+            "smoke_cmds": [],
+            "isolated_verification": {
+                "applicable": True,
+                "required_for_delivery": False,
+                "setup_cmd": "",
+                "verify_cmds": ["advisory-isolated-fail"],
+                "runtime_smoke_cmds": [],
+                "cleanup_paths": [],
+                "reason": "advisory test check",
+            },
+        }
+
+    monkeypatch.setattr(agent_language_adapters, "detect_contract", advisory_contract)
+    http = _AdvisoryIsolatedFailHTTP(_SMOKE_FILES, smoke_exit=0)
+
+    envelope = _run(reviewer.run_review(
+        http, _NullEvents(), "conv-smoke", "/root/projects/snip",
+    ))
+
+    assert envelope["status"] == "clean"
+    assert envelope["issues"] == []
+    assert envelope["isolated_required"] is False
+    assert envelope["isolated_status"] == "failed"
+    assert envelope["isolated_exit"] == 1
+    assert "advisory check failed" in envelope["isolated_output_tail"]
+
+
 def test_extract_console_scripts():
     toml = (
         "[project]\nname = \"snip\"\n\n"

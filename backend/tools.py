@@ -3999,11 +3999,11 @@ async def exec_tool(
                     _runs_pre = await db.get_runs_by_conversation(conv_id, limit=10)
                     _latest_pre = next(
                         (r for r in _runs_pre
-                         if r.get("role") in {"fixer", "reviewer", "acceptance"}
+                         if r.get("role") in {"fixer", "aider.fix", "reviewer", "acceptance"}
                          and (r.get("status") or "").lower() in {"succeeded", "failed", "partial"}),
                         None,
                     )
-                    if _latest_pre and _latest_pre.get("role") == "fixer":
+                    if _latest_pre and _latest_pre.get("role") in {"fixer", "aider.fix"}:
                         _env_pre = _latest_pre.get("result_envelope") or {}
                         if not (_env_pre.get("source_role") == "acceptance"
                                 and _env_pre.get("docs_only")):

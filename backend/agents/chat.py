@@ -701,12 +701,9 @@ def _record_blocked_tool_result(state: dict, tool_name: str, tool_result: str) -
 
 
 _PLAN_PROJECT_AUTO_BUILD_MARKERS = (
-    "Builder invoked automatically from the Architect plan",
-    "AUTOMATIC BUILD CONTINUATION",
     "AUTOMATIC VERIFICATION",
     "AUTOMATIC ACCEPTANCE",
     "PROJECT COMPLETE",
-    "BUILD PAUSED",
 )
 
 

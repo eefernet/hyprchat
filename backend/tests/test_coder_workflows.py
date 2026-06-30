@@ -94,6 +94,33 @@ def test_manifest_adapters_expose_isolated_verification_contracts():
         assert iso["verify_cmds"]
 
 
+def test_node_adapter_runtime_smoke_is_guarded_and_bounded():
+    contract = language_adapters.detect_contract(["package.json", "src/index.js"], "javascript")
+    runtime_cmds = contract["isolated_verification"]["runtime_smoke_cmds"]
+
+    assert runtime_cmds
+    cmd = runtime_cmds[0]
+    assert "no start script or bin" in cmd
+    assert "binpath:" in cmd
+    assert "timeout 15 npm start" in cmd
+    assert "treating timeout as started-ok" in cmd
+    assert contract["smoke_cmds"]
+    assert contract["smoke_cmds"][0].startswith("if [ ! -f package.json ]")
+
+
+def test_rust_adapter_runtime_smoke_only_for_binary_targets():
+    lib_contract = language_adapters.detect_contract(["Cargo.toml", "src/lib.rs"], "rust")
+    bin_contract = language_adapters.detect_contract(["Cargo.toml", "src/main.rs"], "rust")
+    named_bin_contract = language_adapters.detect_contract(["Cargo.toml", "src/bin/server.rs"], "rust")
+
+    assert lib_contract["smoke_cmds"] == []
+    assert lib_contract["isolated_verification"]["runtime_smoke_cmds"] == []
+    assert bin_contract["smoke_cmds"]
+    assert "timeout 15 cargo run -- --help" in bin_contract["smoke_cmds"][0]
+    assert "treating timeout as started-ok" in bin_contract["smoke_cmds"][0]
+    assert "cargo run --bin server -- --help" in named_bin_contract["smoke_cmds"][0]
+
+
 def test_aider_scope_expands_cli_import_mismatch():
     envelope = {
         "summary": (
@@ -509,24 +536,23 @@ def test_chat_plain_plan_project_result_gets_generate_code_nudge(monkeypatch):
     sys.modules.pop("agents.chat", None)
 
 
-def test_chat_daedalus_auto_plan_project_result_skips_generate_code_nudge(monkeypatch):
+def test_chat_daedalus_verified_result_skips_generate_code_nudge(monkeypatch):
     chat = _import_chat_with_optional_stubs(monkeypatch)
-    auto_result = "\n".join([
+    verified_result = "\n".join([
         "Plan ready for a large project.",
         "- app.py",
         "- server.py",
         "- frontend/src/main.jsx",
         "- frontend/src/state.js",
         "Details: " + ("implement routing, state, persistence, and tests. " * 40),
-        "=== DAEDALUS BUILD - Builder invoked automatically from the Architect plan ===",
-        "PROJECT COMPLETE. OpenHands agent built the project in /root/projects/demo.",
         "=== AUTOMATIC VERIFICATION - run_review already ran; do NOT call it again ===",
         "REVIEW CLEAN.",
+        "PROJECT COMPLETE. OpenHands agent built the project in /root/projects/demo.",
     ])
 
-    assert len(auto_result) > 1000
-    assert chat._plan_project_file_ref_count(auto_result) >= 3
-    assert chat._plan_project_should_nudge_generate_code(auto_result) is False
+    assert len(verified_result) > 1000
+    assert chat._plan_project_file_ref_count(verified_result) >= 3
+    assert chat._plan_project_should_nudge_generate_code(verified_result) is False
     sys.modules.pop("agents.chat", None)
 
 
@@ -1003,6 +1029,144 @@ def test_acceptance_base_cap_forces_research_before_delivery(monkeypatch):
     assert tools._fix_cap_releases_tool("download_project") is False
 
 
+def test_acceptance_review_blocks_after_source_aider_acceptance_fix(monkeypatch):
+    import tools
+
+    class Events:
+        async def emit(self, *_args, **_kwargs):
+            pass
+
+    runs = [
+        {
+            "id": "run-aider",
+            "role": "aider.fix",
+            "status": "succeeded",
+            "parent_run_id": "run-acceptance",
+            "result_envelope": {
+                "status": "applied",
+                "source_role": "acceptance",
+                "docs_only": False,
+                "files_touched": ["main.py"],
+            },
+        },
+        {
+            "id": "run-review",
+            "role": "reviewer",
+            "status": "succeeded",
+            "result_envelope": {
+                "status": "clean",
+                "project_dir": "/root/projects/demo",
+            },
+        },
+    ]
+
+    async def get_runs_by_conversation(_conv_id, limit=50):
+        return runs
+
+    async def get_conversation(_conv_id):
+        return {"id": _conv_id, "messages": [], "model_config_id": ""}
+
+    async def get_latest_coder_workflow(_conv_id, project_id=None):
+        return None
+
+    async def is_v2(_conv_id, conv_row=None):
+        return False
+
+    monkeypatch.setattr(tools.db, "get_runs_by_conversation", get_runs_by_conversation)
+    monkeypatch.setattr(tools.db, "get_conversation", get_conversation)
+    monkeypatch.setattr(tools.db, "get_latest_coder_workflow", get_latest_coder_workflow)
+    monkeypatch.setattr(tools, "_is_v2_persona", is_v2)
+
+    result = _run(tools.exec_tool(
+        object(),
+        Events(),
+        "run_acceptance_review",
+        {"project_dir": "/root/projects/demo"},
+        "conv-accept",
+    ))
+
+    assert "cannot run immediately after source/test/manifest fixes" in result
+    assert "Call run_review first" in result
+
+
+def test_acceptance_review_allows_docs_only_aider_acceptance_fix(monkeypatch):
+    import tools
+    from agents import acceptance
+
+    class Events:
+        async def emit(self, *_args, **_kwargs):
+            pass
+
+    reviewer_run = {
+        "id": "run-review",
+        "role": "reviewer",
+        "status": "succeeded",
+        "result_envelope": {
+            "status": "clean",
+            "project_dir": "/root/projects/demo",
+            "project_id": "demo",
+        },
+    }
+    runs = [
+        {
+            "id": "run-aider",
+            "role": "aider.fix",
+            "status": "succeeded",
+            "parent_run_id": "run-acceptance",
+            "result_envelope": {
+                "status": "applied",
+                "source_role": "acceptance",
+                "docs_only": True,
+                "files_touched": ["README.md"],
+            },
+        },
+        reviewer_run,
+    ]
+
+    async def get_runs_by_conversation(_conv_id, limit=50):
+        return runs
+
+    async def get_conversation(_conv_id):
+        return {"id": _conv_id, "messages": [], "model_config_id": ""}
+
+    async def get_latest_coder_workflow(_conv_id, project_id=None):
+        return None
+
+    async def get_run(run_id):
+        return reviewer_run if run_id == reviewer_run["id"] else None
+
+    async def is_v2(_conv_id, conv_row=None):
+        return False
+
+    async def no_prior_acceptance(_conv_id):
+        return ""
+
+    async def no_workflow_event(*_args, **_kwargs):
+        return ""
+
+    async def fake_acceptance(*_args, **_kwargs):
+        return {"status": "accepted", "summary": "ok", "run_id": "run-accepted"}
+
+    monkeypatch.setattr(tools.db, "get_runs_by_conversation", get_runs_by_conversation)
+    monkeypatch.setattr(tools.db, "get_conversation", get_conversation)
+    monkeypatch.setattr(tools.db, "get_latest_coder_workflow", get_latest_coder_workflow)
+    monkeypatch.setattr(tools.db, "get_run", get_run)
+    monkeypatch.setattr(tools, "_is_v2_persona", is_v2)
+    monkeypatch.setattr(tools, "_prior_acceptance_issues_context", no_prior_acceptance)
+    monkeypatch.setattr(tools, "_apply_workflow_event", no_workflow_event)
+    monkeypatch.setattr(acceptance, "run_acceptance_review", fake_acceptance)
+
+    result = _run(tools.exec_tool(
+        object(),
+        Events(),
+        "run_acceptance_review",
+        {"project_dir": "/root/projects/demo", "reviewer_run_id": "run-review"},
+        "conv-accept-docs",
+    ))
+
+    assert result.startswith("ACCEPTANCE ACCEPTED")
+
+
 def test_new_coder_tools_are_registered():
     for name in (
         "start_coder_workflow",
@@ -1014,6 +1178,35 @@ def test_new_coder_tools_are_registered():
 
     assert "Primary repair editor" in CODEAGENT_TOOLS["run_aider_fix"]["function"]["description"]
     assert "project_id" in CODEAGENT_TOOLS["run_aider_fix"]["function"]["parameters"]["properties"]
+
+
+def test_daedalus_seed_prompt_prefers_aider_for_existing_project_roots(monkeypatch):
+    from agents import personas
+
+    captured = {}
+
+    class FakeDB:
+        async def get_model_configs(self):
+            return []
+
+        async def get_kbs(self):
+            return []
+
+        async def create_model_config(self, mc_id, name, base_model, system_prompt,
+                                      tool_ids, kb_ids, parameters):
+            captured["system_prompt"] = system_prompt
+            captured["tool_ids"] = tool_ids
+
+    monkeypatch.setattr(personas, "db", FakeDB())
+
+    _run(personas.seed_coder_bot_v2())
+
+    prompt = captured["system_prompt"]
+    assert "Existing project root" in prompt
+    assert "run_aider_fix(issue_run_id='run-...'" in prompt
+    assert "Fixer is fallback only" in prompt
+    assert "Greenfield/OpenHands output: call `run_fixer" not in prompt
+    assert "Acceptance returns issues, call `run_fixer" not in prompt
 
 
 def test_project_archive_excludes_aider_runtime_files(tmp_path):

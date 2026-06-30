@@ -457,8 +457,9 @@ async def _run_isolated_verification(http, project_dir: str, project_files: list
     """Run adapter-provided clean-environment checks.
 
     This is intentionally adapter driven: Reviewer only understands the common
-    setup/verify/runtime phases and turns any non-zero exit into a deterministic
-    delivery-blocking issue.
+    setup/verify/runtime phases and records any non-zero exit. Required
+    isolated checks become delivery-blocking issues; advisory checks stay in the
+    review envelope for Acceptance/user visibility.
     """
     try:
         from agents import language_adapters as _la
@@ -1541,7 +1542,8 @@ async def run_review(http, events, conv_id: str, project_dir: str,
             isolated_summary = await _run_isolated_verification(
                 http, project_dir, project_files, language, marker, run_id, _step
             )
-            if isolated_summary.get("status") == "failed":
+            if (isolated_summary.get("status") == "failed"
+                    and isolated_summary.get("required", False)):
                 issue = isolated_summary.get("failure_issue") or {
                     "severity": "packaging",
                     "file": marker if marker != "(none)" else "",

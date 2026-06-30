@@ -43,6 +43,12 @@
 - Fixer symbol-mismatch handling now gives the model actual class method references and drops unresolved broken edits instead of auto-rewriting call sites incorrectly.
 - Daedalus message rendering now detects all Daedalus outputs, preserves run ids from raw events, and shows workflow/run cards for non-full-build Daedalus actions.
 - Live endpoint tests now skip cleanly when no HyprChat server is reachable, and connector tests mock the async URL-safety checks introduced by the refactor.
+- Node isolated runtime smoke now skips packages without a declared `start` script or `bin` entry, and bounds long-running starts so server-style projects no longer false-fail Reviewer delivery checks.
+- Rust isolated runtime smoke now runs only for binary targets, including named `src/bin/*.rs` binaries, so library crates no longer fail clean review on `cargo run`.
+- Advisory isolated verification failures can now be recorded in the Reviewer envelope without blocking an otherwise clean review when an adapter marks the check non-required.
+- Acceptance now requires a fresh Reviewer pass after source, test, or manifest edits from `aider.fix`, while docs-only Aider acceptance fixes may return directly to Acceptance.
+- Daedalus seeded persona guidance now matches Aider-first repair routing for existing project roots, with the marker-format Fixer described as fallback only.
+- Removed stale single-turn Architect→Builder markers from the plan-project generate-code nudge logic so reverted auto-builder behavior is no longer implied.
 
 ## Refactor follow-up
 - Backend route, artifact, database schema, research-config, workflow-gate, parser, model-management, and Codebox tool helpers were split into focused modules while keeping the public API behavior stable.
