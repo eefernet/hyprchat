@@ -862,6 +862,65 @@ def test_uploaded_project_bootstrap_exec_tool_uses_extracted_gate(monkeypatch):
     assert events.items[-1][2]["status"] == "⛔ Blocked — uploaded-project fixes use Aider first"
 
 
+def test_exec_tool_calls_extracted_gate_with_partial_v2_context(monkeypatch):
+    import tools
+    from tooling.gate_decisions import GateDecision
+
+    class Events:
+        def __init__(self):
+            self.items = []
+
+        async def emit(self, conv_id, event_type, data):
+            self.items.append((conv_id, event_type, data))
+
+    seen = {}
+
+    async def get_conversation(conv_id):
+        return {
+            "id": conv_id,
+            "model_config_id": "mc-v2",
+            "messages": [{"role": "user", "created_at": "2026-01-01 12:00:00"}],
+        }
+
+    async def get_runs_by_conversation(_conv_id, limit=50):
+        assert limit == 50
+        raise RuntimeError("transient runs read failure")
+
+    async def get_latest_coder_workflow(_conv_id, project_id=None):
+        return None
+
+    async def is_v2(_conv_id, conv_row=None):
+        return True
+
+    async def fake_evaluate_gate(ctx):
+        seen["ctx"] = ctx
+        return GateDecision.block(
+            message="BLOCKED partial context",
+            event_status="⛔ partial context evaluated",
+        )
+
+    monkeypatch.setattr(tools.db, "get_conversation", get_conversation)
+    monkeypatch.setattr(tools.db, "get_runs_by_conversation", get_runs_by_conversation)
+    monkeypatch.setattr(tools.db, "get_latest_coder_workflow", get_latest_coder_workflow)
+    monkeypatch.setattr(tools, "_is_v2_persona", is_v2)
+    monkeypatch.setattr(tools, "evaluate_gate", fake_evaluate_gate)
+
+    events = Events()
+    result = _run(tools.exec_tool(
+        http=object(),
+        events=events,
+        name="read_file",
+        args={"path": "/root/projects/demo/app.py"},
+        conv_id="conv-partial",
+    ))
+
+    assert result == "BLOCKED partial context"
+    assert seen["ctx"].is_v2 is True
+    assert seen["ctx"].snapshot_partial is True
+    assert seen["ctx"].runs == []
+    assert events.items[-1][2]["status"] == "⛔ partial context evaluated"
+
+
 def test_acceptance_base_cap_forces_research_before_delivery(monkeypatch):
     import tools
 

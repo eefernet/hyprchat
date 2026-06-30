@@ -1776,31 +1776,30 @@ async def exec_tool(
         async def _gate_latest_user_task_text() -> str:
             return await _latest_user_task_text(conv_id)
 
-        _gate_ctx: GateContext | None = None
-        try:
-            _gate_ctx = await build_gate_context(
-                name,
-                args,
-                conv_id,
-                _is_v2_persona,
-                research_since=_gate_research_since,
-                ship_anyway=_gate_ship_anyway,
-                latest_user_task_text=_gate_latest_user_task_text,
-            )
-        except Exception as _gce:
-            print(f"[v2-gate] context build failed (non-fatal): {_gce}")
+        _gate_ctx: GateContext | None = await build_gate_context(
+            name,
+            args,
+            conv_id,
+            _is_v2_persona,
+            research_since=_gate_research_since,
+            ship_anyway=_gate_ship_anyway,
+            latest_user_task_text=_gate_latest_user_task_text,
+        )
 
         # Cache the v2 check result once per exec_tool call so the gate
         # doesn't hit the DB for each sub-state. Initialized to None =
         # "not checked yet"; False/True = cached result.
-        _v2_cached: bool | None = _gate_ctx.is_v2 if _gate_ctx is not None else None
+        _v2_cached: bool | None = (
+            None if (_gate_ctx.snapshot_partial and not _gate_ctx.is_v2)
+            else _gate_ctx.is_v2
+        )
         async def _check_v2(cr=None) -> bool:
             nonlocal _v2_cached
             if _v2_cached is None:
                 _v2_cached = await _is_v2_persona(conv_id, conv_row=cr)
             return _v2_cached
 
-        if _gate_ctx is not None and _gate_ctx.is_v2:
+        if _gate_ctx.is_v2:
             await reconcile_workflow_state(_gate_ctx)
             _gate_decision = await evaluate_gate(_gate_ctx)
             if _gate_decision is not None:
@@ -1833,6 +1832,8 @@ async def exec_tool(
                 if _gate_decision.log:
                     print(_gate_decision.log, flush=True)
                 return _gate_decision.message
+            if _gate_ctx.snapshot_partial:
+                _gate_ctx = None
 
         _runs_for_cap = None
         _uts_cap = None

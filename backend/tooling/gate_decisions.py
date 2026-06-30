@@ -55,6 +55,7 @@ class GateContext:
     is_v2: bool = False
     latest_workflow: dict | None = None
     conv_row: dict | None = None
+    snapshot_partial: bool = False
     aider_context_resolver: AsyncContextResolver = _default_none
     research_since: AsyncBoolResolver = _default_false
     ship_anyway: Callable[[], Awaitable[bool]] = _default_false
@@ -128,13 +129,38 @@ async def build_gate_context(
     latest_workflow = None
     latest_user_ts = None
     is_v2 = False
+    snapshot_partial = False
     if conv_id:
-        conv_row = await db.get_conversation(conv_id)
-        is_v2 = await is_v2_resolver(conv_id, conv_row=conv_row)
+        try:
+            conv_row = await db.get_conversation(conv_id)
+            is_v2 = await is_v2_resolver(conv_id, conv_row=conv_row)
+        except Exception as exc:
+            print(f"[v2-gate] context base lookup failed (non-fatal): {exc}")
+            snapshot_partial = True
+            try:
+                is_v2 = await is_v2_resolver(conv_id, conv_row=None)
+            except Exception as inner_exc:
+                print(f"[v2-gate] context v2 fallback failed (non-fatal): {inner_exc}")
+                is_v2 = False
         if is_v2:
-            runs = await db.get_runs_by_conversation(conv_id, limit=50)
-            latest_user_ts = await latest_user_msg_ts(conv_id, conv_row=conv_row)
-            latest_workflow = await db.get_latest_coder_workflow(conv_id)
+            try:
+                runs = await db.get_runs_by_conversation(conv_id, limit=50)
+            except Exception as exc:
+                print(f"[v2-gate] context runs snapshot failed (non-fatal): {exc}")
+                snapshot_partial = True
+                runs = []
+            try:
+                latest_user_ts = await latest_user_msg_ts(conv_id, conv_row=conv_row)
+            except Exception as exc:
+                print(f"[v2-gate] context latest-user snapshot failed (non-fatal): {exc}")
+                snapshot_partial = True
+                latest_user_ts = None
+            try:
+                latest_workflow = await db.get_latest_coder_workflow(conv_id)
+            except Exception as exc:
+                print(f"[v2-gate] context workflow snapshot failed (non-fatal): {exc}")
+                snapshot_partial = True
+                latest_workflow = None
     return GateContext(
         conv_id=conv_id,
         name=name,
@@ -144,6 +170,7 @@ async def build_gate_context(
         is_v2=is_v2,
         latest_workflow=latest_workflow,
         conv_row=conv_row,
+        snapshot_partial=snapshot_partial,
         aider_context_resolver=aider_context_resolver,
         research_since=research_since,
         ship_anyway=ship_anyway,

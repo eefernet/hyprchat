@@ -237,6 +237,58 @@ def test_build_gate_context_skips_heavy_reads_for_non_v2(monkeypatch):
     assert calls == {"conv": 1, "runs": 0, "workflow": 0, "v2": 1}
 
 
+def test_build_gate_context_returns_partial_v2_context_on_snapshot_failure(monkeypatch):
+    calls = {"conv": 0, "runs": 0, "workflow": 0, "v2": 0}
+
+    async def get_conversation(conv_id):
+        calls["conv"] += 1
+        assert conv_id == "conv-partial"
+        return {
+            "id": conv_id,
+            "model_config_id": "mc-v2",
+            "messages": [{"role": "user", "created_at": "2026-01-01 12:00:00"}],
+        }
+
+    async def get_runs_by_conversation(_conv_id, limit=0):
+        calls["runs"] += 1
+        assert limit == 50
+        raise RuntimeError("db unavailable")
+
+    async def get_latest_coder_workflow(conv_id):
+        calls["workflow"] += 1
+        assert conv_id == "conv-partial"
+        return {"id": "wf-partial", "state": "reviewing"}
+
+    async def is_v2(conv_id, conv_row=None):
+        calls["v2"] += 1
+        assert conv_id == "conv-partial"
+        assert conv_row["id"] == "conv-partial"
+        return True
+
+    async def research_since(_since):
+        return True
+
+    monkeypatch.setattr(gate_decisions.db, "get_conversation", get_conversation)
+    monkeypatch.setattr(gate_decisions.db, "get_runs_by_conversation", get_runs_by_conversation)
+    monkeypatch.setattr(gate_decisions.db, "get_latest_coder_workflow", get_latest_coder_workflow)
+
+    ctx = _run(gate_decisions.build_gate_context(
+        "read_file",
+        {},
+        "conv-partial",
+        is_v2,
+        research_since=research_since,
+    ))
+
+    assert ctx.is_v2 is True
+    assert ctx.snapshot_partial is True
+    assert ctx.runs == []
+    assert ctx.latest_user_ts == datetime(2026, 1, 1, 12, 0, 0)
+    assert ctx.latest_workflow["id"] == "wf-partial"
+    assert _run(ctx.research_since(None)) is True
+    assert calls == {"conv": 1, "runs": 1, "workflow": 1, "v2": 1}
+
+
 def test_reconcile_workflow_state_logs_high_confidence_divergence(capsys):
     ctx = _ctx([
         _run_row("rev-clean", "reviewer", env={"status": "clean"}),
