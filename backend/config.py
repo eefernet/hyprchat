@@ -188,6 +188,7 @@ OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "30"))
 OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", "32768"))
 AIDER_ENABLED = os.getenv("AIDER_ENABLED", "true").lower() == "true"
 AIDER_FOR_GREENFIELD = os.getenv("AIDER_FOR_GREENFIELD", "true").lower() == "true"
+GATE_RECONCILE_AUTOCORRECT = os.getenv("GATE_RECONCILE_AUTOCORRECT", "false").lower() == "true"
 AIDER_MODEL = os.getenv("AIDER_MODEL", "")  # Empty = use FIXER_MODEL, then CODER_MODEL
 AIDER_NUM_CTX = int(os.getenv("AIDER_NUM_CTX", os.getenv("OPENHANDS_NUM_CTX", "16384")))
 AIDER_AUTO_TEST = os.getenv("AIDER_AUTO_TEST", "true").lower() == "true"

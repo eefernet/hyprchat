@@ -801,6 +801,67 @@ def test_uploaded_project_bootstrap_gate_releases_after_agent_run():
     assert tools._uploaded_project_manual_gate_state(workflow, runs) == ""
 
 
+def test_uploaded_project_bootstrap_exec_tool_uses_extracted_gate(monkeypatch):
+    import tools
+
+    class Events:
+        def __init__(self):
+            self.items = []
+
+        async def emit(self, conv_id, event_type, data):
+            self.items.append((conv_id, event_type, data))
+
+    workflow = {
+        "id": "cw-upload",
+        "mode": "fix_uploaded_project",
+        "state": "fixing",
+        "project_id": "proj-upload",
+        "user_task": "Fix the import mismatch",
+        "artifact_status": "not_ready",
+        "cancel_requested": False,
+    }
+
+    async def get_conversation(conv_id):
+        return {
+            "id": conv_id,
+            "model_config_id": "mc-v2",
+            "messages": [{"role": "user", "content": "Fix the import mismatch"}],
+        }
+
+    async def get_runs_by_conversation(_conv_id, limit=50):
+        assert limit == 50
+        return []
+
+    async def get_latest_coder_workflow(_conv_id, project_id=None):
+        return workflow
+
+    async def is_v2(_conv_id, conv_row=None):
+        return True
+
+    async def latest_task(_conv_id):
+        return "Fix the import mismatch"
+
+    monkeypatch.setattr(tools.db, "get_conversation", get_conversation)
+    monkeypatch.setattr(tools.db, "get_runs_by_conversation", get_runs_by_conversation)
+    monkeypatch.setattr(tools.db, "get_latest_coder_workflow", get_latest_coder_workflow)
+    monkeypatch.setattr(tools, "_is_v2_persona", is_v2)
+    monkeypatch.setattr(tools, "_latest_user_task_text", latest_task)
+
+    events = Events()
+    result = _run(tools.exec_tool(
+        http=object(),
+        events=events,
+        name="read_file",
+        args={"path": "/root/projects/proj-upload/main.py"},
+        conv_id="conv-upload",
+    ))
+
+    assert result.startswith("BLOCKED")
+    assert "uploaded-project fixes must start with Aider" in result
+    assert "run_aider_fix(project_dir='/root/projects/proj-upload'" in result
+    assert events.items[-1][2]["status"] == "⛔ Blocked — uploaded-project fixes use Aider first"
+
+
 def test_acceptance_base_cap_forces_research_before_delivery(monkeypatch):
     import tools
 

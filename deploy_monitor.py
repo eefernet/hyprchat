@@ -78,6 +78,7 @@ WATCHED = {
     "backend/tooling/parser.py":    ("Tool Parser",      REMOTE_TOOLING,            True),
     "backend/tooling/codebox_tools.py": ("Codebox Tools", REMOTE_TOOLING,            True),
     "backend/tooling/workflow_gate.py": ("Workflow Gate",  REMOTE_TOOLING,            True),
+    "backend/tooling/gate_decisions.py": ("Gate Decisions", REMOTE_TOOLING,           True),
     "backend/connectors.py":        ("Connectors",       REMOTE_BACKEND,            True),
     "backend/model_providers.py":   ("Model Providers",  REMOTE_BACKEND,            True),
     "backend/cancel_registry.py":   ("Cancel Registry",  REMOTE_BACKEND,            True),

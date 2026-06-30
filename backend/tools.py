@@ -3,7 +3,6 @@ Tool definitions and execution dispatch for HyprChat's integrated CodeAgent.
 """
 import asyncio
 import base64
-import calendar
 import json
 import os
 import re
@@ -22,14 +21,23 @@ from artifact_files import extract_indexable_text
 from connectors import execute_connector_tool
 from research import fetch_bytes_safely, run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
 from tooling.codebox_tools import CODEBOX_TOOL_NAMES, run_codebox_tool
+from tooling.gate_decisions import (
+    GateContext,
+    build_gate_context,
+    compute_fix_budget,
+    evaluate_gate,
+    reconcile_workflow_state,
+)
 from tooling.workflow_gate import (
     _RECENT_RESEARCH,
     _RECENT_RESEARCH_MAX,
     _RESEARCH_FRESH_SECONDS,
     _WF_EVENT_TRANSITIONS,
     _apply_workflow_event,
+    _deep_research_called_since as _wg_deep_research_called_since,
     _fix_budget_note,
     _get_recent_research,
+    _is_v2_persona as _wg_is_v2_persona,
     _latest_user_msg_ts,
     _parse_ts_loose,
     _prior_acceptance_issues_context,
@@ -167,69 +175,7 @@ def _issue_signatures(envelope: dict) -> set:
 
 
 async def _deep_research_called_since(conv_id: str, since_iso: str | None) -> bool:
-    """Return True iff deep_research has run on this conversation since the
-    trigger event at `since_iso`. Checks two sources:
-
-      1. In-process `_RECENT_RESEARCH` cache (10-min freshness, populated
-         immediately when deep_research's dispatcher returns). This is what
-         catches mid-stream calls — a model that calls deep_research and
-         then run_fixer in the same turn won't have the deep_research event
-         persisted to the conversation yet (assistant message is only saved
-         at stream end), so the DB walk below misses it. Without this check,
-         the FINAL_CYCLE / STUCK_FIX gates fire a second time, the model
-         dutifully re-runs deep_research, and the user sees duplicate
-         carousels and ~3 minutes of wasted research.
-      2. Persisted assistant messages' saved_events (cross-stream / restart
-         survival). Only consulted when (1) returns nothing.
-    """
-    # In-stream check first — matches what's already populated via
-    # `_stash_research_result` on deep_research completion. The cache is
-    # keyed by conv_id. When since_iso is provided, we also verify the
-    # cached entry is newer than the trigger event — pre-build research
-    # done before the latest reviewer run must not satisfy the gate.
-    try:
-        _cached = _get_recent_research(conv_id) if conv_id else None
-        if _cached:
-            if since_iso:
-                _since_dt = _parse_ts_loose(since_iso)
-                if _since_dt:
-                    _since_unix = calendar.timegm(_since_dt.timetuple()) + _since_dt.microsecond / 1_000_000
-                    if _cached.get("ts", 0) >= _since_unix:
-                        return True
-                # Cached research is older than since_iso — fall through to DB
-            else:
-                return True
-    except Exception as _e:
-        print(f"[v2-gate] in-stream research cache check failed (non-fatal): {_e}")
-
-    if not since_iso:
-        return False
-    try:
-        conv = await db.get_conversation(conv_id)
-        msgs = (conv or {}).get("messages") or []
-        since_ts = _parse_ts_loose(since_iso)
-        for m in reversed(msgs):
-            if m.get("role") != "assistant":
-                continue
-            m_ts = _parse_ts_loose(m.get("created_at"))
-            if since_ts and m_ts and m_ts < since_ts:
-                # Once we walk past the trigger run, we can stop.
-                return False
-            md = m.get("metadata") or {}
-            if isinstance(md, str):
-                try:
-                    md = json.loads(md)
-                except Exception:
-                    md = {}
-            for ev in md.get("saved_events") or []:
-                if ev.get("type") != "tool_start":
-                    continue
-                if (ev.get("data") or {}).get("tool") == "deep_research":
-                    return True
-        return False
-    except Exception as _e:
-        print(f"[v2-gate] deep_research history check failed (non-fatal): {_e}")
-        return False
+    return await _wg_deep_research_called_since(conv_id, since_iso)
 
 
 _SHIP_ANYWAY_ACTION_RE = re.compile(
@@ -1018,28 +964,7 @@ def _guess_fix_scope(test_file_abs: str, project_dir: str) -> list[str]:
 
 
 async def _is_v2_persona(conv_id: str, conv_row: dict | None = None) -> bool:
-    """Return True iff this conversation is using the v2 coding persona.
-
-    Centralised so the workflow gate doesn't repeat the same db lookup +
-    string match in five different places. Pass conv_row if the caller has
-    already fetched it to avoid a second db query. Uses a direct by-id
-    query instead of loading all configs. Failures are non-fatal and return
-    False (fail-safe — gate stays off rather than mis-firing on a v1 persona)."""
-    try:
-        if conv_row is None:
-            conv_row = await db.get_conversation(conv_id)
-        _mc_id = (conv_row or {}).get("model_config_id") if conv_row else None
-        if not _mc_id:
-            return False
-        _mc = await db.get_model_config(_mc_id)
-        # NOTE: chat.py detects v2 from req.persona_id's config name; this
-        # gate detects it from conversation.model_config_id. The matching
-        # rules are shared via _v2_name_match so the two can only diverge on
-        # *which* config they look at, not on how the name is interpreted.
-        return bool(_mc and _v2_name_match(_mc.get("name") or ""))
-    except Exception as _e:
-        print(f"[v2-gate] persona lookup failed (non-fatal): {_e}")
-        return False
+    return await _wg_is_v2_persona(conv_id, conv_row=conv_row)
 
 
 # ── Ollama-native tool definitions ──
@@ -1842,98 +1767,72 @@ async def exec_tool(
         #     said "Hard cap: 3 review/fix cycles" since Phase 2; this
         #     enforces it server-side instead of trusting the model to obey.
         #
+        async def _gate_research_since(since_iso=None) -> bool:
+            return await _deep_research_called_since(conv_id, since_iso)
+
+        async def _gate_ship_anyway() -> bool:
+            return await _latest_user_requested_ship_anyway(conv_id)
+
+        async def _gate_latest_user_task_text() -> str:
+            return await _latest_user_task_text(conv_id)
+
+        _gate_ctx: GateContext | None = None
+        try:
+            _gate_ctx = await build_gate_context(
+                name,
+                args,
+                conv_id,
+                _is_v2_persona,
+                research_since=_gate_research_since,
+                ship_anyway=_gate_ship_anyway,
+                latest_user_task_text=_gate_latest_user_task_text,
+            )
+        except Exception as _gce:
+            print(f"[v2-gate] context build failed (non-fatal): {_gce}")
+
         # Cache the v2 check result once per exec_tool call so the gate
         # doesn't hit the DB for each sub-state. Initialized to None =
         # "not checked yet"; False/True = cached result.
-        _v2_cached: bool | None = None
+        _v2_cached: bool | None = _gate_ctx.is_v2 if _gate_ctx is not None else None
         async def _check_v2(cr=None) -> bool:
             nonlocal _v2_cached
             if _v2_cached is None:
                 _v2_cached = await _is_v2_persona(conv_id, conv_row=cr)
             return _v2_cached
 
-        # Q&A is read-only and terminal for the current turn. Some review/fix
-        # tools are whitelisted below so the normal state gate can allow the
-        # intended next step after builder/reviewer runs; block those explicitly
-        # when the most recent meaningful run is a non-change ProjectQA answer.
-        if conv_id and name not in {"ask_project", "get_coder_workflow", "cancel_coder_workflow"}:
-            try:
-                _runs_qt = await db.get_runs_by_conversation(conv_id, limit=12)
-                _terminal_qa_run = None
-                for _r in _runs_qt:
-                    _role_qt = _r.get("role", "")
-                    if _role_qt == "qa":
-                        _env_qt = _r.get("result_envelope") or {}
-                        if (_r.get("status") == "succeeded"
-                                and not _env_qt.get("looks_like_change_request", False)):
-                            _terminal_qa_run = _r
-                        break
-                    if (_role_qt in {"reviewer", "acceptance", "fixer", "aider.fix"}
-                            or _role_qt.startswith("builder")):
-                        break
-                if _terminal_qa_run is not None:
-                    # Turn-scoped: a QA answer is terminal only for the turn it
-                    # answered. A newer user message ("now run the tests")
-                    # releases the gate instead of blocking forever.
-                    _uts_qt = await _latest_user_msg_ts(conv_id)
-                    _qa_ts = _parse_ts_loose(_terminal_qa_run.get("started_at"))
-                    if (_uts_qt is not None and _qa_ts is not None
-                            and _qa_ts < _uts_qt):
-                        _terminal_qa_run = None
-                if _terminal_qa_run is not None and await _check_v2():
-                    _qid = _terminal_qa_run.get("id", "?")
+        if _gate_ctx is not None and _gate_ctx.is_v2:
+            await reconcile_workflow_state(_gate_ctx)
+            _gate_decision = await evaluate_gate(_gate_ctx)
+            if _gate_decision is not None:
+                if _gate_decision.action == "redirect":
                     await events.emit(conv_id, "tool_end", {
-                        "tool": name, "icon": "code",
-                        "status": f"⛔ Blocked — answer the user (ask_project {_qid[:14]}… is terminal)",
+                        "tool": name,
+                        "icon": _gate_decision.event_icon,
+                        "status": _gate_decision.event_status,
                     })
-                    print(f"[v2-gate] state=qa-terminal blocked tool={name} "
-                          f"trigger={_qid}", flush=True)
-                    return (
-                        f"BLOCKED — ask_project ({_qid}) just answered the user's question. "
-                        f"The user asked something; you have the answer. Your VERY NEXT output "
-                        f"MUST be plain text relaying that answer to the user.\n\n"
-                        f"Do NOT call run_review, run_fixer, run_aider_fix, generate_code, "
-                        f"read_file, write_file, run_shell, download_project, or any other "
-                        f"tool. The project Q&A path is read-only.\n\n"
-                        f"If the user follows up with another question, call ask_project again. "
-                        f"If they explicitly request a change, route that new turn through "
-                        f"fix_uploaded_project or a write workflow."
+                    if _gate_decision.log:
+                        print(_gate_decision.log, flush=True)
+                    return await exec_tool(
+                        http,
+                        events,
+                        _gate_decision.tool,
+                        _gate_decision.args,
+                        conv_id,
+                        custom_tool_map=custom_tool_map,
+                        connector_tool_name_map=connector_tool_name_map,
+                        conv_model=conv_model,
+                        kb_ids=kb_ids,
+                        artifact_message_id=artifact_message_id,
+                        persona_context=persona_context,
                     )
-            except Exception as _qte:
-                print(f"[v2-gate] qa-terminal check failed (non-fatal): {_qte}")
-
-        if (conv_id
-                and not _uploaded_project_tool_allowed_during_bootstrap(name)
-                and await _check_v2()):
-            try:
-                _wf_up = await db.get_latest_coder_workflow(conv_id)
-                _runs_up = await db.get_runs_by_conversation(conv_id, limit=20)
-                _gate_state_up = _uploaded_project_manual_gate_state(_wf_up, _runs_up)
-                if _gate_state_up:
-                    _pid_up = (_wf_up or {}).get("project_id") or ""
-                    _project_dir_up = f"/root/projects/{_pid_up}" if _pid_up else ""
-                    _task_up = await _latest_user_task_text(conv_id)
-                    _body_up = _uploaded_project_bootstrap_block_message(
-                        name,
-                        _wf_up or {},
-                        _project_dir_up,
-                        _task_up,
-                        _gate_state_up,
-                    )
-                    await events.emit(conv_id, "tool_end", {
-                        "tool": name, "icon": "code",
-                        "status": (
-                            "⛔ Blocked — uploaded-project fixes use Aider first"
-                            if _gate_state_up == "bootstrap"
-                            else "⛔ Blocked — uploaded-project run already in progress"
-                        ),
-                    })
-                    print(f"[v2-gate] state=uploaded-project-{_gate_state_up} "
-                          f"blocked tool={name} workflow={(_wf_up or {}).get('id','?')}",
-                          flush=True)
-                    return _body_up
-            except Exception as _upe:
-                print(f"[v2-gate] uploaded-project bootstrap check failed (non-fatal): {_upe}")
+                await events.emit(conv_id, "tool_end", {
+                    "tool": name,
+                    "icon": _gate_decision.event_icon,
+                    "status": _gate_decision.event_status,
+                })
+                if _gate_decision.log:
+                    print(_gate_decision.log, flush=True)
+                return _gate_decision.message
 
         _runs_for_cap = None
         _uts_cap = None
@@ -1943,8 +1842,10 @@ async def exec_tool(
                 # limit=50 so the cap window isn't silently truncated by run
                 # scroll; counters below are additionally scoped to the
                 # current user request via _runs_since.
-                _runs_for_cap = await db.get_runs_by_conversation(conv_id, limit=50)
-                _uts_cap = await _latest_user_msg_ts(conv_id)
+                _runs_for_cap = (_gate_ctx.runs if _gate_ctx is not None
+                                 else await db.get_runs_by_conversation(conv_id, limit=50))
+                _uts_cap = (_gate_ctx.latest_user_ts if _gate_ctx is not None
+                            else await _latest_user_msg_ts(conv_id))
                 _run_role_by_id_cap = {r.get("id"): r.get("role") for r in _runs_for_cap}
                 _requested_parent_id = (args.get("reviewer_run_id") or "").strip()
                 _parent_role_for_cap = ""
@@ -1983,7 +1884,9 @@ async def exec_tool(
                         _issue_run_id = _issue_run_for_aider.get("id", "")
                         _project_dir = _aider_ctx.get("project_dir") or ""
                         _task = _task_from_issue_run(
-                            await _latest_user_task_text(conv_id),
+                            (await _gate_ctx.latest_user_task_text()
+                             if _gate_ctx is not None
+                             else await _latest_user_task_text(conv_id)),
                             _issue_run_for_aider,
                         )
                         await events.emit(conv_id, "tool_end", {
@@ -2008,32 +1911,24 @@ async def exec_tool(
                             artifact_message_id=artifact_message_id,
                         )
 
-                def _fixer_source_role_cap(_fr):
-                    _fenv = _fr.get("result_envelope") or {}
-                    return (_fenv.get("source_role")
-                            or _run_role_by_id_cap.get(_fr.get("parent_run_id"))
-                            or "reviewer")
-
-                # Turn-scoped (G1) and Aider-inclusive (G2): only successful
-                # fix runs since the latest user message count, and aider.fix
-                # consumes the same budget as the scoped Fixer.
-                _fixer_succ = sum(
-                    1 for r in _runs_since(_runs_for_cap, _uts_cap)
-                    if (r.get("role") in {"fixer", "aider.fix"}
-                        and r.get("status") == "succeeded"
-                        and _fixer_source_role_cap(r) == _parent_role_for_cap)
+                _budget_cap = await compute_fix_budget(
+                    GateContext(
+                        conv_id=conv_id,
+                        name=name,
+                        args=args,
+                        runs=_runs_for_cap,
+                        latest_user_ts=_uts_cap,
+                        is_v2=bool(_v2_cached),
+                        research_since=_gate_research_since,
+                    ),
+                    _parent_role_for_cap,
                 )
-                # Repair escalation ladder: base caps are reviewer=3 and
-                # acceptance=2. Once the model has spent a round on
-                # deep_research in this budget window, allow one more
-                # research-informed repair window (cap=4). Aider and Fixer
-                # consume the same budget.
-                _research_done_for_cap = await _deep_research_called_since(conv_id, _uts_cap)
-                if _parent_role_for_cap == "acceptance":
-                    _base_cap_limit = 2
-                else:
-                    _base_cap_limit = 3
-                _cap_limit = 4 if _research_done_for_cap else _base_cap_limit
+                # Turn-scoped (G1) and Aider-inclusive (G2): only successful
+                # fix runs gate the cycle cap; failed/no-op terminal attempts
+                # are exposed separately for post-review release logic.
+                _fixer_succ = _budget_cap.succeeded
+                _research_done_for_cap = _budget_cap.research_done
+                _cap_limit = _budget_cap.cap_limit
                 if _fixer_succ >= _cap_limit:
                     # v1 doesn't run this loop, so cap only applies to v2.
                     if await _check_v2():
@@ -2126,7 +2021,8 @@ async def exec_tool(
             try:
                 _runs_sf = _runs_for_cap
                 if _runs_sf is None:
-                    _runs_sf = await db.get_runs_by_conversation(conv_id, limit=50)
+                    _runs_sf = (_gate_ctx.runs if _gate_ctx is not None
+                                else await db.get_runs_by_conversation(conv_id, limit=50))
                 # Role-aware: reviewer-driven and acceptance-driven loops both
                 # get the "same error twice → research first" nudge. For
                 # acceptance, once research has run in this budget window the
@@ -2134,16 +2030,22 @@ async def exec_tool(
                 _track_role = (_parent_role_for_cap
                                if _parent_role_for_cap in {"reviewer", "acceptance"}
                                else "reviewer")
-                _research_skip_sf = await _deep_research_called_since(conv_id, _uts_cap)
+                _budget_sf = await compute_fix_budget(
+                    GateContext(
+                        conv_id=conv_id,
+                        name=name,
+                        args=args,
+                        runs=_runs_sf,
+                        latest_user_ts=_uts_cap,
+                        is_v2=bool(_v2_cached),
+                        research_since=_gate_research_since,
+                    ),
+                    _track_role,
+                )
+                _research_skip_sf = _budget_sf.research_done
                 # Same turn-scoped window as the cycle cap, counting both fix
                 # paths for THIS role — the gates must agree on cycle counts.
-                _fsucc_sf = sum(
-                    1 for r in _runs_since(_runs_sf, _uts_cap)
-                    if (r.get("role") in {"fixer", "aider.fix"}
-                        and r.get("status") == "succeeded"
-                        and ((r.get("result_envelope") or {}).get("source_role")
-                             or "reviewer") == _track_role)
-                )
+                _fsucc_sf = _budget_sf.succeeded
                 # 1 ≤ fixer_succ ≤ 2: between first failure and final cycle.
                 # 0 = first attempt, no gate. ≥3 = cap (handled above).
                 # Research nudge text is fixer-specific; Aider already requires
@@ -2249,7 +2151,8 @@ async def exec_tool(
             # case; this guard handles every other case.
             try:
                 if await _check_v2():
-                    _runs_pf = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _runs_pf = (_gate_ctx.runs_window(20) if _gate_ctx is not None
+                                else await db.get_runs_by_conversation(conv_id, limit=20))
                     _latest_meaningful = None
                     _MEANINGFUL_STATUSES = {"succeeded", "issues", "clean", "partial",
                                             "stuck", "failed", "error"}
@@ -2311,19 +2214,22 @@ async def exec_tool(
         # always produces a worse result than 2 surgical write_file edits.
         if conv_id and name == "generate_code":
             try:
-                _conv_full = await db.get_conversation(conv_id)
+                _conv_full = (_gate_ctx.conv_row if _gate_ctx is not None
+                              else await db.get_conversation(conv_id))
                 if await _check_v2(cr=_conv_full):
                     if args.get("manifest_completion_retry"):
                         print("[v2-gate] allowing manifest completion retry through anti-rebuild guard", flush=True)
                         raise StopAsyncIteration("manifest completion retry allowed")
-                    _runs_rb = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _runs_rb = (_gate_ctx.runs_window(20) if _gate_ctx is not None
+                                else await db.get_runs_by_conversation(conv_id, limit=20))
                     for _r in _runs_rb:
                         if _builder_completion_allowed(name, args, _r):
                             print("[v2-gate] allowing generate_code to complete partial builder", flush=True)
                             raise StopAsyncIteration("builder completion allowed")
                         if _r.get("role") in {"reviewer", "acceptance", "qa", "fixer", "aider.fix"}:
                             break
-                    _latest_user_ts = await _latest_user_msg_ts(conv_id, conv_row=_conv_full)
+                    _latest_user_ts = (_gate_ctx.latest_user_ts if _gate_ctx is not None
+                                       else await _latest_user_msg_ts(conv_id, conv_row=_conv_full))
 
                     if _latest_user_ts is not None:
                         _builder_succ_this_turn = 0
@@ -2385,7 +2291,8 @@ async def exec_tool(
         if conv_id and name in {"run_review", "run_acceptance_review"}:
             try:
                 if await _check_v2():
-                    _runs_bi = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _runs_bi = (_gate_ctx.runs_window(20) if _gate_ctx is not None
+                                else await db.get_runs_by_conversation(conv_id, limit=20))
                     _bi = _blocking_incomplete_builder(_runs_bi)
                     if _bi is not None:
                         _bi_env = _bi.get("result_envelope") or {}
@@ -2418,7 +2325,8 @@ async def exec_tool(
                                     "run_aider_fix", "ask_project", "get_coder_workflow",
                                     "cancel_coder_workflow"):
             try:
-                _runs_for_v2_gate = await db.get_runs_by_conversation(conv_id, limit=20)
+                _runs_for_v2_gate = (_gate_ctx.runs_window(20) if _gate_ctx is not None
+                                     else await db.get_runs_by_conversation(conv_id, limit=20))
                 _pending_run = None    # state 1 trigger
                 _pending_kind = ""
                 _pending_review = None  # state 2 trigger
@@ -2491,7 +2399,9 @@ async def exec_tool(
                         and _blocking_incomplete_builder(_runs_for_v2_gate) is not None
                     )
                     if (name in {"download_project", "download_file"}
-                            and await _latest_user_requested_ship_anyway(conv_id)):
+                            and (await _gate_ctx.ship_anyway()
+                                 if _gate_ctx is not None
+                                 else await _latest_user_requested_ship_anyway(conv_id))):
                         print(f"[v2-gate] ship-anyway: allowing {name} before "
                               f"{'completion' if _build_incomplete else 'review'} "
                               f"because latest user requested delivery", flush=True)
@@ -2541,7 +2451,9 @@ async def exec_tool(
                     _source_role = _pending_acceptance_needed.get("role", "")
                     _reviewer_id = (_env.get("reviewer_run_id") or _rid)
                     if (name in {"download_project", "download_file"}
-                            and await _latest_user_requested_ship_anyway(conv_id)):
+                            and (await _gate_ctx.ship_anyway()
+                                 if _gate_ctx is not None
+                                 else await _latest_user_requested_ship_anyway(conv_id))):
                         print(f"[v2-gate] ship-anyway: allowing {name} before "
                               f"acceptance because latest user requested delivery", flush=True)
                     else:
@@ -2581,30 +2493,28 @@ async def exec_tool(
                     # for the release — a fixer that declined still represents
                     # an exhausted attempt. The cycle-cap check (which gates
                     # run_fixer itself) still counts only successes.
-                    _FIXER_TERMINAL = {"succeeded", "failed", "partial", "no_op"}
-                    _run_role_by_id = {r.get("id"): r.get("role") for r in _runs_for_v2_gate}
-                    def _fixer_source_role(_fr):
-                        _fenv = _fr.get("result_envelope") or {}
-                        return (_fenv.get("source_role")
-                                or _run_role_by_id.get(_fr.get("parent_run_id"))
-                                or "reviewer")
                     # Same turn-scoped window as the cycle cap, so cap and
                     # cap-release agree on how many attempts happened.
-                    _uts_gate = await _latest_user_msg_ts(conv_id)
-                    _runs_gate_window = _runs_since(_runs_for_v2_gate, _uts_gate)
-                    _fixer_attempts_gate = sum(
-                        1 for _r in _runs_gate_window
-                        if (_r.get("role") in {"fixer", "aider.fix"} and _r.get("status") in _FIXER_TERMINAL
-                            and _fixer_source_role(_r) == _pending_role)
+                    _uts_gate = (_gate_ctx.latest_user_ts if _gate_ctx is not None
+                                 else await _latest_user_msg_ts(conv_id))
+                    _budget_gate = await compute_fix_budget(
+                        GateContext(
+                            conv_id=conv_id,
+                            name=name,
+                            args=args,
+                            runs=_runs_for_v2_gate,
+                            latest_user_ts=_uts_gate,
+                            is_v2=bool(_v2_cached),
+                            research_since=_gate_research_since,
+                        ),
+                        _pending_role,
                     )
-                    _fixer_succ_gate = sum(
-                        1 for _r in _runs_gate_window
-                        if (_r.get("role") in {"fixer", "aider.fix"} and _r.get("status") == "succeeded"
-                            and _fixer_source_role(_r) == _pending_role)
-                    )
+                    _fixer_attempts_gate = _budget_gate.attempts
                     _ship_anyway_gate = (
                         name in _DELIVERY_SHIP_TOOLS
-                        and await _latest_user_requested_ship_anyway(conv_id)
+                        and (await _gate_ctx.ship_anyway()
+                             if _gate_ctx is not None
+                             else await _latest_user_requested_ship_anyway(conv_id))
                     )
                     _aider_ctx_gate = None
                     if (getattr(config, "AIDER_ENABLED", True)
@@ -2625,12 +2535,9 @@ async def exec_tool(
                     # Repair ladder: force research at the base cap, then allow
                     # research-informed Aider/Fixer retries until the extended
                     # cap. Never auto-release manual write_file/run_shell.
-                    _research_done_gate = await _deep_research_called_since(conv_id, _uts_gate)
-                    if _pending_role == "acceptance":
-                        _base_cap_limit_gate = 2
-                    else:
-                        _base_cap_limit_gate = 3
-                    _cap_limit_gate = 4 if _research_done_gate else _base_cap_limit_gate
+                    _research_done_gate = _budget_gate.research_done
+                    _base_cap_limit_gate = _budget_gate.base_cap
+                    _cap_limit_gate = _budget_gate.cap_limit
                     _needs_research_gate = (
                         _fixer_attempts_gate >= _base_cap_limit_gate
                         and not _research_done_gate

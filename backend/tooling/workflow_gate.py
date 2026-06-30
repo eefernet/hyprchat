@@ -10,6 +10,8 @@ import os
 import re
 import time
 import uuid
+import json
+import calendar
 from collections import OrderedDict
 from datetime import datetime
 
@@ -59,6 +61,73 @@ def v2_name_match(name: str) -> bool:
     """Match v2/Daedalus persona names without matching unrelated substrings."""
     n = (name or "").lower()
     return "daedalus" in n or re.search(r"\bv2\b", n) is not None
+
+
+async def is_v2_persona(conv_id: str, conv_row: dict | None = None) -> bool:
+    """Return True iff this conversation is using the v2 coding persona.
+
+    Pass conv_row if the caller already fetched it. Failures are non-fatal and
+    return False so the gate stays off instead of misfiring on a normal chat.
+    """
+    try:
+        if conv_row is None:
+            conv_row = await db.get_conversation(conv_id)
+        mc_id = (conv_row or {}).get("model_config_id") if conv_row else None
+        if not mc_id:
+            return False
+        mc = await db.get_model_config(mc_id)
+        return bool(mc and v2_name_match(mc.get("name") or ""))
+    except Exception as e:
+        print(f"[v2-gate] persona lookup failed (non-fatal): {e}")
+        return False
+
+
+async def deep_research_called_since(conv_id: str, since_iso: str | None) -> bool:
+    """Return True iff deep_research has run since the trigger timestamp."""
+    try:
+        cached = get_recent_research(conv_id) if conv_id else None
+        if cached:
+            if since_iso:
+                since_dt = parse_ts_loose(since_iso)
+                if since_dt:
+                    since_unix = (
+                        calendar.timegm(since_dt.timetuple())
+                        + since_dt.microsecond / 1_000_000
+                    )
+                    if cached.get("ts", 0) >= since_unix:
+                        return True
+            else:
+                return True
+    except Exception as e:
+        print(f"[v2-gate] in-stream research cache check failed (non-fatal): {e}")
+
+    if not since_iso:
+        return False
+    try:
+        conv = await db.get_conversation(conv_id)
+        msgs = (conv or {}).get("messages") or []
+        since_ts = parse_ts_loose(since_iso)
+        for m in reversed(msgs):
+            if m.get("role") != "assistant":
+                continue
+            m_ts = parse_ts_loose(m.get("created_at"))
+            if since_ts and m_ts and m_ts < since_ts:
+                return False
+            md = m.get("metadata") or {}
+            if isinstance(md, str):
+                try:
+                    md = json.loads(md)
+                except Exception:
+                    md = {}
+            for ev in md.get("saved_events") or []:
+                if ev.get("type") != "tool_start":
+                    continue
+                if (ev.get("data") or {}).get("tool") == "deep_research":
+                    return True
+        return False
+    except Exception as e:
+        print(f"[v2-gate] deep_research history check failed (non-fatal): {e}")
+        return False
 
 
 async def prior_fix_attempts_context(conv_id: str, *, max_attempts: int = 3) -> str:
@@ -356,6 +425,8 @@ _parse_ts_loose = parse_ts_loose
 _latest_user_msg_ts = latest_user_msg_ts
 _runs_since = runs_since
 _v2_name_match = v2_name_match
+_is_v2_persona = is_v2_persona
+_deep_research_called_since = deep_research_called_since
 _prior_fix_attempts_context = prior_fix_attempts_context
 _prior_acceptance_issues_context = prior_acceptance_issues_context
 _fix_budget_note = fix_budget_note
