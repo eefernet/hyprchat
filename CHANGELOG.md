@@ -8,6 +8,7 @@
 - Refreshed Quick Search source and result rendering for clearer scanability in chat.
 - Search status, source titles, and result metadata now present with less visual noise.
 - Result cards better match the current HyprChat theme and spacing.
+- Quick Search now uses recent chat and memory context to frame ambiguous searches, strips attachment noise, avoids news freshness for non-news state questions, and ranks context-matching sources higher.
 
 ## Daedalus UI Rendering
 - Daedalus workflow output now renders as a summarized project status view instead of raw tool/event-heavy transcript blocks.
@@ -32,8 +33,11 @@
 
 ## UI
 - Changelog release sections now render as collapsible version cards, with the latest version expanded and version labels styled as larger title headers.
+- Quick Search source cards now show source numbers under favicons and avoid duplicating citation lists when the result carousel is already present.
 
 ## Bug fixes
+- Knowledge-base name and description edits now autosave and persist across server restarts.
+- `generate_image` fenced blocks now become tool calls, and local actor names are no longer searched when they are only part of the conversation wording.
 - Restored Daedalus to the intended two-turn Architect → Builder flow: fresh v2 builds now block `generate_code` until `plan_project` has produced a structured plan.
 - Removed the reverted single-turn Architect→Builder auto-handoff, strict manifest retry, and `BUILD PAUSED` gate that could cause one-file builds or duplicate build work.
 - Builder completion now depends on OpenHands reaching a real finish signal; truncated or round-limited builds are marked incomplete instead of being treated as successful.

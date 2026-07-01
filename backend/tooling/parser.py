@@ -101,6 +101,22 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
         except (json.JSONDecodeError, TypeError, KeyError):
             pass
 
+    # 1b. Markdown prompt fence mistake: some models emit
+    # ```generate_image\n<prompt>\n``` as if the fence were executable. Treat
+    # only this exact fence label as the image prompt; other fences are normal
+    # renderable chat content.
+    if "generate_image" in available_names:
+        for m in re.finditer(
+            r'```[ \t]*generate_image[ \t]*\r?\n(.*?)\r?\n?[ \t]*```',
+            content,
+            re.DOTALL | re.IGNORECASE,
+        ):
+            prompt = m.group(1).strip()
+            if prompt:
+                calls.append({"function": {"name": "generate_image", "arguments": {"prompt": prompt}}})
+        if calls:
+            return calls
+
     # 2. <tool_call>JSON</tool_call> tags (Qwen native format)
     # Also match <|call|>JSON patterns (GPT-OSS format)
     tag_matches = re.findall(
@@ -459,6 +475,19 @@ def _parse_loose_tool_calls(content: str, available_names: set) -> list[dict]:
 
 def strip_tool_calls(content: str, available_names: set | None = None) -> str:
     """Remove tool call artifacts from content so the user sees clean text."""
+    if available_names is None:
+        from tools import CODEAGENT_TOOLS
+
+        available_names = set(CODEAGENT_TOOLS)
+
+    if "generate_image" in available_names:
+        content = re.sub(
+            r'```[ \t]*generate_image[ \t]*\r?\n.*?\r?\n?[ \t]*```',
+            '',
+            content,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+
     # Remove <tool_call>...</tool_call>
     content = re.sub(
         r'<tool[_\-]?call[s]?\b[^>]*>\s*.*?\s*</tool[_\-]?call[s]?>',
@@ -499,10 +528,6 @@ def strip_tool_calls(content: str, available_names: set | None = None) -> str:
     # <tool...> tag is present, so 'you can use read_file (with a path)' and
     # backtick-quoted explanations survive.
     has_tag = bool(re.search(r'<tools?\b|<tool[_\-]?call', content, re.IGNORECASE))
-    if available_names is None:
-        from tools import CODEAGENT_TOOLS
-
-        available_names = set(CODEAGENT_TOOLS)
     spans = []
     for name in available_names:
         for m in re.finditer(rf'(?<![\w.])(["\']?){re.escape(name)}(["\']?)\s*\(', content):

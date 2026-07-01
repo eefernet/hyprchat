@@ -477,6 +477,7 @@ function HyprChat(){
   // Conversation id currently being streamed (null when idle). Set at sendMessages start, cleared on completion.
   const streamingCidRef=useRef(null);
   const [kbs,setKbs]=useState([]);
+  const kbSaveTimersRef=useRef(new Map());
   const [uploadProgress,setUploadProgress]=useState({});  // {kbId: {filename, progress, status, error}}
   const [tools,setTools]=useState([]);
   const [mcs,setMcs]=useState([]);
@@ -1061,7 +1062,26 @@ function HyprChat(){
     setLastPersonaId(mc.id);localStorage.setItem("hc-last-persona",mc.id);setPanel("chat");
   };
   const clearPendingProfile=()=>{setPendingPersona(null);setPendingToolIds([]);setLastPersonaId(null);try{localStorage.removeItem("hc-last-persona");}catch{};};
-  const saveKb=(kb)=>{fetch(`${API}/api/knowledge-bases/${kb.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:kb.name,description:kb.description})}).catch(()=>{});};
+  const saveKb=(kb)=>{
+    if(!kb?.id)return Promise.resolve();
+    return fetch(`${API}/api/knowledge-bases/${kb.id}`,{
+      method:"PUT",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({name:kb.name||"",description:kb.description||""})
+    }).catch(()=>{});
+  };
+  const scheduleKbSave=(kb,delay=450)=>{
+    if(!kb?.id)return;
+    const timers=kbSaveTimersRef.current;
+    if(timers.has(kb.id))clearTimeout(timers.get(kb.id));
+    timers.set(kb.id,setTimeout(()=>{timers.delete(kb.id);saveKb(kb);},delay));
+  };
+  const flushKbSave=(kb)=>{
+    if(!kb?.id)return;
+    const timers=kbSaveTimersRef.current;
+    if(timers.has(kb.id)){clearTimeout(timers.get(kb.id));timers.delete(kb.id);}
+    saveKb(kb);
+  };
   const parseConnectorJson=(txt,fallback,label)=>{
     try{return (txt||"").trim()?JSON.parse(txt):fallback;}catch(e){notify({type:"error",text:`Invalid ${label}`,detail:e.message||String(e)});throw e;}
   };
@@ -4504,8 +4524,8 @@ function HyprChat(){
       {kbs.map(kb=><div key={kb.id} style={cardS}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
           <div style={{flex:1}}>
-            <input value={kb.name} onChange={e=>setKbs(p=>p.map(k=>k.id===kb.id?{...k,name:e.target.value}:k))} style={{...inputS,fontSize:14,fontWeight:600,background:"transparent",border:"none",padding:"0 0 4px 0",color:t.text}}/>
-            <input value={kb.description||""} onChange={e=>setKbs(p=>p.map(k=>k.id===kb.id?{...k,description:e.target.value}:k))} placeholder="Description..." style={{...inputS,background:"transparent",border:"none",padding:0,fontSize:11,color:t.mut}}/>
+            <input value={kb.name} onChange={e=>{const next={...kb,name:e.target.value};setKbs(p=>p.map(k=>k.id===kb.id?next:k));scheduleKbSave(next);}} onBlur={e=>flushKbSave({...kb,name:e.target.value})} style={{...inputS,fontSize:14,fontWeight:600,background:"transparent",border:"none",padding:"0 0 4px 0",color:t.text}}/>
+            <input value={kb.description||""} onChange={e=>{const next={...kb,description:e.target.value};setKbs(p=>p.map(k=>k.id===kb.id?next:k));scheduleKbSave(next);}} onBlur={e=>flushKbSave({...kb,description:e.target.value})} placeholder="Description..." style={{...inputS,background:"transparent",border:"none",padding:0,fontSize:11,color:t.mut}}/>
           </div>
           <button onClick={async()=>{fetch(`${API}/api/knowledge-bases/${kb.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.filter(k=>k.id!==kb.id));}} style={btnS(t.err)}><IC.Trash/></button>
         </div>
@@ -7533,6 +7553,7 @@ function HyprChat(){
                     if(isU||msg.isS||isDaedalusOutput)return null;
                     const co=renderOpts;
                     if(!co?.citations?.length)return null;
+                    if(co.quickSearch&&co.citations.every(s2=>s2?.kind==="quick_search"))return null;
                     return <Collapsible theme={t} font={font} summary={`Sources (${co.citations.length})`}>
                       <div style={{display:"flex",flexDirection:"column",gap:6}}>
                         {co.citations.map(s2=><div key={s2.n} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"6px 8px",background:`${t.surface}44`,border:`1px solid ${t.brd}33`,borderRadius:6}}>

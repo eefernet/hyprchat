@@ -800,8 +800,11 @@ function QuickSearchSourcesPanel({payload,t,font,defaultOpen=false}){
         const isMedia=r.type==="youtube"||r.type==="image";
         const thumb=r.thumbnail&&isMedia;
         const badges=[r.published_date,r.freshness,r.source_tier].filter(Boolean).join(" - ");
-        return <a key={`${r.url}-${i}`} href={r.url} target="_blank" rel="noreferrer" title={r.score_reason||r.title||r.url} style={{textDecoration:"none",display:"grid",gridTemplateColumns:thumb?"24px minmax(0,1fr) 54px":"24px minmax(0,1fr)",gap:8,alignItems:"start",minWidth:0,padding:"8px 9px",borderRadius:7,border:`1px solid ${t.brd}32`,background:`${t.bgDeep}55`,color:t.dim,boxSizing:"border-box"}}>
-          <SourceFavicon url={r.url} domain={r.domain} size={22} theme={t} title={r.domain}/>
+        return <a key={`${r.url}-${i}`} href={r.url} target="_blank" rel="noreferrer" title={r.score_reason||r.title||r.url} style={{textDecoration:"none",display:"grid",gridTemplateColumns:thumb?"30px minmax(0,1fr) 54px":"30px minmax(0,1fr)",gap:8,alignItems:"start",minWidth:0,padding:"8px 9px",borderRadius:7,border:`1px solid ${t.brd}32`,background:`${t.bgDeep}55`,color:t.dim,boxSizing:"border-box"}}>
+          <span style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4,width:30,minWidth:30}}>
+            <SourceFavicon url={r.url} domain={r.domain} size={22} theme={t} title={r.domain}/>
+            <span title={`Source ${i+1}`} style={{fontSize:9,lineHeight:1,fontWeight:900,color:t.acc,padding:"2px 3px",borderRadius:4,background:`${t.acc}10`,border:`1px solid ${t.acc}24`}}>[{i+1}]</span>
+          </span>
           <span style={{minWidth:0,display:"flex",flexDirection:"column",gap:3}}>
             <span style={{fontSize:11,fontWeight:800,color:t.text,lineHeight:1.35,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{r.title||r.domain||"Source"}</span>
             {r.snippet&&<span style={{fontSize:10,color:t.mut,lineHeight:1.4,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{r.snippet}</span>}

@@ -1500,6 +1500,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     # ── Quick Search: gate → rewrite → search → rank → fetch → inject ──
     if "quick_search" in requested_tool_ids:
         try:
+            _quick_search_context_hint = "\n\n".join(
+                s for s in [
+                    (global_memory_info.get("context") or "")[:1800],
+                    (workspace_memory_info.get("context") or "")[:1800],
+                ] if s
+            )[:3000]
             qs = await run_quick_search_for_chat(
                 http,
                 config.OLLAMA_URL,
@@ -1507,6 +1513,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 events, conv_id, messages,
                 default_model=config.DEFAULT_MODEL,
                 chat_model=req.model or "",
+                context_hint=_quick_search_context_hint,
             )
             if qs.get("context"):
                 for m in reversed(messages):
