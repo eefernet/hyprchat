@@ -1,5 +1,5 @@
 <details open>
-<summary>Alpha v17.3.1 — June 23, 2026</summary>
+<summary>Alpha v17.3.1 — July 1, 2026</summary>
 
 > UI/readability polish and behavior hardening for Quick Search, Daedalus output
 > rendering, and Council sessions.

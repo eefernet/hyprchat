@@ -741,6 +741,7 @@ async def init_db():
                     print(f"[DB MIGRATION] Warning adding artifacts.{col}: {e}")
         await db.executescript("""
             CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_messages_conv_created_id ON messages(conversation_id, created_at, id);
             CREATE INDEX IF NOT EXISTS idx_knowledge_bases_user ON knowledge_bases(user_id, updated_at);
             CREATE INDEX IF NOT EXISTS idx_tools_user ON tools(user_id, updated_at);
             CREATE INDEX IF NOT EXISTS idx_model_configs_user ON model_configs(user_id, updated_at);
