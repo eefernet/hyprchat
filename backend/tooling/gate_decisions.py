@@ -15,6 +15,7 @@ from typing import Any
 import database as db
 
 from tooling.workflow_gate import (
+    is_environment_fault,
     latest_user_msg_ts,
     parse_ts_loose,
     runs_since,
@@ -31,6 +32,17 @@ AsyncStringResolver = Callable[[], Awaitable[str]]
 
 FIX_ROLES = {"fixer", "aider.fix"}
 FIX_TERMINAL_STATUSES = {"succeeded", "failed", "partial", "no_op"}
+
+# Progress-based fix budget: consecutive fix attempts without verified
+# progress force deep_research at 4, allow one post-research attempt at 5,
+# and a hard ceiling of total attempts per user request backstops loops
+# where each fix resolves old issues but introduces new ones.
+NO_PROGRESS_RESEARCH_AT = 4
+NO_PROGRESS_LAST_SHOT = 5
+FIX_ATTEMPT_HARD_CEILING = 25
+
+_ISSUE_ENV_STATUSES = {"issues", "error"}
+_VERIFY_ENV_STATUSES = {"issues", "error", "clean", "accepted"}
 
 
 async def _default_false(_since: Any = None) -> bool:
@@ -102,13 +114,37 @@ class GateDecision:
 
 
 @dataclass(slots=True)
-class FixBudget:
-    role: str
-    succeeded: int
-    attempts: int
-    research_done: bool
-    base_cap: int
-    cap_limit: int
+class FixBattleState:
+    """Progress-scored fix budget for the current user request.
+
+    ``no_progress_streak`` counts consecutive fix attempts (Aider + Fixer,
+    reviewer- and acceptance-driven combined) whose follow-up verification
+    still reported the same trouble; verified progress resets it.
+    ``total_attempts`` never resets within a turn and backs the hard ceiling.
+    """
+    total_attempts: int = 0
+    no_progress_streak: int = 0
+    # Roles ("aider.fix"/"fixer") of the current streak's attempts, oldest
+    # first — drives the Aider→Fixer escalation policy.
+    streak_editors: list[str] = field(default_factory=list)
+    pending_verification: bool = False
+    research_done: bool = False
+
+    def _trailing(self, role: str) -> int:
+        n = 0
+        for r in reversed(self.streak_editors):
+            if r != role:
+                break
+            n += 1
+        return n
+
+    @property
+    def trailing_aider(self) -> int:
+        return self._trailing("aider.fix")
+
+    @property
+    def trailing_fixer(self) -> int:
+        return self._trailing("fixer")
 
 
 async def build_gate_context(
@@ -205,49 +241,173 @@ def infer_fix_parent_role(ctx: GateContext) -> str:
     return parent_role or "reviewer"
 
 
-async def compute_fix_budget(ctx: GateContext, role: str) -> FixBudget:
-    """Shared fixer/Aider cycle budget for the current user request.
-
-    ``succeeded`` and ``attempts`` intentionally differ:
-    succeeded gates cycle caps, while terminal attempts release or exhaust
-    post-review states after a fixer/Aider pass declined or failed.
-    """
-    role = role or "reviewer"
-    run_role_by_id = {r.get("id"): r.get("role") for r in ctx.runs}
-    window = runs_since(ctx.runs, ctx.latest_user_ts)
-    succeeded = 0
-    attempts = 0
-    for run in window:
-        if run.get("role") not in FIX_ROLES:
-            continue
-        if fixer_source_role(run, run_role_by_id) != role:
-            continue
-        status = (run.get("status") or "").lower()
-        if status == "succeeded":
-            succeeded += 1
-        if status in FIX_TERMINAL_STATUSES:
-            attempts += 1
-    research_done = await ctx.research_since(ctx.latest_user_ts)
-    base_cap = 2 if role == "acceptance" else 3
-    cap_limit = 4 if research_done else base_cap
-    return FixBudget(
-        role=role,
-        succeeded=succeeded,
-        attempts=attempts,
-        research_done=research_done,
-        base_cap=base_cap,
-        cap_limit=cap_limit,
-    )
+def normalize_issue_path(path: str, project_dir: str = "") -> str:
+    """Normalize an issue file path for cross-envelope comparison."""
+    p = (path or "").strip().replace("\\", "/")
+    if not p:
+        return ""
+    if project_dir:
+        pd = project_dir.strip().replace("\\", "/").rstrip("/")
+        if pd and (p == pd or p.startswith(pd + "/")):
+            p = p[len(pd):]
+    while p.startswith("./"):
+        p = p[2:]
+    return p.lstrip("/").rstrip("/")
 
 
-def issue_signatures(envelope: dict) -> set[tuple[str, str]]:
-    sigs: set[tuple[str, str]] = set()
+def envelope_issue_files(envelope: dict | None, project_dir: str = "") -> set[str]:
+    files: set[str] = set()
     for issue in (envelope or {}).get("issues") or []:
-        path = (issue.get("file") or "").strip()
-        summary = (issue.get("summary") or "").strip().lower()[:60]
-        if path and summary:
-            sigs.add((path, summary))
-    return sigs
+        p = normalize_issue_path(str(issue.get("file") or ""), project_dir)
+        if p:
+            files.add(p)
+    return files
+
+
+def issue_scoped_files(envelope: dict | None, project_dir: str = "") -> set[str]:
+    """Files an issue envelope points at: issue["file"] + suggested_fix_scope."""
+    files = envelope_issue_files(envelope, project_dir)
+    for issue in (envelope or {}).get("issues") or []:
+        scope = issue.get("suggested_fix_scope") or []
+        if isinstance(scope, str):
+            scope = [scope]
+        for entry in scope:
+            p = normalize_issue_path(str(entry or ""), project_dir)
+            if p:
+                files.add(p)
+    return files
+
+
+def paths_overlap(a: set[str], b: set[str]) -> bool:
+    """Normalized-path equality, plus basename matching when either side is a
+    bare basename — envelopes often cite "cli.py" where the other says
+    "src/cli.py"."""
+    if a & b:
+        return True
+    bases_a = {p.rsplit("/", 1)[-1] for p in a}
+    bases_b = {p.rsplit("/", 1)[-1] for p in b}
+    if any("/" not in p and p in bases_b for p in a):
+        return True
+    if any("/" not in p and p in bases_a for p in b):
+        return True
+    return False
+
+
+def progress_verdict(src_env: dict | None, ver_env: dict | None) -> str:
+    """Did a fix attempt verifiably resolve the issues that triggered it?
+
+    Compares issue FILE PATHS between the triggering envelope and the
+    follow-up verification — never summary text, which reviewers reword
+    between rounds. Returns "progress" or "no_progress".
+    """
+    if not src_env:
+        # An attempt that can't demonstrate what it targeted earns no reset.
+        return "no_progress"
+    ver_status = ((ver_env or {}).get("status") or "").lower()
+    if ver_status in {"clean", "accepted"}:
+        return "progress"
+    src_files = envelope_issue_files(src_env)
+    ver_files = envelope_issue_files(ver_env)
+    if src_files and ver_files:
+        # New issues confined to new files start a fresh battle; the hard
+        # ceiling backstops fix-old/create-new loops.
+        return "no_progress" if paths_overlap(src_files, ver_files) else "progress"
+    src_n = len((src_env or {}).get("issues") or [])
+    ver_n = len((ver_env or {}).get("issues") or [])
+    if src_n > 0 and ver_n < src_n:
+        return "progress"
+    return "no_progress"
+
+
+def compute_fix_battle(runs: list[Run], latest_user_ts) -> FixBattleState:
+    """Score the current turn's fix attempts by verified progress.
+
+    For each terminal fix run: resolve the envelope that triggered it
+    (parent_run_id, else nearest older same-source-role issue run) and the
+    verification that followed it (nearest newer same-source-role run), then
+    apply ``progress_verdict``. Reviewer-driven fixes are verified by the
+    auto run_review; acceptance-driven fixes by the next acceptance run.
+    Environment-fault envelopes prove nothing and are skipped on both sides.
+    """
+    state = FixBattleState()
+    ordered = list(reversed(runs_since(runs, latest_user_ts)))  # oldest first
+    run_role_by_id = {r.get("id"): r.get("role") for r in ordered}
+    run_by_id = {r.get("id"): r for r in ordered}
+
+    fix_indices = [
+        i for i, r in enumerate(ordered)
+        if r.get("role") in FIX_ROLES
+        and (r.get("status") or "").lower() in FIX_TERMINAL_STATUSES
+    ]
+    for idx in fix_indices:
+        fix_run = ordered[idx]
+        source_role = fixer_source_role(fix_run, run_role_by_id)
+
+        src_env = None
+        parent = run_by_id.get(fix_run.get("parent_run_id"))
+        if parent is not None:
+            penv = parent.get("result_envelope") or {}
+            if (not is_environment_fault(penv)
+                    and (penv.get("status") or "").lower() in _ISSUE_ENV_STATUSES):
+                src_env = penv
+        if src_env is None:
+            for j in range(idx - 1, -1, -1):
+                r = ordered[j]
+                if r.get("role") != source_role:
+                    continue
+                env = r.get("result_envelope") or {}
+                if is_environment_fault(env):
+                    continue
+                if (env.get("status") or "").lower() in _ISSUE_ENV_STATUSES:
+                    src_env = env
+                break
+
+        ver_env = None
+        for j in range(idx + 1, len(ordered)):
+            r = ordered[j]
+            if r.get("role") != source_role:
+                continue
+            env = r.get("result_envelope") or {}
+            if is_environment_fault(env):
+                continue
+            if (env.get("status") or "").lower() in _VERIFY_ENV_STATUSES:
+                ver_env = env
+                break
+
+        state.total_attempts += 1
+        if ver_env is None:
+            if idx == fix_indices[-1]:
+                state.pending_verification = True
+            continue
+        if progress_verdict(src_env, ver_env) == "progress":
+            state.no_progress_streak = 0
+            state.streak_editors = []
+        else:
+            state.no_progress_streak += 1
+            state.streak_editors.append(fix_run.get("role") or "")
+    return state
+
+
+async def compute_fix_battle_ctx(ctx: GateContext) -> FixBattleState:
+    """Async wrapper adding the turn-scoped research flag to the battle."""
+    state = compute_fix_battle(ctx.runs, ctx.latest_user_ts)
+    try:
+        state.research_done = await ctx.research_since(ctx.latest_user_ts)
+    except Exception as exc:
+        print(f"[v2-gate] research flag lookup failed (non-fatal): {exc}")
+        state.research_done = False
+    return state
+
+
+def preferred_fix_editor(state: FixBattleState) -> str:
+    """Aider-first with escalation: after 2 consecutive no-progress Aider
+    attempts route to the in-house Fixer, give it a 2-attempt block, then
+    alternate back."""
+    if state.trailing_aider >= 2:
+        return "fixer"
+    if 0 < state.trailing_fixer < 2:
+        return "fixer"
+    return "aider"
 
 
 async def evaluate_gate(_ctx: GateContext) -> GateDecision | None:

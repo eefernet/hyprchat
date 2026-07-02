@@ -54,60 +54,271 @@ def _ctx(runs, *, latest_user_ts=None, research_done=False):
     )
 
 
-def test_compute_fix_budget_keeps_successes_and_attempts_distinct():
-    latest_user = datetime(2026, 1, 1, 12, 0, 0)
-    runs = [
-        _run_row("rev-1", "reviewer", env={"status": "issues"}),
-        _run_row("fix-1", "fixer", "succeeded", env={"source_role": "reviewer"}),
-        _run_row("fix-2", "aider.fix", "failed", parent_run_id="rev-1"),
-        _run_row(
-            "fix-old",
-            "fixer",
-            "succeeded",
-            "2026-01-01 11:59:00",
-            env={"source_role": "reviewer"},
-        ),
-    ]
-
-    budget = _run(gate_decisions.compute_fix_budget(_ctx(runs, latest_user_ts=latest_user), "reviewer"))
-
-    assert budget.succeeded == 1
-    assert budget.attempts == 2
-    assert budget.base_cap == 3
-    assert budget.cap_limit == 3
+# ─── progress_verdict — file-path based, reword-proof ───────────────────────
 
 
-def test_compute_fix_budget_scopes_by_source_role_with_parent_fallback():
-    runs = [
-        _run_row("rev-1", "reviewer", env={"status": "issues"}),
-        _run_row("acc-1", "acceptance", env={"status": "issues"}),
-        _run_row("fix-review", "aider.fix", "succeeded", parent_run_id="rev-1"),
-        _run_row("fix-accept", "fixer", "no_op", parent_run_id="acc-1"),
-        _run_row("fix-accept-2", "fixer", "succeeded", env={"source_role": "acceptance"}),
-    ]
-
-    reviewer = _run(gate_decisions.compute_fix_budget(_ctx(runs), "reviewer"))
-    acceptance = _run(gate_decisions.compute_fix_budget(_ctx(runs), "acceptance"))
-
-    assert reviewer.succeeded == 1
-    assert reviewer.attempts == 1
-    assert reviewer.base_cap == 3
-    assert acceptance.succeeded == 1
-    assert acceptance.attempts == 2
-    assert acceptance.base_cap == 2
+def _issues_env(*files, status="issues"):
+    return {"status": status,
+            "issues": [{"file": f, "summary": f"problem in {f}"} for f in files]}
 
 
-def test_compute_fix_budget_research_bumps_cap_to_four_for_both_roles():
-    runs = [
-        _run_row("acc-1", "acceptance", env={"status": "issues"}),
-        _run_row("fix-1", "fixer", "succeeded", env={"source_role": "acceptance"}),
-    ]
+def test_progress_verdict_same_file_reworded_summary_is_no_progress():
+    # The empirical failure case: acceptance rewords the summary each round
+    # ("lists NumPy as a requirement" vs "claims NumPy is used") but the file
+    # is the same — that is NOT progress.
+    src = {"status": "issues", "issues": [
+        {"file": "README.md", "summary": "The README lists NumPy as a requirement"}]}
+    ver = {"status": "issues", "issues": [
+        {"file": "README.md", "summary": "The README claims NumPy is used for math"}]}
+    assert gate_decisions.progress_verdict(src, ver) == "no_progress"
 
-    budget = _run(gate_decisions.compute_fix_budget(_ctx(runs, research_done=True), "acceptance"))
 
-    assert budget.research_done is True
-    assert budget.base_cap == 2
-    assert budget.cap_limit == 4
+def test_progress_verdict_disjoint_files_is_progress():
+    assert gate_decisions.progress_verdict(
+        _issues_env("a.py"), _issues_env("b.py")) == "progress"
+
+
+def test_progress_verdict_clean_or_accepted_is_progress():
+    assert gate_decisions.progress_verdict(
+        _issues_env("a.py"), {"status": "clean", "issues": []}) == "progress"
+    assert gate_decisions.progress_verdict(
+        _issues_env("a.py"), {"status": "accepted", "issues": []}) == "progress"
+
+
+def test_progress_verdict_basename_matches_nested_path():
+    assert gate_decisions.progress_verdict(
+        _issues_env("cli.py"), _issues_env("src/cli.py")) == "no_progress"
+    assert gate_decisions.progress_verdict(
+        _issues_env("src/cli.py"), _issues_env("cli.py")) == "no_progress"
+
+
+def test_progress_verdict_count_fallback_when_files_missing():
+    src = {"status": "error", "issues": [{"summary": "boom"}, {"summary": "bang"}]}
+    fewer = {"status": "error", "issues": [{"summary": "boom"}]}
+    same = {"status": "error", "issues": [{"summary": "x"}, {"summary": "y"}]}
+    assert gate_decisions.progress_verdict(src, fewer) == "progress"
+    assert gate_decisions.progress_verdict(src, same) == "no_progress"
+
+
+def test_progress_verdict_missing_source_is_no_progress():
+    assert gate_decisions.progress_verdict(None, _issues_env("a.py")) == "no_progress"
+    assert gate_decisions.progress_verdict({}, {"status": "clean"}) == "no_progress"
+
+
+def test_issue_scoped_files_unions_file_and_fix_scope():
+    env = {"issues": [
+        {"file": "src/app.py", "suggested_fix_scope": ["README.md", "./cli.py"]},
+        {"file": "", "suggested_fix_scope": "tests/test_app.py"},
+    ]}
+    assert gate_decisions.issue_scoped_files(env) == {
+        "src/app.py", "README.md", "cli.py", "tests/test_app.py"}
+
+
+def test_normalize_issue_path_strips_project_dir_and_dots():
+    norm = gate_decisions.normalize_issue_path
+    assert norm("/root/projects/x/app.py", "/root/projects/x") == "app.py"
+    assert norm("./src/cli.py") == "src/cli.py"
+    assert norm("src\\cli.py") == "src/cli.py"
+
+
+# ─── compute_fix_battle — the streak walk ────────────────────────────────────
+#
+# Helpers build runs in CHRONOLOGICAL order; the DB returns newest-first, so
+# _battle() reverses before calling.
+
+
+def _battle(chronological_runs, latest_user_ts=None):
+    return gate_decisions.compute_fix_battle(
+        list(reversed(chronological_runs)), latest_user_ts)
+
+
+def _seq(*specs):
+    """Build chronological runs: ('rev', files...) / ('acc', ...) /
+    ('aider'|'fixer', parent_id) / ('clean',) / raw dicts pass through."""
+    out = []
+    for i, spec in enumerate(specs):
+        ts = f"2026-01-02 00:{i:02d}:00"
+        if isinstance(spec, dict):
+            spec = {**spec, "started_at": ts}
+            out.append(spec)
+            continue
+        kind, *rest = spec
+        rid = f"{kind}-{i}"
+        if kind in ("rev", "acc"):
+            role = "reviewer" if kind == "rev" else "acceptance"
+            out.append(_run_row(rid, role, started_at=ts, env=_issues_env(*rest)))
+        elif kind == "clean":
+            role = rest[0] if rest else "reviewer"
+            status = "accepted" if role == "acceptance" else "clean"
+            out.append(_run_row(rid, role, started_at=ts,
+                                env={"status": status, "issues": []}))
+        elif kind in ("aider", "fixer"):
+            role = "aider.fix" if kind == "aider" else "fixer"
+            parent = rest[0] if rest else ""
+            out.append(_run_row(rid, role, "succeeded", started_at=ts,
+                                parent_run_id=parent))
+        else:
+            raise AssertionError(f"unknown spec {spec}")
+    return out
+
+
+def test_battle_streak_counts_no_progress_across_editors_and_roles():
+    runs = _seq(
+        ("rev", "a.py"),
+        ("aider", "rev-0"),
+        ("rev", "a.py"),        # verification: same file → no progress
+        ("fixer", "rev-2"),
+        ("rev", "a.py"),        # still same file → no progress
+        ("acc", "a.py"),
+        ("aider", "acc-5"),
+        ("acc", "a.py"),        # acceptance-driven no progress too
+    )
+    state = _battle(runs)
+    assert state.total_attempts == 3
+    assert state.no_progress_streak == 3
+    assert state.streak_editors == ["aider.fix", "fixer", "aider.fix"]
+
+
+def test_battle_resets_streak_on_verified_progress():
+    runs = _seq(
+        ("rev", "a.py"),
+        ("aider", "rev-0"),
+        ("rev", "a.py"),        # no progress
+        ("aider", "rev-2"),
+        ("rev", "b.py"),        # a.py resolved → progress, new battle
+        ("fixer", "rev-4"),
+        ("rev", "b.py"),        # no progress on b.py
+    )
+    state = _battle(runs)
+    assert state.total_attempts == 3      # ceiling counter never resets
+    assert state.no_progress_streak == 1  # only the b.py attempt
+    assert state.streak_editors == ["fixer"]
+
+
+def test_battle_clean_verification_resets_streak():
+    runs = _seq(
+        ("rev", "a.py"),
+        ("aider", "rev-0"),
+        ("clean",),
+    )
+    state = _battle(runs)
+    assert state.total_attempts == 1
+    assert state.no_progress_streak == 0
+
+
+def test_battle_pending_verification_flagged_not_counted():
+    runs = _seq(
+        ("rev", "a.py"),
+        ("aider", "rev-0"),
+    )
+    state = _battle(runs)
+    assert state.total_attempts == 1
+    assert state.no_progress_streak == 0
+    assert state.pending_verification is True
+
+
+def test_battle_source_resolution_falls_back_to_nearest_older_issue_run():
+    # Fix run with no parent_run_id still resolves its source envelope from
+    # the nearest older same-role issue run.
+    runs = _seq(
+        ("rev", "a.py"),
+        ("aider",),           # no parent id
+        ("rev", "a.py"),
+    )
+    state = _battle(runs)
+    assert state.no_progress_streak == 1
+
+
+def test_battle_env_fault_verification_is_skipped():
+    fault = _run_row("rev-fault", "reviewer", env={
+        "status": "error", "deterministic_issue": "environment_fault",
+        "issues": [{"file": "a.py", "summary": "sandbox broken"}]})
+    runs = _seq(
+        ("rev", "a.py"),
+        ("aider", "rev-0"),
+        fault,                # proves nothing about the fix
+    )
+    state = _battle(runs)
+    assert state.no_progress_streak == 0
+    assert state.pending_verification is True
+
+
+def test_battle_turn_scoped_to_latest_user_message():
+    runs = _seq(
+        ("rev", "a.py"),
+        ("aider", "rev-0"),
+        ("rev", "a.py"),
+    )
+    latest_user = datetime(2026, 1, 2, 0, 30, 0)  # after all runs
+    state = _battle(runs, latest_user_ts=latest_user)
+    assert state.total_attempts == 0
+    assert state.no_progress_streak == 0
+
+
+def test_battle_partial_and_failed_count_as_attempts_never_progress():
+    partial = _run_row("aider-p", "aider.fix", "partial", parent_run_id="rev-0")
+    failed = _run_row("fixer-f", "fixer", "failed", parent_run_id="rev-0")
+    runs = _seq(
+        ("rev", "a.py"),
+        partial,
+        ("rev", "a.py"),
+        failed,
+        ("rev", "a.py"),
+    )
+    state = _battle(runs)
+    assert state.total_attempts == 2
+    assert state.no_progress_streak == 2
+
+
+def test_battle_acceptance_fix_verified_by_next_acceptance_not_review():
+    # Acceptance-driven fix followed by a clean reviewer run must NOT count
+    # as progress — the acceptance re-run is the verification.
+    runs = _seq(
+        ("acc", "README.md"),
+        ("aider", "acc-0"),
+        ("clean", "reviewer"),      # intermediate auto-review, ignored
+        ("acc", "README.md"),       # acceptance still flags README
+    )
+    state = _battle(runs)
+    assert state.no_progress_streak == 1
+
+
+# ─── preferred_fix_editor — 2-and-2 escalation blocks ────────────────────────
+
+
+def _state(editors):
+    s = gate_decisions.FixBattleState()
+    s.no_progress_streak = len(editors)
+    s.streak_editors = list(editors)
+    return s
+
+
+def test_preferred_editor_defaults_to_aider():
+    assert gate_decisions.preferred_fix_editor(_state([])) == "aider"
+    assert gate_decisions.preferred_fix_editor(_state(["aider.fix"])) == "aider"
+
+
+def test_preferred_editor_escalates_after_two_aider_no_progress():
+    assert gate_decisions.preferred_fix_editor(
+        _state(["aider.fix", "aider.fix"])) == "fixer"
+
+
+def test_preferred_editor_gives_fixer_a_two_attempt_block_then_alternates():
+    assert gate_decisions.preferred_fix_editor(
+        _state(["aider.fix", "aider.fix", "fixer"])) == "fixer"
+    assert gate_decisions.preferred_fix_editor(
+        _state(["aider.fix", "aider.fix", "fixer", "fixer"])) == "aider"
+
+
+def test_preferred_editor_reset_returns_to_aider():
+    # Progress reset empties the streak — back to Aider-first.
+    assert gate_decisions.preferred_fix_editor(_state([])) == "aider"
+
+
+def test_battle_thresholds_are_wired():
+    assert gate_decisions.NO_PROGRESS_RESEARCH_AT == 4
+    assert gate_decisions.NO_PROGRESS_LAST_SHOT == 5
+    assert gate_decisions.FIX_ATTEMPT_HARD_CEILING == 25
 
 
 def test_gate_context_window_slicing_preserves_old_gate_windows():

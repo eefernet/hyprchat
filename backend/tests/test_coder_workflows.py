@@ -740,25 +740,41 @@ def test_greenfield_aider_context_accepts_issue_project_dir(monkeypatch):
     }
 
 
-def test_aider_yields_to_fixer_after_same_role_aider_attempt():
+def test_aider_escalates_to_fixer_after_two_no_progress_attempts():
     import tools
 
-    issue_run = {"id": "run-acceptance-2", "role": "acceptance", "result_envelope": {"status": "issues"}}
-    runs = [
-        issue_run,
-        {
-            "id": "run-aider",
-            "role": "aider.fix",
-            "parent_run_id": "run-acceptance-1",
-            "status": "succeeded",
-            "result_envelope": {"source_role": "acceptance", "status": "applied"},
-        },
-        {"id": "run-acceptance-1", "role": "acceptance", "result_envelope": {"status": "issues"}},
-    ]
+    def _acc(rid, i):
+        return {"id": rid, "role": "acceptance", "status": "succeeded",
+                "started_at": f"2026-01-02 00:0{i}:00",
+                "result_envelope": {"status": "issues", "issues": [
+                    {"file": "app.py", "summary": f"broken round {i}"}]}}
 
-    assert tools._latest_repair_before_issue_was_aider(runs, issue_run) is True
-    runs[1]["role"] = "fixer"
-    assert tools._latest_repair_before_issue_was_aider(runs, issue_run) is False
+    def _aider(rid, parent, i):
+        return {"id": rid, "role": "aider.fix", "parent_run_id": parent,
+                "status": "succeeded",
+                "started_at": f"2026-01-02 00:0{i}:00",
+                "result_envelope": {"source_role": "acceptance", "status": "applied"}}
+
+    # Newest-first, as the DB returns them. One no-progress Aider attempt →
+    # still Aider's battle; two → escalate to Fixer for a 2-attempt block.
+    one_attempt = [
+        _acc("acc-2", 2),
+        _aider("aider-1", "acc-1", 1),
+        _acc("acc-1", 0),
+    ]
+    battle = tools.compute_fix_battle(one_attempt, None)
+    assert tools.preferred_fix_editor(battle) == "aider"
+
+    two_attempts = [
+        _acc("acc-3", 4),
+        _aider("aider-2", "acc-2", 3),
+        _acc("acc-2", 2),
+        _aider("aider-1", "acc-1", 1),
+        _acc("acc-1", 0),
+    ]
+    battle = tools.compute_fix_battle(two_attempts, None)
+    assert battle.no_progress_streak == 2
+    assert tools.preferred_fix_editor(battle) == "fixer"
 
 
 def test_aider_first_context_requires_worker_health(monkeypatch):
@@ -1034,7 +1050,7 @@ def test_partial_snapshot_discarded_so_gates_refetch_runs(monkeypatch):
     assert result == "FIXER SKIPPED: stub."
 
 
-def test_acceptance_base_cap_forces_research_before_delivery(monkeypatch):
+def test_acceptance_no_progress_streak_forces_research_before_delivery(monkeypatch):
     import tools
 
     class Events:
@@ -1044,12 +1060,12 @@ def test_acceptance_base_cap_forces_research_before_delivery(monkeypatch):
         async def emit(self, conv_id, event_type, data):
             self.items.append((conv_id, event_type, data))
 
-    runs = [
-        {
-            "id": "run-acceptance",
+    def _acc_run(rid, minute):
+        return {
+            "id": rid,
             "role": "acceptance",
             "status": "succeeded",
-            "started_at": "2026-06-24T10:03:00",
+            "started_at": f"2026-06-24T10:{minute:02d}:00",
             "result_envelope": {
                 "status": "issues",
                 "project_dir": "/root/projects/neon-pong-game",
@@ -1060,24 +1076,32 @@ def test_acceptance_base_cap_forces_research_before_delivery(monkeypatch):
                     "suggested_fix_scope": ["main.py", "effects/particle_system.py"],
                 }],
             },
-        },
-        {
-            "id": "run-fix-2",
+        }
+
+    def _fix_run(rid, parent, minute):
+        return {
+            "id": rid,
             "role": "fixer",
             "status": "succeeded",
-            "parent_run_id": "run-acceptance",
-            "started_at": "2026-06-24T10:02:00",
+            "parent_run_id": parent,
+            "started_at": f"2026-06-24T10:{minute:02d}:00",
             "result_envelope": {"status": "applied", "source_role": "acceptance"},
-        },
-        {
-            "id": "run-fix-1",
-            "role": "fixer",
-            "status": "succeeded",
-            "parent_run_id": "run-acceptance",
-            "started_at": "2026-06-24T10:01:00",
-            "result_envelope": {"status": "applied", "source_role": "acceptance"},
-        },
+        }
+
+    # Newest-first: 4 interleaved acceptance-issue→fix pairs, each fix
+    # verified as no-progress (same file flagged again) → research is forced.
+    runs = [
+        _acc_run("run-acceptance", 9),
+        _fix_run("run-fix-4", "run-acc-3", 8),
+        _acc_run("run-acc-3", 7),
+        _fix_run("run-fix-3", "run-acc-2", 6),
+        _acc_run("run-acc-2", 5),
+        _fix_run("run-fix-2", "run-acc-1", 4),
+        _acc_run("run-acc-1", 3),
+        _fix_run("run-fix-1", "run-acc-0", 2),
+        _acc_run("run-acc-0", 1),
     ]
+    tools._RECENT_RESEARCH.clear()
 
     async def get_runs_by_conversation(_conv_id, limit=20):
         return runs
@@ -1551,6 +1575,97 @@ def test_aider_no_fallback_after_partial_stream(tmp_path, monkeypatch):
     assert "not restarting" in env["summary"]
     assert not any(u.endswith("/aider/run") for u in fake.posts)
     assert any("/aider/cancel/" in u for u in fake.posts)
+
+
+_README_ISSUE_ENVELOPE = {
+    "status": "issues",
+    "issues": [{"file": "README.md", "summary": "README claims NumPy is used",
+                "suggested_fix_scope": ["README.md"]}],
+}
+
+
+def test_aider_ok_without_touching_issue_files_downgrades_to_partial(tmp_path, monkeypatch):
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import config
+    import database as db
+    _prep_aider_db(tmp_path, db)
+    monkeypatch.setattr(config, "AIDER_WORKER_URL", "http://127.0.0.1:9")
+    # Worker says ok, but every touched file misses the issue scope (README.md).
+    fake = _AiderFakeHTTP({"status": "ok", "summary": "edited game loop",
+                           "files_touched": ["neon_pong.py"]})
+
+    env = _run(aider_fixer.run_aider_fix(
+        fake, _NullEvents(), "conv-aider",
+        project_dir="/root/projects/proj-a", task="fix the README claims",
+        issue_envelope=dict(_README_ISSUE_ENVELOPE),
+        project_id="proj-a", workflow_id="cw-aider",
+    ))
+
+    assert env["status"] == "partial"
+    assert "touched none of the issue-scoped files" in env["summary"]
+    assert env["needs_review"] is True
+    runs = _run(db.get_runs_by_conversation("conv-aider", limit=5))
+    aider_run = next(r for r in runs if r["role"] == "aider.fix")
+    assert aider_run["status"] == "partial"
+    # partial still changed the tree — workflow heads to review, not blocked.
+    wf = _run(db.get_coder_workflow("cw-aider"))
+    assert wf["state"] == "reviewing"
+
+
+def test_aider_ok_touching_issue_files_stays_applied(tmp_path, monkeypatch):
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import config
+    import database as db
+    _prep_aider_db(tmp_path, db)
+    monkeypatch.setattr(config, "AIDER_WORKER_URL", "http://127.0.0.1:9")
+    fake = _AiderFakeHTTP({"status": "ok", "summary": "fixed README",
+                           "files_touched": ["README.md", "neon_pong.py"]})
+
+    env = _run(aider_fixer.run_aider_fix(
+        fake, _NullEvents(), "conv-aider",
+        project_dir="/root/projects/proj-a", task="fix the README claims",
+        issue_envelope=dict(_README_ISSUE_ENVELOPE),
+        project_id="proj-a", workflow_id="cw-aider",
+    ))
+
+    assert env["status"] == "applied"
+    assert "touched none" not in env["summary"]
+
+
+def test_aider_preadds_manifest_files_after_issue_scope(tmp_path, monkeypatch):
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import config
+    import database as db
+    _prep_aider_db(tmp_path, db)
+    monkeypatch.setattr(config, "AIDER_WORKER_URL", "http://127.0.0.1:9")
+
+    captured = {}
+
+    class _CaptureHTTP(_AiderFakeHTTP):
+        async def post(self, url, **kw):
+            if url.endswith("/aider/run"):
+                captured["payload"] = kw.get("json") or {}
+            return await super().post(url, **kw)
+
+    fake = _CaptureHTTP({"status": "ok", "summary": "ok",
+                         "files_touched": ["README.md"]})
+
+    _run(aider_fixer.run_aider_fix(
+        fake, _NullEvents(), "conv-aider",
+        project_dir="/root/projects/proj-a", task="fix the README claims",
+        issue_envelope=dict(_README_ISSUE_ENVELOPE),
+        project_id="proj-a", workflow_id="cw-aider",
+    ))
+
+    allowed = (captured.get("payload") or {}).get("allowed_files") or []
+    # Issue-scoped files keep priority; manifests are appended so an LLM
+    # prose mention can't trigger aider's add-file re-send-and-discard.
+    assert allowed[0] == "README.md"
+    for manifest in ("requirements.txt", "pyproject.toml", "package.json"):
+        assert manifest in allowed
 
 
 def test_aider_error_with_edits_routes_to_review_not_fixer(tmp_path, monkeypatch):
@@ -2708,35 +2823,50 @@ def test_fix_needed_manual_tool_auto_dispatches_to_aider(monkeypatch):
 
 
 def test_fix_needed_at_research_gate_stays_blocked_no_dispatch(monkeypatch):
-    """At the base cap without research, manual tools must stay BLOCKED with the
-    deep_research demand — auto-dispatch must not bypass the research ladder."""
+    """At the research threshold (4 no-progress attempts) without research,
+    manual tools must stay BLOCKED with the deep_research demand —
+    auto-dispatch must not bypass the research ladder."""
     import tools
 
-    aider_success = {
-        "role": "aider.fix",
-        "status": "succeeded",
-        "started_at": "2026-01-01 12:20:00",
-        "result_envelope": {"status": "applied", "source_role": "reviewer",
-                            "files_touched": ["app.py"]},
-    }
-    reviewer_run = {
-        "id": "run-rev-cap",
-        "role": "reviewer",
-        "status": "succeeded",
-        "started_at": "2026-01-01 12:25:00",
-        "result_envelope": {
-            "status": "issues",
-            "project_dir": "/root/projects/demo",
-            "issues": [{"severity": "bug", "file": "app.py",
-                        "summary": "boom", "suggested_fix_scope": ["app.py"]}],
-        },
-    }
-    # Newest-first: reviewer with issues, then THREE successful reviewer-driven
-    # fixes → base cap (3) hit, no research since → research gate must hold.
-    runs = [reviewer_run] + [
-        {**aider_success, "id": f"run-fx-{i}",
-         "started_at": f"2026-01-01 12:1{i}:00"} for i in (3, 2, 1)
+    def _rev(rid, minute):
+        return {
+            "id": rid,
+            "role": "reviewer",
+            "status": "succeeded",
+            "started_at": f"2026-01-01 12:{minute:02d}:00",
+            "result_envelope": {
+                "status": "issues",
+                "project_dir": "/root/projects/demo",
+                "issues": [{"severity": "bug", "file": "app.py",
+                            "summary": "boom", "suggested_fix_scope": ["app.py"]}],
+            },
+        }
+
+    def _fx(rid, parent, minute):
+        return {
+            "id": rid,
+            "role": "aider.fix",
+            "status": "succeeded",
+            "parent_run_id": parent,
+            "started_at": f"2026-01-01 12:{minute:02d}:00",
+            "result_envelope": {"status": "applied", "source_role": "reviewer",
+                                "files_touched": ["app.py"]},
+        }
+
+    # Newest-first: 4 interleaved reviewer-issue→fix pairs, each fix verified
+    # as no-progress → the research gate must hold.
+    runs = [
+        _rev("run-rev-cap", 25),
+        _fx("run-fx-4", "run-rev-3", 18),
+        _rev("run-rev-3", 17),
+        _fx("run-fx-3", "run-rev-2", 16),
+        _rev("run-rev-2", 15),
+        _fx("run-fx-2", "run-rev-1", 14),
+        _rev("run-rev-1", 13),
+        _fx("run-fx-1", "run-rev-0", 12),
+        _rev("run-rev-0", 11),
     ]
+    tools._RECENT_RESEARCH.clear()
 
     async def get_conversation(conv_id):
         return {

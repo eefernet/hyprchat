@@ -914,6 +914,9 @@ def _write_aider_prompt(req: AiderRunRequest, prompt_dir: Path) -> Path:
 Rules:
 - Work from the existing repository. Do not rebuild the project from scratch.
 - Prefer focused edits over broad rewrites.
+- Fix EVERY instance of the described inaccuracy or bug in each file you touch,
+  not only the cited lines — scan the whole file for other occurrences of the
+  same problem.
 - Preserve existing behavior unless the task or review envelope requires a change.
 - If tests fail, fix the root cause and rerun the relevant command when possible.
 - When the review reports stale `/root/projects/...` paths, prioritize the

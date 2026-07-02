@@ -481,33 +481,54 @@ def _patch_fixer_config(monkeypatch):
     monkeypatch.setattr(fixer.config, "AIDER_ENABLED", False)
 
 
-def _seed_cap_conversation(conv_id: str, mc_id: str, *, fix_role: str = "fixer"):
-    """Three successful reviewer-driven fix runs + a reviewer with issues."""
+def _issue_env(summary="boom"):
+    return {
+        "status": "issues", "summary": "still broken",
+        "project_dir": "/root/projects/demo",
+        "issues": [{"file": "app.py", "summary": summary,
+                    "suggested_fix_scope": ["app.py"]}],
+    }
+
+
+def _seed_cap_conversation(conv_id: str, mc_id: str, *, fix_role: str = "fixer",
+                           attempts: int = 4):
+    """Interleave issue→fix pairs so every fix attempt is VERIFIED as
+    no-progress (same file flagged again), ending on a reviewer with issues.
+    The progress budget scores verified no-progress attempts, so seeds must
+    interleave — a bare pile of fix runs has pending verification and counts
+    a zero streak. Returns the final reviewer run id."""
     _run(db.create_model_config(mc_id, "Daedalus Coder v2", "test-model",
                                 tool_ids=["run_fixer"]))
     _run(db.create_conversation(conv_id, "Cap Test", model_config_id=mc_id))
-    for i in range(3):
-        rid = f"run-fx-{conv_id}-{i}"
-        _run(db.create_run(rid, conv_id, role=fix_role, status="succeeded"))
-        _run(db.update_run(rid, status="succeeded", result_envelope={
+    t = 0
+    for i in range(attempts):
+        rev_id = f"run-rev-{conv_id}-{i}"
+        _run(db.create_run(rev_id, conv_id, role="reviewer", status="succeeded"))
+        _run(db.update_run(rev_id, status="succeeded",
+                           result_envelope=_issue_env(f"boom take {i}"), ended=True))
+        _run(_set_run_times(rev_id, f"2026-01-01T00:00:{t:02d}", f"2026-01-01T00:00:{t:02d}"))
+        t += 1
+        fix_id = f"run-fx-{conv_id}-{i}"
+        _run(db.create_run(fix_id, conv_id, role=fix_role,
+                           parent_run_id=rev_id, status="succeeded"))
+        _run(db.update_run(fix_id, status="succeeded", result_envelope={
             "status": "applied", "source_role": "reviewer",
         }, ended=True))
-        _run(_set_run_times(rid, f"2026-01-01T00:00:0{i}", f"2026-01-01T00:00:0{i}"))
-    _run(db.create_run(f"run-rev-{conv_id}", conv_id, role="reviewer", status="succeeded"))
-    _run(db.update_run(f"run-rev-{conv_id}", status="succeeded", result_envelope={
-        "status": "issues", "summary": "still broken",
-        "project_dir": "/root/projects/demo",
-        "issues": [{"file": "app.py", "summary": "boom",
-                    "suggested_fix_scope": ["app.py"]}],
-    }, ended=True))
-    _run(_set_run_times(f"run-rev-{conv_id}", "2026-01-01T00:00:05", "2026-01-01T00:00:06"))
+        _run(_set_run_times(fix_id, f"2026-01-01T00:00:{t:02d}", f"2026-01-01T00:00:{t:02d}"))
+        t += 1
+    final_rev = f"run-rev-{conv_id}"
+    _run(db.create_run(final_rev, conv_id, role="reviewer", status="succeeded"))
+    _run(db.update_run(final_rev, status="succeeded",
+                       result_envelope=_issue_env("boom final"), ended=True))
+    _run(_set_run_times(final_rev, f"2026-01-01T00:00:{t:02d}", f"2026-01-01T00:00:{t + 1:02d}"))
+    return final_rev
 
 
 def test_cycle_cap_resets_after_new_user_message(tmp_path, monkeypatch):
     db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
     _run(db.init_db())
     _seed_cap_conversation("conv-capr", "mc-capr")
-    # The user sends a NEW request after the three exhausted cycles.
+    # The user sends a NEW request after the four exhausted attempts.
     _run(db.add_message("conv-capr", "user", "try a different approach"))
     _run(_set_message_times("conv-capr", "2026-01-01 00:01:00"))
     _patch_fixer_config(monkeypatch)
@@ -518,19 +539,19 @@ def test_cycle_cap_resets_after_new_user_message(tmp_path, monkeypatch):
         conv_id="conv-capr",
     ))
 
-    # The cap BLOCK message says "Hard cap of"; the phrase "Hard cap:" also
-    # appears benignly in chained-review guidance text.
-    assert "Hard cap of" not in result
+    assert "hard ceiling" not in result
     assert "BLOCKED" not in result
 
 
-def test_cycle_cap_blocks_within_same_user_turn(tmp_path, monkeypatch):
+def test_no_progress_streak_blocks_within_same_user_turn(tmp_path, monkeypatch):
     db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
     _run(db.init_db())
+    # 4 verified no-progress attempts, user message predates them all —
+    # research is forced before attempt 5.
     _seed_cap_conversation("conv-capb", "mc-capb")
-    # The user message predates the three cycles — same request, cap holds.
     _run(db.add_message("conv-capb", "user", "fix my app"))
     _run(_set_message_times("conv-capb", "2025-12-31 00:00:00"))
+    tools._RECENT_RESEARCH.clear()
     _patch_fixer_config(monkeypatch)
 
     result = _run(tools.exec_tool(
@@ -542,12 +563,33 @@ def test_cycle_cap_blocks_within_same_user_turn(tmp_path, monkeypatch):
     assert "BLOCKED" in result and "deep_research(" in result
 
 
-def test_aider_success_counts_toward_cap(tmp_path, monkeypatch):
+def test_streak_below_research_threshold_is_allowed(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    # 3 verified no-progress attempts — under the old design this hit the
+    # reviewer cap; the progress budget allows it (research forces at 4).
+    final_rev = _seed_cap_conversation("conv-caps3", "mc-caps3", attempts=3)
+    _run(db.add_message("conv-caps3", "user", "fix my app"))
+    _run(_set_message_times("conv-caps3", "2025-12-31 00:00:00"))
+    tools._RECENT_RESEARCH.clear()
+    _patch_fixer_config(monkeypatch)
+
+    result = _run(tools.exec_tool(
+        http=_FixerHTTP(), events=_FakeEvents(),
+        name="run_fixer", args={"reviewer_run_id": final_rev},
+        conv_id="conv-caps3",
+    ))
+
+    assert "BLOCKED" not in result
+
+
+def test_aider_attempts_count_toward_budget(tmp_path, monkeypatch):
     db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
     _run(db.init_db())
     _seed_cap_conversation("conv-capa", "mc-capa", fix_role="aider.fix")
     _run(db.add_message("conv-capa", "user", "fix my app"))
     _run(_set_message_times("conv-capa", "2025-12-31 00:00:00"))
+    tools._RECENT_RESEARCH.clear()
     _patch_fixer_config(monkeypatch)
 
     result = _run(tools.exec_tool(
@@ -559,48 +601,113 @@ def test_aider_success_counts_toward_cap(tmp_path, monkeypatch):
     assert "BLOCKED" in result and "deep_research(" in result
 
 
+def test_hard_ceiling_stops_even_with_research(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    from tooling.gate_decisions import FIX_ATTEMPT_HARD_CEILING
+    # Interleave issue→fix→PROGRESS cycles so the streak keeps resetting but
+    # total attempts pile up to the ceiling. Build manually: each fix is
+    # verified by a review flagging a DIFFERENT file (progress), so only the
+    # ceiling can block.
+    _run(db.create_model_config("mc-ceil", "Daedalus Coder v2", "test-model",
+                                tool_ids=["run_fixer"]))
+    _run(db.create_conversation("conv-ceil", "Ceiling Test", model_config_id="mc-ceil"))
+    t = 0
+    for i in range(FIX_ATTEMPT_HARD_CEILING):
+        rev_id = f"run-rev-ceil-{i}"
+        _run(db.create_run(rev_id, "conv-ceil", role="reviewer", status="succeeded"))
+        _run(db.update_run(rev_id, status="succeeded", result_envelope={
+            "status": "issues", "summary": "next bug",
+            "project_dir": "/root/projects/demo",
+            "issues": [{"file": f"mod_{i}.py", "summary": f"bug {i}",
+                        "suggested_fix_scope": [f"mod_{i}.py"]}],
+        }, ended=True))
+        _run(_set_run_times(rev_id, f"2026-01-01T00:{t // 60:02d}:{t % 60:02d}"))
+        t += 1
+        fix_id = f"run-fx-ceil-{i}"
+        _run(db.create_run(fix_id, "conv-ceil", role="fixer",
+                           parent_run_id=rev_id, status="succeeded"))
+        _run(db.update_run(fix_id, status="succeeded", result_envelope={
+            "status": "applied", "source_role": "reviewer",
+        }, ended=True))
+        _run(_set_run_times(fix_id, f"2026-01-01T00:{t // 60:02d}:{t % 60:02d}"))
+        t += 1
+    final_rev = "run-rev-ceil-final"
+    _run(db.create_run(final_rev, "conv-ceil", role="reviewer", status="succeeded"))
+    _run(db.update_run(final_rev, status="succeeded", result_envelope={
+        "status": "issues", "summary": "yet another bug",
+        "project_dir": "/root/projects/demo",
+        "issues": [{"file": "mod_final.py", "summary": "bug final",
+                    "suggested_fix_scope": ["mod_final.py"]}],
+    }, ended=True))
+    _run(_set_run_times(final_rev, f"2026-01-01T00:{t // 60:02d}:{t % 60:02d}"))
+    _run(db.add_message("conv-ceil", "user", "fix my app"))
+    _run(_set_message_times("conv-ceil", "2025-12-31 00:00:00"))
+    tools._stash_research_result("conv-ceil", "bug", "report body")
+    _patch_fixer_config(monkeypatch)
+
+    result = _run(tools.exec_tool(
+        http=_FixerHTTP(), events=_FakeEvents(),
+        name="run_fixer", args={"reviewer_run_id": final_rev},
+        conv_id="conv-ceil",
+    ))
+
+    assert "BLOCKED" in result
+    assert "hard ceiling" in result
+    assert "automated repair budget" in result
+
+
 # ---------------------------------------------------------------------------
-# Acceptance-driven escalation ladder: same-error → research → cap-bump → stop/ask
+# Acceptance-driven escalation ladder: progress budget → research → last shot → stop/ask
 # ---------------------------------------------------------------------------
 
 def _seed_acceptance_conversation(conv_id: str, mc_id: str, *,
-                                  fix_success: int, accept_runs: int,
-                                  sig: str = "boom"):
-    """`accept_runs` acceptance runs (same issue sig) + `fix_success`
-    acceptance-driven fixer successes. Returns the latest acceptance run id."""
+                                  attempts: int, sig: str = "boom"):
+    """Interleave acceptance-issue→fix pairs so each acceptance-driven fix is
+    VERIFIED as no-progress by the next acceptance run (same file), ending on
+    an acceptance run with issues. Returns that final acceptance run id."""
     _run(db.create_model_config(mc_id, "Daedalus Coder v2", "test-model",
                                 tool_ids=["run_fixer", "write_file"]))
     _run(db.create_conversation(conv_id, "Accept Test", model_config_id=mc_id))
-    last_acc = ""
-    for j in range(accept_runs):
+    t = 0
+    for j in range(attempts):
         aid = f"run-acc-{conv_id}-{j}"
         _run(db.create_run(aid, conv_id, role="acceptance", status="succeeded"))
         _run(db.update_run(aid, status="succeeded", result_envelope={
             "status": "issues", "summary": "still broken",
             "project_dir": "/root/projects/demo",
-            "issues": [{"file": "app.py", "summary": sig,
+            "issues": [{"file": "app.py", "summary": f"{sig} round {j}",
                         "suggested_fix_scope": ["app.py"]}],
         }, ended=True))
-        _run(_set_run_times(aid, f"2026-01-01T00:00:1{j}", f"2026-01-01T00:00:1{j}"))
-        last_acc = aid
-    for i in range(fix_success):
-        rid = f"run-fx-{conv_id}-{i}"
-        _run(db.create_run(rid, conv_id, role="fixer", status="succeeded"))
+        _run(_set_run_times(aid, f"2026-01-01T00:00:{t:02d}", f"2026-01-01T00:00:{t:02d}"))
+        t += 1
+        rid = f"run-fx-{conv_id}-{j}"
+        _run(db.create_run(rid, conv_id, role="fixer",
+                           parent_run_id=aid, status="succeeded"))
         _run(db.update_run(rid, status="succeeded", result_envelope={
             "status": "applied", "source_role": "acceptance",
         }, ended=True))
-        _run(_set_run_times(rid, f"2026-01-01T00:00:2{i}", f"2026-01-01T00:00:2{i}"))
+        _run(_set_run_times(rid, f"2026-01-01T00:00:{t:02d}", f"2026-01-01T00:00:{t:02d}"))
+        t += 1
+    last_acc = f"run-acc-{conv_id}-final"
+    _run(db.create_run(last_acc, conv_id, role="acceptance", status="succeeded"))
+    _run(db.update_run(last_acc, status="succeeded", result_envelope={
+        "status": "issues", "summary": "still broken",
+        "project_dir": "/root/projects/demo",
+        "issues": [{"file": "app.py", "summary": f"{sig} final",
+                    "suggested_fix_scope": ["app.py"]}],
+    }, ended=True))
+    _run(_set_run_times(last_acc, f"2026-01-01T00:00:{t:02d}", f"2026-01-01T00:00:{t + 1:02d}"))
     return last_acc
 
 
-def test_acceptance_stuck_forces_research_first(tmp_path, monkeypatch):
+def test_acceptance_single_no_progress_attempt_is_allowed(tmp_path, monkeypatch):
     db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
     _run(db.init_db())
     tools._RECENT_RESEARCH.clear()
-    # Two acceptance runs with the SAME issue + one acceptance-driven fix → the
-    # error recurred, so the gate must force deep_research before another fixer.
-    last_acc = _seed_acceptance_conversation(
-        "conv-accs", "mc-accs", fix_success=1, accept_runs=2)
+    # One verified no-progress acceptance-driven attempt — well under the
+    # research threshold (4); another fixer pass is allowed.
+    last_acc = _seed_acceptance_conversation("conv-accs", "mc-accs", attempts=1)
     _run(db.add_message("conv-accs", "user", "build my app"))
     _run(_set_message_times("conv-accs", "2025-12-31 00:00:00"))
     _patch_fixer_config(monkeypatch)
@@ -611,15 +718,16 @@ def test_acceptance_stuck_forces_research_first(tmp_path, monkeypatch):
         conv_id="conv-accs",
     ))
 
-    assert "BLOCKED" in result and "deep_research" in result
+    assert "BLOCKED" not in result
 
 
-def test_acceptance_cap_is_two_without_research(tmp_path, monkeypatch):
+def test_acceptance_two_attempts_allowed_under_progress_budget(tmp_path, monkeypatch):
     db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
     _run(db.init_db())
     tools._RECENT_RESEARCH.clear()
-    last_acc = _seed_acceptance_conversation(
-        "conv-accc", "mc-accc", fix_success=2, accept_runs=1)
+    # The old acceptance base cap was 2; the progress budget allows attempt 3
+    # (research forces at 4 consecutive no-progress attempts).
+    last_acc = _seed_acceptance_conversation("conv-accc", "mc-accc", attempts=2)
     _run(db.add_message("conv-accc", "user", "build my app"))
     _run(_set_message_times("conv-accc", "2025-12-31 00:00:00"))
     _patch_fixer_config(monkeypatch)
@@ -630,20 +738,36 @@ def test_acceptance_cap_is_two_without_research(tmp_path, monkeypatch):
         conv_id="conv-accc",
     ))
 
-    # Base cap (2) hit, no research yet → force deep_research, not hand-fix.
+    assert "BLOCKED" not in result
+
+
+def test_acceptance_streak_four_forces_research(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    tools._RECENT_RESEARCH.clear()
+    last_acc = _seed_acceptance_conversation("conv-acc4", "mc-acc4", attempts=4)
+    _run(db.add_message("conv-acc4", "user", "build my app"))
+    _run(_set_message_times("conv-acc4", "2025-12-31 00:00:00"))
+    _patch_fixer_config(monkeypatch)
+
+    result = _run(tools.exec_tool(
+        http=_FixerHTTP(), events=_FakeEvents(),
+        name="run_fixer", args={"reviewer_run_id": last_acc},
+        conv_id="conv-acc4",
+    ))
+
     assert "BLOCKED" in result and "deep_research(" in result
     assert "authorize manual intervention" not in result
 
 
-def test_acceptance_cap_bumps_to_four_after_research(tmp_path, monkeypatch):
+def test_streak_four_with_research_allows_last_shot(tmp_path, monkeypatch):
     db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
     _run(db.init_db())
     tools._RECENT_RESEARCH.clear()
-    last_acc = _seed_acceptance_conversation(
-        "conv-accb", "mc-accb", fix_success=2, accept_runs=1)
+    last_acc = _seed_acceptance_conversation("conv-accb", "mc-accb", attempts=4)
     _run(db.add_message("conv-accb", "user", "build my app"))
     _run(_set_message_times("conv-accb", "2025-12-31 00:00:00"))
-    # Research happened this budget window → cap extends 2→4, fixer allowed.
+    # Research happened this budget window → attempt 5 (last shot) allowed.
     tools._stash_research_result("conv-accb", "pygame collision", "report body")
     _patch_fixer_config(monkeypatch)
 
@@ -653,22 +777,20 @@ def test_acceptance_cap_bumps_to_four_after_research(tmp_path, monkeypatch):
         conv_id="conv-accb",
     ))
 
-    # succ=2 < bumped cap 4 → run_fixer runs instead of being cap-blocked.
-    assert "Hard cap" not in result
+    assert "BLOCKED" not in result
 
 
-def test_acceptance_terminal_stops_and_asks_after_research(tmp_path, monkeypatch):
+def test_streak_five_stops_and_asks_after_research(tmp_path, monkeypatch):
     db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
     _run(db.init_db())
     tools._RECENT_RESEARCH.clear()
-    last_acc = _seed_acceptance_conversation(
-        "conv-acct", "mc-acct", fix_success=4, accept_runs=1)
+    last_acc = _seed_acceptance_conversation("conv-acct", "mc-acct", attempts=5)
     _run(db.add_message("conv-acct", "user", "build my app"))
     _run(_set_message_times("conv-acct", "2025-12-31 00:00:00"))
     tools._stash_research_result("conv-acct", "pygame collision", "report body")
     _patch_fixer_config(monkeypatch)
 
-    # run_fixer is now budget-exhausted (4/4 after research) → stop-and-ask.
+    # 5 consecutive no-progress attempts incl. the post-research one → stop.
     blocked = _run(tools.exec_tool(
         http=_FixerHTTP(), events=_FakeEvents(),
         name="run_fixer", args={"reviewer_run_id": last_acc},
@@ -685,7 +807,65 @@ def test_acceptance_terminal_stops_and_asks_after_research(tmp_path, monkeypatch
         conv_id="conv-acct",
     ))
     assert "BLOCKED" in released
-    assert "write_file" not in released or "Your VERY NEXT tool call MUST be" in released
+    # Not silently released or auto-dispatched — the exhausted message stands.
+    assert "Auto-dispatched" not in released
+    assert "automated repair budget" in released
+
+
+def test_verified_progress_resets_streak(tmp_path, monkeypatch):
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    tools._RECENT_RESEARCH.clear()
+    # 4 no-progress attempts on app.py, then a fix whose verification flags a
+    # DIFFERENT file — verified progress resets the streak, so the next fix
+    # attempt is allowed without research.
+    _run(db.create_model_config("mc-prog", "Daedalus Coder v2", "test-model",
+                                tool_ids=["run_fixer"]))
+    _run(db.create_conversation("conv-prog", "Progress Test", model_config_id="mc-prog"))
+    t = 0
+
+    def _rev(rid, file, summary):
+        nonlocal t
+        _run(db.create_run(rid, "conv-prog", role="reviewer", status="succeeded"))
+        _run(db.update_run(rid, status="succeeded", result_envelope={
+            "status": "issues", "summary": summary,
+            "project_dir": "/root/projects/demo",
+            "issues": [{"file": file, "summary": summary,
+                        "suggested_fix_scope": [file]}],
+        }, ended=True))
+        _run(_set_run_times(rid, f"2026-01-01T00:00:{t:02d}"))
+        t += 1
+
+    def _fix(rid, parent):
+        nonlocal t
+        _run(db.create_run(rid, "conv-prog", role="fixer",
+                           parent_run_id=parent, status="succeeded"))
+        _run(db.update_run(rid, status="succeeded", result_envelope={
+            "status": "applied", "source_role": "reviewer",
+        }, ended=True))
+        _run(_set_run_times(rid, f"2026-01-01T00:00:{t:02d}"))
+        t += 1
+
+    for i in range(4):
+        _rev(f"rev-{i}", "app.py", f"boom {i}")
+        _fix(f"fix-{i}", f"rev-{i}")
+    # Attempt 5 resolves app.py; the follow-up review finds a new bug in a
+    # different file → progress.
+    _rev("rev-4", "app.py", "boom 4")
+    _fix("fix-4", "rev-4")
+    _rev("rev-5", "other.py", "new bug in other file")
+
+    _run(db.add_message("conv-prog", "user", "fix my app"))
+    _run(_set_message_times("conv-prog", "2025-12-31 00:00:00"))
+    _patch_fixer_config(monkeypatch)
+
+    result = _run(tools.exec_tool(
+        http=_FixerHTTP(), events=_FakeEvents(),
+        name="run_fixer", args={"reviewer_run_id": "rev-5"},
+        conv_id="conv-prog",
+    ))
+
+    assert "BLOCKED" not in result
 
 
 def _seed_qa_conversation(conv_id: str, mc_id: str):
@@ -883,18 +1063,33 @@ def test_fix_budget_note_counts_per_request(tmp_path):
     _run(db.create_conversation("conv-budget", "Budget"))
     _run(db.add_message("conv-budget", "user", "fix it"))
     _run(_set_message_times("conv-budget", "2025-12-31 00:00:00"))
-    for i, role in enumerate(["fixer", "aider.fix"]):
-        rid = f"run-bgt-{i}"
-        _run(db.create_run(rid, "conv-budget", role=role, status="succeeded"))
-        _run(db.update_run(rid, status="succeeded", result_envelope={
-            "status": "applied", "source_role": "reviewer",
-        }, ended=True))
+    # Interleave issue→fix→issue so both fixes verify as no-progress.
+    specs = [
+        ("run-bgt-rev-0", "reviewer", None),
+        ("run-bgt-0", "fixer", "run-bgt-rev-0"),
+        ("run-bgt-rev-1", "reviewer", None),
+        ("run-bgt-1", "aider.fix", "run-bgt-rev-1"),
+        ("run-bgt-rev-2", "reviewer", None),
+    ]
+    for i, (rid, role, parent) in enumerate(specs):
+        _run(db.create_run(rid, "conv-budget", role=role,
+                           parent_run_id=parent or "", status="succeeded"))
+        env = ({"status": "applied", "source_role": "reviewer"}
+               if role in {"fixer", "aider.fix"} else
+               {"status": "issues",
+                "issues": [{"file": "app.py", "summary": f"boom {i}"}]})
+        _run(db.update_run(rid, status="succeeded", result_envelope=env, ended=True))
         _run(_set_run_times(rid, f"2026-01-01T00:00:0{i}", f"2026-01-01T00:00:0{i}"))
 
     note = _run(tools._fix_budget_note("conv-budget", "reviewer"))
-    assert "2/3" in note
-    note_acc = _run(tools._fix_budget_note("conv-budget", "acceptance"))
-    assert "0/2" in note_acc
+    assert "2 consecutive attempt(s) without verified progress" in note
+    assert "2/25 total attempts" in note
+
+    # New user message resets the turn-scoped window.
+    _run(_set_message_times("conv-budget", "2026-01-02 00:00:00"))
+    note_reset = _run(tools._fix_budget_note("conv-budget", "reviewer"))
+    assert "0 consecutive attempt(s)" in note_reset
+    assert "0/25 total attempts" in note_reset
 
 
 def test_fixer_applied_creates_git_checkpoint(tmp_path, monkeypatch):

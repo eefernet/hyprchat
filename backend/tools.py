@@ -22,11 +22,18 @@ from connectors import execute_connector_tool
 from research import fetch_bytes_safely, run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
 from tooling.codebox_tools import CODEBOX_TOOL_NAMES, run_codebox_tool
 from tooling.gate_decisions import (
+    FIX_ATTEMPT_HARD_CEILING,
+    NO_PROGRESS_LAST_SHOT,
+    NO_PROGRESS_RESEARCH_AT,
     GateContext,
     build_gate_context,
-    compute_fix_budget,
+    compute_fix_battle,
+    compute_fix_battle_ctx,
     evaluate_gate,
-    issue_signatures as _gd_issue_signatures,
+    issue_scoped_files,
+    normalize_issue_path,
+    paths_overlap,
+    preferred_fix_editor,
     reconcile_workflow_state,
 )
 from tooling.workflow_gate import (
@@ -160,11 +167,6 @@ async def _git_checkpoint(http, project_dir: str, label: str) -> str:
     except Exception as e:
         print(f"[git-checkpoint] failed (non-fatal): {e}")
     return ""
-
-
-# Single source of truth lives in tooling.gate_decisions — the local copy had
-# drifted into a duplicate implementation of the same signature logic.
-_issue_signatures = _gd_issue_signatures
 
 
 async def _deep_research_called_since(conv_id: str, since_iso: str | None) -> bool:
@@ -324,39 +326,6 @@ async def _aider_first_context(http, conv_id: str, *, issue_run: dict | None = N
     if not await _aider_worker_healthy(http):
         return None
     return ctx
-
-
-def _latest_repair_before_issue_was_aider(runs: list[dict], issue_run: dict | None) -> bool:
-    """True when this issue is the result of a just-tried Aider repair.
-
-    Runs are newest-first. For a persisted reviewer/acceptance issue, the first
-    older repair run for the same source role tells us which editor just failed
-    to converge. If it was Aider, route the next pass to the fallback Fixer.
-    """
-    issue_id = (issue_run or {}).get("id") or ""
-    issue_role = (issue_run or {}).get("role") or ""
-    if issue_role not in {"reviewer", "acceptance"}:
-        return False
-    seen_issue = not issue_id
-    run_role_by_id = {r.get("id"): r.get("role") for r in runs or []}
-    for run in runs or []:
-        if not seen_issue:
-            if run.get("id") == issue_id:
-                seen_issue = True
-            continue
-        role = run.get("role") or ""
-        if role not in {"aider.fix", "fixer"}:
-            continue
-        env = run.get("result_envelope") or {}
-        source_role = (
-            env.get("source_role")
-            or run_role_by_id.get(run.get("parent_run_id"))
-            or "reviewer"
-        )
-        if source_role == issue_role:
-            return role == "aider.fix"
-        return False
-    return False
 
 
 async def _latest_user_requested_ship_anyway(conv_id: str) -> bool:
@@ -1917,12 +1886,24 @@ async def exec_tool(
                 if not _parent_role_for_cap:
                     _parent_role_for_cap = "reviewer"
 
+                # Progress-scored unified budget: one battle state drives the
+                # Aider/Fixer routing AND the caps below. Verified progress
+                # (the fix's follow-up verification no longer flags the same
+                # files) resets the streak; the hard ceiling never resets.
+                _battle_cap = compute_fix_battle(_runs_for_cap, _uts_cap)
+                try:
+                    _battle_cap.research_done = await _gate_research_since(_uts_cap)
+                except Exception as _re:
+                    print(f"[v2-gate] research flag lookup failed (non-fatal): {_re}")
+
                 # Existing-project repairs are owned by Aider first. This redirect is
                 # deliberately before cycle/research gates so stale personas
                 # that still call run_fixer do not get stuck in the old scoped
                 # Fixer loop. v2-only: a v1 persona's run_fixer must not be
                 # silently rerouted. Internal `_aider_fallback` calls bypass this
-                # so Fixer can be the second editor when Aider can't fix.
+                # so Fixer can be the second editor when Aider can't fix — and
+                # the escalation policy (2 consecutive no-progress Aider
+                # attempts → a 2-attempt Fixer block) keeps run_fixer local.
                 if (name == "run_fixer" and _parent_role_for_cap in {"reviewer", "acceptance"}
                         and getattr(config, "AIDER_ENABLED", True)
                         and not args.get("_aider_fallback")
@@ -1930,7 +1911,7 @@ async def exec_tool(
                     _requested_parent_id = (args.get("reviewer_run_id") or "").strip()
                     _issue_run_for_aider = await _latest_actionable_issue_run(conv_id, _requested_parent_id)
                     _aider_ctx = None
-                    if not _latest_repair_before_issue_was_aider(_runs_for_cap, _issue_run_for_aider):
+                    if preferred_fix_editor(_battle_cap) == "aider":
                         _aider_ctx = await _aider_first_context(
                             http,
                             conv_id, issue_run=_issue_run_for_aider,
@@ -1966,25 +1947,16 @@ async def exec_tool(
                             artifact_message_id=artifact_message_id,
                         )
 
-                _budget_cap = await compute_fix_budget(
-                    GateContext(
-                        conv_id=conv_id,
-                        name=name,
-                        args=args,
-                        runs=_runs_for_cap,
-                        latest_user_ts=_uts_cap,
-                        is_v2=bool(_v2_cached),
-                        research_since=_gate_research_since,
-                    ),
-                    _parent_role_for_cap,
+                # ─── Unified progress budget — ceiling / streak / research ──
+                _streak_cap = _battle_cap.no_progress_streak
+                _total_cap = _battle_cap.total_attempts
+                _research_done_for_cap = _battle_cap.research_done
+                _at_ceiling = _total_cap >= FIX_ATTEMPT_HARD_CEILING
+                _streak_exhausted = _streak_cap >= NO_PROGRESS_LAST_SHOT
+                _needs_research_cap = (
+                    _streak_cap >= NO_PROGRESS_RESEARCH_AT and not _research_done_for_cap
                 )
-                # Turn-scoped (G1) and Aider-inclusive (G2): only successful
-                # fix runs gate the cycle cap; failed/no-op terminal attempts
-                # are exposed separately for post-review release logic.
-                _fixer_succ = _budget_cap.succeeded
-                _research_done_for_cap = _budget_cap.research_done
-                _cap_limit = _budget_cap.cap_limit
-                if _fixer_succ >= _cap_limit:
+                if _at_ceiling or _streak_exhausted or _needs_research_cap:
                     # v1 doesn't run this loop, so cap only applies to v2.
                     if await _check_v2():
                         # Pull the latest actionable summary so the model has
@@ -2007,7 +1979,7 @@ async def exec_tool(
                                 + (f":{','.join(str(x) for x in _iss.get('lines') or [])}" if _iss.get('lines') else "")
                                 + f" — {(_iss.get('summary','') or '')[:160]}"
                             )
-                        if not _research_done_for_cap:
+                        if _needs_research_cap and not _at_ceiling and not _streak_exhausted:
                             _topic_seed = (
                                 _rev_sum
                                 or (_issue_lines[0] if _issue_lines else "project repair loop")
@@ -2016,14 +1988,15 @@ async def exec_tool(
                             _topic_seed = _topic_seed.replace("\\", "\\\\").replace("'", "\\'")
                             await events.emit(conv_id, "tool_end", {
                                 "tool": name, "icon": "search",
-                                "status": f"⛔ Repair cap reached ({_fixer_succ}/{_cap_limit}) — call deep_research",
+                                "status": (f"⛔ {_streak_cap} attempts without progress "
+                                           f"— call deep_research"),
                             })
-                            print(f"[v2-gate] CYCLE CAP: blocking {name}; "
+                            print(f"[v2-gate] NO-PROGRESS STREAK: blocking {name}; "
                                   f"forcing deep_research before more repair attempts", flush=True)
                             return (
-                                f"BLOCKED — {_parent_role_for_cap} repair reached its base cap "
-                                f"({_fixer_succ}/{_cap_limit}) and the issue persists. The next "
-                                f"step must gather outside guidance before another editor runs.\n\n"
+                                f"BLOCKED — {_streak_cap} consecutive repair attempts have not "
+                                f"made verified progress on the reported issues. The next step "
+                                f"must gather outside guidance before another editor runs.\n\n"
                                 f"Your VERY NEXT tool call MUST be:\n"
                                 f"  deep_research(topic='{_parent_role_for_cap} issue still failing: "
                                 f"{_topic_seed}', "
@@ -2034,23 +2007,40 @@ async def exec_tool(
                                 + (f"\n\nLatest issue summary: \"{_rev_sum}\"" if _rev_sum else "")
                                 + (("\nRemaining issue(s):\n" + "\n".join(_issue_lines)) if _issue_lines else "")
                             )
+                        if _at_ceiling:
+                            _cap_reason = (
+                                f"BLOCKED — the hard ceiling of {FIX_ATTEMPT_HARD_CEILING} total "
+                                f"fix attempts for this user request is reached ({_total_cap} "
+                                f"attempts, Aider + Fixer combined — fixes kept resolving some "
+                                f"issues while new ones appeared). The full automated repair "
+                                f"budget is exhausted and another automated repair call will "
+                                f"not help."
+                            )
+                            _cap_status = (f"⛔ Hard ceiling reached "
+                                           f"({_total_cap}/{FIX_ATTEMPT_HARD_CEILING} attempts) "
+                                           f"— summarize and stop")
+                        else:
+                            _cap_reason = (
+                                f"BLOCKED — {_streak_cap} consecutive fix attempts without "
+                                f"verified progress, including the post-research attempt "
+                                f"(Aider + Fixer combined). The full automated repair budget "
+                                f"is exhausted and another automated repair call will not help."
+                            )
+                            _cap_status = (f"⛔ No progress after {_streak_cap} attempts "
+                                           f"— summarize and stop")
                         await events.emit(conv_id, "tool_end", {
                             "tool": name, "icon": "wrench",
-                            "status": f"⛔ Cycle cap reached ({_fixer_succ}/{_cap_limit}) — summarize and stop",
+                            "status": _cap_status,
                         })
-                        print(f"[v2-gate] CYCLE CAP: blocking {name} (already "
-                              f"{_fixer_succ} succeeded {_parent_role_for_cap}-driven fix runs "
-                              f"since the latest user message)", flush=True)
+                        print(f"[v2-gate] BUDGET EXHAUSTED: blocking {name} "
+                              f"(streak={_streak_cap}, total={_total_cap}, "
+                              f"research_done={_research_done_for_cap})", flush=True)
                         return (
-                            f"BLOCKED — Hard cap of {_cap_limit} {_parent_role_for_cap}/fix "
-                            f"cycles already attempted for this user request after deep_research "
-                            f"({_fixer_succ} successful repair runs; Aider + Fixer combined).\n\n"
-                            f"The same class of issue is persisting and another automated repair "
-                            f"call will not help. Your VERY NEXT output MUST be plain text to the "
-                            f"user that:\n"
-                            f"  1. Summarizes what was changed across the {_fixer_succ} fix cycles\n"
+                            _cap_reason
+                            + "\n\nYour VERY NEXT output MUST be plain text to the user that:\n"
+                            f"  1. Summarizes what was changed across the {_total_cap} fix attempt(s)\n"
                             f"  2. States the remaining issue with file:line references"
-                            + (f"\n     (latest reviewer: \"{_rev_sum}\")" if _rev_sum else "")
+                            + (f"\n     (latest {_parent_role_for_cap}: \"{_rev_sum}\")" if _rev_sum else "")
                             + (("\n" + "\n".join(_issue_lines)) if _issue_lines else "")
                             + "\n  3. Asks the user for guidance — what behavior they actually "
                             f"want, or whether to skip this issue and ship anyway.\n\n"
@@ -2062,138 +2052,6 @@ async def exec_tool(
             except Exception as _ce:
                 print(f"[v2-gate] cycle cap check failed (non-fatal): {_ce}")
 
-            # ─── State 5+6 — STUCK_FIX / FINAL_CYCLE — research nudge ───────
-            # If the model is about to call run_fixer for the 2nd or 3rd time
-            # AND either (a) the same issue signatures returned across reviewer
-            # cycles, or (b) this would be the 3rd (last-allowed) fixer run,
-            # block until deep_research has been called. The persona prompt
-            # tells the model to do this; the gate enforces it server-side.
-            #
-            # Uses the same _runs_for_cap walk as the cycle cap — cheap because
-            # we already paid for that db hit above. _runs_for_cap is
-            # initialized to None before the first try block so it's always
-            # in scope here.
-            try:
-                _runs_sf = _runs_for_cap
-                if _runs_sf is None:
-                    _runs_sf = (_gate_ctx.runs if _gate_ctx is not None
-                                else await db.get_runs_by_conversation(conv_id, limit=50))
-                # Role-aware: reviewer-driven and acceptance-driven loops both
-                # get the "same error twice → research first" nudge. For
-                # acceptance, once research has run in this budget window the
-                # cap-bump path (2→4) governs, so suppress further nudges.
-                _track_role = (_parent_role_for_cap
-                               if _parent_role_for_cap in {"reviewer", "acceptance"}
-                               else "reviewer")
-                _budget_sf = await compute_fix_budget(
-                    GateContext(
-                        conv_id=conv_id,
-                        name=name,
-                        args=args,
-                        runs=_runs_sf,
-                        latest_user_ts=_uts_cap,
-                        is_v2=bool(_v2_cached),
-                        research_since=_gate_research_since,
-                    ),
-                    _track_role,
-                )
-                _research_skip_sf = _budget_sf.research_done
-                # Same turn-scoped window as the cycle cap, counting both fix
-                # paths for THIS role — the gates must agree on cycle counts.
-                _fsucc_sf = _budget_sf.succeeded
-                # 1 ≤ fixer_succ ≤ 2: between first failure and final cycle.
-                # 0 = first attempt, no gate. ≥3 = cap (handled above).
-                # Research nudge text is fixer-specific; Aider already requires
-                # a follow-up run_review, so only run_fixer is gated here.
-                if (name == "run_fixer" and 1 <= _fsucc_sf <= 2
-                        and await _check_v2() and not _research_skip_sf):
-                    _latest_rev_sf = next(
-                        (r for r in _runs_sf if r.get("role") == _track_role),
-                        None,
-                    )
-                    if _latest_rev_sf:
-                        _cur_iss = _issue_signatures(_latest_rev_sf.get("result_envelope") or {})
-                        _research_done = await _deep_research_called_since(
-                            conv_id, _latest_rev_sf.get("started_at")
-                        )
-
-                        # State 5 — STUCK: same issue signature seen in a prior
-                        # run of this role AND no research call since.
-                        _is_stuck = False
-                        if _cur_iss:
-                            _prior_revs_sf = [
-                                r for r in _runs_sf
-                                if r.get("role") == _track_role
-                                and r.get("id") != _latest_rev_sf.get("id")
-                            ]
-                            if _prior_revs_sf:
-                                _prior_rev_sf = _prior_revs_sf[0]
-                                _prior_iss = _issue_signatures(
-                                    _prior_rev_sf.get("result_envelope") or {}
-                                )
-                                if _cur_iss & _prior_iss:
-                                    _is_stuck = True
-
-                        # State 6 — FINAL CYCLE: reviewer-only (cap 3, last shot).
-                        # Acceptance uses the research cap-bump, not a fixed slot.
-                        _is_final = (_track_role == "reviewer" and _fsucc_sf == 2)
-
-                        if (_is_stuck or _is_final) and not _research_done:
-                            _why_label = ("STUCK" if _is_stuck else "FINAL_CYCLE")
-                            _gate_status = (
-                                "⛔ Same issue returned — call Agent Research first"
-                                if _is_stuck else
-                                "⛔ Final fixer cycle — call Agent Research first"
-                            )
-                            # Pull a representative error to seed the research topic.
-                            _seed_iss = (_latest_rev_sf.get("result_envelope") or {}).get("issues") or []
-                            _seed_lines = []
-                            for _i, _iss in enumerate(_seed_iss[:2], 1):
-                                _seed_lines.append(
-                                    f"  {_i}. [{_iss.get('severity','?')}] "
-                                    f"{_iss.get('file','?')}"
-                                    + (f":{','.join(str(x) for x in _iss.get('lines') or [])}" if _iss.get('lines') else "")
-                                    + f" — {(_iss.get('summary','') or '')[:160]}"
-                                )
-                            _seed_block = ("\n" + "\n".join(_seed_lines)) if _seed_lines else ""
-
-                            await events.emit(conv_id, "tool_end", {
-                                "tool": "run_fixer", "icon": "wrench",
-                                "status": _gate_status,
-                            })
-                            print(f"[v2-gate] {_why_label}: blocking run_fixer "
-                                  f"(fixer_succ={_fsucc_sf}, stuck={_is_stuck}, "
-                                  f"final={_is_final}, research_done={_research_done})", flush=True)
-
-                            if _is_stuck:
-                                _reason = (
-                                    f"BLOCKED — run_review returned the same issue(s) you already "
-                                    f"attempted to fix in a previous run_fixer cycle ({_fsucc_sf} fixer "
-                                    f"run(s) so far). Calling run_fixer again without new information "
-                                    f"will produce the same result.\n"
-                                )
-                            else:
-                                _reason = (
-                                    f"BLOCKED — this would be your 3rd (final) run_fixer call. "
-                                    f"After it, the cycle cap blocks any further fixer runs. "
-                                    f"Spend one round on web research before the last shot.\n"
-                                )
-
-                            return (
-                                _reason
-                                + "\nRecurring issue(s):" + _seed_block + "\n\n"
-                                + "Your VERY NEXT tool call MUST be:\n"
-                                + "  deep_research(topic='<exact error message + library/version>', depth=2)\n\n"
-                                + "After Agent Research (`deep_research`) returns, call run_fixer — the Fixer will see the "
-                                + "research result in your conversation and use it to ground the next "
-                                + "edit. Use depth=2 (fast); only use depth=3 if the issue is genuinely "
-                                + "obscure. Do NOT call run_fixer, generate_code, write_file, run_shell, "
-                                + "or run_review until deep_research has run."
-                            )
-            except StopAsyncIteration:
-                pass
-            except Exception as _sfe:
-                print(f"[v2-gate] stuck/final-cycle check failed (non-fatal): {_sfe}")
 
             # Phantom run_fixer guard: block run_fixer when the latest run
             # isn't a reviewer/acceptance run with status='issues'/'error'. Without this,
@@ -2593,19 +2451,13 @@ async def exec_tool(
                     # cap-release agree on how many attempts happened.
                     _uts_gate = (_gate_ctx.latest_user_ts if _gate_ctx is not None
                                  else await _latest_user_msg_ts(conv_id))
-                    _budget_gate = await compute_fix_budget(
-                        GateContext(
-                            conv_id=conv_id,
-                            name=name,
-                            args=args,
-                            runs=_runs_for_v2_gate,
-                            latest_user_ts=_uts_gate,
-                            is_v2=bool(_v2_cached),
-                            research_since=_gate_research_since,
-                        ),
-                        _pending_role,
-                    )
-                    _fixer_attempts_gate = _budget_gate.attempts
+                    _battle_gate = compute_fix_battle(_runs_for_v2_gate, _uts_gate)
+                    try:
+                        _battle_gate.research_done = await _gate_research_since(_uts_gate)
+                    except Exception as _rge:
+                        print(f"[v2-gate] research flag lookup failed (non-fatal): {_rge}")
+                    _fixer_attempts_gate = _battle_gate.total_attempts
+                    _streak_gate = _battle_gate.no_progress_streak
                     _ship_anyway_gate = (
                         name in _DELIVERY_SHIP_TOOLS
                         and (await _gate_ctx.ship_anyway()
@@ -2614,45 +2466,43 @@ async def exec_tool(
                     )
                     _aider_ctx_gate = None
                     if (getattr(config, "AIDER_ENABLED", True)
-                            and not _latest_repair_before_issue_was_aider(_runs_for_v2_gate, _pending_review)):
+                            and preferred_fix_editor(_battle_gate) == "aider"):
                         _aider_ctx_gate = await _aider_first_context(
                             http, conv_id, issue_run=_pending_review,
                         )
-                    # Deadlock break: the FINAL_CYCLE gate (2 successful fixers,
-                    # no research since the last reviewer) blocks run_fixer with
-                    # the message "call Agent Research first". The STUCK_FIX gate
-                    # does the same when issues recur after a fix cycle. But this
-                    # post-review gate then blocks deep_research itself ("call
-                    # run_fixer first") — circular. Whitelist deep_research once
-                    # at least one fixer cycle has run, so the model can satisfy
-                    # the research-first requirement and then retry run_fixer on
-                    # the next round. Below 1 fixer attempt the model should
-                    # actually try fixing before researching.
-                    # Repair ladder: force research at the base cap, then allow
-                    # research-informed Aider/Fixer retries until the extended
-                    # cap. Never auto-release manual write_file/run_shell.
-                    _research_done_gate = _budget_gate.research_done
-                    _base_cap_limit_gate = _budget_gate.base_cap
-                    _cap_limit_gate = _budget_gate.cap_limit
+                    # Deadlock break: the no-progress streak gate blocks
+                    # run_fixer/run_aider_fix with the message "call
+                    # deep_research first", but this post-review gate would
+                    # then block deep_research itself ("call run_fixer first")
+                    # — circular. Whitelist deep_research once at least one
+                    # fix attempt has run, so the model can satisfy the
+                    # research-first requirement and retry the fix tool on the
+                    # next round. Below 1 attempt the model should actually
+                    # try fixing before researching.
+                    # Repair ladder: force research at 4 consecutive
+                    # no-progress attempts, allow one research-informed last
+                    # shot at 5, hard-stop at the total-attempt ceiling.
+                    # Never auto-release manual write_file/run_shell.
+                    _research_done_gate = _battle_gate.research_done
                     _needs_research_gate = (
-                        _fixer_attempts_gate >= _base_cap_limit_gate
+                        _streak_gate >= NO_PROGRESS_RESEARCH_AT
                         and not _research_done_gate
                     )
                     _exhausted_after_research_gate = (
-                        _research_done_gate
-                        and _fixer_attempts_gate >= _cap_limit_gate
+                        _streak_gate >= NO_PROGRESS_LAST_SHOT
+                        or _fixer_attempts_gate >= FIX_ATTEMPT_HARD_CEILING
                     )
-                    # Anchor on started_at to match the STUCK/FINAL gates —
-                    # research stashed while the review was still running must
-                    # satisfy both, or the gates disagree and loop. Both
-                    # reviewer- and acceptance-driven loops may research now.
+                    # Anchor on started_at so research stashed while the
+                    # review was still running satisfies both gates — or the
+                    # gates disagree and loop. Both reviewer- and
+                    # acceptance-driven loops may research now.
                     if (name == "deep_research"
                             and _fixer_attempts_gate >= 1
                             and not await _deep_research_called_since(
                                 conv_id, _pending_review.get("started_at"))):
                         print(f"[v2-gate] research-release: allowing deep_research "
-                              f"despite fix-needed (fixer_attempts={_fixer_attempts_gate}, "
-                              f"required by FINAL_CYCLE/STUCK_FIX)", flush=True)
+                              f"despite fix-needed (fix_attempts={_fixer_attempts_gate}, "
+                              f"streak={_streak_gate})", flush=True)
                         # Skip _gate_msg → deep_research runs.
                     elif _ship_anyway_gate:
                         print(f"[v2-gate] ship-anyway: allowing {name} despite "
@@ -2672,8 +2522,8 @@ async def exec_tool(
                         _gate_msg = (
                             "state", "fix-needed-research",
                             f"BLOCKED — {_pending_role} ({_rid}) still has issues after "
-                            f"{_fixer_attempts_gate} automated repair attempt(s). Before another "
-                            f"Aider/Fixer pass, gather targeted guidance.\n\n"
+                            f"{_streak_gate} repair attempt(s) without verified progress. Before "
+                            f"another Aider/Fixer pass, gather targeted guidance.\n\n"
                             f"Your VERY NEXT tool call MUST be:\n"
                             f"  deep_research(topic='{_pending_role} repair issue: {_topic_seed}', depth=2)\n\n"
                             f"Do NOT call {name}, read_file, list_files, write_file, run_shell, "
@@ -2687,7 +2537,8 @@ async def exec_tool(
                             "state", "fix-needed-exhausted",
                             f"BLOCKED — {_pending_role} ({_rid}) still has issues after "
                             f"deep_research and the full automated repair budget "
-                            f"({_fixer_attempts_gate}/{_cap_limit_gate}, Aider + Fixer combined).\n\n"
+                            f"({_streak_gate} attempt(s) without verified progress; "
+                            f"{_fixer_attempts_gate} total, Aider + Fixer combined).\n\n"
                             f"Your VERY NEXT output MUST be plain text to the user: summarize the "
                             f"remaining issue, say the automated repair budget is exhausted, and "
                             f"ask whether to ship as-is or authorize manual intervention.\n\n"
@@ -2706,7 +2557,8 @@ async def exec_tool(
                         # until the duplicate-blocked stop killed the turn. Bounded
                         # by the same attempt budget as the caps above.
                         if (name in _FIX_LOOP_MANUAL_TOOLS
-                                and _fixer_attempts_gate < _cap_limit_gate):
+                                and not _needs_research_gate
+                                and not _exhausted_after_research_gate):
                             _auto_dispatch_gate = ("run_aider_fix", {
                                 "issue_run_id": _rid,
                                 "project_dir": _project_dir,
@@ -2732,7 +2584,8 @@ async def exec_tool(
                         _tool_name = "run_acceptance_review" if _pending_role == "acceptance" else "run_review"
                         _issue_label = "run_acceptance_review" if _pending_role == "acceptance" else "run_review"
                         if (name in _FIX_LOOP_MANUAL_TOOLS
-                                and _fixer_attempts_gate < _cap_limit_gate):
+                                and not _needs_research_gate
+                                and not _exhausted_after_research_gate):
                             _auto_dispatch_gate = ("run_fixer", {
                                 "reviewer_run_id": _rid,
                             })
@@ -3857,6 +3710,25 @@ async def exec_tool(
             issue_env = (issue_run or {}).get("result_envelope") or {}
             if issue_run:
                 issue_env = {**issue_env, "_source_role": issue_run.get("role", "")}
+
+            # Escalation: after 2 consecutive Aider attempts without verified
+            # progress, hand the battle to the in-house Fixer for a 2-attempt
+            # block — enforced here so a model following a stale
+            # "call run_aider_fix" hint still gets rerouted. Internal
+            # fallback dispatches never loop back (run_fixer honors
+            # _aider_fallback).
+            if conv_id:
+                try:
+                    _esc_runs = await db.get_runs_by_conversation(conv_id, limit=50)
+                    _esc_battle = compute_fix_battle(
+                        _esc_runs, await _latest_user_msg_ts(conv_id))
+                    if preferred_fix_editor(_esc_battle) == "fixer":
+                        return await _fallback_to_fixer(
+                            "escalation: 2 consecutive Aider attempts without "
+                            "verified progress — Fixer takes the next block")
+                except Exception as _esc_e:
+                    print(f"[run_aider_fix] escalation check failed (non-fatal): {_esc_e}")
+
             if not project_dir:
                 project_dir = (issue_env.get("project_dir") or "").strip()
 
@@ -3951,10 +3823,14 @@ async def exec_tool(
             )
             files = envelope.get("files_touched") or []
             status = envelope.get("status", "?")
-            if status == "applied":
+            if status in {"applied", "partial"}:
+                # "partial" = Aider reported success but touched none of the
+                # issue-scoped files (downgraded in aider_fixer). The tree
+                # still changed, so verification review must run — that review
+                # is what feeds the no-progress verdict.
                 _ckpt = await _git_checkpoint(
                     http, envelope.get("project_dir", "") or project_dir,
-                    f"aider applied: {(envelope.get('summary') or task or '')[:60]} "
+                    f"aider {status}: {(envelope.get('summary') or task or '')[:60]} "
                     f"({envelope.get('run_id', '')})",
                 )
                 _auto_review_note = ""
@@ -3994,8 +3870,14 @@ async def exec_tool(
                     conv_model=conv_model, kb_ids=kb_ids,
                     artifact_message_id=artifact_message_id,
                 )
-                return (
+                _applied_header = (
                     f"AIDER APPLIED EDITS to {len(files)} file(s).\n"
+                    if status == "applied" else
+                    f"AIDER PARTIAL: edits applied to {len(files)} file(s), but none "
+                    f"touched the issue-scoped files — verification review follows.\n"
+                )
+                return (
+                    _applied_header
                     + "\n".join(f"  - {f}" for f in files[:12])
                     + f"\nworkflow_id: {workflow_id or '(none)'}\n"
                     + (f"Git checkpoint: {_ckpt}\n" if _ckpt else "")

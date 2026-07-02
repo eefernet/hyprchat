@@ -191,19 +191,25 @@ async def prior_acceptance_issues_context(conv_id: str) -> str:
 
 async def fix_budget_note(conv_id: str, source_role: str) -> str:
     """One-line fix-cycle budget readout for the current user request."""
+    # Function-level import: gate_decisions imports this module at load time.
+    from tooling.gate_decisions import (
+        FIX_ATTEMPT_HARD_CEILING,
+        NO_PROGRESS_LAST_SHOT,
+        NO_PROGRESS_RESEARCH_AT,
+        compute_fix_battle,
+    )
     try:
         runs = await db.get_runs_by_conversation(conv_id, limit=50)
         uts = await latest_user_msg_ts(conv_id)
-        source_role = source_role or "reviewer"
-        succ = sum(
-            1 for r in runs_since(runs, uts)
-            if (r.get("role") in {"fixer", "aider.fix"}
-                and r.get("status") == "succeeded"
-                and ((r.get("result_envelope") or {}).get("source_role") or "reviewer") == source_role)
+        battle = compute_fix_battle(runs, uts)
+        return (
+            f"\n\nFix-cycle budget: {battle.no_progress_streak} consecutive "
+            f"attempt(s) without verified progress (research forced at "
+            f"{NO_PROGRESS_RESEARCH_AT}, last automated attempt at "
+            f"{NO_PROGRESS_LAST_SHOT}); {battle.total_attempts}/"
+            f"{FIX_ATTEMPT_HARD_CEILING} total attempts this request. "
+            f"Verified progress resets the counter."
         )
-        cap = 2 if source_role == "acceptance" else 3
-        return (f"\n\nFix-cycle budget: {min(succ, cap)}/{cap} successful "
-                f"{source_role}-driven fix(es) used for this request.")
     except Exception:
         return ""
 

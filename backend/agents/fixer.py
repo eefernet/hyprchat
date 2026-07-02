@@ -96,6 +96,7 @@ If you genuinely cannot fix any issue (ambiguous, need info not provided, etc.),
 5. Address ALL listed issues in a single pass. If two issues touch the same file, put all its SEARCH/REPLACE blocks in ONE EDIT section.
 6. "This file should not be in the project" issues are fixed with `### DELETE:` — editing .gitignore or README does NOT remove the file and the issue will come back.
 7. For method/function mismatch issues, choose ONE canonical symbol name and make callers and definitions agree. Do not rename both sides in opposite directions. Before output, verify that every edited call still resolves to a matching definition in the scoped files.
+8. Fix EVERY instance of the described inaccuracy or bug in each file you touch, not only the cited lines — scan the whole file for other occurrences of the same problem.
 
 Output your sections now:"""
 

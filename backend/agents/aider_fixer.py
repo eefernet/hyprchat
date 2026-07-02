@@ -19,6 +19,11 @@ import httpx
 import cancel_registry
 import config
 import database as db
+from tooling.gate_decisions import (
+    issue_scoped_files,
+    normalize_issue_path,
+    paths_overlap,
+)
 
 
 _STATE_FIX_HINT_RE = re.compile(
@@ -59,6 +64,17 @@ _ENTRYPOINT_BASENAME_HINTS = [
 ]
 _DOC_BASENAMES = {"readme", "license", "notice", "changelog", "changes"}
 _DOC_EXTS = {".md", ".markdown", ".rst", ".txt", ".adoc"}
+
+# Pre-added to every Aider run (worker-side _safe_allowed_files drops any that
+# don't exist). When the LLM merely MENTIONS a file not in the chat, Aider
+# adds it and re-sends the request, DISCARDING every edit from the first
+# response — a verified lost fix. Small manifests are the usual trigger.
+# No lockfiles: they're huge and never the mention target.
+_MANIFEST_PREADD_BASENAMES = [
+    "requirements.txt", "pyproject.toml", "setup.py", "setup.cfg",
+    "package.json", "tsconfig.json", "Cargo.toml", "go.mod",
+    "Makefile", "README.md",
+]
 
 
 def _append_unique(paths: list[str], path: str) -> None:
@@ -165,6 +181,10 @@ async def run_aider_fix(http, events, conv_id: str, *,
     seeded_allowed_files = list(allowed_files or [])
     for path in _allowed_files_from_issues(issue_envelope) + _allowed_files_from_task(task):
         _append_unique(seeded_allowed_files, path)
+    # After the issue/task seeds so issue-scoped files keep list priority
+    # under the worker's allowed-files cap.
+    for path in _MANIFEST_PREADD_BASENAMES:
+        _append_unique(seeded_allowed_files, path)
     allowed_files = seeded_allowed_files
     try:
         recent_runs = await db.get_runs_by_conversation(conv_id, limit=12) if conv_id else []
@@ -241,7 +261,9 @@ async def run_aider_fix(http, events, conv_id: str, *,
                 wf = await db.get_coder_workflow(workflow_id)
                 if wf and wf.get("state") == "cancelled":
                     return
-                if run_status == "succeeded":
+                if run_status in ("succeeded", "partial"):
+                    # partial still changed the tree — head to review, not
+                    # blocked; the verification review scores the attempt.
                     state, artifact = "reviewing", "not_ready"
                 elif run_status == "cancelled":
                     state, artifact = "cancelled", "cancelled"
@@ -369,9 +391,25 @@ async def run_aider_fix(http, events, conv_id: str, *,
 
         worker_status = (result.get("status") or "error").lower()
         files = result.get("files_touched") or []
+        env_status = "applied" if worker_status == "ok" else worker_status
+        summary = result.get("summary") or ""
+        # Downgrade fake success: Aider "applied" edits but touched none of
+        # the files the issue envelope pointed at. The run must not burn a
+        # progress reset — it counts as an attempt, and review still runs
+        # because the tree did change.
+        if worker_status == "ok" and files:
+            _scoped = issue_scoped_files(issue_envelope)
+            _touched = {normalize_issue_path(f, project_dir) for f in files}
+            _touched.discard("")
+            if _scoped and _touched and not paths_overlap(_touched, _scoped):
+                env_status = "partial"
+                summary += (
+                    " | Aider reported success but touched none of the "
+                    f"issue-scoped files: {', '.join(sorted(_scoped)[:6])}"
+                )
         envelope = {
-            "status": "applied" if worker_status == "ok" else worker_status,
-            "summary": result.get("summary") or "",
+            "status": env_status,
+            "summary": summary,
             "project_dir": result.get("project_dir") or project_dir,
             "files_touched": files,
             "diff": result.get("diff") or "",
@@ -390,7 +428,12 @@ async def run_aider_fix(http, events, conv_id: str, *,
             "docs_only": _paths_are_docs_only(files),
             "source": "aider",
         }
-        run_status = "succeeded" if worker_status == "ok" else ("cancelled" if worker_status == "cancelled" else "failed")
+        if worker_status == "ok":
+            run_status = "partial" if env_status == "partial" else "succeeded"
+        elif worker_status == "cancelled":
+            run_status = "cancelled"
+        else:
+            run_status = "failed"
         await events.emit(conv_id, "tool_end", {
             "tool": "run_aider_fix", "icon": "wrench",
             "status": f"Aider {envelope['status']} ({len(files)} file(s))",
