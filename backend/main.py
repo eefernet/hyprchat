@@ -348,6 +348,9 @@ async def lifespan(app: FastAPI):
             _re = "medium"
         config.OPENHANDS_REASONING_EFFORT = _re
         print(f"[Config] Loaded OpenHands reasoning effort: {config.OPENHANDS_REASONING_EFFORT}")
+    if "openhands_disable_thinking" in _settings:
+        config.OPENHANDS_DISABLE_THINKING = bool(_settings["openhands_disable_thinking"])
+        print(f"[Config] Loaded OpenHands disable thinking: {config.OPENHANDS_DISABLE_THINKING}")
     if "aider_enabled" in _settings:
         config.AIDER_ENABLED = bool(_settings["aider_enabled"])
         print(f"[Config] Loaded Aider enabled: {config.AIDER_ENABLED}")
@@ -355,11 +358,16 @@ async def lifespan(app: FastAPI):
         config.AIDER_MODEL = _settings["aider_model"] or ""
         print(f"[Config] Loaded Aider Model from settings: {config.AIDER_MODEL or '(inherit fixer/coder)'}")
     if "aider_num_ctx" in _settings:
-        config.AIDER_NUM_CTX = config.coerce_num_ctx(
-            _settings["aider_num_ctx"],
-            fallback=config.AIDER_NUM_CTX,
-        )
-        print(f"[Config] Loaded Aider num_ctx: {config.AIDER_NUM_CTX}")
+        # 0/empty = inherit the Daedalus context-window slider at call time.
+        _actx = _settings["aider_num_ctx"]
+        if not _actx:
+            config.AIDER_NUM_CTX = 0
+        else:
+            config.AIDER_NUM_CTX = config.coerce_num_ctx(
+                _actx,
+                fallback=config.AIDER_NUM_CTX or config.OPENHANDS_NUM_CTX,
+            )
+        print(f"[Config] Loaded Aider num_ctx: {config.AIDER_NUM_CTX or '(inherit Daedalus slider)'}")
     if "aider_auto_test" in _settings:
         config.AIDER_AUTO_TEST = bool(_settings["aider_auto_test"])
         print(f"[Config] Loaded Aider auto-test: {config.AIDER_AUTO_TEST}")

@@ -39,6 +39,12 @@ AIDER_REPEAT_LINE_LIMIT = int(os.environ.get("AIDER_REPEAT_LINE_LIMIT", "120"))
 # on genuinely dead calls, not on long-but-healthy generations.
 OH_LLM_TIMEOUT_SECONDS = int(os.environ.get("OH_LLM_TIMEOUT_SECONDS", "420"))
 OH_NUM_PREDICT = int(os.environ.get("OH_NUM_PREDICT", "8192"))
+# Thinking control for the builder LLM. Thinking-capable models (qwen3.5
+# merges etc.) otherwise reason with an UNBOUNDED budget on every tool call —
+# reasoning_effort never reaches Ollama's `think` switch through litellm.
+# "" (default) = send think:false to models whose /api/show capabilities
+# include "thinking"; "on" = never send it; "off" = same as default.
+OH_THINK = os.environ.get("OH_THINK", "").strip().lower()
 
 
 def _register_run(run_id: str, conversation, cancel_event: threading.Event) -> None:
@@ -245,7 +251,8 @@ def _missing_required_files(work_dir, required: list[str]) -> list[str]:
 
 
 def _run_completion_nudges(conversation, work_dir, required: list[str],
-                           cancel_event=None, on_nudge=None) -> tuple[int, list[str]]:
+                           cancel_event=None, on_nudge=None,
+                           extra_note: str = "") -> tuple[int, list[str]]:
     """Resume a finished conversation until every required file exists.
 
     Returns (nudges_used, still_missing). A single no-progress nudge (the
@@ -286,6 +293,8 @@ def _run_completion_nudges(conversation, work_dir, required: list[str],
                 f"verification steps, and only then call `finish`. Do not respond "
                 f"with a plain text message — every response must be a tool call."
             )
+        if extra_note:
+            msg += extra_note
         conversation.send_message(msg)
         conversation.run()
         missing = _missing_required_files(work_dir, required)
@@ -319,6 +328,11 @@ class RunRequest(BaseModel):
     # Reasoning effort passed to the SDK LLM. Default "medium"; "high" is
     # heavy-think-token mode and slow on local Ollama models, "low" is fastest.
     reasoning_effort: str = "medium"  # low | medium | high
+    # Send `think: false` to thinking-capable models (qwen3.5 merges reason
+    # with an UNBOUNDED budget per tool call otherwise — reasoning_effort
+    # never reaches Ollama's think switch through litellm). Non-thinking
+    # models are unaffected (the flag is capability-gated worker-side).
+    disable_thinking: bool = True
     # Only meaningful when profile == "continue": list of manifest files the
     # last builder run failed to write. The worker focuses on these.
     manifest_missing: list[str] = []
@@ -341,6 +355,10 @@ class RunResponse(BaseModel):
     agent_finished: bool = True
     # required_files entries still absent after the completion-nudge loop.
     missing_required_files: list[str] = []
+    # True when the model repeatedly emitted file_editor calls with the
+    # file_text argument missing (≥3 in this run) — a native-tool-arg
+    # reliability failure, not a task failure.
+    arg_drop_detected: bool = False
 
 
 class AiderRunRequest(BaseModel):
@@ -377,8 +395,139 @@ CACHE_PATH = Path("/opt/openhands-worker/.tool_cache.json")
 # Bump to invalidate persisted entries when the detection logic changes.
 # v2: Ollama 0.30 capabilities-aware check — pre-0.30 entries misclassified
 # llama.cpp-backend models (degenerate template, no .Tools) as prompt-based.
-_TOOL_CACHE_VERSION = 2
+# v3: multi-line arg round-trip probe — v2 trusted capabilities alone, which
+# passed models (Qwopus3.6 merge) that emit tool calls with the file_text
+# argument MISSING. v3 verifies a multi-line string arg survives intact.
+_TOOL_CACHE_VERSION = 3
 _tool_support_cache: dict[str, bool] = {}
+
+# /api/show capabilities per model (in-process only — cheap call, and
+# capabilities change when the user re-imports a model).
+_caps_cache: dict[str, list] = {}
+
+
+def _model_capabilities(ollama_base: str, model: str) -> list:
+    """Cached /api/show capabilities list for a model. [] on any failure
+    (transient failures are NOT cached)."""
+    key = f"{ollama_base}:{model}"
+    if key in _caps_cache:
+        return _caps_cache[key]
+    try:
+        import requests
+        r = requests.post(f"{ollama_base}/api/show", json={"name": model}, timeout=5)
+        if not r.ok:
+            return []
+        caps = r.json().get("capabilities") or []
+    except Exception:
+        return []
+    _caps_cache[key] = caps
+    return caps
+
+
+def _resolve_think_flag(ollama_base: str, model: str, disable_thinking: bool) -> bool | None:
+    """False → send `think: false` to Ollama; None → send nothing.
+
+    Only thinking-capable models get the flag (Ollama 400s otherwise). The
+    OH_THINK env var overrides the per-request setting: "on" never disables,
+    "off" always disables (for thinking-capable models).
+    """
+    if OH_THINK == "on":
+        return None
+    if not disable_thinking and OH_THINK != "off":
+        return None
+    if "thinking" in _model_capabilities(ollama_base, model):
+        return False
+    return None
+
+
+# file_editor's observation text when the model omitted the content arg.
+_ARG_DROP_MARKER = "file_text` is required"
+_ARG_DROP_NOTE = (
+    "\n\nCRITICAL: when calling file_editor `create` you MUST include the "
+    "complete file content in the `file_text` parameter of the SAME call — "
+    "never a path alone. If the tool keeps rejecting your call, write the "
+    "file with a terminal heredoc instead: cat > /path/file << 'EOF' ... EOF"
+)
+
+
+def _maybe_demote_native_tc(ollama_base: str, model: str, drops: int,
+                            still_missing: list) -> None:
+    """Persist native_tool_calling=False for a model that dropped file_text
+    args ≥3 times in a run that still failed to complete its manifest —
+    future runs (and this build's continue passes) use the prompt-based path."""
+    if drops < 3 or not still_missing:
+        return
+    ck = f"{ollama_base}:{model}"
+    if _tool_support_cache.get(ck) is False:
+        return
+    _tool_support_cache[ck] = False
+    _persist_tool_cache()
+    print(f"[OH-Worker] {model}: dropped file_text args {drops}x this run with "
+          f"{len(still_missing)} planned file(s) still missing — DEMOTED to "
+          f"prompt-based tool calling (persisted)")
+
+
+def _make_llm_and_agent(req: "RunRequest", ollama_base: str, native_tc: bool,
+                        tag: str = ""):
+    """LLM + Agent construction shared by /run and /run-stream.
+
+    Keeping one copy prevents the paths from drifting (the stream path
+    historically missed reasoning_effort → SDK default "high").
+    """
+    _re = (req.reasoning_effort or "medium").strip().lower()
+    if _re not in ("low", "medium", "high"):
+        _re = "medium"
+    # num_ctx/num_predict/temperature must ride inside "options" — the
+    # ollama_chat litellm path drops top-level kwargs (bare num_ctx is
+    # silently ignored → Modelfile default, often 131K+, blows VRAM), and
+    # num_predict bounds each completion so it always terminates.
+    extra_body = {"options": {
+        "num_ctx": req.num_ctx,
+        "num_predict": OH_NUM_PREDICT,
+        "temperature": 0.3,
+    }}
+    think_flag = _resolve_think_flag(ollama_base, req.model, req.disable_thinking)
+    if think_flag is False:
+        # Top-level sibling of "options" — merged into the Ollama request
+        # body by the same extra_body mechanism that delivers options.num_ctx.
+        extra_body["think"] = False
+    _llm_kwargs = dict(
+        model=f"ollama_chat/{req.model}",
+        api_key="ollama",
+        base_url=ollama_base,
+        temperature=0.3,
+        timeout=OH_LLM_TIMEOUT_SECONDS,
+        num_retries=2,
+        drop_params=True,
+        native_tool_calling=native_tc,
+        litellm_extra_body=extra_body,
+    )
+    # SDK accepts `reasoning_effort` as a top-level kwarg; older builds may
+    # not. Try with it; if rejected, retry without (SDK default is "high").
+    try:
+        llm = _LLM(reasoning_effort=_re, **_llm_kwargs)
+        print(f"[OH-Worker] reasoning_effort={_re}"
+              f" think={'off' if think_flag is False else 'model-default'}{tag}")
+    except TypeError:
+        print(f"[OH-Worker] SDK rejected reasoning_effort kwarg — using default{tag}")
+        llm = _LLM(**_llm_kwargs)
+
+    tools = [
+        _Tool(name="terminal"),
+        _Tool(name="file_editor"),
+        _Tool(name="glob"),
+        _Tool(name="grep"),
+    ]
+    # Exclude the SDK-default ThinkTool: reasoning models double-think with
+    # it, and a live build burned 4 straight rounds on think spam before
+    # writing a single file. FinishTool must stay (only way a run ends).
+    try:
+        agent = _Agent(llm=llm, tools=tools, include_default_tools=["FinishTool"])
+    except Exception as agent_err:
+        print(f"[OH-Worker] include_default_tools kwarg rejected "
+              f"({type(agent_err).__name__}) — using SDK default toolset{tag}")
+        agent = _Agent(llm=llm, tools=tools)
+    return llm, agent
 
 # Load persisted cache on startup; discard stale-version caches wholesale.
 try:
@@ -1085,13 +1234,20 @@ async def run_aider_stream(req: AiderRunRequest):
     )
 
 
-def _check_tool_support(ollama_base: str, model: str) -> bool:
-    """Check if an Ollama model actually returns structured tool_calls.
+def _check_tool_support(ollama_base: str, model: str, num_ctx: int = 8192) -> bool:
+    """Check if an Ollama model reliably returns structured tool_calls.
 
-    Sends a minimal test request with a dummy tool. If the response contains
-    a 'tool_calls' field, native tool calling works. If the model puts the
-    tool call as JSON text in 'content' instead, it doesn't truly support
-    structured tool calls and we fall back to prompt-based.
+    Two stages:
+      1. /api/show capabilities — no "tools" means prompt-based, full stop.
+      2. Multi-line arg round-trip: ask the model to call a write_file tool
+         whose file_text argument is a known 3-line body. Capabilities alone
+         are NOT enough — merge models (Qwopus3.6) advertise tools yet emit
+         `create` calls with the file_text argument missing, which burns
+         builder rounds on "Parameter `file_text` is required" errors.
+
+    `num_ctx` should be the run's context size so a cold probe doesn't load
+    the model at the Modelfile default (262K on some imports → huge KV
+    allocation) or at a size _ensure_loaded would immediately evict.
     Results are cached per model so the live test only runs once.
     """
     import requests
@@ -1118,13 +1274,7 @@ def _check_tool_support(ollama_base: str, model: str) -> bool:
                     _tool_support_cache[cache_key] = False
                     _persist_tool_cache()
                     return False
-                # Capabilities are authoritative on 0.30+ — trust them. The
-                # "Say hello" live test false-negatives on capable models that
-                # simply answer in text instead of calling the dummy tool.
-                print(f"[OH-Worker] {model}: capabilities advertise tools → native")
-                _tool_support_cache[cache_key] = True
-                _persist_tool_cache()
-                return True
+                _caps_cache[f"{ollama_base}:{model}"] = caps
             elif ".Tools" not in body.get("template", ""):
                 print(f"[OH-Worker] {model}: no .Tools in template → prompt-based")
                 _tool_support_cache[cache_key] = False
@@ -1136,39 +1286,91 @@ def _check_tool_support(ollama_base: str, model: str) -> bool:
         print(f"[OH-Worker] Template check failed for {model}: {e}")
         return False
 
-    # Live test: send a trivial tool call and check for structured response
-    try:
-        test_payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": "Say hello"}],
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": "say",
-                    "description": "Say a message",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"text": {"type": "string"}},
-                        "required": ["text"],
+    # Live multi-line round-trip: the model must produce a structured
+    # tool_call AND the multi-line file_text argument must survive intact.
+    probe_body = "alpha line one\nbeta line two\ngamma line three"
+    test_payload = {
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": (
+                "Use the write_file tool to create /tmp/probe.txt. The "
+                "file_text argument must be exactly these three lines:\n"
+                f"{probe_body}\n"
+                "Call the tool now — do not reply with text."
+            ),
+        }],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Write a text file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "file_text": {"type": "string",
+                                      "description": "Complete file contents"},
                     },
+                    "required": ["path", "file_text"],
                 },
-            }],
-            "stream": False,
-        }
-        r = requests.post(f"{ollama_base}/api/chat", json=test_payload, timeout=30)
-        if r.ok:
-            msg = r.json().get("message", {})
-            has_tool_calls = bool(msg.get("tool_calls"))
-            print(f"[OH-Worker] {model}: live tool test → "
-                  f"{'structured tool_calls' if has_tool_calls else 'text JSON (no tool_calls)'}")
-            _tool_support_cache[cache_key] = has_tool_calls
-            _persist_tool_cache()
-            return has_tool_calls
-    except Exception as e:
-        # Transient failure — don't persist a False verdict for the model.
-        print(f"[OH-Worker] Live tool test failed for {model}: {e}")
+            },
+        }],
+        "stream": False,
+        "options": {"num_ctx": max(2048, int(num_ctx or 8192)),
+                    "num_predict": 512},
+    }
+    if "thinking" in _model_capabilities(ollama_base, model):
+        test_payload["think"] = False
 
-    return False
+    saw_tool_call = False
+    for attempt in (1, 2):
+        try:
+            r = requests.post(f"{ollama_base}/api/chat", json=test_payload, timeout=120)
+            if not r.ok:
+                print(f"[OH-Worker] {model}: probe HTTP {r.status_code} (attempt {attempt})")
+                continue
+            calls = (r.json().get("message") or {}).get("tool_calls") or []
+            if not calls:
+                continue
+            saw_tool_call = True
+            args = (calls[0].get("function") or {}).get("arguments") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+            file_text = str(args.get("file_text") or "")
+            if "alpha line one" in file_text and file_text.count("\n") >= 2:
+                print(f"[OH-Worker] {model}: multi-line arg probe OK → native")
+                _tool_support_cache[cache_key] = True
+                _persist_tool_cache()
+                return True
+            print(f"[OH-Worker] {model}: tool_call arrived but file_text was "
+                  f"{'MISSING' if not file_text else 'mangled'} "
+                  f"(attempt {attempt}) — args keys: {sorted(args)}")
+        except Exception as e:
+            # Transient failure — don't persist a False verdict.
+            print(f"[OH-Worker] Probe attempt {attempt} failed for {model}: {e}")
+            if attempt == 2 and not saw_tool_call:
+                return False
+
+    if saw_tool_call:
+        # Structured calls arrive but multi-line args get dropped — the
+        # exact failure that stalls builds. Persist prompt-based.
+        print(f"[OH-Worker] {model}: drops multi-line tool args → prompt-based (persisted)")
+        _tool_support_cache[cache_key] = False
+        _persist_tool_cache()
+        return False
+
+    # No tool_calls at all on a capabilities-advertised model: known false
+    # negative (some models answer probes in text but tool-call fine in real
+    # agent loops). Trust capabilities, but don't persist — re-probe next
+    # restart, and the runtime arg-drop demotion catches real offenders.
+    print(f"[OH-Worker] {model}: probe got no tool_calls; capabilities say tools → "
+          f"native (unpersisted)")
+    _tool_support_cache[cache_key] = True
+    return True
 
 
 @app.post("/run", response_model=RunResponse)
@@ -1193,55 +1395,15 @@ def run_task(req: RunRequest):
         # ── Detect native tool support via live test ──
         # Some models (qwen3) return structured tool_calls → use native mode.
         # Others (qwen2.5-coder) put JSON in content text → use prompt-based.
-        native_tc = _check_tool_support(ollama_base, req.model)
+        native_tc = _check_tool_support(ollama_base, req.model, num_ctx=req.num_ctx)
 
-        # ── LLM config ──
+        # ── LLM + Agent (shared factory) ──
         # The user's num_ctx from HyprChat settings is authoritative — we don't
         # second-guess it based on task length / keywords. Force-load Ollama at
-        # exactly that value, and pass it nested under "options" so litellm
-        # forwards it as options.num_ctx (Ollama ignores top-level num_ctx).
+        # exactly that value; the factory also passes it nested under "options"
+        # so litellm forwards it as options.num_ctx.
         _ensure_loaded(ollama_base, req.model, req.num_ctx)
-        _re = (req.reasoning_effort or "medium").strip().lower()
-        if _re not in ("low", "medium", "high"):
-            _re = "medium"
-        _llm_kwargs = dict(
-            model=f"ollama_chat/{req.model}",
-            api_key="ollama",
-            base_url=ollama_base,
-            temperature=0.3,
-            timeout=OH_LLM_TIMEOUT_SECONDS,
-            num_retries=2,
-            drop_params=True,
-            native_tool_calling=native_tc,
-            # temperature/num_predict must ride inside "options" — the
-            # ollama_chat litellm path drops the top-level temperature (the
-            # server-side sampler log shows the Modelfile default otherwise),
-            # and num_predict bounds each completion so it always terminates.
-            litellm_extra_body={"options": {
-                "num_ctx": req.num_ctx,
-                "num_predict": OH_NUM_PREDICT,
-                "temperature": 0.3,
-            }},
-        )
-        # SDK accepts `reasoning_effort` as a top-level kwarg; older builds may
-        # not. Try with it; if it's rejected, retry without (SDK falls back to
-        # its built-in default of "high").
-        try:
-            llm = _LLM(reasoning_effort=_re, **_llm_kwargs)
-            print(f"[OH-Worker] reasoning_effort={_re}")
-        except TypeError:
-            print(f"[OH-Worker] SDK rejected reasoning_effort kwarg — using default")
-            llm = _LLM(**_llm_kwargs)
-
-        # ── Agent with core tools ──
-        tools = [
-            _Tool(name="terminal"),
-            _Tool(name="file_editor"),
-            _Tool(name="glob"),
-            _Tool(name="grep"),
-        ]
-
-        agent = _Agent(llm=llm, tools=tools)
+        llm, agent = _make_llm_and_agent(req, ollama_base, native_tc)
 
         # ── Workspace setup ──
         work_dir, project_name, _reusing = _workspace_for_request(req)
@@ -1257,6 +1419,8 @@ def run_task(req: RunRequest):
         pre_snapshot = _snapshot_workspace(work_dir)
 
         # ── Event callback for live progress tracking ──
+        arg_drop = {"total": 0}
+
         def on_event(event):
             if cancel_event.is_set():
                 raise _RunCancelled()
@@ -1266,6 +1430,9 @@ def run_task(req: RunRequest):
                     progress_log.append(step_info)
                     action = step_info.get("action", "")
                     detail = step_info.get("detail", "")[:80]
+                    if (action == "file_editor_result"
+                            and _ARG_DROP_MARKER in step_info.get("detail", "")):
+                        arg_drop["total"] += 1
                     print(f"[OH-Worker]   Step {len(progress_log)}: {action} — {detail}")
             except Exception:
                 pass
@@ -1303,7 +1470,9 @@ def run_task(req: RunRequest):
 
         _nudges_used, _still_missing = _run_completion_nudges(
             conversation, work_dir, req.required_files, cancel_event=cancel_event,
+            extra_note=_ARG_DROP_NOTE if arg_drop["total"] >= 2 else "",
         )
+        _maybe_demote_native_tc(ollama_base, req.model, arg_drop["total"], _still_missing)
 
         status_str = str(conversation.state.execution_status)
         event_count = len(list(conversation.state.events))
@@ -1379,6 +1548,7 @@ def run_task(req: RunRequest):
             project_id=project_name,
             agent_finished=agent_finished,
             missing_required_files=_still_missing,
+            arg_drop_detected=arg_drop["total"] >= 3,
         )
 
     except _RunCancelled:
@@ -1462,60 +1632,19 @@ async def run_task_stream(req: RunRequest):
         """Synchronous function that runs in a thread."""
         try:
             ollama_base = req.ollama_url.rstrip("/")
-            native_tc = _check_tool_support(ollama_base, req.model)
+            native_tc = _check_tool_support(ollama_base, req.model, num_ctx=req.num_ctx)
             # Force the loaded instance to match req.num_ctx — user setting wins
             # over Modelfile defaults and over whatever litellm forwards (or fails to forward).
             _ensure_loaded(ollama_base, req.model, req.num_ctx)
 
-            _re = (req.reasoning_effort or "medium").strip().lower()
-            if _re not in ("low", "medium", "high"):
-                _re = "medium"
-            _llm_kwargs = dict(
-                model=f"ollama_chat/{req.model}",
-                api_key="ollama",
-                base_url=ollama_base,
-                temperature=0.3,
-                timeout=OH_LLM_TIMEOUT_SECONDS,
-                num_retries=2,
-                drop_params=True,
-                native_tool_calling=native_tc,
-                # Pass num_ctx nested under "options" so litellm forwards it to
-                # Ollama's options.num_ctx field. A bare {"num_ctx": ...} lands at
-                # the body's top level, which Ollama silently ignores → it falls
-                # back to the modelfile default (often 131K), blowing VRAM and
-                # tripping the timeout. num_predict bounds each completion so a
-                # runaway response can't outlive the timeout, and temperature
-                # must ride in options too — the ollama_chat path drops the
-                # top-level kwarg.
-                litellm_extra_body={"options": {
-                    "num_ctx": req.num_ctx,
-                    "num_predict": OH_NUM_PREDICT,
-                    "temperature": 0.3,
-                }},
-            )
-            # Same reasoning_effort handling as the blocking /run path. Without
-            # this the SDK default is "high" — heavy think-token overhead that
-            # made the primary streamed build slow and flaky while the blocking
-            # continue passes (which did set it) ran fine.
-            try:
-                llm = _LLM(reasoning_effort=_re, **_llm_kwargs)
-                print(f"[OH-Worker] reasoning_effort={_re} (stream)")
-            except TypeError:
-                print(f"[OH-Worker] SDK rejected reasoning_effort kwarg — using default (stream)")
-                llm = _LLM(**_llm_kwargs)
-
-            tools = [
-                _Tool(name="terminal"),
-                _Tool(name="file_editor"),
-                _Tool(name="glob"),
-                _Tool(name="grep"),
-            ]
-            agent = _Agent(llm=llm, tools=tools)
+            llm, agent = _make_llm_and_agent(req, ollama_base, native_tc, tag=" (stream)")
 
             work_dir, project_name, _reusing = _workspace_for_request(req)
 
             full_task = _build_task_prompt(req, str(work_dir), continuing=_reusing)
             pre_snapshot = _snapshot_workspace(work_dir)
+
+            arg_drop = {"total": 0}
 
             def on_event(event):
                 # Cancellation check happens BEFORE the inner try/except so
@@ -1528,6 +1657,9 @@ async def run_task_stream(req: RunRequest):
                         step_counter[0] += 1
                         step_info["step"] = step_counter[0]
                         progress_log.append(step_info)
+                        if (step_info.get("action") == "file_editor_result"
+                                and _ARG_DROP_MARKER in step_info.get("detail", "")):
+                            arg_drop["total"] += 1
                         _send_sse({
                             "type": "step",
                             "action": step_info.get("action", ""),
@@ -1577,7 +1709,9 @@ async def run_task_stream(req: RunRequest):
             _nudges_used, _still_missing = _run_completion_nudges(
                 conversation, work_dir, req.required_files,
                 cancel_event=cancel_event, on_nudge=_nudge_sse,
+                extra_note=_ARG_DROP_NOTE if arg_drop["total"] >= 2 else "",
             )
+            _maybe_demote_native_tc(ollama_base, req.model, arg_drop["total"], _still_missing)
             _stream_status_str = str(conversation.state.execution_status)
 
             # Post-run processing
@@ -1637,6 +1771,7 @@ async def run_task_stream(req: RunRequest):
                 "project_id": project_name,
                 "agent_finished": agent_finished,
                 "missing_required_files": _still_missing,
+                "arg_drop_detected": arg_drop["total"] >= 3,
             }
 
         except _RunCancelled:
@@ -1817,6 +1952,8 @@ You MUST complete every step before calling `finish`. `finish` is a gate, not a 
 Only call `finish` after step 2 exits 0 with every expected file present. Calling `finish` early — with compile errors, missing files, or unresolved references — counts as task failure.
 
 NEVER end your turn with a plain text message. Every response must be a tool call; the ONLY way to stop is the `finish` tool. A text-only reply (e.g. "Now let me create the frontend files:") aborts the build.
+
+When creating a file with `file_editor`, you MUST pass the complete file content in the `file_text` parameter of that same call — never call `create` with a path alone.
 """
 
     return prompt

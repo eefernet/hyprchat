@@ -190,7 +190,11 @@ AIDER_ENABLED = os.getenv("AIDER_ENABLED", "true").lower() == "true"
 AIDER_FOR_GREENFIELD = os.getenv("AIDER_FOR_GREENFIELD", "true").lower() == "true"
 GATE_RECONCILE_AUTOCORRECT = os.getenv("GATE_RECONCILE_AUTOCORRECT", "false").lower() == "true"
 AIDER_MODEL = os.getenv("AIDER_MODEL", "")  # Empty = use FIXER_MODEL, then CODER_MODEL
-AIDER_NUM_CTX = int(os.getenv("AIDER_NUM_CTX", os.getenv("OPENHANDS_NUM_CTX", "16384")))
+# 0 = inherit the Daedalus context-window slider (OPENHANDS_NUM_CTX) at call
+# time. The old int default (16384) silently pinned Aider below the slider and
+# forced an Ollama evict/reload on every build↔fix alternation. Set the env or
+# the aider_num_ctx setting only to explicitly diverge from the slider.
+AIDER_NUM_CTX = int(os.getenv("AIDER_NUM_CTX", "0") or 0)
 AIDER_AUTO_TEST = os.getenv("AIDER_AUTO_TEST", "true").lower() == "true"
 AIDER_WORKER_URL = os.getenv("AIDER_WORKER_URL", OPENHANDS_URL)
 # Reasoning effort for the OpenHands builder LLM. The SDK passes this through
@@ -198,6 +202,12 @@ AIDER_WORKER_URL = os.getenv("AIDER_WORKER_URL", OPENHANDS_URL)
 # Ollama models silently ignore unsupported values. Default "medium" — "high"
 # adds a lot of think-token overhead per round on small/medium local models.
 OPENHANDS_REASONING_EFFORT = os.getenv("OPENHANDS_REASONING_EFFORT", "medium").strip().lower()
+# Send think:false to thinking-capable coder models during builds. Without it
+# a qwen3.5-class model reasons with an UNBOUNDED budget before every tool
+# call (reasoning_effort never reaches Ollama's think switch through litellm).
+# The worker gates the flag on /api/show capabilities, so non-thinking models
+# are unaffected either way.
+OPENHANDS_DISABLE_THINKING = os.getenv("OPENHANDS_DISABLE_THINKING", "true").lower() == "true"
 MIN_NUM_CTX = int(os.getenv("MIN_NUM_CTX", "1024"))
 CODER_V2_MIN_NUM_CTX = int(os.getenv("CODER_V2_MIN_NUM_CTX", "32768"))
 

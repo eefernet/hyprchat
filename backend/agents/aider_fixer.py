@@ -288,7 +288,10 @@ async def run_aider_fix(http, events, conv_id: str, *,
         "contract": contract,
         "model": aider_model,
         "ollama_url": config.OLLAMA_URL,
-        "num_ctx": config.AIDER_NUM_CTX,
+        # AIDER_NUM_CTX=0 means "inherit the Daedalus context-window slider":
+        # a divergent Aider ctx forces Ollama to evict/reload the coder model
+        # on every build↔fix alternation and quietly caps Aider below the UI.
+        "num_ctx": config.AIDER_NUM_CTX or config.OPENHANDS_NUM_CTX,
         "test_cmd": test_cmd or contract.get("aider_test_cmd") or contract.get("test_cmd") or "",
         "lint_cmd": lint_cmd or (contract.get("aider_lint_cmd") if contract.get("safe_lint") else "") or "",
         "allowed_files": allowed_files,

@@ -16,7 +16,13 @@
 - Phase chips cover plan, build, review, fix, acceptance, and package progress.
 - Artifact and download actions are more visible, while build details and raw events stay available in collapsible sections.
 
-## Daedalus Builder and Repair Hardening
+## Daedalus Builder, Model and Repair Hardening
+- The worker now sends `think: false` to thinking-capable coder models during builds (capability-gated via `/api/show`, so non-thinking models are untouched). Thinking merges (qwen3.5-class) previously reasoned with an unbounded budget before every tool call and routinely emitted `file_editor.create` calls with the `file_text` argument missing — builds crawled at one file per nudge. Controlled by Settings → Daedalus → "Disable model thinking during builds" (`openhands_disable_thinking`, default on) and the worker-side `OH_THINK` env override.
+- The SDK-default ThinkTool is excluded from builder agents (`include_default_tools=["FinishTool"]`) — reasoning models were double-thinking and burning rounds on think spam before writing any file.
+- The native-tool-calling probe now does a live multi-line arg round-trip (dummy `write_file` with a 3-line body) instead of trusting `/api/show` capabilities. Models that emit structured tool calls but drop multi-line string args are persisted as prompt-based. Probe requests pin `options.num_ctx` so a cold probe can't load a model at its Modelfile default (262K on some imports). Tool cache bumped to v3.
+- Runtime auto-recovery: repeated "Parameter `file_text` is required" failures fold a corrective note into the next completion nudge, and a run that ends incomplete after ≥3 dropped args demotes the model to prompt-based tool calling (persisted) and reports `arg_drop_detected` to the backend.
+- Builder task prompts now state explicitly that `file_editor create` must carry the complete file content in `file_text` in the same call.
+- LLM/Agent construction is factored into one shared helper for `/run` and `/run-stream` so the paths can't drift again.
 - Architect plans can now include an advisory interface contract for entrypoints, dependency policy, shared constants, public signatures, and cross-file rules so Builder has stronger cross-file guidance without adding a hard gate.
 - OpenHands Builder rounds now scale with the planned file count, and missing manifest files trigger bounded backend-owned continue passes before Reviewer runs.
 - Builder results that stop without an OpenHands finish signal are marked incomplete/partial instead of flowing to review, acceptance, or delivery as successful.

@@ -5191,6 +5191,10 @@ async def exec_tool(
                 # User-tunable reasoning_effort — drops think-token overhead
                 # significantly on slow local models when set to "low".
                 "reasoning_effort": getattr(config, "OPENHANDS_REASONING_EFFORT", "medium"),
+                # Send think:false to thinking-capable coder models (worker
+                # gates on /api/show capabilities). Without it qwen3.5-class
+                # merges reason with an unbounded budget before every tool call.
+                "disable_thinking": bool(getattr(config, "OPENHANDS_DISABLE_THINKING", True)),
             }
 
             async def _signal_oh_cancel(reason: str):
@@ -5519,6 +5523,11 @@ async def exec_tool(
                                 _expected_files.append(_fn)
                     except Exception as _ef_e:
                         print(f"[CODEGEN:OH] Expected-file parse failed (non-fatal): {_ef_e}")
+
+                if result.get("arg_drop_detected"):
+                    print("[CODEGEN:OH] Worker reported repeated dropped file_text "
+                          "args — model demoted to prompt-based tool calling for "
+                          "future runs")
 
                 if _expected_files:
                     if _manifest_strict:
