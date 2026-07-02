@@ -28,6 +28,12 @@
 - OpenHands LLM calls now cap `num_predict` and use a longer per-call timeout so a runaway completion can't stall a build until the user cancels; temperature rides inside Ollama `options` so it actually reaches the sampler.
 - A fix run that explicitly changed nothing on disk (Aider `no_changes`, or a fixer that failed before writing) no longer forces a redundant `run_review`, removing the review/research gate ping-pong after no-op repairs.
 - The Architect's `tests_required` files now count toward the Builder's completeness gate alongside the file tree, so planned test files are created during the Build phase instead of Acceptance burning its whole fix budget adding them afterwards.
+- Architect plans must now include `README.md` and `.gitignore` in every manifest, so docs and packaging hygiene are built during the Build phase instead of retrofitted by Acceptance fix cycles.
+- The Reviewer now detects nested subproject manifests (e.g. `backend/pyproject.toml` + `frontend/package.json`) and composes a compound build contract — full-stack monorepos previously reviewed as "plain python" and the frontend was never build-verified.
+- C# is now a first-class fix-path language: `.sln`/`.csproj` reviewer markers (suffix-matched), a dotnet language adapter (build/test with the Codebox .NET 8 SDK), a csharp Builder verify command, and Makefile-only C projects now route to the C adapter instead of generic.
+- Manual file/shell tool attempts while reviewer/acceptance issues are pending are now AUTO-DISPATCHED into `run_aider_fix` (or `run_fixer` when Aider is unavailable) instead of returning repeated BLOCKED messages — flailing chat models no longer terminate the turn via the duplicate-blocked stop. The research/exhaustion gates still take precedence.
+- Acceptance verdict parsing normalizes passing synonyms ("clean", "pass", "ok") to accepted instead of hard-downgrading them to error, and Aider's issue-text scope mining now recognizes all project languages (was Python-only) including relative paths.
+- The Reviewer LLM prompt now receives the Architect plan's build/test/run commands as context (never executed), and `download_project` no longer writes the FSM-invalid `partial_delivered` workflow state (artifact status carries partial delivery).
 
 ## Council of AI
 - Council setup has been refreshed with cleaner organization, presets, host settings, member cards, and analytics presentation.

@@ -130,6 +130,126 @@ _PROJECT_MARKERS = [
                                                                                       "",                   "cpp"),
 ]
 
+# .NET SDK lives at /root/.dotnet on Codebox but service shells may not have it
+# on PATH — every dotnet command exports it first. `dotnet test` on a project
+# with no test csproj is an error, so the test command probes for one first.
+_DOTNET_ENV = 'export PATH="$PATH:/root/.dotnet:$HOME/.dotnet" && export DOTNET_CLI_TELEMETRY_OPTOUT=1'
+_DOTNET_BUILD_CMD = f"{_DOTNET_ENV} && dotnet build -nologo -v q"
+_DOTNET_TEST_CMD = (
+    f"{_DOTNET_ENV} && "
+    "if find . -iname '*test*.csproj' -not -path '*/bin/*' -not -path '*/obj/*' "
+    "| head -1 | grep -q .; then dotnet test -nologo -v q; "
+    "else echo '(no dotnet test project detected)'; fi"
+)
+
+# Marker families matched by filename SUFFIX (solution/project files carry the
+# project's own name, so exact-name matching like _PROJECT_MARKERS can't work).
+_SUFFIX_MARKERS = [
+    ((".sln", ".csproj"), _DOTNET_BUILD_CMD, _DOTNET_TEST_CMD, "", "csharp"),
+]
+
+# ── Nested-manifest (monorepo) detection ──
+# A frontend/backend split (backend/pyproject.toml + frontend/package.json)
+# has NO top-level marker, so it used to fall through to the plain-source
+# profile: py_compile as "build", the frontend never verified at all. The
+# depth-2 scan finds subproject manifests and composes a compound contract.
+_NESTED_MARKER_NAMES = [
+    "pyproject.toml", "requirements.txt", "Cargo.toml", "go.mod", "pom.xml",
+    "CMakeLists.txt", "Makefile", "package.json", "*.csproj", "*.sln",
+]
+# Priority for picking the PRIMARY subproject (owns test/lint + language) and
+# the build order (python/dotnet backends build before the node frontend).
+_NESTED_PRIORITY = [
+    "pyproject.toml", "requirements.txt", "*.csproj", "*.sln", "Cargo.toml",
+    "go.mod", "pom.xml", "CMakeLists.txt", "Makefile", "package.json",
+]
+_MARKER_CMDS = {m: (b, t, l, lang) for m, b, t, l, lang in _PROJECT_MARKERS}
+_MARKER_CMDS["*.csproj"] = (_DOTNET_BUILD_CMD, _DOTNET_TEST_CMD, "", "csharp")
+_MARKER_CMDS["*.sln"] = (_DOTNET_BUILD_CMD, _DOTNET_TEST_CMD, "", "csharp")
+
+
+async def _detect_nested_projects(http, project_dir: str) -> list[dict]:
+    """Depth-2 scan for subproject manifests. Returns [{dir, marker}] sorted by
+    _NESTED_PRIORITY, one entry per subdirectory (highest-priority marker wins)."""
+    name_expr = " -o ".join(f"-name '{n}'" for n in _NESTED_MARKER_NAMES)
+    cmd = (
+        f"cd {shlex.quote(project_dir)} && "
+        f"find . -mindepth 2 -maxdepth 2 -type f \\( {name_expr} \\) "
+        "-not -path '*/node_modules/*' -not -path '*/.git/*' "
+        "-not -path '*/venv/*' -not -path '*/.venv/*' "
+        "-not -path '*/bin/*' -not -path '*/obj/*' | sort"
+    )
+    lines: list[str] = []
+    try:
+        r = await http.post(
+            f"{config.CODEBOX_URL}/command",
+            json={"command": cmd, "timeout": 10},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            lines = [ln.strip() for ln in (r.json().get("stdout") or "").splitlines()
+                     if ln.strip()]
+    except Exception:
+        return []
+
+    def _marker_key(basename: str) -> str:
+        if basename.endswith(".csproj"):
+            return "*.csproj"
+        if basename.endswith(".sln"):
+            return "*.sln"
+        return basename
+
+    def _priority(marker: str) -> int:
+        try:
+            return _NESTED_PRIORITY.index(marker)
+        except ValueError:
+            return len(_NESTED_PRIORITY)
+
+    by_dir: dict[str, str] = {}
+    for line in lines:
+        rel = line.lstrip("./")
+        if "/" not in rel:
+            continue
+        subdir, base = rel.split("/", 1)
+        marker = _marker_key(base)
+        if marker not in _MARKER_CMDS:
+            continue
+        prev = by_dir.get(subdir)
+        if prev is None or _priority(marker) < _priority(prev):
+            by_dir[subdir] = marker
+    subs = [{"dir": d, "marker": m} for d, m in by_dir.items()]
+    subs.sort(key=lambda s: (_priority(s["marker"]), s["dir"]))
+    return subs[:3]
+
+
+def _compose_nested_contract(project_dir: str, subs: list[dict],
+                             top_files: list[str]) -> dict:
+    """Compound build/test contract for a monorepo: build every subproject from
+    its own dir (priority order — backends first, node frontend last); test and
+    lint come from the primary (highest-priority) subproject."""
+    build_parts = []
+    for sub in subs:
+        b = _MARKER_CMDS[sub["marker"]][0]
+        build_parts.append(f"(cd {shlex.quote(sub['dir'])} && {b})")
+    primary = subs[0]
+    p_build, p_test, p_lint, p_lang = _MARKER_CMDS[primary["marker"]]
+    test_cmd = f"(cd {shlex.quote(primary['dir'])} && {p_test})" if p_test else ""
+    lint_cmd = f"(cd {shlex.quote(primary['dir'])} && {p_lint})" if p_lint else ""
+    marker = "nested:" + ",".join(f"{s['dir']}/{s['marker']}" for s in subs)
+    return {
+        "marker": marker,
+        "build_cmd": " && ".join(build_parts),
+        "test_cmd": test_cmd,
+        "lint_cmd": lint_cmd,
+        "language": p_lang or "generic",
+        "files": sorted(top_files)[:30],
+        "subprojects": [{"dir": s["dir"], "marker": s["marker"],
+                         "language": _MARKER_CMDS[s["marker"]][3]} for s in subs],
+        "verification_level": "build-verified",
+        "confidence": "high",
+        "profile": marker,
+    }
+
 
 # Plain-source fallbacks when no formal build file exists. Order matters: we
 # pick the language with the most source files in the tree.
@@ -262,6 +382,22 @@ async def _detect_project(http, project_dir: str) -> dict:
                     "lint_cmd": lint, "language": lang, "files": sorted(files)[:30],
                     "verification_level": "build-verified", "confidence": "high",
                     "profile": f"marker:{marker}"}
+
+    # Suffix-matched markers (.sln/.csproj carry the project's own name).
+    for suffixes, build, test, lint, lang in _SUFFIX_MARKERS:
+        hit = next((f for f in sorted(files) if f.endswith(suffixes)), None)
+        if hit:
+            return {"marker": hit, "build_cmd": build, "test_cmd": test,
+                    "lint_cmd": lint, "language": lang, "files": sorted(files)[:30],
+                    "verification_level": "build-verified", "confidence": "high",
+                    "profile": f"marker:{hit}"}
+
+    # Layer 1.5: nested subproject manifests (frontend/backend monorepo).
+    # Without this, a Vite+FastAPI project reviews as "plain python" and the
+    # frontend is never build-verified.
+    nested = await _detect_nested_projects(http, project_dir)
+    if nested:
+        return _compose_nested_contract(project_dir, nested, sorted(files))
 
     if "index.html" in files:
         prof = _PLAIN_LANG_PROFILES["html"]
@@ -1204,7 +1340,7 @@ The build command was: `{build_cmd}`
 Build exit code: {build_exit}
 Test command: `{test_cmd}`
 Test exit code: {test_exit}
-{lint_section}
+{lint_section}{plan_cmds_section}
 
 ## Build/test output (most recent {build_chars} chars of build, {test_chars} of test)
 ```
@@ -1280,8 +1416,12 @@ def _try_parse_review_json(text: str) -> dict | None:
 
 async def run_review(http, events, conv_id: str, project_dir: str,
                      project_id: str = "", parent_run_id: str = "",
-                     conv_model: str = "") -> dict:
+                     conv_model: str = "", plan_cmds: dict | None = None) -> dict:
     """Execute a Reviewer run on a project. Returns the result envelope.
+
+    `plan_cmds` optionally carries the Architect plan's build/test/entrypoint
+    commands. They are CONTEXT ONLY for the LLM analysis (never executed —
+    plan text may be hallucinated); on-disk detection stays authoritative.
 
     Side effects:
       - Creates a `runs` row with role="reviewer".
@@ -1806,6 +1946,15 @@ async def run_review(http, events, conv_id: str, project_dir: str,
         review_model = (config.REVIEWER_MODEL or config.PLANNING_MODEL
                         or model_providers.reject_cloud(conv_model)
                         or model_providers.reject_cloud(config.DEFAULT_MODEL))
+        _plan_cmds_section = ""
+        if plan_cmds and any(plan_cmds.get(k) for k in ("build_cmd", "test_cmd", "run_cmd")):
+            _plan_cmds_section = (
+                "\nArchitect plan commands (CONTEXT ONLY — the detected commands "
+                "above are what actually ran):"
+                + (f"\n  planned build: `{plan_cmds.get('build_cmd')}`" if plan_cmds.get("build_cmd") else "")
+                + (f"\n  planned test: `{plan_cmds.get('test_cmd')}`" if plan_cmds.get("test_cmd") else "")
+                + (f"\n  planned run: `{plan_cmds.get('run_cmd')}`" if plan_cmds.get("run_cmd") else "")
+            )
         prompt = _REVIEW_PROMPT.format(
             verification_profile=profile,
             verification_level=verification_level,
@@ -1813,6 +1962,7 @@ async def run_review(http, events, conv_id: str, project_dir: str,
             build_exit=build_result["exit_code"],
             test_cmd=test_cmd or "(none)",
             test_exit=test_result["exit_code"],
+            plan_cmds_section=_plan_cmds_section,
             lint_section=(f"Lint command: `{lint_cmd}`\nLint exit: {lint_result['exit_code']}" if lint_cmd else ""),
             build_chars=len(build_result.get("stdout", "")),
             test_chars=len(test_result.get("stdout", "")),

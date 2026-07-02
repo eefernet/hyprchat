@@ -49,8 +49,8 @@ _ARCHITECT_PROMPT = """You are the Architect — a focused project planning agen
 
 {{
   "project_id": "<short kebab-case slug, 2-3 words from the task, e.g. 'pong-game'>",
-  "language": "<lowercase language name: java, python, rust, go, javascript, typescript, c, cpp, kotlin, etc.>",
-  "build_system": "<one of: maven, gradle, cargo, npm, pyproject, cmake, make, none>",
+  "language": "<lowercase language name: java, python, rust, go, javascript, typescript, c, cpp, csharp, kotlin, etc.>",
+  "build_system": "<one of: maven, gradle, cargo, npm, pyproject, cmake, make, dotnet, none>",
   "build_cmd": "<exact shell command, e.g. 'mvn -q -DskipTests compile'>",
   "test_cmd": "<exact shell command, e.g. 'mvn -q test', or empty string if no tests>",
   "lint_cmd": "<exact shell command, or empty string if not applicable>",
@@ -96,7 +96,7 @@ _ARCHITECT_PROMPT = """You are the Architect — a focused project planning agen
 ## Hard rules
 1. Output ONLY the JSON object. First character is `{{`, last character is `}}`. No markdown fences. No prose before or after.
 2. All strings must escape backslashes, quotes, and newlines correctly.
-3. `manifest` should list 3-25 source/config files for typical projects. Be concrete (real paths, not placeholders).
+3. `manifest` should list 3-25 source/config files for typical projects. Be concrete (real paths, not placeholders). The manifest MUST ALWAYS include `README.md` (install steps, how to run EVERY entrypoint, how to seed/reset data if applicable) and `.gitignore` (covering `__pycache__/`, caches, build output, and local DB/state files) — the Acceptance gate rejects deliverables missing docs or packaging hygiene.
 4. `success_criteria` MUST include "build_cmd exits 0" or equivalent — the Reviewer uses these to gate completion.
 5. If the language is uncertain, pick the most likely one and add a `risk_notes` entry.
 6. For any multi-file app, include an interface contract: shared constants used across files, public methods/functions called across files, runtime entrypoint, dependency policy, and cross-file contracts. Use exact names/signatures so Builder can keep files consistent.

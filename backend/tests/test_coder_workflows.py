@@ -2594,8 +2594,9 @@ def _no_change_gate_env(monkeypatch, aider_envelope):
 def test_no_change_fix_run_does_not_force_review(monkeypatch):
     """An Aider run that changed NOTHING on disk (status no_changes, empty
     files_touched) must not gate on run_review — the prior reviewer's issues
-    keep driving the state, so the model is routed back to fixing instead of
-    ping-ponging between 'call run_review first' and the research gates."""
+    keep driving the state. With auto-dispatch, the blocked manual tool is
+    converted straight into the repair path instead of ping-ponging between
+    'call run_review first' and the research gates."""
     import tools
 
     events = _no_change_gate_env(monkeypatch, {
@@ -2614,8 +2615,10 @@ def test_no_change_fix_run_does_not_force_review(monkeypatch):
     ))
 
     assert "run_review has not been called yet" not in result
-    assert result.startswith("BLOCKED")
-    assert "run_fixer" in result  # routed to the fix loop, not re-review
+    # Aider is unhealthy in this env → the manual tool auto-dispatches to the
+    # fallback Fixer instead of returning a BLOCKED lecture.
+    assert result.startswith("AUTO-DISPATCH")
+    assert "run_fixer" in result
 
 
 def test_fix_run_with_files_touched_still_forces_review(monkeypatch):
@@ -2639,3 +2642,182 @@ def test_fix_run_with_files_touched_still_forces_review(monkeypatch):
     ))
 
     assert "run_review has not been called yet" in result
+
+
+class _AnyOkHTTP:
+    """Answers any codebox/ollama call with an empty success."""
+    class _Resp:
+        status_code = 200
+        text = ""
+        def json(self):
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+    async def post(self, *a, **k):
+        return self._Resp()
+
+    async def get(self, *a, **k):
+        return self._Resp()
+
+
+def test_fix_needed_manual_tool_auto_dispatches_to_aider(monkeypatch):
+    """With Aider healthy and budget remaining, a blocked manual tool in
+    fix-needed state is converted into run_aider_fix instead of a BLOCKED
+    lecture — flailing becomes repair progress."""
+    import tools
+    from agents import aider_fixer as aider_mod
+
+    events = _no_change_gate_env(monkeypatch, {
+        "status": "no_changes",
+        "summary": "Aider completed without changes.",
+        "project_dir": "/root/projects/demo",
+        "files_touched": [],
+    })
+
+    async def healthy(_http, force=False):
+        return True
+
+    async def fake_aider_ctx(_http, _conv_id, issue_run=None):
+        return {"project_dir": "/root/projects/demo"}
+
+    dispatched = {}
+
+    async def fake_run_aider_fix(_http, _events, _conv_id, **kwargs):
+        dispatched.update(kwargs)
+        return {"status": "cancelled", "summary": "stub aider run"}
+
+    monkeypatch.setattr(tools, "_aider_worker_healthy", healthy)
+    monkeypatch.setattr(tools, "_aider_first_context", fake_aider_ctx)
+    monkeypatch.setattr(aider_mod, "run_aider_fix", fake_run_aider_fix)
+
+    result = _run(tools.exec_tool(
+        http=_AnyOkHTTP(),
+        events=events,
+        name="write_file",
+        args={"path": "/root/projects/demo/app.py", "content": "print('x')\n"},
+        conv_id="conv-auto-dispatch",
+    ))
+
+    assert result.startswith("AUTO-DISPATCH")
+    assert "run_aider_fix" in result
+    # The dispatched task names the pending issue and the blocked call's intent.
+    assert dispatched.get("task") and "boom" in dispatched["task"]
+    assert "write_file" in dispatched["task"]
+
+
+def test_fix_needed_at_research_gate_stays_blocked_no_dispatch(monkeypatch):
+    """At the base cap without research, manual tools must stay BLOCKED with the
+    deep_research demand — auto-dispatch must not bypass the research ladder."""
+    import tools
+
+    aider_success = {
+        "role": "aider.fix",
+        "status": "succeeded",
+        "started_at": "2026-01-01 12:20:00",
+        "result_envelope": {"status": "applied", "source_role": "reviewer",
+                            "files_touched": ["app.py"]},
+    }
+    reviewer_run = {
+        "id": "run-rev-cap",
+        "role": "reviewer",
+        "status": "succeeded",
+        "started_at": "2026-01-01 12:25:00",
+        "result_envelope": {
+            "status": "issues",
+            "project_dir": "/root/projects/demo",
+            "issues": [{"severity": "bug", "file": "app.py",
+                        "summary": "boom", "suggested_fix_scope": ["app.py"]}],
+        },
+    }
+    # Newest-first: reviewer with issues, then THREE successful reviewer-driven
+    # fixes → base cap (3) hit, no research since → research gate must hold.
+    runs = [reviewer_run] + [
+        {**aider_success, "id": f"run-fx-{i}",
+         "started_at": f"2026-01-01 12:1{i}:00"} for i in (3, 2, 1)
+    ]
+
+    async def get_conversation(conv_id):
+        return {
+            "id": conv_id,
+            "model_config_id": "mc-v2",
+            "messages": [{"role": "user", "created_at": "2026-01-01 12:00:00"}],
+        }
+
+    async def get_runs_by_conversation(_conv_id, limit=50):
+        return runs
+
+    async def get_run(run_id):
+        return next((r for r in runs if r.get("id") == run_id), None)
+
+    async def none_wf(_conv_id, project_id=None):
+        return None
+
+    async def no_project(_conv_id):
+        return None
+
+    async def is_v2(_conv_id, conv_row=None):
+        return True
+
+    async def healthy(_http, force=False):
+        return True
+
+    monkeypatch.setattr(tools.db, "get_conversation", get_conversation)
+    monkeypatch.setattr(tools.db, "get_runs_by_conversation", get_runs_by_conversation)
+    monkeypatch.setattr(tools.db, "get_run", get_run)
+    monkeypatch.setattr(tools.db, "get_latest_coder_workflow", none_wf)
+    monkeypatch.setattr(tools.db, "get_coding_project_by_conv", no_project)
+    monkeypatch.setattr(tools, "_is_v2_persona", is_v2)
+    monkeypatch.setattr(tools, "_aider_worker_healthy", healthy)
+
+    class Events:
+        async def emit(self, *a, **k):
+            pass
+
+    result = _run(tools.exec_tool(
+        http=_AnyOkHTTP(),
+        events=Events(),
+        name="write_file",
+        args={"path": "/root/projects/demo/app.py", "content": "print('x')\n"},
+        conv_id="conv-cap-gate",
+    ))
+
+    assert "AUTO-DISPATCH" not in result
+    assert "BLOCKED" in result
+    assert "deep_research" in result
+
+
+def test_csharp_adapter_contract():
+    from agents.language_adapters import detect_adapter
+
+    a = detect_adapter(["App.csproj", "Program.cs",
+                        "Tests/AppTests.csproj", "Tests/ProgramTests.cs"])
+    assert a.language == "csharp"
+    assert a.build_system == "dotnet"
+    assert "dotnet build" in a.build_cmd and "/root/.dotnet" in a.build_cmd
+    assert "dotnet test" in a.test_cmd  # test project present
+
+    b = detect_adapter(["App.csproj", "Program.cs"])
+    assert b.test_cmd == ""  # no test project → no dotnet test
+
+    # Makefile-only C project routes to the C adapter, not generic.
+    c = detect_adapter(["Makefile", "main.c", "util.h"])
+    assert c.language == "c"
+    assert c.build_system == "make"
+    assert not c.safe_lint  # make mutates the tree — never a safe Aider lint
+
+
+def test_aider_scope_mines_non_python_mentions():
+    envelope = {
+        "summary": "Schema mismatch between frontend/src/services/api.ts and Program.cs",
+        "issues": [{
+            "file": "",
+            "summary": "Type drift; also see styles.css and app.toml",
+            "suggested_fix_scope": [],
+        }],
+    }
+
+    files = aider_fixer._allowed_files_from_issues(envelope)
+
+    assert "frontend/src/services/api.ts" in files
+    assert "Program.cs" in files
+    assert "styles.css" in files
+    assert "app.toml" in files

@@ -73,6 +73,17 @@ class _FakeHTTP:
                 "stdout": "\n".join(top_level) if self.ls_exit == 0 else "",
                 "stderr": "" if self.ls_exit == 0 else "ls failed",
             })
+        if "-mindepth 2 -maxdepth 2" in command:
+            import fnmatch
+            hits = []
+            for path in self.files:
+                parts = path.split("/")
+                if len(parts) == 2 and any(
+                        fnmatch.fnmatch(parts[1], pat)
+                        for pat in reviewer._NESTED_MARKER_NAMES):
+                    hits.append(f"./{path}")
+            return _FakeResponse({"exit_code": 0, "stdout": "\n".join(sorted(hits)),
+                                  "stderr": ""})
         if "sort | uniq -c" in command:
             counts = {}
             for path in self.files:
@@ -392,3 +403,52 @@ def test_smoke_cleans_up_its_own_runtime_files():
     assert envelope["smoke_new_files"] == ["snip.json"]
     rm_cmds = [c for c in http.posts if "rm -f --" in c and "snip.json" in c]
     assert rm_cmds, "smoke must remove the runtime files it created"
+
+
+def test_detects_fullstack_monorepo_compound_contract():
+    """backend/pyproject.toml + frontend/package.json has NO top-level marker;
+    it must compose a compound contract instead of reviewing as plain python
+    (which left the frontend entirely unverified)."""
+    result = _run(reviewer._detect_project(
+        _FakeHTTP([
+            "backend/pyproject.toml", "backend/main.py",
+            "frontend/package.json", "frontend/src/App.tsx",
+        ]),
+        "/root/projects/recipe-manager",
+    ))
+
+    assert result["marker"].startswith("nested:")
+    assert "backend" in result["build_cmd"] and "pip install" in result["build_cmd"]
+    assert "frontend" in result["build_cmd"] and "npm install" in result["build_cmd"]
+    # Python side is primary: it owns tests and the reported language.
+    assert "backend" in result["test_cmd"]
+    assert result["language"] == "python"
+    assert len(result["subprojects"]) == 2
+    assert result["verification_level"] == "build-verified"
+
+
+def test_detects_csharp_solution_by_suffix():
+    """.sln/.csproj carry the project's own name — exact-name markers can't
+    match them, so the suffix pass must produce a dotnet contract."""
+    result = _run(reviewer._detect_project(
+        _FakeHTTP(["MyApp.sln", "MyApp/MyApp.csproj", "MyApp/Program.cs"]),
+        "/root/projects/myapp",
+    ))
+
+    assert result["marker"] == "MyApp.sln"
+    assert result["language"] == "csharp"
+    assert "dotnet build" in result["build_cmd"]
+    assert "/root/.dotnet" in result["build_cmd"]
+    assert result["verification_level"] == "build-verified"
+
+
+def test_single_top_level_marker_unchanged_by_nested_scan():
+    """A normal single-language project must keep the existing marker path."""
+    result = _run(reviewer._detect_project(
+        _FakeHTTP(["pyproject.toml", "app/main.py", "tests/test_app.py"]),
+        "/root/projects/tool",
+    ))
+
+    assert result["marker"] == "pyproject.toml"
+    assert result["language"] == "python"
+    assert result["profile"] == "marker:pyproject.toml"

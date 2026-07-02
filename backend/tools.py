@@ -26,6 +26,7 @@ from tooling.gate_decisions import (
     build_gate_context,
     compute_fix_budget,
     evaluate_gate,
+    issue_signatures as _gd_issue_signatures,
     reconcile_workflow_state,
 )
 from tooling.workflow_gate import (
@@ -159,19 +160,9 @@ async def _git_checkpoint(http, project_dir: str, label: str) -> str:
     return ""
 
 
-def _issue_signatures(envelope: dict) -> set:
-    """Reduce a reviewer envelope to a set of (file, summary_prefix) tuples
-    suitable for set-overlap comparison. Used by the v2 gate to detect
-    'same problem returned' across run_review cycles. Summary prefix is
-    lowercased + stripped + truncated to 60 chars so trivial wording diffs
-    don't defeat the overlap check, but the file path must match exactly."""
-    sigs = set()
-    for iss in (envelope or {}).get("issues") or []:
-        f = (iss.get("file") or "").strip()
-        s = (iss.get("summary") or "").strip().lower()[:60]
-        if f and s:
-            sigs.add((f, s))
-    return sigs
+# Single source of truth lives in tooling.gate_decisions — the local copy had
+# drifted into a duplicate implementation of the same signature logic.
+_issue_signatures = _gd_issue_signatures
 
 
 async def _deep_research_called_since(conv_id: str, since_iso: str | None) -> bool:
@@ -196,6 +187,30 @@ _SHIP_ANYWAY_DIRECT_RE = re.compile(
     re.I,
 )
 _DELIVERY_SHIP_TOOLS = {"download_project", "download_file"}
+
+# Manual work tools that get AUTO-DISPATCHED to the repair path (Aider first,
+# Fixer fallback) when a reviewer/acceptance issue is pending. Local chat
+# models flail on these instead of calling run_aider_fix; converting the call
+# turns a burned round into repair progress.
+_FIX_LOOP_MANUAL_TOOLS = {"read_file", "list_files", "write_file", "run_shell"}
+
+
+def _auto_dispatch_task(name: str, args: dict, pending_role: str,
+                        rid: str, pending_env: dict) -> str:
+    """Aider task text for an auto-dispatched manual-tool attempt."""
+    issue_bits = "; ".join(
+        (iss.get("summary") or "").strip()[:140]
+        for iss in (pending_env.get("issues") or [])[:3]
+        if (iss.get("summary") or "").strip()
+    )
+    detail = issue_bits or (pending_env.get("summary") or "").strip()[:220]
+    try:
+        arg_preview = ", ".join(
+            f"{k}={str(v)[:80]!r}" for k, v in list((args or {}).items())[:3])
+    except Exception:
+        arg_preview = ""
+    intent = f" (the orchestrator attempted {name}({arg_preview}) — fold that intent in if relevant)" if arg_preview else ""
+    return f"Fix the {pending_role} issues from {rid}: {detail}{intent}"
 _CAP_RELEASE_DIAGNOSTIC_TOOLS = {"read_file", "list_files"}
 _AIDER_HEALTH_CACHE = {"url": "", "ts": 0.0, "healthy": False}
 _AIDER_HEALTH_TTL_SECONDS = 30.0
@@ -2403,6 +2418,7 @@ async def exec_tool(
 
                 # If neither state triggers, fall through and run normally.
                 _gate_msg = None
+                _auto_dispatch_gate = None  # ("run_aider_fix"|"run_fixer", args)
                 if _pending_run is not None:
                     _env = _pending_run.get("result_envelope") or {}
                     _pd = (_env.get("project_dir") or "").strip()
@@ -2622,6 +2638,19 @@ async def exec_tool(
                         )
                     elif _aider_ctx_gate:
                         _project_dir = _aider_ctx_gate.get("project_dir") or _pending_env.get("project_dir") or ""
+                        # Manual work tools in fix-needed state get AUTO-DISPATCHED
+                        # to the repair path instead of a BLOCKED lecture — local
+                        # chat models kept flailing (write_file/run_shell/list_files)
+                        # until the duplicate-blocked stop killed the turn. Bounded
+                        # by the same attempt budget as the caps above.
+                        if (name in _FIX_LOOP_MANUAL_TOOLS
+                                and _fixer_attempts_gate < _cap_limit_gate):
+                            _auto_dispatch_gate = ("run_aider_fix", {
+                                "issue_run_id": _rid,
+                                "project_dir": _project_dir,
+                                "task": _auto_dispatch_task(
+                                    name, args, _pending_role, _rid, _pending_env),
+                            })
                         _gate_msg = (
                             "state", "fix-needed",
                             f"BLOCKED — {_pending_role} ({_rid}) returned status='{_rstatus_disp}' "
@@ -2640,6 +2669,11 @@ async def exec_tool(
                     else:
                         _tool_name = "run_acceptance_review" if _pending_role == "acceptance" else "run_review"
                         _issue_label = "run_acceptance_review" if _pending_role == "acceptance" else "run_review"
+                        if (name in _FIX_LOOP_MANUAL_TOOLS
+                                and _fixer_attempts_gate < _cap_limit_gate):
+                            _auto_dispatch_gate = ("run_fixer", {
+                                "reviewer_run_id": _rid,
+                            })
                         _gate_msg = (
                             "state", "fix-needed",
                             f"BLOCKED — {_issue_label} ({_rid}) returned status='{_rstatus_disp}' "
@@ -2660,6 +2694,27 @@ async def exec_tool(
                     # the gate only blocks v2 personas.
                     if await _check_v2():
                         _, _state_label, _body, _short_status, _trigger_id = _gate_msg
+                        if _auto_dispatch_gate is not None:
+                            _ad_tool, _ad_args = _auto_dispatch_gate
+                            await events.emit(conv_id, "tool_end", {
+                                "tool": name, "icon": "wrench",
+                                "status": f"↪ Auto-dispatched {name} → {_ad_tool} "
+                                          f"({_pending_role} {_trigger_id[:14]}… has issues)",
+                            })
+                            print(f"[v2-gate] auto-dispatch: {name} → {_ad_tool} "
+                                  f"trigger={_trigger_id}", flush=True)
+                            _ad_result = await exec_tool(
+                                http, events, _ad_tool, _ad_args, conv_id,
+                                custom_tool_map=custom_tool_map,
+                                connector_tool_name_map=connector_tool_name_map,
+                                conv_model=conv_model,
+                                kb_ids=kb_ids,
+                                artifact_message_id=artifact_message_id,
+                            )
+                            return (f"AUTO-DISPATCH: your {name} call was converted into "
+                                    f"{_ad_tool} (manual tools are blocked while "
+                                    f"{_pending_role} issues are pending) — act on the "
+                                    f"result below; do NOT retry {name}.\n\n{_ad_result}")
                         await events.emit(conv_id, "tool_end", {
                             "tool": name, "icon": "code",
                             "status": _short_status,
@@ -3378,9 +3433,13 @@ async def exec_tool(
                 })
                 try:
                     if _wf:
+                        # `partial_delivered` is an ARTIFACT status, not a
+                        # workflow state — gates and the frontend key partial
+                        # delivery off artifact_status; writing it into state
+                        # bypassed the FSM vocabulary.
                         await db.update_coder_workflow(
                             _wf["id"],
-                            state="partial_delivered" if _partial else "accepted",
+                            state="accepted",
                             artifact_status="partial_delivered" if _partial else "delivered",
                         )
                 except Exception as _wfe:
@@ -3949,10 +4008,32 @@ async def exec_tool(
                         "or an active project on this conversation. Pass it explicitly: "
                         "run_review(project_dir='/root/projects/<name>')")
 
+            # Architect plan commands as LLM context (never executed — on-disk
+            # detection stays authoritative; plan text may be hallucinated).
+            _plan_cmds = None
+            if conv_id:
+                try:
+                    _runs_for_plan = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _plan_run = next(
+                        (r for r in _runs_for_plan
+                         if r.get("role") == "architect" and r.get("status") == "succeeded"),
+                        None,
+                    )
+                    if _plan_run:
+                        _pe = _plan_run.get("result_envelope") or {}
+                        _plan_cmds = {
+                            "build_cmd": (_pe.get("build_cmd") or "").strip(),
+                            "test_cmd": (_pe.get("test_cmd") or "").strip(),
+                            "run_cmd": ((_pe.get("entrypoint") or {}).get("run_cmd") or "").strip(),
+                        }
+                except Exception as _pce:
+                    print(f"[run_review] plan-cmd lookup failed (non-fatal): {_pce}")
+
             envelope = await reviewer.run_review(http, events, conv_id,
                                                   project_dir=project_dir,
                                                   project_id=project_id,
-                                                  conv_model=conv_model)
+                                                  conv_model=conv_model,
+                                                  plan_cmds=_plan_cmds)
             _rev_status_wf = (envelope.get("status") or "").lower()
             if _rev_status_wf not in ("cancelled", ""):
                 await _apply_workflow_event(

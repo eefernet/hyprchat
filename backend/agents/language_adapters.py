@@ -167,6 +167,9 @@ EXT_TO_LANGUAGE = {
     ".cxx": "cpp",
     ".h": "c",
     ".hpp": "cpp",
+    ".cs": "csharp",
+    ".csproj": "csharp",
+    ".sln": "csharp",
     ".rb": "ruby",
     ".php": "php",
     ".sh": "shell",
@@ -499,10 +502,16 @@ def java_adapter(manifest: list[str]) -> LanguageAdapter:
 def c_cpp_adapter(manifest: list[str], language: str) -> LanguageAdapter:
     is_cpp = language == "cpp" or any(p.endswith((".cpp", ".cc", ".cxx", ".hpp")) for p in manifest)
     has_cmake = _top_level_has(manifest, "CMakeLists.txt")
+    has_make = _top_level_has(manifest, "Makefile")
     if has_cmake:
         build_cmd = "cmake -B build -S . && cmake --build build --quiet"
         test_cmd = "cd build && ctest --output-on-failure"
         build_system = "cmake"
+    elif has_make:
+        build_cmd = "make -s 2>&1 | head -200"
+        test_cmd = ("if grep -qE '^test[[:space:]:]' Makefile; then make -s test; "
+                    "else echo '(no make test target)'; fi")
+        build_system = "make"
     elif is_cpp:
         build_cmd = "g++ -Wall -fsyntax-only $(find . -name '*.cpp' -o -name '*.cc' -o -name '*.cxx')"
         test_cmd = ""
@@ -521,8 +530,10 @@ def c_cpp_adapter(manifest: list[str], language: str) -> LanguageAdapter:
         source_extensions=[".cpp", ".cc", ".cxx", ".hpp", ".h"] if is_cpp else [".c", ".h"],
         ignored_dirs=COMMON_IGNORES + ["out"],
         aider_test_cmd=test_cmd,
-        aider_lint_cmd=build_cmd if not has_cmake else "",
-        safe_lint=not has_cmake,
+        # Only the pure -fsyntax-only sweeps are safe as a lint; cmake and make
+        # both mutate the tree (build dirs / arbitrary recipes).
+        aider_lint_cmd=build_cmd if not (has_cmake or has_make) else "",
+        safe_lint=not (has_cmake or has_make),
         isolated_verification=_isolated_contract(
             applicable=has_cmake,
             setup_cmd=_isolated_copy_cmd() if has_cmake else "",
@@ -532,6 +543,42 @@ def c_cpp_adapter(manifest: list[str], language: str) -> LanguageAdapter:
                 "cd {tmp}/cmake-build && ctest --output-on-failure",
             ] if has_cmake else []),
             reason="out-of-tree CMake build",
+        ),
+    )
+
+
+# .NET SDK lives at /root/.dotnet on Codebox; service shells may not have it
+# on PATH, so every dotnet command exports it first (mirrors reviewer.py).
+_DOTNET_ENV = ('export PATH="$PATH:/root/.dotnet:$HOME/.dotnet" && '
+               'export DOTNET_CLI_TELEMETRY_OPTOUT=1')
+
+
+def csharp_adapter(manifest: list[str]) -> LanguageAdapter:
+    has_tests = any(
+        p.endswith(".csproj") and "test" in p.lower() for p in manifest
+    )
+    build_cmd = f"{_DOTNET_ENV} && dotnet build -nologo -v q"
+    test_cmd = f"{_DOTNET_ENV} && dotnet test -nologo -v q" if has_tests else ""
+    return LanguageAdapter(
+        language="csharp",
+        build_system="dotnet",
+        build_cmd=build_cmd,
+        test_cmd=test_cmd,
+        smoke_cmds=[],
+        package_rules=["Do not package bin/, obj/, or NuGet cache directories."],
+        source_extensions=[".cs", ".csproj", ".sln"],
+        ignored_dirs=COMMON_IGNORES + ["bin", "obj"],
+        aider_test_cmd=test_cmd,
+        aider_lint_cmd=build_cmd,
+        safe_lint=True,
+        isolated_verification=_isolated_contract(
+            applicable=True,
+            setup_cmd=_isolated_copy_cmd(),
+            verify_cmds=[
+                f"cd {{tmp}}/work && {_DOTNET_ENV} && dotnet build -nologo -v q"
+            ] + ([f"cd {{tmp}}/work && {_DOTNET_ENV} && dotnet test -nologo -v q"]
+                 if has_tests else []),
+            reason="isolated dotnet build (bin/obj kept out of the delivered tree)",
         ),
     )
 
@@ -572,7 +619,12 @@ def detect_adapter(manifest: list[str], language_hint: str = "") -> LanguageAdap
         return go_adapter(manifest)
     if language in {"java", "kotlin"} or _has(manifest, "pom.xml") or _has(manifest, "build.gradle") or _has(manifest, "build.gradle.kts"):
         return java_adapter(manifest)
-    if language in {"c", "cpp"} or _has(manifest, "CMakeLists.txt"):
+    if language in {"csharp", "c#", "cs", "dotnet"} or any(
+            p.endswith((".csproj", ".sln")) for p in manifest):
+        return csharp_adapter(manifest)
+    if (language in {"c", "cpp"} or _has(manifest, "CMakeLists.txt")
+            or (_has(manifest, "Makefile")
+                and any(p.endswith((".c", ".cpp", ".cc", ".cxx")) for p in manifest))):
         return c_cpp_adapter(manifest, language)
     return generic_adapter(manifest, language)
 

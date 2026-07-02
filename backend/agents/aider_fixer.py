@@ -91,7 +91,16 @@ def _allowed_files_from_issues(issue_envelope: dict) -> list[str]:
         if path and path not in out:
             out.append(path)
     text = "\n".join(text_bits)
-    for mention in re.findall(r"(?<![\w./-])[\w.-]+\.py\b", text):
+    # Mine file mentions from issue/test text across ALL project languages —
+    # the old .py-only pattern meant frontend/C#/C++ issues seeded no scope.
+    # Relative paths are captured whole ("frontend/src/api.ts"); absolute
+    # paths stay excluded (the stale-path detector owns those).
+    _mention_exts = (
+        r"py|ts|tsx|js|jsx|mjs|go|rs|java|kt|cs|c|cpp|cc|cxx|h|hpp|rb|php"
+        r"|css|html|toml|yaml|yml|json|md|csproj|sln|cmake"
+    )
+    for mention in re.findall(
+            rf"(?<![\w./-])(?:[\w.-]+/)*[\w.-]+\.(?:{_mention_exts})\b", text):
         if mention and mention not in out:
             out.append(mention)
     # Python CLI import failures are often reported at __main__.py even though

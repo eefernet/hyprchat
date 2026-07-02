@@ -678,6 +678,13 @@ async def run_acceptance_review(http, events, conv_id: str, *,
             }
 
         status = (parsed.get("status") or "error").lower()
+        # Local models emit natural synonyms for a passing verdict (the
+        # Reviewer's own schema uses "clean", so the confusion is baked in);
+        # hard-downgrading them to "error" blocked delivery on passing projects.
+        if status in {"clean", "pass", "passed", "ok", "approved", "accept"}:
+            status = "accepted"
+        elif status in {"issue", "failed", "rejected"}:
+            status = "issues"
         if status not in {"accepted", "issues", "error"}:
             status = "error"
         issues = [_normalize_issue(i, project_dir) for i in (parsed.get("issues") or []) if isinstance(i, dict)]

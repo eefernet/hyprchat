@@ -1734,6 +1734,7 @@ def _build_task_prompt(req: RunRequest, work_dir: str = "/root", continuing: boo
         "typescript": "`npx tsc --noEmit` to type-check. If package.json exists: `npm install && npm run build`.",
         "c": "`gcc -Wall -Wextra -fsyntax-only *.c` to check, then `make` or compile and run.",
         "cpp": "`g++ -Wall -Wextra -fsyntax-only *.cpp` to check, then `make` or compile and run.",
+        "csharp": "`export PATH=\"$PATH:/root/.dotnet\" && dotnet build -nologo -v q` must exit 0. Run `dotnet test` if a test project exists.",
         "rust": "`cargo check` (or `cargo build` if no Cargo.toml, use `rustc --edition 2021 *.rs`).",
         "go": "`go build ./...` to compile all packages.",
     }
