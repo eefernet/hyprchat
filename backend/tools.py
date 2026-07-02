@@ -1832,8 +1832,13 @@ async def exec_tool(
                 if _gate_decision.log:
                     print(_gate_decision.log, flush=True)
                 return _gate_decision.message
-            if _gate_ctx.snapshot_partial:
-                _gate_ctx = None
+        # A partial snapshot must never feed the gates below — even when the
+        # v2 lookup fell back to False, a later _check_v2() re-check can flip
+        # to True, and the gates would then run against an empty runs list
+        # (phantom-fixer blocking real fixes, the main walk missing pending
+        # states). Null the ctx so every consumer refetches from the DB.
+        if _gate_ctx is not None and _gate_ctx.snapshot_partial:
+            _gate_ctx = None
 
         _runs_for_cap = None
         _uts_cap = None
@@ -2376,6 +2381,18 @@ async def exec_tool(
                         break
                     if _role in {"fixer", "aider.fix"} and _r.get("status") in _FIXER_GATING:
                         _env_f = _r.get("result_envelope") or {}
+                        _ft_keys = [k for k in ("files_touched", "files_written")
+                                    if k in _env_f]
+                        if _ft_keys and not any(_env_f.get(k) for k in _ft_keys):
+                            # The fix run EXPLICITLY reports it changed nothing
+                            # on disk (Aider no_changes, or a fixer that failed
+                            # before any write — both always set files_touched).
+                            # An unchanged tree can't have invalidated the prior
+                            # review state, so forcing run_review here just
+                            # ping-pongs against the research gates. Let the
+                            # older reviewer/acceptance run keep driving.
+                            # Envelopes MISSING the key (legacy rows) still gate.
+                            continue
                         if (_env_f.get("source_role") == "acceptance"
                                 and _env_f.get("docs_only")):
                             _pending_acceptance_needed = _r
@@ -3732,10 +3749,18 @@ async def exec_tool(
                             active_project.get("file_manifest") or [],
                             active_project.get("language") or "",
                         )
+                    # Only genuinely uploaded projects get the uploaded-fix mode;
+                    # the bootstrap/inflight gates key on it. A greenfield
+                    # OpenHands build being repaired stays a build workflow.
+                    _is_uploaded_proj = (
+                        (active_project or {}).get("description") or ""
+                    ).startswith("Uploaded project:")
                     workflow_id = f"cw-{uuid.uuid4().hex[:12]}"
                     await db.create_coder_workflow(
                         workflow_id, conv_id, project_id=project_id,
-                        mode="fix_uploaded_project", state="fixing",
+                        mode=("fix_uploaded_project" if _is_uploaded_proj
+                              else "build_from_prompt"),
+                        state="fixing",
                         user_task=task, contract=contract, artifact_status="not_ready",
                     )
                 if workflow_id:
@@ -3792,24 +3817,34 @@ async def exec_tool(
                     f"({envelope.get('run_id', '')})",
                 )
                 _auto_review_note = ""
-                try:
-                    _arv = await exec_tool(
-                        http, events, "run_review",
-                        {"project_dir": envelope.get("project_dir", "") or project_dir},
-                        conv_id,
-                        custom_tool_map=custom_tool_map,
-                        connector_tool_name_map=connector_tool_name_map,
-                        conv_model=conv_model,
-                        kb_ids=kb_ids,
-                        artifact_message_id=artifact_message_id,
-                    )
+                if (envelope.get("source_role") == "acceptance"
+                        and envelope.get("docs_only")):
+                    # Same routing as run_fixer: docs-only acceptance fixes go
+                    # straight back to Acceptance instead of burning a full
+                    # build/test review cycle on a README/doc edit.
                     _auto_review_note = (
-                        "\n\n=== AUTOMATIC VERIFICATION — run_review already ran; "
-                        "do NOT call it again, act on this result ===\n" + _arv
+                        "\n\nREQUIRED NEXT TOOL CALL: run_acceptance_review "
+                        "(docs-only fix; build review may be skipped)."
                     )
-                except Exception as _are:
-                    _auto_review_note = (f"\n\n(automatic run_review failed: {_are} — "
-                                         f"call run_review manually)")
+                else:
+                    try:
+                        _arv = await exec_tool(
+                            http, events, "run_review",
+                            {"project_dir": envelope.get("project_dir", "") or project_dir},
+                            conv_id,
+                            custom_tool_map=custom_tool_map,
+                            connector_tool_name_map=connector_tool_name_map,
+                            conv_model=conv_model,
+                            kb_ids=kb_ids,
+                            artifact_message_id=artifact_message_id,
+                        )
+                        _auto_review_note = (
+                            "\n\n=== AUTOMATIC VERIFICATION — run_review already ran; "
+                            "do NOT call it again, act on this result ===\n" + _arv
+                        )
+                    except Exception as _are:
+                        _auto_review_note = (f"\n\n(automatic run_review failed: {_are} — "
+                                             f"call run_review manually)")
                 _auto_redeliver_note = await _maybe_auto_redeliver(
                     http, events, conv_id,
                     envelope.get("project_dir", "") or project_dir,
@@ -3829,7 +3864,12 @@ async def exec_tool(
                 )
             if status == "no_changes":
                 return await _fallback_to_fixer(f"Aider made no changes: {envelope.get('summary','')[:160]}")
-            if status in {"error", "failed"}:
+            # Fallback is for "Aider produced nothing" only. An error run that
+            # DID write files (non-zero exit, failing auto-test) already changed
+            # the tree — a second editor without a Reviewer pass in between
+            # would edit blind against the stale pre-Aider issue envelope, so
+            # that case falls through to the run_review routing below.
+            if status in {"error", "failed"} and not (envelope.get("files_touched") or []):
                 return await _fallback_to_fixer(f"Aider failed: {envelope.get('summary','')[:160]}")
             return (
                 f"AIDER FAILED ({status}): {envelope.get('summary','')}\n"
@@ -5013,11 +5053,19 @@ async def exec_tool(
                             # partial build (e.g. 4/9 files) sails through as
                             # "succeeded". The Architect plan is the authoritative
                             # file list, so treat it as the strict manifest here.
+                            # tests_required rides along: the plan lists test files
+                            # SEPARATELY from the file tree, and leaving them out
+                            # meant the Builder never wrote them — Acceptance then
+                            # burned its whole fix budget adding tests after the fact.
                             if not required_files:
-                                required_files = _manifest_required_code_files(_manifest)
+                                _planned_files = list(_manifest)
+                                _planned_files.extend(
+                                    _arch_env.get("tests_required") or [])
+                                required_files = _manifest_required_code_files(_planned_files)
                                 if required_files:
                                     print(f"[CODEGEN] Manifest → completeness gate: "
-                                          f"{len(required_files)} required code file(s)")
+                                          f"{len(required_files)} required code file(s) "
+                                          f"(incl. planned tests)")
                             if not architect_run_id:
                                 architect_run_id = _arch_run.get("id") or ""
                 except Exception as _ame:
@@ -5055,6 +5103,10 @@ async def exec_tool(
                 # other profiles ignore it.
                 "profile": _builder_profile,
                 "manifest_missing": _profile_continue_missing,
+                # Full Architect manifest — the worker nudges the agent (same
+                # conversation) until every planned file exists, so a text-only
+                # early finish no longer ends the build at 2/8 files.
+                "required_files": list(required_files or []),
                 # User-tunable reasoning_effort — drops think-token overhead
                 # significantly on slow local models when set to "low".
                 "reasoning_effort": getattr(config, "OPENHANDS_REASONING_EFFORT", "medium"),

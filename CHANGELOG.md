@@ -23,6 +23,11 @@
 - Aider is now the preferred repair editor for existing project roots, including uploaded projects and greenfield projects after Builder creates them; the marker-format Fixer remains the fallback when Aider is disabled, unhealthy, missing a project dir, or produces no usable patch.
 - Reviewer and acceptance repair caps now force `deep_research` at the base cap, retry Aider/Fixer with research context, and stop to ask the user after extended exhaustion instead of silently releasing manual `write_file`.
 - Delivered project archives now exclude Aider runtime metadata such as `.aider.chat.history.md` and `.aider.tags.cache.v4/` while keeping user-authored files like `.gitignore`.
+- The Builder now receives the full Architect manifest and nudges the coding agent inside the SAME OpenHands conversation until every planned file exists (bounded, stops on no-progress) — a text-only model reply no longer ends a build at 2/8 files, and the backend continue passes become a rare fallback.
+- `reasoning_effort` is now applied on the worker's streaming build path too; it previously fell back to the SDK default "high" there, making primary builds slow and flaky (empty responses, runaway generations) while continue passes ran fine at "medium".
+- OpenHands LLM calls now cap `num_predict` and use a longer per-call timeout so a runaway completion can't stall a build until the user cancels; temperature rides inside Ollama `options` so it actually reaches the sampler.
+- A fix run that explicitly changed nothing on disk (Aider `no_changes`, or a fixer that failed before writing) no longer forces a redundant `run_review`, removing the review/research gate ping-pong after no-op repairs.
+- The Architect's `tests_required` files now count toward the Builder's completeness gate alongside the file tree, so planned test files are created during the Build phase instead of Acceptance burning its whole fix budget adding them afterwards.
 
 ## Council of AI
 - Council setup has been refreshed with cleaner organization, presets, host settings, member cards, and analytics presentation.

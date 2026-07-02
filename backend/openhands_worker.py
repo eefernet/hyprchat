@@ -33,6 +33,12 @@ _ACTIVE_AIDER_RUNS: dict[str, dict] = {}
 _ACTIVE_AIDER_RUNS_LOCK = threading.Lock()
 AIDER_MAX_SECONDS = int(os.environ.get("AIDER_MAX_SECONDS", "420"))
 AIDER_REPEAT_LINE_LIMIT = int(os.environ.get("AIDER_REPEAT_LINE_LIMIT", "120"))
+# OpenHands LLM call bounds. num_predict caps a single completion so it always
+# terminates (an uncapped qwen3-coder response was observed at 14K+ tokens,
+# which can never finish inside any sane timeout); the timeout then only fires
+# on genuinely dead calls, not on long-but-healthy generations.
+OH_LLM_TIMEOUT_SECONDS = int(os.environ.get("OH_LLM_TIMEOUT_SECONDS", "420"))
+OH_NUM_PREDICT = int(os.environ.get("OH_NUM_PREDICT", "8192"))
 
 
 def _register_run(run_id: str, conversation, cancel_event: threading.Event) -> None:
@@ -193,6 +199,110 @@ def _agent_finished(status_str: str, progress_log: list[dict]) -> bool:
     return False
 
 
+# Bounded same-conversation "you are not done" nudges. Local coder models
+# routinely end a turn with plain text ("Now let me create the frontend
+# files:") and no tool call, which the SDK treats as the agent finishing —
+# leaving most planned files unwritten. send_message() on a FINISHED
+# conversation resets it to IDLE, so a nudge resumes the SAME warm
+# conversation instead of paying for a fresh worker pass.
+# Observed live: qwen3-coder narrates-then-stops after almost every action,
+# so a nudge typically yields ONE file in 2-10s off the warm prompt cache.
+# The budget is therefore generous, and a single text-only reply doesn't end
+# the loop — only OH_NUDGE_NO_PROGRESS_LIMIT consecutive no-progress nudges do.
+OH_COMPLETION_NUDGES = int(os.environ.get("OH_COMPLETION_NUDGES", "12"))
+OH_NUDGE_NO_PROGRESS_LIMIT = int(os.environ.get("OH_NUDGE_NO_PROGRESS_LIMIT", "2"))
+
+
+def _normalize_required_path(path: str) -> str:
+    """Mirror the backend's _normalize_manifest_path so both sides agree."""
+    path = str(path or "").replace("\\", "/").strip()
+    if not path:
+        return ""
+    path = re.sub(r"^/+", "", path)
+    if path.startswith("root/projects/"):
+        parts = path.split("/")
+        path = "/".join(parts[3:]) if len(parts) > 3 else ""
+    path = re.sub(r"/+", "/", path).strip("/")
+    if not path or path.endswith("/"):
+        return ""
+    return path
+
+
+def _missing_required_files(work_dir, required: list[str]) -> list[str]:
+    """Planned files that do not exist under work_dir yet."""
+    base = Path(work_dir)
+    missing = []
+    for raw in required or []:
+        rel = _normalize_required_path(raw)
+        if not rel:
+            continue
+        try:
+            if not (base / rel).is_file():
+                missing.append(rel)
+        except OSError:
+            missing.append(rel)
+    return missing
+
+
+def _run_completion_nudges(conversation, work_dir, required: list[str],
+                           cancel_event=None, on_nudge=None) -> tuple[int, list[str]]:
+    """Resume a finished conversation until every required file exists.
+
+    Returns (nudges_used, still_missing). A single no-progress nudge (the
+    model replied with narration text and no tool call — its signature
+    failure) gets ONE insistent retry naming a concrete file; only
+    OH_NUDGE_NO_PROGRESS_LIMIT consecutive no-progress nudges end the loop.
+    """
+    missing = _missing_required_files(work_dir, required)
+    nudges = 0
+    no_progress = 0
+    while missing and nudges < OH_COMPLETION_NUDGES:
+        if cancel_event is not None and cancel_event.is_set():
+            raise _RunCancelled()
+        nudges += 1
+        before = set(missing)
+        if on_nudge:
+            try:
+                on_nudge(nudges, missing)
+            except Exception:
+                pass
+        print(f"[OH-Worker] Completion nudge {nudges}/{OH_COMPLETION_NUDGES}: "
+              f"{len(missing)} required file(s) missing — resuming conversation")
+        listing = "\n".join(f"  - {p}" for p in missing[:30])
+        if no_progress:
+            msg = (
+                f"STOP narrating. Your previous reply was plain text with no tool "
+                f"call — that does nothing. Use the file_editor tool RIGHT NOW to "
+                f"create `{work_dir}/{missing[0]}` with its complete contents. "
+                f"Then create the rest, one tool call after another, until every "
+                f"file below exists:\n{listing}\n\n"
+                f"Only call `finish` when all of them exist."
+            )
+        else:
+            msg = (
+                f"You are NOT done. These planned files are still missing from "
+                f"`{work_dir}`:\n{listing}\n\n"
+                f"Create EVERY one of them now with their full contents, re-run the "
+                f"verification steps, and only then call `finish`. Do not respond "
+                f"with a plain text message — every response must be a tool call."
+            )
+        conversation.send_message(msg)
+        conversation.run()
+        missing = _missing_required_files(work_dir, required)
+        if set(missing) == before:
+            no_progress += 1
+            if no_progress >= OH_NUDGE_NO_PROGRESS_LIMIT:
+                print(f"[OH-Worker] Nudge {nudges}: {no_progress} consecutive "
+                      f"no-progress nudges on {len(missing)} missing file(s); "
+                      f"stopping nudge loop")
+                break
+            print(f"[OH-Worker] Nudge {nudges} made no progress "
+                  f"({len(missing)} still missing) — retrying with insistent nudge")
+        else:
+            no_progress = 0
+    return nudges, missing
+
+
 class RunRequest(BaseModel):
     task: str
     model: str = "qwen2.5:14b"
@@ -212,6 +322,10 @@ class RunRequest(BaseModel):
     # Only meaningful when profile == "continue": list of manifest files the
     # last builder run failed to write. The worker focuses on these.
     manifest_missing: list[str] = []
+    # Full Architect manifest (project-root-relative paths). When set, the
+    # worker nudges the agent (same conversation) until every file exists or
+    # the nudge budget runs out, and reports what is still missing.
+    required_files: list[str] = []
 
 
 class RunResponse(BaseModel):
@@ -225,6 +339,8 @@ class RunResponse(BaseModel):
     # False when the agent stopped without a proper `finish` (truncated /
     # hit the round cap). Lets the backend flag a one-file build incomplete.
     agent_finished: bool = True
+    # required_files entries still absent after the completion-nudge loop.
+    missing_required_files: list[str] = []
 
 
 class AiderRunRequest(BaseModel):
@@ -1093,11 +1209,19 @@ def run_task(req: RunRequest):
             api_key="ollama",
             base_url=ollama_base,
             temperature=0.3,
-            timeout=180,
+            timeout=OH_LLM_TIMEOUT_SECONDS,
             num_retries=2,
             drop_params=True,
             native_tool_calling=native_tc,
-            litellm_extra_body={"options": {"num_ctx": req.num_ctx}},
+            # temperature/num_predict must ride inside "options" — the
+            # ollama_chat litellm path drops the top-level temperature (the
+            # server-side sampler log shows the Modelfile default otherwise),
+            # and num_predict bounds each completion so it always terminates.
+            litellm_extra_body={"options": {
+                "num_ctx": req.num_ctx,
+                "num_predict": OH_NUM_PREDICT,
+                "temperature": 0.3,
+            }},
         )
         # SDK accepts `reasoning_effort` as a top-level kwarg; older builds may
         # not. Try with it; if it's rejected, retry without (SDK falls back to
@@ -1177,6 +1301,10 @@ def run_task(req: RunRequest):
         print(f"[OH-Worker] Starting run (run_id={req.run_id or '-'}, max_rounds={req.max_rounds}, num_ctx={req.num_ctx})...")
         conversation.run()
 
+        _nudges_used, _still_missing = _run_completion_nudges(
+            conversation, work_dir, req.required_files, cancel_event=cancel_event,
+        )
+
         status_str = str(conversation.state.execution_status)
         event_count = len(list(conversation.state.events))
         print(f"[OH-Worker] Run finished. Status: {status_str}, Events: {event_count}")
@@ -1234,9 +1362,12 @@ def run_task(req: RunRequest):
 
         summary = _extract_summary(conversation)
         duration = time.time() - start
-        agent_finished = _agent_finished(status_str, progress_log)
+        # A run only counts as finished when the agent reached `finish` AND no
+        # planned file is still missing after the nudge loop.
+        agent_finished = _agent_finished(status_str, progress_log) and not _still_missing
         print(f"[OH-Worker] Done in {duration:.1f}s — {len(files_created)} files, "
-              f"{len(progress_log)} steps, stuck={stuck}, finished={agent_finished}")
+              f"{len(progress_log)} steps, stuck={stuck}, finished={agent_finished}, "
+              f"nudges={_nudges_used}, still_missing={len(_still_missing)}")
 
         return RunResponse(
             status="stuck" if stuck and not files_created else "ok",
@@ -1247,6 +1378,7 @@ def run_task(req: RunRequest):
             steps=progress_log[-20:],
             project_id=project_name,
             agent_finished=agent_finished,
+            missing_required_files=_still_missing,
         )
 
     except _RunCancelled:
@@ -1335,12 +1467,15 @@ async def run_task_stream(req: RunRequest):
             # over Modelfile defaults and over whatever litellm forwards (or fails to forward).
             _ensure_loaded(ollama_base, req.model, req.num_ctx)
 
-            llm = _LLM(
+            _re = (req.reasoning_effort or "medium").strip().lower()
+            if _re not in ("low", "medium", "high"):
+                _re = "medium"
+            _llm_kwargs = dict(
                 model=f"ollama_chat/{req.model}",
                 api_key="ollama",
                 base_url=ollama_base,
                 temperature=0.3,
-                timeout=180,
+                timeout=OH_LLM_TIMEOUT_SECONDS,
                 num_retries=2,
                 drop_params=True,
                 native_tool_calling=native_tc,
@@ -1348,9 +1483,26 @@ async def run_task_stream(req: RunRequest):
                 # Ollama's options.num_ctx field. A bare {"num_ctx": ...} lands at
                 # the body's top level, which Ollama silently ignores → it falls
                 # back to the modelfile default (often 131K), blowing VRAM and
-                # tripping the 180s timeout.
-                litellm_extra_body={"options": {"num_ctx": req.num_ctx}},
+                # tripping the timeout. num_predict bounds each completion so a
+                # runaway response can't outlive the timeout, and temperature
+                # must ride in options too — the ollama_chat path drops the
+                # top-level kwarg.
+                litellm_extra_body={"options": {
+                    "num_ctx": req.num_ctx,
+                    "num_predict": OH_NUM_PREDICT,
+                    "temperature": 0.3,
+                }},
             )
+            # Same reasoning_effort handling as the blocking /run path. Without
+            # this the SDK default is "high" — heavy think-token overhead that
+            # made the primary streamed build slow and flaky while the blocking
+            # continue passes (which did set it) ran fine.
+            try:
+                llm = _LLM(reasoning_effort=_re, **_llm_kwargs)
+                print(f"[OH-Worker] reasoning_effort={_re} (stream)")
+            except TypeError:
+                print(f"[OH-Worker] SDK rejected reasoning_effort kwarg — using default (stream)")
+                llm = _LLM(**_llm_kwargs)
 
             tools = [
                 _Tool(name="terminal"),
@@ -1414,6 +1566,18 @@ async def run_task_stream(req: RunRequest):
 
             print(f"[OH-Worker] Starting streamed run (run_id={req.run_id or '-'}, max_rounds={req.max_rounds}, num_ctx={req.num_ctx})...")
             conversation.run()
+
+            def _nudge_sse(n, miss):
+                _send_sse({
+                    "type": "step", "action": "nudge",
+                    "detail": (f"Completion nudge {n}/{OH_COMPLETION_NUDGES}: "
+                               f"{len(miss)} planned file(s) missing — continuing build"),
+                    "step": step_counter[0],
+                })
+            _nudges_used, _still_missing = _run_completion_nudges(
+                conversation, work_dir, req.required_files,
+                cancel_event=cancel_event, on_nudge=_nudge_sse,
+            )
             _stream_status_str = str(conversation.state.execution_status)
 
             # Post-run processing
@@ -1455,9 +1619,12 @@ async def run_task_stream(req: RunRequest):
 
             summary = _extract_summary(conversation)
             duration = time.time() - start
-            agent_finished = _agent_finished(_stream_status_str, progress_log)
+            # Finished = reached `finish` AND no planned file missing post-nudges.
+            agent_finished = (_agent_finished(_stream_status_str, progress_log)
+                              and not _still_missing)
             print(f"[OH-Worker] Streamed run done in {duration:.1f}s — {len(files_created)} files, "
-                  f"stuck={stuck}, finished={agent_finished}")
+                  f"stuck={stuck}, finished={agent_finished}, "
+                  f"nudges={_nudges_used}, still_missing={len(_still_missing)}")
 
             result_holder[0] = {
                 "type": "done",
@@ -1469,6 +1636,7 @@ async def run_task_stream(req: RunRequest):
                 "steps": progress_log[-20:],
                 "project_id": project_name,
                 "agent_finished": agent_finished,
+                "missing_required_files": _still_missing,
             }
 
         except _RunCancelled:
@@ -1646,6 +1814,8 @@ You MUST complete every step before calling `finish`. `finish` is a gate, not a 
 {git_step}
 
 Only call `finish` after step 2 exits 0 with every expected file present. Calling `finish` early — with compile errors, missing files, or unresolved references — counts as task failure.
+
+NEVER end your turn with a plain text message. Every response must be a tool call; the ONLY way to stop is the `finish` tool. A text-only reply (e.g. "Now let me create the frontend files:") aborts the build.
 """
 
     return prompt

@@ -947,6 +947,90 @@ def test_exec_tool_calls_extracted_gate_with_partial_v2_context(monkeypatch):
     assert events.items[-1][2]["status"] == "⛔ partial context evaluated"
 
 
+def test_partial_snapshot_discarded_so_gates_refetch_runs(monkeypatch):
+    """A partial gate snapshot must never feed the gates as an (empty)
+    authoritative runs list. When the v2 lookup fails closed during
+    build_gate_context but a later _check_v2() re-check succeeds, the
+    phantom-fixer gate must see the real actionable reviewer run from the DB
+    instead of blocking run_fixer against runs=[]."""
+    import tools
+    from agents import fixer as fixer_mod
+
+    class Events:
+        async def emit(self, *a, **k):
+            pass
+
+    conv_calls = {"n": 0}
+    v2_calls = {"n": 0}
+    reviewer_run = {
+        "id": "run-rev-1",
+        "role": "reviewer",
+        "status": "succeeded",
+        "started_at": "2026-01-01 12:05:00",
+        "result_envelope": {
+            "status": "issues",
+            "project_dir": "/root/projects/demo",
+            "issues": [{"severity": "bug", "file": "app.py",
+                        "summary": "boom", "suggested_fix_scope": ["app.py"]}],
+        },
+    }
+
+    async def get_conversation(conv_id):
+        conv_calls["n"] += 1
+        if conv_calls["n"] == 1:
+            raise RuntimeError("transient conversation read failure")
+        return {
+            "id": conv_id,
+            "model_config_id": "mc-v2",
+            "messages": [{"role": "user", "created_at": "2026-01-01 12:00:00"}],
+        }
+
+    async def get_runs_by_conversation(_conv_id, limit=50):
+        return [reviewer_run]
+
+    async def get_run(run_id):
+        return reviewer_run if run_id == "run-rev-1" else None
+
+    async def get_latest_coder_workflow(_conv_id, project_id=None):
+        return None
+
+    async def no_project(_conv_id):
+        return None
+
+    async def is_v2(_conv_id, conv_row=None):
+        v2_calls["n"] += 1
+        # Build-time fallback fails closed; the later re-check succeeds.
+        return v2_calls["n"] > 1
+
+    async def unhealthy(_http, force=False):
+        return False
+
+    async def fake_run_fixer(_http, _events, _conv_id, **kwargs):
+        return {"status": "skipped", "summary": "stub"}
+
+    monkeypatch.setattr(tools.db, "get_conversation", get_conversation)
+    monkeypatch.setattr(tools.db, "get_runs_by_conversation", get_runs_by_conversation)
+    monkeypatch.setattr(tools.db, "get_run", get_run)
+    monkeypatch.setattr(tools.db, "get_latest_coder_workflow", get_latest_coder_workflow)
+    monkeypatch.setattr(tools.db, "get_coding_project_by_conv", no_project)
+    monkeypatch.setattr(tools, "_is_v2_persona", is_v2)
+    monkeypatch.setattr(tools, "_aider_worker_healthy", unhealthy)
+    monkeypatch.setattr(fixer_mod, "run_fixer", fake_run_fixer)
+
+    result = _run(tools.exec_tool(
+        http=object(),
+        events=Events(),
+        name="run_fixer",
+        args={"reviewer_run_id": "run-rev-1"},
+        conv_id="conv-gate-partial",
+    ))
+
+    # Pre-fix, the phantom-fixer gate evaluated the stale empty snapshot and
+    # returned "BLOCKED — run_fixer requires a recent reviewer ...".
+    assert "requires a recent reviewer or acceptance envelope" not in result
+    assert result == "FIXER SKIPPED: stub."
+
+
 def test_acceptance_base_cap_forces_research_before_delivery(monkeypatch):
     import tools
 
@@ -1464,6 +1548,195 @@ def test_aider_no_fallback_after_partial_stream(tmp_path, monkeypatch):
     assert "not restarting" in env["summary"]
     assert not any(u.endswith("/aider/run") for u in fake.posts)
     assert any("/aider/cancel/" in u for u in fake.posts)
+
+
+def test_aider_error_with_edits_routes_to_review_not_fixer(tmp_path, monkeypatch):
+    """An Aider run that FAILED but already wrote files must not fall back to
+    the marker Fixer (second editor, stale envelope, no review in between) —
+    it must route to run_review instead."""
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import tools
+    import database as db
+    from agents import fixer as fixer_mod
+    _prep_aider_db(tmp_path, db)
+
+    async def healthy(_http, force=False):
+        return True
+
+    async def fake_aider(_http, _events, _conv_id, **kwargs):
+        return {
+            "status": "error",
+            "summary": "tests failing after edits",
+            "files_touched": ["main.py"],
+            "project_dir": "/root/projects/proj-a",
+            "stderr_tail": "AssertionError",
+            "source_role": "reviewer",
+            "run_id": "run-aider-x",
+        }
+
+    fixer_calls = {"n": 0}
+
+    async def spy_fixer(*a, **k):
+        fixer_calls["n"] += 1
+        return {"status": "skipped", "summary": "stub"}
+
+    monkeypatch.setattr(tools, "_aider_worker_healthy", healthy)
+    monkeypatch.setattr(aider_fixer, "run_aider_fix", fake_aider)
+    monkeypatch.setattr(fixer_mod, "run_fixer", spy_fixer)
+
+    result = _run(tools.exec_tool(
+        http=_AiderFakeHTTP({}),
+        events=_NullEvents(),
+        name="run_aider_fix",
+        args={"task": "fix it", "project_dir": "/root/projects/proj-a"},
+        conv_id="conv-aider",
+    ))
+
+    assert result.startswith("AIDER FAILED (error)")
+    assert "run_review" in result
+    assert fixer_calls["n"] == 0
+
+
+def test_aider_error_without_edits_still_falls_back_to_fixer(tmp_path, monkeypatch):
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import tools
+    import database as db
+    from agents import fixer as fixer_mod
+    _prep_aider_db(tmp_path, db)
+    # An actionable reviewer run so the fallback can resolve a real envelope.
+    _run(db.create_run("run-rev-a", "conv-aider", role="reviewer", status="running"))
+    _run(db.update_run("run-rev-a", status="succeeded", ended=True, result_envelope={
+        "status": "issues",
+        "project_dir": "/root/projects/proj-a",
+        "issues": [{"severity": "bug", "file": "main.py", "summary": "boom",
+                    "suggested_fix_scope": ["main.py"]}],
+    }))
+
+    async def healthy(_http, force=False):
+        return True
+
+    async def fake_aider(_http, _events, _conv_id, **kwargs):
+        return {
+            "status": "error",
+            "summary": "aider crashed before editing",
+            "files_touched": [],
+            "project_dir": "/root/projects/proj-a",
+            "stderr_tail": "",
+        }
+
+    fixer_calls = {"n": 0}
+
+    async def spy_fixer(*a, **k):
+        fixer_calls["n"] += 1
+        return {"status": "skipped", "summary": "stub"}
+
+    monkeypatch.setattr(tools, "_aider_worker_healthy", healthy)
+    monkeypatch.setattr(aider_fixer, "run_aider_fix", fake_aider)
+    monkeypatch.setattr(fixer_mod, "run_fixer", spy_fixer)
+
+    result = _run(tools.exec_tool(
+        http=_AiderFakeHTTP({}),
+        events=_NullEvents(),
+        name="run_aider_fix",
+        args={"task": "fix it", "project_dir": "/root/projects/proj-a"},
+        conv_id="conv-aider",
+    ))
+
+    assert fixer_calls["n"] == 1
+    assert result == "FIXER SKIPPED: stub."
+
+
+def test_aider_workflow_mode_matches_project_kind(tmp_path, monkeypatch):
+    """run_aider_fix must not label a greenfield repair workflow as
+    fix_uploaded_project — the uploaded-project gates key on that mode."""
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import tools
+    import database as db
+
+    db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
+    _run(db.init_db())
+    _run(db.create_conversation("conv-green", "Greenfield"))
+    _run(db.upsert_coding_project(
+        "proj-g", "Snake", conversation_id="conv-green",
+        description="Snake game built from prompt", language="python",
+    ))
+    _run(db.create_conversation("conv-upl", "Uploaded"))
+    _run(db.upsert_coding_project(
+        "proj-u", "Legacy", conversation_id="conv-upl",
+        description="Uploaded project: legacy.zip", language="python",
+    ))
+
+    async def healthy(_http, force=False):
+        return True
+
+    async def fake_aider(_http, _events, _conv_id, **kwargs):
+        return {"status": "error", "summary": "boom",
+                "files_touched": ["a.py"],
+                "project_dir": kwargs.get("project_dir", ""), "stderr_tail": ""}
+
+    monkeypatch.setattr(tools, "_aider_worker_healthy", healthy)
+    monkeypatch.setattr(aider_fixer, "run_aider_fix", fake_aider)
+
+    _run(tools.exec_tool(
+        http=_AiderFakeHTTP({}), events=_NullEvents(),
+        name="run_aider_fix",
+        args={"task": "fix the crash", "project_dir": "/root/projects/proj-g"},
+        conv_id="conv-green",
+    ))
+    _run(tools.exec_tool(
+        http=_AiderFakeHTTP({}), events=_NullEvents(),
+        name="run_aider_fix",
+        args={"task": "fix the crash", "project_dir": "/root/projects/proj-u"},
+        conv_id="conv-upl",
+    ))
+
+    green_wf = _run(db.get_latest_coder_workflow("conv-green"))
+    upl_wf = _run(db.get_latest_coder_workflow("conv-upl"))
+    assert green_wf is not None and green_wf["mode"] == "build_from_prompt"
+    assert upl_wf is not None and upl_wf["mode"] == "fix_uploaded_project"
+
+
+def test_aider_docs_only_acceptance_fix_skips_auto_review(tmp_path, monkeypatch):
+    """Docs-only acceptance fixes go straight back to Acceptance — the Aider
+    applied path must not burn a full build/test run_review cycle (same
+    routing run_fixer already uses)."""
+    if not _HAS_AIOSQLITE:
+        pytest.skip("aiosqlite not installed")
+    import tools
+    import database as db
+    _prep_aider_db(tmp_path, db)
+
+    async def healthy(_http, force=False):
+        return True
+
+    async def fake_aider(_http, _events, _conv_id, **kwargs):
+        return {
+            "status": "applied",
+            "summary": "reworded README",
+            "files_touched": ["README.md"],
+            "project_dir": "/root/projects/proj-a",
+            "source_role": "acceptance",
+            "docs_only": True,
+            "run_id": "run-aider-docs",
+        }
+
+    monkeypatch.setattr(tools, "_aider_worker_healthy", healthy)
+    monkeypatch.setattr(aider_fixer, "run_aider_fix", fake_aider)
+
+    result = _run(tools.exec_tool(
+        http=_AiderFakeHTTP({}),
+        events=_NullEvents(),
+        name="run_aider_fix",
+        args={"task": "fix the README wording", "project_dir": "/root/projects/proj-a"},
+        conv_id="conv-aider",
+    ))
+
+    assert result.startswith("AIDER APPLIED EDITS")
+    assert "run_acceptance_review" in result
+    assert "AUTOMATIC VERIFICATION" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -2159,3 +2432,210 @@ def test_generate_code_is_builder_completion_tool_for_partial_manifest():
     assert tools._builder_completion_allowed("generate_code", {}, stuck) is True
     assert tools._builder_completion_allowed("run_review", {}, partial) is False
     assert tools._builder_completion_allowed("generate_code", {}, complete) is False
+
+
+def test_openhands_worker_missing_required_files_normalizes_paths(tmp_path, monkeypatch):
+    """Manifest paths arrive in mixed shapes (./x, /root/projects/p/x, x) — the
+    worker's missing check must resolve them all against the workspace root."""
+    worker = _import_openhands_worker_for_prompt_tests(monkeypatch)
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "backend" / "main.py").write_text("print('hi')\n")
+    (tmp_path / "config.py").write_text("X = 1\n")
+
+    missing = worker._missing_required_files(tmp_path, [
+        "./backend/main.py",
+        "/root/projects/demo/config.py",
+        "frontend/app.js",
+        "",
+    ])
+
+    assert missing == ["frontend/app.js"]
+    sys.modules.pop("openhands_worker", None)
+
+
+def test_openhands_worker_completion_nudges_fill_missing_files(tmp_path, monkeypatch):
+    """A text-only early finish leaves planned files missing; the nudge loop
+    resumes the SAME conversation until the manifest is complete."""
+    worker = _import_openhands_worker_for_prompt_tests(monkeypatch)
+    (tmp_path / "main.py").write_text("print('hi')\n")
+
+    class DummyConversation:
+        def __init__(self):
+            self.messages = []
+
+        def send_message(self, msg):
+            self.messages.append(msg)
+
+        def run(self):
+            # Each resumed run writes one more planned file.
+            for rel in ("config.py", "entities/ball.py"):
+                target = tmp_path / rel
+                if not target.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("x = 1\n")
+                    return
+
+    conv = DummyConversation()
+    nudges, missing = worker._run_completion_nudges(
+        conv, tmp_path, ["main.py", "config.py", "entities/ball.py"],
+    )
+
+    assert nudges == 2
+    assert missing == []
+    # The nudge message names the missing files and forbids text-only replies.
+    assert "config.py" in conv.messages[0]
+    assert "finish" in conv.messages[0]
+    sys.modules.pop("openhands_worker", None)
+
+
+def test_openhands_worker_completion_nudges_stop_on_no_progress(tmp_path, monkeypatch):
+    """A wedged model that ignores nudges must not burn the whole budget: one
+    text-only reply earns an insistent retry naming a concrete file, then two
+    consecutive no-progress nudges end the loop."""
+    worker = _import_openhands_worker_for_prompt_tests(monkeypatch)
+
+    class StubbornConversation:
+        def __init__(self):
+            self.runs = 0
+            self.messages = []
+
+        def send_message(self, msg):
+            self.messages.append(msg)
+
+        def run(self):
+            self.runs += 1
+
+    conv = StubbornConversation()
+    nudges, missing = worker._run_completion_nudges(
+        conv, tmp_path, ["never_written.py"],
+    )
+
+    assert nudges == 2  # stopped after two consecutive no-progress passes
+    assert conv.runs == 2
+    assert missing == ["never_written.py"]
+    # The retry escalates: names a concrete file and calls out the text-only reply.
+    assert "STOP narrating" in conv.messages[1]
+    assert "never_written.py" in conv.messages[1]
+    sys.modules.pop("openhands_worker", None)
+
+
+def _no_change_gate_env(monkeypatch, aider_envelope):
+    """Shared setup: newest run is a fix attempt, older run is a reviewer with
+    issues. Returns the Events collector; the caller execs read_file."""
+    import tools
+
+    aider_run = {
+        "id": "run-aider-nc",
+        "role": "aider.fix",
+        "status": "failed",
+        "started_at": "2026-01-01 12:10:00",
+        "result_envelope": aider_envelope,
+    }
+    reviewer_run = {
+        "id": "run-rev-nc",
+        "role": "reviewer",
+        "status": "succeeded",
+        "started_at": "2026-01-01 12:05:00",
+        "result_envelope": {
+            "status": "issues",
+            "project_dir": "/root/projects/demo",
+            "issues": [{"severity": "bug", "file": "app.py",
+                        "summary": "boom", "suggested_fix_scope": ["app.py"]}],
+        },
+    }
+    runs = [aider_run, reviewer_run]
+
+    async def get_conversation(conv_id):
+        return {
+            "id": conv_id,
+            "model_config_id": "mc-v2",
+            "messages": [{"role": "user", "created_at": "2026-01-01 12:00:00"}],
+        }
+
+    async def get_runs_by_conversation(_conv_id, limit=50):
+        return runs
+
+    async def get_run(run_id):
+        for r in runs:
+            if r["id"] == run_id:
+                return r
+        return None
+
+    async def get_latest_coder_workflow(_conv_id, project_id=None):
+        return None
+
+    async def no_project(_conv_id):
+        return None
+
+    async def is_v2(_conv_id, conv_row=None):
+        return True
+
+    async def unhealthy(_http, force=False):
+        return False
+
+    monkeypatch.setattr(tools.db, "get_conversation", get_conversation)
+    monkeypatch.setattr(tools.db, "get_runs_by_conversation", get_runs_by_conversation)
+    monkeypatch.setattr(tools.db, "get_run", get_run)
+    monkeypatch.setattr(tools.db, "get_latest_coder_workflow", get_latest_coder_workflow)
+    monkeypatch.setattr(tools.db, "get_coding_project_by_conv", no_project)
+    monkeypatch.setattr(tools, "_is_v2_persona", is_v2)
+    monkeypatch.setattr(tools, "_aider_worker_healthy", unhealthy)
+
+    class Events:
+        def __init__(self):
+            self.items = []
+
+        async def emit(self, conv_id, event_type, data):
+            self.items.append((conv_id, event_type, data))
+
+    return Events()
+
+
+def test_no_change_fix_run_does_not_force_review(monkeypatch):
+    """An Aider run that changed NOTHING on disk (status no_changes, empty
+    files_touched) must not gate on run_review — the prior reviewer's issues
+    keep driving the state, so the model is routed back to fixing instead of
+    ping-ponging between 'call run_review first' and the research gates."""
+    import tools
+
+    events = _no_change_gate_env(monkeypatch, {
+        "status": "no_changes",
+        "summary": "Aider completed without changes.",
+        "project_dir": "/root/projects/demo",
+        "files_touched": [],
+    })
+
+    result = _run(tools.exec_tool(
+        http=object(),
+        events=events,
+        name="read_file",
+        args={"path": "/root/projects/demo/app.py"},
+        conv_id="conv-no-change-gate",
+    ))
+
+    assert "run_review has not been called yet" not in result
+    assert result.startswith("BLOCKED")
+    assert "run_fixer" in result  # routed to the fix loop, not re-review
+
+
+def test_fix_run_with_files_touched_still_forces_review(monkeypatch):
+    """A failed fix run that DID write files changed the tree — review stays
+    mandatory before anything else."""
+    import tools
+
+    events = _no_change_gate_env(monkeypatch, {
+        "status": "error",
+        "summary": "Aider exited non-zero after edits.",
+        "project_dir": "/root/projects/demo",
+        "files_touched": ["app.py"],
+    })
+
+    result = _run(tools.exec_tool(
+        http=object(),
+        events=events,
+        name="read_file",
+        args={"path": "/root/projects/demo/app.py"},
+        conv_id="conv-touched-gate",
+    ))
+
+    assert "run_review has not been called yet" in result
