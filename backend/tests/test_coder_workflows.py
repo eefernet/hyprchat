@@ -49,10 +49,13 @@ def test_python_adapter_catches_cli_package_contract():
 
     assert contract["language"] == "python"
     assert contract["build_system"] == "pyproject.toml"
-    assert "/root/venv/bin/python3 -m pip install -e ." in contract["build_cmd"]
-    assert contract["test_cmd"] == "/root/venv/bin/python3 -m pytest -q"
-    assert contract["aider_test_cmd"] == "/root/venv/bin/python3 -m pytest -q"
-    assert "/root/venv/bin/python3 -m taskforge --help" in contract["smoke_cmds"]
+    # Per-project venv: build bootstraps ./.venv, all phases run through it.
+    assert contract["build_cmd"].startswith(language_adapters.PY_VENV_GUARD)
+    assert "./.venv/bin/python3 -m pip install -e ." in contract["build_cmd"]
+    assert contract["test_cmd"].endswith("./.venv/bin/python3 -m pytest -q")
+    assert contract["test_cmd"].startswith(language_adapters.PY_VENV_GUARD)
+    assert contract["aider_test_cmd"] == contract["test_cmd"]
+    assert "./.venv/bin/python3 -m taskforge --help" in contract["smoke_cmds"]
     assert contract["safe_lint"] is True
     assert "__main__.py" in " ".join(contract["package_rules"])
     iso = contract["isolated_verification"]
@@ -2821,3 +2824,63 @@ def test_aider_scope_mines_non_python_mentions():
     assert "Program.cs" in files
     assert "styles.css" in files
     assert "app.toml" in files
+
+
+# ─── Hermetic worker environment ────────────────────────────────────────────
+
+def test_worker_strips_hermetic_env_and_stays_in_sync(monkeypatch):
+    """The worker pops host-level package-manager config vars at import so
+    OpenHands/Aider subprocesses build the project, not the host's config —
+    and its mirrored denylist must not drift from language_adapters."""
+    import os
+    monkeypatch.setenv("PIP_CONSTRAINT", "/root/pip-constraints.txt")
+    worker = _import_openhands_worker_for_prompt_tests(monkeypatch)
+    try:
+        assert "PIP_CONSTRAINT" not in os.environ
+        assert worker._HERMETIC_UNSET_VARS == language_adapters.HERMETIC_UNSET_VARS
+    finally:
+        sys.modules.pop("openhands_worker", None)
+
+
+def test_worker_python_prefers_project_venv(tmp_path, monkeypatch):
+    worker = _import_openhands_worker_for_prompt_tests(monkeypatch)
+    try:
+        # No project venv → falls back to shared/system python.
+        assert worker._worker_python(tmp_path) != "./.venv/bin/python3"
+        venv_bin = tmp_path / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "python3").touch()
+        # Project venv present → relative interpreter (cwd is project root).
+        assert worker._worker_python(tmp_path) == "./.venv/bin/python3"
+        assert worker._normalize_worker_command(
+            "python -m pytest -q", tmp_path
+        ) == "./.venv/bin/python3 -m pytest -q"
+    finally:
+        sys.modules.pop("openhands_worker", None)
+
+
+def test_isolated_commands_pass_codebox_denylist():
+    """codebox-api /command substring-blocks "rm -rf /" — a bare
+    `rm -rf /tmp/...` in the isolated setup 400-blocked every isolated
+    verification run. Orchestrator-generated absolute-path removals must use
+    the `rm -rf -- /path` form."""
+    denylist = ["rm -rf /", "rm -rf /*", "mkfs", "dd if=/dev/zero"]
+    cases = [
+        (["pyproject.toml", "pkg/__init__.py"], "python"),
+        (["requirements.txt", "main.py"], "python"),
+        (["package.json", "src/index.js"], "javascript"),
+        (["Cargo.toml", "src/main.rs"], "rust"),
+        (["go.mod", "main.go"], "go"),
+        (["pom.xml", "src/main/java/App.java"], "java"),
+    ]
+    for manifest, language in cases:
+        contract = language_adapters.detect_contract(manifest, language)
+        iso = contract["isolated_verification"]
+        cmds = ([iso.get("setup_cmd", "")] + list(iso.get("verify_cmds") or [])
+                + list(iso.get("runtime_smoke_cmds") or []))
+        for raw in cmds:
+            cmd = (raw or "").replace("{tmp}", "/tmp/daedalus-review-run-x")
+            for bad in denylist:
+                assert bad not in cmd.lower(), (
+                    f"{language}: denylisted {bad!r} in isolated cmd: {cmd[:140]}"
+                )

@@ -215,9 +215,34 @@ WF_EVENT_TRANSITIONS = {
     "FIX_APPLIED":   ("reviewing", "not_ready"),
     "REVIEW_CLEAN":  ("accepting", "not_ready"),
     "REVIEW_ISSUES": ("fixing",    "not_ready"),
+    # Sandbox environment fault: nothing in the project to fix — the workflow
+    # parks as blocked (non-polling terminal for WorkflowCard) until the user
+    # remediates the Codebox and a new review runs.
+    "REVIEW_ENV_FAULT": ("blocked", "not_ready"),
     "ACCEPT_OK":     ("accepted",  "accepted"),
     "ACCEPT_ISSUES": ("fixing",    "not_ready"),
 }
+
+
+def is_environment_fault(envelope: dict | None) -> bool:
+    """Reviewer classified the failure as a sandbox environment fault (missing
+    absolute path outside the project that no project file references).
+    Nothing in the project can be edited to fix it — such envelopes must never
+    route to Aider/Fixer, count toward fix budgets, or force deep_research."""
+    return (envelope or {}).get("deterministic_issue") == "environment_fault"
+
+
+def environment_fault_notice(envelope: dict | None) -> str:
+    env = envelope or {}
+    detail = (env.get("summary") or "").strip()
+    return (
+        "⛔ SANDBOX ENVIRONMENT FAULT — not a project code issue.\n\n"
+        f"{detail}\n\n"
+        "Do NOT call run_aider_fix, run_fixer, or deep_research for this — "
+        "there is nothing in the project to fix. Report the problem to the "
+        "user so they can remediate the Codebox environment, then call "
+        "run_review again once it is fixed."
+    )
 
 
 async def apply_workflow_event(conv_id: str, event: str, *,
@@ -432,6 +457,8 @@ _prior_acceptance_issues_context = prior_acceptance_issues_context
 _fix_budget_note = fix_budget_note
 _WF_EVENT_TRANSITIONS = WF_EVENT_TRANSITIONS
 _apply_workflow_event = apply_workflow_event
+_is_environment_fault = is_environment_fault
+_environment_fault_notice = environment_fault_notice
 _RECENT_RESEARCH = RECENT_RESEARCH
 _RECENT_RESEARCH_MAX = RECENT_RESEARCH_MAX
 _RESEARCH_FRESH_SECONDS = RESEARCH_FRESH_SECONDS

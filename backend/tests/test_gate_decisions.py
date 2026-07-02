@@ -311,3 +311,42 @@ def test_reconcile_workflow_state_ignores_terminal_workflows(capsys):
     _run(gate_decisions.reconcile_workflow_state(ctx))
 
     assert capsys.readouterr().out == ""
+
+
+# ─── Environment-fault envelope routing ─────────────────────────────────────
+
+from tooling import workflow_gate  # noqa: E402
+
+
+def _env_fault_envelope():
+    return {
+        "status": "error",
+        "deterministic_issue": "environment_fault",
+        "summary": ("Sandbox environment fault: the build phase failed because "
+                    "`/root/pip-constraints.txt` does not exist on the Codebox "
+                    "and no project file references it."),
+        "issues": [{"severity": "environment", "file": "",
+                    "suggested_fix_scope": []}],
+    }
+
+
+def test_is_environment_fault_matches_only_the_marker():
+    assert workflow_gate.is_environment_fault(_env_fault_envelope())
+    assert not workflow_gate.is_environment_fault({"status": "error"})
+    assert not workflow_gate.is_environment_fault(
+        {"status": "issues", "deterministic_issue": "dependency_install_failure"})
+    assert not workflow_gate.is_environment_fault(None)
+
+
+def test_environment_fault_notice_reports_and_forbids_fix_tools():
+    notice = workflow_gate.environment_fault_notice(_env_fault_envelope())
+    assert "SANDBOX ENVIRONMENT FAULT" in notice
+    assert "/root/pip-constraints.txt" in notice
+    assert "run_aider_fix" in notice and "deep_research" in notice
+    assert "run_review" in notice  # the recovery path stays explicit
+
+
+def test_env_fault_workflow_event_parks_blocked():
+    state, artifact = workflow_gate.WF_EVENT_TRANSITIONS["REVIEW_ENV_FAULT"]
+    assert state == "blocked"
+    assert artifact == "not_ready"

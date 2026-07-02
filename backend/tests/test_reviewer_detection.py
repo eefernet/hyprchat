@@ -373,7 +373,7 @@ class _ConsoleScriptSmokeHTTP(_SmokeHTTP):
                 "[project]\nname = \"snip\"\n\n"
                 "[project.scripts]\nsnip = \"snip.cli:main\"\n"
             ), "stderr": ""})
-        if "/root/venv/bin/snip --help" in command:
+        if "./.venv/bin/snip --help" in command:
             return _FakeResponse({"exit_code": self.smoke_exit,
                                   "stdout": self.smoke_stdout, "stderr": ""})
         return await super().post(url, json=json, timeout=timeout)
@@ -388,7 +388,7 @@ def test_console_script_smoke_runs_first_and_catches_runtime_state():
     ))
 
     assert envelope["status"] == "clean"
-    assert envelope["smoke_cmds"][0] == "/root/venv/bin/snip --help"
+    assert envelope["smoke_cmds"][0] == "./.venv/bin/snip --help"
     assert envelope["smoke_new_files"] == ["snip.json"]
 
 
@@ -452,3 +452,179 @@ def test_single_top_level_marker_unchanged_by_nested_scan():
     assert result["marker"] == "pyproject.toml"
     assert result["language"] == "python"
     assert result["profile"] == "marker:pyproject.toml"
+
+
+# ─── Environment-fault classification ──────────────────────────────────────
+# A build failure referencing a missing absolute path OUTSIDE the project that
+# no project file mentions is a sandbox environment fault (the
+# /root/pip-constraints.txt incident) — it must classify as status="error"
+# with deterministic_issue="environment_fault" and never reach the fix loop.
+
+_PIP_CONSTRAINT_FAILURE = (
+    "ERROR: Could not open requirements file: [Errno 2] "
+    "No such file or directory: '/root/pip-constraints.txt'"
+)
+
+
+class _EnvFaultHTTP:
+    """Sandbox stub for the classifier's confirmation calls."""
+
+    def __init__(self, *, missing=True, referenced=False, env_lines=None,
+                 transport_fail=False):
+        self.missing = missing
+        self.referenced = referenced
+        self.env_lines = env_lines or []
+        self.transport_fail = transport_fail
+        self.posts = []
+
+    async def post(self, url, json=None, timeout=None):
+        command = (json or {}).get("command", "")
+        self.posts.append(command)
+        if self.transport_fail:
+            raise RuntimeError("codebox unreachable")
+        if "test -e" in command:
+            return _FakeResponse({
+                "exit_code": 0,
+                "stdout": "__NO__" if self.missing else "__YES__",
+                "stderr": "",
+            })
+        if "grep -rlF" in command:
+            return _FakeResponse({
+                "exit_code": 0 if self.referenced else 1,
+                "stdout": "./tests/test_x.py" if self.referenced else "",
+                "stderr": "",
+            })
+        if "((env)" in command:
+            return _FakeResponse({
+                "exit_code": 0,
+                "stdout": "\n".join(self.env_lines),
+                "stderr": "",
+            })
+        return _FakeResponse({"exit_code": 0, "stdout": "", "stderr": ""})
+
+
+def test_candidate_env_fault_paths_filters_project_and_scratch():
+    text = "\n".join([
+        _PIP_CONSTRAINT_FAILURE,
+        "FileNotFoundError: No such file or directory: "
+        "'/root/projects/neon-pong-game/missing.py'",
+        "No such file or directory: '/tmp/daedalus-review-run-1/work/x'",
+        "some ordinary line mentioning /etc/hosts without an error phrase",
+    ])
+    paths = reviewer._candidate_env_fault_paths(text, "/root/projects/neon-pong-game")
+    assert paths == ["/root/pip-constraints.txt"]
+
+
+def test_environment_fault_classified_with_env_culprit():
+    http = _EnvFaultHTTP(env_lines=[
+        "PATH=/usr/bin",
+        "PIP_CONSTRAINT=/root/pip-constraints.txt",
+    ])
+    parsed = _run(reviewer._environment_fault_issue_from_failure(
+        http, _PIP_CONSTRAINT_FAILURE, "/root/projects/neon-pong-game", "build",
+    ))
+    assert parsed is not None
+    assert parsed["status"] == "error"
+    assert parsed["deterministic_issue"] == "environment_fault"
+    assert parsed["environment_fault_path"] == "/root/pip-constraints.txt"
+    assert parsed["environment_fault_env_vars"] == ["PIP_CONSTRAINT"]
+    issue = parsed["issues"][0]
+    assert issue["severity"] == "environment"
+    assert issue["suggested_fix_scope"] == []
+    assert "NOT a project code issue" in issue["summary"]
+
+
+def test_environment_fault_skipped_when_path_exists():
+    http = _EnvFaultHTTP(missing=False)
+    parsed = _run(reviewer._environment_fault_issue_from_failure(
+        http, _PIP_CONSTRAINT_FAILURE, "/root/projects/neon-pong-game", "build",
+    ))
+    assert parsed is None
+
+
+def test_environment_fault_skipped_when_project_references_path():
+    # A stale-path/state issue: the project itself mentions the missing path,
+    # so Aider CAN fix it — normal classification must run instead.
+    http = _EnvFaultHTTP(referenced=True)
+    parsed = _run(reviewer._environment_fault_issue_from_failure(
+        http, _PIP_CONSTRAINT_FAILURE, "/root/projects/neon-pong-game", "test",
+    ))
+    assert parsed is None
+
+
+def test_environment_fault_aborts_on_transport_failure():
+    # Guessing "environment fault" from an unreachable sandbox would be worse
+    # than a wasted fix cycle — classification must abort.
+    http = _EnvFaultHTTP(transport_fail=True)
+    parsed = _run(reviewer._environment_fault_issue_from_failure(
+        http, _PIP_CONSTRAINT_FAILURE, "/root/projects/neon-pong-game", "build",
+    ))
+    assert parsed is None
+
+
+def test_environment_fault_ignores_project_internal_missing_files():
+    text = ("FileNotFoundError: [Errno 2] No such file or directory: "
+            "'/root/projects/neon-pong-game/assets/sound.wav'")
+    http = _EnvFaultHTTP()
+    parsed = _run(reviewer._environment_fault_issue_from_failure(
+        http, text, "/root/projects/neon-pong-game", "test",
+    ))
+    assert parsed is None
+    assert http.posts == []  # no candidates → no sandbox round-trips
+
+
+# ─── Hermetic sandbox environment ───────────────────────────────────────────
+
+def test_run_in_sandbox_wraps_commands_hermetically():
+    http = _EnvFaultHTTP()
+    _run(reviewer._run_in_sandbox(http, "/root/projects/x", "echo hi"))
+    assert len(http.posts) == 1
+    assert "unset PIP_CONSTRAINT" in http.posts[0]
+    assert "(echo hi)" in http.posts[0]
+
+
+def test_run_in_sandbox_hermetic_false_leaves_env_alone():
+    http = _EnvFaultHTTP()
+    _run(reviewer._run_in_sandbox(http, "/root/projects/x", "env", hermetic=False))
+    assert len(http.posts) == 1
+    assert "unset" not in http.posts[0]
+
+
+def test_hermetic_prefix_covers_pip_constraint():
+    prefix = language_adapters.hermetic_prefix()
+    assert prefix.startswith("unset ")
+    for var in ("PIP_CONSTRAINT", "PIP_CONFIG_FILE"):
+        assert var in prefix
+
+
+class _IsolatedBlockedHTTP(_SmokeHTTP):
+    """codebox-api deny-list rejects the isolated setup command with HTTP 400
+    ("Blocked dangerous command pattern") — the transport-failure shape."""
+
+    async def post(self, url, json=None, timeout=None):
+        command = (json or {}).get("command", "")
+        if "tar cf -" in command:
+            resp = _FakeResponse({})
+            resp.status_code = 400
+            resp.text = '{"detail":"Blocked dangerous command pattern"}'
+            return resp
+        return await super().post(url, json=json, timeout=timeout)
+
+
+def test_isolated_transport_block_yields_infra_error_not_packaging_issue():
+    """A blocked/unreachable isolated setup means NOTHING was verified — the
+    review must be an infra error envelope, never a packaging issue pinned to
+    pyproject.toml (that laundering burned 4 fix cycles on an innocent
+    manifest once)."""
+    http = _IsolatedBlockedHTTP(_SMOKE_FILES, smoke_exit=0)
+
+    envelope = _run(reviewer.run_review(
+        http, _NullEvents(), "conv-smoke", "/root/projects/snip",
+    ))
+
+    assert envelope["status"] == "error"
+    issue = envelope["issues"][0]
+    assert issue["severity"] == "infra"
+    assert issue["suggested_fix_scope"] == []
+    assert issue["file"] == ""
+    assert "not a code issue" in issue["summary"]

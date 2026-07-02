@@ -27,15 +27,22 @@ import config
 import database as db
 import cancel_registry
 import model_providers
+from agents.language_adapters import (
+    CODEBOX_PYTHON as _ADAPTER_VENV_PY,
+    PY_VENV_BOOTSTRAP as _PY_VENV_BOOTSTRAP,
+    PY_VENV_GUARD as _PY_VENV_GUARD,
+    hermetic_prefix as _hermetic_prefix,
+)
 
 
-# Pin the venv python that Codebox provisions — same binary `run_tests` uses
-# (tools.py:2009). Using bare `python3` here meant pip install -e . hit Arch's
-# externally-managed system Python (silently failed under `|| true`) and the
-# pytest run that followed had no project deps installed → ImportError → the
-# `|| echo` chain swallowed it → exit 0 → reviewer reported "clean" while the
-# project was actually broken.
-_VENV_PY = "/root/venv/bin/python3"
+# Per-project venv at the project root. Reviews must verify the project's own
+# declared manifest, not whatever earlier projects installed into a shared
+# interpreter — the old shared /root/venv let missing requirements.txt entries
+# pass silently and let pytest plugins from one project alter another's runs.
+# Relative because every sandbox command cds into the project root first.
+# Bare `python3` is still only used to CREATE the venv (installs through it
+# would hit Arch's externally-managed system Python and fail).
+_VENV_PY = _ADAPTER_VENV_PY
 
 # Python test command that:
 #   - Uses the venv python so installed deps are visible
@@ -49,6 +56,7 @@ _VENV_PY = "/root/venv/bin/python3"
 #     real diagnostics. The reviewer combines stdout+stderr at the Codebox
 #     wrapper level via `2>&1` already.
 _PY_TEST_CMD = (
+    f"{_PY_VENV_GUARD}"
     f"if {_VENV_PY} -c 'import pytest' 2>/dev/null; then "
     f"{_VENV_PY} -m pytest -q --no-header; ec=$?; "
     "if [ $ec -eq 5 ]; then echo '(no tests collected)'; exit 0; fi; "
@@ -60,6 +68,7 @@ _PY_TEST_CMD = (
 # project syntax level, e.g. PEP 695 generics on python 3.12+). Kept separate
 # from build_cmd so its exit code surfaces as `lint_exit` in the envelope.
 _PY_LINT_CMD = (
+    f"{_PY_VENV_GUARD}"
     f"{_VENV_PY} -m py_compile "
     "$(find . -name '*.py' -not -path '*/venv/*' -not -path '*/.venv/*' "
     "-not -path '*/.git/*' -not -path '*/__pycache__/*')"
@@ -116,11 +125,11 @@ _PROJECT_MARKERS = [
     # error in setup.py, etc.) the reviewer flags it as a build issue. That's
     # the right behavior; previously `|| true` meant a broken pip step looked
     # the same as a successful one.
-    ("pyproject.toml",  f"{_VENV_PY} -m pip install -q -e .",
+    ("pyproject.toml",  f"{_PY_VENV_BOOTSTRAP} && {_VENV_PY} -m pip install -q -e .",
                                                             _PY_TEST_CMD,
                                                                                       _PY_LINT_CMD,
                                                                                                             "python"),
-    ("requirements.txt",f"{_VENV_PY} -m pip install -q -r requirements.txt",
+    ("requirements.txt",f"{_PY_VENV_BOOTSTRAP} && {_VENV_PY} -m pip install -q -r requirements.txt",
                                                             _PY_TEST_CMD,
                                                                                       _PY_LINT_CMD,
                                                                                                             "python"),
@@ -502,8 +511,8 @@ _SCRIPT_ENTRY_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)\s*=", re.MULTILINE)
 def _extract_console_scripts(pyproject_text: str) -> list[str]:
     """Console-script names from a pyproject [project.scripts] table.
 
-    The build phase pip-installs the project into the Codebox venv, so these
-    are runnable from /root/venv/bin — smoking the real CLI is a far stronger
+    The build phase pip-installs the project into its own ./.venv, so these
+    are runnable from ./.venv/bin — smoking the real CLI is a far stronger
     signal than the import fallback."""
     m = _PYPROJECT_SCRIPTS_RE.search(pyproject_text or "")
     if not m:
@@ -527,16 +536,25 @@ def _transport_failure_detail(res: dict) -> str:
 
 
 async def _run_in_sandbox(http, project_dir: str, command: str,
-                          timeout: int = 300, run_id: str = "") -> dict:
+                          timeout: int = 300, run_id: str = "",
+                          hermetic: bool = True) -> dict:
     """Run a shell command at project_dir via Codebox. Returns truncated stdout/stderr.
     When run_id is provided, the HTTP call is wrapped in cancel_registry so the
-    user's Stop button can abort it mid-flight."""
+    user's Stop button can abort it mid-flight.
+
+    Hermetic wrap (default on): codebox-api's service environment leaks into
+    every child shell (systemd Environment=, e.g. a stray PIP_CONSTRAINT once
+    broke all pip installs). Verification must see the project, not the host,
+    so package-manager redirectors are stripped. hermetic=False exists for the
+    environment-fault culprit hunt, which inspects that same raw environment."""
     if not command:
         return {"exit_code": -1, "stdout": "", "stderr": "(no command)"}
+    prefix = _hermetic_prefix() if hermetic else ""
     try:
         coro = http.post(
             f"{config.CODEBOX_URL}/command",
-            json={"command": f"cd {shlex.quote(project_dir)} && ({command}) 2>&1",
+            json={"command": (f"cd {shlex.quote(project_dir)} && "
+                              f"({prefix}({command}) 2>&1)"),
                   "timeout": timeout},
             timeout=timeout + 30,
         )
@@ -991,6 +1009,116 @@ def _state_isolation_issue_from_failure(failure_text: str, project_dir: str,
         "state_error_signals": signals,
         "state_paths": state_paths,
     }
+
+
+# ENOENT-class failure lines: a tool tried to open a file that doesn't exist.
+# When the missing path is absolute, OUTSIDE the project root, and no project
+# file references it, editing the project cannot fix the failure — it's a
+# sandbox environment fault (e.g. PIP_CONSTRAINT in the service env pointing
+# at a file nobody created; that one burned a full fix budget on an innocent
+# requirements.txt before this classifier existed).
+_ENOENT_PHRASES_RE = re.compile(
+    r"no such file or directory|could not open|cannot open|couldn't read|\bENOENT\b",
+    re.I,
+)
+_ABS_PATH_RE = re.compile(r"(/[A-Za-z0-9._][A-Za-z0-9._/\-]*)")
+
+
+def _candidate_env_fault_paths(failure_text: str, project_dir: str) -> list[str]:
+    """Absolute paths on ENOENT-class failure lines that live outside the
+    project root — environment suspects, not project files."""
+    active = (project_dir or "").rstrip("/")
+    out: list[str] = []
+    for line in (failure_text or "").splitlines():
+        if not _ENOENT_PHRASES_RE.search(line):
+            continue
+        for raw in _ABS_PATH_RE.findall(line):
+            p = raw.rstrip("/").rstrip(".,:;)'\"")
+            if len(p) < 2 or p in out:
+                continue
+            if active and (p == active or p.startswith(active + "/")):
+                continue  # inside the project → normal code-issue flow
+            if p.startswith("/tmp/daedalus-review-"):
+                continue  # our own isolated-verification scratch tree
+            out.append(p)
+    return out[:5]
+
+
+async def _environment_fault_issue_from_failure(http, failure_text: str,
+                                                project_dir: str, phase: str,
+                                                run_id: str = "") -> dict | None:
+    """Classify sandbox-environment faults before any LLM review or fix routing.
+
+    Confirmation is deliberately strict — every check must pass or we fall
+    through to the normal flow:
+      1. the path genuinely does not exist on the Codebox, and
+      2. no project file references the full path OR its basename (a match
+         means the project itself points at the path — that's a code/stale-path
+         issue the existing classifiers and Aider can actually fix).
+    A transport failure during confirmation aborts classification entirely;
+    guessing "environment fault" from an unreachable sandbox would be worse
+    than a wasted fix cycle.
+    """
+    for path in _candidate_env_fault_paths(failure_text, project_dir):
+        q = shlex.quote(path)
+        exists = await _run_in_sandbox(
+            http, project_dir, f"test -e {q} && echo __YES__ || echo __NO__",
+            timeout=10, run_id=run_id)
+        if _transport_failure_detail(exists):
+            return None
+        if "__NO__" not in (exists.get("stdout") or ""):
+            continue  # path exists (or shell noise) → not a missing-path fault
+
+        base = path.rsplit("/", 1)[-1]
+        grep_args = f"-e {q}" + (f" -e {shlex.quote(base)}" if base and base != path else "")
+        referenced = await _run_in_sandbox(
+            http, project_dir,
+            "grep -rlF --exclude-dir=.git --exclude-dir=.venv --exclude-dir=venv "
+            "--exclude-dir=node_modules --exclude-dir=__pycache__ "
+            f"{grep_args} . | head -3",
+            timeout=20, run_id=run_id)
+        if _transport_failure_detail(referenced):
+            return None
+        if (referenced.get("stdout") or "").strip():
+            continue  # the project mentions it → fixable in the project
+
+        # Name the culprit when a service-level env var carries the path.
+        # hermetic=False: the normal sandbox wrapper unsets known redirectors,
+        # which would hide exactly what we're hunting for.
+        env_res = await _run_in_sandbox(http, project_dir, "env",
+                                        timeout=10, run_id=run_id, hermetic=False)
+        culprits = [
+            ln.split("=", 1)[0]
+            for ln in (env_res.get("stdout") or "").splitlines()
+            if path in ln and "=" in ln
+        ][:5]
+
+        summary = (
+            f"Sandbox environment fault: the {phase} phase failed because `{path}` "
+            "does not exist on the Codebox and no project file references it. "
+            + (f"It is injected by the sandbox environment variable(s): {', '.join(culprits)}. "
+               if culprits else
+               "It likely comes from host-level tool configuration "
+               "(service env vars, pip.conf/.npmrc-style files). ")
+            + "This is NOT a project code issue — editing the project cannot fix it. "
+              "Remediate the Codebox environment (remove or fix the offending "
+              "configuration, or create the missing file), then call run_review again."
+        )
+        return {
+            "status": "error",
+            "summary": summary[:600],
+            "issues": [{
+                "severity": "environment",
+                "file": "",
+                "lines": [],
+                "summary": summary,
+                "suggested_fix_scope": [],
+            }],
+            "deterministic_issue": "environment_fault",
+            "environment_fault_path": path,
+            "environment_fault_env_vars": culprits,
+        }
+    return None
 
 
 _DEP_INSTALL_PATTERNS = [
@@ -1593,7 +1721,7 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                                                  "cat pyproject.toml", timeout=10,
                                                  run_id=run_id)
                     for _script in reversed(_extract_console_scripts(_pyp.get("stdout", ""))):
-                        _scmd_new = f"/root/venv/bin/{_script} --help"
+                        _scmd_new = f"./.venv/bin/{_script} --help"
                         if _scmd_new not in _smoke_cmds:
                             _smoke_cmds.insert(0, _scmd_new)
                 _smoke_cmds = _smoke_cmds[:2]
@@ -1679,6 +1807,7 @@ async def run_review(http, events, conv_id: str, project_dir: str,
 
             if not project_files:
                 project_files = _files_before_smoke or await _list_project_files(http, project_dir)
+            _cancel_phase = "isolated verification"
             isolated_summary = await _run_isolated_verification(
                 http, project_dir, project_files, language, marker, run_id, _step
             )
@@ -1691,6 +1820,17 @@ async def run_review(http, events, conv_id: str, project_dir: str,
                     "summary": "Isolated verification failed.",
                     "suggested_fix_scope": [marker] if marker and marker != "(none)" else [],
                 }
+                if issue.get("severity") == "infra":
+                    # Transport-class failure (Codebox HTTP error / exception):
+                    # the isolated env never ran, so nothing was verified and
+                    # nothing in the project can fix it. Route through the
+                    # infra envelope instead of pinning a packaging issue on
+                    # the manifest — that laundered a blocked sandbox command
+                    # into 4 wasted pyproject.toml fix cycles once.
+                    raise _SandboxTransportError(
+                        f"isolated verification could not run: "
+                        f"{(issue.get('summary') or '')[:300]}"
+                    )
                 envelope = {
                     "status": "issues",
                     "summary": "Build/tests/lint pass, but isolated delivery verification failed.",
@@ -1754,6 +1894,52 @@ async def run_review(http, events, conv_id: str, project_dir: str,
         if any_failure:
             await _step("scan_files", "indexing real project files")
             project_files = await _list_project_files(http, project_dir)
+
+        # Deterministic environment-fault classification — FIRST, before any
+        # issue can be pinned on a project file. A missing absolute path
+        # outside the project that no project file references cannot be fixed
+        # by Aider/Fixer; routing it into the fix loop burns the whole budget
+        # on innocent files (the /root/pip-constraints.txt incident).
+        if any_failure:
+            _fail_phase = ("build" if build_result["exit_code"] != 0 else
+                           "test" if test_result["exit_code"] != 0 else "lint")
+            env_parsed = await _environment_fault_issue_from_failure(
+                http, failure_text, project_dir, _fail_phase, run_id
+            )
+            if env_parsed:
+                await _step("environment_fault",
+                            env_parsed.get("environment_fault_path", ""))
+                envelope = {
+                    **env_parsed,
+                    "build_cmd": build_cmd, "test_cmd": test_cmd, "lint_cmd": lint_cmd,
+                    "build_exit": build_result["exit_code"], "test_exit": test_result["exit_code"],
+                    "lint_exit": lint_result["exit_code"],
+                    "build_stdout_tail": (build_result.get("stdout", "") or "")[-3000:],
+                    "test_stdout_tail": (test_result.get("stdout", "") or "")[-5000:],
+                    "lint_stdout_tail": (lint_result.get("stdout", "") or "")[-2000:],
+                    "language": language, "marker": marker,
+                    "verification_level": verification_level,
+                    "verification_profile": profile,
+                    "verification_confidence": confidence,
+                    "review_model": "(deterministic environment classifier)",
+                    "raw_review_chars": 0,
+                    "project_dir": project_dir,
+                    "run_id": run_id,
+                }
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "run_review", "icon": "search-check",
+                    "status": "⛔ Review blocked — sandbox environment fault (not a code issue)",
+                    "run_id": run_id,
+                })
+                if run_id:
+                    try:
+                        # failed, not succeeded: the project was never verified.
+                        await db.update_run(run_id, status="failed",
+                                            result_envelope=envelope, ended=True)
+                    except Exception:
+                        pass
+                    cancel_registry.cleanup(run_id)
+                return envelope
 
         # Deterministic dependency-install classification. If pip fails while
         # building or resolving an external package, compiler traces can cite

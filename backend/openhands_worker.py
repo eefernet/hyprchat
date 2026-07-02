@@ -27,6 +27,25 @@ class _RunCancelled(Exception):
     """Raised inside on_event when the client requests cancellation."""
 
 
+# Host-level package-manager config redirectors, stripped from this process's
+# environment at import time so OpenHands bash actions and Aider subprocesses
+# (both inherit os.environ) build the project, not the host's config. A stray
+# PIP_CONSTRAINT= in the service unit once broke every pip install on the box.
+# Mirror of backend/agents/language_adapters.py:HERMETIC_UNSET_VARS — this
+# file deploys standalone to Codebox and cannot import backend modules; keep
+# the two lists in sync.
+_HERMETIC_UNSET_VARS = [
+    "PIP_CONSTRAINT",
+    "PIP_CONFIG_FILE",
+    "PIP_REQUIRE_VIRTUALENV",
+    "NPM_CONFIG_USERCONFIG",
+    "NPM_CONFIG_GLOBALCONFIG",
+    "GOFLAGS",
+]
+for _var in _HERMETIC_UNSET_VARS:
+    os.environ.pop(_var, None)
+
+
 _ACTIVE_RUNS: dict[str, dict] = {}
 _ACTIVE_RUNS_LOCK = threading.Lock()
 _ACTIVE_AIDER_RUNS: dict[str, dict] = {}
@@ -732,17 +751,22 @@ def _safe_allowed_files(project_dir: Path, files: list[str]) -> list[str]:
     return out
 
 
-def _worker_python() -> str:
+def _worker_python(project_dir: str | Path | None = None) -> str:
+    # Per-project venv first: relative form because Aider/test subprocesses
+    # run with cwd at the project root. Shared /root/venv is the legacy
+    # fallback for projects that predate per-project venvs.
+    if project_dir and (Path(project_dir) / ".venv" / "bin" / "python3").exists():
+        return "./.venv/bin/python3"
     preferred = Path("/root/venv/bin/python3")
     if preferred.exists():
         return str(preferred)
     return shutil.which("python3") or "python3"
 
 
-def _normalize_worker_command(cmd: str) -> str:
+def _normalize_worker_command(cmd: str, project_dir: str | Path | None = None) -> str:
     if not cmd:
         return ""
-    py = _worker_python()
+    py = _worker_python(project_dir)
     # Stale upload contracts used bare `python`, but the worker only guarantees
     # python3/the Codebox venv. Replace shell command tokens without touching
     # python3, paths like /usr/bin/python, or prose in file names.
@@ -927,8 +951,8 @@ def _build_aider_command(req: AiderRunRequest, prompt_file: Path,
         "--no-auto-commits",
         "--model-settings-file", str(model_settings_file),
     ]
-    test_cmd = _normalize_worker_command(req.test_cmd)
-    lint_cmd = _normalize_worker_command(req.lint_cmd)
+    test_cmd = _normalize_worker_command(req.test_cmd, req.project_dir)
+    lint_cmd = _normalize_worker_command(req.lint_cmd, req.project_dir)
     if req.auto_test and test_cmd:
         cmd += ["--test-cmd", test_cmd, "--auto-test"]
     if lint_cmd:
@@ -957,15 +981,15 @@ def _run_aider_blocking(req: AiderRunRequest, stream_cb=None) -> dict:
         }
 
     prompt_dir = Path("/tmp/hyprchat-aider")
-    req.test_cmd = _normalize_worker_command(req.test_cmd)
-    req.lint_cmd = _normalize_worker_command(req.lint_cmd)
+    req.test_cmd = _normalize_worker_command(req.test_cmd, project_dir)
+    req.lint_cmd = _normalize_worker_command(req.lint_cmd, project_dir)
     if isinstance(req.contract, dict):
         for key in ("build_cmd", "test_cmd", "smoke_cmd", "aider_test_cmd", "aider_lint_cmd"):
             if isinstance(req.contract.get(key), str):
-                req.contract[key] = _normalize_worker_command(req.contract[key])
+                req.contract[key] = _normalize_worker_command(req.contract[key], project_dir)
         if isinstance(req.contract.get("smoke_cmds"), list):
             req.contract["smoke_cmds"] = [
-                _normalize_worker_command(c) if isinstance(c, str) else c
+                _normalize_worker_command(c, project_dir) if isinstance(c, str) else c
                 for c in req.contract["smoke_cmds"]
             ]
     req.allowed_files = _safe_allowed_files(project_dir, req.allowed_files)
@@ -1864,7 +1888,7 @@ def _build_task_prompt(req: RunRequest, work_dir: str = "/root", continuing: boo
     # Language-specific build/check commands
     _VERIFY_CMDS = {
         "java": "If using Maven: `mvn compile`. If plain javac: `javac -d out $(find . -name '*.java')`. Ensure pom.xml includes all needed dependencies with correct versions and native classifiers where required (e.g. LWJGL needs platform-specific natives).",
-        "python": "`python -c \"import py_compile; import glob; [py_compile.compile(f, doraise=True) for f in glob.glob('**/*.py', recursive=True)]\"` to syntax-check all files. Then run the entry point or tests if present.",
+        "python": "First create the project venv: `test -x .venv/bin/python3 || python3 -m venv .venv`, then install dependencies INTO IT: `./.venv/bin/pip install -r requirements.txt` (or `-e .` for pyproject). Use `./.venv/bin/python3` for every python command — never bare python/pip. Syntax-check: `./.venv/bin/python3 -c \"import py_compile; import glob; [py_compile.compile(f, doraise=True) for f in glob.glob('**/*.py', recursive=True)]\"`. Then run the entry point or tests if present.",
         "javascript": "`node --check *.js` for syntax. If package.json exists: `npm install && npm run build` (or `npm test` if tests exist).",
         "typescript": "`npx tsc --noEmit` to type-check. If package.json exists: `npm install && npm run build`.",
         "c": "`gcc -Wall -Wextra -fsyntax-only *.c` to check, then `make` or compile and run.",

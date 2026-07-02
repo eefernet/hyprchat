@@ -36,7 +36,9 @@ from tooling.workflow_gate import (
     _WF_EVENT_TRANSITIONS,
     _apply_workflow_event,
     _deep_research_called_since as _wg_deep_research_called_since,
+    _environment_fault_notice,
     _fix_budget_note,
+    _is_environment_fault,
     _get_recent_research,
     _is_v2_persona as _wg_is_v2_persona,
     _latest_user_msg_ts,
@@ -402,13 +404,17 @@ async def _latest_user_task_text(conv_id: str) -> str:
 
 
 async def _latest_actionable_issue_run(conv_id: str, requested_id: str = "") -> dict | None:
-    """Return the requested/latest reviewer or acceptance run with issues."""
+    """Return the requested/latest reviewer or acceptance run with issues.
+
+    Environment-fault envelopes are excluded: "actionable" here means
+    "dispatchable to Aider/Fixer", and an environment fault has no project
+    files to fix."""
     if not conv_id and not requested_id:
         return None
     if requested_id:
         try:
             run = await db.get_run(requested_id)
-            if run:
+            if run and not _is_environment_fault(run.get("result_envelope")):
                 return run
         except Exception as _e:
             print(f"[v2-gate] requested issue run lookup failed (non-fatal): {_e}")
@@ -419,7 +425,8 @@ async def _latest_actionable_issue_run(conv_id: str, requested_id: str = "") -> 
         return next(
             (r for r in runs
              if r.get("role") in {"reviewer", "acceptance"}
-             and ((r.get("result_envelope") or {}).get("status") or "").lower() in {"issues", "error"}),
+             and ((r.get("result_envelope") or {}).get("status") or "").lower() in {"issues", "error"}
+             and not _is_environment_fault(r.get("result_envelope"))),
             None,
         )
     except Exception as _e:
@@ -1867,6 +1874,33 @@ async def exec_tool(
                                  else await db.get_runs_by_conversation(conv_id, limit=50))
                 _uts_cap = (_gate_ctx.latest_user_ts if _gate_ctx is not None
                             else await _latest_user_msg_ts(conv_id))
+
+                # Environment faults cannot be repaired from inside the
+                # project — block the fix tools outright before any cap or
+                # redirect logic runs, so no budget/research cycle is spent.
+                _ef_requested = (args.get("reviewer_run_id")
+                                 or args.get("issue_run_id") or "").strip()
+                _ef_run = None
+                if _ef_requested:
+                    _ef_run = next((r for r in _runs_for_cap
+                                    if r.get("id") == _ef_requested), None)
+                    if _ef_run is None:
+                        try:
+                            _ef_run = await db.get_run(_ef_requested)
+                        except Exception:
+                            _ef_run = None
+                else:
+                    _ef_run = next(
+                        (r for r in _runs_for_cap
+                         if r.get("role") in {"reviewer", "acceptance"}
+                         and ((r.get("result_envelope") or {}).get("status") or "").lower()
+                         in {"issues", "error"}),
+                        None)
+                if _ef_run and _is_environment_fault(_ef_run.get("result_envelope")):
+                    print(f"[v2-gate] BLOCKED {name}: environment fault "
+                          f"run={_ef_run.get('id')}", flush=True)
+                    return _environment_fault_notice(_ef_run.get("result_envelope"))
+
                 _run_role_by_id_cap = {r.get("id"): r.get("role") for r in _runs_for_cap}
                 _requested_parent_id = (args.get("reviewer_run_id") or "").strip()
                 _parent_role_for_cap = ""
@@ -2352,6 +2386,7 @@ async def exec_tool(
                 _pending_kind = ""
                 _pending_review = None  # state 2 trigger
                 _pending_acceptance_needed = None  # clean review must be accepted before delivery
+                _env_fault_run = None  # sandbox env fault — nothing in the project to fix
 
                 # Walk newest-first.
                 # Builder/fixer runs in ANY non-trivial state require verification.
@@ -2370,9 +2405,13 @@ async def exec_tool(
                         break
                     if _role == "reviewer":
                         # Most recent reviewer: issues need fixer; clean needs acceptance.
+                        # Environment faults need neither — the sandbox is broken,
+                        # not the project; report to the user instead of fixing.
                         _env_r = _r.get("result_envelope") or {}
                         _rstatus = (_env_r.get("status") or "").lower()
-                        if _rstatus in ("issues", "error"):
+                        if _is_environment_fault(_env_r):
+                            _env_fault_run = _r
+                        elif _rstatus in ("issues", "error"):
                             _pending_review = _r
                         elif _rstatus == "clean":
                             _pending_acceptance_needed = _r
@@ -2382,7 +2421,9 @@ async def exec_tool(
                         # accepted releases the delivery gate.
                         _env_a = _r.get("result_envelope") or {}
                         _astatus = (_env_a.get("status") or "").lower()
-                        if _astatus in ("issues", "error"):
+                        if _is_environment_fault(_env_a):
+                            _env_fault_run = _r
+                        elif _astatus in ("issues", "error"):
                             _pending_review = _r
                         break
                     if _role.startswith("builder") and _r.get("status") in _BUILDER_GATING:
@@ -2419,7 +2460,28 @@ async def exec_tool(
                 # If neither state triggers, fall through and run normally.
                 _gate_msg = None
                 _auto_dispatch_gate = None  # ("run_aider_fix"|"run_fixer", args)
-                if _pending_run is not None:
+                if _env_fault_run is not None:
+                    # Sandbox environment fault: no fix routing, no budget, no
+                    # research forcing — the model's forward action is telling
+                    # the user to remediate the Codebox. Ship-as-is stays
+                    # available when the latest user message asks for it.
+                    _efr_env = _env_fault_run.get("result_envelope") or {}
+                    _efr_id = _env_fault_run.get("id", "?")
+                    if (name in _DELIVERY_SHIP_TOOLS
+                            and (await _gate_ctx.ship_anyway()
+                                 if _gate_ctx is not None
+                                 else await _latest_user_requested_ship_anyway(conv_id))):
+                        print(f"[v2-gate] ship-anyway: allowing {name} despite "
+                              f"environment fault because latest user requested "
+                              f"delivery", flush=True)
+                    else:
+                        _gate_msg = (
+                            "state", "environment-fault",
+                            _environment_fault_notice(_efr_env),
+                            "⛔ Blocked — sandbox environment fault (not a code issue)",
+                            _efr_id,
+                        )
+                elif _pending_run is not None:
                     _env = _pending_run.get("result_envelope") or {}
                     _pd = (_env.get("project_dir") or "").strip()
                     _pid = _pending_run.get("id", "?")
@@ -3191,6 +3253,20 @@ async def exec_tool(
                                       f"despite reviewer={_latest_reviewer.get('id')} "
                                       f"status={_rstatus} issues={n} "
                                       f"requested={_ship_anyway_requested}")
+                            elif _is_environment_fault(_env):
+                                # Unverified because the SANDBOX is broken, not
+                                # the project — don't lecture about fix workers.
+                                await events.emit(conv_id, "tool_end", {
+                                    "tool": "download_project", "icon": "code",
+                                    "status": "⛔ Blocked — project unverified (sandbox environment fault)",
+                                })
+                                return (
+                                    _environment_fault_notice(_env)
+                                    + "\n\nDelivery stays blocked because the project was "
+                                      "never verified. If the user explicitly asks to ship "
+                                      "anyway, call download_project again and disclose that "
+                                      "the build is unverified."
+                                )
                             else:
                                 lines = [
                                     f"BLOCKED — last run_review on this project returned status='{_rstatus}'.",
@@ -3492,15 +3568,20 @@ async def exec_tool(
                 else:
                     framework = "pytest"  # fallback
 
+            # Project .venv first (per-project isolation); fall back to the
+            # shared scratch venv for pre-.venv projects and loose test dirs.
+            _pytest_py = ("if [ -x .venv/bin/python3 ]; then PY=.venv/bin/python3; "
+                          "else PY=/root/venv/bin/python3; fi; $PY")
             test_cmds = {
-                "pytest": f"cd {shlex.quote(path)} && /root/venv/bin/python3 -m pytest -v --tb=short 2>&1",
+                "pytest": f"cd {shlex.quote(path)} && {_pytest_py} -m pytest -v --tb=short 2>&1",
                 "jest": f"cd {shlex.quote(path)} && npx jest --verbose 2>&1",
                 "vitest": f"cd {shlex.quote(path)} && npx vitest run 2>&1",
                 "npm": f"cd {shlex.quote(path)} && npm test 2>&1",
                 "cargo": f"cd {shlex.quote(path)} && cargo test 2>&1",
                 "go": f"cd {shlex.quote(path)} && go test ./... -v 2>&1",
             }
-            cmd = test_cmds.get(framework, test_cmds["pytest"])
+            from agents.language_adapters import hermetic_prefix as _hp
+            cmd = _hp() + test_cmds.get(framework, test_cmds["pytest"])
             await events.emit(conv_id, "tool_start", {"tool": "run_tests", "icon": "code", "status": f"Running {framework} tests..."})
             start = time.time()
             r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 120}, timeout=130)
@@ -3766,7 +3847,8 @@ async def exec_tool(
                 issue_run = next(
                     (r for r in runs
                      if r.get("role") in {"reviewer", "acceptance"}
-                     and ((r.get("result_envelope") or {}).get("status") or "").lower() in {"issues", "error"}),
+                     and ((r.get("result_envelope") or {}).get("status") or "").lower() in {"issues", "error"}
+                     and not _is_environment_fault(r.get("result_envelope"))),
                     None,
                 )
                 if issue_run:
@@ -4038,7 +4120,9 @@ async def exec_tool(
             if _rev_status_wf not in ("cancelled", ""):
                 await _apply_workflow_event(
                     conv_id,
-                    "REVIEW_CLEAN" if _rev_status_wf == "clean" else "REVIEW_ISSUES",
+                    ("REVIEW_ENV_FAULT" if _is_environment_fault(envelope)
+                     else "REVIEW_CLEAN" if _rev_status_wf == "clean"
+                     else "REVIEW_ISSUES"),
                     run_id=envelope.get("run_id", ""),
                     project_id=project_id,
                 )
@@ -4055,6 +4139,12 @@ async def exec_tool(
                         f"reviewer_run_id: {reviewer_run_id}\n"
                         f"REQUIRED NEXT TOOL CALL: run_acceptance_review(reviewer_run_id='{reviewer_run_id}'). "
                         f"Do not call download_project until acceptance is accepted unless the latest user message explicitly asks to ship/download anyway.")
+            if _is_environment_fault(envelope):
+                # No FIX PROCEDURE: there is nothing in the project to fix.
+                return (
+                    _environment_fault_notice(envelope)
+                    + f"\n\nreviewer_run_id: {reviewer_run_id}"
+                )
             lines = [f"REVIEW FOUND {len(issues)} ISSUE(S). {summary}",
                      f"Build: `{envelope.get('build_cmd','')}` exit={envelope.get('build_exit','?')}. "
                      f"Tests: `{envelope.get('test_cmd','')}` exit={envelope.get('test_exit','?')}.",
@@ -4292,7 +4382,8 @@ async def exec_tool(
                         if _r.get("role") not in {"reviewer", "acceptance"}:
                             continue
                         _env = _r.get("result_envelope") or {}
-                        if (_env.get("status") or "").lower() in {"issues", "error"}:
+                        if ((_env.get("status") or "").lower() in {"issues", "error"}
+                                and not _is_environment_fault(_env)):
                             return _r["id"]
                 except Exception as _re:
                     print(f"[run_fixer] actionable run lookup failed: {_re}")
