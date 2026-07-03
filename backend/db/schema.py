@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS model_provider_credentials (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_messages_conv_created_id ON messages(conversation_id, created_at, id);
 CREATE INDEX IF NOT EXISTS idx_kb_files_kb ON kb_files(kb_id);
 
 CREATE TABLE IF NOT EXISTS workspaces (

@@ -298,6 +298,29 @@ _RECIPE_RE = re.compile(
     r"vegetarian|vegan|gluten[\s-]free|keto|paleo)\b",
     re.IGNORECASE,
 )
+_GAME_RE = re.compile(
+    r"\b(?:game|gaming|gameplay|video\s+game|steam|xbox|playstation|nintendo|"
+    r"switch|wiki\.gg|fandom|walkthrough|speedrun|strategy\s+game|campaign|"
+    r"quest|level|boss|build|patch\s+notes?|dlc|mods?|nerf|buff|meta|"
+    r"eu4|hoi4|ck3|civ\s*[456]|bg3|rpg|mmo|fps|rts)\b",
+    re.IGNORECASE,
+)
+_GAME_RESULT_RE = re.compile(
+    r"\b(?:game|gaming|gameplay|steam|wiki\.gg|fandom|walkthrough|campaign|"
+    r"quest|level|boss|achievement|strategy|guide|dev\s+diar(?:y|ies)|"
+    r"patch|dlc|mod|meta|speedrun)\b",
+    re.IGNORECASE,
+)
+_GAME_SOURCE_DOMAINS = frozenset({
+    "wiki.gg", "fandom.com", "steamcommunity.com", "reddit.com",
+    "ign.com", "gamespot.com", "gamepressure.com", "polygon.com",
+    "pcgamesn.com", "rockpapershotgun.com", "thegamer.com",
+    "paradoxwikis.com", "paradoxplaza.com", "forum.paradoxplaza.com",
+})
+_GENERAL_REFERENCE_DOMAINS = frozenset({
+    "wikipedia.org", "britannica.com", "history.com", "thoughtco.com",
+    "worldhistory.org", "shutterstock.com", "istockphoto.com", "gettyimages.com",
+})
 
 _DOWNRANK_DOMAINS: dict[str, frozenset[str]] = {
     "news": frozenset({
@@ -317,6 +340,11 @@ _DOWNRANK_DOMAINS: dict[str, frozenset[str]] = {
         "stackoverflow.com", "github.com", "gitlab.com",
         "cnn.com", "bbc.com", "reuters.com", "nytimes.com",
     }),
+    "game": frozenset({
+        "cnn.com", "bbc.com", "bbc.co.uk", "reuters.com", "nytimes.com",
+        "washingtonpost.com", "bloomberg.com", "shutterstock.com",
+        "istockphoto.com", "gettyimages.com",
+    }),
     "general": frozenset(),
 }
 
@@ -329,6 +357,8 @@ def _classify_query(q: str) -> str:
         return "code"
     if _RECIPE_RE.search(q):
         return "recipe"
+    if _GAME_RE.search(q):
+        return "game"
     return "general"
 
 
@@ -474,6 +504,27 @@ def _plan_get(plan, key: str, default=None):
     return getattr(plan, key, default)
 
 
+def _anchor_match_score(anchor_terms: list[str], text: str) -> float:
+    if not anchor_terms:
+        return 0.0
+    low = (text or "").lower()
+    best = 0.0
+    for anchor in anchor_terms:
+        cleaned = re.sub(r"\s+", " ", str(anchor or "").strip()).lower()
+        if not cleaned:
+            continue
+        if re.search(rf"\b{re.escape(cleaned)}\b", low):
+            best = max(best, 1.0)
+            continue
+        tokens = _content_tokens(cleaned)
+        if not tokens:
+            continue
+        overlap = tokens & _content_tokens(low)
+        if overlap:
+            best = max(best, min(0.75, len(overlap) / len(tokens)))
+    return best
+
+
 def _rank_for_search_plan(
     results: list,
     query: str,
@@ -493,6 +544,7 @@ def _rank_for_search_plan(
     rank_pos = {u: i for i, u in enumerate(ranked_urls)}
     freshness_mode = _plan_get(plan, "freshness_mode", "none")
     resolved_date = _plan_get(plan, "resolved_date", None)
+    anchor_terms = _plan_get(plan, "anchor_terms", None) or []
     strict_day = freshness_mode == "day"
 
     scored: list[dict] = []
@@ -503,6 +555,16 @@ def _rank_for_search_plan(
         published = _result_published_date(item)
         freshness, freshness_score = _freshness_fit(published, freshness_mode, resolved_date)
         source_tier, source_score = _source_tier_for_domain(domain)
+        game_source = cat == "game" and domain in _GAME_SOURCE_DOMAINS
+        game_blob = " ".join([
+            item.get("title") or "",
+            item.get("content") or item.get("snippet") or "",
+            domain,
+        ])
+        game_terms = cat == "game" and bool(_GAME_RESULT_RE.search(game_blob))
+        anchor_score = _anchor_match_score(anchor_terms, game_blob)
+        if game_source:
+            source_tier, source_score = ("community" if domain == "reddit.com" else "game"), max(source_score, 0.84)
         lexical = _lexical_relevance(query, item)
         snippet_score = _snippet_usefulness(item)
         base_rank = 1.0 - (rank_pos.get(url, idx) / max(1, len(text_only)))
@@ -532,6 +594,18 @@ def _rank_for_search_plan(
             )
         if domain in (_DOWNRANK_DOMAINS.get(cat) or frozenset()):
             score *= 0.72
+        if anchor_terms:
+            if anchor_score > 0:
+                score *= 1.0 + min(0.35, anchor_score * 0.35)
+            elif cat in {"game", "code"}:
+                score *= 0.58
+        if cat == "game":
+            if game_source or game_terms or anchor_score > 0:
+                score *= 1.18
+            else:
+                score *= 0.42
+            if domain in _GENERAL_REFERENCE_DOMAINS and not (game_terms or anchor_score > 0):
+                score *= 0.55
 
         item["published_date"] = published.isoformat() if published else (item.get("published_date") or "")
         item["freshness"] = freshness
@@ -539,7 +613,8 @@ def _rank_for_search_plan(
         item["score"] = round(score * 100, 1)
         item["score_reason"] = (
             f"lexical={lexical:.2f}; freshness={freshness}; "
-            f"source={source_tier}; snippet={snippet_score:.2f}"
+            f"source={source_tier}; snippet={snippet_score:.2f}; "
+            f"anchor={anchor_score:.2f}"
         )
         scored.append(item)
 
@@ -1178,7 +1253,7 @@ async def _enrich_og_images(http, results: list, max_fetch: int = 6) -> None:
 
 async def run_quick_search_for_chat(
     http, ollama_url: str, workspace_model: str, events, conv_id: str, messages: list,
-    *, default_model: str = "", chat_model: str = "",
+    *, default_model: str = "", chat_model: str = "", context_hint: str = "",
 ) -> dict:
     """Used by `agents/chat.py` to inject fresh search context.
 
@@ -1204,6 +1279,7 @@ async def run_quick_search_for_chat(
         http, ollama_url, refine_model,
         events, conv_id, messages,
         default_model=default_model or workspace_model,
+        context_hint=context_hint,
     )
 
 

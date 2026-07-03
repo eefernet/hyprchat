@@ -1,6 +1,8 @@
 """
 Tests for health checks, settings, changelog, and system endpoints.
 """
+from pathlib import Path
+
 import pytest
 
 
@@ -54,7 +56,8 @@ class TestChangelog:
         r = client.get("/api/changelog")
         assert r.status_code == 200
         data = r.json()
-        assert "content" in data
+        expected = (Path(__file__).resolve().parents[2] / "CHANGELOG.md").read_text(encoding="utf-8")
+        assert data["content"] == expected
 
 
 class TestRagStats:

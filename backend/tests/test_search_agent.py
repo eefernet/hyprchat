@@ -162,10 +162,129 @@ def _many_web_results(n: int, *, prefix: str = "Result") -> list[dict]:
     ]
 
 
+def _balanced_mode(max_queries: int = 4) -> search_agent.SearchModeConfig:
+    return search_agent.SearchModeConfig(
+        mode="balanced",
+        min_results=10,
+        target_results=24,
+        max_results=35,
+        page_reads=8,
+        max_queries=max_queries,
+        allow_refine=False,
+        embed_rerank=False,
+    )
+
+
 def _seed_public_dns(host: str):
     now = datetime.now(tz=timezone.utc).timestamp()
     quick_search._DNS_CACHE[host] = (now, True)
     research._DNS_CACHE[host] = (now, True)
+
+
+def test_deterministic_plan_uses_context_anchor_and_strips_attachment_noise():
+    latest = "should i invade the papal states?\n\n[Attached 1 image: image.png]"
+    plan = search_agent._deterministic_plan(
+        [{"role": "user", "content": latest}],
+        latest,
+        _balanced_mode(),
+        context_hint="The user plays Europa Universalis IV and discusses strategy games.",
+    )
+
+    assert plan.category == "game"
+    assert plan.anchor_terms
+    assert any("Europa Universalis" in q or "EU4" in q for q in plan.queries)
+    assert all("Attached" not in q and "image.png" not in q for q in plan.queries)
+
+
+def test_deterministic_plan_does_not_treat_in_game_currently_as_news():
+    latest = "how do i get france to join the war? they currently wont and i already have 80+ curry favors with them"
+    plan = search_agent._deterministic_plan(
+        [{"role": "user", "content": latest}],
+        latest,
+        _balanced_mode(),
+        context_hint="The user plays Europa Universalis IV and discusses strategy games.",
+    )
+
+    assert plan.category == "game"
+    assert plan.freshness_mode == "none"
+    assert plan.time_range is None
+    assert all("currently" not in q.lower() for q in plan.queries)
+
+
+def test_deterministic_plan_drops_local_actor_names_from_queries():
+    latest = "should Cody try playing other nations in EU4?"
+    plan = search_agent._deterministic_plan(
+        [{"role": "user", "content": latest}],
+        latest,
+        _balanced_mode(),
+    )
+
+    assert plan.category == "game"
+    assert any("EU4" in q or "Europa Universalis" in q for q in plan.queries)
+    assert all("Cody" not in q for q in plan.queries)
+
+
+def test_deterministic_plan_historical_wording_overrides_game_context():
+    latest = "historically should Italy invade the Papal States?"
+    plan = search_agent._deterministic_plan(
+        [{"role": "user", "content": latest}],
+        latest,
+        _balanced_mode(),
+        context_hint="The user plays Europa Universalis IV and discusses strategy games.",
+    )
+
+    assert plan.category != "game"
+    assert not plan.anchor_terms
+    assert all("Europa Universalis" not in q and "EU4" not in q for q in plan.queries)
+
+
+def test_deterministic_plan_context_frame_works_for_non_game_subjects():
+    latest = "why is the hook state not persisting after restart?"
+    plan = search_agent._deterministic_plan(
+        [{"role": "user", "content": latest}],
+        latest,
+        _balanced_mode(),
+        context_hint="The user is working on a React project with a FastAPI backend.",
+    )
+
+    assert plan.category == "code"
+    assert any("React" in q or "FastAPI" in q for q in plan.queries)
+
+
+def test_anchor_match_ranking_beats_generic_entity_match():
+    results = [
+        {
+            "title": "Papal States - Wikipedia",
+            "url": "https://en.wikipedia.org/wiki/Papal_States",
+            "content": "Historical overview of the Papal States.",
+            "engine": "test",
+            "score": 90,
+            "type": "web",
+        },
+        {
+            "title": "Papal States - Europa Universalis IV Wiki",
+            "url": "https://eu4.paradoxwikis.com/Papal_States",
+            "content": "EU4 strategy guide for the Papal States campaign.",
+            "engine": "test",
+            "score": 60,
+            "type": "web",
+        },
+    ]
+
+    ranked = quick_search._rank_for_search_plan(
+        results,
+        "Papal States",
+        {
+            "category": "game",
+            "freshness_mode": "none",
+            "resolved_date": None,
+            "anchor_terms": ["Europa Universalis IV", "EU4"],
+        },
+        category="game",
+        limit=2,
+    )
+
+    assert ranked[0]["url"] == "https://eu4.paradoxwikis.com/Papal_States"
 
 
 def test_fetch_clean_page_rejects_private_redirect_before_fetching_target():

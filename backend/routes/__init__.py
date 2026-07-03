@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 
 from .context import configure_context
-from . import audio, health, hf, model_configs, model_providers, ollama_models, settings, tools_connectors, users
+from . import artifacts, audio, catalog, downloads, health, hf, model_configs, model_providers, ollama_models, settings, tools_connectors, users
 
 
 def register_extracted_routes(
@@ -21,6 +21,7 @@ def register_extracted_routes(
     request_session_token=None,
     validated_request_user=None,
     delete_artifact_files_for_user_ids=None,
+    create_research_report=None,
     delete_all_models=None,
 ) -> None:
     configure_context(
@@ -37,6 +38,7 @@ def register_extracted_routes(
         request_session_token=request_session_token,
         validated_request_user=validated_request_user,
         delete_artifact_files_for_user_ids=delete_artifact_files_for_user_ids,
+        create_research_report=create_research_report,
         delete_all_models=delete_all_models,
     )
     app.include_router(health.router)
@@ -48,3 +50,6 @@ def register_extracted_routes(
     app.include_router(tools_connectors.router)
     app.include_router(model_configs.router)
     app.include_router(ollama_models.router)
+    app.include_router(downloads.router)
+    app.include_router(catalog.router)
+    app.include_router(artifacts.router)

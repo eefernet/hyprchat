@@ -22,6 +22,7 @@ class RouteContext:
     request_session_token: Callable[[Any], str] | None = None
     validated_request_user: Callable[[Any], Any] | None = None
     delete_artifact_files_for_user_ids: Callable[[list[str]], Any] | None = None
+    create_research_report: Callable[[dict], Any] | None = None
     delete_all_models: Callable[[], Any] | None = None
 
 
@@ -43,6 +44,7 @@ def configure_context(
     request_session_token: Callable[[Any], str] | None = None,
     validated_request_user: Callable[[Any], Any] | None = None,
     delete_artifact_files_for_user_ids: Callable[[list[str]], Any] | None = None,
+    create_research_report: Callable[[dict], Any] | None = None,
     delete_all_models: Callable[[], Any] | None = None,
 ) -> None:
     global _context
@@ -60,6 +62,7 @@ def configure_context(
         request_session_token=request_session_token,
         validated_request_user=validated_request_user,
         delete_artifact_files_for_user_ids=delete_artifact_files_for_user_ids,
+        create_research_report=create_research_report,
         delete_all_models=delete_all_models,
     )
 

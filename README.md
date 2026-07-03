@@ -92,7 +92,7 @@ The browser only talks to HyprChat. The backend proxies OpenAI-compatible STT an
 
 ### 🏛️ Daedalus Agentic Coding
 
-Daedalus is the coding workflow. It plans, builds, reviews, fixes, and acceptance-checks projects instead of sending a single giant prompt and hoping for the best. `plan_project` always uses the structured Architect path, so Builder and Reviewer receive the same manifest contract across coding profiles.
+Daedalus is the coding workflow. It plans, builds, reviews, fixes, and acceptance-checks projects instead of sending a single giant prompt and hoping for the best. `plan_project` always uses the structured Architect path, so Builder receives the same manifest plus an advisory interface contract: entrypoint, dependency policy, shared constants, public signatures, and cross-file rules when the Architect can infer them.
 
 <p align="center">
   <img src="docs/images/daedalus%20Prompt.png" alt="Daedalus coding prompt result" width="440">
@@ -101,14 +101,15 @@ Daedalus is the coding workflow. It plans, builds, reviews, fixes, and acceptanc
 
 | Agent | Role |
 |---|---|
-| 📐 Architect | Creates a structured plan, file tree, commands, dependencies, and success criteria |
-| 🏗️ Builder | Uses OpenHands in Codebox for greenfield builds |
+| 📐 Architect | Creates a structured plan, file tree, commands, dependencies, success criteria, and optional interface contract |
+| 🏗️ Builder | Uses OpenHands in Codebox for greenfield builds, with scaled rounds and bounded missing-file continuation |
 | 🔍 Reviewer | Runs real build/test/lint commands and returns concrete issues |
-| 🛠️ Aider Fixer | Applies focused edits to uploaded projects from the active project root |
+| 🛠️ Aider Fixer | Applies focused repairs to existing project roots, including uploads and Builder-created projects |
+| 🔧 Fixer | Fallback scoped editor when Aider is disabled, unhealthy, or cannot produce a patch |
 | ✅ Acceptance | Final gate for request fit, docs, tests, packaging, and generated artifacts |
 | ❓ ProjectQA | Answers codebase questions with grounded file references |
 
-Workflow state is enforced server-side, so Daedalus cannot skip review, ship before acceptance, or loop forever on the same blocker.
+Workflow state is enforced server-side, so Daedalus cannot skip review, ship before acceptance, or loop forever on the same blocker. Delivered project archives exclude generated/cache/build outputs plus Aider runtime metadata such as `.aider*`.
 
 ### 🧰 Tools & Quick Search
 
@@ -408,9 +409,13 @@ Integration tests expect a live HyprChat instance:
 
 ```bash
 cd backend
-python3 -m pip install pytest httpx
+python3 -m pip install -r requirements.txt pytest
 HYPRCHAT_URL=http://127.0.0.1:8000 python3 -m pytest tests/ -v
 ```
+
+Daedalus research/fixer hardening coverage requires `aiosqlite` from
+`backend/requirements.txt`; `backend/tests/test_agent_research_hardening.py`
+is a required CI check and will skip in incomplete local test environments.
 
 ## Stack
 

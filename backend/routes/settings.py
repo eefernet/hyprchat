@@ -1,6 +1,7 @@
 """Runtime settings, cleanup, RAG stats, changelog, and analytics routes."""
 import os
 import re
+from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException, Query
 
@@ -70,6 +71,7 @@ async def get_app_settings():
         "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
         "openhands_num_ctx": config.OPENHANDS_NUM_CTX,
         "openhands_reasoning_effort": config.OPENHANDS_REASONING_EFFORT,
+        "openhands_disable_thinking": config.OPENHANDS_DISABLE_THINKING,
         "aider_enabled": config.AIDER_ENABLED,
         "aider_model": config.AIDER_MODEL,
         "aider_num_ctx": config.AIDER_NUM_CTX,
@@ -103,7 +105,7 @@ async def update_app_settings(body: dict = Body(...)):
                "workspace_model",
                "architect_model", "reviewer_model", "acceptance_model", "builder_model", "fixer_model", "qa_model",
                "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
-               "openhands_reasoning_effort",
+               "openhands_reasoning_effort", "openhands_disable_thinking",
                "aider_enabled", "aider_model", "aider_num_ctx", "aider_auto_test", "aider_worker_url",
                "default_num_ctx", "research_num_ctx", "quick_search_mode",
                "image_chat_checkpoint", "image_chat_workflow", "image_chat_resolution", "image_chat_vae",
@@ -245,6 +247,9 @@ async def update_app_settings(body: dict = Body(...)):
         # Persist the validated value, not the raw input.
         settings["openhands_reasoning_effort"] = _re_in
         print(f"[Config] OpenHands reasoning effort: {config.OPENHANDS_REASONING_EFFORT}")
+    if "openhands_disable_thinking" in body:
+        config.OPENHANDS_DISABLE_THINKING = bool(body["openhands_disable_thinking"])
+        print(f"[Config] OpenHands disable thinking: {config.OPENHANDS_DISABLE_THINKING}")
     if "aider_enabled" in body:
         config.AIDER_ENABLED = bool(body["aider_enabled"])
         print(f"[Config] Aider enabled: {config.AIDER_ENABLED}")
@@ -252,12 +257,19 @@ async def update_app_settings(body: dict = Body(...)):
         config.AIDER_MODEL = body["aider_model"] or ""
         print(f"[Config] Aider Model: {config.AIDER_MODEL or '(inherit fixer/coder)'}")
     if "aider_num_ctx" in body:
-        config.AIDER_NUM_CTX = config.coerce_num_ctx(
-            body["aider_num_ctx"],
-            fallback=config.AIDER_NUM_CTX,
-        )
+        # 0 / empty = inherit the Daedalus context-window slider
+        # (OPENHANDS_NUM_CTX) at call time; a positive value is an explicit
+        # per-Aider override.
+        _actx_raw = body["aider_num_ctx"]
+        if not _actx_raw:
+            config.AIDER_NUM_CTX = 0
+        else:
+            config.AIDER_NUM_CTX = config.coerce_num_ctx(
+                _actx_raw,
+                fallback=config.AIDER_NUM_CTX or config.OPENHANDS_NUM_CTX,
+            )
         settings["aider_num_ctx"] = config.AIDER_NUM_CTX
-        print(f"[Config] Aider num_ctx: {config.AIDER_NUM_CTX}")
+        print(f"[Config] Aider num_ctx: {config.AIDER_NUM_CTX or '(inherit Daedalus slider)'}")
     if "aider_auto_test" in body:
         config.AIDER_AUTO_TEST = bool(body["aider_auto_test"])
         print(f"[Config] Aider auto-test: {config.AIDER_AUTO_TEST}")
@@ -348,6 +360,7 @@ async def update_app_settings(body: dict = Body(...)):
         "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
         "openhands_num_ctx": config.OPENHANDS_NUM_CTX,
         "openhands_reasoning_effort": config.OPENHANDS_REASONING_EFFORT,
+        "openhands_disable_thinking": config.OPENHANDS_DISABLE_THINKING,
         "aider_enabled": config.AIDER_ENABLED,
         "aider_model": config.AIDER_MODEL,
         "aider_num_ctx": config.AIDER_NUM_CTX,
@@ -454,9 +467,9 @@ async def cleanup_codebox():
 @router.get("/api/changelog")
 async def get_changelog():
     """Return the CHANGELOG.md content."""
-    changelog_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "..", "CHANGELOG.md")
+    changelog_path = Path(__file__).resolve().parents[2] / "CHANGELOG.md"
     try:
-        with open(changelog_path, "r") as f:
+        with open(changelog_path, "r", encoding="utf-8") as f:
             content = f.read()
         return {"content": content}
     except FileNotFoundError:

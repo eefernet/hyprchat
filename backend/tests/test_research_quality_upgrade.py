@@ -354,13 +354,15 @@ def test_streamed_report_output_filters_thinking_before_live_emit(monkeypatch):
 
 def test_pdf_export_uses_react_markdown_renderer_and_pygraph_alias():
     index = (_BACKEND.parent / "frontend" / "src" / "main.jsx").read_text()
+    markdown_blocks = (_BACKEND.parent / "frontend" / "src" / "components" / "markdownBlocks.jsx").read_text()
     assert "ResearchPrintPage" in index
     # PDF export wraps the report markdown through the React renderer with
     # print-mode + theme args (repinned after the renderer gained options).
     assert re.search(r"<MDWrap>\{md\(bodyMd,\{printMode:true", index)
     assert 'lang==="chart"||lang==="pygraph"' in index
     assert 'looksLikeChartConfig(code)' in index
-    assert 'function sanitizeMermaidCode' in index
+    assert 'function sanitizeMermaidCode' in markdown_blocks
+    assert 'sanitizeMermaidCode(code)' in markdown_blocks
     assert "waitForResearchRender" in index
     assert "html2pdf().set" in index
 

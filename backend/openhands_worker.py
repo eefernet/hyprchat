@@ -27,12 +27,43 @@ class _RunCancelled(Exception):
     """Raised inside on_event when the client requests cancellation."""
 
 
+# Host-level package-manager config redirectors, stripped from this process's
+# environment at import time so OpenHands bash actions and Aider subprocesses
+# (both inherit os.environ) build the project, not the host's config. A stray
+# PIP_CONSTRAINT= in the service unit once broke every pip install on the box.
+# Mirror of backend/agents/language_adapters.py:HERMETIC_UNSET_VARS — this
+# file deploys standalone to Codebox and cannot import backend modules; keep
+# the two lists in sync.
+_HERMETIC_UNSET_VARS = [
+    "PIP_CONSTRAINT",
+    "PIP_CONFIG_FILE",
+    "PIP_REQUIRE_VIRTUALENV",
+    "NPM_CONFIG_USERCONFIG",
+    "NPM_CONFIG_GLOBALCONFIG",
+    "GOFLAGS",
+]
+for _var in _HERMETIC_UNSET_VARS:
+    os.environ.pop(_var, None)
+
+
 _ACTIVE_RUNS: dict[str, dict] = {}
 _ACTIVE_RUNS_LOCK = threading.Lock()
 _ACTIVE_AIDER_RUNS: dict[str, dict] = {}
 _ACTIVE_AIDER_RUNS_LOCK = threading.Lock()
 AIDER_MAX_SECONDS = int(os.environ.get("AIDER_MAX_SECONDS", "420"))
 AIDER_REPEAT_LINE_LIMIT = int(os.environ.get("AIDER_REPEAT_LINE_LIMIT", "120"))
+# OpenHands LLM call bounds. num_predict caps a single completion so it always
+# terminates (an uncapped qwen3-coder response was observed at 14K+ tokens,
+# which can never finish inside any sane timeout); the timeout then only fires
+# on genuinely dead calls, not on long-but-healthy generations.
+OH_LLM_TIMEOUT_SECONDS = int(os.environ.get("OH_LLM_TIMEOUT_SECONDS", "420"))
+OH_NUM_PREDICT = int(os.environ.get("OH_NUM_PREDICT", "8192"))
+# Thinking control for the builder LLM. Thinking-capable models (qwen3.5
+# merges etc.) otherwise reason with an UNBOUNDED budget on every tool call —
+# reasoning_effort never reaches Ollama's `think` switch through litellm.
+# "" (default) = send think:false to models whose /api/show capabilities
+# include "thinking"; "on" = never send it; "off" = same as default.
+OH_THINK = os.environ.get("OH_THINK", "").strip().lower()
 
 
 def _register_run(run_id: str, conversation, cancel_event: threading.Event) -> None:
@@ -143,6 +174,163 @@ def _derive_project_name(task: str, language: str) -> str:
     return f"{language}-project"
 
 
+def _clean_project_name(name: str) -> str:
+    """Return a safe single-directory project name."""
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", (name or "").strip())
+    cleaned = cleaned.strip(".-_")
+    return cleaned[:80]
+
+
+def _workspace_for_request(req: "RunRequest") -> tuple[Path, str, bool]:
+    """Choose the OpenHands workspace (pre-refactor behavior).
+
+    A provided project_id is honored only as a genuine RESUME — i.e. when that
+    directory already exists. A fresh build always lands in a new task-derived,
+    uuid-uniquified directory so it can never inherit "continue working on the
+    existing files" semantics from a colliding or stale project id (which is
+    what made the Builder write a single file into a pre-existing dir).
+    """
+    import uuid
+
+    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    requested = _clean_project_name(req.project_id)
+    if requested and (PROJECTS_DIR / requested).is_dir():
+        work_dir = PROJECTS_DIR / requested
+        work_dir.mkdir(parents=True, exist_ok=True)
+        return work_dir, requested, True
+
+    project_name = _derive_project_name(req.task, req.language)
+    work_dir = PROJECTS_DIR / project_name
+    if work_dir.exists():
+        work_dir = PROJECTS_DIR / f"{project_name}-{uuid.uuid4().hex[:4]}"
+        project_name = work_dir.name
+    work_dir.mkdir(parents=True, exist_ok=True)
+    return work_dir, project_name, False
+
+
+def _agent_finished(status_str: str, progress_log: list[dict]) -> bool:
+    """True if the build agent reached a proper `finish`, not a truncation.
+
+    A run that stops without finishing (model truncated mid-build, hit the round
+    cap, errored) must not be reported as a complete success. Conservative:
+    only returns False when NEITHER a FINISHED execution status NOR a finish
+    action was observed, so genuinely-finished builds are never false-flagged.
+    """
+    if "finish" in (status_str or "").lower():
+        return True
+    for step in progress_log or []:
+        if "finish" in str(step.get("action") or "").lower():
+            return True
+    return False
+
+
+# Bounded same-conversation "you are not done" nudges. Local coder models
+# routinely end a turn with plain text ("Now let me create the frontend
+# files:") and no tool call, which the SDK treats as the agent finishing —
+# leaving most planned files unwritten. send_message() on a FINISHED
+# conversation resets it to IDLE, so a nudge resumes the SAME warm
+# conversation instead of paying for a fresh worker pass.
+# Observed live: qwen3-coder narrates-then-stops after almost every action,
+# so a nudge typically yields ONE file in 2-10s off the warm prompt cache.
+# The budget is therefore generous, and a single text-only reply doesn't end
+# the loop — only OH_NUDGE_NO_PROGRESS_LIMIT consecutive no-progress nudges do.
+OH_COMPLETION_NUDGES = int(os.environ.get("OH_COMPLETION_NUDGES", "12"))
+OH_NUDGE_NO_PROGRESS_LIMIT = int(os.environ.get("OH_NUDGE_NO_PROGRESS_LIMIT", "2"))
+
+
+def _normalize_required_path(path: str) -> str:
+    """Mirror the backend's _normalize_manifest_path so both sides agree."""
+    path = str(path or "").replace("\\", "/").strip()
+    if not path:
+        return ""
+    path = re.sub(r"^/+", "", path)
+    if path.startswith("root/projects/"):
+        parts = path.split("/")
+        path = "/".join(parts[3:]) if len(parts) > 3 else ""
+    path = re.sub(r"/+", "/", path).strip("/")
+    if not path or path.endswith("/"):
+        return ""
+    return path
+
+
+def _missing_required_files(work_dir, required: list[str]) -> list[str]:
+    """Planned files that do not exist under work_dir yet."""
+    base = Path(work_dir)
+    missing = []
+    for raw in required or []:
+        rel = _normalize_required_path(raw)
+        if not rel:
+            continue
+        try:
+            if not (base / rel).is_file():
+                missing.append(rel)
+        except OSError:
+            missing.append(rel)
+    return missing
+
+
+def _run_completion_nudges(conversation, work_dir, required: list[str],
+                           cancel_event=None, on_nudge=None,
+                           extra_note: str = "") -> tuple[int, list[str]]:
+    """Resume a finished conversation until every required file exists.
+
+    Returns (nudges_used, still_missing). A single no-progress nudge (the
+    model replied with narration text and no tool call — its signature
+    failure) gets ONE insistent retry naming a concrete file; only
+    OH_NUDGE_NO_PROGRESS_LIMIT consecutive no-progress nudges end the loop.
+    """
+    missing = _missing_required_files(work_dir, required)
+    nudges = 0
+    no_progress = 0
+    while missing and nudges < OH_COMPLETION_NUDGES:
+        if cancel_event is not None and cancel_event.is_set():
+            raise _RunCancelled()
+        nudges += 1
+        before = set(missing)
+        if on_nudge:
+            try:
+                on_nudge(nudges, missing)
+            except Exception:
+                pass
+        print(f"[OH-Worker] Completion nudge {nudges}/{OH_COMPLETION_NUDGES}: "
+              f"{len(missing)} required file(s) missing — resuming conversation")
+        listing = "\n".join(f"  - {p}" for p in missing[:30])
+        if no_progress:
+            msg = (
+                f"STOP narrating. Your previous reply was plain text with no tool "
+                f"call — that does nothing. Use the file_editor tool RIGHT NOW to "
+                f"create `{work_dir}/{missing[0]}` with its complete contents. "
+                f"Then create the rest, one tool call after another, until every "
+                f"file below exists:\n{listing}\n\n"
+                f"Only call `finish` when all of them exist."
+            )
+        else:
+            msg = (
+                f"You are NOT done. These planned files are still missing from "
+                f"`{work_dir}`:\n{listing}\n\n"
+                f"Create EVERY one of them now with their full contents, re-run the "
+                f"verification steps, and only then call `finish`. Do not respond "
+                f"with a plain text message — every response must be a tool call."
+            )
+        if extra_note:
+            msg += extra_note
+        conversation.send_message(msg)
+        conversation.run()
+        missing = _missing_required_files(work_dir, required)
+        if set(missing) == before:
+            no_progress += 1
+            if no_progress >= OH_NUDGE_NO_PROGRESS_LIMIT:
+                print(f"[OH-Worker] Nudge {nudges}: {no_progress} consecutive "
+                      f"no-progress nudges on {len(missing)} missing file(s); "
+                      f"stopping nudge loop")
+                break
+            print(f"[OH-Worker] Nudge {nudges} made no progress "
+                  f"({len(missing)} still missing) — retrying with insistent nudge")
+        else:
+            no_progress = 0
+    return nudges, missing
+
+
 class RunRequest(BaseModel):
     task: str
     model: str = "qwen2.5:14b"
@@ -159,9 +347,18 @@ class RunRequest(BaseModel):
     # Reasoning effort passed to the SDK LLM. Default "medium"; "high" is
     # heavy-think-token mode and slow on local Ollama models, "low" is fastest.
     reasoning_effort: str = "medium"  # low | medium | high
+    # Send `think: false` to thinking-capable models (qwen3.5 merges reason
+    # with an UNBOUNDED budget per tool call otherwise — reasoning_effort
+    # never reaches Ollama's think switch through litellm). Non-thinking
+    # models are unaffected (the flag is capability-gated worker-side).
+    disable_thinking: bool = True
     # Only meaningful when profile == "continue": list of manifest files the
     # last builder run failed to write. The worker focuses on these.
     manifest_missing: list[str] = []
+    # Full Architect manifest (project-root-relative paths). When set, the
+    # worker nudges the agent (same conversation) until every file exists or
+    # the nudge budget runs out, and reports what is still missing.
+    required_files: list[str] = []
 
 
 class RunResponse(BaseModel):
@@ -172,6 +369,15 @@ class RunResponse(BaseModel):
     duration_seconds: float = 0.0
     steps: list[dict] = []
     project_id: str = ""
+    # False when the agent stopped without a proper `finish` (truncated /
+    # hit the round cap). Lets the backend flag a one-file build incomplete.
+    agent_finished: bool = True
+    # required_files entries still absent after the completion-nudge loop.
+    missing_required_files: list[str] = []
+    # True when the model repeatedly emitted file_editor calls with the
+    # file_text argument missing (≥3 in this run) — a native-tool-arg
+    # reliability failure, not a task failure.
+    arg_drop_detected: bool = False
 
 
 class AiderRunRequest(BaseModel):
@@ -208,8 +414,139 @@ CACHE_PATH = Path("/opt/openhands-worker/.tool_cache.json")
 # Bump to invalidate persisted entries when the detection logic changes.
 # v2: Ollama 0.30 capabilities-aware check — pre-0.30 entries misclassified
 # llama.cpp-backend models (degenerate template, no .Tools) as prompt-based.
-_TOOL_CACHE_VERSION = 2
+# v3: multi-line arg round-trip probe — v2 trusted capabilities alone, which
+# passed models (Qwopus3.6 merge) that emit tool calls with the file_text
+# argument MISSING. v3 verifies a multi-line string arg survives intact.
+_TOOL_CACHE_VERSION = 3
 _tool_support_cache: dict[str, bool] = {}
+
+# /api/show capabilities per model (in-process only — cheap call, and
+# capabilities change when the user re-imports a model).
+_caps_cache: dict[str, list] = {}
+
+
+def _model_capabilities(ollama_base: str, model: str) -> list:
+    """Cached /api/show capabilities list for a model. [] on any failure
+    (transient failures are NOT cached)."""
+    key = f"{ollama_base}:{model}"
+    if key in _caps_cache:
+        return _caps_cache[key]
+    try:
+        import requests
+        r = requests.post(f"{ollama_base}/api/show", json={"name": model}, timeout=5)
+        if not r.ok:
+            return []
+        caps = r.json().get("capabilities") or []
+    except Exception:
+        return []
+    _caps_cache[key] = caps
+    return caps
+
+
+def _resolve_think_flag(ollama_base: str, model: str, disable_thinking: bool) -> bool | None:
+    """False → send `think: false` to Ollama; None → send nothing.
+
+    Only thinking-capable models get the flag (Ollama 400s otherwise). The
+    OH_THINK env var overrides the per-request setting: "on" never disables,
+    "off" always disables (for thinking-capable models).
+    """
+    if OH_THINK == "on":
+        return None
+    if not disable_thinking and OH_THINK != "off":
+        return None
+    if "thinking" in _model_capabilities(ollama_base, model):
+        return False
+    return None
+
+
+# file_editor's observation text when the model omitted the content arg.
+_ARG_DROP_MARKER = "file_text` is required"
+_ARG_DROP_NOTE = (
+    "\n\nCRITICAL: when calling file_editor `create` you MUST include the "
+    "complete file content in the `file_text` parameter of the SAME call — "
+    "never a path alone. If the tool keeps rejecting your call, write the "
+    "file with a terminal heredoc instead: cat > /path/file << 'EOF' ... EOF"
+)
+
+
+def _maybe_demote_native_tc(ollama_base: str, model: str, drops: int,
+                            still_missing: list) -> None:
+    """Persist native_tool_calling=False for a model that dropped file_text
+    args ≥3 times in a run that still failed to complete its manifest —
+    future runs (and this build's continue passes) use the prompt-based path."""
+    if drops < 3 or not still_missing:
+        return
+    ck = f"{ollama_base}:{model}"
+    if _tool_support_cache.get(ck) is False:
+        return
+    _tool_support_cache[ck] = False
+    _persist_tool_cache()
+    print(f"[OH-Worker] {model}: dropped file_text args {drops}x this run with "
+          f"{len(still_missing)} planned file(s) still missing — DEMOTED to "
+          f"prompt-based tool calling (persisted)")
+
+
+def _make_llm_and_agent(req: "RunRequest", ollama_base: str, native_tc: bool,
+                        tag: str = ""):
+    """LLM + Agent construction shared by /run and /run-stream.
+
+    Keeping one copy prevents the paths from drifting (the stream path
+    historically missed reasoning_effort → SDK default "high").
+    """
+    _re = (req.reasoning_effort or "medium").strip().lower()
+    if _re not in ("low", "medium", "high"):
+        _re = "medium"
+    # num_ctx/num_predict/temperature must ride inside "options" — the
+    # ollama_chat litellm path drops top-level kwargs (bare num_ctx is
+    # silently ignored → Modelfile default, often 131K+, blows VRAM), and
+    # num_predict bounds each completion so it always terminates.
+    extra_body = {"options": {
+        "num_ctx": req.num_ctx,
+        "num_predict": OH_NUM_PREDICT,
+        "temperature": 0.3,
+    }}
+    think_flag = _resolve_think_flag(ollama_base, req.model, req.disable_thinking)
+    if think_flag is False:
+        # Top-level sibling of "options" — merged into the Ollama request
+        # body by the same extra_body mechanism that delivers options.num_ctx.
+        extra_body["think"] = False
+    _llm_kwargs = dict(
+        model=f"ollama_chat/{req.model}",
+        api_key="ollama",
+        base_url=ollama_base,
+        temperature=0.3,
+        timeout=OH_LLM_TIMEOUT_SECONDS,
+        num_retries=2,
+        drop_params=True,
+        native_tool_calling=native_tc,
+        litellm_extra_body=extra_body,
+    )
+    # SDK accepts `reasoning_effort` as a top-level kwarg; older builds may
+    # not. Try with it; if rejected, retry without (SDK default is "high").
+    try:
+        llm = _LLM(reasoning_effort=_re, **_llm_kwargs)
+        print(f"[OH-Worker] reasoning_effort={_re}"
+              f" think={'off' if think_flag is False else 'model-default'}{tag}")
+    except TypeError:
+        print(f"[OH-Worker] SDK rejected reasoning_effort kwarg — using default{tag}")
+        llm = _LLM(**_llm_kwargs)
+
+    tools = [
+        _Tool(name="terminal"),
+        _Tool(name="file_editor"),
+        _Tool(name="glob"),
+        _Tool(name="grep"),
+    ]
+    # Exclude the SDK-default ThinkTool: reasoning models double-think with
+    # it, and a live build burned 4 straight rounds on think spam before
+    # writing a single file. FinishTool must stay (only way a run ends).
+    try:
+        agent = _Agent(llm=llm, tools=tools, include_default_tools=["FinishTool"])
+    except Exception as agent_err:
+        print(f"[OH-Worker] include_default_tools kwarg rejected "
+              f"({type(agent_err).__name__}) — using SDK default toolset{tag}")
+        agent = _Agent(llm=llm, tools=tools)
+    return llm, agent
 
 # Load persisted cache on startup; discard stale-version caches wholesale.
 try:
@@ -414,17 +751,22 @@ def _safe_allowed_files(project_dir: Path, files: list[str]) -> list[str]:
     return out
 
 
-def _worker_python() -> str:
+def _worker_python(project_dir: str | Path | None = None) -> str:
+    # Per-project venv first: relative form because Aider/test subprocesses
+    # run with cwd at the project root. Shared /root/venv is the legacy
+    # fallback for projects that predate per-project venvs.
+    if project_dir and (Path(project_dir) / ".venv" / "bin" / "python3").exists():
+        return "./.venv/bin/python3"
     preferred = Path("/root/venv/bin/python3")
     if preferred.exists():
         return str(preferred)
     return shutil.which("python3") or "python3"
 
 
-def _normalize_worker_command(cmd: str) -> str:
+def _normalize_worker_command(cmd: str, project_dir: str | Path | None = None) -> str:
     if not cmd:
         return ""
-    py = _worker_python()
+    py = _worker_python(project_dir)
     # Stale upload contracts used bare `python`, but the worker only guarantees
     # python3/the Codebox venv. Replace shell command tokens without touching
     # python3, paths like /usr/bin/python, or prose in file names.
@@ -547,7 +889,7 @@ def _write_aider_prompt(req: AiderRunRequest, prompt_dir: Path) -> Path:
     allowed = "\n".join(f"- {p}" for p in (req.allowed_files or [])[:80]) or "(none specified)"
     known_root = _known_test_root_section(req)
     state_isolation = _test_state_isolation_section(req)
-    content = f"""You are editing an existing uploaded project. Make the smallest coherent patch that satisfies the task.
+    content = f"""You are editing an existing project. Make the smallest coherent patch that satisfies the task.
 
 ## User Task
 {req.task}
@@ -572,6 +914,9 @@ def _write_aider_prompt(req: AiderRunRequest, prompt_dir: Path) -> Path:
 Rules:
 - Work from the existing repository. Do not rebuild the project from scratch.
 - Prefer focused edits over broad rewrites.
+- Fix EVERY instance of the described inaccuracy or bug in each file you touch,
+  not only the cited lines — scan the whole file for other occurrences of the
+  same problem.
 - Preserve existing behavior unless the task or review envelope requires a change.
 - If tests fail, fix the root cause and rerun the relevant command when possible.
 - When the review reports stale `/root/projects/...` paths, prioritize the
@@ -609,8 +954,8 @@ def _build_aider_command(req: AiderRunRequest, prompt_file: Path,
         "--no-auto-commits",
         "--model-settings-file", str(model_settings_file),
     ]
-    test_cmd = _normalize_worker_command(req.test_cmd)
-    lint_cmd = _normalize_worker_command(req.lint_cmd)
+    test_cmd = _normalize_worker_command(req.test_cmd, req.project_dir)
+    lint_cmd = _normalize_worker_command(req.lint_cmd, req.project_dir)
     if req.auto_test and test_cmd:
         cmd += ["--test-cmd", test_cmd, "--auto-test"]
     if lint_cmd:
@@ -639,15 +984,15 @@ def _run_aider_blocking(req: AiderRunRequest, stream_cb=None) -> dict:
         }
 
     prompt_dir = Path("/tmp/hyprchat-aider")
-    req.test_cmd = _normalize_worker_command(req.test_cmd)
-    req.lint_cmd = _normalize_worker_command(req.lint_cmd)
+    req.test_cmd = _normalize_worker_command(req.test_cmd, project_dir)
+    req.lint_cmd = _normalize_worker_command(req.lint_cmd, project_dir)
     if isinstance(req.contract, dict):
         for key in ("build_cmd", "test_cmd", "smoke_cmd", "aider_test_cmd", "aider_lint_cmd"):
             if isinstance(req.contract.get(key), str):
-                req.contract[key] = _normalize_worker_command(req.contract[key])
+                req.contract[key] = _normalize_worker_command(req.contract[key], project_dir)
         if isinstance(req.contract.get("smoke_cmds"), list):
             req.contract["smoke_cmds"] = [
-                _normalize_worker_command(c) if isinstance(c, str) else c
+                _normalize_worker_command(c, project_dir) if isinstance(c, str) else c
                 for c in req.contract["smoke_cmds"]
             ]
     req.allowed_files = _safe_allowed_files(project_dir, req.allowed_files)
@@ -916,13 +1261,20 @@ async def run_aider_stream(req: AiderRunRequest):
     )
 
 
-def _check_tool_support(ollama_base: str, model: str) -> bool:
-    """Check if an Ollama model actually returns structured tool_calls.
+def _check_tool_support(ollama_base: str, model: str, num_ctx: int = 8192) -> bool:
+    """Check if an Ollama model reliably returns structured tool_calls.
 
-    Sends a minimal test request with a dummy tool. If the response contains
-    a 'tool_calls' field, native tool calling works. If the model puts the
-    tool call as JSON text in 'content' instead, it doesn't truly support
-    structured tool calls and we fall back to prompt-based.
+    Two stages:
+      1. /api/show capabilities — no "tools" means prompt-based, full stop.
+      2. Multi-line arg round-trip: ask the model to call a write_file tool
+         whose file_text argument is a known 3-line body. Capabilities alone
+         are NOT enough — merge models (Qwopus3.6) advertise tools yet emit
+         `create` calls with the file_text argument missing, which burns
+         builder rounds on "Parameter `file_text` is required" errors.
+
+    `num_ctx` should be the run's context size so a cold probe doesn't load
+    the model at the Modelfile default (262K on some imports → huge KV
+    allocation) or at a size _ensure_loaded would immediately evict.
     Results are cached per model so the live test only runs once.
     """
     import requests
@@ -949,13 +1301,7 @@ def _check_tool_support(ollama_base: str, model: str) -> bool:
                     _tool_support_cache[cache_key] = False
                     _persist_tool_cache()
                     return False
-                # Capabilities are authoritative on 0.30+ — trust them. The
-                # "Say hello" live test false-negatives on capable models that
-                # simply answer in text instead of calling the dummy tool.
-                print(f"[OH-Worker] {model}: capabilities advertise tools → native")
-                _tool_support_cache[cache_key] = True
-                _persist_tool_cache()
-                return True
+                _caps_cache[f"{ollama_base}:{model}"] = caps
             elif ".Tools" not in body.get("template", ""):
                 print(f"[OH-Worker] {model}: no .Tools in template → prompt-based")
                 _tool_support_cache[cache_key] = False
@@ -967,39 +1313,91 @@ def _check_tool_support(ollama_base: str, model: str) -> bool:
         print(f"[OH-Worker] Template check failed for {model}: {e}")
         return False
 
-    # Live test: send a trivial tool call and check for structured response
-    try:
-        test_payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": "Say hello"}],
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": "say",
-                    "description": "Say a message",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"text": {"type": "string"}},
-                        "required": ["text"],
+    # Live multi-line round-trip: the model must produce a structured
+    # tool_call AND the multi-line file_text argument must survive intact.
+    probe_body = "alpha line one\nbeta line two\ngamma line three"
+    test_payload = {
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": (
+                "Use the write_file tool to create /tmp/probe.txt. The "
+                "file_text argument must be exactly these three lines:\n"
+                f"{probe_body}\n"
+                "Call the tool now — do not reply with text."
+            ),
+        }],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Write a text file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "file_text": {"type": "string",
+                                      "description": "Complete file contents"},
                     },
+                    "required": ["path", "file_text"],
                 },
-            }],
-            "stream": False,
-        }
-        r = requests.post(f"{ollama_base}/api/chat", json=test_payload, timeout=30)
-        if r.ok:
-            msg = r.json().get("message", {})
-            has_tool_calls = bool(msg.get("tool_calls"))
-            print(f"[OH-Worker] {model}: live tool test → "
-                  f"{'structured tool_calls' if has_tool_calls else 'text JSON (no tool_calls)'}")
-            _tool_support_cache[cache_key] = has_tool_calls
-            _persist_tool_cache()
-            return has_tool_calls
-    except Exception as e:
-        # Transient failure — don't persist a False verdict for the model.
-        print(f"[OH-Worker] Live tool test failed for {model}: {e}")
+            },
+        }],
+        "stream": False,
+        "options": {"num_ctx": max(2048, int(num_ctx or 8192)),
+                    "num_predict": 512},
+    }
+    if "thinking" in _model_capabilities(ollama_base, model):
+        test_payload["think"] = False
 
-    return False
+    saw_tool_call = False
+    for attempt in (1, 2):
+        try:
+            r = requests.post(f"{ollama_base}/api/chat", json=test_payload, timeout=120)
+            if not r.ok:
+                print(f"[OH-Worker] {model}: probe HTTP {r.status_code} (attempt {attempt})")
+                continue
+            calls = (r.json().get("message") or {}).get("tool_calls") or []
+            if not calls:
+                continue
+            saw_tool_call = True
+            args = (calls[0].get("function") or {}).get("arguments") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+            file_text = str(args.get("file_text") or "")
+            if "alpha line one" in file_text and file_text.count("\n") >= 2:
+                print(f"[OH-Worker] {model}: multi-line arg probe OK → native")
+                _tool_support_cache[cache_key] = True
+                _persist_tool_cache()
+                return True
+            print(f"[OH-Worker] {model}: tool_call arrived but file_text was "
+                  f"{'MISSING' if not file_text else 'mangled'} "
+                  f"(attempt {attempt}) — args keys: {sorted(args)}")
+        except Exception as e:
+            # Transient failure — don't persist a False verdict.
+            print(f"[OH-Worker] Probe attempt {attempt} failed for {model}: {e}")
+            if attempt == 2 and not saw_tool_call:
+                return False
+
+    if saw_tool_call:
+        # Structured calls arrive but multi-line args get dropped — the
+        # exact failure that stalls builds. Persist prompt-based.
+        print(f"[OH-Worker] {model}: drops multi-line tool args → prompt-based (persisted)")
+        _tool_support_cache[cache_key] = False
+        _persist_tool_cache()
+        return False
+
+    # No tool_calls at all on a capabilities-advertised model: known false
+    # negative (some models answer probes in text but tool-call fine in real
+    # agent loops). Trust capabilities, but don't persist — re-probe next
+    # restart, and the runtime arg-drop demotion catches real offenders.
+    print(f"[OH-Worker] {model}: probe got no tool_calls; capabilities say tools → "
+          f"native (unpersisted)")
+    _tool_support_cache[cache_key] = True
+    return True
 
 
 @app.post("/run", response_model=RunResponse)
@@ -1024,63 +1422,21 @@ def run_task(req: RunRequest):
         # ── Detect native tool support via live test ──
         # Some models (qwen3) return structured tool_calls → use native mode.
         # Others (qwen2.5-coder) put JSON in content text → use prompt-based.
-        native_tc = _check_tool_support(ollama_base, req.model)
+        native_tc = _check_tool_support(ollama_base, req.model, num_ctx=req.num_ctx)
 
-        # ── LLM config ──
+        # ── LLM + Agent (shared factory) ──
         # The user's num_ctx from HyprChat settings is authoritative — we don't
         # second-guess it based on task length / keywords. Force-load Ollama at
-        # exactly that value, and pass it nested under "options" so litellm
-        # forwards it as options.num_ctx (Ollama ignores top-level num_ctx).
+        # exactly that value; the factory also passes it nested under "options"
+        # so litellm forwards it as options.num_ctx.
         _ensure_loaded(ollama_base, req.model, req.num_ctx)
-        _re = (req.reasoning_effort or "medium").strip().lower()
-        if _re not in ("low", "medium", "high"):
-            _re = "medium"
-        _llm_kwargs = dict(
-            model=f"ollama_chat/{req.model}",
-            api_key="ollama",
-            base_url=ollama_base,
-            temperature=0.3,
-            timeout=180,
-            num_retries=2,
-            drop_params=True,
-            native_tool_calling=native_tc,
-            litellm_extra_body={"options": {"num_ctx": req.num_ctx}},
-        )
-        # SDK accepts `reasoning_effort` as a top-level kwarg; older builds may
-        # not. Try with it; if it's rejected, retry without (SDK falls back to
-        # its built-in default of "high").
-        try:
-            llm = _LLM(reasoning_effort=_re, **_llm_kwargs)
-            print(f"[OH-Worker] reasoning_effort={_re}")
-        except TypeError:
-            print(f"[OH-Worker] SDK rejected reasoning_effort kwarg — using default")
-            llm = _LLM(**_llm_kwargs)
-
-        # ── Agent with core tools ──
-        tools = [
-            _Tool(name="terminal"),
-            _Tool(name="file_editor"),
-            _Tool(name="glob"),
-            _Tool(name="grep"),
-        ]
-
-        agent = _Agent(llm=llm, tools=tools)
+        llm, agent = _make_llm_and_agent(req, ollama_base, native_tc)
 
         # ── Workspace setup ──
-        import uuid
-        PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-        _reusing = False
-        if req.project_id and (PROJECTS_DIR / req.project_id).is_dir():
-            work_dir = PROJECTS_DIR / req.project_id
-            project_name = req.project_id
-            _reusing = True
+        work_dir, project_name, _reusing = _workspace_for_request(req)
+        if _reusing:
             print(f"[OH-Worker] Reusing existing workspace: {work_dir}")
         else:
-            project_name = _derive_project_name(req.task, req.language)
-            work_dir = PROJECTS_DIR / project_name
-            if work_dir.exists():
-                work_dir = PROJECTS_DIR / f"{project_name}-{uuid.uuid4().hex[:4]}"
-            work_dir.mkdir(parents=True, exist_ok=True)
             print(f"[OH-Worker] Workspace: {work_dir} (project: {project_name})")
 
         # ── Build task prompt (concise — SDK provides its own system prompt) ──
@@ -1090,6 +1446,8 @@ def run_task(req: RunRequest):
         pre_snapshot = _snapshot_workspace(work_dir)
 
         # ── Event callback for live progress tracking ──
+        arg_drop = {"total": 0}
+
         def on_event(event):
             if cancel_event.is_set():
                 raise _RunCancelled()
@@ -1099,6 +1457,9 @@ def run_task(req: RunRequest):
                     progress_log.append(step_info)
                     action = step_info.get("action", "")
                     detail = step_info.get("detail", "")[:80]
+                    if (action == "file_editor_result"
+                            and _ARG_DROP_MARKER in step_info.get("detail", "")):
+                        arg_drop["total"] += 1
                     print(f"[OH-Worker]   Step {len(progress_log)}: {action} — {detail}")
             except Exception:
                 pass
@@ -1133,6 +1494,12 @@ def run_task(req: RunRequest):
         conversation.send_message(full_task)
         print(f"[OH-Worker] Starting run (run_id={req.run_id or '-'}, max_rounds={req.max_rounds}, num_ctx={req.num_ctx})...")
         conversation.run()
+
+        _nudges_used, _still_missing = _run_completion_nudges(
+            conversation, work_dir, req.required_files, cancel_event=cancel_event,
+            extra_note=_ARG_DROP_NOTE if arg_drop["total"] >= 2 else "",
+        )
+        _maybe_demote_native_tc(ollama_base, req.model, arg_drop["total"], _still_missing)
 
         status_str = str(conversation.state.execution_status)
         event_count = len(list(conversation.state.events))
@@ -1187,11 +1554,16 @@ def run_task(req: RunRequest):
                     moved.append(str(dest))
                     print(f"[OH-Worker]   Moved: {rf.name}")
                 files_created = moved
+                all_workspace_files = _list_all_files(work_dir)
 
         summary = _extract_summary(conversation)
         duration = time.time() - start
+        # A run only counts as finished when the agent reached `finish` AND no
+        # planned file is still missing after the nudge loop.
+        agent_finished = _agent_finished(status_str, progress_log) and not _still_missing
         print(f"[OH-Worker] Done in {duration:.1f}s — {len(files_created)} files, "
-              f"{len(progress_log)} steps, stuck={stuck}")
+              f"{len(progress_log)} steps, stuck={stuck}, finished={agent_finished}, "
+              f"nudges={_nudges_used}, still_missing={len(_still_missing)}")
 
         return RunResponse(
             status="stuck" if stuck and not files_created else "ok",
@@ -1201,6 +1573,9 @@ def run_task(req: RunRequest):
             duration_seconds=round(duration, 1),
             steps=progress_log[-20:],
             project_id=project_name,
+            agent_finished=agent_finished,
+            missing_required_files=_still_missing,
+            arg_drop_detected=arg_drop["total"] >= 3,
         )
 
     except _RunCancelled:
@@ -1284,52 +1659,19 @@ async def run_task_stream(req: RunRequest):
         """Synchronous function that runs in a thread."""
         try:
             ollama_base = req.ollama_url.rstrip("/")
-            native_tc = _check_tool_support(ollama_base, req.model)
+            native_tc = _check_tool_support(ollama_base, req.model, num_ctx=req.num_ctx)
             # Force the loaded instance to match req.num_ctx — user setting wins
             # over Modelfile defaults and over whatever litellm forwards (or fails to forward).
             _ensure_loaded(ollama_base, req.model, req.num_ctx)
 
-            llm = _LLM(
-                model=f"ollama_chat/{req.model}",
-                api_key="ollama",
-                base_url=ollama_base,
-                temperature=0.3,
-                timeout=180,
-                num_retries=2,
-                drop_params=True,
-                native_tool_calling=native_tc,
-                # Pass num_ctx nested under "options" so litellm forwards it to
-                # Ollama's options.num_ctx field. A bare {"num_ctx": ...} lands at
-                # the body's top level, which Ollama silently ignores → it falls
-                # back to the modelfile default (often 131K), blowing VRAM and
-                # tripping the 180s timeout.
-                litellm_extra_body={"options": {"num_ctx": req.num_ctx}},
-            )
+            llm, agent = _make_llm_and_agent(req, ollama_base, native_tc, tag=" (stream)")
 
-            tools = [
-                _Tool(name="terminal"),
-                _Tool(name="file_editor"),
-                _Tool(name="glob"),
-                _Tool(name="grep"),
-            ]
-            agent = _Agent(llm=llm, tools=tools)
-
-            import uuid
-            PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-            _reusing = False
-            if req.project_id and (PROJECTS_DIR / req.project_id).is_dir():
-                work_dir = PROJECTS_DIR / req.project_id
-                project_name = req.project_id
-                _reusing = True
-            else:
-                project_name = _derive_project_name(req.task, req.language)
-                work_dir = PROJECTS_DIR / project_name
-                if work_dir.exists():
-                    work_dir = PROJECTS_DIR / f"{project_name}-{uuid.uuid4().hex[:4]}"
-                work_dir.mkdir(parents=True, exist_ok=True)
+            work_dir, project_name, _reusing = _workspace_for_request(req)
 
             full_task = _build_task_prompt(req, str(work_dir), continuing=_reusing)
             pre_snapshot = _snapshot_workspace(work_dir)
+
+            arg_drop = {"total": 0}
 
             def on_event(event):
                 # Cancellation check happens BEFORE the inner try/except so
@@ -1342,6 +1684,9 @@ async def run_task_stream(req: RunRequest):
                         step_counter[0] += 1
                         step_info["step"] = step_counter[0]
                         progress_log.append(step_info)
+                        if (step_info.get("action") == "file_editor_result"
+                                and _ARG_DROP_MARKER in step_info.get("detail", "")):
+                            arg_drop["total"] += 1
                         _send_sse({
                             "type": "step",
                             "action": step_info.get("action", ""),
@@ -1381,6 +1726,21 @@ async def run_task_stream(req: RunRequest):
             print(f"[OH-Worker] Starting streamed run (run_id={req.run_id or '-'}, max_rounds={req.max_rounds}, num_ctx={req.num_ctx})...")
             conversation.run()
 
+            def _nudge_sse(n, miss):
+                _send_sse({
+                    "type": "step", "action": "nudge",
+                    "detail": (f"Completion nudge {n}/{OH_COMPLETION_NUDGES}: "
+                               f"{len(miss)} planned file(s) missing — continuing build"),
+                    "step": step_counter[0],
+                })
+            _nudges_used, _still_missing = _run_completion_nudges(
+                conversation, work_dir, req.required_files,
+                cancel_event=cancel_event, on_nudge=_nudge_sse,
+                extra_note=_ARG_DROP_NOTE if arg_drop["total"] >= 2 else "",
+            )
+            _maybe_demote_native_tc(ollama_base, req.model, arg_drop["total"], _still_missing)
+            _stream_status_str = str(conversation.state.execution_status)
+
             # Post-run processing
             stuck = False
             stuck_reason = ""
@@ -1416,9 +1776,16 @@ async def run_task_stream(req: RunRequest):
                         shutil.move(str(rf), str(dest))
                         moved.append(str(dest))
                     files_created = moved
+                    all_workspace_files = _list_all_files(work_dir)
 
             summary = _extract_summary(conversation)
             duration = time.time() - start
+            # Finished = reached `finish` AND no planned file missing post-nudges.
+            agent_finished = (_agent_finished(_stream_status_str, progress_log)
+                              and not _still_missing)
+            print(f"[OH-Worker] Streamed run done in {duration:.1f}s — {len(files_created)} files, "
+                  f"stuck={stuck}, finished={agent_finished}, "
+                  f"nudges={_nudges_used}, still_missing={len(_still_missing)}")
 
             result_holder[0] = {
                 "type": "done",
@@ -1429,6 +1796,9 @@ async def run_task_stream(req: RunRequest):
                 "duration_seconds": round(duration, 1),
                 "steps": progress_log[-20:],
                 "project_id": project_name,
+                "agent_finished": agent_finished,
+                "missing_required_files": _still_missing,
+                "arg_drop_detected": arg_drop["total"] >= 3,
             }
 
         except _RunCancelled:
@@ -1521,11 +1891,12 @@ def _build_task_prompt(req: RunRequest, work_dir: str = "/root", continuing: boo
     # Language-specific build/check commands
     _VERIFY_CMDS = {
         "java": "If using Maven: `mvn compile`. If plain javac: `javac -d out $(find . -name '*.java')`. Ensure pom.xml includes all needed dependencies with correct versions and native classifiers where required (e.g. LWJGL needs platform-specific natives).",
-        "python": "`python -c \"import py_compile; import glob; [py_compile.compile(f, doraise=True) for f in glob.glob('**/*.py', recursive=True)]\"` to syntax-check all files. Then run the entry point or tests if present.",
+        "python": "First create the project venv: `test -x .venv/bin/python3 || python3 -m venv .venv`, then install dependencies INTO IT: `./.venv/bin/pip install -r requirements.txt` (or `-e .` for pyproject). Use `./.venv/bin/python3` for every python command — never bare python/pip. Syntax-check: `./.venv/bin/python3 -c \"import py_compile; import glob; [py_compile.compile(f, doraise=True) for f in glob.glob('**/*.py', recursive=True)]\"`. Then run the entry point or tests if present.",
         "javascript": "`node --check *.js` for syntax. If package.json exists: `npm install && npm run build` (or `npm test` if tests exist).",
         "typescript": "`npx tsc --noEmit` to type-check. If package.json exists: `npm install && npm run build`.",
         "c": "`gcc -Wall -Wextra -fsyntax-only *.c` to check, then `make` or compile and run.",
         "cpp": "`g++ -Wall -Wextra -fsyntax-only *.cpp` to check, then `make` or compile and run.",
+        "csharp": "`export PATH=\"$PATH:/root/.dotnet\" && dotnet build -nologo -v q` must exit 0. Run `dotnet test` if a test project exists.",
         "rust": "`cargo check` (or `cargo build` if no Cargo.toml, use `rustc --edition 2021 *.rs`).",
         "go": "`go build ./...` to compile all packages.",
     }
@@ -1599,13 +1970,17 @@ IMPORTANT: ALL files MUST live inside `{work_dir}`. Do NOT create files in /root
 ## VERIFICATION (REQUIRED BEFORE finish)
 You MUST complete every step before calling `finish`. `finish` is a gate, not a goal.
 
-1. **Inventory**: Run `ls -R {work_dir}` and confirm every file mentioned in the TASK above exists. If the TASK lists a file structure, EVERY file in that list must be present. Missing any → you are not done.
+1. **Inventory**: Run `ls -R {work_dir}` and confirm every file the TASK calls for exists. Missing any → you are not done.
 2. **Compile / parse**: {verify_cmd}
 3. **Resolve missing references**: If step 2 fails because a referenced class, module, function, type, or import does not exist, you MUST create the missing file(s) with their full contents and re-run step 2. Do NOT stub them out, do NOT call `finish` with unresolved references.
 4. **Dependencies**: Make sure imports reference real libraries (declared in pom.xml/package.json/requirements.txt etc.) or files you created.
 {git_step}
 
 Only call `finish` after step 2 exits 0 with every expected file present. Calling `finish` early — with compile errors, missing files, or unresolved references — counts as task failure.
+
+NEVER end your turn with a plain text message. Every response must be a tool call; the ONLY way to stop is the `finish` tool. A text-only reply (e.g. "Now let me create the frontend files:") aborts the build.
+
+When creating a file with `file_editor`, you MUST pass the complete file content in the `file_text` parameter of that same call — never call `create` with a path alone.
 """
 
     return prompt

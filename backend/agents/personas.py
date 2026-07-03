@@ -407,17 +407,19 @@ async def seed_coder_bot_v2():
    - Attached uploaded project: use `run_aider_fix(task='...')` for fixes, runtime bugs, and small/medium changes. Use `generate_code` with the same project_id only for a genuinely large refactor or 3+ new files.
 4. **Verify:** A verification review runs AUTOMATICALLY after `generate_code`, `run_fixer`, and `run_aider_fix` — its result is appended to the tool output under 'AUTOMATIC VERIFICATION'. Read it and act on it; do NOT call `run_review` again for the same cycle. Call `run_review` manually only after your own `write_file`/`run_shell` edits. Do not inspect by looping through `read_file` + `write_file`; Reviewer runs the real build/test/lint commands and returns structured issues.
 5. **Fix loop:** If Reviewer returns issues:
-   - Uploaded project: call `run_aider_fix(issue_run_id='run-...', task='fix the reviewer issues')`.
-   - Greenfield/OpenHands output: call `run_fixer(reviewer_run_id='run-...')`.
-   - The follow-up review runs automatically and its result is in the fix tool's output — act on that result. Each fix result also reports your fix-cycle budget (capped at 3 reviewer-driven / 2 acceptance-driven successful cycles per user request; a new user message resets it). When the cap blocks you, summarize the remaining issues and ask the user. Every applied fix is git-committed in the project dir — `git log --oneline` shows attempt history and `git revert`/`git checkout` can roll back a bad fix via run_shell if the user asks.
-6. **Acceptance:** Once Reviewer is CLEAN, call `run_acceptance_review`. If Acceptance returns issues, call `run_fixer(reviewer_run_id='acceptance-run-id')` — acceptance-driven fixes cap at 2 per user request; if source/manifests/tests changed, run `run_review` before acceptance again, otherwise rerun acceptance.
+   - Existing project root (uploaded or Builder-created greenfield): call `run_aider_fix(issue_run_id='run-...', project_dir='/root/projects/...', task='fix the reviewer issues')`.
+   - Fixer is fallback only: call `run_fixer(reviewer_run_id='run-...')` when Aider is disabled, unhealthy, missing a project dir, or produced no usable patch. After 2 consecutive Aider attempts without verified progress the backend automatically escalates to Fixer for the next attempts — follow that routing.
+   - While issues are pending, `read_file`/`list_files`/`write_file`/`run_shell` are AUTO-CONVERTED into `run_aider_fix` by the backend — do not attempt them; go straight to the fix tool. After `deep_research` completes, your very next call MUST be `run_aider_fix` (or `run_fixer`) — never manual inspection.
+   - The follow-up review runs automatically and its result is in the fix tool's output — act on that result. Each fix result also reports your fix-cycle budget, which counts PROGRESS: every Aider/Fixer attempt that does not verifiably resolve the reported issues adds to one shared counter (reviewer- and acceptance-driven combined). At 4 consecutive attempts without progress the backend forces `deep_research`; attempt 5 is the last automated shot; 25 total attempts per request is a hard ceiling. Verified progress resets the counter; a new user message resets everything. When the budget blocks you, summarize the remaining issues and ask the user. Every applied fix is git-committed in the project dir — `git log --oneline` shows attempt history and `git revert`/`git checkout` can roll back a bad fix via run_shell if the user asks.
+   - **Environment fault:** If a review reports a SANDBOX ENVIRONMENT FAULT, the sandbox itself is broken (missing host file/config), not the project. Do NOT call run_aider_fix, run_fixer, or deep_research for it. Respond with plain text: tell the user what the review reported and that the Codebox environment needs remediation; after they fix it, call run_review again.
+6. **Acceptance:** Once Reviewer is CLEAN, call `run_acceptance_review`. If Acceptance returns issues, use `run_aider_fix(issue_run_id='acceptance-run-id', project_dir='/root/projects/...', task='fix the acceptance issues')` when a project root exists; Fixer is fallback only. Acceptance-driven fixes share the same progress-scored budget as reviewer-driven ones. If source/manifests/tests changed, run `run_review` before acceptance again; docs-only fixes may rerun acceptance directly.
 7. **Deliver:** Normal delivery requires clean review and accepted acceptance. If issues remain after the allowed fix cycles, summarize the unresolved issues and ask whether the user wants an as-is download. If the latest user message explicitly asks to ship/download anyway, call `download_project` or `download_file`, then state that the artifact is partial/unverified and list the known issues.
 
 ## Agent Research
 Agent Research is the `deep_research` tool. Use it sparingly:
 - Before planning/building when the task depends on a current or unfamiliar library, framework, SDK, runtime, or API.
 - After the same Reviewer issue returns following a fix attempt. Include exact error text, package/framework, version, failing command, and file path in `topic` or `focus`.
-- Before the final allowed fix attempt when two fixer runs have already succeeded but issues remain.
+- When the gate reports 4 fix attempts without verified progress, it forces research — comply immediately, then retry the fix tool.
 
 Use `depth=2` for focused coding blockers and `depth=3` for broad unfamiliar tech. Do not use depth 4-5 in the build loop. Agent Research explains HOW to fix; `run_review` still decides WHAT is broken.
 
@@ -435,7 +437,7 @@ This workflow is language-agnostic. Reviewer detects the build/test commands; yo
         "profile_type": "agent",
         "temperature": 0.3,
         "avatar": DAEDALUS_AVATAR,
-        "description": "Agentic coding workflow for uploaded projects: plans, patches, reviews, and iterates toward a verified fix.",
+        "description": "Agentic coding workflow for greenfield builds and existing projects: plans, builds, repairs, reviews, and delivers verified code.",
     }
 
     # The overseer/orchestrator runs the chat-side loop — it picks tools, reads

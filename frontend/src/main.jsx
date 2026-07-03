@@ -42,6 +42,7 @@ import {
   modelContextLength,
   researchModelOptions,
 } from './modelHelpers.js';
+import { createSettingsSync } from './settingsSync.js';
 import ModelPicker from './ModelPicker.jsx';
 import AnalyticsPanel from './panels/AnalyticsPanel.jsx';
 import PromptLibraryPanel from './panels/PromptLibraryPanel.jsx';
@@ -81,7 +82,9 @@ import {
   _activityIsTerminal,
   _activityStatusKey,
   _daedalusRunIdsForMessage,
+  _eventsHaveDaedalusFullBuild,
   _fmtElapsed,
+  _isDaedalusFullBuildOutput,
   _isDaedalusOutput,
   _metaObj,
   _parseUtcishMs,
@@ -102,6 +105,7 @@ const ReactDOM = { ...ReactDOMFull, createRoot, hydrateRoot };
 
 // ───────────────────────── original component body ─────────────────────────
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
+const CHAT_HISTORY_RENDER_CHUNK = 80;
 
 // ============================================================
 function HyprChat(){
@@ -154,6 +158,7 @@ function HyprChat(){
   const [aiderEnabled,setAiderEnabled]=useState(()=>{try{return localStorage.getItem("hc-aider-enabled")!=="false";}catch{return true;}});
   const [aiderModel,setAiderModel]=useState(()=>{try{return localStorage.getItem("hc-aider-model")||"";}catch{return "";}});
   const [aiderAutoTest,setAiderAutoTest]=useState(()=>{try{return localStorage.getItem("hc-aider-auto-test")!=="false";}catch{return true;}});
+  const [openhandsDisableThinking,setOpenhandsDisableThinking]=useState(()=>{try{return localStorage.getItem("hc-openhands-disable-thinking")!=="false";}catch{return true;}});
   const [quickSearchMode,setQuickSearchMode]=useState(()=>{try{return localStorage.getItem("hc-quick-search-mode")||"balanced";}catch{return "balanced";}});
   const [ctxTokens,setCtxTokens]=useState(0);
   const [genTokens,setGenTokens]=useState(0);
@@ -310,20 +315,13 @@ function HyprChat(){
     if(settingsPulseTimer.current)clearTimeout(settingsPulseTimer.current);
     settingsPulseTimer.current=setTimeout(()=>setSettingsPulse(null),1800);
   };
-  const hydrateServerSetting=(settingKey,setter,value,current)=>{
-    if(value!==current)skipSettingPatchRef.current[settingKey]=true;
-    setter(value);
-  };
-  const persistServerSetting=(storageKey,settingKey,value,storageValue=String(value))=>{
-    const seen=!!seenSettingEffectRef.current[settingKey];
-    seenSettingEffectRef.current[settingKey]=true;
-    try{localStorage.setItem(storageKey,storageValue);}catch{}
-    if(skipSettingPatchRef.current[settingKey]){delete skipSettingPatchRef.current[settingKey];return;}
-    if(!settingsLoadedRef.current&&!seen)return;
-    fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({[settingKey]:value})})
-      .then(r=>{flashSettingsPulse(r.ok?"Saved":"Failed",r.ok?"success":"error");})
-      .catch(()=>flashSettingsPulse("Failed","error"));
-  };
+  const {hydrateServerSetting,persistServerSetting}=createSettingsSync({
+    api:API,
+    settingsLoadedRef,
+    seenSettingEffectRef,
+    skipSettingPatchRef,
+    flashSettingsPulse,
+  });
 
   // Mermaid init — re-runs when theme/font changes; bumps epoch to force diagram re-render
   const [mermaidEpoch,setMermaidEpoch]=useState(0);
@@ -389,6 +387,7 @@ function HyprChat(){
   useEffect(()=>{persistServerSetting("hc-openhands-enabled","openhands_enabled",openhandsEnabled,String(openhandsEnabled));},[openhandsEnabled]);
   useEffect(()=>{persistServerSetting("hc-openhands-max-rounds","openhands_max_rounds",openhandsMaxRounds,String(openhandsMaxRounds));},[openhandsMaxRounds]);
   useEffect(()=>{persistServerSetting("hc-openhands-reasoning-effort","openhands_reasoning_effort",openhandsReasoningEffort);},[openhandsReasoningEffort]);
+  useEffect(()=>{persistServerSetting("hc-openhands-disable-thinking","openhands_disable_thinking",openhandsDisableThinking,String(openhandsDisableThinking));},[openhandsDisableThinking]);
   useEffect(()=>{persistServerSetting("hc-aider-enabled","aider_enabled",aiderEnabled,String(aiderEnabled));},[aiderEnabled]);
   useEffect(()=>{persistServerSetting("hc-aider-model","aider_model",aiderModel);},[aiderModel]);
   useEffect(()=>{persistServerSetting("hc-aider-auto-test","aider_auto_test",aiderAutoTest,String(aiderAutoTest));},[aiderAutoTest]);
@@ -481,6 +480,7 @@ function HyprChat(){
   // Conversation id currently being streamed (null when idle). Set at sendMessages start, cleared on completion.
   const streamingCidRef=useRef(null);
   const [kbs,setKbs]=useState([]);
+  const kbSaveTimersRef=useRef(new Map());
   const [uploadProgress,setUploadProgress]=useState({});  // {kbId: {filename, progress, status, error}}
   const [tools,setTools]=useState([]);
   const [mcs,setMcs]=useState([]);
@@ -504,6 +504,7 @@ function HyprChat(){
   const [connectorBusy,setConnectorBusy]=useState("");
   const [expandedPill,setExpandedPill]=useState(null);
   const [loadingConv,setLoadingConv]=useState(false);
+  const [visibleMessageCounts,setVisibleMessageCounts]=useState({});
   const [editingMsg,setEditingMsg]=useState(null); // {index, content}
   const [regenPopover,setRegenPopover]=useState(null); // {index, model, temperature, personaId}
   const [toasts,setToasts]=useState([]); // [{id,type,text,detail,action}]
@@ -932,7 +933,7 @@ function HyprChat(){
       return "Roleplay persona focused on identity, voice, tone, scenario, and conversational style.";
     }
     if(n.includes("deep researcher"))return "Research-first agent for multi-source investigations, citations, and synthesized reports.";
-    if(n.includes("daedalus"))return "Agentic coding workflow for uploaded projects: plans, patches, reviews, and iterates toward a verified fix.";
+    if(n.includes("daedalus"))return "Agentic coding workflow for greenfield builds and existing projects: plans, builds, repairs, reviews, and delivers verified code.";
     if(n.includes("coder"))return "General coding agent for shell work, file edits, debugging, and implementation help.";
     if(n.includes("conspiracy"))return "Investigative research agent for hidden narratives, disputed claims, source comparison, and deep-dive synthesis.";
     const tools=(mc.tool_ids||[]);
@@ -1065,7 +1066,26 @@ function HyprChat(){
     setLastPersonaId(mc.id);localStorage.setItem("hc-last-persona",mc.id);setPanel("chat");
   };
   const clearPendingProfile=()=>{setPendingPersona(null);setPendingToolIds([]);setLastPersonaId(null);try{localStorage.removeItem("hc-last-persona");}catch{};};
-  const saveKb=(kb)=>{fetch(`${API}/api/knowledge-bases/${kb.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:kb.name,description:kb.description})}).catch(()=>{});};
+  const saveKb=(kb)=>{
+    if(!kb?.id)return Promise.resolve();
+    return fetch(`${API}/api/knowledge-bases/${kb.id}`,{
+      method:"PUT",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({name:kb.name||"",description:kb.description||""})
+    }).catch(()=>{});
+  };
+  const scheduleKbSave=(kb,delay=450)=>{
+    if(!kb?.id)return;
+    const timers=kbSaveTimersRef.current;
+    if(timers.has(kb.id))clearTimeout(timers.get(kb.id));
+    timers.set(kb.id,setTimeout(()=>{timers.delete(kb.id);saveKb(kb);},delay));
+  };
+  const flushKbSave=(kb)=>{
+    if(!kb?.id)return;
+    const timers=kbSaveTimersRef.current;
+    if(timers.has(kb.id)){clearTimeout(timers.get(kb.id));timers.delete(kb.id);}
+    saveKb(kb);
+  };
   const parseConnectorJson=(txt,fallback,label)=>{
     try{return (txt||"").trim()?JSON.parse(txt):fallback;}catch(e){notify({type:"error",text:`Invalid ${label}`,detail:e.message||String(e)});throw e;}
   };
@@ -1124,7 +1144,7 @@ function HyprChat(){
   };
 
   const resetUserScopedState=()=>{
-    setConvs([]);setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];
+    setConvs([]);setVisibleMessageCounts({});setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];
     setKbs([]);setTools([]);setMcs([]);setWorkspaces([]);setActiveWs(null);setWsDetail(null);setWsPanel(false);
     setConnectorTools([]);setMcpServers([]);setOpenapiConnectors([]);
     setResearchReports([]);setActiveResearchId(null);setActiveResearch(null);setResearchEvents([]);setResearchLiveMarkdown("");setResearchRunning(false);
@@ -1319,6 +1339,7 @@ function HyprChat(){
       if(d.openhands_enabled!=null)hydrateServerSetting("openhands_enabled",setOpenhandsEnabled,d.openhands_enabled,openhandsEnabled);
       if(d.openhands_max_rounds!=null)hydrateServerSetting("openhands_max_rounds",setOpenhandsMaxRounds,d.openhands_max_rounds,openhandsMaxRounds);
       if(d.openhands_reasoning_effort)hydrateServerSetting("openhands_reasoning_effort",setOpenhandsReasoningEffort,d.openhands_reasoning_effort,openhandsReasoningEffort);
+      if(d.openhands_disable_thinking!=null)hydrateServerSetting("openhands_disable_thinking",setOpenhandsDisableThinking,d.openhands_disable_thinking,openhandsDisableThinking);
       if(d.aider_enabled!=null)hydrateServerSetting("aider_enabled",setAiderEnabled,d.aider_enabled,aiderEnabled);
       if(d.aider_model!=null)hydrateServerSetting("aider_model",setAiderModel,d.aider_model,aiderModel);
       if(d.aider_auto_test!=null)hydrateServerSetting("aider_auto_test",setAiderAutoTest,d.aider_auto_test,aiderAutoTest);
@@ -1886,6 +1907,7 @@ function HyprChat(){
     setConvs(prev=>prev.filter(c=>!isGhostConv(c)));
     setGhostMode(false);
     setActId(id);setPanel("chat");setEvts([]);setExpandedPill(null);setQuickResults([]);
+    setVisibleMessageCounts(p=>({...p,[id]:CHAT_HISTORY_RENDER_CHUNK}));
     // Check if we're navigating back to an active council stream
     const activeStream=councilStreamRef.current;
     if(activeStream?.cid===id&&activeStream.running){
@@ -2049,6 +2071,16 @@ function HyprChat(){
       }
       return updated;
     }));
+  },[]);
+  const revealOlderMessages=useCallback((id,totalMessages)=>{
+    if(!id)return;
+    const el=chatScrollRef.current;
+    const beforeHeight=el?.scrollHeight||0;
+    setVisibleMessageCounts(p=>({...p,[id]:Math.min(totalMessages,(p[id]||CHAT_HISTORY_RENDER_CHUNK)+CHAT_HISTORY_RENDER_CHUNK)}));
+    requestAnimationFrame(()=>{
+      const next=chatScrollRef.current;
+      if(next&&beforeHeight)next.scrollTop+=next.scrollHeight-beforeHeight;
+    });
   },[]);
   const useModelFromManager=(modelName)=>{
     if(!modelName)return;
@@ -2313,7 +2345,7 @@ function HyprChat(){
       const r=await fetch(`${API}/api/conversations`,{method:"DELETE"});
       const d=await r.json().catch(()=>({}));
       if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
-      setConvs([]);setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];setCoderWorkflows([]);
+      setConvs([]);setVisibleMessageCounts({});setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];setCoderWorkflows([]);
       notify({type:"success",text:"Chats deleted",detail:`Deleted ${d.deleted||0} conversations.`});
     }catch(e){notify({type:"error",text:"Delete failed",detail:e.message});}
   };
@@ -2632,6 +2664,7 @@ function HyprChat(){
       // Prefer the persistent stream-save buffer, which survives chat switches. Fall back to evtsRef for safety.
       const _rawEvts = streamSaveEvtsRef.current.length > 0 ? streamSaveEvtsRef.current : evtsRef.current;
       let _savedEvts = _rawEvts.filter(e=>["source_links","search_results","kb_sources","codeagent_note","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
+      const _streamHasFullProductBuild = _eventsHaveDaedalusFullBuild(_savedEvts);
       // Bound the persisted metadata. `thinking` events are cumulative 3KB tail
       // snapshots emitted every ~100 chars — a long reasoning trace persists
       // ~100 overlapping copies (~300KB on one message, reloaded every fetch).
@@ -2642,13 +2675,14 @@ function HyprChat(){
         if(_lastThinkIdx>=0)_savedEvts=_savedEvts.filter((e,i)=>e.type!=="thinking"||i===_lastThinkIdx);
         if(_savedEvts.length>150)_savedEvts=_savedEvts.slice(-150);
       }
-      // Pluck run_ids out of the saved events so the RunCard component can find them
-      // even after a reload (when live evts are gone).
-      const _streamRunIds = _runIdsFromEvents(_savedEvts);
+      // Pluck run_ids out of the raw event stream so the Daedalus summary can
+      // find every run even when older status events are trimmed.
+      const _streamRunIds = _runIdsFromEvents(_rawEvts);
       const _msgMeta = (_savedEvts.length || refinementsCount > 0 || _streamRunIds.length) ? {
         ...(_savedEvts.length?{saved_events:_savedEvts}:{}),
         ...(refinementsCount>0?{refinements:refinementsCount}:{}),
         ...(_streamRunIds.length?{run_ids:_streamRunIds}:{}),
+        has_full_product_build: _streamHasFullProductBuild,
         in_progress: false,
       } : {in_progress: false};
       const finalFull=replacePersonaPlaceholdersForConversation(full,cv);
@@ -3807,7 +3841,7 @@ function HyprChat(){
           .trim();
         const open=/^<details[^>]*\bopen\b/i.test(p);
         if(printMode)return <div key={i} className="print-details"><div className="print-details-summary">{summary}</div>{md(body,opts)}</div>;
-        return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open}>{md(body,opts)}</Collapsible>;
+        return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open} variant={opts.changelog?"changelog":""}>{md(body,opts)}</Collapsible>;
       }
       if(/^[ \t]{0,3}```/.test(p)){
         const m=p.match(/^[ \t]*```(\w*)\n?([\s\S]*?)\n?[ \t]*```[ \t]*$/);
@@ -4506,8 +4540,8 @@ function HyprChat(){
       {kbs.map(kb=><div key={kb.id} style={cardS}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
           <div style={{flex:1}}>
-            <input value={kb.name} onChange={e=>setKbs(p=>p.map(k=>k.id===kb.id?{...k,name:e.target.value}:k))} style={{...inputS,fontSize:14,fontWeight:600,background:"transparent",border:"none",padding:"0 0 4px 0",color:t.text}}/>
-            <input value={kb.description||""} onChange={e=>setKbs(p=>p.map(k=>k.id===kb.id?{...k,description:e.target.value}:k))} placeholder="Description..." style={{...inputS,background:"transparent",border:"none",padding:0,fontSize:11,color:t.mut}}/>
+            <input value={kb.name} onChange={e=>{const next={...kb,name:e.target.value};setKbs(p=>p.map(k=>k.id===kb.id?next:k));scheduleKbSave(next);}} onBlur={e=>flushKbSave({...kb,name:e.target.value})} style={{...inputS,fontSize:14,fontWeight:600,background:"transparent",border:"none",padding:"0 0 4px 0",color:t.text}}/>
+            <input value={kb.description||""} onChange={e=>{const next={...kb,description:e.target.value};setKbs(p=>p.map(k=>k.id===kb.id?next:k));scheduleKbSave(next);}} onBlur={e=>flushKbSave({...kb,description:e.target.value})} placeholder="Description..." style={{...inputS,background:"transparent",border:"none",padding:0,fontSize:11,color:t.mut}}/>
           </div>
           <button onClick={async()=>{fetch(`${API}/api/knowledge-bases/${kb.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.filter(k=>k.id!==kb.id));}} style={btnS(t.err)}><IC.Trash/></button>
         </div>
@@ -6809,6 +6843,14 @@ function HyprChat(){
           </select>
           <div style={{fontSize:9,color:t.mut,marginTop:4}}>Controls how much the Builder LLM thinks before each tool call. Drop to <b>low</b> if generate_code is taking minutes per file.</div>
         </div>
+
+        <div style={{marginBottom:6,marginTop:12}}>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:t.dim,fontWeight:600,cursor:"pointer"}}>
+            <input type="checkbox" checked={openhandsDisableThinking} onChange={e=>setOpenhandsDisableThinking(e.target.checked)} style={{accentColor:t.acc}}/>
+            Disable model thinking during builds
+          </label>
+          <div style={{fontSize:9,color:t.mut,marginTop:4}}>Sends <b>think: false</b> to thinking-capable coder models (qwen3.5-class). Without it they reason with an unbounded budget before every tool call, making builds slow and tool calls flaky. Non-thinking models are unaffected.</div>
+        </div>
       </div>
 
       {/* TILE: Appearance */}
@@ -7125,12 +7167,12 @@ function HyprChat(){
 	      </div>
 
       {/* TILE: Changelog */}
-      <div style={{...settingsCardS,display:settingsTab==="changelog"?"block":"none",padding:0,overflow:"hidden"}}>
-        <div style={{maxHeight:"calc(85vh - 120px)",overflowY:"auto",padding:"20px 24px",lineHeight:1.7,fontSize:13,color:t.text}}>
+      <div style={{display:settingsTab==="changelog"?"block":"none",padding:0,overflow:"hidden",background:"transparent",border:"none",borderRadius:0,marginBottom:0}}>
+        <div style={{maxHeight:"calc(85vh - 120px)",overflowY:"auto",padding:"6px 4px 20px",lineHeight:1.7,fontSize:13,color:t.text}}>
           {!changelogContent?<div style={{textAlign:"center",padding:40,color:t.mut,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
             <div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
             Loading changelog...
-          </div>:<MDWrap>{md(changelogContent)}</MDWrap>}
+          </div>:<div className="changelog-markdown"><MDWrap>{md(changelogContent,{changelog:true})}</MDWrap></div>}
         </div>
       </div>
 
@@ -7426,11 +7468,22 @@ function HyprChat(){
               <div ref={chatEnd}/>
             </div>;
           })():<div key={actId||"empty"} style={{maxWidth:chatWidth,margin:"0 auto",padding:"2px 18px 0"}}>
-            {(()=>{const filteredMsgs=(act.messages||[]).filter(msg=>msg.role==="user"||msg.role==="assistant");
-              // Find the last assistant message so live search/tool events attach to the active answer.
-              let lastAssistantFilteredIdx=-1;
-              filteredMsgs.forEach((m,idx)=>{if(m.role==="assistant")lastAssistantFilteredIdx=idx;});
-              return filteredMsgs.map((msg,i)=>{const isU=msg.role==="user";const mid=`m${i}`;const isEditing=editingMsg?.index===i;
+            {(()=>{const messageRows=(act.messages||[]).map((msg,index)=>({msg,index})).filter(({msg})=>msg.role==="user"||msg.role==="assistant");
+              const totalMessages=messageRows.length;
+              const visibleCount=Math.max(CHAT_HISTORY_RENDER_CHUNK,visibleMessageCounts[actId]||CHAT_HISTORY_RENDER_CHUNK);
+              const hiddenCount=Math.max(0,totalMessages-visibleCount);
+              const visibleRows=hiddenCount>0?messageRows.slice(hiddenCount):messageRows;
+              // Find the last assistant message once so live search/tool events attach to the active answer.
+              let lastAssistantMsgIdx=-1;
+              messageRows.forEach(({msg,index})=>{if(msg.role==="assistant")lastAssistantMsgIdx=index;});
+              return <>
+              {hiddenCount>0&&<div style={{display:"flex",justifyContent:"center",margin:"0 0 14px"}}>
+                <button onClick={()=>revealOlderMessages(actId,totalMessages)} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:8,border:`1px solid ${t.brd}44`,background:`${t.surface}B8`,color:t.mut,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:700}}>
+                  <span style={{display:"inline-flex",transform:"rotate(180deg)"}}><IC.ChevDown/></span>
+                  Show older ({hiddenCount})
+                </button>
+              </div>}
+              {visibleRows.map(({msg,index:i},visibleIdx)=>{const isU=msg.role==="user";const mid=`m${i}`;const isEditing=editingMsg?.index===i;
               const activeProfile=!isU?getProfileForConversation(act):null;
               const personaAvatar=!isU&&(act?.persona_avatar||profileAvatar(activeProfile));
               const personaName=!isU&&act?.persona_name;
@@ -7439,16 +7492,17 @@ function HyprChat(){
               const renderedContent=!isU?replacePersonaPlaceholdersForConversation(msg.content||"",act):msg.content;
               const meta=_metaObj(msg.metadata);
               const savedEvents=Array.isArray(meta.saved_events)?meta.saved_events:[];
-              const isLastAssistant=!isU&&i===lastAssistantFilteredIdx;
+              const isLastAssistant=!isU&&i===lastAssistantMsgIdx;
               const liveEventsForMsg=isLastAssistant?evts:[];
               const messageWorkflows=isLastAssistant&&Array.isArray(coderWorkflows)?coderWorkflows.slice(0,3):[];
               const daedalusRunIds=!isU?_daedalusRunIdsForMessage(meta,isLastAssistant,evts):[];
+              const isDaedalusFullBuild=!isU&&_isDaedalusFullBuildOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
               const isDaedalusOutput=!isU&&_isDaedalusOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
               const liveQuickSearchPayload=isLastAssistant?_quickSearchPayloadFromEvents(evts,quickResults):null;
               const renderOpts=citeOptsFor(msg,liveQuickSearchPayload);
               const quickSearchPayload=renderOpts?.quickSearch;
-              return <React.Fragment key={i}>
-              <div style={{marginBottom:compactMode?7:18,display:"flex",gap:9,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(i*.04,.2)}s both`}}>
+              return <React.Fragment key={msg.id?`${msg.id}-${i}`:i}>
+              <div style={{marginBottom:compactMode?7:18,display:"flex",gap:9,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(visibleIdx*.04,.2)}s both`}}>
                 <div style={{width:isU?28:40,height:isU?28:40,borderRadius:isU?7:10,display:"flex",alignItems:"center",justifyContent:"center",background:isU?t.bgDeep:`${personaColor}10`,border:`1px solid ${isU?t.f4:personaColor}38`,color:isU?t.f4:personaColor,flexShrink:0,marginTop:isU?3:1,overflow:"hidden",boxShadow:"none"}}>
                   {isU?<IC.User/>:personaAvatar?<img src={avatarSrc(personaAvatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
                 </div>
@@ -7489,22 +7543,20 @@ function HyprChat(){
                       </span>)}
                     </div>}
                     {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                    {msg.isS&&!msg.content&&!isDaedalusOutput&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
+                    {msg.isS&&!msg.content&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
                   </div>
                   {isDaedalusOutput&&<DaedalusSummary runIds={daedalusRunIds} savedEvents={savedEvents} liveEvts={liveEventsForMsg} workflows={messageWorkflows} t={t} font={font} md={md} msgContent={renderedContent} live={!!msg.isS} onPreview={openPreview} onOpenArtifact={openArtifact}/>}
-                  {msg.isS&&msg.content&&!isDaedalusOutput&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
-                  {!msg.isS&&!isDaedalusOutput&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
-                  {(()=>{if(isU||isDaedalusOutput||msg.isS||!savedEvents.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={savedEvents.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>;})()}
-                  {(()=>{if(isU||isDaedalusOutput)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;if(i!==lastAI||!coderWorkflows.length)return null;return coderWorkflows.slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
+                  {msg.isS&&msg.content&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
+                  {!msg.isS&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
+                  {(()=>{if(isU||isDaedalusOutput||msg.isS||!savedEvents.length)return null;const isLast=isLastAssistant;if(isLast&&evts.length>0)return null;return <ToolStatus evts={savedEvents.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>;})()}
+                  {(()=>{if(isU||isDaedalusOutput)return null;if(!isLastAssistant||!coderWorkflows.length)return null;return coderWorkflows.slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
                   {/* Coder Bot v2 — durable run cards. Render one card per unique run_id.
                       Sources, in priority: explicit metadata.run_ids (written server-side at
                       each round boundary — survives mid-stream reload), then live events
                       (current message), then saved_events (history). */}
                   {(()=>{
                     if(isU||isDaedalusOutput) return null;
-                    const msgs = act.messages||[];
-                    const lastAI = msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;
-                    const isLast = i===lastAI;
+                    const isLast = isLastAssistant;
                     // Merge run_ids from all three sources, dedup, preserve first-seen order.
                     const ridsFromMeta = Array.isArray(msg.metadata?.run_ids) ? msg.metadata.run_ids : [];
                     const ridsFromEvts = _runIdsFromEvents(isLast && evts.length>0 ? evts : (msg.metadata?.saved_events||[]));
@@ -7534,6 +7586,7 @@ function HyprChat(){
                     if(isU||msg.isS||isDaedalusOutput)return null;
                     const co=renderOpts;
                     if(!co?.citations?.length)return null;
+                    if(co.quickSearch&&co.citations.every(s2=>s2?.kind==="quick_search"))return null;
                     return <Collapsible theme={t} font={font} summary={`Sources (${co.citations.length})`}>
                       <div style={{display:"flex",flexDirection:"column",gap:6}}>
                         {co.citations.map(s2=><div key={s2.n} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"6px 8px",background:`${t.surface}44`,border:`1px solid ${t.brd}33`,borderRadius:6}}>
@@ -7610,7 +7663,7 @@ function HyprChat(){
                   </div>}
                 </div>
               </div></React.Fragment>;
-            });})()}
+            })}</>;})()}
             {evts.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}><ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/></div>}
             <div ref={chatEnd}/>
           </div>}
