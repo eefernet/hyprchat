@@ -1,75 +1,48 @@
 <details open>
-<summary>Alpha v17.3.1 — July 1, 2026</summary>
+<summary>Alpha v17.3.1 — July 3, 2026</summary>
 
-> UI/readability polish and behavior hardening for Quick Search, Daedalus output
-> rendering, and Council sessions.
+> UI readability and reliability polish for Quick Search, Daedalus, Council
+> sessions, and release notes.
 
 ## Quick Search
-- Refreshed Quick Search source and result rendering for clearer scanability in chat.
-- Search status, source titles, and result metadata now present with less visual noise.
-- Result cards better match the current HyprChat theme and spacing.
-- Quick Search now uses recent chat and memory context to frame ambiguous searches, strips attachment noise, avoids news freshness for non-news state questions, and ranks context-matching sources higher.
+- Search results now scan cleaner, with calmer cards, clearer titles, and less repeated metadata.
+- Ambiguous searches use recent chat and memory context, avoid unnecessary news recency, and rank context-matching sources higher.
 
 ## Daedalus UI Rendering
-- Daedalus workflow output now renders as a summarized project status view instead of raw tool/event-heavy transcript blocks.
-- Project states make it easier to distinguish ready, working, and needs-attention runs.
-- Phase chips cover plan, build, review, fix, acceptance, and package progress.
-- Artifact and download actions are more visible, while build details and raw events stay available in collapsible sections.
+- Workflow output now renders as summarized project status cards instead of raw tool-heavy transcripts.
+- State labels and phase chips make plan, build, review, fix, acceptance, and package progress easier to follow.
+- Artifacts, downloads, build details, and raw events remain available without crowding the main message.
 
 ## Daedalus Builder, Model and Repair Hardening
-- The worker now sends `think: false` to thinking-capable coder models during builds (capability-gated via `/api/show`, so non-thinking models are untouched). Thinking merges (qwen3.5-class) previously reasoned with an unbounded budget before every tool call and routinely emitted `file_editor.create` calls with the `file_text` argument missing — builds crawled at one file per nudge. Controlled by Settings → Daedalus → "Disable model thinking during builds" (`openhands_disable_thinking`, default on) and the worker-side `OH_THINK` env override.
-- The SDK-default ThinkTool is excluded from builder agents (`include_default_tools=["FinishTool"]`) — reasoning models were double-thinking and burning rounds on think spam before writing any file.
-- The native-tool-calling probe now does a live multi-line arg round-trip (dummy `write_file` with a 3-line body) instead of trusting `/api/show` capabilities. Models that emit structured tool calls but drop multi-line string args are persisted as prompt-based. Probe requests pin `options.num_ctx` so a cold probe can't load a model at its Modelfile default (262K on some imports). Tool cache bumped to v3.
-- Runtime auto-recovery: repeated "Parameter `file_text` is required" failures fold a corrective note into the next completion nudge, and a run that ends incomplete after ≥3 dropped args demotes the model to prompt-based tool calling (persisted) and reports `arg_drop_detected` to the backend.
-- Builder task prompts now state explicitly that `file_editor create` must carry the complete file content in `file_text` in the same call.
-- LLM/Agent construction is factored into one shared helper for `/run` and `/run-stream` so the paths can't drift again.
-- Architect plans can now include an advisory interface contract for entrypoints, dependency policy, shared constants, public signatures, and cross-file rules so Builder has stronger cross-file guidance without adding a hard gate.
-- OpenHands Builder rounds now scale with the planned file count, and missing manifest files trigger bounded backend-owned continue passes before Reviewer runs.
-- Builder results that stop without an OpenHands finish signal are marked incomplete/partial instead of flowing to review, acceptance, or delivery as successful.
-- Aider is now the preferred repair editor for existing project roots, including uploaded projects and greenfield projects after Builder creates them; the marker-format Fixer remains the fallback when Aider is disabled, unhealthy, missing a project dir, or produces no usable patch.
-- Reviewer and acceptance repair caps now force `deep_research` at the base cap, retry Aider/Fixer with research context, and stop to ask the user after extended exhaustion instead of silently releasing manual `write_file`.
-- Delivered project archives now exclude Aider runtime metadata such as `.aider.chat.history.md` and `.aider.tags.cache.v4/` while keeping user-authored files like `.gitignore`.
-- The Builder now receives the full Architect manifest and nudges the coding agent inside the SAME OpenHands conversation until every planned file exists (bounded, stops on no-progress) — a text-only model reply no longer ends a build at 2/8 files, and the backend continue passes become a rare fallback.
-- `reasoning_effort` is now applied on the worker's streaming build path too; it previously fell back to the SDK default "high" there, making primary builds slow and flaky (empty responses, runaway generations) while continue passes ran fine at "medium".
-- OpenHands LLM calls now cap `num_predict` and use a longer per-call timeout so a runaway completion can't stall a build until the user cancels; temperature rides inside Ollama `options` so it actually reaches the sampler.
-- A fix run that explicitly changed nothing on disk (Aider `no_changes`, or a fixer that failed before writing) no longer forces a redundant `run_review`, removing the review/research gate ping-pong after no-op repairs.
-- The Architect's `tests_required` files now count toward the Builder's completeness gate alongside the file tree, so planned test files are created during the Build phase instead of Acceptance burning its whole fix budget adding them afterwards.
-- Architect plans must now include `README.md` and `.gitignore` in every manifest, so docs and packaging hygiene are built during the Build phase instead of retrofitted by Acceptance fix cycles.
-- The Reviewer now detects nested subproject manifests (e.g. `backend/pyproject.toml` + `frontend/package.json`) and composes a compound build contract — full-stack monorepos previously reviewed as "plain python" and the frontend was never build-verified.
-- C# is now a first-class fix-path language: `.sln`/`.csproj` reviewer markers (suffix-matched), a dotnet language adapter (build/test with the Codebox .NET 8 SDK), a csharp Builder verify command, and Makefile-only C projects now route to the C adapter instead of generic.
-- Manual file/shell tool attempts while reviewer/acceptance issues are pending are now AUTO-DISPATCHED into `run_aider_fix` (or `run_fixer` when Aider is unavailable) instead of returning repeated BLOCKED messages — flailing chat models no longer terminate the turn via the duplicate-blocked stop. The research/exhaustion gates still take precedence.
-- Acceptance verdict parsing normalizes passing synonyms ("clean", "pass", "ok") to accepted instead of hard-downgrading them to error, and Aider's issue-text scope mining now recognizes all project languages (was Python-only) including relative paths.
-- The Reviewer LLM prompt now receives the Architect plan's build/test/run commands as context (never executed), and `download_project` no longer writes the FSM-invalid `partial_delivered` workflow state (artifact status carries partial delivery).
+- Thinking-capable coder models now build with bounded reasoning, avoid extra think-tool loops, and share one OpenHands agent setup across build paths.
+- Tool-calling probes now verify multiline arguments live, recover from dropped file content, and fall back to prompt-based tools when needed.
+- Architect manifests now carry advisory interfaces, required tests, README, and `.gitignore` into Builder without adding hard gates.
+- Builder rounds and continue passes scale with planned files, require a real finish signal, and keep incomplete builds out of review/delivery.
+- OpenHands builds now honor streaming `reasoning_effort`, cap runaway completions, and apply sampler options consistently.
+- Aider is the default repair editor for existing, uploaded, and Builder-created projects; Fixer remains the fallback, and no-op repairs no longer force review loops.
+- Repair and review coverage now includes research-gated retry caps, nested projects, C#/.NET, Makefile-only C, cleaner Node/Rust smoke checks, and tidier delivered archives.
 
 ## Council of AI
-- Council setup has been refreshed with cleaner organization, presets, host settings, member cards, and analytics presentation.
-- Council members can now be linked to personas through `model_config_id`, using the latest persona model, prompt, and name at runtime.
-- Council chat sessions now render with an address panel, round sections, member cards, peer ballot, and moderator verdict.
-- New council metadata tracks round labels, who a response is addressing, vote winners, and round counts.
-- Council prompts now push members to respond directly to one another and vote comparatively.
+- Council setup now has cleaner presets, host settings, member cards, and analytics presentation.
+- Council members can link to personas through `model_config_id`, using the latest persona model, prompt, and name at runtime.
+- Council chats now show address panels, round sections, peer ballots, moderator verdicts, and richer round metadata.
 
 ## UI
-- Changelog release sections now render as collapsible version cards, with the latest version expanded and version labels styled as larger title headers.
-- Quick Search source cards now show source numbers under favicons and avoid duplicating citation lists when the result carousel is already present.
+- Changelog releases now render as collapsible version cards, with the latest release expanded.
+- Quick Search source cards now show source numbers under favicons and avoid duplicate citation lists.
 
 ## Bug fixes
 - Knowledge-base name and description edits now autosave and persist across server restarts.
 - `generate_image` fenced blocks now become tool calls, and local actor names are no longer searched when they are only part of the conversation wording.
-- Restored Daedalus to the intended two-turn Architect → Builder flow: fresh v2 builds now block `generate_code` until `plan_project` has produced a structured plan.
-- Removed the reverted single-turn Architect→Builder auto-handoff, strict manifest retry, and `BUILD PAUSED` gate that could cause one-file builds or duplicate build work.
-- Builder completion now depends on OpenHands reaching a real finish signal; truncated or round-limited builds are marked incomplete instead of being treated as successful.
-- Fresh OpenHands builds now use a task-derived workspace unless an existing project directory is truly being resumed, avoiding stale or colliding project reuse.
-- Blocked Daedalus tool summaries now recommend valid next actions after hard caps, hand-fix releases, or upload-workflow blocks instead of nudging another rejected tool call.
-- Reviewer and acceptance fix-cycle gates now track role-specific budgets, allow deep-research-backed acceptance retries, and release direct hand-fixing when the acceptance cap is exhausted after research.
-- Fixer symbol-mismatch handling now gives the model actual class method references and drops unresolved broken edits instead of auto-rewriting call sites incorrectly.
-- Daedalus message rendering now detects all Daedalus outputs, preserves run ids from raw events, and shows workflow/run cards for non-full-build Daedalus actions.
+- Restored Daedalus to the intended two-turn Architect → Builder flow, removed stale single-turn handoff cues, and kept truncated builds incomplete.
+- Fresh OpenHands builds now use task-derived workspaces unless an existing project directory is truly being resumed.
+- Blocked Daedalus summaries and repair gates now recommend valid next actions and support research-backed retries before hand-fix release.
+- Fixer symbol-mismatch handling now uses real class method references and drops unresolved edits instead of rewriting call sites incorrectly.
+- Daedalus message rendering now detects more output shapes, preserves run ids, and shows workflow/run cards for non-full-build actions.
 - Live endpoint tests now skip cleanly when no HyprChat server is reachable, and connector tests mock the async URL-safety checks introduced by the refactor.
-- Node isolated runtime smoke now skips packages without a declared `start` script or `bin` entry, and bounds long-running starts so server-style projects no longer false-fail Reviewer delivery checks.
-- Rust isolated runtime smoke now runs only for binary targets, including named `src/bin/*.rs` binaries, so library crates no longer fail clean review on `cargo run`.
-- Advisory isolated verification failures can now be recorded in the Reviewer envelope without blocking an otherwise clean review when an adapter marks the check non-required.
-- Acceptance now requires a fresh Reviewer pass after source, test, or manifest edits from `aider.fix`, while docs-only Aider acceptance fixes may return directly to Acceptance.
-- Daedalus seeded persona guidance now matches Aider-first repair routing for existing project roots, with the marker-format Fixer described as fallback only.
-- Removed stale single-turn Architect→Builder markers from the plan-project generate-code nudge logic so reverted auto-builder behavior is no longer implied.
+- Node/Rust smoke checks and non-required advisory verification now avoid false review failures.
+- Acceptance now requires fresh review after source/test/manifest edits from `aider.fix`; docs-only fixes may return directly to Acceptance.
+- Daedalus persona guidance now matches Aider-first repair routing, with Fixer described as fallback only.
 
 ## Refactor follow-up
 - Backend route, artifact, database schema, research-config, workflow-gate, parser, model-management, and Codebox tool helpers were split into focused modules while keeping the public API behavior stable.
