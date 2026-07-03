@@ -1357,7 +1357,7 @@ function HyprChat(){
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
     fetch(`${API}/api/workspaces`).then(r=>r.json()).then(setWorkspaces).catch(()=>{});
     fetch(`${API}/api/research/templates`).then(r=>r.json()).then(d=>{const tm=d.templates||[];setResearchTemplates(tm);if(tm[0])setResearchDraft(p=>({...p,report_type:p.report_type||tm[0].id,depth:p.depth||tm[0].default_depth||3}));}).catch(()=>{});
-    fetch(`${API}/api/research/reports`).then(r=>r.json()).then(d=>{setResearchReports(d||[]);if((d||[])[0])setActiveResearchId((d||[])[0].id);}).catch(()=>{});
+    fetch(`${API}/api/research/reports`).then(r=>r.json()).then(d=>{setResearchReports(d||[]);if((d||[])[0]){setActiveResearchId((d||[])[0].id);setResearchView("reports");}}).catch(()=>{});
     fetch(`${API}/api/councils`).then(r=>r.json()).then(setCouncils).catch(()=>{});
     fetch(`${API}/api/council-presets`).then(r=>r.json()).then(setCouncilPresets).catch(()=>{});
     const quickSearchEntry={id:"quick_search",name:"⚡ Quick Search",description:"SearXNG instant search with inline YouTube, image & web previews",icon:"flash"};
@@ -1511,6 +1511,7 @@ function HyprChat(){
       setResearchDraft(p=>({...p,query:"",focus:"",inputs:[]}));
       setResearchInputText("");
       setPanel("research");
+      setResearchView("reports");
     }catch(e){setResearchRunning(false);notify({type:"error",text:"Research failed to start",detail:e.message||String(e)});}
     setResearchLoading(false);
   };
@@ -1683,7 +1684,9 @@ function HyprChat(){
       h2{font-size:14.5pt;line-height:1.25;margin:20pt 0 7pt;color:#1f2937;border-top:1px solid #d7dde8;padding-top:10pt}
       h3{font-size:12pt;line-height:1.3;margin:13pt 0 5pt;color:#1f2937}
       h4,h5,h6{font-size:10.5pt;line-height:1.3;margin:10pt 0 4pt;color:#374151}
+      h1,h2,h3,h4{page-break-inside:avoid;break-inside:avoid;page-break-after:avoid;break-after:avoid}
       p{margin:0 0 8pt}
+      p,li{orphans:2;widows:2}
       ul,ol{margin:0 0 9pt 18pt;padding:0}
       li{margin:0 0 4pt;padding-left:2pt}
       code{font-family:"SFMono-Regular",Menlo,Consolas,monospace;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:3pt;padding:0 3pt;color:#334155;font-size:.92em}
@@ -1709,7 +1712,7 @@ function HyprChat(){
       .print-details{border:1px solid #d7dde8;background:#f8fafc;border-radius:5pt;padding:7pt 9pt;margin:8pt 0}
       .print-details-summary{font-size:8.5pt;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#475467;margin-bottom:4pt}
       .sources{margin-top:22pt;border-top:1px solid #d7dde8;padding-top:12pt}
-      .sources li{margin-bottom:6pt}
+      .sources li{margin-bottom:6pt;page-break-inside:avoid;break-inside:avoid}
       .source-title{font-weight:700;color:#1f2937}
       .source-url{font-size:8.5pt;color:#57606a;overflow-wrap:anywhere}
       @page{size:letter;margin:.58in}
@@ -1732,7 +1735,7 @@ function HyprChat(){
       const idx=src.index||src.source_index||"";
       const title=escapePrintHtml(src.title||src.url||"Source");
       const url=escapePrintHtml(src.url||"");
-      const snippet=escapePrintHtml(src.snippet||"");
+      const snippet=escapePrintHtml(String(src.snippet||"").slice(0,600));
       return `<li><div class="source-title">${idx?`[S${idx}] `:""}${title}</div>${url?`<div class="source-url">${url}</div>`:""}${snippet?`<p>${snippet}</p>`:""}</li>`;
     }).join("")}</ol></section>`:"";
     return `<div class="research-print-page">
@@ -1777,7 +1780,7 @@ function HyprChat(){
             <div className="source-title">[S{idx}] {src.title||src.url||"Source"}</div>
             {src.url&&<div className="source-url">{src.url}</div>}
             {src.credibility_score!==undefined&&<div className="source-url">Credibility: {src.credibility_score}/100{(src.credibility_factors||[]).length?` — ${(src.credibility_factors||[]).join(", ")}`:""}</div>}
-            {src.snippet&&<p>{src.snippet}</p>}
+            {src.snippet&&<p>{String(src.snippet).slice(0,600)}</p>}
           </li>;
         })}</ol>
       </section>}
@@ -1830,7 +1833,7 @@ function HyprChat(){
         image:{type:"png",quality:1},
         html2canvas:{scale:2,backgroundColor:"#ffffff",useCORS:true,logging:false},
         jsPDF:{unit:"in",format:"letter",orientation:"portrait"},
-        pagebreak:{mode:["css","legacy"],avoid:["pre","blockquote",".chart-print-block",".mermaid-print-block"]}
+        pagebreak:{mode:["css","legacy"],avoid:["pre","blockquote",".chart-print-block",".mermaid-print-block",".sources li","h1","h2","h3","h4"]}
       }).from(host.querySelector(".research-print-page")).save();
     }catch(e){
       notify({type:"error",text:"PDF export failed",detail:e.message||String(e)});
@@ -4864,28 +4867,35 @@ function HyprChat(){
     </div>
   </div>
 
-      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return `Audit complete${d.coverage_score!==undefined?` - coverage ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return d.summary?`Report complete - ${d.summary}`:"Report complete";if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=[...(report?.outline?.sections||[])].map(s=>s.heading||s).filter(Boolean);return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return `Audit complete${d.coverage_score!==undefined?` - coverage ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return d.summary?`Report complete - ${d.summary}`:"Report complete";if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=[...(report?.outline?.sections||[])].map(s=>s.heading||s).filter(Boolean);const cardS={background:`${t.surface}80`,border:`1px solid ${t.brd}33`,borderRadius:10,padding:14,display:"flex",flexDirection:"column",gap:9};const cardHeadS={fontSize:11,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.6};return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}>
       <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}><IC.Search/><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Deep Research</span>{researchRunning&&<span style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.acc}14`,border:`1px solid ${t.acc}33`,color:t.acc}}>live</span>}<div style={{display:"flex",gap:3,marginLeft:8,padding:3,border:`1px solid ${t.brd}28`,borderRadius:8,background:`${t.bgDeep}88`}}>{[["new","New"],["reports",researchReports.length?`Reports ${researchReports.length}`:"Reports"]].map(([id,label])=><button key={id} onClick={()=>setResearchView(id)} style={{fontSize:10,padding:"5px 9px",borderRadius:6,border:"none",background:researchView===id?`${t.acc}22`:"transparent",color:researchView===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontWeight:researchView===id?800:600}}>{label}</button>)}</div></div>
-      <div style={{display:"flex",gap:6,alignItems:"center"}}>
+      {researchView==="reports"&&<div style={{display:"flex",gap:6,alignItems:"center"}}>
         {activeResearchId&&researchRunning&&<button onClick={()=>cancelResearchReport(activeResearchId)} style={btnS(t.err)}><IC.Stop/> Stop</button>}
         {activeResearchId&&<button onClick={()=>rerunResearchReport(activeResearchId)} style={btnS(t.acc)}><IC.Refresh/> Rerun</button>}
         {body&&<button onClick={exportResearchMarkdown} style={btnS(t.warm)}><IC.Download/> Markdown</button>}
         {body&&<button onClick={exportResearchPdf} style={btnS(t.mut)}><IC.Download/> PDF</button>}
         {body&&<button onClick={printResearchReport} style={btnS(t.mut)}><IC.External/> Print</button>}
-      </div>
+      </div>}
     </div>
-    <div style={{flex:1,display:"grid",gridTemplateColumns:"290px minmax(0,1fr) 320px",overflow:"hidden",minHeight:0}}>
-      <div style={{borderRight:`1px solid ${t.brd}24`,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:12}}>
-        {researchView==="new"?<>
-        <div style={{background:`${t.surface}80`,border:`1px solid ${t.brd}33`,borderRadius:8,padding:12,display:"flex",flexDirection:"column",gap:9}}>
+    {researchView==="new"?
+    <div style={{flex:1,overflowY:"auto",minHeight:0,padding:"28px 24px"}}>
+      <div style={{maxWidth:960,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}}>
+        <div style={cardS}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
-            <span style={{fontSize:11,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.6}}>New Report</span>
-            <span style={{fontSize:9,color:t.mut}}>{tmpl.label}</span>
+            <span style={cardHeadS}>New Report</span>
+            <span style={{fontSize:10,color:t.mut}}>{tmpl.label}</span>
           </div>
-          <textarea value={researchDraft.query} onChange={e=>setResearchDraft(p=>({...p,query:e.target.value}))} placeholder="Research topic or question" rows={3} style={{...inputS,resize:"vertical",fontSize:12,lineHeight:1.45}}/>
+          <textarea value={researchDraft.query} onChange={e=>setResearchDraft(p=>({...p,query:e.target.value}))} placeholder="Research topic or question" rows={4} style={{...inputS,resize:"vertical",fontSize:14,lineHeight:1.45}}/>
           <input value={researchDraft.focus||""} onChange={e=>setResearchDraft(p=>({...p,focus:e.target.value}))} placeholder="Optional focus" style={{...inputS,fontSize:12}}/>
-          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{display:"flex",justifyContent:"flex-end"}}>
+            <button onClick={startResearchReport} disabled={researchLoading||researchRunning} style={{...btnS(t.acc),justifyContent:"center",minWidth:160,padding:"9px 18px",opacity:(researchLoading||researchRunning)?0.55:1}}><IC.Zap/> Start</button>
+          </div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))",gap:12,alignItems:"start"}}>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={cardS}>
+            <span style={cardHeadS}>Report</span>
             <select value={researchDraft.report_type} onChange={e=>{const nt=researchTemplates.find(x=>x.id===e.target.value);setResearchDraft(p=>({...p,report_type:e.target.value,depth:nt?.default_depth||p.depth||3}));}} style={{...inputS,fontSize:12}}>
               {(researchTemplates.length?researchTemplates:[tmpl]).map(rt=>{const ico={analyst:"📊",academic:"🎓",decision:"⚖️",market:"📈",technical:"🛠️",timeline:"🗓️",digest:"🗂️"}[rt.id]||"🔬";return <option key={rt.id} value={rt.id}>{ico} {rt.label}</option>;})}
             </select>
@@ -4897,6 +4907,30 @@ function HyprChat(){
               <option value={5}>🧠 Exhaustive</option>
             </select>
           </div>
+          <div style={cardS}>
+            <span style={cardHeadS}>Sources & Notes</span>
+          <textarea value={researchInputText} onChange={e=>setResearchInputText(e.target.value)} placeholder="Optional pasted notes, constraints, or source excerpts" rows={4} style={{...inputS,resize:"vertical",fontSize:11,lineHeight:1.45}}/>
+          <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+            <label style={{...btnS(t.f1),justifyContent:"center",flex:1}}><IC.Upload/> Add Files<input ref={researchFileRef} type="file" multiple accept=".pdf,.txt,.md,.csv,.json,.html,.py,.js,.ts" style={{display:"none"}} onChange={e=>{handleResearchFiles(e.target.files);e.target.value="";}}/></label>
+          </div>
+          {(researchDraft.inputs||[]).length>0&&<div style={{display:"flex",flexDirection:"column",gap:4}}>
+            {(researchDraft.inputs||[]).map((inp,i)=><div key={`${inp.name}-${i}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 7px",border:`1px solid ${t.brd}22`,borderRadius:7,background:`${t.surface}55`}}>
+              <span style={{fontSize:10,color:t.f1,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{inp.name}</span>
+              <span style={{fontSize:9,color:t.mut}}>{Math.round((inp.content||"").length/1000)}k</span>
+              <button onClick={()=>setResearchDraft(p=>({...p,inputs:(p.inputs||[]).filter((_,ix)=>ix!==i)}))} style={{background:"none",border:"none",color:t.err,cursor:"pointer",display:"flex",padding:2}}><IC.X/></button>
+            </div>)}
+          </div>}
+          {kbs.length>0&&<div style={{display:"flex",flexDirection:"column",gap:4}}>
+            <div style={{fontSize:9,fontWeight:800,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Knowledge Bases</div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+              {kbs.slice(0,8).map(kb=>{const on=(researchDraft.kb_ids||[]).includes(kb.id);return <button key={kb.id} onClick={()=>setResearchDraft(p=>({...p,kb_ids:on?(p.kb_ids||[]).filter(x=>x!==kb.id):[...(p.kb_ids||[]),kb.id]}))} style={{fontSize:9,padding:"4px 7px",borderRadius:7,border:`1px solid ${on?t.acc:t.brd}33`,background:on?`${t.acc}18`:`${t.surface}55`,color:on?t.acc:t.mut,cursor:"pointer",fontFamily:font}}>{kb.name}</button>;})}
+            </div>
+          </div>}
+          </div>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={cardS}>
+            <span style={cardHeadS}>Model</span>
           <ModelPicker value={researchDraft.model||researchSelectableModels[0]||""} onChange={v=>setResearchDraft(p=>({...p,model:v}))} models={researchSelectableModels} modelDetails={modelDetails} t={t} font={font}/>
           <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
             {localMoeResearchModels.length>0&&<button onClick={()=>applyResearchPreset("balanced_moe")} style={{...btnS(t.acc),fontSize:9}}>Balanced MoE</button>}
@@ -4913,8 +4947,11 @@ function HyprChat(){
               <ModelPicker value={researchDraft.auditor_model||""} onChange={v=>setResearchDraft(p=>({...p,auditor_model:v}))} models={["",...researchSelectableModels]} modelDetails={modelDetails} t={t} font={font}/>
             </div>
           </details>
-          <div style={{border:`1px solid ${t.brd}22`,borderRadius:8,padding:"7px 9px",background:`${t.bgDeep}88`}}>
-            <label style={{fontSize:10,fontWeight:800,color:t.mut,textTransform:"uppercase",letterSpacing:.5,display:"block",marginBottom:5}}>Context Window: <span style={{color:t.acc}}>{researchNumCtx.toLocaleString()}</span></label>
+          </div>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={cardS}>
+            <label style={{...cardHeadS,color:t.mut,display:"block"}}>Context Window: <span style={{color:t.acc}}>{researchNumCtx.toLocaleString()}</span></label>
             <input type="range" min="8192" max="131072" step="2048" value={researchNumCtx} onChange={e=>setResearchNumCtx(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
             <div style={{fontSize:9,color:t.mut,marginTop:4,lineHeight:1.4}}>
               {researchNumCtx<=16384?<><b style={{color:t.acc}}>Compact (&le;16K)</b> — evidence is clamped hard; fine for depth 1–2 reports.</>
@@ -4929,26 +4966,12 @@ function HyprChat(){
               :<>Selected model context: {selectedResearchCtx?`${formatModelCtx(selectedResearchCtx)} ctx`:"unknown"}.</>}
             </div>
           </div>
-          <textarea value={researchInputText} onChange={e=>setResearchInputText(e.target.value)} placeholder="Optional pasted notes, constraints, or source excerpts" rows={4} style={{...inputS,resize:"vertical",fontSize:11,lineHeight:1.45}}/>
-          <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
-            <label style={{...btnS(t.f1),justifyContent:"center",flex:1}}><IC.Upload/> Add Files<input ref={researchFileRef} type="file" multiple accept=".pdf,.txt,.md,.csv,.json,.html,.py,.js,.ts" style={{display:"none"}} onChange={e=>{handleResearchFiles(e.target.files);e.target.value="";}}/></label>
-            <button onClick={startResearchReport} disabled={researchLoading||researchRunning} style={{...btnS(t.acc),justifyContent:"center",flex:1,opacity:(researchLoading||researchRunning)?0.55:1}}><IC.Zap/> Start</button>
           </div>
-          {(researchDraft.inputs||[]).length>0&&<div style={{display:"flex",flexDirection:"column",gap:4}}>
-            {(researchDraft.inputs||[]).map((inp,i)=><div key={`${inp.name}-${i}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 7px",border:`1px solid ${t.brd}22`,borderRadius:7,background:`${t.surface}55`}}>
-              <span style={{fontSize:10,color:t.f1,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{inp.name}</span>
-              <span style={{fontSize:9,color:t.mut}}>{Math.round((inp.content||"").length/1000)}k</span>
-              <button onClick={()=>setResearchDraft(p=>({...p,inputs:(p.inputs||[]).filter((_,ix)=>ix!==i)}))} style={{background:"none",border:"none",color:t.err,cursor:"pointer",display:"flex",padding:2}}><IC.X/></button>
-            </div>)}
-          </div>}
-          {kbs.length>0&&<div style={{display:"flex",flexDirection:"column",gap:4}}>
-            <div style={{fontSize:9,fontWeight:800,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Knowledge Bases</div>
-            <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-              {kbs.slice(0,8).map(kb=>{const on=(researchDraft.kb_ids||[]).includes(kb.id);return <button key={kb.id} onClick={()=>setResearchDraft(p=>({...p,kb_ids:on?(p.kb_ids||[]).filter(x=>x!==kb.id):[...(p.kb_ids||[]),kb.id]}))} style={{fontSize:9,padding:"4px 7px",borderRadius:7,border:`1px solid ${on?t.acc:t.brd}33`,background:on?`${t.acc}18`:`${t.surface}55`,color:on?t.acc:t.mut,cursor:"pointer",fontFamily:font}}>{kb.name}</button>;})}
-            </div>
-          </div>}
         </div>
-        </>:<>
+      </div>
+    </div>
+    :<div style={{flex:1,display:"grid",gridTemplateColumns:"290px minmax(0,1fr) 320px",overflow:"hidden",minHeight:0}}>
+      <div style={{borderRight:`1px solid ${t.brd}24`,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:12}}>
         <div style={{display:"flex",alignItems:"center",gap:6}}>
           <input value={researchReportFilter} onChange={e=>setResearchReportFilter(e.target.value)} placeholder="Filter reports" style={{...inputS,fontSize:11,padding:"7px 9px"}}/>
           <button onClick={()=>refreshResearchReports()} style={btnS(t.mut)}><IC.Refresh/></button>
@@ -4968,7 +4991,6 @@ function HyprChat(){
           </div>;})}
           {!filteredReports.length&&<div style={{textAlign:"center",padding:18,color:t.mut,fontSize:11,border:`1px dashed ${t.brd}33`,borderRadius:8}}>No research reports yet.</div>}
         </div>
-        </>}
       </div>
       <div style={{overflowY:"auto",padding:"18px 26px",minWidth:0}}>
         {report?<div style={{maxWidth:960,margin:"0 auto"}}>
@@ -5047,7 +5069,7 @@ function HyprChat(){
           </div>
         </div>
       </div>
-    </div>
+    </div>}
   </div>;})()
 
       :panel==="council"?(()=>{const personaProfiles=mcs.filter(isPersonaProfile);const panelS={flex:1,display:"flex",flexDirection:"column",overflow:"hidden"};const headerS={padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,background:`${t.surface}36`};const sectionS={background:`${t.surface}5C`,border:`1px solid ${t.brd}26`,borderRadius:8,padding:12};const kickerS={fontSize:10,fontWeight:900,color:t.mut,textTransform:"uppercase",letterSpacing:.7};const metaS={fontSize:10,color:t.mut,lineHeight:1.45};const chipS=(c=t.acc)=>({display:"inline-flex",alignItems:"center",gap:4,padding:"2px 7px",borderRadius:6,background:`${c}12`,border:`1px solid ${c}32`,color:c,fontSize:9,fontWeight:800,whiteSpace:"nowrap"});const segmentS=(on,c)=>({padding:"5px 9px",borderRadius:7,border:`1px solid ${on?c:t.brd}38`,background:on?`${c}16`:`${t.surface}55`,color:on?c:t.mut,cursor:"pointer",fontFamily:font,fontSize:10,fontWeight:800});const nativeSelectS={...inputS,fontSize:11,padding:"8px 10px",background:t.bgDeep,color:t.text};const memberProfile=m=>m?.model_config_id?personaProfiles.find(mc=>mc.id===m.model_config_id):null;const memberView=m=>{const mc=memberProfile(m);return{profile:mc,missing:!!m?.model_config_id&&!mc,name:mc?.name||m.persona_name||m.model?.split(":")[0]||"Council member",model:mc?.base_model||m.model||"",prompt:mc?.system_prompt||m.system_prompt||"",avatar:mc?profileAvatar(mc):"",linked:!!mc};};const updateMemberLocal=(cid,mid,patch)=>setCouncils(p=>p.map(c=>c.id===cid?{...c,members:(c.members||[]).map(m=>m.id===mid?{...m,...patch}:m)}:c));const saveMember=async(council,member)=>{const linked=editMemberForm.model_config_id?personaProfiles.find(mc=>mc.id===editMemberForm.model_config_id):null;const up={model:linked?.base_model||editMemberForm.model||member.model||models[0]||"",model_config_id:editMemberForm.model_config_id||"",system_prompt:linked?.system_prompt??editMemberForm.system_prompt??"",persona_name:linked?.name??editMemberForm.persona_name??""};await fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)}).catch(()=>{});updateMemberLocal(council.id,member.id,up);setEditMember(null);};const addCustomMember=async(council)=>{if(!models.length)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:models[0],model_config_id:"",system_prompt:"",persona_name:""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:m.model||models[0]||"",model_config_id:"",system_prompt:"",persona_name:""});};const addPersonaMember=async(council)=>{const mc=personaProfiles[0];if(!mc)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""});};return <div style={panelS}>
