@@ -41,7 +41,6 @@ TTS_URL = os.getenv("TTS_URL", "")  # empty = speech synthesis disabled (OpenAI-
 STT_MODEL = os.getenv("STT_MODEL", "Systran/faster-distil-whisper-large-v3")
 TTS_VOICE = os.getenv("TTS_VOICE", "af_heart")
 N8N_WEBHOOK_PATH = os.getenv("N8N_WEBHOOK_PATH", "/webhook/execute-code")
-N8N_RESEARCH_PATH = os.getenv("N8N_RESEARCH_PATH", "/webhook/deep-research")
 HTTP_VERIFY_SSL = os.getenv("HTTP_VERIFY_SSL", "true").lower() == "true"
 OUTBOUND_PROXY_URL = (
     os.getenv("HYPRCHAT_OUTBOUND_PROXY")
@@ -188,7 +187,6 @@ OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "30"))
 OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", "32768"))
 AIDER_ENABLED = os.getenv("AIDER_ENABLED", "true").lower() == "true"
 AIDER_FOR_GREENFIELD = os.getenv("AIDER_FOR_GREENFIELD", "true").lower() == "true"
-GATE_RECONCILE_AUTOCORRECT = os.getenv("GATE_RECONCILE_AUTOCORRECT", "false").lower() == "true"
 AIDER_MODEL = os.getenv("AIDER_MODEL", "")  # Empty = use FIXER_MODEL, then CODER_MODEL
 # 0 = inherit the Daedalus context-window slider (OPENHANDS_NUM_CTX) at call
 # time. The old int default (16384) silently pinned Aider below the slider and

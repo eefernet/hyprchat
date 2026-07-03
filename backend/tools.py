@@ -2130,9 +2130,6 @@ async def exec_tool(
                 _conv_full = (_gate_ctx.conv_row if _gate_ctx is not None
                               else await db.get_conversation(conv_id))
                 if await _check_v2(cr=_conv_full):
-                    if args.get("manifest_completion_retry"):
-                        print("[v2-gate] allowing manifest completion retry through anti-rebuild guard", flush=True)
-                        raise StopAsyncIteration("manifest completion retry allowed")
                     _runs_rb = (_gate_ctx.runs_window(20) if _gate_ctx is not None
                                 else await db.get_runs_by_conversation(conv_id, limit=20))
                     for _r in _runs_rb:

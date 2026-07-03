@@ -202,9 +202,6 @@ const Pill = ({ev,t,expanded,onToggle})=>{
   </div>;
 };
 
-// Reasoning is intentionally shown only in the compact brain-icon thinking pill.
-const ReasoningPanel = ({text,t,streaming})=>null;
-
 const PlanPanel = ({plan,t,streaming,md,onCopy})=>{
   const [expanded,setExpanded]=useState(streaming);
   const [copied,setCopied]=useState(false);
@@ -2769,7 +2766,6 @@ function MDWrap({children}){
 
 export {
   Pill,
-  ReasoningPanel,
   PlanPanel,
   RunCard,
   WorkflowCard,
