@@ -102,7 +102,12 @@ def test_execute_openapi_tool_builds_request(monkeypatch):
         assert connector_id == "openapi-test"
         return connector
 
+    async def fake_assert_url_allowed(url, allow_private=False):
+        assert url == "https://example.com/items/abc"
+        assert allow_private is False
+
     monkeypatch.setattr(connectors.db, "get_openapi_connector", fake_get_openapi_connector, raising=False)
+    monkeypatch.setattr(connectors, "assert_url_allowed", fake_assert_url_allowed)
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
@@ -146,7 +151,12 @@ def test_execute_openapi_tool_supports_extra_query(monkeypatch):
     async def fake_get_openapi_connector(connector_id):
         return connector
 
+    async def fake_assert_url_allowed(url, allow_private=False):
+        assert url == "https://httpbin.org/anything"
+        assert allow_private is False
+
     monkeypatch.setattr(connectors.db, "get_openapi_connector", fake_get_openapi_connector, raising=False)
+    monkeypatch.setattr(connectors, "assert_url_allowed", fake_assert_url_allowed)
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert str(request.url) == "https://httpbin.org/anything?anything=hyprchat-test"

@@ -407,7 +407,8 @@ Acceptance criteria:
 - packaging: package metadata, entrypoints, generated artifacts, and archive hygiene must be sane. If the review summary lists smoke_new_files (state files the program created when run), flag any that sit in the project tree as a packaging issue — runtime state must not ship in the deliverable.
 - tests: tests must be meaningful and isolated; they must not write to a real home directory or depend on host state.
 - runtime: flag likely user-visible behavior bugs that static inspection reveals, but do not speculate.
-- verification: accept static-only projects when the user's requested app type has no build step, but flag docs or delivery claims that imply stronger verification than the Reviewer actually performed.
+- verification: accept static-only projects when the user's requested app type has no build step, but flag docs or delivery claims that imply stronger verification than the Reviewer actually performed. If isolated_required is true, normal delivery requires isolated_status "passed"; if isolated_status is missing, failed, or not-run for an app/game/CLI/server project with a manifest, flag a packaging/runtime issue.
+- install docs: shell commands that include package version specifiers with `>`, `<`, or `>=` must quote the specifier, e.g. `pip install "pygame-ce>=2.5.0"`; unquoted examples can be interpreted as shell redirection and should be flagged as docs/packaging issues.
 
 Rules:
 - If there are no blocking delivery issues, emit status "accepted" and issues [].
@@ -577,6 +578,11 @@ async def run_acceptance_review(http, events, conv_id: str, *,
             "verification_confidence": review_env.get("verification_confidence", ""),
             "smoke_cmds": review_env.get("smoke_cmds", []),
             "smoke_new_files": review_env.get("smoke_new_files", []),
+            "isolated_required": review_env.get("isolated_required", False),
+            "isolated_status": review_env.get("isolated_status", ""),
+            "isolated_cmds": review_env.get("isolated_cmds", []),
+            "isolated_exit": review_env.get("isolated_exit", None),
+            "isolated_output_tail": review_env.get("isolated_output_tail", ""),
         }, indent=2)
 
         if prior_acceptance_context:
@@ -672,6 +678,13 @@ async def run_acceptance_review(http, events, conv_id: str, *,
             }
 
         status = (parsed.get("status") or "error").lower()
+        # Local models emit natural synonyms for a passing verdict (the
+        # Reviewer's own schema uses "clean", so the confusion is baked in);
+        # hard-downgrading them to "error" blocked delivery on passing projects.
+        if status in {"clean", "pass", "passed", "ok", "approved", "accept"}:
+            status = "accepted"
+        elif status in {"issue", "failed", "rejected"}:
+            status = "issues"
         if status not in {"accepted", "issues", "error"}:
             status = "error"
         issues = [_normalize_issue(i, project_dir) for i in (parsed.get("issues") or []) if isinstance(i, dict)]

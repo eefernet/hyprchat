@@ -1,5 +1,5 @@
 """
-Aider fixer agent for uploaded projects.
+Aider fixer agent for existing project roots.
 
 This module owns the HyprChat-side durable run. The actual Aider process runs
 inside the Codebox/OpenHands worker via /aider/run-stream, so the main service
@@ -19,6 +19,11 @@ import httpx
 import cancel_registry
 import config
 import database as db
+from tooling.gate_decisions import (
+    issue_scoped_files,
+    normalize_issue_path,
+    paths_overlap,
+)
 
 
 _STATE_FIX_HINT_RE = re.compile(
@@ -57,6 +62,19 @@ _ENTRYPOINT_BASENAME_HINTS = [
     "index.ts", "main.ts", "cli.ts", "commands.ts",
     "main.go", "main.rs", "Main.java",
 ]
+_DOC_BASENAMES = {"readme", "license", "notice", "changelog", "changes"}
+_DOC_EXTS = {".md", ".markdown", ".rst", ".txt", ".adoc"}
+
+# Pre-added to every Aider run (worker-side _safe_allowed_files drops any that
+# don't exist). When the LLM merely MENTIONS a file not in the chat, Aider
+# adds it and re-sends the request, DISCARDING every edit from the first
+# response — a verified lost fix. Small manifests are the usual trigger.
+# No lockfiles: they're huge and never the mention target.
+_MANIFEST_PREADD_BASENAMES = [
+    "requirements.txt", "pyproject.toml", "setup.py", "setup.cfg",
+    "package.json", "tsconfig.json", "Cargo.toml", "go.mod",
+    "Makefile", "README.md",
+]
 
 
 def _append_unique(paths: list[str], path: str) -> None:
@@ -89,7 +107,16 @@ def _allowed_files_from_issues(issue_envelope: dict) -> list[str]:
         if path and path not in out:
             out.append(path)
     text = "\n".join(text_bits)
-    for mention in re.findall(r"(?<![\w./-])[\w.-]+\.py\b", text):
+    # Mine file mentions from issue/test text across ALL project languages —
+    # the old .py-only pattern meant frontend/C#/C++ issues seeded no scope.
+    # Relative paths are captured whole ("frontend/src/api.ts"); absolute
+    # paths stay excluded (the stale-path detector owns those).
+    _mention_exts = (
+        r"py|ts|tsx|js|jsx|mjs|go|rs|java|kt|cs|c|cpp|cc|cxx|h|hpp|rb|php"
+        r"|css|html|toml|yaml|yml|json|md|csproj|sln|cmake"
+    )
+    for mention in re.findall(
+            rf"(?<![\w./-])(?:[\w.-]+/)*[\w.-]+\.(?:{_mention_exts})\b", text):
         if mention and mention not in out:
             out.append(mention)
     # Python CLI import failures are often reported at __main__.py even though
@@ -126,6 +153,19 @@ def _allowed_files_from_task(task: str) -> list[str]:
     return out
 
 
+def _paths_are_docs_only(paths: list[str]) -> bool:
+    if not paths:
+        return False
+    for path in paths:
+        rel = (path or "").replace("\\", "/").rstrip("/")
+        base = rel.rsplit("/", 1)[-1].lower()
+        stem = base.rsplit(".", 1)[0]
+        ext = "." + base.rsplit(".", 1)[1] if "." in base else ""
+        if stem not in _DOC_BASENAMES and ext not in _DOC_EXTS:
+            return False
+    return True
+
+
 async def run_aider_fix(http, events, conv_id: str, *,
                         project_dir: str, task: str,
                         issue_envelope: dict | None = None,
@@ -140,6 +180,10 @@ async def run_aider_fix(http, events, conv_id: str, *,
     contract = contract or {}
     seeded_allowed_files = list(allowed_files or [])
     for path in _allowed_files_from_issues(issue_envelope) + _allowed_files_from_task(task):
+        _append_unique(seeded_allowed_files, path)
+    # After the issue/task seeds so issue-scoped files keep list priority
+    # under the worker's allowed-files cap.
+    for path in _MANIFEST_PREADD_BASENAMES:
         _append_unique(seeded_allowed_files, path)
     allowed_files = seeded_allowed_files
     try:
@@ -217,7 +261,9 @@ async def run_aider_fix(http, events, conv_id: str, *,
                 wf = await db.get_coder_workflow(workflow_id)
                 if wf and wf.get("state") == "cancelled":
                     return
-                if run_status == "succeeded":
+                if run_status in ("succeeded", "partial"):
+                    # partial still changed the tree — head to review, not
+                    # blocked; the verification review scores the attempt.
                     state, artifact = "reviewing", "not_ready"
                 elif run_status == "cancelled":
                     state, artifact = "cancelled", "cancelled"
@@ -264,7 +310,10 @@ async def run_aider_fix(http, events, conv_id: str, *,
         "contract": contract,
         "model": aider_model,
         "ollama_url": config.OLLAMA_URL,
-        "num_ctx": config.AIDER_NUM_CTX,
+        # AIDER_NUM_CTX=0 means "inherit the Daedalus context-window slider":
+        # a divergent Aider ctx forces Ollama to evict/reload the coder model
+        # on every build↔fix alternation and quietly caps Aider below the UI.
+        "num_ctx": config.AIDER_NUM_CTX or config.OPENHANDS_NUM_CTX,
         "test_cmd": test_cmd or contract.get("aider_test_cmd") or contract.get("test_cmd") or "",
         "lint_cmd": lint_cmd or (contract.get("aider_lint_cmd") if contract.get("safe_lint") else "") or "",
         "allowed_files": allowed_files,
@@ -342,9 +391,25 @@ async def run_aider_fix(http, events, conv_id: str, *,
 
         worker_status = (result.get("status") or "error").lower()
         files = result.get("files_touched") or []
+        env_status = "applied" if worker_status == "ok" else worker_status
+        summary = result.get("summary") or ""
+        # Downgrade fake success: Aider "applied" edits but touched none of
+        # the files the issue envelope pointed at. The run must not burn a
+        # progress reset — it counts as an attempt, and review still runs
+        # because the tree did change.
+        if worker_status == "ok" and files:
+            _scoped = issue_scoped_files(issue_envelope)
+            _touched = {normalize_issue_path(f, project_dir) for f in files}
+            _touched.discard("")
+            if _scoped and _touched and not paths_overlap(_touched, _scoped):
+                env_status = "partial"
+                summary += (
+                    " | Aider reported success but touched none of the "
+                    f"issue-scoped files: {', '.join(sorted(_scoped)[:6])}"
+                )
         envelope = {
-            "status": "applied" if worker_status == "ok" else worker_status,
-            "summary": result.get("summary") or "",
+            "status": env_status,
+            "summary": summary,
             "project_dir": result.get("project_dir") or project_dir,
             "files_touched": files,
             "diff": result.get("diff") or "",
@@ -360,9 +425,15 @@ async def run_aider_fix(http, events, conv_id: str, *,
             "run_id": run_id,
             "workflow_id": workflow_id,
             "source_role": source_role,
+            "docs_only": _paths_are_docs_only(files),
             "source": "aider",
         }
-        run_status = "succeeded" if worker_status == "ok" else ("cancelled" if worker_status == "cancelled" else "failed")
+        if worker_status == "ok":
+            run_status = "partial" if env_status == "partial" else "succeeded"
+        elif worker_status == "cancelled":
+            run_status = "cancelled"
+        else:
+            run_status = "failed"
         await events.emit(conv_id, "tool_end", {
             "tool": "run_aider_fix", "icon": "wrench",
             "status": f"Aider {envelope['status']} ({len(files)} file(s))",

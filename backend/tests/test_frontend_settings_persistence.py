@@ -1,7 +1,7 @@
 """
-Static guard tests for the single-file frontend settings persistence.
+Static guard tests for frontend settings persistence.
 
-The frontend has no build/test pipeline, so these tests protect the small
+The frontend has no unit-test pipeline, so these tests protect the small
 hydration contract that keeps stale localStorage from overwriting server
 settings on page load.
 """
@@ -9,26 +9,34 @@ from pathlib import Path
 
 
 FRONTEND = Path(__file__).resolve().parents[2] / "frontend" / "src" / "main.jsx"
+SETTINGS_SYNC = Path(__file__).resolve().parents[2] / "frontend" / "src" / "settingsSync.js"
 
 
 def _html() -> str:
     return FRONTEND.read_text(encoding="utf-8")
 
 
+def _sync() -> str:
+    return SETTINGS_SYNC.read_text(encoding="utf-8")
+
+
 def test_settings_hydration_guard_exists():
     html = _html()
+    sync = _sync()
 
     assert "settingsLoadedRef=useRef(false)" in html
     assert "seenSettingEffectRef=useRef({})" in html
     assert "skipSettingPatchRef=useRef({})" in html
-    assert "hydrateServerSetting=(settingKey,setter,value,current)" in html
-    assert "persistServerSetting=(storageKey,settingKey,value" in html
-    assert "if(!settingsLoadedRef.current&&!seen)return;" in html
+    assert "createSettingsSync({" in html
+    assert "hydrateServerSetting=(settingKey,setter,value,current)" in sync
+    assert "persistServerSetting=(storageKey,settingKey,value" in sync
+    assert "if(!settingsLoadedRef.current&&!seen)return;" in sync
     assert "settingsLoadedRef.current=true;" in html
 
 
 def test_server_persisted_settings_use_guarded_persistence():
     html = _html()
+    sync = _sync()
     expected_pairs = [
         ("hc-num-ctx", "default_num_ctx"),
         ("hc-ws-model", "workspace_model"),
@@ -49,6 +57,7 @@ def test_server_persisted_settings_use_guarded_persistence():
     for storage_key, setting_key in expected_pairs:
         assert f'persistServerSetting("{storage_key}","{setting_key}"' in html
 
+    assert 'fetch(`${api}/api/settings`' in sync
     assert 'localStorage.setItem("hc-num-ctx",String(numCtx));fetch(`${API}/api/settings`' not in html
     assert 'localStorage.setItem("hc-acceptance-model",acceptanceModel);fetch(`${API}/api/settings`' not in html
 

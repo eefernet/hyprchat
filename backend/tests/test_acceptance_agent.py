@@ -335,3 +335,16 @@ def test_explicit_cloud_acceptance_model_routes_to_provider():
 
     assert envelope["status"] == "accepted"
     assert not [p for p in http.posts if p["url"].endswith("/api/chat")]
+
+
+def test_acceptance_clean_synonym_normalizes_to_accepted():
+    """Local models emit 'clean' (the Reviewer schema's own passing word) —
+    it must map to accepted, not hard-downgrade to error and block delivery."""
+    envelope, _http, _events = _run_acceptance_with_ollama_payload({
+        "message": {"content": json.dumps({
+            "status": "clean", "summary": "Looks good.", "issues": [],
+        })},
+    })
+
+    assert envelope["status"] == "accepted"
+    assert envelope["issues"] == []

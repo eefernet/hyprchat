@@ -1,0 +1,8 @@
+[Unit]
+Description=SearXNG ProtonVPN watchdog (re-establish tunnel on drop)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/searxng-vpn-watchdog.sh

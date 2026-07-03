@@ -14,6 +14,88 @@ import './vendor.js';
 import React from 'react';
 import * as ReactDOMFull from 'react-dom';
 import { createRoot, hydrateRoot } from 'react-dom/client';
+import {
+  API,
+  HC_USER_KEY,
+  dismissHyprLoader,
+  hcSessionKey,
+  hcSetUserContext,
+  hcStoredSession,
+  hcStoredUserId,
+  proxiedImageUrl,
+  userScopedUrl,
+} from './session.js';
+import {
+  BACKGROUND_EFFECTS,
+  FONTS,
+  THEMES,
+  WELCOME_VERSION,
+  fallbackWelcome,
+  localDayKey,
+} from './theme.js';
+import {
+  cleanResearchMarkdown,
+  formatModelCtx,
+  isCloudModelName,
+  isEmbeddingModelName,
+  isMoeModelName,
+  modelContextLength,
+  researchModelOptions,
+} from './modelHelpers.js';
+import { createSettingsSync } from './settingsSync.js';
+import ModelPicker from './ModelPicker.jsx';
+import AnalyticsPanel from './panels/AnalyticsPanel.jsx';
+import PromptLibraryPanel from './panels/PromptLibraryPanel.jsx';
+import BackgroundCanvas from './components/BackgroundCanvas.jsx';
+import { IC, TIC } from './components/icons.jsx';
+import {
+  ChartBlock,
+  CodeBlock,
+  Collapsible,
+  InlineColorSwatch,
+  InlineMath,
+  MermaidBlock,
+  initMermaidTheme,
+  looksLikeChartConfig,
+  normalizeRenderableFences,
+} from './components/markdownBlocks.jsx';
+import {
+  ArtifactStudioPanel,
+  ImageStudioPanel,
+} from './components/artifactComponents.jsx';
+import {
+  Chip,
+  DaedalusSummary,
+  MDWrap,
+  MemoMD,
+  MemoryProfilePanel,
+  QuickSearchSourcesPanel,
+  QuickSourceInlineChip,
+  ResearchLiveStatus,
+  RunCard,
+  SandboxSection,
+  Tip,
+  ToolStatus,
+  WorkflowCard,
+  WorkspaceDetail,
+  _activityGroupKey,
+  _activityIsTerminal,
+  _activityStatusKey,
+  _daedalusRunIdsForMessage,
+  _eventsHaveDaedalusFullBuild,
+  _fmtElapsed,
+  _isDaedalusFullBuildOutput,
+  _isDaedalusOutput,
+  _metaObj,
+  _parseUtcishMs,
+  _phaseFromEvent,
+  _quickSearchPayloadFromEvents,
+  _quickSourceForUrl,
+  _qsHost,
+  _runIdsFromEvents,
+  citeOptsFor,
+  CitationChip,
+} from './components/hyprChatWidgets.jsx';
 
 // The original code used the UMD ReactDOM global, which exposed BOTH
 // createRoot (React 18 client) and createPortal (react-dom). Rebuild a single
@@ -23,3539 +105,7 @@ const ReactDOM = { ...ReactDOMFull, createRoot, hydrateRoot };
 
 // ───────────────────────── original component body ─────────────────────────
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
-
-const API = window.HYPRCHAT_API || "";
-const HC_USER_KEY = "hc-current-user";
-const HC_SESSION_PREFIX = "hc-user-session-";
-const hcSessionKey = id => `${HC_SESSION_PREFIX}${id || "default"}`;
-const hcStoredUserId = () => {
-  try { return localStorage.getItem(HC_USER_KEY) || "default"; } catch { return "default"; }
-};
-const hcStoredSession = id => {
-  try { return localStorage.getItem(hcSessionKey(id)) || ""; } catch { return ""; }
-};
-const hcSetUserContext = (id, sessionToken = null) => {
-  const uid = id || "default";
-  window.__hyprchatUserId = uid;
-  if (sessionToken !== null) window.__hyprchatSessionToken = sessionToken || "";
-};
-hcSetUserContext(hcStoredUserId(), hcStoredSession(hcStoredUserId()));
-const dismissHyprLoader = () => {
-  const el = document.getElementById("hc-loading");
-  if (!el || el.classList.contains("hc-dismiss")) return;
-  el.classList.add("hc-dismiss");
-  setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 800);
-};
-const userScopedUrl = path => {
-  const uid = window.__hyprchatUserId || hcStoredUserId();
-  const session = window.__hyprchatSessionToken || hcStoredSession(uid);
-  const sep = String(path).includes("?") ? "&" : "?";
-  return `${API}${path}${sep}user_id=${encodeURIComponent(uid)}${session ? `&session=${encodeURIComponent(session)}` : ""}`;
-};
-const proxiedImageUrl = src => {
-  if(!/^https?:\/\//i.test(src||""))return src;
-  let raw = src;
-  if(/%25[0-9A-F]{2}/i.test(raw)){try{raw = decodeURIComponent(raw);}catch{}}
-  return `${API}/api/img-proxy?u=${encodeURIComponent(raw)}`;
-};
-const _hyprFetch = window.fetch.bind(window);
-window.fetch = (input, init = {}) => {
-  const rawUrl = typeof input === "string" ? input : (input && input.url) || "";
-  const apiPath = `${API}/api/`;
-  const isApi = rawUrl.startsWith("/api/") || rawUrl.startsWith(apiPath) || rawUrl.startsWith(`${window.location.origin}/api/`);
-  if (!isApi) return _hyprFetch(input, init);
-  const uid = window.__hyprchatUserId || hcStoredUserId();
-  const session = window.__hyprchatSessionToken || hcStoredSession(uid);
-  const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
-  headers.set("X-HyprChat-User", uid);
-  if (session) headers.set("X-HyprChat-Session", session);
-  return _hyprFetch(input, {...init, headers});
-};
-const THEMES = {
-  hyprflat:{name:"HyprFlat",bg:"#282C34",bgDeep:"#111418",surface:"#171B21",sfHov:"#20262E",sfBri:"#2B343D",brd:"#355A66",text:"#CDEFF7",dim:"#9CDEF2",mut:"#6B8A94",acc:"#9CDEF2",acc2:"#74CFE7",warm:"#E06C75",ok:"#50FA7B",err:"#E06C75",pink:"#B48EAD",f1:"#88C0D0",f4:"#81A1C1"},
-  nord:{name:"Nord",bg:"#2E3440",bgDeep:"#242933",surface:"#3B4252",sfHov:"#434C5E",sfBri:"#4C566A",brd:"#4C566A",text:"#ECEFF4",dim:"#D8DEE9",mut:"#81A1C1",acc:"#88C0D0",acc2:"#81A1C1",warm:"#EBCB8B",ok:"#A3BE8C",err:"#BF616A",pink:"#B48EAD",f1:"#8FBCBB",f4:"#5E81AC"},
-  catppuccin:{name:"Catppuccin",bg:"#1E1E2E",bgDeep:"#181825",surface:"#313244",sfHov:"#45475A",sfBri:"#585B70",brd:"#45475A",text:"#CDD6F4",dim:"#BAC2DE",mut:"#89B4FA",acc:"#89B4FA",acc2:"#74C7EC",warm:"#F9E2AF",ok:"#A6E3A1",err:"#F38BA8",pink:"#CBA6F7",f1:"#94E2D5",f4:"#7287FD"},
-  gruvbox:{name:"Gruvbox",bg:"#282828",bgDeep:"#1D2021",surface:"#3C3836",sfHov:"#504945",sfBri:"#665C54",brd:"#504945",text:"#EBDBB2",dim:"#D5C4A1",mut:"#a89984",acc:"#83A598",acc2:"#8EC07C",warm:"#FABD2F",ok:"#B8BB26",err:"#FB4934",pink:"#D3869B",f1:"#8EC07C",f4:"#83a598"},
-  tokyoNight:{name:"Tokyo Night",bg:"#1A1B26",bgDeep:"#16161E",surface:"#24283B",sfHov:"#292E42",sfBri:"#3B4261",brd:"#3B4261",text:"#C0CAF5",dim:"#A9B1D6",mut:"#7AA2F7",acc:"#7AA2F7",acc2:"#7DCFFF",warm:"#E0AF68",ok:"#9ECE6A",err:"#F7768E",pink:"#BB9AF7",f1:"#73DACA",f4:"#2AC3DE"},
-  rosePine:{name:"Rosé Pine",bg:"#191724",bgDeep:"#1F1D2E",surface:"#26233A",sfHov:"#2A2837",sfBri:"#403D52",brd:"#403D52",text:"#E0DEF4",dim:"#c9bdde",mut:"#908caa",acc:"#9CCFD8",acc2:"#C4A7E7",warm:"#F6C177",ok:"#5ca99c",err:"#EB6F92",pink:"#C4A7E7",f1:"#9CCFD8",f4:"#EA9A97"},
-  dracula:{name:"Dracula",bg:"#282A36",bgDeep:"#1E1F29",surface:"#343746",sfHov:"#414354",sfBri:"#4D4F64",brd:"#44475A",text:"#F8F8F2",dim:"#CFCFCF",mut:"#8a9cd0",acc:"#BD93F9",acc2:"#FF79C6",warm:"#F1FA8C",ok:"#50FA7B",err:"#FF5555",pink:"#FF79C6",f1:"#8BE9FD",f4:"#BD93F9"},
-  oneLight:{name:"One Light",bg:"#FAFAFA",bgDeep:"#EFEFEF",surface:"#E2E3E5",sfHov:"#D5D6DA",sfBri:"#C5C6CC",brd:"#B0B1B8",text:"#282A30",dim:"#3E4047",mut:"#6B6E78",acc:"#3569D6",acc2:"#4260CC",warm:"#A06D00",ok:"#3D8B3D",err:"#D03B2F",pink:"#9021A0",f1:"#0174A8",f4:"#3569D6"},
-  midnight:{name:"Midnight",bg:"#0A0A0F",bgDeep:"#050508",surface:"#111118",sfHov:"#1A1A24",sfBri:"#222230",brd:"#1E1E2E",text:"#C8C8E8",dim:"#9090B8",mut:"#7a7aa8",acc:"#9b8ce0",acc2:"#6e63b8",warm:"#E0A060",ok:"#40C080",err:"#E05060",pink:"#c080c0",f1:"#5ab8d0",f4:"#7a7ad0"},
-  terminal:{name:"Terminal",bg:"#0a0f0a",bgDeep:"#050805",surface:"#0d1a0d",sfHov:"#112211",sfBri:"#163316",brd:"#1a3a1a",text:"#baffc6",dim:"#7fe89a",mut:"#5ca776",acc:"#00ff41",acc2:"#33ff77",warm:"#ffcc00",ok:"#00ff41",err:"#ff7a7a",pink:"#ff66ff",f1:"#7ad6ff",f4:"#55ffa0"},
-  cyberpunk:{name:"Cyberpunk",bg:"#0d0015",bgDeep:"#080010",surface:"#150025",sfHov:"#1a002e",sfBri:"#220038",brd:"#2a0045",text:"#f0e6ff",dim:"#d2b8ff",mut:"#b083d8",acc:"#f26bff",acc2:"#d859e5",warm:"#ffe066",ok:"#5cf2c9",err:"#ff5577",pink:"#ff66d4",f1:"#5cc9ff",f4:"#c77bff"},
-  solarizedDark:{name:"Solarized Dark",bg:"#002b36",bgDeep:"#001e27",surface:"#073642",sfHov:"#0a4153",sfBri:"#0d4f63",brd:"#094858",text:"#d6dcd6",dim:"#a7b4b3",mut:"#839496",acc:"#4ba6e8",acc2:"#4dbab0",warm:"#cfa036",ok:"#a4b53b",err:"#e05652",pink:"#e25999",f1:"#4dbab0",f4:"#868bd8"},
-  solarizedLight:{name:"Solarized Light",bg:"#fdf6e3",bgDeep:"#eee8d5",surface:"#e8e1cc",sfHov:"#ddd5be",sfBri:"#d0c8b0",brd:"#b5ad96",text:"#3b4d53",dim:"#475963",mut:"#6e7f86",acc:"#1a7abf",acc2:"#1f8c85",warm:"#a37400",ok:"#6d8400",err:"#c62828",pink:"#c42484",f1:"#1f8c85",f4:"#5c63b0"},
-  materialOcean:{name:"Material Ocean",bg:"#0f111a",bgDeep:"#090b10",surface:"#1a1c25",sfHov:"#21232d",sfBri:"#292b36",brd:"#2a2d3a",text:"#a6accd",dim:"#8b91b8",mut:"#4b526d",acc:"#82aaff",acc2:"#89ddff",warm:"#ffcb6b",ok:"#c3e88d",err:"#f07178",pink:"#c792ea",f1:"#89ddff",f4:"#7986cb"},
-  ayuDark:{name:"Ayu Dark",bg:"#0b0e14",bgDeep:"#070910",surface:"#0d1017",sfHov:"#111520",sfBri:"#161a26",brd:"#1a1f2e",text:"#cccac2",dim:"#b3b1ad",mut:"#626a73",acc:"#39bae6",acc2:"#59c2ff",warm:"#ffb454",ok:"#aad94c",err:"#f28779",pink:"#d2a6ff",f1:"#95e6cb",f4:"#39bae6"},
-};
-const FONTS = [
-  {name:"JetBrains Mono",v:"'JetBrains Mono',monospace",i:"JetBrains+Mono:wght@300;400;500;600;700"},
-  {name:"Fira Code",v:"'Fira Code',monospace",i:"Fira+Code:wght@300;400;500;600;700"},
-  {name:"Source Code Pro",v:"'Source Code Pro',monospace",i:"Source+Code+Pro:wght@300;400;500;600;700"},
-  {name:"IBM Plex Mono",v:"'IBM Plex Mono',monospace",i:"IBM+Plex+Mono:wght@300;400;500;600;700"},
-  {name:"Victor Mono",v:"'Victor Mono',monospace",i:"Victor+Mono:wght@300;400;500;600;700"},
-  {name:"Inconsolata",v:"'Inconsolata',monospace",i:"Inconsolata:wght@300;400;500;600;700"},
-  {name:"Cascadia Code",v:"'Cascadia Code',monospace",i:"Cascadia+Code:wght@300;400;500;600;700"},
-  {name:"Space Mono",v:"'Space Mono',monospace",i:"Space+Mono:wght@400;700"},
-  {name:"Geist Mono",v:"'Geist Mono',monospace",i:"Geist+Mono:wght@300;400;500;600;700"},
-];
-
-const BACKGROUND_EFFECTS = [
-  {id:"dots",name:"Dot Grid"},
-  {id:"rain",name:"Pixel Rain"},
-  {id:"flow",name:"Soft Flow"},
-  {id:"aurora",name:"Aurora Lines"},
-  {id:"stars",name:"Star Drift"},
-  {id:"circuit",name:"Circuit Drift"},
-  {id:"neural",name:"Neural Constellation"},
-  {id:"sacred",name:"Sacred Geometry"},
-  {id:"signal",name:"Signal Drift"},
-  {id:"quantum",name:"Quantum Foam"},
-  {id:"veins",name:"Data Veins"},
-  {id:"solar",name:"Solar Wind"},
-  {id:"terminalGhost",name:"Blackbox Terminal"},
-  {id:"orbital",name:"Orbital Mechanics"},
-  {id:"lattice",name:"Lattice Field"},
-  {id:"synapse",name:"Synapse Rain"},
-  {id:"sonar",name:"Deep Ocean Sonar"},
-  {id:"magnetic",name:"Magnetic Field Lines"},
-  {id:"candle",name:"Monastery Candlelight"},
-  {id:"microwave",name:"Cosmic Microwave"},
-  {id:"blueprint",name:"Blueprint Ghosts"},
-  {id:"scanlines",name:"Scanlines"},
-  {id:"off",name:"Off"},
-];
-
-const WELCOME_FALLBACKS = [
-  "Summon a better rabbit hole",
-  "Ask the question with teeth",
-  "Turn chaos into a checklist",
-  "Make the weird idea executable",
-  "Disturb the obvious answer",
-  "Open a trapdoor in the problem",
-  "Give the machine a worthy puzzle",
-  "Bring snacks for the algorithm",
-  "Make today's mystery regret it",
-  "Translate fog into working code",
-];
-const WELCOME_VERSION="fun-2";
-const HC_UI_BUILD="research-live-2026-06-04b";
-const localDayKey=()=>{
-  const d=new Date();
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-};
-const fallbackWelcome=()=>{
-  const key=localDayKey().replace(/\D/g,"");
-  const idx=Number(key.slice(-4))%WELCOME_FALLBACKS.length;
-  return WELCOME_FALLBACKS[idx];
-};
-
-const hexToRgb=(hex)=>{
-  const s=String(hex||"").replace("#","");
-  const m=s.match(/^([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
-  return m?{r:parseInt(m[1],16),g:parseInt(m[2],16),b:parseInt(m[3],16)}:{r:17,g:20,b:24};
-};
-
-function BackgroundCanvas({effect,t}){
-  const ref=useRef(null);
-  useEffect(()=>{
-    const canvasEffects=["rain","flow","aurora","stars","circuit","neural","sacred","signal","quantum","veins","solar","terminalGhost","orbital","lattice","synapse","sonar","magnetic","candle","microwave","blueprint"];
-    if(!canvasEffects.includes(effect))return;
-    const canvas=ref.current;
-    if(!canvas)return;
-    const reduced=window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const ctx=canvas.getContext("2d");
-    if(!ctx)return;
-    let raf=0, stopped=false, particles=[];
-    let view={w:1,h:1,dpr:1};
-    const colors=[t.acc,t.warm,t.f1||t.acc,t.acc2||t.acc].filter(Boolean);
-    const snap=(v,s=4)=>Math.round(v/s)*s;
-    const clampCount=(n,min,max)=>Math.min(max,Math.max(min,Math.floor(n)));
-    const n2=(x,y)=>{
-      const v=Math.sin(x*127.1+y*311.7)*43758.5453123;
-      return v-Math.floor(v);
-    };
-    const noise=(x,y)=>{
-      const xi=Math.floor(x), yi=Math.floor(y), xf=x-xi, yf=y-yi;
-      const u=xf*xf*(3-2*xf), v=yf*yf*(3-2*yf);
-      const a=n2(xi,yi), b=n2(xi+1,yi), c=n2(xi,yi+1), d=n2(xi+1,yi+1);
-      return (a+(b-a)*u)+((c+(d-c)*u)-(a+(b-a)*u))*v;
-    };
-    const makeRain=(w,h,i)=>({x:Math.random()*w,y:Math.random()*h-h*.4,c:colors[i%colors.length],a:.08+Math.random()*.16,v:1+Math.random()*2.6,drift:(Math.random()-.5)*.42,size:2+(Math.random()>.82?2:0),blocks:1+Math.floor(Math.random()*4),gap:6+Math.floor(Math.random()*8)});
-    const makeFlow=(w,h,i)=>({x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.16+Math.random()*.24,s:.36+Math.random()*.8});
-    const makeStar=(w,h,i)=>({x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.28+Math.random()*.48,v:.18+Math.random()*.65,size:1+(Math.random()>.62?1:0)+(Math.random()>.9?1:0)});
-    const makePoint=(w,h,i)=>({x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.08+Math.random()*.3,v:.15+Math.random()*.9,r:1+Math.random()*3,phase:Math.random()*Math.PI*2});
-    const makeCircuit=(w,h,i)=>{
-      let x=Math.random()*w, y=Math.random()*h, segs=[];
-      for(let j=0;j<5+Math.floor(Math.random()*5);j++){
-        const len=(30+Math.random()*130)*(Math.random()>.5?1:-1);
-        segs.push(Math.random()>.5?[len,0]:[0,len*.55]);
-      }
-      return {x,y,segs,c:colors[i%colors.length],a:.11+Math.random()*.16,phase:Math.random()*Math.PI*2,v:.045+Math.random()*.1};
-    };
-    const seed=(w,h)=>{
-      const area=w*h;
-      if(effect==="rain")particles=Array.from({length:clampCount(area/36000,24,78)},(_,i)=>makeRain(w,h,i));
-      else if(effect==="flow")particles=Array.from({length:clampCount(area/11000,70,240)},(_,i)=>makeFlow(w,h,i));
-      else if(effect==="stars")particles=Array.from({length:clampCount(area/8000,90,300)},(_,i)=>makeStar(w,h,i));
-      else if(effect==="circuit")particles=Array.from({length:clampCount(area/30000,25,82)},(_,i)=>makeCircuit(w,h,i));
-      else if(["neural","quantum","veins","solar","terminalGhost","orbital","lattice","synapse","sonar","magnetic","candle","microwave","blueprint","signal","sacred"].includes(effect))particles=Array.from({length:clampCount(area/15000,55,260)},(_,i)=>makePoint(w,h,i));
-      else particles=[];
-    };
-    const resize=()=>{
-      const rect=canvas.getBoundingClientRect();
-      const dpr=Math.min(window.devicePixelRatio||1,2);
-      view={w:Math.max(1,rect.width),h:Math.max(1,rect.height),dpr};
-      canvas.width=Math.max(1,Math.floor(view.w*dpr));
-      canvas.height=Math.max(1,Math.floor(view.h*dpr));
-      ctx.setTransform(dpr,0,0,dpr,0,0);
-      ctx.imageSmoothingEnabled=false;
-      seed(view.w,view.h);
-      ctx.clearRect(0,0,view.w,view.h);
-    };
-    const drawRain=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);
-      particles.forEach((p,i)=>{
-        p.y+=p.v;
-        p.x+=p.drift+Math.sin(time*.001+i)*.05;
-        if(p.y>h+40||p.x<-20||p.x>w+20)Object.assign(p,makeRain(w,h,i),{y:-Math.random()*h*.35});
-        const x=snap(p.x,4), y=snap(p.y,4);
-        ctx.fillStyle=p.c;
-        ctx.globalAlpha=p.a;
-        for(let b=0;b<p.blocks;b++)ctx.fillRect(x,y-b*p.gap,p.size,p.size*2);
-      });
-      ctx.globalAlpha=1;
-    };
-    const drawFlow=(time,w,h)=>{
-      ctx.globalCompositeOperation="destination-out";
-      ctx.fillStyle="rgba(0,0,0,.12)";
-      ctx.fillRect(0,0,w,h);
-      ctx.globalCompositeOperation="source-over";
-      particles.forEach((p,i)=>{
-        const px=p.x, py=p.y;
-        const ang=noise(p.x*.0036+time*.000035,p.y*.0036-time*.000022)*Math.PI*4;
-        const nx=p.x+Math.cos(ang)*(0.28+p.s);
-        const ny=p.y+Math.sin(ang)*(0.28+p.s);
-        if(nx<-8||nx>w+8||ny<-8||ny>h+8){Object.assign(p,makeFlow(w,h,i));return;}
-        p.x=nx;p.y=ny;
-        ctx.globalAlpha=p.a;
-        ctx.strokeStyle=p.c;
-        ctx.lineWidth=1.35;
-        ctx.beginPath();
-        ctx.moveTo(px,py);
-        ctx.lineTo(p.x,p.y);
-        ctx.stroke();
-      });
-      ctx.globalAlpha=1;
-    };
-    const drawAurora=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);
-      for(let i=0;i<7;i++){
-        const yBase=h*(.16+i*.12);
-        ctx.beginPath();
-        for(let x=-80;x<=w+80;x+=48){
-          const y=yBase+Math.sin(x*.006+time*.00024+i)*32+Math.sin(x*.017-time*.00018+i*2)*12;
-          if(x===-80)ctx.moveTo(x,y);else ctx.lineTo(x,y);
-        }
-        ctx.strokeStyle=colors[i%colors.length];
-        ctx.globalAlpha=.06+i*.011;
-        ctx.lineWidth=1.3+(i%3)*.55;
-        ctx.stroke();
-      }
-      ctx.globalAlpha=1;
-    };
-    const drawStars=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);
-      particles.forEach((p,i)=>{
-        p.y+=p.v;
-        p.x+=Math.sin(time*.00045+i)*.08;
-        if(p.y>h+8)Object.assign(p,makeStar(w,h,i),{y:-8});
-        ctx.fillStyle=p.c;
-        ctx.globalAlpha=p.a*(.72+.28*Math.sin(time*.002+i));
-        const x=snap(p.x,2), y=snap(p.y,2);
-        ctx.fillRect(x,y,p.size,p.size);
-        if(p.size>1){
-          ctx.globalAlpha*=.36;
-          ctx.fillRect(x-2,y, p.size+4, 1);
-          ctx.fillRect(x,y-2, 1, p.size+4);
-        }
-      });
-      ctx.globalAlpha=1;
-    };
-    const drawCircuit=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);
-      particles.forEach((p,i)=>{
-        p.y+=p.v;
-        if(p.y>h+160)Object.assign(p,makeCircuit(w,h,i),{y:-120});
-        let x=p.x, y=p.y;
-        ctx.beginPath();
-        ctx.moveTo(snap(x,8),snap(y,8));
-        p.segs.forEach(([dx,dy])=>{x+=dx;y+=dy;ctx.lineTo(snap(x,8),snap(y,8));});
-        ctx.strokeStyle=p.c;
-        ctx.globalAlpha=p.a*(.6+.4*Math.sin(time*.001+p.phase));
-        ctx.lineWidth=1.45;
-        ctx.stroke();
-        ctx.fillStyle=p.c;
-        ctx.globalAlpha*=.8;
-        ctx.fillRect(snap(x,8)-2,snap(y,8)-2,5,5);
-      });
-      ctx.globalAlpha=1;
-    };
-    const drawNeural=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);
-      particles.forEach((p,i)=>{p.x+=Math.sin(time*.00035+p.phase)*.16;p.y+=Math.cos(time*.00028+p.phase)*.16;});
-      for(let i=0;i<particles.length;i++)for(let j=i+1;j<particles.length;j+=3){
-        const a=particles[i],b=particles[j],dx=a.x-b.x,dy=a.y-b.y,d=Math.hypot(dx,dy);
-        if(d<145){ctx.globalAlpha=(1-d/145)*.12;ctx.strokeStyle=a.c;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();}
-      }
-      particles.forEach(p=>{ctx.globalAlpha=p.a;ctx.fillStyle=p.c;ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fill();});ctx.globalAlpha=1;
-    };
-    const drawSacred=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);ctx.save();ctx.translate(w/2,h/2);ctx.rotate(time*.00008);ctx.strokeStyle=t.acc;ctx.lineWidth=1.2;
-      for(let ring=0;ring<5;ring++){const r=Math.min(w,h)*(.11+ring*.075);ctx.globalAlpha=.08+ring*.018;ctx.beginPath();ctx.arc(0,0,r,0,Math.PI*2);ctx.stroke();for(let i=0;i<6;i++){const a=i*Math.PI/3+ring*.34;ctx.beginPath();ctx.arc(Math.cos(a)*r*.82,Math.sin(a)*r*.82,r*.38,0,Math.PI*2);ctx.stroke();}}
-      ctx.restore();ctx.globalAlpha=1;
-    };
-    const drawSignal=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);const cx=w*.22,cy=h*.72;for(let i=0;i<10;i++){const r=((time*.045+i*90)%(Math.max(w,h)*1.2));ctx.globalAlpha=Math.max(0,.16-r/(Math.max(w,h)*7));ctx.strokeStyle=colors[i%colors.length];ctx.lineWidth=1.4;ctx.beginPath();ctx.arc(cx,cy,r,-.95,-.05);ctx.stroke();}ctx.globalAlpha=1;
-    };
-    const drawQuantum=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);particles.forEach((p,i)=>{if(Math.random()<.012){p.x=Math.random()*w;p.y=Math.random()*h;}p.x+=Math.sin(time*.001+p.phase)*.25;p.y+=Math.cos(time*.0008+p.phase)*.25;ctx.globalAlpha=p.a*(.35+.65*Math.sin(time*.006+i)**2);ctx.fillStyle=p.c;ctx.fillRect(snap(p.x,2),snap(p.y,2),p.r,p.r);});ctx.globalAlpha=1;
-    };
-    const drawVeins=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);particles.slice(0,70).forEach((p,i)=>{const x=(p.x+time*.015*(i%3+1))%(w+160)-80;const y=p.y;ctx.globalAlpha=.08+p.a*.25;ctx.strokeStyle=p.c;ctx.beginPath();ctx.moveTo(x,y);for(let k=0;k<5;k++)ctx.lineTo(x+k*48,y+Math.sin(time*.0008+i+k)*34);ctx.stroke();});ctx.globalAlpha=1;
-    };
-    const drawSolar=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);for(let i=0;i<18;i++){ctx.globalAlpha=.05+(i%4)*.015;ctx.strokeStyle=colors[i%colors.length];ctx.lineWidth=1.2;ctx.beginPath();for(let x=-80;x<w+80;x+=32){const y=h*(.2+i*.035)+Math.sin(x*.01+time*.0005+i)*28;if(x===-80)ctx.moveTo(x,y);else ctx.lineTo(x,y);}ctx.stroke();}ctx.globalAlpha=1;
-    };
-    const drawTerminal=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);ctx.font="11px monospace";const glyphs="01AF39#{}[]<>/sys:root";particles.slice(0,90).forEach((p,i)=>{const y=(p.y+time*.018*(1+i%4))%(h+40);ctx.globalAlpha=.04+p.a*.22;ctx.fillStyle=p.c;ctx.fillText(glyphs[(i+Math.floor(time*.002))%glyphs.length],snap(p.x,12),snap(y,14));});ctx.globalAlpha=1;
-    };
-    const drawOrbital=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);particles.slice(0,12).forEach((p,i)=>{const cx=w*((i%4)+1)/5,cy=h*(.24+Math.floor(i/4)*.22),r=34+(i%5)*18;ctx.globalAlpha=.09;ctx.strokeStyle=p.c;ctx.beginPath();ctx.ellipse(cx,cy,r,r*.42,(i%3)*.6,0,Math.PI*2);ctx.stroke();const a=time*.00035*(i%3+1)+p.phase;ctx.globalAlpha=.42;ctx.fillStyle=p.c;ctx.beginPath();ctx.arc(cx+Math.cos(a)*r,cy+Math.sin(a)*r*.42,2.2,0,Math.PI*2);ctx.fill();});ctx.globalAlpha=1;
-    };
-    const drawLattice=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);ctx.strokeStyle=t.acc;ctx.lineWidth=1;for(let y=h*.18;y<h;y+=36){ctx.globalAlpha=.045+(y/h)*.08;ctx.beginPath();for(let x=0;x<=w;x+=36){const yy=y+Math.sin(x*.012+time*.0008+y*.01)*10;if(x===0)ctx.moveTo(x,yy);else ctx.lineTo(x,yy);}ctx.stroke();}for(let x=0;x<w;x+=52){ctx.globalAlpha=.04;ctx.beginPath();ctx.moveTo(x,h*.18);ctx.lineTo(w/2+(x-w/2)*1.8,h);ctx.stroke();}ctx.globalAlpha=1;
-    };
-    const drawSynapse=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);particles.slice(0,45).forEach((p,i)=>{const y=(p.y+time*.035*(1+i%3))%(h+80)-40;ctx.strokeStyle=p.c;ctx.globalAlpha=.08+p.a*.15;ctx.beginPath();ctx.moveTo(p.x,y);ctx.bezierCurveTo(p.x+30,y+30,p.x-20,y+70,p.x+50,y+110);ctx.stroke();ctx.globalAlpha=.45;ctx.fillStyle=p.c;ctx.beginPath();ctx.arc(p.x+Math.sin(time*.004+i)*34,y+((time*.08+i*17)%110),2,0,Math.PI*2);ctx.fill();});ctx.globalAlpha=1;
-    };
-    const drawSonar=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);const cx=w*.78,cy=h*.68,max=Math.max(w,h);for(let i=0;i<7;i++){const r=(time*.055+i*130)%max;ctx.globalAlpha=Math.max(0,.18-r/max*.18);ctx.strokeStyle=colors[i%colors.length];ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.stroke();}ctx.globalAlpha=1;
-    };
-    const drawMagnetic=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);for(let i=0;i<24;i++){ctx.globalAlpha=.055;ctx.strokeStyle=colors[i%colors.length];ctx.beginPath();for(let y=-40;y<h+40;y+=28){const x=w*.5+Math.sin(y*.01+time*.0004+i)*Math.min(w,h)*(.18+i*.006);if(y===-40)ctx.moveTo(x,y);else ctx.lineTo(x,y);}ctx.stroke();}ctx.globalAlpha=1;
-    };
-    const drawCandle=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);const grd=ctx.createRadialGradient(w*.5,h*.42,20,w*.5,h*.42,Math.max(w,h)*.7);grd.addColorStop(0,`${t.warm}20`);grd.addColorStop(1,"rgba(0,0,0,0)");ctx.fillStyle=grd;ctx.globalAlpha=.5+.1*Math.sin(time*.006);ctx.fillRect(0,0,w,h);for(let i=0;i<40;i++){ctx.globalAlpha=.015;ctx.fillStyle=i%2?t.warm:t.acc;ctx.fillRect(Math.random()*w,Math.random()*h,1,Math.random()*80);}ctx.globalAlpha=1;
-    };
-    const drawMicrowave=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);particles.forEach((p,i)=>{ctx.globalAlpha=.035+p.a*.12;ctx.fillStyle=colors[(i+Math.floor(time*.0004))%colors.length];ctx.fillRect(snap(p.x,3),snap(p.y,3),2,2);});ctx.globalAlpha=1;
-    };
-    const drawBlueprint=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);ctx.strokeStyle=t.acc;ctx.lineWidth=1;for(let i=0;i<16;i++){const x=(particles[i]?.x||0),y=(particles[i]?.y||0),ww=60+(i%5)*26,hh=30+(i%4)*18;ctx.globalAlpha=.045+(i%3)*.02;ctx.strokeRect(snap(x,16),snap(y,16),ww,hh);ctx.beginPath();ctx.moveTo(snap(x,16)-16,snap(y,16)+hh/2);ctx.lineTo(snap(x,16)+ww+16,snap(y,16)+hh/2);ctx.moveTo(snap(x,16)+ww/2,snap(y,16)-16);ctx.lineTo(snap(x,16)+ww/2,snap(y,16)+hh+16);ctx.stroke();}ctx.globalAlpha=1;
-    };
-    const step=(time)=>{
-      if(stopped)return;
-      const w=view.w, h=view.h;
-      if(effect==="rain")drawRain(time,w,h);
-      else if(effect==="flow")drawFlow(time,w,h);
-      else if(effect==="aurora")drawAurora(time,w,h);
-      else if(effect==="stars")drawStars(time,w,h);
-      else if(effect==="circuit")drawCircuit(time,w,h);
-      else if(effect==="neural")drawNeural(time,w,h);
-      else if(effect==="sacred")drawSacred(time,w,h);
-      else if(effect==="signal")drawSignal(time,w,h);
-      else if(effect==="quantum")drawQuantum(time,w,h);
-      else if(effect==="veins")drawVeins(time,w,h);
-      else if(effect==="solar")drawSolar(time,w,h);
-      else if(effect==="terminalGhost")drawTerminal(time,w,h);
-      else if(effect==="orbital")drawOrbital(time,w,h);
-      else if(effect==="lattice")drawLattice(time,w,h);
-      else if(effect==="synapse")drawSynapse(time,w,h);
-      else if(effect==="sonar")drawSonar(time,w,h);
-      else if(effect==="magnetic")drawMagnetic(time,w,h);
-      else if(effect==="candle")drawCandle(time,w,h);
-      else if(effect==="microwave")drawMicrowave(time,w,h);
-      else if(effect==="blueprint")drawBlueprint(time,w,h);
-      if(!reduced)raf=requestAnimationFrame(step);
-    };
-    resize();
-    window.addEventListener("resize",resize);
-    let ro=null;
-    if(window.ResizeObserver){ro=new ResizeObserver(resize);ro.observe(canvas);}
-    step(performance.now());
-    return ()=>{stopped=true;cancelAnimationFrame(raf);window.removeEventListener("resize",resize);if(ro)ro.disconnect();};
-  },[effect,t.acc,t.acc2,t.warm,t.f1]);
-  if(!["rain","flow","aurora","stars","circuit","neural","sacred","signal","quantum","veins","solar","terminalGhost","orbital","lattice","synapse","sonar","magnetic","candle","microwave","blueprint"].includes(effect))return null;
-  const opacity=effect==="rain"?0.58:effect==="flow"?0.86:effect==="aurora"?0.66:effect==="stars"?0.82:effect==="circuit"?0.78:effect==="candle"?0.48:effect==="microwave"?0.5:0.7;
-  return <canvas ref={ref} aria-hidden="true" style={{position:"absolute",inset:0,width:"100%",height:"100%",zIndex:0,pointerEvents:"none",opacity}}/>;
-}
-
-const sv=(d,w=16)=><svg width={w} height={w} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{d}</svg>;
-const IC={
-  Send:()=>sv(<><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></>,18),
-  Plus:()=>sv(<><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></>),
-  Trash:()=>sv(<><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></>,14),
-  Sidebar:()=>sv(<><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></>,18),
-  Bot:()=>sv(<><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/></>),
-  Ghost:()=>sv(<><path d="M9 10h.01"/><path d="M15 10h.01"/><path d="M12 2a7 7 0 0 0-7 7v11l2-1.5L9 20l3-2 3 2 2-1.5L19 20V9a7 7 0 0 0-7-7z"/></>,15),
-  User:()=>sv(<><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></>),
-  Copy:()=>sv(<><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></>,14),
-  Check:()=>sv(<polyline points="20 6 9 17 4 12"/>,14),
-  Search:()=>sv(<><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></>,14),
-  Research:()=>sv(<><path d="M10 2v7L5.5 18.5A2.4 2.4 0 0 0 7.7 22h8.6a2.4 2.4 0 0 0 2.2-3.5L14 9V2"/><path d="M8 2h8"/><path d="M7.2 16h9.6"/></>,15),
-  Brain:()=>sv(<><path d="M9.5 2A3.5 3.5 0 0 0 6 5.5v.2A3.5 3.5 0 0 0 4 9v1a4 4 0 0 0 0 8 3 3 0 0 0 3 3h2.5V2Z"/><path d="M14.5 2A3.5 3.5 0 0 1 18 5.5v.2A3.5 3.5 0 0 1 20 9v1a4 4 0 0 1 0 8 3 3 0 0 1-3 3h-2.5V2Z"/><path d="M9.5 8H8"/><path d="M14.5 8H16"/><path d="M9.5 13H7"/><path d="M14.5 13H17"/></>,15),
-  More:()=>sv(<><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></>,16),
-  Stop:()=><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>,
-  ChevDown:()=>sv(<polyline points="6 9 12 15 18 9"/>,14),
-  Database:()=>sv(<><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></>),
-  Tool:()=>sv(<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>),
-  Code:()=>sv(<><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></>),
-  Cube:()=>sv(<><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></>),
-  Upload:()=>sv(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></>),
-  X:()=>sv(<><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></>,14),
-  Chat:()=>sv(<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>),
-  Settings:()=>sv(<><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-2.82 1.18V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1.08H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1.08-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1.08 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.604.852 1.08 1.51 1.08H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1.08z"/></>),
-  Terminal:()=>sv(<><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></>,14),
-  Globe:()=>sv(<><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/></>,14),
-  Zap:()=>sv(<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>,14),
-  Activity:()=>sv(<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>,14),
-  Download:()=>sv(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></>),
-  Clock:()=>sv(<><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></>,14),
-  External:()=>sv(<><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></>,14),
-  Pencil:()=>sv(<><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></>,14),
-  Refresh:()=>sv(<><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></>,14),
-  Paperclip:()=>sv(<><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></>,14),
-  Image:()=>sv(<><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></>),
-  Mic:()=>sv(<><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></>,14),
-  Volume:()=>sv(<><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></>,14),
-  Layers:()=>sv(<><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></>),
-  ToggleOn:()=>sv(<><rect x="1" y="5" width="22" height="14" rx="7" ry="7"/><circle cx="16" cy="12" r="3"/></>),
-  ToggleOff:()=>sv(<><rect x="1" y="5" width="22" height="14" rx="7" ry="7"/><circle cx="8" cy="12" r="3"/></>),
-  Council:()=>sv(<><path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M7 21H17"/><path d="M12 21V7"/><path d="m22 7-4.5-2.5L13 7"/><path d="m2 7 4.5-2.5L11 7"/></>),
-  Trophy:()=>sv(<><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2z"/></>),
-  Flash:()=>sv(<><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><path d="M9 11h4M11 9v4"/></>,14),
-  Star:()=>sv(<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>,14),
-  Crown:()=>sv(<><path d="M2 20h20"/><path d="m2 16 5-10 5 4 5-4 5 10"/></>,14),
-  GitBranch:(p)=>sv(<><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></>,p?.s||14),
-  BarChart:()=>sv(<><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></>),
-  Pin:()=>sv(<><line x1="12" y1="17" x2="12" y2="22"/><path d="M9 9V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v5l2 3v2H7v-2l2-3z"/></>,13),
-  Tag:()=>sv(<><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></>,13),
-};
-
-const TIC = {code:IC.Code,search:IC.Search,terminal:IC.Terminal,globe:IC.Globe,workflow:IC.Activity};
-
-// Status pill - inline with chat, expressive and geeky
-const Pill = ({ev,t,expanded,onToggle})=>{
-  const scrollRef = useRef(null);
-  const stickRef = useRef(true);  // sticky-bottom: auto-scroll to new steps unless user scrolled up
-  const [copiedDetail,setCopiedDetail]=useState("");
-  const isS = ev.type==="tool_start"||ev.type==="tool_progress"||ev.type==="thinking";
-  const isE = ev.type==="tool_error"||ev.type==="error";
-  const isD = ev.type==="tool_end"||ev.type==="tool_done"||ev.type==="complete"||ev.type==="thought_done";
-  const isThink = ev.type==="thinking"||ev.type==="thought_done";
-  const bg=isE?`${t.err}18`:isD?`${t.surface}44`:isThink?`${t.f4}10`:`${t.acc}10`;
-  const bc=isE?`${t.err}40`:isD?`${t.brd}24`:isThink?`${t.f4}28`:`${t.acc}28`;
-  const tc=isE?t.err:isD?t.ok:isThink?t.f4:t.acc;
-  let detail = null;
-  if(expanded && ev.data?.detail){try{detail=JSON.parse(ev.data.detail);}catch{detail=ev.data.detail;}}
-  const isClickable = !!(ev.data?.detail) || isThink;
-  const stepsLen = (detail && typeof detail==="object" && Array.isArray(detail.steps)) ? detail.steps.length : 0;
-  // Reset sticky + jump to bottom when the panel is (re)opened.
-  useEffect(()=>{
-    if(!expanded)return;
-    stickRef.current = true;
-    const el=scrollRef.current;
-    if(el)el.scrollTop = el.scrollHeight;
-  },[expanded]);
-  // When new steps arrive, auto-scroll only if user hasn't scrolled up.
-  useEffect(()=>{
-    if(!expanded||!stickRef.current)return;
-    const el=scrollRef.current;
-    if(el)el.scrollTop = el.scrollHeight;
-  },[stepsLen,expanded]);
-  const handlePanelScroll = (e)=>{
-    const el=e.currentTarget;
-    // 24px tolerance — treat "almost at bottom" as still sticky
-    stickRef.current = (el.scrollHeight - el.scrollTop - el.clientHeight) < 24;
-  };
-  
-  const toolName = ev.data?.tool||ev.type;
-  const status = ev.data?.status||"";
-  
-  // Geeky expressive labels + icons
-  const labelMap = {
-    "thinking": ["🧠", "Reasoning"],
-    "thought_done": ["🧠", "Reasoned"],
-    "processing": isD ? ["⚡", "Initialized"] : ["🔮", "Connecting"],
-    "execute_code": isD ? ["🎯", "Executed"] : ["⚡", "Sandbox"],
-    "research": isD ? ["📡", "Signal Acquired"] : ["🔎", "Scanning"],
-    "deep_research": isD ? ["📊", "Research Ready"] : ["🔬", "Agent Research"],
-    "conspiracy_research": isD ? ["🕵️", "Dossier Ready"] : ["🔮", "Digging"],
-    "generate_image": isD ? ["🖼️", "Image ready"] : ["🖼️", "Generating image"],
-    "write_file": isD ? ["💾", "Committed"] : ["📝", "Writing"],
-    "read_file": isD ? ["📖", "Loaded"] : ["📂", "Reading"],
-    "list_files": isD ? ["📋", "Indexed"] : ["🗂️", "Scanning"],
-    "run_shell": isD ? ["⚡", "Exited"] : ["🖥️", "Shell"],
-    "fetch_url": isD ? ["🌐", "Fetched"] : ["🕸️", "Spidering"],
-    "install_package": isD ? ["📦", "Installed"] : ["📥", "Installing"],
-    "complete": ["✅", "Done"],
-    "download_file": isD ? ["📎", "Ready"] : ["📤", "Packaging"],
-    "delete_file": isD ? ["🗑️", "Deleted"] : ["🗑️", "Deleting"],
-    "download_project": isD ? ["📦", "Packaged"] : ["📦", "Archiving"],
-    "kb": isD ? ["📚", "Retrieved"] : ["📖", "Knowledge Base"],
-    "memory": isD ? ["🧠", "Recalled"] : ["🧠", "Remembering"],
-    "generate_code": isD ? ["🧬", "Code Ready"] : ["🧬", "Agent Coding"],
-    "generating": ["✍️", "Generating"],
-    "refinement": isD ? ["✨", "Refined"] : ["✨", "Refining"],
-    "error": ["❌", "Error"],
-    "tool_error": ["❌", "Error"],
-  };
-  const [icon, label] = labelMap[toolName] || (isE ? ["❌", toolName] : isD ? ["✓", toolName] : ["⏳", toolName]);
-  const isActive = isS && !isD;
-  // De-duplicate status: backend often emits "🔮 Connecting to neural oracle..." while the
-  // labelMap also renders "🔮 Connecting" — strip a leading emoji and the label word from
-  // the status so the pill doesn't read "Connecting Connecting...".
-  const displayStatus = (()=>{
-    if(!status)return "";
-    // Strip leading emoji (incl. ZWJ U+200D and VS16 U+FE0F) and whitespace.
-    let s = status.replace(/^[\p{Extended_Pictographic}‍️\s]+/u,"");
-    if(label){
-      const re = new RegExp("^" + label.replace(/[.*+?^${}()|[\]\\]/g,"\\$&") + "\\s*[:—\\-]?\\s*","i");
-      s = s.replace(re,"");
-    }
-    return s.trim();
-  })();
-  const showMarquee = isThink && isActive && !expanded && displayStatus.length > 15;
-  const getIconAnim = (name) => {
-    if(name==="execute_code"||name==="run_shell") return "spin 1.2s linear infinite";
-    if(name==="research"||name==="deep_research"||name==="fetch_url"||name==="conspiracy_research"||name==="kb") return "swing 1.5s ease-in-out infinite";
-    if(name==="generate_code") return "pulse 1.5s ease-in-out infinite";
-    if(name==="write_file"||name==="download_file"||name==="download_project") return "bounce 1s ease-in-out infinite";
-    if(name==="memory") return "memoryPulse 1.8s ease-in-out infinite";
-    if(name==="generating") return "writing 0.8s ease-in-out infinite";
-    if(name==="thinking") return "bop 2s ease-in-out infinite";
-    return "bop 1.5s ease-in-out infinite";
-  };
-  const marqueeKey = Math.floor(displayStatus.length / 30);
-  const copyDetailText=(key,text)=>{
-    try{
-      navigator.clipboard?.writeText(String(text||""));
-      setCopiedDetail(key);
-      window.setTimeout(()=>setCopiedDetail(""),1200);
-    }catch{}
-  };
-  const isImageDetail=detail&&typeof detail==="object"&&detail.tool==="generate_image";
-  const ImagePromptDetail=()=>{
-    const preS={margin:0,padding:8,background:`${t.surface}88`,borderRadius:5,whiteSpace:"pre-wrap",wordBreak:"break-word",color:t.dim,fontSize:11,maxHeight:150,overflow:"auto",border:`1px solid ${t.brd}18`};
-    const block=(key,label,value)=>value?<div style={{marginBottom:8}}>
-      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-        <span style={{fontSize:10,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.5}}>{label}</span>
-        <button onClick={()=>copyDetailText(key,value)} style={{marginLeft:"auto",fontSize:9,padding:"2px 7px",borderRadius:6,border:`1px solid ${t.acc}33`,background:`${t.acc}10`,color:t.acc,cursor:"pointer",fontFamily:"inherit"}}>{copiedDetail===key?"Copied":"Copy"}</button>
-      </div>
-      <pre style={preS}>{value}</pre>
-    </div>:null;
-    const flags=[
-      ["Size",detail.width&&detail.height?`${detail.width} x ${detail.height}`:""],
-      ["Steps",detail.steps],
-      ["CFG",detail.cfg],
-      ["Sampler",detail.sampler],
-      ["Scheduler",detail.scheduler],
-      ["Model type",detail.model_sampling],
-      ["Persona profile",detail.profile_active?"yes":"no"],
-      ["Workflow",detail.workflow_active?(detail.profile_workflow?"persona":"global"):"default"],
-      ["LoRAs",detail.loras_active?"yes":"no"],
-      ["Fallback",detail.prompt_fallback?"yes":"no"],
-    ].filter(([,v])=>v!==undefined&&v!==null&&v!=="");
-    return <div>
-      {block("prompt","Prompt sent to ComfyUI",detail.prompt)}
-      {block("negative","Negative prompt",detail.negative_prompt)}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:6,marginTop:2}}>
-        {flags.map(([k,v])=><div key={k} style={{border:`1px solid ${t.brd}22`,background:`${t.surface}55`,borderRadius:6,padding:"6px 8px",minWidth:0}}>
-          <div style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:2}}>{k}</div>
-          <div style={{fontSize:10,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{String(v)}</div>
-        </div>)}
-      </div>
-    </div>;
-  };
-
-  return <div style={{animation:"fadeIn .3s",marginBottom:2}}>
-    <div onClick={isClickable?onToggle:undefined} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 12px",background:bg,border:`1px solid ${bc}`,borderRadius:expanded?"9px 9px 0 0":9,fontSize:12,color:tc,cursor:isClickable?"pointer":"default",maxWidth:"100%",transition:"all .2s",animation:isActive?`fadeIn .3s, pillGlow 2s ease-in-out infinite`:"fadeIn .3s",boxShadow:isActive?`0 0 8px ${bc}`:"none"}}>
-      {isS&&!isD&&<span style={{display:"inline-block",animation:getIconAnim(toolName),flexShrink:0,lineHeight:1,transformOrigin:"center"}}>{icon}</span>}
-      {isD&&<><span style={{color:t.ok,flexShrink:0,lineHeight:1}}>✓</span><span style={{flexShrink:0,lineHeight:1}}>{icon}</span></>}
-      <span style={{fontWeight:600,flexShrink:0}}>{label}</span>
-      {showMarquee
-        ? <span className="pill-marquee-wrap">
-            <span key={marqueeKey} className="pill-marquee-inner" style={{color:tc,opacity:.75,fontStyle:"italic"}}>
-              {displayStatus}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{displayStatus}
-            </span>
-          </span>
-        : displayStatus&&<span style={{opacity:.6,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:350,fontStyle:isThink?"italic":"normal"}}>{displayStatus}</span>
-      }
-      {isClickable&&<span style={{opacity:.3,flexShrink:0,fontSize:8,marginLeft:2}}>{expanded?"▴":"▾"}</span>}
-    </div>
-    {expanded&&(detail||isThink)&&<div ref={scrollRef} onScroll={handlePanelScroll} style={{background:`${t.bgDeep}`,border:`1px solid ${bc}`,borderTop:"none",borderRadius:"0 0 8px 8px",padding:10,fontSize:11,maxHeight:300,overflowY:"auto",maxWidth:600}}>
-      {!detail?<div style={{color:t.dim,fontStyle:"italic",lineHeight:1.6,whiteSpace:"pre-wrap",opacity:.7}}>{status||"Thinking..."}</div>
-      :typeof detail==="string"?<pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontFamily:"inherit"}}>{detail}</pre>
-      :isImageDetail?<ImagePromptDetail/>
-      :detail.thinking?<div ref={el=>{if(el&&isActive)el.scrollTop=el.scrollHeight;}} style={{color:t.dim,fontStyle:"italic",lineHeight:1.6,whiteSpace:"pre-wrap",maxHeight:250,overflowY:"auto"}}>{detail.thinking}</div>
-      :detail.code?<div>
-        {detail.language&&<div style={{color:t.mut,marginBottom:4,fontSize:10}}>🔧 <span style={{color:t.acc}}>{detail.language}</span></div>}
-        <pre style={{margin:0,padding:8,background:`${t.surface}88`,borderRadius:4,whiteSpace:"pre-wrap",color:t.warm,fontSize:11,maxHeight:100,overflow:"auto",border:`1px solid ${t.brd}18`}}>{detail.code}</pre>
-        {detail.stdout&&<><div style={{color:t.ok,marginTop:6,fontWeight:600,fontSize:10}}>📤 stdout:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.dim,fontSize:11,background:`${t.ok}08`,borderRadius:4,marginTop:2}}>{detail.stdout}</pre></>}
-        {detail.stderr&&<><div style={{color:t.err,marginTop:6,fontWeight:600,fontSize:10}}>⚠️ stderr:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.err,fontSize:11,background:`${t.err}08`,borderRadius:4,marginTop:2}}>{detail.stderr}</pre></>}
-      </div>
-      :detail.results?<div>{detail.results.map((r,i)=><div key={i} style={{marginBottom:4}}><a href={r.url} target="_blank" style={{color:t.acc,textDecoration:"none",fontSize:11}}>🔗 {r.title}</a></div>)}</div>
-      :detail.steps?<div>
-        <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
-          <span style={{fontSize:10,fontWeight:700,color:t.acc}}>Agent Timeline</span>
-          <span style={{fontSize:9,color:t.mut,background:`${t.surface}88`,padding:"1px 6px",borderRadius:8}}>{detail.steps.length} step{detail.steps.length!==1?"s":""}</span>
-        </div>
-        {detail.steps.length>0&&(()=>{const last=detail.steps[detail.steps.length-1];return <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,padding:"4px 8px",background:`${t.acc}11`,borderRadius:6,border:`1px solid ${t.acc}22`}}>
-          <div style={{width:8,height:8,borderRadius:"50%",background:t.acc,animation:"pulse 1.4s infinite",flexShrink:0}}/>
-          <span style={{fontSize:10,color:t.mut,fontWeight:600}}>Current:</span>
-          <span style={{fontSize:11,fontWeight:700,color:t.acc}}>{last.icon} {last.label}</span>
-          <span style={{fontSize:10,color:t.dim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{last.detail}</span>
-        </div>;})()}
-        <div style={{display:"flex",flexDirection:"column",gap:0,paddingLeft:8,borderLeft:`2px solid ${t.acc}22`}}>
-          {detail.steps.map((s,i)=>{const isLast=i===detail.steps.length-1;return <div key={i} style={{display:"flex",gap:6,alignItems:"flex-start",padding:"3px 0",position:"relative",opacity:isLast?1:.65}}>
-            <span style={{position:"absolute",left:-13,top:6,width:isLast?8:6,height:isLast?8:6,borderRadius:"50%",background:isLast?t.acc:`${t.acc}55`,animation:isLast?"pulse 1.4s infinite":"none",transition:"all .2s"}}/>
-            <span style={{flexShrink:0,fontSize:11,width:18,textAlign:"center"}}>{s.icon}</span>
-            <span style={{color:isLast?t.acc:`${t.acc}99`,fontSize:10,fontWeight:isLast?700:600,flexShrink:0,minWidth:55}}>{s.label}</span>
-            <span style={{color:isLast?t.text:t.dim,fontSize:10,fontWeight:isLast?600:400,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{s.detail}</span>
-          </div>;})}
-        </div>
-      </div>
-      :detail.method?<div>
-        <div style={{color:t.mut,fontSize:10,marginBottom:4}}>⚙️ <span style={{color:t.acc}}>{detail.method}</span></div>
-        {detail.args&&<pre style={{margin:0,padding:6,background:`${t.surface}66`,borderRadius:4,whiteSpace:"pre-wrap",color:t.dim,fontSize:10,maxHeight:60,overflow:"auto"}}>{JSON.stringify(detail.args,null,2)}</pre>}
-        {detail.result&&<><div style={{color:t.ok,marginTop:4,fontWeight:600,fontSize:10}}>📤 Result:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.dim,fontSize:10,maxHeight:80,overflow:"auto"}}>{detail.result}</pre></>}
-      </div>
-      :<pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontSize:10}}>{JSON.stringify(detail,null,2)}</pre>}
-    </div>}
-  </div>;
-};
-
-// Reasoning is intentionally shown only in the compact brain-icon thinking pill.
-const ReasoningPanel = ({text,t,streaming})=>null;
-
-const PlanPanel = ({plan,t,streaming,md,onCopy})=>{
-  const [expanded,setExpanded]=useState(streaming);
-  const [copied,setCopied]=useState(false);
-  useEffect(()=>{setExpanded(streaming);},[streaming]);
-  if(!plan) return null;
-  const bc=streaming?`${t.acc}66`:`${t.acc}38`;
-  const bg=`${t.acc}0c`;
-  const tc=t.acc;
-  const copy=async(e)=>{
-    e.stopPropagation();
-    try{await navigator.clipboard.writeText(plan);setCopied(true);setTimeout(()=>setCopied(false),1400);}catch{}
-    onCopy&&onCopy();
-  };
-  return <div style={{marginBottom:6,animation:"fadeIn .3s",borderRadius:10,border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%",boxShadow:streaming?`0 0 12px ${t.acc}22`:"none",transition:"all .3s"}}>
-    <div onClick={()=>setExpanded(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none",animation:streaming?"pillGlow 2s ease-in-out infinite":"none"}}>
-      <span style={{fontSize:13,lineHeight:1,animation:streaming?"bop 2s ease-in-out infinite":"none",transformOrigin:"center"}}>📐</span>
-      <span style={{fontWeight:700,fontSize:11,color:tc,letterSpacing:.3}}>Architecture Plan</span>
-      {streaming&&<span style={{fontSize:10,color:tc,opacity:.6,fontStyle:"italic"}}>building…</span>}
-      <button onClick={copy} title="Copy plan" style={{marginLeft:"auto",background:copied?`${t.ok}22`:"transparent",border:`1px solid ${copied?t.ok:`${tc}33`}`,color:copied?t.ok:tc,padding:"2px 8px",borderRadius:6,fontSize:9,fontFamily:"inherit",cursor:"pointer",fontWeight:600,opacity:.85}}>{copied?"copied":"copy"}</button>
-      <span style={{fontSize:9,color:tc,opacity:.45,marginLeft:4}}>{expanded?"▴":"▾"}</span>
-    </div>
-    {expanded&&<div style={{padding:"10px 14px",fontSize:12,lineHeight:1.65,color:t.dim,maxHeight:420,overflowY:"auto"}}>
-      {md?<MDWrap>{md(plan)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit",color:t.dim}}>{plan}</pre>}
-    </div>}
-  </div>;
-};
-
-// Coder Bot v2 — durable run card. Reads a `runs` row by id, subscribes to
-// run-tagged live events from the parent's events stream, and renders
-// status + collapsible event timeline. Survives browser disconnects: on mount
-// it fetches /api/runs/{runId} so the timeline rebuilds even if the SSE chat
-// stream dropped while the agent was still running.
-
-// Role → (emoji, friendly label). Each agent gets a distinct visual identity
-// so a stack of cards reads as a sequence of distinct phases instead of
-// "🤖 Run · builder.feature succeeded" × N. Lookup tolerates minor variants
-// (builder.scaffold, builder.feature, builder.continue) by
-// falling back to the role's prefix before the dot.
-const _ROLE_VISUALS = {
-  "architect":         {icon: "📐", label: "Designing plan"},
-  "builder":           {icon: "🏗", label: "Building project"},
-  "builder.scaffold":  {icon: "🏗", label: "Building project"},
-  "builder.continue":  {icon: "🔄", label: "Resuming build"},
-  "builder.feature":   {icon: "✨", label: "Adding feature"},
-  "builder.bugfix":    {icon: "🩹", label: "Bug fix build"},
-  "reviewer":          {icon: "🔍", label: "Reviewing"},
-  "fixer":             {icon: "🛠", label: "Fixing issues"},
-  "qa":                {icon: "❓", label: "Investigating"},
-  "indexer":           {icon: "📚", label: "Indexing project"},
-};
-const _roleVisual = (role)=>{
-  if(_ROLE_VISUALS[role]) return _ROLE_VISUALS[role];
-  // Try the prefix before "." (e.g. unknown "builder.X" → "builder")
-  const base = (role||"").split(".")[0];
-  if(_ROLE_VISUALS[base]) return _ROLE_VISUALS[base];
-  return {icon: "🤖", label: role || "Run"};
-};
-
-// Map OpenHands action names → small leading icon for step rows. Keeps the
-// timeline scannable.
-const _STEP_ACTION_ICONS = {
-  "starting": "🚀",
-  "thinking": "🧠",
-  "terminal": "⚡",  "terminal_result": "📤",
-  "file_create": "📄",  "file_edit": "✏️",  "file_view": "👁",
-  "file_str_replace": "🔁",  "file_editor_result": "✅",
-  "glob": "🔎",  "glob_result": "🔎",
-  "grep": "🔎",  "grep_result": "🔎",
-  "finish": "🏁",
-  // Reviewer
-  "detect": "🧭",  "detected": "🧭",
-  "build": "🔨",  "build_done": "🔨",
-  "test": "🧪",  "test_done": "🧪",
-  "lint": "🧹",  "lint_done": "🧹",
-  "read_files": "📖",
-  "analyze": "🔬",
-  "parse_fallback": "⚠",
-  // Architect
-  "planning": "📐",  "retry": "🔄",
-  "language": "🌐",  "build_cmd": "🔨",  "test_cmd": "🧪",  "lint_cmd": "🧹",
-  "manifest": "📋",  "file": "📄",
-  "tests_required": "🧪",  "dependencies": "📦",  "dep": "📦",
-  "risk": "⚠",  "success_criteria": "🎯",  "criterion": "🎯",
-  // Fixer
-  "issue": "🩹",  "writing": "✏️",  "calling": "🧠",
-  // Indexer
-  "indexing": "📚",  "found_files": "📁",  "reading": "📖",  "read_done": "📖",
-  // QA
-  "question": "❓",  "list_files": "📁",  "keywords": "🏷",
-  "filename_targets": "🎯",  "matched_files": "🎯",  "snippets": "📑",
-  "compose": "✍️",  "fallback": "↩",  "no_match": "❌",
-  // Generic
-  "start": "🚀",  "done": "✅",  "error": "❌",
-};
-
-const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact})=>{
-  const [run, setRun] = useState(null);
-  // expanded starts false; flips to true automatically once we've loaded the
-  // run and detect it needs attention (failed, or reviewer-with-issues). The
-  // user can still toggle either way after that.
-  const [expanded, setExpanded] = useState(false);
-  const [autoExpanded, setAutoExpanded] = useState(false);
-  const [err, setErr] = useState(null);
-  const [artifacts,setArtifacts]=useState([]);
-  // Initial fetch + when run terminal status changes, refetch for envelope.
-  useEffect(()=>{
-    if(!runId) return;
-    let cancelled = false;
-    const load = async ()=>{
-      try{
-        const r = await fetch(`${API}/api/runs/${runId}`);
-        if(!r.ok) throw new Error(`HTTP ${r.status}`);
-        const d = await r.json();
-        if(!cancelled) setRun(d);
-      }catch(e){if(!cancelled) setErr(e.message||"load failed");}
-    };
-    load();
-    // Light poll while the run is still in flight — covers reconnect mid-run
-    // when liveEvts haven't yet filled in. Stops as soon as we see a terminal status.
-    const id = setInterval(()=>{
-      setRun(cur=>{
-        if(cur && (cur.status==="succeeded"||cur.status==="failed"||cur.status==="partial"||cur.status==="cancelled"||cur.status==="skipped")){clearInterval(id);return cur;}
-        load(); return cur;
-      });
-    }, 4000);
-    return ()=>{cancelled=true; clearInterval(id);};
-  },[runId]);
-  useEffect(()=>{
-    if(!runId)return;
-    let cancelled=false;
-    fetch(`${API}/api/artifacts?run_id=${encodeURIComponent(runId)}&limit=20`)
-      .then(r=>r.ok?r.json():[])
-      .then(d=>{if(!cancelled)setArtifacts(Array.isArray(d)?d:[]);})
-      .catch(()=>{});
-    return()=>{cancelled=true;};
-  },[runId,run?.status]);
-  // Merge persisted events with live events that arrived for this run after mount.
-  const persistedEvts = run?.events_log || [];
-  const liveForRun = (liveEvts||[]).filter(e=>{
-    const rid = e?.data?.run_id || e?.run_id;
-    return rid && rid===runId && (e.type==="tool_progress"||e.type==="tool_start"||e.type==="step");
-  });
-  // Dedupe live events by step number against persisted log (persisted is ground truth on reconnect).
-  const persistedSteps = new Set(persistedEvts.filter(p=>p.type==="step").map(p=>p.step));
-  const newLive = liveForRun.filter(e=>{
-    const step = e?.data?.step ?? e?.step;
-    return step!==undefined && !persistedSteps.has(step);
-  });
-  const allSteps = [...persistedEvts.filter(p=>p.type==="step"),
-                    ...newLive.map(e=>({type:"step", step:e.data?.step ?? e.step,
-                                        action:e.data?.action ?? e.action,
-                                        detail:e.data?.detail ?? e.detail}))];
-  // Visual status colour
-  const status = run?.status || "loading";
-  const colour = status==="succeeded" ? t.ok :
-                 status==="failed" ? t.err :
-                 status==="partial" ? "#e9a45a" :
-                 (status==="cancelled"||status==="skipped") ? t.mut :
-                 t.acc;
-  const statusLabel = {
-    queued:"queued", running:"running…", succeeded:"succeeded",
-    failed:"failed", partial:"partial", cancelled:"cancelled",
-    skipped:"skipped", loading:"loading…",
-  }[status] || status;
-  const role = run?.role || "builder";
-  const visual = _roleVisual(role);
-  const env = run?.result_envelope || {};
-  const filesN = (env.files_written||env.files_touched||[]).length;
-  const dur = env.duration_s;
-  const isStreaming = status==="running" || status==="queued";
-  // Auto-expand cards that need attention: any failed run, OR a reviewer
-  // that returned issues/error. Only fires once per card, and only after the
-  // run has loaded — so a streaming run doesn't pre-pop open and then close
-  // when it succeeds.
-  const needsAttention = (
-    status === "failed" ||
-    (role === "reviewer" && (env.status === "issues" || env.status === "error"))
-  );
-  if (run && needsAttention && !autoExpanded) {
-    setAutoExpanded(true);
-    setExpanded(true);
-  }
-  const bc = isStreaming ? `${colour}66` : needsAttention ? `${colour}55` : `${t.brd}24`;
-  const bg = isStreaming ? `${colour}0c` : needsAttention ? `${colour}10` : `${t.surface}36`;
-  return <div style={{marginTop:6,marginBottom:6,animation:"fadeIn .3s",borderRadius:10,border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%",boxShadow:isStreaming?`0 0 12px ${colour}22`:"none",transition:"all .3s"}}>
-    <div onClick={()=>setExpanded(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none",animation:isStreaming?"pillGlow 2s ease-in-out infinite":"none"}}>
-      <span style={{fontSize:13,lineHeight:1,animation:isStreaming?"bop 2s ease-in-out infinite":"none"}}>{visual.icon}</span>
-      <span style={{fontWeight:700,fontSize:11,color:colour,letterSpacing:.3}}>{visual.label}</span>
-      <span style={{fontSize:10,color:t.mut,opacity:.6}}>· {role}</span>
-      <span style={{fontSize:10,color:colour,opacity:.7,fontStyle:isStreaming?"italic":"normal"}}>· {statusLabel}</span>
-      {filesN>0 && <span style={{fontSize:10,color:t.mut}}>· {filesN} file{filesN===1?"":"s"}</span>}
-      {artifacts.length>0 && <span style={{fontSize:10,color:t.ok}}>· {artifacts.length} artifact{artifacts.length===1?"":"s"}</span>}
-      {dur && <span style={{fontSize:10,color:t.mut}}>· {dur}s</span>}
-      {err && <span style={{fontSize:10,color:t.err}}>· {err}</span>}
-      {artifacts.length>0&&onOpenArtifact&&<button onClick={e=>{e.stopPropagation();onOpenArtifact(artifacts[0].id);}} style={{marginLeft:"auto",fontSize:10,color:t.ok,background:`${t.ok}10`,border:`1px solid ${t.ok}35`,borderRadius:6,padding:"2px 7px",fontWeight:800,cursor:"pointer",fontFamily:font}}>artifact</button>}
-      <span style={{fontSize:9,color:colour,opacity:.45,marginLeft:artifacts.length>0&&onOpenArtifact?0:"auto"}}>{expanded?"▴":"▾"}</span>
-    </div>
-    {!expanded && needsAttention && <div style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",borderTop:`1px solid ${bc}`,fontSize:10,color:t.err,background:`${t.err}08`}}>
-      <span style={{fontWeight:800}}>Failed run</span>
-      <span style={{color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{env.error||env.summary||"Open details for the recorded issue."}</span>
-      <button onClick={()=>setExpanded(true)} style={{background:"none",border:`1px solid ${t.err}35`,color:t.err,cursor:"pointer",padding:"2px 8px",borderRadius:6,fontFamily:font,fontSize:9,fontWeight:700}}>Details</button>
-    </div>}
-    {expanded && <div style={{padding:"8px 12px",fontSize:11,lineHeight:1.55,color:t.dim,maxHeight:320,overflowY:"auto",fontFamily:font}}>
-      {allSteps.length===0 && <div style={{color:t.mut,fontStyle:"italic"}}>No steps recorded yet…</div>}
-      {allSteps.map((s,i)=>{
-        const stepIcon = _STEP_ACTION_ICONS[s.action] || "·";
-        return <div key={i} style={{padding:"3px 0",borderBottom:i<allSteps.length-1?`1px solid ${t.brd}12`:"none",display:"flex",alignItems:"baseline",gap:6}}>
-          <span style={{color:t.mut,fontSize:10,minWidth:24,textAlign:"right"}}>#{s.step}</span>
-          <span style={{fontSize:11,opacity:.85,minWidth:16,textAlign:"center"}}>{stepIcon}</span>
-          <span style={{color:colour,fontWeight:600}}>{s.action||"?"}</span>
-          <span style={{color:t.dim,flex:1,wordBreak:"break-word"}}>{(s.detail||"").slice(0,160)}</span>
-        </div>;
-      })}
-      {env.summary && <div style={{marginTop:8,padding:"6px 8px",borderRadius:6,background:`${colour}10`,color:t.dim,fontStyle:"italic"}}>{env.summary}</div>}
-      {env.error && <div style={{marginTop:8,padding:"6px 8px",borderRadius:6,background:`${t.err}10`,color:t.err}}>⚠ {env.error}</div>}
-      {(env.manifest_missing||[]).length>0 && <div style={{marginTop:6,fontSize:10,color:t.mut}}>missing: {(env.manifest_missing||[]).slice(0,8).join(", ")}</div>}
-      {role==="qa" && env.answer && <div style={{marginTop:10,padding:"10px 12px",borderRadius:8,background:`${colour}08`,border:`1px solid ${colour}22`,color:t.dim,fontSize:12,lineHeight:1.6}}>
-        {md?<MDWrap>{md(env.answer)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit"}}>{env.answer}</pre>}
-        {env.looks_like_change_request && <div style={{marginTop:8,padding:"4px 8px",borderRadius:5,background:`${t.acc}18`,color:t.acc,fontSize:10,fontWeight:600,display:"inline-block"}}>⚡ Flagged as change request</div>}
-        {(env.files_examined||[]).length>0 && <div style={{marginTop:8,fontSize:10,color:t.mut}}>📂 examined: {(env.files_examined||[]).slice(0,5).join(", ")}{(env.files_examined||[]).length>5?` +${(env.files_examined||[]).length-5} more`:""}</div>}
-      </div>}
-    </div>}
-  </div>;
-};
-
-const WorkflowCard = ({workflow, t, font, onOpenArtifact})=>{
-  const [wf,setWf]=useState(workflow);
-  const [artifacts,setArtifacts]=useState([]);
-  useEffect(()=>{setWf(workflow);},[workflow?.id,workflow?.updated_at]);
-  useEffect(()=>{
-    if(!wf?.id)return;
-    const active=["planning","reviewing","fixing","accepting"].includes(wf.state);
-    if(!active)return;
-    let stop=false;
-    const tick=async()=>{
-      try{
-        const r=await fetch(`${API}/api/coder/workflows/${wf.id}`);
-        if(r.ok&&!stop)setWf(await r.json());
-      }catch{}
-    };
-    const id=setInterval(tick,5000);tick();
-    return()=>{stop=true;clearInterval(id);};
-  },[wf?.id,wf?.state]);
-  useEffect(()=>{
-    if(!wf?.id)return;
-    let stop=false;
-    fetch(`${API}/api/artifacts?workflow_id=${encodeURIComponent(wf.id)}&limit=3`)
-      .then(r=>r.ok?r.json():[])
-      .then(d=>{if(!stop)setArtifacts(Array.isArray(d)?d:[]);})
-      .catch(()=>{});
-    return()=>{stop=true;};
-  },[wf?.id,wf?.artifact_status,wf?.updated_at]);
-  if(!wf)return null;
-  const state=wf.state||"planning";
-  const artifact=wf.artifact_status||"not_ready";
-  const colour=state==="accepted"||artifact==="delivered"?t.ok:state==="blocked"||state==="cancelled"?t.err:artifact==="partial_delivered"?"#e9a45a":t.acc;
-  const modeLabel=(wf.mode||"workflow").replaceAll("_"," ");
-  const contract=wf.contract_json||{};
-  return <div style={{marginTop:6,marginBottom:6,borderRadius:10,border:`1px solid ${colour}38`,background:`${colour}0c`,padding:"7px 12px",fontFamily:font,maxWidth:"100%"}}>
-    <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
-      <span style={{fontSize:13}}>🧭</span>
-      <span style={{fontWeight:700,fontSize:11,color:colour,letterSpacing:.3}}>Workflow</span>
-      <span style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>· {modeLabel}</span>
-      <span style={{fontSize:10,color:colour}}>· {state}</span>
-      <span style={{fontSize:10,color:t.mut}}>· artifact: {artifact}</span>
-      {artifacts.length>0&&<a href={artifacts[0].id?`${API}/api/artifacts/${artifacts[0].id}/download`:`${API}${artifacts[0].url}`} download={artifacts[0].filename} onClick={e=>e.stopPropagation()} style={{marginLeft:"auto",fontSize:10,color:t.ok,textDecoration:"none",border:`1px solid ${t.ok}35`,borderRadius:6,padding:"2px 7px",fontWeight:700}}>download</a>}
-      {artifacts.length>0&&onOpenArtifact&&<button onClick={e=>{e.stopPropagation();onOpenArtifact(artifacts[0].id);}} style={{fontSize:10,color:t.acc,background:`${t.acc}10`,border:`1px solid ${t.acc}35`,borderRadius:6,padding:"2px 7px",fontWeight:800,cursor:"pointer",fontFamily:font}}>details</button>}
-    </div>
-    <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:5,fontSize:10,color:t.mut}}>
-      {wf.project_id&&<span>project: {wf.project_id}</span>}
-      {contract.build_system&&<span>build: {contract.build_system}</span>}
-      {contract.test_cmd&&<span>test: {contract.test_cmd.slice(0,60)}</span>}
-      {wf.active_run_id&&<span>run: {wf.active_run_id}</span>}
-    </div>
-  </div>;
-};
-
-const artifactKindMeta=(kind,t,metadata={})=>{
-  const k=String(kind||"file").toLowerCase();
-  const isProject=k==="archive"&&(metadata.project_id||metadata.artifact_status);
-  if(isProject)return{label:"Project",icon:IC.Cube,color:t.warm};
-  const map={
-    image:{label:"Image",icon:IC.Image,color:t.f1},
-    html:{label:"HTML",icon:IC.Code,color:t.acc},
-    markdown:{label:"Markdown",icon:IC.Paperclip,color:t.pink},
-    code:{label:"Code",icon:IC.Code,color:t.acc},
-    data:{label:"Data",icon:IC.Database,color:t.ok},
-    archive:{label:"Archive",icon:IC.Cube,color:t.warm},
-    pdf:{label:"PDF",icon:IC.Paperclip,color:t.err},
-    text:{label:"Text",icon:IC.Paperclip,color:t.dim},
-  };
-  return map[k]||{label:"File",icon:IC.Paperclip,color:t.mut};
-};
-
-function ArtifactPreviewBlock({preview,t,font}){
-  const [mode,setMode]=useState("rendered");
-  const [filter,setFilter]=useState("");
-  const [archiveDir,setArchiveDir]=useState("");
-  const [archiveQuery,setArchiveQuery]=useState("");
-  const [entryPreview,setEntryPreview]=useState(null);
-  const [entryLoading,setEntryLoading]=useState(false);
-  useEffect(()=>{setMode("rendered");setFilter("");setArchiveDir("");setArchiveQuery("");setEntryPreview(null);},[preview?.id,preview?.updated_at,preview?.preview_type]);
-  if(!preview)return <div style={{padding:18,color:t.mut,fontSize:12}}>Loading preview...</div>;
-  const type=preview.preview_type||"metadata";
-  if(type==="missing")return <div style={{padding:14,border:`1px solid ${t.err}35`,background:`${t.err}08`,borderRadius:8,color:t.err,fontSize:12}}>File metadata is retained, but the physical file is missing.</div>;
-  if(type==="image")return <img src={`${API}${preview.download_url||preview.url}`} alt={preview.filename} style={{maxWidth:"100%",borderRadius:8,border:`1px solid ${t.brd}22`,display:"block"}}/>;
-  if(type==="pdf")return <iframe src={`${API}${preview.download_url||preview.url}`} title={preview.filename} style={{width:"100%",height:520,border:`1px solid ${t.brd}22`,borderRadius:8,background:"#fff"}}/>;
-  if(type==="archive"){
-    const raw=(preview.preview?.entries||[]).filter(e=>e.name!=="./"&&e.name!=="."&&e.name!=="/");
-    const norm=raw.map(e=>{const path=(e.path||String(e.name||"").replace(/\/$/,"")).replace(/^\.\/+/,"");const parent=e.parent??(path.includes("/")?path.split("/").slice(0,-1).join("/"):"");const base=e.display_name||String(e.name||path).replace(/\/$/,"").split("/").pop()+(e.is_dir?"/":"");return{...e,path,parent,display_name:base};});
-    const q=archiveQuery.trim().toLowerCase();
-    const shown=norm.filter(e=>q?(e.path||e.name||"").toLowerCase().includes(q):(e.parent||"")===archiveDir);
-    const crumbs=archiveDir?archiveDir.split("/").filter(Boolean):[];
-    const openEntry=async(entry)=>{
-      if(entry.is_dir){setArchiveDir(entry.path||"");setEntryPreview(null);return;}
-      if(!entry.previewable){setEntryPreview({error:entry.preview_blocked_reason||"Preview unavailable",entry});return;}
-      setEntryLoading(true);setEntryPreview(null);
-      try{
-        const r=await fetch(`${API}/api/artifacts/${encodeURIComponent(preview.id)}/archive-entry?path=${encodeURIComponent(entry.path)}`);
-        const d=await r.json().catch(()=>({}));
-        if(!r.ok)throw new Error(d.detail||d.error||`HTTP ${r.status}`);
-        setEntryPreview(d);
-      }catch(e){setEntryPreview({error:e.message||String(e),entry});}
-      setEntryLoading(false);
-    };
-    return <div style={{border:`1px solid ${t.brd}22`,borderRadius:8,overflow:"hidden",display:"grid",gridTemplateRows:"auto auto minmax(240px,1fr)",maxHeight:680}}>
-      <div style={{padding:"8px 10px",background:`${t.surface}66`,display:"flex",justifyContent:"space-between",gap:8,fontSize:11,color:t.mut}}>
-        <span>{preview.preview?.file_count||0} files · {preview.preview?.folder_count||0} folders</span>
-        <span>{preview.preview?.archive_type||"archive"}</span>
-      </div>
-      <div style={{padding:8,borderTop:`1px solid ${t.brd}12`,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
-        <button onClick={()=>{setArchiveDir("");setEntryPreview(null);}} style={{background:archiveDir?`${t.surface}66`:`${t.acc}14`,border:`1px solid ${archiveDir?t.brd:t.acc}35`,color:archiveDir?t.mut:t.acc,borderRadius:6,padding:"4px 7px",fontSize:10,fontFamily:font,cursor:"pointer"}}>/</button>
-        {crumbs.map((part,i)=>{const next=crumbs.slice(0,i+1).join("/");return <button key={next} onClick={()=>{setArchiveDir(next);setEntryPreview(null);}} style={{background:next===archiveDir?`${t.acc}14`:`${t.surface}66`,border:`1px solid ${next===archiveDir?t.acc:t.brd}35`,color:next===archiveDir?t.acc:t.mut,borderRadius:6,padding:"4px 7px",fontSize:10,fontFamily:font,cursor:"pointer"}}>{part}</button>;})}
-        <input value={archiveQuery} onChange={e=>setArchiveQuery(e.target.value)} placeholder="Filter files" style={{marginLeft:"auto",minWidth:120,background:t.bgDeep,border:`1px solid ${t.brd}35`,color:t.text,padding:"5px 8px",borderRadius:6,fontFamily:font,fontSize:10,outline:"none"}}/>
-      </div>
-      <div style={{display:"grid",gridTemplateColumns:"minmax(130px,42%) minmax(0,1fr)",minHeight:0,borderTop:`1px solid ${t.brd}12`}}>
-        <div style={{overflow:"auto",borderRight:`1px solid ${t.brd}18`,minHeight:240}}>
-          {!shown.length&&<div style={{padding:14,color:t.mut,fontSize:11}}>No entries.</div>}
-          {shown.map((entry,i)=><button key={`${entry.path}-${i}`} onClick={()=>openEntry(entry)} style={{width:"100%",display:"grid",gridTemplateColumns:"18px 1fr auto",gap:6,alignItems:"center",padding:"7px 9px",border:"none",borderTop:i?`1px solid ${t.brd}10`:"none",background:entryPreview?.entry?.path===entry.path?`${t.acc}12`:"transparent",color:entry.is_dir?t.warm:entry.previewable?t.dim:t.mut,cursor:"pointer",fontFamily:font,fontSize:11,textAlign:"left"}}>
-            <span>{entry.is_dir?"▸":entry.previewable?"•":"-"}</span>
-            <span title={entry.path} style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{entry.display_name||entry.name||entry.path}</span>
-            {!entry.is_dir&&<span style={{fontSize:9,color:t.mut,fontFamily:"monospace"}}>{entry.size||0}B</span>}
-          </button>)}
-        </div>
-        <div style={{overflow:"auto",padding:10,minHeight:240}}>
-          {entryLoading&&<div style={{fontSize:11,color:t.mut}}>Loading entry...</div>}
-          {!entryLoading&&!entryPreview&&<div style={{fontSize:11,color:t.mut,lineHeight:1.6}}>Select a small text-like file to preview it inside the archive.</div>}
-          {!entryLoading&&entryPreview?.error&&<div style={{border:`1px solid ${t.warm}30`,background:`${t.warm}08`,borderRadius:7,padding:10,color:t.warm,fontSize:11,lineHeight:1.55}}>
-            <div style={{fontWeight:900,marginBottom:4}}>Preview unavailable</div>
-            <div>{entryPreview.error}</div>
-            {entryPreview.entry&&<div style={{marginTop:6,color:t.mut,wordBreak:"break-word"}}>{entryPreview.entry.path} · {entryPreview.entry.size||0}B</div>}
-            <div style={{marginTop:6,color:t.mut}}>Download the archive to inspect this entry.</div>
-          </div>}
-          {!entryLoading&&entryPreview?.content!=null&&<pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:11,color:t.dim,fontFamily:font,lineHeight:1.55}}>{entryPreview.content}</pre>}
-        </div>
-      </div>
-    </div>;
-  }
-  if(type==="table"){
-    const cols=preview.columns||[];
-    const rows=(preview.rows||[]).filter(r=>!filter||r.join(" ").toLowerCase().includes(filter.toLowerCase()));
-    return <div style={{display:"flex",flexDirection:"column",gap:8}}>
-      <input value={filter} onChange={e=>setFilter(e.target.value)} placeholder="Filter rows" style={{background:t.bgDeep,border:`1px solid ${t.brd}35`,color:t.text,padding:"7px 9px",borderRadius:7,fontFamily:font,fontSize:11,outline:"none"}}/>
-      <div style={{overflow:"auto",border:`1px solid ${t.brd}22`,borderRadius:8,maxHeight:430}}>
-        <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,color:t.dim}}>
-          <thead><tr>{cols.map((c,i)=><th key={i} style={{position:"sticky",top:0,background:t.surface,padding:"6px 8px",textAlign:"left",color:t.text,borderBottom:`1px solid ${t.brd}22`}}>{c||`col ${i+1}`}</th>)}</tr></thead>
-          <tbody>{rows.map((r,i)=><tr key={i}>{cols.map((_,j)=><td key={j} style={{padding:"5px 8px",borderTop:`1px solid ${t.brd}10`,whiteSpace:"nowrap"}}>{r[j]||""}</td>)}</tr>)}</tbody>
-        </table>
-      </div>
-      {preview.truncated&&<div style={{fontSize:10,color:t.warm}}>Preview truncated.</div>}
-    </div>;
-  }
-  if(type==="json"){
-    const data=preview.json;
-    if(Array.isArray(data)&&data.length&&typeof data[0]==="object"&&!Array.isArray(data[0])){
-      const cols=Array.from(new Set(data.slice(0,100).flatMap(o=>Object.keys(o||{})))).slice(0,20);
-      const rows=data.filter(o=>!filter||JSON.stringify(o).toLowerCase().includes(filter.toLowerCase())).slice(0,100);
-      return <div style={{display:"flex",flexDirection:"column",gap:8}}>
-        <input value={filter} onChange={e=>setFilter(e.target.value)} placeholder="Filter JSON rows" style={{background:t.bgDeep,border:`1px solid ${t.brd}35`,color:t.text,padding:"7px 9px",borderRadius:7,fontFamily:font,fontSize:11,outline:"none"}}/>
-        <div style={{overflow:"auto",border:`1px solid ${t.brd}22`,borderRadius:8,maxHeight:430}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:11,color:t.dim}}><thead><tr>{cols.map(c=><th key={c} style={{position:"sticky",top:0,background:t.surface,padding:"6px 8px",textAlign:"left",color:t.text,borderBottom:`1px solid ${t.brd}22`}}>{c}</th>)}</tr></thead><tbody>{rows.map((o,i)=><tr key={i}>{cols.map(c=><td key={c} style={{padding:"5px 8px",borderTop:`1px solid ${t.brd}10`,whiteSpace:"nowrap"}}>{typeof o[c]==="object"?JSON.stringify(o[c]):String(o[c]??"")}</td>)}</tr>)}</tbody></table></div>
-      </div>;
-    }
-    return <pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:11,color:t.dim,fontFamily:font,lineHeight:1.55}}>{preview.parse_error?preview.content:JSON.stringify(data??preview.content,null,2)}</pre>;
-  }
-  if(type==="markdown")return <div style={{display:"flex",flexDirection:"column",gap:8}}>
-    <div style={{display:"flex",gap:5}}>{["rendered","raw"].map(m=><button key={m} onClick={()=>setMode(m)} style={{padding:"5px 9px",borderRadius:6,border:`1px solid ${mode===m?t.acc:t.brd}35`,background:mode===m?`${t.acc}14`:"transparent",color:mode===m?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:10,fontWeight:800}}>{m}</button>)}</div>
-    {mode==="raw"?<pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:11,color:t.dim,fontFamily:font,lineHeight:1.55}}>{preview.content}</pre>:<div className="md" style={{fontSize:12,color:t.dim,lineHeight:1.65}} dangerouslySetInnerHTML={{__html:preview.html||""}}/>}
-  </div>;
-  if(type==="html")return <iframe sandbox="" srcDoc={preview.content||""} title={preview.filename} style={{width:"100%",height:520,border:`1px solid ${t.brd}22`,borderRadius:8,background:"#fff"}}/>;
-  return <pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:11,color:t.dim,fontFamily:font,lineHeight:1.55}}>{preview.content||preview.message||"No preview available."}</pre>;
-}
-
-function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify,confirmAction}){
-  const [prompt,setPrompt]=useState("");
-  const [negPrompt,setNegPrompt]=useState("");
-  const [size,setSize]=useState("1024x1024");
-  const [customW,setCustomW]=useState(1024);
-  const [customH,setCustomH]=useState(1024);
-  const [steps,setSteps]=useState(25);
-  const [cfg,setCfg]=useState(7);
-  const [seed,setSeed]=useState("");
-  const [count,setCount]=useState(1);
-  const [sampler,setSampler]=useState("euler");
-  const [scheduler,setScheduler]=useState("normal");
-  const [modelSampling,setModelSampling]=useState("");
-  const [checkpoints,setCheckpoints]=useState([]);
-  const [checkpoint,setCheckpoint]=useState("");
-  const [vaes,setVaes]=useState([]);
-  const [vae,setVae]=useState("");
-  const [ckptSettings,setCkptSettings]=useState({});
-  const [workflows,setWorkflows]=useState([]);
-  const [workflow,setWorkflow]=useState("");
-  const [job,setJob]=useState(null); // {id, started, status, queuePos}
-  const [gallery,setGallery]=useState([]);
-  const [galleryLoading,setGalleryLoading]=useState(false);
-  const [viewIdx,setViewIdx]=useState(0);     // index into gallery shown in the main viewer (0 = newest)
-  const [lightbox,setLightbox]=useState(false);
-  const [enhancing,setEnhancing]=useState(false);
-  const [restartingComfy,setRestartingComfy]=useState(false);
-  const [freeingComfy,setFreeingComfy]=useState(false);
-  const [comfyMemory,setComfyMemory]=useState(null);
-  const [showAdvanced,setShowAdvanced]=useState(()=>{try{return localStorage.getItem("hc-img-adv")==="1";}catch{return false;}});
-  const [error,setError]=useState("");
-  const pollRef=useRef(null);
-  const wfUploadRef=useRef(null);
-  const thumbsRef=useRef(null);
-  const toggleAdvanced=()=>setShowAdvanced(p=>{const v=!p;try{localStorage.setItem("hc-img-adv",v?"1":"0");}catch{}return v;});
-  const stopPoll=()=>{if(pollRef.current){clearInterval(pollRef.current);pollRef.current=null;}};
-  const loadWorkflows=()=>fetch(`${API}/api/images/workflows`).then(r=>r.ok?r.json():{workflows:[]}).then(d=>setWorkflows(d.workflows||[])).catch(()=>{});
-  const loadGallery=()=>{
-    setGalleryLoading(true);
-    fetch(`${API}/api/artifacts?kind=image&source=image_studio&limit=100`)
-      .then(r=>r.ok?r.json():[])
-      .then(d=>{
-        const rows=Array.isArray(d)?d:(d.artifacts||[]);
-        setGallery(rows.filter(a=>(a.metadata||{}).source_tool==="image_studio"));
-      }).catch(()=>{}).finally(()=>setGalleryLoading(false));
-  };
-  const loadComfyMemoryStatus=async()=>{
-    if(!configured)return null;
-    try{
-      const r=await fetch(`${API}/api/images/memory-status`);
-      const d=await r.json().catch(()=>({}));
-      if(!r.ok){
-        setComfyMemory({available:false,message:d.detail||d.error||`HTTP ${r.status}`});
-        return null;
-      }
-      const next={available:true,...d};
-      setComfyMemory(next);
-      return next;
-    }catch(e){
-      setComfyMemory({available:false,message:String(e.message||e)});
-      return null;
-    }
-  };
-  const enhance=async()=>{
-    if(!prompt.trim()||enhancing||job)return;
-    setEnhancing(true);
-    try{
-      const r=await fetch(`${API}/api/images/enhance-prompt`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({prompt:prompt.trim()})});
-      const d=await r.json();
-      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
-      if(d.prompt)setPrompt(d.prompt);
-      if(d.negative_prompt)setNegPrompt(d.negative_prompt);
-      notify&&notify({type:"success",text:"Prompt enhanced",duration:2000});
-    }catch(e){notify&&notify({type:"error",text:"Enhance failed",detail:String(e.message||e)});}
-    finally{setEnhancing(false);}
-  };
-  const reuseParams=(meta)=>{
-    if(!meta)return;
-    if(meta.prompt)setPrompt(meta.prompt);
-    setNegPrompt(meta.negative_prompt||"");
-    if(meta.steps)setSteps(meta.steps);
-    if(meta.cfg!=null)setCfg(meta.cfg);
-    if(meta.sampler)setSampler(meta.sampler);
-    if(meta.scheduler)setScheduler(meta.scheduler);
-    setModelSampling(meta.model_sampling||"");
-    setVae(meta.vae&&vaes.includes(meta.vae)?meta.vae:"");
-    if(meta.checkpoint&&checkpoints.includes(meta.checkpoint))setCheckpoint(meta.checkpoint);
-    if(meta.workflow&&workflows.some(w=>w.name===meta.workflow))setWorkflow(meta.workflow);else setWorkflow("");
-    if(meta.width&&meta.height){
-      const preset=`${meta.width}x${meta.height}`;
-      if(["1024x1024","1216x832","832x1216"].includes(preset))setSize(preset);
-      else{setSize("custom");setCustomW(meta.width);setCustomH(meta.height);}
-    }
-    if(meta.seed!=null)setSeed(String(meta.seed));
-  };
-  const deleteOne=async(a)=>{
-    const ok=await confirmAction({
-      title:"Delete image",
-      body:"This removes the file and its record from HyprChat.",
-      confirmLabel:"Delete Image",
-      tone:"danger",
-    });
-    if(!ok)return;
-    try{
-      const r=await fetch(`${API}/api/artifacts/${a.id}`,{method:"DELETE"});
-      if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${r.status}`);}
-      const next=gallery.filter(x=>x.id!==a.id);
-      setGallery(next);
-      setViewIdx(v=>Math.min(v,Math.max(0,next.length-1)));
-      if(!next.length)setLightbox(false);
-    }catch(e){notify&&notify({type:"error",text:"Delete failed",detail:String(e.message||e)});}
-  };
-  const purgeAll=async()=>{
-    const ok=await confirmAction({
-      title:"Delete all generated images",
-      body:"This removes every trace: Image Studio AND chat-generated images, their files and records on HyprChat, references inside chat messages (replies that included a photo are edited to remove it), ComfyUI's job history and file copies, and the server logs. This cannot be undone.",
-      confirmLabel:"Delete Everything",
-      tone:"danger",
-    });
-    if(!ok)return;
-    try{
-      const r=await fetch(`${API}/api/images/purge`,{method:"POST"});
-      const d=await r.json();
-      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
-      setGallery([]);setViewIdx(0);setLightbox(false);
-      const bits=[`${d.deleted_artifacts} image(s)`];
-      if(d.scrubbed_messages)bits.push(`${d.scrubbed_messages} chat message(s) scrubbed`);
-      if(d.comfyui_files_deleted!=null)bits.push(`${d.comfyui_files_deleted} ComfyUI file(s)`);
-      if(d.journal_cleared)bits.push("server logs cleared");
-      notify&&notify({type:"success",text:"All image traces deleted",detail:bits.join(" · ")+(d.comfyui_files_deleted==null?" — install the ComfyUI cleanup node for instant remote file removal":""),duration:5000});
-    }catch(e){notify&&notify({type:"error",text:"Purge failed",detail:String(e.message||e)});}
-  };
-  const restartComfyUI=async()=>{
-    if(job||restartingComfy||freeingComfy)return;
-    setRestartingComfy(true);
-    setError("");
-    try{
-      const r=await fetch(`${API}/api/images/restart-comfyui`,{method:"POST"});
-      const d=await r.json().catch(()=>({}));
-      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
-      notify&&notify({
-        type:"success",
-        text:"ComfyUI restart requested",
-        detail:d.message||"The image service will be unavailable briefly while it restarts.",
-        duration:4500,
-      });
-      setTimeout(()=>loadComfyMemoryStatus(),4000);
-    }catch(e){
-      const msg=String(e.message||e);
-      setError(msg);
-      notify&&notify({type:"error",text:"Restart failed",detail:msg});
-    }
-    finally{setRestartingComfy(false);}
-  };
-  const freeComfyMemory=async()=>{
-    if(job||restartingComfy||freeingComfy)return;
-    setFreeingComfy(true);
-    setError("");
-    try{
-      const r=await fetch(`${API}/api/images/free-memory`,{method:"POST"});
-      const d=await r.json().catch(()=>({}));
-      if(!r.ok)throw new Error(d.detail||d.error||`HTTP ${r.status}`);
-      notify&&notify({
-        type:"success",
-        text:"ComfyUI memory unload requested",
-        detail:d.message||(d.custom_node?"Resident models unloaded and VRAM free requested.":"Built-in unload accepted; install the HyprChat control node for CPU RAM idle unload."),
-        duration:4500,
-      });
-      await loadComfyMemoryStatus();
-    }catch(e){
-      const msg=String(e.message||e);
-      setError(msg);
-      notify&&notify({type:"error",text:"Unload failed",detail:msg});
-    }
-    finally{setFreeingComfy(false);}
-  };
-  const applySettings=(s)=>{
-    if(!s)return;
-    if(s.steps)setSteps(s.steps);
-    if(s.cfg!=null)setCfg(s.cfg);
-    if(s.sampler)setSampler(s.sampler);
-    if(s.scheduler)setScheduler(s.scheduler);
-    setModelSampling(s.model_sampling||"");
-  };
-  const applyCheckpoint=(name,settingsMap)=>{
-    setCheckpoint(name);
-    applySettings((settingsMap||ckptSettings)[name]);
-  };
-  useEffect(()=>{
-    if(!configured)return;
-    fetch(`${API}/api/images/checkpoints`).then(r=>r.ok?r.json():{checkpoints:[]}).then(d=>{
-      setCheckpoints(d.checkpoints||[]);
-      setVaes(d.vaes||[]);
-      setCkptSettings(d.settings||{});
-      setCheckpoint(c=>{
-        const initial=c||d.default||"";
-        // Auto-configure for the initially selected model too
-        if(!c&&initial)applySettings((d.settings||{})[initial]);
-        return initial;
-      });
-    }).catch(()=>{});
-    loadWorkflows();
-    loadGallery();
-    loadComfyMemoryStatus();
-    return stopPoll;
-  },[configured]);
-  // Lightbox keyboard nav (mermaid-fullscreen pattern): Escape closes,
-  // arrows step through the gallery with functional updates (no stale closures)
-  useEffect(()=>{
-    if(!lightbox)return;
-    const h=(e)=>{
-      if(e.key==="Escape")setLightbox(false);
-      else if(e.key==="ArrowLeft")setViewIdx(i=>Math.max(0,i-1));
-      else if(e.key==="ArrowRight")setViewIdx(i=>Math.min(gallery.length-1,i+1));
-    };
-    window.addEventListener("keydown",h);
-    return ()=>window.removeEventListener("keydown",h);
-  },[lightbox,gallery.length]);
-  // Keep the selected thumbnail visible in the carousel strip
-  useEffect(()=>{
-    const el=thumbsRef.current?.querySelector(`[data-idx="${viewIdx}"]`);
-    if(el&&el.scrollIntoView)el.scrollIntoView({inline:"nearest",block:"nearest",behavior:"smooth"});
-  },[viewIdx,gallery.length]);
-  const saveModelDefaults=async()=>{
-    if(!checkpoint)return;
-    try{
-      const r=await fetch(`${API}/api/images/model-settings/${encodeURIComponent(checkpoint)}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({model_sampling:modelSampling,sampler,scheduler,cfg:Number(cfg)||7,steps:Number(steps)||25})});
-      const d=await r.json();
-      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
-      setCkptSettings(p=>({...p,[checkpoint]:d.settings}));
-      notify&&notify({type:"success",text:`Defaults saved for ${checkpoint}`,duration:2200});
-    }catch(e){notify&&notify({type:"error",text:"Save failed",detail:String(e.message||e)});}
-  };
-  const activeWf=workflows.find(w=>w.name===workflow)||null;
-  const applyWorkflow=(name)=>{
-    setWorkflow(name);
-    const meta=workflows.find(w=>w.name===name);
-    if(!meta)return;
-    // Prefill the controls from the workflow's own base settings
-    if(meta.steps)setSteps(meta.steps);
-    if(meta.cfg!=null)setCfg(meta.cfg);
-    if(meta.sampler)setSampler(meta.sampler);
-    if(meta.scheduler)setScheduler(meta.scheduler);
-    if(meta.checkpoint&&checkpoints.includes(meta.checkpoint))setCheckpoint(meta.checkpoint);
-    if(meta.width&&meta.height){
-      const preset=`${meta.width}x${meta.height}`;
-      if(["1024x1024","1216x832","832x1216"].includes(preset))setSize(preset);
-      else{setSize("custom");setCustomW(meta.width);setCustomH(meta.height);}
-    }
-    setModelSampling(""); // built-in sampling nodes (if any) come with the workflow itself
-  };
-  const uploadWorkflow=async(file)=>{
-    if(!file)return;
-    const isPng=/\.png$/i.test(file.name)||file.type==="image/png";
-    const payload={name:file.name.replace(/\.(json|png)$/i,"")};
-    if(isPng){
-      // ComfyUI embeds the API workflow in PNG metadata — send the image, backend extracts it
-      const buf=new Uint8Array(await file.arrayBuffer());
-      let bin="";const CH=0x8000;
-      for(let i=0;i<buf.length;i+=CH)bin+=String.fromCharCode.apply(null,buf.subarray(i,i+CH));
-      payload.png_base64=btoa(bin);
-    }else{
-      try{payload.workflow=JSON.parse(await file.text());}
-      catch{notify&&notify({type:"error",text:"Not valid JSON"});return;}
-    }
-    try{
-      const r=await fetch(`${API}/api/images/workflows`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
-      const d=await r.json();
-      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
-      await loadWorkflows();
-      notify&&notify({type:"success",text:`Workflow "${d.name}" saved${isPng?" (extracted from image)":""}`,duration:2500});
-    }catch(e){notify&&notify({type:"error",text:"Workflow rejected",detail:String(e.message||e)});}
-  };
-  const dims=()=>{
-    if(size==="custom")return[parseInt(customW)||1024,parseInt(customH)||1024];
-    const [w,h]=size.split("x").map(Number);return[w,h];
-  };
-  const generate=async()=>{
-    if(!prompt.trim()||job)return;
-    setError("");
-    const [w,h]=dims();
-    const body={prompt:prompt.trim(),negative_prompt:negPrompt.trim(),width:w,height:h,steps:Number(steps)||25,cfg:Number(cfg)||7,count:Number(count)||1,checkpoint,sampler,scheduler,model_sampling:modelSampling,vae,workflow};
-    if(seed!=="")body.seed=parseInt(seed)||0;
-    let d;
-    try{
-      const r=await fetch(`${API}/api/images/generate`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-      d=await r.json();
-      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
-    }catch(e){setError(String(e.message||e));return;}
-    const jid=d.job_id;
-    setJob({id:jid,started:Date.now(),status:"queued",params:d.params});
-    pollRef.current=setInterval(async()=>{
-      try{
-        const r=await fetch(`${API}/api/images/jobs/${jid}`);
-        const s=await r.json();
-        if(!r.ok)throw new Error(s.detail||`HTTP ${r.status}`);
-        if(s.status==="done"){
-          stopPoll();
-          setJob(null);
-          loadGallery();
-          setViewIdx(0); // newest lands in the main viewer
-          notify&&notify({type:"success",text:`Image ready (seed ${d.params?.seed})`,duration:2500});
-        }else if(s.status==="error"){
-          stopPoll();setJob(null);setError(s.error||"Generation failed");
-        }else{
-          setJob(p=>p?{...p,status:s.status,queuePos:s.queue_position}:p);
-        }
-      }catch(e){stopPoll();setJob(null);setError(String(e.message||e));}
-    },1000);
-  };
-  const cancelJob=async()=>{
-    if(!job)return;
-    stopPoll();
-    try{await fetch(`${API}/api/images/jobs/${job.id}/cancel`,{method:"POST"});}catch{}
-    setJob(null);
-  };
-  const useInChat=async(r)=>{
-    if(!r.artifact_id)return;
-    try{
-      const resp=await fetch(`${API}/api/artifacts/${r.artifact_id}/use-in-chat`,{method:"POST"});
-      const d=await resp.json();
-      if(d.attachment)onUseInChat&&onUseInChat(d.attachment);
-    }catch(e){notify&&notify({type:"error",text:"Use in chat failed",detail:String(e.message||e)});}
-  };
-  const inputS={width:"100%",background:`${t.bgDeep}E6`,border:`1px solid ${t.brd}55`,color:t.text,padding:"9px 12px",borderRadius:7,fontFamily:font,fontSize:13,outline:"none",boxSizing:"border-box"};
-  const smallNum={...inputS,width:"100%",padding:"7px 8px",fontSize:12};
-  const labelS={fontSize:10,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.55,display:"flex",flexDirection:"column",gap:5,minWidth:0};
-  const railSectionS={padding:"0 0 14px",borderBottom:`1px solid ${t.brd}24`,display:"flex",flexDirection:"column",gap:10};
-  const sectionHead=(label,Icon,extra=null)=><div style={{display:"flex",alignItems:"center",gap:7,minHeight:22}}>
-    {Icon&&<span style={{display:"flex",color:t.acc}}><Icon/></span>}
-    <span style={{fontSize:10,fontWeight:900,letterSpacing:.9,textTransform:"uppercase",color:t.acc}}>{label}</span>
-    <div style={{flex:1}}/>
-    {extra}
-  </div>;
-  const section=(label,Icon,children,extra=null)=><section style={railSectionS}>{sectionHead(label,Icon,extra)}{children}</section>;
-  const grid2={display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8,alignItems:"end"};
-  const railBtn=(c,opts={})=>({minHeight:34,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6,padding:"7px 10px",borderRadius:7,background:opts.solid?c:`${c}14`,border:opts.solid?`1px solid ${c}`:`1px solid ${c}3d`,color:opts.solid?t.bgDeep:c,cursor:opts.disabled?"default":"pointer",fontFamily:font,fontWeight:800,fontSize:11,opacity:opts.disabled?0.55:1,boxSizing:"border-box"});
-  if(!configured)return <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:10,color:t.mut}}>
-    <span style={{fontSize:42,opacity:.5}}>🎨</span>
-    <div style={{fontSize:14,fontWeight:700,color:t.dim}}>Image Studio</div>
-    <div style={{fontSize:12,maxWidth:380,textAlign:"center"}}>ComfyUI is not configured. Set the ComfyUI URL in Settings → Connections to enable local Stable Diffusion image generation.</div>
-  </div>;
-  const elapsed=job?Math.round((Date.now()-job.started)/1000):0;
-  const smallBtn=(c)=>({fontSize:10,padding:"6px 9px",borderRadius:7,background:`${c}14`,border:`1px solid ${c}35`,color:c,cursor:"pointer",fontFamily:font,fontWeight:800,display:"inline-flex",alignItems:"center",gap:5,textDecoration:"none"});
-  const cur=gallery[viewIdx]||null;
-  const curMeta=(cur&&cur.metadata)||{};
-  const metaLine=(m)=>`seed ${m.seed} · ${m.steps} steps · ${m.width}×${m.height}${m.checkpoint?` · ${String(m.checkpoint).replace(/\.(safetensors|ckpt)$/i,"")}`:""}`;
-  const actionChips=(a,m)=>(<div style={{display:"flex",gap:5,flexWrap:"wrap",justifyContent:"center"}}>
-    <a href={`${API}/api/artifacts/${a.id}/download`} download={a.filename} style={smallBtn(t.ok)}><IC.Download/>Download</a>
-    <button onClick={()=>useInChat({artifact_id:a.id})} style={smallBtn(t.acc)}><IC.Send/>Use in chat</button>
-    <button onClick={()=>reuseParams(m)} title="Load this image's prompt and settings back into the form" style={smallBtn(t.acc2)}><IC.Refresh/>Reuse</button>
-    {m.seed!=null&&<button onClick={()=>setSeed(String(m.seed))} title="Reuse this seed only" style={smallBtn(t.warm)}><IC.Star/>Seed</button>}
-    <button onClick={()=>deleteOne(a)} title="Delete this image" style={smallBtn(t.err)}><IC.Trash/>Delete</button>
-  </div>);
-  const navBtn=(dir,disabled,onClick,big)=>(<button onClick={onClick} disabled={disabled} style={{width:big?46:30,height:big?46:58,flexShrink:0,borderRadius:big?23:8,border:`1px solid ${t.brd}40`,background:big?"rgba(0,0,0,.45)":`${t.surface}cc`,color:disabled?t.mut:t.text,fontSize:big?20:14,cursor:disabled?"default":"pointer",opacity:disabled?0.35:1,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:font}}>{dir}</button>);
-  return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",alignItems:"center",gap:8}}>
-      <IC.Image/><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Image Studio</span>
-      <span style={{fontSize:10,color:t.mut,marginLeft:8}}>Local Stable Diffusion via ComfyUI</span>
-      <div style={{flex:1}}/>
-      {gallery.length>0&&<span style={{fontSize:10,color:t.mut,marginRight:6}}>{gallery.length} image{gallery.length===1?"":"s"}</span>}
-      {gallery.length>0&&<button onClick={purgeAll} title="Delete every trace of generated images everywhere: Image Studio + chat images, files, records, chat-message references, ComfyUI history/copies, and server logs." style={{fontSize:10,padding:"6px 11px",borderRadius:6,background:`${t.err}10`,border:`1px solid ${t.err}30`,color:t.err,cursor:"pointer",fontFamily:font,fontWeight:600}}>Delete all</button>}
-    </div>
-    <div style={{flex:1,display:"flex",overflow:"hidden"}}>
-      {/* LEFT RAIL — prompt + all generation inputs */}
-      <div style={{width:"clamp(330px,30vw,420px)",flexShrink:0,borderRight:`1px solid ${t.brd}28`,overflowY:"auto",padding:16,display:"flex",flexDirection:"column",gap:12}}>
-        {section("Prompt",IC.Pencil,<>
-          <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&(e.metaKey||e.ctrlKey)){e.preventDefault();generate();}}} placeholder="Subject, style, lighting, mood" rows={5} style={{...inputS,resize:"vertical",lineHeight:1.55,fontSize:13.5,padding:"11px 13px"}}/>
-          <textarea value={negPrompt} onChange={e=>setNegPrompt(e.target.value)} placeholder="Negative prompt" rows={1} style={{...inputS,resize:"vertical",fontSize:12,minHeight:38}}/>
-          <div style={grid2}>
-            <button onClick={enhance} disabled={!prompt.trim()||enhancing||!!job} title="Enhance prompt" style={railBtn(t.acc2,{disabled:!prompt.trim()||enhancing||!!job})}>
-              {enhancing?<div style={{width:11,height:11,border:`2px solid ${t.acc2}44`,borderTopColor:t.acc2,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>:<IC.Star/>}
-              {enhancing?"Enhancing":"Enhance"}
-            </button>
-            {!job
-              ?<button onClick={generate} disabled={!prompt.trim()} style={railBtn(t.acc,{solid:true,disabled:!prompt.trim()})}><IC.Image/>Generate</button>
-              :<button onClick={cancelJob} style={railBtn(t.err)}><IC.Stop/>Stop</button>}
-          </div>
-        </>)}
-        {section("Model",IC.Layers,<>
-          {checkpoints.length>0?<div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto auto",gap:8,alignItems:"end"}}>
-            <label style={labelS}>Model{ckptSettings[checkpoint]?.user_override&&<span title="Using saved defaults" style={{color:t.acc,marginLeft:4}}>★</span>}
-              <select value={checkpoint} onChange={e=>applyCheckpoint(e.target.value)} title="Selecting a model auto-applies its saved settings" style={{...inputS,padding:"8px 10px",fontSize:12}}>
-                {checkpoints.map(c=><option key={c} value={c}>{c.replace(/\.(safetensors|ckpt)$/i,"")}</option>)}
-              </select>
-            </label>
-            <button onClick={freeComfyMemory} disabled={!!job||restartingComfy||freeingComfy} title="Unload resident ComfyUI models and free VRAM" style={railBtn(t.f1,{disabled:!!job||restartingComfy||freeingComfy})}>
-              {freeingComfy?<div style={{width:11,height:11,border:`2px solid ${t.f1}44`,borderTopColor:t.f1,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>:<IC.Activity/>}
-              {freeingComfy?"Unloading":"Unload"}
-            </button>
-            <button onClick={restartComfyUI} disabled={!!job||restartingComfy||freeingComfy} title="Restart ComfyUI to release system RAM held by the image service" style={railBtn(t.warm,{disabled:!!job||restartingComfy||freeingComfy})}>
-              {restartingComfy?<div style={{width:11,height:11,border:`2px solid ${t.warm}44`,borderTopColor:t.warm,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>:<IC.Refresh/>}
-              {restartingComfy?"Restarting":"Restart"}
-            </button>
-          </div>:<div style={{fontSize:11,color:t.mut}}>No checkpoints reported.</div>}
-        </>)}
-        {section("Canvas",IC.Image,<>
-          <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 74px",gap:8,alignItems:"end"}}>
-            <label style={labelS}>Aspect ratio
-              <select value={size} onChange={e=>setSize(e.target.value)} style={{...inputS,padding:"8px 10px",fontSize:12}}>
-                <option value="1024x1024">Square · 1024 x 1024</option>
-                <option value="1216x832">Landscape · 1216 x 832</option>
-                <option value="832x1216">Portrait · 832 x 1216</option>
-                <option value="custom">Custom</option>
-              </select>
-            </label>
-            <label style={labelS}>Count
-              <select value={count} onChange={e=>setCount(e.target.value)} style={{...inputS,padding:"8px 10px",fontSize:12}}>{[1,2,3,4].map(n=><option key={n} value={n}>{n}</option>)}</select>
-            </label>
-          </div>
-          {size==="custom"&&<div style={grid2}>
-            <label style={labelS}>Width<input type="number" min={256} max={2048} step={8} value={customW} onChange={e=>setCustomW(e.target.value)} style={smallNum}/></label>
-            <label style={labelS}>Height<input type="number" min={256} max={2048} step={8} value={customH} onChange={e=>setCustomH(e.target.value)} style={smallNum}/></label>
-          </div>}
-        </>)}
-        {section("Status",IC.Activity,<>
-          {job?<div style={{display:"flex",alignItems:"center",gap:10,padding:"9px 11px",background:`${t.acc}0d`,border:`1px solid ${t.acc}28`,borderRadius:8,fontSize:12,color:t.dim}}>
-            <div style={{width:14,height:14,border:`2px solid ${t.acc}44`,borderTopColor:t.acc,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
-            {job.status==="queued"&&job.queuePos>0?`Queued behind ${job.queuePos}`:elapsed<8?"Generating":elapsed<60?`Generating ${elapsed}s`:`Generating ${elapsed}s`}
-          </div>:<div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:8,alignItems:"center",fontSize:11,color:t.mut}}>
-            <span>Ready</span><span>{gallery.length} image{gallery.length===1?"":"s"}</span>
-          </div>}
-          {comfyMemory&&<div style={{padding:"8px 10px",background:`${comfyMemory.available?t.surface:t.warm}22`,border:`1px solid ${comfyMemory.available?t.brd:t.warm}33`,borderRadius:8,fontSize:10,color:comfyMemory.available?t.mut:t.warm,lineHeight:1.45}}>
-            {comfyMemory.available
-              ?`Queue ${comfyMemory.running||0}/${comfyMemory.pending||0} · idle ${comfyMemory.idle_seconds||0}s · loaded ${comfyMemory.loaded_models??"?"}`
-              :`Control node unavailable: ${comfyMemory.message}`}
-          </div>}
-          {error&&<div style={{padding:"9px 11px",background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:8,fontSize:12,color:t.err}}>{error}</div>}
-        </>)}
-        <section style={railSectionS}>
-          <button onClick={toggleAdvanced} style={{display:"flex",alignItems:"center",gap:7,width:"100%",padding:0,background:"none",border:"none",color:t.acc,cursor:"pointer",fontFamily:font}}>
-            <IC.Settings/><span style={{fontSize:10,fontWeight:900,letterSpacing:.9,textTransform:"uppercase"}}>Advanced Sampling</span><div style={{flex:1}}/><span style={{display:"flex",transform:showAdvanced?"rotate(0deg)":"rotate(-90deg)",transition:"transform .15s"}}><IC.ChevDown/></span>
-          </button>
-          {showAdvanced&&<div style={{display:"flex",flexDirection:"column",gap:10}}>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(0,1fr))",gap:8,alignItems:"end"}}>
-              <label style={labelS}>Steps<input type="number" min={1} max={60} value={steps} onChange={e=>setSteps(e.target.value)} style={smallNum}/></label>
-              <label style={labelS}>CFG<input type="number" min={1} max={20} step={0.5} value={cfg} onChange={e=>setCfg(e.target.value)} style={smallNum}/></label>
-              <label style={labelS}>Seed<input type="text" placeholder="random" value={seed} onChange={e=>setSeed(e.target.value.replace(/[^\d]/g,""))} style={smallNum}/></label>
-            </div>
-            <div style={grid2}>
-              <label style={labelS}>Sampler
-                <select value={sampler} onChange={e=>setSampler(e.target.value)} style={{...inputS,padding:"7px 8px",fontSize:12}}>
-                  {["euler","euler_ancestral","dpmpp_2m","dpmpp_2m_sde","dpmpp_3m_sde","dpmpp_sde","heun","ddim","uni_pc","lcm"].map(s2=><option key={s2} value={s2}>{s2}</option>)}
-                </select>
-              </label>
-              <label style={labelS}>Scheduler
-                <select value={scheduler} onChange={e=>setScheduler(e.target.value)} style={{...inputS,padding:"7px 8px",fontSize:12}}>
-                  {["normal","karras","sgm_uniform","exponential","simple","beta"].map(s2=><option key={s2} value={s2}>{s2}</option>)}
-                </select>
-              </label>
-            </div>
-            <div style={grid2}>
-              <label title="Checkpoint training type" style={{...labelS,color:modelSampling?t.acc:t.mut}}>Model type
-                <select value={modelSampling} onChange={e=>setModelSampling(e.target.value)} style={{...inputS,padding:"7px 8px",fontSize:12}}>
-                  <option value="">Standard</option>
-                  <option value="flow">Flow matching</option>
-                  <option value="vpred">v-prediction</option>
-                </select>
-              </label>
-              {vaes.length>0?<label title="Override the checkpoint VAE" style={{...labelS,color:vae?t.acc:t.mut}}>VAE
-                <select value={vae} onChange={e=>setVae(e.target.value)} style={{...inputS,padding:"7px 8px",fontSize:12}}>
-                  <option value="">Baked</option>
-                  {vaes.map(v=><option key={v} value={v}>{v.replace(/\.(safetensors|pt|ckpt)$/i,"")}</option>)}
-                </select>
-              </label>:<span/>}
-            </div>
-            {checkpoint&&<button onClick={saveModelDefaults} title="Save current sampling defaults for the selected model" style={{...railBtn(t.warm),alignSelf:"flex-start"}}><IC.Star/>Save defaults</button>}
-          </div>}
-        </section>
-        {section("Workflow",IC.Cube,<>
-          <label style={labelS}>Workflow
-            <select value={workflow} onChange={e=>applyWorkflow(e.target.value)} style={{...inputS,padding:"8px 10px",fontSize:12}}>
-              <option value="">Default built-in graph</option>
-              {workflows.map(w=><option key={w.name} value={w.name}>{w.name}{w.has_lora?" *":""}</option>)}
-            </select>
-          </label>
-          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-            <button onClick={()=>wfUploadRef.current?.click()} title="Upload API JSON or workflow-bearing PNG" style={railBtn(t.acc)}><IC.Upload/>Upload</button>
-            <input ref={wfUploadRef} type="file" accept=".json,.png,application/json,image/png" style={{display:"none"}} onChange={e=>{uploadWorkflow(e.target.files?.[0]);e.target.value="";}}/>
-            {workflow&&<button onClick={async()=>{const ok=await confirmAction({title:"Delete workflow",body:`Delete workflow "${workflow}"?`,confirmLabel:"Delete Workflow",tone:"danger"});if(!ok)return;await fetch(`${API}/api/images/workflows/${encodeURIComponent(workflow)}`,{method:"DELETE"}).catch(()=>{});setWorkflow("");loadWorkflows();}} title="Delete this saved workflow" style={railBtn(t.err)}><IC.Trash/>Delete</button>}
-            {activeWf?.model_sampling_builtin&&<span style={{fontSize:9,color:t.warm}}>{activeWf.model_sampling_builtin==="flow"?"flow-matching":activeWf.model_sampling_builtin==="flux-graph"?"Flux architecture":"v-pred"} sampling built in</span>}
-          </div>
-        </>)}
-        </div>
-      {/* RIGHT VIEWER — newest/selected image large, carousel of the rest below */}
-      <div style={{flex:1,minWidth:0,display:"flex",flexDirection:"column",padding:16,gap:10,overflow:"hidden"}}>
-        {gallery.length===0
-          ?<div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,color:t.mut}}>
-            <span style={{fontSize:40,opacity:.4}}>🖼️</span>
-            <div style={{fontSize:12}}>{galleryLoading?"Loading gallery…":"No generations yet — describe an image on the left and hit Generate."}</div>
-          </div>
-          :<>
-            <div onClick={()=>cur&&cur.exists_status!=="missing"&&setLightbox(true)} title="Click to open the full-screen viewer" style={{flex:1,minHeight:0,position:"relative",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.bgDeep}99`,border:`1px solid ${t.brd}30`,borderRadius:12,overflow:"hidden",cursor:cur&&cur.exists_status!=="missing"?"zoom-in":"default"}}>
-              {cur&&(cur.exists_status==="missing"
-                ?<div style={{fontSize:12,color:t.mut}}>file missing on disk</div>
-                :<img src={`${API}${cur.url}`} alt={cur.filename} style={{maxWidth:"100%",maxHeight:"100%",objectFit:"contain",display:"block"}}/>)}
-              {job&&<div style={{position:"absolute",top:10,left:10,display:"flex",alignItems:"center",gap:8,padding:"6px 12px",background:"rgba(0,0,0,.55)",border:`1px solid ${t.acc}40`,borderRadius:20,fontSize:11,color:t.text,backdropFilter:"blur(4px)"}}>
-                <div style={{width:11,height:11,border:`2px solid ${t.acc}44`,borderTopColor:t.acc,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>Generating…
-              </div>}
-            </div>
-            {cur&&<div style={{textAlign:"center",fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={curMeta.prompt}>{metaLine(curMeta)}</div>}
-            {cur&&actionChips(cur,curMeta)}
-            {gallery.length>1&&<div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
-              {navBtn("◀",viewIdx<=0,()=>setViewIdx(i=>Math.max(0,i-1)))}
-              <div ref={thumbsRef} style={{display:"flex",gap:8,overflowX:"auto",flex:1,padding:"4px 2px"}}>
-                {gallery.map((a,i)=><div key={a.id} data-idx={i} onClick={()=>setViewIdx(i)} title={(a.metadata||{}).prompt} style={{width:74,height:74,flexShrink:0,borderRadius:8,overflow:"hidden",cursor:"pointer",border:`2px solid ${i===viewIdx?t.acc:`${t.brd}40`}`,opacity:i===viewIdx?1:.6,transition:"opacity .15s, border-color .15s",background:t.bgDeep}}>
-                  {a.exists_status==="missing"
-                    ?<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,color:t.mut}}>missing</div>
-                    :<img src={`${API}${a.url}`} loading="lazy" alt="" style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>}
-                </div>)}
-              </div>
-              {navBtn("▶",viewIdx>=gallery.length-1,()=>setViewIdx(i=>Math.min(gallery.length-1,i+1)))}
-            </div>}
-          </>}
-      </div>
-    </div>
-    {/* LIGHTBOX — front-and-center full preview with arrow navigation */}
-    {lightbox&&cur&&ReactDOM.createPortal(
-      <div onClick={e=>{if(e.target===e.currentTarget)setLightbox(false);}} style={{position:"fixed",inset:0,zIndex:200,background:"rgba(0,0,0,.85)",backdropFilter:"blur(8px)",display:"flex",alignItems:"center",justifyContent:"center",gap:14,animation:"fadeIn .2s"}}>
-        <button onClick={()=>setLightbox(false)} title="Close (Esc)" style={{position:"absolute",top:16,right:18,width:36,height:36,borderRadius:18,border:`1px solid ${t.brd}55`,background:"rgba(0,0,0,.5)",color:t.text,fontSize:15,cursor:"pointer",fontFamily:font}}>✕</button>
-        {navBtn("◀",viewIdx<=0,()=>setViewIdx(i=>Math.max(0,i-1)),true)}
-        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10,maxWidth:"86vw",minWidth:0}}>
-          {cur.exists_status==="missing"
-            ?<div style={{padding:60,fontSize:13,color:t.mut}}>file missing on disk</div>
-            :<img src={`${API}${cur.url}`} alt={cur.filename} style={{maxWidth:"86vw",maxHeight:"78vh",objectFit:"contain",borderRadius:10,boxShadow:"0 8px 48px #000a"}}/>}
-          <div style={{fontSize:11,color:t.dim,maxWidth:"80vw",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={curMeta.prompt}>{cur.filename} · {metaLine(curMeta)} · {viewIdx+1}/{gallery.length}</div>
-          {actionChips(cur,curMeta)}
-        </div>
-        {navBtn("▶",viewIdx>=gallery.length-1,()=>setViewIdx(i=>Math.min(gallery.length-1,i+1)),true)}
-      </div>,
-      document.body
-    )}
-  </div>;
-}
-
-function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onDelete,onUseInChat,notify,onRefreshList,onOpenArtifact}){
-  const [preview,setPreview]=useState(null);
-  const [timeline,setTimeline]=useState([]);
-  const [tagDraft,setTagDraft]=useState("");
-  const [kbId,setKbId]=useState(kbs?.[0]?.id||"");
-  const a=artifact||{};
-  const btnS=(c,bg)=>({background:bg||`${c}14`,border:`1px solid ${c}35`,color:c,padding:"6px 9px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:10,fontWeight:800,display:"inline-flex",alignItems:"center",gap:5,textDecoration:"none"});
-  const gridBtn=(c)=>({...btnS(c),justifyContent:"center",padding:"7px 6px",minWidth:0,whiteSpace:"nowrap"});
-  useEffect(()=>{if(!kbId&&kbs?.[0]?.id)setKbId(kbs[0].id);},[kbs,kbId]);
-  useEffect(()=>{let stop=false;setPreview(null);if(!a.id)return;fetch(`${API}/api/artifacts/${encodeURIComponent(a.id)}/preview`).then(r=>r.json()).then(d=>{if(!stop)setPreview(d);}).catch(e=>{if(!stop)setPreview({preview_type:"metadata",message:e.message||String(e)});});return()=>{stop=true;};},[a.id,a.updated_at,a.exists_status]);
-  useEffect(()=>{let stop=false;setTimeline([]);if(!a.id)return;fetch(`${API}/api/artifacts/${encodeURIComponent(a.id)}/timeline`).then(r=>r.ok?r.json():{events:[]}).then(d=>{if(!stop)setTimeline(d.events||[]);}).catch(()=>{if(!stop)setTimeline([]);});return()=>{stop=true;};},[a.id,a.updated_at,a.status,a.exists_status]);
-  if(!a.id)return null;
-  const meta=a.metadata||{};
-  const km=artifactKindMeta(a.kind,t,meta);
-  const DetailIcon=km.icon;
-  const patch=async(p)=>{const d=await onPatch?.(a.id,p);return d;};
-  const action=async(name,body={})=>{
-    try{
-      const r=await fetch(`${API}/api/artifacts/${encodeURIComponent(a.id)}/${name}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-      const d=await r.json().catch(()=>({}));
-      if(!r.ok)throw new Error(d.detail||d.error||`HTTP ${r.status}`);
-      fetch(`${API}/api/artifacts/${encodeURIComponent(a.id)}/timeline`).then(r=>r.ok?r.json():{events:[]}).then(x=>setTimeline(x.events||[])).catch(()=>{});
-      return d;
-    }catch(e){notify&&notify({type:"error",text:"Artifact action failed",detail:e.message||String(e)});throw e;}
-  };
-  const refreshDetail=()=>{if(onOpenArtifact&&a.id)onOpenArtifact(a.id);};
-  const mergeDuplicate=async(duplicateId)=>{
-    try{
-      const r=await fetch(`${API}/api/artifacts/${encodeURIComponent(a.id)}/merge-duplicate`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({duplicate_id:duplicateId})});
-      const d=await r.json().catch(()=>({}));
-      if(!r.ok)throw new Error(d.detail||d.error||`HTTP ${r.status}`);
-      notify&&notify({type:"success",text:"Duplicate metadata merged",duration:2200});
-      onRefreshList?.();
-      refreshDetail();
-    }catch(e){notify&&notify({type:"error",text:"Duplicate merge failed",detail:e.message||String(e)});}
-  };
-  const archiveDuplicate=async(duplicateId)=>{await onPatch?.(duplicateId,{status:"archived"});onRefreshList?.();refreshDetail();};
-  const addTag=async()=>{const tag=tagDraft.trim();if(!tag)return;await patch({tags:[...(a.tags||[]),tag]});setTagDraft("");};
-  const duplicateRows=a.duplicates||[];
-  const timelineRows=timeline||[];
-  return <div style={{width:"clamp(320px,42vw,430px)",maxWidth:"100vw",borderLeft:`1px solid ${t.brd}28`,background:t.bgDeep,display:"flex",flexDirection:"column",overflow:"hidden",flexShrink:0}}>
-    <div style={{padding:"12px 14px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:8}}>
-      <span style={{color:km.color,display:"flex"}}>{DetailIcon?<DetailIcon/>:null}</span>
-      <div style={{minWidth:0,flex:1}}><div style={{fontSize:13,fontWeight:900,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.title||a.filename}</div><div style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.filename}</div></div>
-      <button onClick={onClose} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:18,lineHeight:1}}>×</button>
-    </div>
-    <div style={{flex:1,overflow:"auto",padding:14,display:"flex",flexDirection:"column",gap:14}}>
-      <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Preview</div><ArtifactPreviewBlock preview={preview} t={t} font={font}/></section>
-      <section style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,fontSize:11,color:t.dim}}>
-        <div><span style={{color:t.mut}}>Status</span><select value={a.status||"draft"} onChange={e=>patch({status:e.target.value})} style={{width:"100%",marginTop:4,background:t.bg,border:`1px solid ${t.brd}35`,color:t.text,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:11}}>{["draft","accepted","archived"].map(s=><option key={s} value={s}>{s}</option>)}</select></div>
-        <div><span style={{color:t.mut}}>Health</span><div style={{marginTop:4,color:a.exists_status==="missing"?t.err:a.exists_status==="present"?t.ok:t.warm,fontWeight:800}}>{a.exists_status||"unknown"}</div></div>
-        <div><span style={{color:t.mut}}>Size</span><div style={{marginTop:4}}>{a.size_bytes?`${(a.size_bytes/1024).toFixed(a.size_bytes>1048576?1:0)} KB`:"unknown"}</div></div>
-        <div><span style={{color:t.mut}}>Created</span><div style={{marginTop:4}}>{a.created_at?new Date(a.created_at).toLocaleString():""}</div></div>
-      </section>
-      <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Actions</div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
-          <button onClick={async()=>{const d=await action("use-in-chat");onUseInChat?.(d.attachment);}} style={gridBtn(t.acc)}>Use in chat</button>
-          <button onClick={async()=>{const d=await action("send-to-research");notify&&notify({type:"success",text:"Research started",detail:d.report_id||d.id||"",duration:2500});}} style={gridBtn(t.pink)}>Research</button>
-          <button onClick={async()=>{const d=await action("fork-to-codebox");notify&&notify({type:"success",text:"Copied to Codebox",detail:d.path,duration:3000});}} style={gridBtn(t.warm)}>Codebox</button>
-          <button onClick={async()=>{await action("revise",{title:`${a.title||a.filename} revision`});onRefreshList?.();}} style={gridBtn(t.f1)}>Revise</button>
-          <button onClick={async()=>{const d=await action("check-file");await onPatch?.(a.id,{});notify&&notify({type:"success",text:"File health checked",detail:d.exists_status||"",duration:1800});}} style={gridBtn(t.mut)}>Check file</button>
-        </div>
-        {kbs?.length>0&&<div style={{display:"flex",gap:6,marginTop:6}}>
-          <select value={kbId} onChange={e=>setKbId(e.target.value)} style={{flex:1,minWidth:0,background:t.bg,border:`1px solid ${t.brd}35`,color:t.text,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:10,outline:"none",cursor:"pointer"}}>{kbs.map(k=><option key={k.id} value={k.id}>{k.name}</option>)}</select>
-          <button onClick={async()=>{await action("add-to-kb",{kb_id:kbId});notify&&notify({type:"success",text:"Artifact imported to KB",duration:1800});}} style={{...btnS(t.ok),flexShrink:0}}>Add to KB</button>
-        </div>}
-      </section>
-      {duplicateRows.length>0&&<section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Duplicates</div>
-        <div style={{display:"flex",flexDirection:"column",gap:7}}>
-          {duplicateRows.map(d=><div key={d.id} style={{border:`1px solid ${t.brd}24`,background:`${t.surface}44`,borderRadius:8,padding:8,display:"flex",flexDirection:"column",gap:6}}>
-            <div style={{display:"flex",gap:8,alignItems:"center",minWidth:0}}>
-              <div style={{minWidth:0,flex:1}}><div style={{fontSize:11,color:t.text,fontWeight:800,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.title||d.filename}</div><div style={{fontSize:9,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.filename}</div></div>
-              <span style={{fontSize:9,color:d.status==="archived"?t.mut:t.warm,border:`1px solid ${t.brd}24`,borderRadius:6,padding:"2px 5px"}}>{d.status}</span>
-            </div>
-            <div style={{fontSize:10,color:t.mut,display:"flex",gap:7,flexWrap:"wrap"}}><span>{d.file_health?.size_bytes?`${(d.file_health.size_bytes/1024).toFixed(0)} KB`:"unknown size"}</span>{d.pinned? <span style={{color:t.warm}}>pinned</span>:null}{(d.workspaces||[]).slice(0,2).map(w=><span key={w.id}>{w.name}</span>)}</div>
-            <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-              <button onClick={()=>onOpenArtifact?.(d.id)} style={btnS(t.f1)}>Open</button>
-              <button onClick={()=>archiveDuplicate(d.id)} style={btnS(t.warm)}>Archive duplicate</button>
-              <button onClick={()=>mergeDuplicate(d.id)} style={btnS(t.ok)}>Merge metadata</button>
-            </div>
-          </div>)}
-        </div>
-      </section>}
-      {timelineRows.length>0&&<section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Timeline</div>
-        <div style={{display:"flex",flexDirection:"column",gap:7}}>
-          {timelineRows.slice(0,40).map(ev=>{const md=ev.metadata||{};const rel=md.related_artifact_id||(Array.isArray(md.related_artifact_ids)?md.related_artifact_ids[0]:null);return <div key={ev.id} style={{display:"grid",gridTemplateColumns:"82px 1fr",gap:8,fontSize:11,color:t.dim,lineHeight:1.45}}>
-            <div style={{color:t.mut,fontSize:9}}>{ev.created_at?new Date(ev.created_at).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):""}</div>
-            <div style={{borderLeft:`2px solid ${ev.source==="event"?t.acc:t.brd}55`,paddingLeft:8,minWidth:0}}>
-              <div style={{color:t.text,fontWeight:800,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{String(ev.event_type||"event").replace(/_/g," ")}</div>
-              <div style={{wordBreak:"break-word"}}>{ev.summary||""}</div>
-              {rel&&<button onClick={()=>onOpenArtifact?.(rel)} style={{marginTop:4,background:"transparent",border:"none",padding:0,color:t.acc,cursor:"pointer",fontFamily:font,fontSize:10}}>Open related artifact</button>}
-            </div>
-          </div>;})}
-        </div>
-      </section>}
-      <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Tags</div>
-        <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:7}}>{(a.tags||[]).map(tag=><button key={tag} onClick={()=>patch({tags:(a.tags||[]).filter(x=>x!==tag)})} title="Remove tag" style={{background:`${t.acc}12`,border:`1px solid ${t.acc}30`,color:t.acc,padding:"3px 7px",borderRadius:6,fontSize:10,cursor:"pointer",fontFamily:font}}>#{tag} ×</button>)}</div>
-        <div style={{display:"flex",gap:6}}><input value={tagDraft} onChange={e=>setTagDraft(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")addTag();}} placeholder="Add tag" style={{flex:1,background:t.bg,border:`1px solid ${t.brd}35`,color:t.text,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:11,outline:"none"}}/><button onClick={addTag} style={btnS(t.acc)}>Add</button></div>
-      </section>
-      <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Workspaces</div>
-        <div style={{display:"flex",flexDirection:"column",gap:5}}>{workspaces.map(w=>{const checked=(a.workspace_ids||[]).includes(w.id);return <label key={w.id} style={{display:"flex",alignItems:"center",gap:7,fontSize:11,color:checked?t.text:t.mut}}><input type="checkbox" checked={checked} onChange={e=>{const cur=new Set(a.workspace_ids||[]);if(e.target.checked)cur.add(w.id);else cur.delete(w.id);patch({workspace_ids:Array.from(cur)});}}/> {w.name}</label>;})}</div>
-      </section>
-      <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Lineage</div>
-        <div style={{display:"flex",flexDirection:"column",gap:5}}>{(a.versions||[]).map(v=><div key={v.id} style={{fontSize:11,color:v.id===a.id?t.acc:t.dim,display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.title||v.filename}{v.latest_for_project&&!v.stale&&<span style={{color:t.ok,fontWeight:800,marginLeft:5}}>latest</span>}{v.stale&&<span title="Project changed after this was packaged" style={{color:t.warm,fontWeight:800,marginLeft:5}}>⚠ stale</span>}</span><span style={{display:"inline-flex",alignItems:"center",gap:6,flexShrink:0}}>{v.status}<a href={`${API}/api/artifacts/${v.id}/download`} download={v.filename} title="Download this version" style={{color:t.ok,textDecoration:"none"}}>⬇</a></span></div>)}</div>
-      </section>
-      <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Provenance</div>
-        <div style={{fontSize:11,color:t.dim,lineHeight:1.7,wordBreak:"break-word"}}>
-          {a.conversation_title&&<div>Chat: {a.conversation_title}</div>}
-          {a.run_id&&<div>Run: {a.run_id}</div>}
-          {a.workflow_id&&<div>Workflow: {a.workflow_id}</div>}
-          {meta.source_tool&&<div>Source: {meta.source_tool}</div>}
-          {a.sha256&&<div style={{fontFamily:"monospace",fontSize:10}}>sha256: {a.sha256.slice(0,24)}...</div>}
-        </div>
-      </section>
-      {onDelete&&<button onClick={()=>onDelete(a.id)} style={{...btnS(t.err),justifyContent:"center"}}>Delete metadata</button>}
-    </div>
-  </div>;
-}
-
-const ArtifactCard=({artifact,t,font,workspaces,onPreview,onOpenConv,onPatch,onDelete,onDetails,onSelect,selected,compact})=>{
-  const a=artifact||{};
-  const meta=a.metadata||{};
-  const km=artifactKindMeta(a.kind,t,meta);
-  const KindIcon=km.icon;
-  const title=a.title||a.filename||"Artifact";
-  const created=a.created_at?new Date(a.created_at).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"";
-  const rename=async()=>{
-    const next=window.prompt("Artifact name",title);
-    if(next===null)return;
-    const clean=String(next||"").trim();
-    if(clean&&clean!==title)await onPatch?.(a.id,{title:clean});
-  };
-  const assign=async(e)=>{
-    const wsId=e.target.value||null;
-    await onPatch?.(a.id,{workspace_id:wsId});
-  };
-  const primaryBtn=(c)=>({display:"flex",alignItems:"center",justifyContent:"center",background:`${c}14`,border:`1px solid ${c}38`,color:c,cursor:"pointer",padding:"7px 0",borderRadius:6,fontFamily:font,fontSize:11,fontWeight:800,textDecoration:"none",minWidth:0});
-  const utilBtn=(c,active)=>({flex:1,display:"flex",alignItems:"center",justifyContent:"center",background:"transparent",border:`1px solid ${t.brd}33`,color:active?c:t.mut,cursor:"pointer",padding:"5px 0",borderRadius:6,fontFamily:font,fontSize:10,fontWeight:700,minWidth:0,whiteSpace:"nowrap"});
-  const selS={width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}36`,color:t.dim,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:10,outline:"none",cursor:"pointer"};
-  const primaryCount=1+(onDetails?1:0)+1;
-  return <div style={{border:`1px solid ${km.color}30`,background:`${t.surface}66`,borderRadius:10,padding:compact?11:13,display:"flex",flexDirection:"column",gap:10,minWidth:0,animation:"fadeIn .18s"}}>
-    <div style={{display:"flex",alignItems:"center",gap:9,minWidth:0}}>
-      {!compact&&onSelect&&<input type="checkbox" checked={!!selected} onChange={e=>onSelect(a.id,e.target.checked)} style={{flexShrink:0,cursor:"pointer"}}/>}
-      <div style={{width:34,height:34,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${km.color}14`,border:`1px solid ${km.color}38`,color:km.color,fontSize:17,flexShrink:0}}>{KindIcon?<KindIcon/>:null}</div>
-      <div style={{minWidth:0,flex:1}}>
-        <div title={title} style={{fontSize:12.5,fontWeight:800,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{title}</div>
-        <div title={a.filename} style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:1}}>{a.filename}</div>
-      </div>
-      <span style={{fontSize:9,color:km.color,background:`${km.color}14`,border:`1px solid ${km.color}34`,borderRadius:6,padding:"2px 7px",fontWeight:800,flexShrink:0,letterSpacing:.3}}>{km.label}</span>
-    </div>
-    <div style={{display:"flex",flexDirection:"column",gap:5,fontSize:10,color:t.mut,minWidth:0,paddingBottom:2,borderBottom:`1px solid ${t.brd}1c`}}>
-      {a.conversation_title&&<button onClick={()=>a.conversation_id&&onOpenConv?.(a.conversation_id)} title={a.conversation_title} style={{background:"none",border:"none",padding:0,color:t.acc,cursor:a.conversation_id?"pointer":"default",fontFamily:font,fontSize:10,textAlign:"left",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.conversation_title}</button>}
-      <div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap"}}>
-        {created&&<span>{created}</span>}
-        {(a.workspace_name||meta.project_id)&&<span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:"100%"}}>· {a.workspace_name||meta.project_id}</span>}
-      </div>
-      {((compact&&a.status)||a.pinned||a.exists_status==="missing"||a.stale||a.latest_for_project)&&<div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
-        {compact&&a.status&&<span style={{textTransform:"capitalize"}}>{a.status}</span>}
-        {a.pinned&&<span style={{color:t.warm,fontWeight:700}}>pinned</span>}
-        {a.exists_status==="missing"&&<span style={{color:t.err,fontWeight:700}}>missing</span>}
-        {a.stale&&<span title="The project changed after this artifact was packaged — repackage for the latest" style={{color:t.warm,fontWeight:800}}>⚠ stale</span>}
-        {a.latest_for_project&&!a.stale&&<span title="Newest delivery for this project" style={{color:t.ok,fontWeight:800}}>latest</span>}
-      </div>}
-    </div>
-    <div style={{display:"grid",gridTemplateColumns:`repeat(${primaryCount},1fr)`,gap:6}}>
-      {onPreview&&<button onClick={()=>onPreview(a.filename,a.url)} style={primaryBtn(t.acc)}>Preview</button>}
-      {onDetails&&<button onClick={()=>onDetails(a.id)} style={primaryBtn(t.f1)}>Details</button>}
-      <a href={a.id?`${API}/api/artifacts/${a.id}/download`:`${API}${a.url}`} download={a.filename} style={primaryBtn(t.ok)}>Download</a>
-    </div>
-    <div style={{display:"flex",gap:6}}>
-      {a.conversation_id?<button onClick={()=>onOpenConv?.(a.conversation_id)} style={utilBtn(t.acc,false)}>Chat</button>:<div style={{flex:1}}/>}
-      <button onClick={()=>onPatch?.(a.id,{pinned:!a.pinned})} style={utilBtn(t.warm,a.pinned)}>{a.pinned?"Unpin":"Pin"}</button>
-      <button onClick={rename} style={utilBtn(t.acc,false)}>Rename</button>
-      {onDelete&&<button onClick={()=>onDelete(a.id)} style={utilBtn(t.err,false)}>Delete</button>}
-    </div>
-    {!compact&&<div style={{display:"flex",flexDirection:"column",gap:6,marginTop:2}}>
-      <select value={a.status||"draft"} onChange={e=>onPatch?.(a.id,{status:e.target.value})} style={selS}>{["draft","accepted","archived"].map(s=><option key={s} value={s}>{s}</option>)}</select>
-      {workspaces?.length>0&&<select value={a.workspace_id||""} onChange={assign} style={selS}>
-        <option value="">No workspace</option>
-        {workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
-      </select>}
-    </div>}
-  </div>;
-};
-
-function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseInChat,focusId,onFocusConsumed,notify}){
-  const [items,setItems]=useState([]);
-  const [view,setView]=useState("all");
-  const [q,setQ]=useState("");
-  const [loading,setLoading]=useState(false);
-  const [detail,setDetail]=useState(null);
-  const [selected,setSelected]=useState(()=>new Set());
-  const filters=[
-    ["all","All"],["pinned","Pinned"],["recent","Recent"],["project","Projects"],
-    ["image","Images"],["data","Data"],["code","Code"],["archived","Archived"]
-  ];
-  const viewParams=(v)=>{
-    if(v==="pinned")return{pinned:"true"};
-    if(v==="archived")return{status:"archived"};
-    if(v==="project")return{kind:"project"};
-    if(["image","data","code"].includes(v))return{kind:v};
-    return{};
-  };
-  const load=useCallback(async()=>{
-    setLoading(true);
-    try{
-      const params=new URLSearchParams({limit:"120"});
-      Object.entries(viewParams(view)).forEach(([k,v])=>params.set(k,v));
-      if(q.trim())params.set("q",q.trim());
-      const list=await fetch(`${API}/api/artifacts?${params.toString()}`).then(r=>r.ok?r.json():[]);
-      let merged=Array.isArray(list)?list:[];
-      if(focusId){
-        const one=await fetch(`${API}/api/artifacts/${encodeURIComponent(focusId)}`).then(r=>r.ok?r.json():null).catch(()=>null);
-        if(one)merged=[one,...merged.filter(x=>x.id!==one.id)];
-        if(one)setDetail(one);
-        onFocusConsumed&&onFocusConsumed();
-      }
-      setItems(merged);
-    }catch(e){notify&&notify({type:"error",text:"Artifacts failed to load",detail:e.message||String(e)});}
-    setLoading(false);
-  },[view,q,focusId,onFocusConsumed,notify]);
-  useEffect(()=>{load();},[load]);
-  const openDetail=async(id)=>{
-    try{
-      const d=await fetch(`${API}/api/artifacts/${encodeURIComponent(id)}`).then(r=>{if(!r.ok)throw new Error(`HTTP ${r.status}`);return r.json();});
-      setDetail(d);
-    }catch(e){notify&&notify({type:"error",text:"Artifact detail failed",detail:e.message||String(e)});}
-  };
-  const patchArtifact=async(id,patch)=>{
-    try{
-      const r=await fetch(`${API}/api/artifacts/${encodeURIComponent(id)}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)});
-      if(!r.ok)throw new Error(`HTTP ${r.status}`);
-      const d=await r.json();
-      setItems(p=>p.map(x=>x.id===id?d:x));
-      setDetail(p=>p?.id===id?d:p);
-      notify&&notify({type:"success",text:"Artifact updated",duration:1800});
-      return d;
-    }catch(e){notify&&notify({type:"error",text:"Artifact update failed",detail:e.message||String(e)});}
-  };
-  const deleteArtifact=async(id)=>{
-    if(!id)return;
-    try{
-      const r=await fetch(`${API}/api/artifacts/${encodeURIComponent(id)}`,{method:"DELETE"});
-      if(!r.ok)throw new Error(`HTTP ${r.status}`);
-      setItems(p=>p.filter(x=>x.id!==id));
-      setSelected(p=>{const n=new Set(p);n.delete(id);return n;});
-      setDetail(p=>p?.id===id?null:p);
-    }catch(e){notify&&notify({type:"error",text:"Artifact delete failed",detail:e.message||String(e)});}
-  };
-  const bundleSelected=async()=>{
-    const ids=Array.from(selected);
-    if(!ids.length)return;
-    try{
-      const r=await fetch(`${API}/api/artifacts/bundle`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({artifact_ids:ids,title:`Artifact bundle (${ids.length})`})});
-      const d=await r.json().catch(()=>({}));
-      if(!r.ok)throw new Error(d.detail||d.error||`HTTP ${r.status}`);
-      setItems(p=>[d,...p]);
-      setSelected(new Set());
-      setDetail(d);
-      notify&&notify({type:"success",text:"Bundle created",detail:d.filename,duration:2500});
-    }catch(e){notify&&notify({type:"error",text:"Bundle failed",detail:e.message||String(e)});}
-  };
-  const toggleSelected=(id,on)=>setSelected(p=>{const n=new Set(p);if(on)n.add(id);else n.delete(id);return n;});
-  return <div style={{flex:1,display:"flex",overflow:"hidden"}}>
-  <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-      <div style={{display:"flex",alignItems:"center",gap:8,minWidth:160}}><IC.Layers/><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Artifacts</span></div>
-      <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
-        {filters.map(([id,label])=><button key={id} onClick={()=>setView(id)} style={{padding:"6px 10px",borderRadius:7,border:`1px solid ${view===id?t.acc:t.brd}35`,background:view===id?`${t.acc}18`:"transparent",color:view===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:10,fontWeight:view===id?800:600}}>{label}</button>)}
-      </div>
-      <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search artifacts..." style={{marginLeft:"auto",minWidth:180,background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"7px 10px",borderRadius:7,fontFamily:font,fontSize:11,outline:"none"}}/>
-      {selected.size>0&&<button onClick={bundleSelected} style={{background:`${t.warm}16`,border:`1px solid ${t.warm}35`,color:t.warm,cursor:"pointer",padding:"7px 10px",borderRadius:7,fontFamily:font,fontSize:10,fontWeight:800}}>Bundle {selected.size}</button>}
-      <button onClick={load} style={{background:`${t.surface}66`,border:`1px solid ${t.brd}35`,color:t.mut,cursor:"pointer",padding:"7px 10px",borderRadius:7,fontFamily:font,fontSize:10,fontWeight:800}}>Refresh</button>
-    </div>
-    <div style={{flex:1,overflowY:"auto",padding:20}}>
-      {loading&&<div style={{fontSize:12,color:t.mut,padding:18}}>Loading artifacts...</div>}
-      {!loading&&!items.length&&<div style={{textAlign:"center",padding:44,color:t.mut,fontSize:12}}>No artifacts found.</div>}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:12}}>
-        {items.map(a=><ArtifactCard key={a.id} artifact={a} t={t} font={font} workspaces={workspaces} onPreview={onPreview} onOpenConv={onOpenConv} onPatch={patchArtifact} onDelete={deleteArtifact} onDetails={openDetail} onSelect={toggleSelected} selected={selected.has(a.id)}/>)}
-      </div>
-    </div>
-  </div>
-  {detail&&<ArtifactDetailPanel artifact={detail} t={t} font={font} workspaces={workspaces} kbs={kbs} onClose={()=>setDetail(null)} onPatch={patchArtifact} onDelete={deleteArtifact} onUseInChat={onUseInChat} notify={notify} onRefreshList={load} onOpenArtifact={openDetail}/>}
-  </div>;
-}
-
-// Pluck unique run_ids out of a list of saved/live events. Each is an
-// independent agent invocation that should render its own RunCard.
-const _runIdsFromEvents = (evts)=>{
-  if(!Array.isArray(evts)) return [];
-  const seen = new Set();
-  const out = [];
-  for(const e of evts){
-    const rid = e?.data?.run_id || e?.run_id;
-    if(rid && !seen.has(rid)){seen.add(rid); out.push(rid);}
-  }
-  return out;
-};
-
-const _activityIsTerminal = (status)=>["done","complete","completed","success","succeeded","error","failed","cancelled","canceled"].includes(String(status||"").toLowerCase());
-const _activityStatusKey = (status)=>{
-  const s=String(status||"queued").toLowerCase();
-  if(["done","complete","completed","success","succeeded"].includes(s))return"complete";
-  if(["error","failed"].includes(s))return"failed";
-  if(["cancelled","canceled"].includes(s))return"canceled";
-  if(["indexing","embedding","reindexing"].includes(s))return"indexing";
-  if(["downloading","uploading","running","creating","working","patching"].includes(s))return"running";
-  return"queued";
-};
-const _activityGroupKey = (item)=>{
-  const kind=String(item?.kind||"").toLowerCase();
-  const name=String(item?.name||"").toLowerCase();
-  if(kind==="chat"||kind==="run"||name.includes("project upload"))return"Chat";
-  if(kind==="indexing"||kind==="rag"||name.includes("kb upload")||name.includes("knowledge")||name.includes("rag "))return"Knowledge";
-  if(kind==="cleanup"||name.includes("cleanup")||name.includes("purge"))return"Cleanup";
-  if(kind==="model"||kind==="download"||kind==="patch"||name.includes("model")||name.includes("template")||name.includes("ollama")||name.includes("huggingface"))return"Models";
-  return"Tools";
-};
-const _fmtElapsed = (start, now=Date.now())=>{
-  if(!start)return"";
-  const s=Math.max(0,Math.floor((now-start)/1000));
-  if(s>=3600)return`${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
-  if(s>=60)return`${Math.floor(s/60)}m ${s%60}s`;
-  return`${s}s`;
-};
-const _parseUtcishMs = (value)=>{
-  if(!value)return 0;
-  if(typeof value==="number")return value>1000000000000?value:value*1000;
-  const s=String(value).trim();
-  const ms=Date.parse(/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)?s:`${s}Z`);
-  return Number.isFinite(ms)?ms:0;
-};
-const _stripStatusEmoji = (txt="")=>String(txt||"").replace(/^[\p{Extended_Pictographic}\u200d\ufe0f\s]+/u,"").trim();
-const _phaseFromEvent = (ev)=>{
-  if(!ev)return null;
-  const d=ev.data||{};
-  const tool=d.tool||ev.type;
-  const status=_stripStatusEmoji(d.label||d.status||"");
-  if(ev.type==="thinking"||ev.type==="thought_done")return{phase:"thinking",label:ev.type==="thought_done"?"Reasoning complete":"Thinking",detail:status,pct:d.pct};
-  if(ev.type==="search_results"&&d.source==="quick_search")return{phase:"searching",label:"Search complete",detail:`${(d.results||[]).length} sources`,pct:100};
-  if(ev.type==="tool_error"||ev.type==="error")return{phase:"failed",label:"Failed",detail:status||tool,pct:d.pct};
-  if(ev.type==="tool_end"||ev.type==="tool_done")return{phase:"complete",label:"Tool complete",detail:status||tool,pct:d.pct||100};
-  if(ev.type==="tool_start"||ev.type==="tool_progress"||ev.type==="tool_status")return{phase:"tool",label:(tool||"tool").replaceAll("_"," "),detail:status,pct:d.pct};
-  return null;
-};
-
-function ResearchLiveStatus({t,font,events=[],metrics={},sources=[],researchRunning=false,elapsedLabel="--",eventLabel}){
-  const visible=(events||[]).filter(e=>e.type!=="research_token");
-  const latestPhase=[...visible].reverse().find(e=>e.type==="research_phase");
-  const phaseKey=latestPhase?.data?.phase||(
-    researchRunning?"planning":(visible.some(e=>e.type==="research_done")?"complete":"idle")
-  );
-  const phaseMap={
-    planning:["Route Plot","Mapping questions, criteria, and weak spots before the search fanout."],
-    context:["Context Load","Pulling notes, files, and knowledge-base fragments into the evidence bay."],
-    search:["Signal Sweep","Launching query waves and sorting early leads from background noise."],
-    reading:["Page Dive","Opening high-value sources and extracting the clean text worth citing."],
-    extracting:["Evidence Distill","Compressing source notes into claim-level findings with source IDs."],
-    audit:["Claim Pressure Test","Stress-testing citations, caveats, missing evidence, and contradictions."],
-    synthesis:["Report Forge","Writing the final brief; live markdown will stream into this pane."],
-    complete:["Report Ready","Final synthesis landed."],
-    idle:["Research Bay","No report body has been rendered yet."],
-  };
-  const [phaseTitle,phaseDetail]=phaseMap[phaseKey]||phaseMap.idle;
-  const pct=Number.isFinite(Number(latestPhase?.data?.pct))?Math.max(0,Math.min(100,Number(latestPhase.data.pct))):(researchRunning?8:0);
-  const metricLine=[
-    ["Sources",sources.length||metrics.source_count||0,metrics.target_sources],
-    ["Pages",metrics.pages_read||0,metrics.target_pages],
-    ["Searches",metrics.searches||0,metrics.target_queries],
-    ["Elapsed",elapsedLabel,null],
-  ];
-  const recent=visible.filter(e=>["research_phase","research_source_found","research_source_read","research_finding","research_audit","research_done","research_error"].includes(e.type)).slice(-6);
-  return <div style={{border:`1px solid ${t.brd}33`,borderRadius:8,padding:22,background:`${t.surface}66`,color:t.mut,fontSize:12,lineHeight:1.55,animation:"fadeIn .2s"}}>
-    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
-      <div style={{width:34,height:34,borderRadius:8,border:`1px solid ${t.acc}33`,background:`${t.acc}12`,display:"flex",alignItems:"center",justifyContent:"center",color:t.acc,flexShrink:0}}><IC.Search/></div>
-      <div style={{minWidth:0}}>
-        <div style={{fontSize:11,fontWeight:900,textTransform:"uppercase",letterSpacing:.8,color:t.acc}}>{phaseTitle}</div>
-        <div style={{fontSize:12,color:t.text,lineHeight:1.35}}>{latestPhase?.data?.detail||phaseDetail}</div>
-      </div>
-      {researchRunning&&<span style={{marginLeft:"auto",fontSize:9,padding:"3px 7px",borderRadius:7,border:`1px solid ${t.f1}33`,color:t.f1,background:`${t.f1}10`,textTransform:"uppercase",letterSpacing:.6}}>live</span>}
-    </div>
-    <div style={{height:6,borderRadius:99,background:`${t.bgDeep}cc`,border:`1px solid ${t.brd}24`,overflow:"hidden",marginBottom:12}}>
-      <div style={{height:"100%",width:`${pct}%`,background:`linear-gradient(90deg, ${t.acc}, ${t.f1})`,boxShadow:`0 0 18px ${t.acc}66`,transition:"width .45s ease"}}/>
-    </div>
-    <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(0,1fr))",gap:7,marginBottom:14}}>
-      {metricLine.map(([label,value,target])=><div key={label} style={{border:`1px solid ${t.brd}24`,borderRadius:7,padding:"7px 8px",background:`${t.bgDeep}66`,minWidth:0}}>
-        <div style={{fontSize:13,fontWeight:900,color:label==="Elapsed"?t.mut:t.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{target?`${value}/${target}`:value}</div>
-        <div style={{fontSize:8,color:t.dim,textTransform:"uppercase",letterSpacing:.6,marginTop:2}}>{label}</div>
-      </div>)}
-    </div>
-    <div style={{display:"flex",flexDirection:"column",gap:6}}>
-      {recent.length?recent.map((ev,i)=>{const c=ev.type==="research_error"?t.err:ev.type==="research_done"?t.ok:ev.type==="research_source_read"?t.f1:ev.type==="research_audit"?t.warm:t.acc;return <div key={`${ev.type}-${i}`} style={{display:"flex",alignItems:"flex-start",gap:8,color:t.dim,fontSize:10,lineHeight:1.35}}>
-        <span style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 8px ${c}66`,marginTop:4,flexShrink:0}}/>
-        <span style={{overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{eventLabel?eventLabel(ev,i):(ev.type||"activity")}</span>
-      </div>}):<div style={{fontSize:10,color:t.dim}}>Awaiting first research event.</div>}
-    </div>
-  </div>;
-}
-
-// Inline tool status: shows latest pill, expands to show all
-const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifact,historical,md,savedEvts,msgContent})=>{
-  const [showAll,setShowAll]=useState(false);
-  if(!evts.length) return null;
-
-  // Stable string key for expandedPill — avoids collapse when new events arrive
-  // Guard: if evts only has source_links/search_results (no tool/thinking), merged will be empty
-  const getPillKey = (ev, idx) => {
-    if(ev.type==="thinking"||ev.type==="thought_done") return "thinking";
-    if(ev.type==="complete") return "streaming";
-    if(idx!==undefined) return `${ev.data?.tool||ev.type}_${idx}`;
-    return ev.data?.tool || ev.type;
-  };
-
-  // Collapse events: keep only meaningful pills
-  const merged = [];
-
-  // First pass: group by category
-  const thinkingEvts = evts.filter(e=>e.type==="thinking"||e.type==="thought_done");
-  const toolEvts = evts.filter(e=>e.type==="tool_start"||e.type==="tool_progress"||e.type==="tool_end"||e.type==="tool_done"||e.type==="tool_error");
-  const streamEvts = evts.filter(e=>e.type==="complete");
-  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_progress","tool_end","tool_done","tool_error","complete","code_output","file_ready","search_results","source_links","kb_sources","codeagent_note"].includes(e.type));
-
-  // Thinking: collapse to just the final state
-  if(thinkingEvts.length){
-    const done = thinkingEvts.find(e=>e.type==="thought_done");
-    merged.push(done || thinkingEvts[thinkingEvts.length-1]);
-  }
-
-  // Tools: pair each start→end sequentially (not by name, so repeated tools each get a step)
-  const _pendingStarts = []; // stack of unmatched tool_start events
-  for(const e of toolEvts){
-    const key = e.data?.tool||"unknown";
-    if(e.type==="tool_start"){
-      _pendingStarts.push({key, evt: e});
-    } else if(e.type==="tool_progress"){
-      // Update the latest pending start for this tool
-      const idx = [..._pendingStarts].reverse().findIndex(p=>p.key===key);
-      if(idx>=0) _pendingStarts[_pendingStarts.length-1-idx].evt = e;
-    } else { // tool_end, tool_done, tool_error
-      // Match with the newest pending start for this tool. Some tools emit an
-      // outer chat-level start and then an inner run-level start with run_id.
-      const revIdx = [..._pendingStarts].reverse().findIndex(p=>p.key===key);
-      if(revIdx>=0) _pendingStarts.splice(_pendingStarts.length-1-revIdx, 1);
-      merged.push(e);
-    }
-  }
-  // Remaining unmatched starts
-  for(const {evt} of _pendingStarts){
-    if(historical){
-      merged.push({...evt, type:"tool_done", data:{...evt.data, status:"done"}});
-    }else{
-      merged.push(evt);
-    }
-  }
-
-  // Streaming: collapse to final state
-  if(streamEvts.length){
-    const done = streamEvts.find(e=>e.type==="complete");
-    merged.push(done || streamEvts[streamEvts.length-1]);
-  }
-
-  // Other events pass through
-  merged.push(...otherEvts);
-
-  const latest = merged.length ? merged[merged.length-1] : null;
-  const completedCount = merged.filter(e=>e.type==="tool_end"||e.type==="tool_done"||e.type==="complete"||e.type==="thought_done").length;
-  const totalSteps = merged.length;
-
-  const codeOutputEvts = evts.filter(e=>e.type==="code_output");
-  const fileReadyEvts = evts.filter(e=>e.type==="file_ready");
-  const kbSourceEvts = evts.filter(e=>e.type==="kb_sources");
-  const codeAgentNoteEvts = evts.filter(e=>e.type==="codeagent_note");
-  // Skip search_agent's events here — those render in the QUICK SEARCH RESULTS
-  // carousel above the message via quickResults state. SearchResultCards is
-  // for the `research` tool's mid-message results, which don't carry source.
-  const searchResultEvts = evts.filter(e=>e.type==="search_results"&&e.data?.source!=="quick_search");
-  const sourceLinkEvts = evts.filter(e=>e.type==="source_links");
-
-  // Surface architecture plans above the pill row. Reasoning stays in the
-  // normal brain-icon thinking pill so it does not render twice.
-  // Plan: latest plan_project tool_end with detail.plan
-  // Live `evts` is a sliding window (last 200) so on long runs the early
-  // plan_project / thought_done events get evicted. `savedEvts` (passed when
-  // the parent has msg.metadata.saved_events) is the durable full record;
-  // we merge it in here to make sure the panels survive multi-cycle runs.
-  const _parseDetail = (ev)=>{const d=ev?.data?.detail;if(!d)return null;try{return typeof d==="string"?JSON.parse(d):d;}catch{return null;}};
-  const _evtPool = (savedEvts && savedEvts.length) ? savedEvts.concat(evts) : evts;
-  const _planEvts = _evtPool.filter(e=>(e.type==="tool_end"||e.type==="tool_done")&&e.data?.tool==="plan_project"&&_parseDetail(e)?.plan);
-  const planText = _planEvts.length ? (_parseDetail(_planEvts[_planEvts.length-1])?.plan||"") : "";
-  const isStreaming = !historical;
-  const Panels = planText ? <div style={{display:"flex",flexDirection:"column",gap:0,marginBottom:4}}>
-    {planText && <PlanPanel plan={planText} t={t} streaming={isStreaming} md={md}/>}
-  </div> : null;
-
-  // Historical renders: the per-message block at msg.metadata.saved_events renders
-  // collapsible code output, so ToolStatus shouldn't render another copy here.
-  const CodeOutputCards = ()=>historical?null:<>{codeOutputEvts.map((e,i)=>{
-    const d=e.data||{};
-    return <div key={i} style={{marginTop:6,borderRadius:8,overflow:"hidden",border:`1px solid ${d.success?t.ok:t.err}33`,background:t.bgDeep,fontSize:11}}>
-      <div style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:`${d.success?t.ok:t.err}10`,borderBottom:`1px solid ${d.success?t.ok:t.err}22`}}>
-        <span>{d.success?"🎯":"❌"}</span>
-        <span style={{fontWeight:600,color:d.success?t.ok:t.err}}>{d.language} output</span>
-        <span style={{color:t.mut,marginLeft:"auto"}}>{d.exec_time?.toFixed?.(1)}s</span>
-      </div>
-      {d.stdout&&<>
-        <div style={{padding:"4px 10px 2px",fontSize:10,color:t.ok,fontWeight:600}}>stdout</div>
-        <pre style={{margin:0,padding:"4px 10px 8px",whiteSpace:"pre-wrap",color:t.dim,maxHeight:200,overflowY:"auto",fontSize:11}}>{d.stdout}</pre>
-      </>}
-      {d.stderr&&<>
-        <div style={{padding:"4px 10px 2px",fontSize:10,color:t.err,fontWeight:600}}>stderr</div>
-        <pre style={{margin:0,padding:"4px 10px 8px",whiteSpace:"pre-wrap",color:t.err,maxHeight:120,overflowY:"auto",fontSize:11}}>{d.stderr}</pre>
-      </>}
-    </div>;
-  })}</>;
-
-  const _fileIcon=(fn)=>{
-    const ext=(fn||"").split(".").pop().toLowerCase();
-    const m={py:"🐍",python:"🐍",js:"📜",mjs:"📜",jsx:"⚛️",ts:"🔷",tsx:"🔷",java:"☕",jar:"☕",rs:"🦀",go:"🐹",c:"⚙️",cpp:"⚙️",h:"⚙️",cs:"🟣",rb:"💎",php:"🐘",swift:"🐦",kt:"🟠",lua:"🌙",r:"📊",sh:"🖥️",bash:"🖥️",zsh:"🖥️",html:"🌐",css:"🎨",scss:"🎨",json:"📋",yaml:"📋",yml:"📋",xml:"📋",toml:"📋",md:"📝",txt:"📄",csv:"📊",sql:"🗃️",dockerfile:"🐳",png:"🖼️",jpg:"🖼️",jpeg:"🖼️",gif:"🖼️",svg:"🖼️",pdf:"📕",zip:"📦",tar:"📦",gz:"📦"};
-    return m[ext]||"📁";
-  };
-  const FileReadyButtons = ()=>{
-    // Deduplicate by filename — keep latest URL, count updates
-    const fileMap={};
-    fileReadyEvts.forEach(e=>{const d=e.data||{};if(!d.filename)return;if(!fileMap[d.filename])fileMap[d.filename]={d,count:1};else{fileMap[d.filename].d=d;fileMap[d.filename].count++;}});
-    return <>{Object.values(fileMap).map(({d,count},i)=>{
-    const isImg=d.is_image||/\.(png|jpe?g|gif|svg|webp)$/i.test(d.filename);
-    // The backend now streams generated-image markdown inline at the point of
-    // generation, so the image already renders inside the message body. Skip the
-    // duplicate <img> here when the message content already references this URL;
-    // keep the download/preview/artifact buttons. Older messages (no inline
-    // markdown) and post-clear refinement paths fall back to rendering it here.
-    const inlineAlready=isImg&&d.url&&typeof msgContent==="string"&&msgContent.includes(d.url);
-    return <div key={i} style={{marginTop:5}}>
-      {isImg&&!inlineAlready&&<img src={`${API}${d.url}`} alt={d.filename} style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`,cursor:"pointer"}} onClick={()=>onPreview&&onPreview(d.filename,d.url)} onError={e=>e.target.style.display="none"}/>}
-      <div style={{display:"inline-flex",alignItems:"center",gap:4,marginTop:isImg?2:0}}>
-      <a href={d.artifact_id?`${API}/api/artifacts/${d.artifact_id}/download`:`${API}${d.url}`} download={d.filename}
-        style={{display:"inline-flex",alignItems:"center",gap:7,padding:"7px 14px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontSize:12,fontWeight:700,cursor:"pointer"}}>
-        <span style={{fontSize:16}}>{_fileIcon(d.filename)}</span><span>{d.filename}</span>{count>1&&<span style={{fontSize:9,background:t.acc,color:t.bg,borderRadius:8,padding:"1px 5px",fontWeight:700,marginLeft:2}}>v{count}</span>}<span style={{fontSize:10,opacity:.6}}>⬇</span>
-      </a>
-      {onPreview&&<button onClick={()=>onPreview(d.filename,d.url)} title="Preview" style={{padding:"7px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:13,display:"flex",alignItems:"center"}}>👁</button>}
-      {d.artifact_id&&onOpenArtifact&&<button onClick={()=>onOpenArtifact(d.artifact_id)} title="Open in Artifacts" style={{padding:"7px 10px",background:`${t.pink}12`,border:`1px solid ${t.pink}35`,borderRadius:8,color:t.pink,cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:800,display:"flex",alignItems:"center"}}>Artifact</button>}
-      </div>
-    </div>;
-  })}</>;};
-
-  const CodeAgentNoteCards = ()=><>{codeAgentNoteEvts.map((e,i)=>{
-    const d=e.data||{};
-    const text=d.status||d.detail||"CodeAgent is starting a direct build.";
-    return <div key={i} style={{marginTop:6,border:`1px solid ${t.acc}30`,background:`${t.acc}0F`,borderRadius:8,padding:"7px 10px",display:"flex",alignItems:"flex-start",gap:8,maxWidth:640}}>
-      <span style={{fontSize:13,lineHeight:1.35,flexShrink:0}}>🧬</span>
-      <div style={{minWidth:0}}>
-        <div style={{fontSize:9,color:t.acc,textTransform:"uppercase",letterSpacing:.7,fontWeight:800,marginBottom:2}}>Direct build</div>
-        <div style={{fontSize:11,color:t.dim,lineHeight:1.45}}>{text}</div>
-      </div>
-    </div>;
-  })}</>;
-
-  const KbSourceCards = ()=>{
-    const latestKb = kbSourceEvts[kbSourceEvts.length-1];
-    const sources = latestKb?.data?.sources||[];
-    if(!sources.length)return null;
-    const names=[...new Set(sources.map(s=>s.filename).filter(Boolean))];
-    return <div style={{marginTop:6,border:`1px solid ${t.acc}28`,background:`${t.surface}42`,borderRadius:8,padding:"7px 10px",maxWidth:680}}>
-      <div style={{fontSize:9,color:t.acc,textTransform:"uppercase",letterSpacing:.7,fontWeight:800,marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
-        <span>📚</span><span>Knowledge sources</span><span style={{color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0}}>· {sources.length} chunk{sources.length!==1?"s":""}</span>
-      </div>
-      <div style={{fontSize:11,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:5}}>
-        {names.length?names.slice(0,4).join(", "):"Knowledge base context"}
-        {names.length>4?` +${names.length-4} more`:""}
-      </div>
-      <div style={{display:"flex",flexDirection:"column",gap:4}}>
-        {sources.slice(0,3).map((s,si)=><div key={`${s.filename||"source"}-${s.chunk_index||si}-${si}`} style={{display:"flex",gap:7,alignItems:"flex-start",fontSize:10,color:t.dim,lineHeight:1.35}}>
-          <span style={{fontWeight:800,color:t.acc,flexShrink:0}}>[{s.n||si+1}]</span>
-          <span style={{minWidth:0,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>
-            <span style={{color:t.text,fontWeight:700}}>{s.filename||"source"}</span>
-            {typeof s.chunk_index==="number"?<span style={{color:t.mut}}> chunk {s.chunk_index}</span>:null}
-            {s.snippet?` - ${s.snippet}`:""}
-          </span>
-        </div>)}
-      </div>
-    </div>;
-  };
-
-  const SearchResultCards = ()=><>{searchResultEvts.map((e,ei)=>{
-    const d=e.data||{};
-    const results=d.results||[];
-    if(!results.length)return null;
-    return <div key={ei} style={{marginTop:10}}>
-      <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:6,display:"flex",alignItems:"center",gap:4}}>
-        <IC.Search/><span>{d.query||"Search"}</span><span style={{opacity:.5}}>· {results.length} sources</span>
-      </div>
-      <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:8}}>
-        {results.map((r,ri)=>{
-          const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();
-          const isYT=r.type==="youtube";
-          const isImg=r.type==="image";
-          const hasThumbnail=!!r.thumbnail;
-          return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:10,overflow:"hidden",cursor:"pointer",minWidth:155,maxWidth:190,flexShrink:0,transition:"border-color .15s"}}
-            onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
-            <div style={{width:"100%",height:88,background:hasThumbnail?(isYT?"#0a0a0a":"transparent"):`linear-gradient(135deg,${t.bgDeep}DD,${t.surface}AA,${t.acc}18)`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-              {hasThumbnail
-                ?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
-                :<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
-                  <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:28,height:28,borderRadius:4,display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
-                  <span style={{fontSize:9,color:t.mut,opacity:.6,letterSpacing:.5}}>{hn}</span>
-                </div>}
-              {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
-                <div style={{width:28,height:28,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:"#fff",boxShadow:"0 2px 8px rgba(0,0,0,.5)"}}>▶</div>
-              </div>}
-              {hasThumbnail&&hn&&<div style={{position:"absolute",top:5,right:5,background:`${t.bg}CC`,backdropFilter:"blur(6px)",borderRadius:5,padding:3,display:"flex",alignItems:"center",justifyContent:"center",border:`1px solid ${t.brd}33`}}>
-                <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=32`} style={{width:16,height:16,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
-              </div>}
-            </div>
-            <div style={{padding:"6px 8px",flex:1,display:"flex",flexDirection:"column",gap:2}}>
-              <div style={{fontSize:10,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.35}}>{r.title}</div>
-              {r.snippet&&<div style={{fontSize:9,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
-              <div style={{fontSize:8,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:"auto",paddingTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
-            </div>
-          </a>;
-        })}
-      </div>
-    </div>;
-  })}</>;
-
-  const SourceLinkCards = ()=>{
-    const allLinks=sourceLinkEvts.flatMap(e=>(e.data?.links||[]));
-    if(!allLinks.length)return null;
-    const [slExpanded,setSlExpanded]=useState(false);
-    const shown=slExpanded?allLinks:allLinks.slice(0,8);
-    return <div style={{marginTop:10}}>
-      <div style={{fontSize:9,color:t.warm,textTransform:"uppercase",letterSpacing:.5,marginBottom:6,display:"flex",alignItems:"center",gap:4}}>
-        <span>🔗</span><span>Sources ({allLinks.length})</span>
-      </div>
-      <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-        {shown.map((lnk,i)=>{
-          const hn=(()=>{try{return new URL(lnk.url).hostname.replace("www.","");}catch{return "";}})();
-          const isPdf=lnk.url.toLowerCase().endsWith(".pdf");
-          const title=(lnk.title||hn||lnk.url).slice(0,60);
-          return <div key={i} style={{display:"inline-flex",alignItems:"center",gap:0}}>
-            <a href={lnk.url} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"5px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:10,fontWeight:600,maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",cursor:"pointer",transition:"all .15s"}}
-              onMouseEnter={e=>e.currentTarget.style.background=`${t.warm}20`} onMouseLeave={e=>e.currentTarget.style.background=`${t.warm}10`}>
-              {isPdf?<span>📄</span>:<img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=16`} style={{width:12,height:12,borderRadius:2}} alt="" onError={e=>e.target.style.display="none"}/>}
-              <span>{title}</span>
-            </a>
-            {onPreview&&<button onClick={()=>onPreview(title,lnk.url)} title="Preview in panel"
-              style={{padding:"5px 8px",background:`${t.acc}12`,border:`1px solid ${t.acc}33`,borderRadius:"0 8px 8px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:11,display:"flex",alignItems:"center",transition:"all .15s"}}
-              onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}25`} onMouseLeave={e=>e.currentTarget.style.background=`${t.acc}12`}>👁</button>}
-          </div>;
-        })}
-      </div>
-      {allLinks.length>8&&<button onClick={()=>setSlExpanded(p=>!p)} style={{background:`${t.surface}60`,border:`1px solid ${t.brd}22`,color:t.mut,padding:"2px 8px",borderRadius:10,fontSize:9,cursor:"pointer",fontFamily:"inherit",marginTop:4}}>{slExpanded?`Show less ▴`:`+${allLinks.length-8} more ▾`}</button>}
-    </div>;
-  };
-
-
-  if(!showAll){
-    const activeThinking = merged.find(e=>e.type==="thinking");
-    const activeTool = [...merged].reverse().find(e=>e.type==="tool_start"||e.type==="tool_progress");
-    const primaryPill = activeThinking || activeTool || latest;
-    return <div style={{padding:"4px 0"}}>
-      {Panels}
-      <CodeAgentNoteCards/>
-      <KbSourceCards/>
-      {primaryPill&&<div style={{display:"flex",flexDirection:"column",gap:3}}>
-        <Pill ev={primaryPill} t={t} expanded={expandedPill===getPillKey(primaryPill)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(primaryPill)?null:getPillKey(primaryPill))}/>
-        {primaryPill!==latest&&latest&&<Pill ev={latest} t={t} expanded={expandedPill===getPillKey(latest)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(latest)?null:getPillKey(latest))}/>}
-        {totalSteps>1&&<button onClick={()=>setShowAll(true)} style={{background:`${t.surface}60`,border:`1px solid ${t.brd}22`,color:t.mut,padding:"2px 8px",borderRadius:10,fontSize:10,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",alignSelf:"flex-start",marginTop:1}}>
-          {completedCount} step{completedCount!==1?"s":""} ▾
-        </button>}
-      </div>}
-      <CodeOutputCards/>
-      <FileReadyButtons/>
-      <SearchResultCards/>
-      <SourceLinkCards/>
-    </div>;
-  }
-
-  return <div style={{padding:"4px 0"}}>
-    {Panels}
-    <CodeAgentNoteCards/>
-    <KbSourceCards/>
-    <button onClick={()=>setShowAll(false)} style={{background:`${t.surface}60`,border:`1px solid ${t.brd}22`,color:t.mut,padding:"2px 8px",borderRadius:10,fontSize:10,cursor:"pointer",fontFamily:"inherit",marginBottom:4}}>
-      Hide steps ▴
-    </button>
-    <div style={{display:"flex",flexDirection:"column",gap:2}}>
-      {merged.map((ev,i)=><Pill key={getPillKey(ev,i)} ev={ev} t={t} expanded={expandedPill===getPillKey(ev,i)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(ev,i)?null:getPillKey(ev,i))}/>)}
-    </div>
-    <CodeOutputCards/>
-    <FileReadyButtons/>
-    <SearchResultCards/>
-    <SourceLinkCards/>
-  </div>;
-};
-
-const Chip=({l,c,bg,onX})=><span style={{display:"inline-flex",alignItems:"center",gap:4,background:bg,color:c,padding:"3px 8px",borderRadius:20,fontSize:10,fontWeight:600}}>{l}{onX&&<span onClick={onX} style={{cursor:"pointer",opacity:.7}}>&times;</span>}</span>;
-
-const TIPS={
-  chunk_size:"Characters per text chunk when indexing KB files. Smaller = more precise retrieval, larger = more context per chunk. Default: 500",
-  chunk_overlap:"Overlap between adjacent chunks in characters. Preserves context at boundaries. Default: 50",
-  max_context:"Maximum total characters injected into system prompt from retrieved KB chunks. Higher = more context but uses more tokens.",
-  top_k:"Number of most-similar chunks retrieved per query. Higher = broader but may include less relevant content. Default: 6",
-  embed_model:"Ollama model used for vector embeddings. Must be pulled first. nomic-embed-text recommended.",
-  temperature:"Controls randomness. 0 = deterministic, 2 = very creative. Default: 0.7",
-  top_p:"Nucleus sampling. Lower = more focused output. Default: 0.9",
-  num_ctx:"Context window in tokens. Determines how much history + prompt the model sees. Default: 4096",
-  repeat_penalty:"Penalizes repeated tokens. Higher = less repetition. 1.0 = no penalty. Default: 1.1",
-  research_top_k:"Number of chunks retrieved from research memory per query. Default: 4",
-  research_max_chars:"Maximum characters from research memory injected into context. Default: 3000",
-};
-const Tip=({k,t})=>{const [show,setShow]=React.useState(false);const txt=TIPS[k];if(!txt)return null;return <span style={{position:"relative",display:"inline-flex",alignItems:"center",cursor:"help",marginLeft:3}} onMouseEnter={()=>setShow(true)} onMouseLeave={()=>setShow(false)}><span style={{fontSize:10,color:t.mut,opacity:.6}}>&#9432;</span>{show&&<div style={{position:"absolute",bottom:"calc(100% + 6px)",left:"50%",transform:"translateX(-50%)",background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:8,padding:"8px 12px",fontSize:10,lineHeight:1.5,color:t.dim,boxShadow:"0 4px 16px #0006",zIndex:999,minWidth:200,maxWidth:280,whiteSpace:"normal",pointerEvents:"none"}}>{txt}</div>}</span>;};
-
-// ============================================================
-// WORKSPACE DETAIL COMPONENT
-// ============================================================
-function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
-  const inputS={width:"100%",background:`${t.bgDeep}E6`,border:`1px solid ${t.brd}55`,color:t.text,padding:"9px 12px",borderRadius:7,fontFamily:font,fontSize:13,outline:"none",boxSizing:"border-box"};
-  const btnS=(c,bg)=>({background:bg||`${c}18`,border:`1px solid ${c}4D`,color:c,padding:"6px 12px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:11,display:"flex",alignItems:"center",gap:5,boxShadow:"none"});
-  const emptyDraft={display_name:"",legal_name:"",birthday:"",age:"",bio:"",interestsText:"",linksText:"",notes:""};
-  const [profile,setProfile]=React.useState(null);
-  const [draft,setDraft]=React.useState(emptyDraft);
-  const [memories,setMemories]=React.useState([]);
-  const [loading,setLoading]=React.useState(false);
-  const [saving,setSaving]=React.useState(false);
-  const [scanning,setScanning]=React.useState(false);
-  const [newMemText,setNewMemText]=React.useState("");
-  const [newMemType,setNewMemType]=React.useState("semantic");
-  const [memEdit,setMemEdit]=React.useState(null);
-  const [memEditText,setMemEditText]=React.useState("");
-  const parseLinks=(text)=>String(text||"").split("\n").map(line=>{
-    const parts=line.split("|").map(x=>x.trim()).filter(Boolean);
-    if(!parts.length)return null;
-    if(parts.length===1)return {label:"",url:parts[0]};
-    return {label:parts[0],url:parts[1]||"",...(parts[2]?{note:parts.slice(2).join(" | ")}:{})};
-  }).filter(Boolean);
-  const linksToText=(links)=>Array.isArray(links)?links.map(l=>[l.label,l.url,l.note].filter(Boolean).join(" | ")).join("\n"):"";
-  const hydrateProfile=(p)=>{
-    const extra=p?.extra||{};
-    setProfile(p||{});
-    setDraft({
-      display_name:p?.display_name||"",
-      legal_name:p?.legal_name||"",
-      birthday:p?.birthday||"",
-      age:p?.age||"",
-      bio:p?.bio||"",
-      interestsText:(p?.interests||[]).join("\n"),
-      linksText:linksToText(p?.links||[]),
-      notes:extra.notes||"",
-    });
-  };
-  const refresh=React.useCallback(async()=>{
-    setLoading(true);
-    try{
-      const [pr,mr]=await Promise.all([
-        fetch(`${API}/api/memory/profile`).then(r=>r.json()),
-        fetch(`${API}/api/memory/memories?status=all`).then(r=>r.json()),
-      ]);
-      hydrateProfile(pr);
-      setMemories(Array.isArray(mr.memories)?mr.memories:[]);
-    }catch(e){notify&&notify({type:"error",text:"Memory failed to load",detail:e.message||String(e)});}
-    setLoading(false);
-  },[API]);
-  React.useEffect(()=>{refresh();},[refresh]);
-  const saveProfile=async()=>{
-    setSaving(true);
-    try{
-      const body={
-        display_name:draft.display_name,
-        legal_name:draft.legal_name,
-        birthday:draft.birthday,
-        age:draft.age,
-        bio:draft.bio,
-        interests:draft.interestsText.split(/[\n,]+/).map(x=>x.trim()).filter(Boolean),
-        links:parseLinks(draft.linksText),
-        extra:{...(profile?.extra||{}),notes:draft.notes},
-      };
-      const r=await fetch(`${API}/api/memory/profile`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-      hydrateProfile(await r.json());
-      notify&&notify({type:"success",text:"Profile saved",duration:2200});
-    }catch(e){notify&&notify({type:"error",text:"Profile save failed",detail:e.message||String(e)});}
-    setSaving(false);
-  };
-  const scanMemory=async()=>{
-    setScanning(true);
-    try{
-      const r=await fetch(`${API}/api/memory/suggest`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})});
-      const d=await r.json();
-      await refresh();
-      notify&&notify({type:d.created?"success":"info",text:d.created?`Queued ${d.created} memory suggestion${d.created===1?"":"s"}`:"No new memory suggestions",detail:d.message||"",duration:4200});
-    }catch(e){notify&&notify({type:"error",text:"Memory scan failed",detail:e.message||String(e)});}
-    setScanning(false);
-  };
-  const updateMemoryLocal=(m)=>setMemories(p=>p.map(x=>x.id===m.id?m:x));
-  const acceptMemory=async(m)=>{
-    try{const r=await fetch(`${API}/api/memory/memories/${m.id}/accept`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});updateMemoryLocal(await r.json());notify&&notify({type:"success",text:"Memory accepted",duration:2200});}
-    catch(e){notify&&notify({type:"error",text:"Memory accept failed",detail:e.message||String(e)});}
-  };
-  const rejectMemory=async(m)=>{
-    try{const r=await fetch(`${API}/api/memory/memories/${m.id}/reject`,{method:"POST"});updateMemoryLocal(await r.json());}
-    catch(e){notify&&notify({type:"error",text:"Memory reject failed",detail:e.message||String(e)});}
-  };
-  const patchMemory=async(m,patch)=>{
-    try{const r=await fetch(`${API}/api/memory/memories/${m.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)});updateMemoryLocal(await r.json());}
-    catch(e){notify&&notify({type:"error",text:"Memory update failed",detail:e.message||String(e)});}
-  };
-  const deleteMemory=async(m)=>{
-    try{await fetch(`${API}/api/memory/memories/${m.id}`,{method:"DELETE"});setMemories(p=>p.filter(x=>x.id!==m.id));}
-    catch(e){notify&&notify({type:"error",text:"Memory delete failed",detail:e.message||String(e)});}
-  };
-  const startMemEdit=(m)=>{setMemEdit(m.id);setMemEditText(m.content||"");};
-  const saveMemEdit=async(m,accept=false)=>{
-    const r=await fetch(`${API}/api/memory/memories/${m.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:memEditText})});
-    let updated=await r.json();
-    if(accept){
-      const ar=await fetch(`${API}/api/memory/memories/${m.id}/accept`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});
-      updated=await ar.json();
-    }
-    updateMemoryLocal(updated);setMemEdit(null);setMemEditText("");
-  };
-  const createManualMemory=async()=>{
-    try{
-      const r=await fetch(`${API}/api/memory/memories`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:newMemText,type:newMemType,status:"accepted",importance:3})});
-      const m=await r.json();setMemories(p=>[m,...p]);setNewMemText("");notify&&notify({type:"success",text:"Memory added",duration:2200});
-    }catch(e){notify&&notify({type:"error",text:"Memory add failed",detail:e.message||String(e)});}
-  };
-  const byStatus=s=>memories.filter(m=>m.status===s);
-  const accepted=byStatus("accepted").filter(m=>!m.valid_until);
-  const suggested=byStatus("suggested");
-  const hidden=memories.filter(m=>["rejected","archived"].includes(m.status)||m.valid_until);
-  const typeMeta={semantic:["Facts & Preferences",t.acc],episodic:["Events & People",t.warm],procedural:["Procedures",t.pink]};
-  const card=(m,mode)=>{const meta=typeMeta[m.type]||typeMeta.semantic;const editing=memEdit===m.id;return <div key={m.id} style={{padding:"10px 12px",borderRadius:8,background:`${t.surface}66`,border:`1px solid ${meta[1]}33`,display:"flex",flexDirection:"column",gap:7}}>
-    <div style={{display:"flex",alignItems:"center",gap:6}}>
-      <span style={{fontSize:9,fontWeight:800,color:meta[1],textTransform:"uppercase",letterSpacing:.6}}>{meta[0]}</span>
-      <span style={{fontSize:9,color:t.mut}}>importance {m.importance||3}</span>
-      {m.pinned?<span style={{fontSize:9,color:t.warm}}>pinned</span>:null}
-      {m.confidence?<span style={{fontSize:9,color:t.mut}}>{Math.round((m.confidence||0)*100)}%</span>:null}
-    </div>
-    {editing?<textarea value={memEditText} onChange={e=>setMemEditText(e.target.value)} style={{...inputS,minHeight:72,lineHeight:1.5,resize:"vertical"}}/>:<div style={{fontSize:12,lineHeight:1.55,color:t.text,whiteSpace:"pre-wrap"}}>{m.content}</div>}
-    {m.metadata?.reason&&<div style={{fontSize:10,color:t.mut,lineHeight:1.4}}>Why: {m.metadata.reason}</div>}
-    <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
-      {editing?<><button onClick={()=>saveMemEdit(m,mode==="suggested")} style={btnS(t.ok)}>{mode==="suggested"?"Save + Accept":"Save"}</button><button onClick={()=>{setMemEdit(null);setMemEditText("");}} style={btnS(t.mut)}>Cancel</button></>
-      :mode==="suggested"?<><button onClick={()=>acceptMemory(m)} style={btnS(t.ok)}>Accept</button><button onClick={()=>startMemEdit(m)} style={btnS(t.acc)}>Edit</button><button onClick={()=>rejectMemory(m)} style={btnS(t.err)}>Reject</button></>
-      :<><button onClick={()=>patchMemory(m,{pinned:m.pinned?0:1})} style={btnS(m.pinned?t.warm:t.mut)}>{m.pinned?"Unpin":"Pin"}</button><button onClick={()=>startMemEdit(m)} style={btnS(t.acc)}>Edit</button><button onClick={()=>patchMemory(m,{status:"archived"})} style={btnS(t.mut)}>Archive</button><button onClick={()=>deleteMemory(m)} style={btnS(t.err)}>Delete</button></>}
-      {m.source_conversation_id&&<button onClick={()=>onOpenConv&&onOpenConv(m.source_conversation_id)} style={{...btnS(t.f1),marginLeft:"auto"}}>Source</button>}
-    </div>
-  </div>;};
-  return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}>
-      <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{display:"flex",color:t.acc}}><IC.Brain/></span><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Memory & Profile</span></div>
-      <div style={{display:"flex",gap:8}}><button onClick={scanMemory} disabled={scanning} style={btnS(t.warm)}>{scanning?"Scanning":"Scan Recent"}</button><button onClick={refresh} disabled={loading} style={btnS(t.acc)}>{loading?"Loading":"Refresh"}</button></div>
-    </div>
-    <div style={{flex:1,overflowY:"auto",padding:20}}>
-      <div style={{display:"grid",gridTemplateColumns:"minmax(280px,0.62fr) minmax(280px,1fr)",gap:14,alignItems:"start"}}>
-        <div style={{background:`${t.surface}F0`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
-          <div style={{fontSize:10,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.7,marginBottom:12}}>User Profile</div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
-            <div><label style={{fontSize:10,color:t.mut,display:"block",marginBottom:4}}>Preferred name</label><input value={draft.display_name} onChange={e=>setDraft(p=>({...p,display_name:e.target.value}))} style={inputS}/></div>
-            <div><label style={{fontSize:10,color:t.mut,display:"block",marginBottom:4}}>Full name</label><input value={draft.legal_name} onChange={e=>setDraft(p=>({...p,legal_name:e.target.value}))} style={inputS}/></div>
-            <div><label style={{fontSize:10,color:t.mut,display:"block",marginBottom:4}}>Birthday</label><input value={draft.birthday} onChange={e=>setDraft(p=>({...p,birthday:e.target.value}))} style={inputS}/></div>
-            <div><label style={{fontSize:10,color:t.mut,display:"block",marginBottom:4}}>Age</label><input value={draft.age} onChange={e=>setDraft(p=>({...p,age:e.target.value}))} style={inputS}/></div>
-          </div>
-          <label style={{fontSize:10,color:t.mut,display:"block",marginBottom:4}}>Bio</label>
-          <textarea value={draft.bio} onChange={e=>setDraft(p=>({...p,bio:e.target.value}))} style={{...inputS,minHeight:86,lineHeight:1.5,resize:"vertical",marginBottom:10}}/>
-          <label style={{fontSize:10,color:t.mut,display:"block",marginBottom:4}}>Interests</label>
-          <textarea value={draft.interestsText} onChange={e=>setDraft(p=>({...p,interestsText:e.target.value}))} style={{...inputS,minHeight:74,lineHeight:1.45,resize:"vertical",marginBottom:10}}/>
-          <label style={{fontSize:10,color:t.mut,display:"block",marginBottom:4}}>Links</label>
-          <textarea value={draft.linksText} onChange={e=>setDraft(p=>({...p,linksText:e.target.value}))} placeholder="Portfolio | https://example.com" style={{...inputS,minHeight:74,lineHeight:1.45,resize:"vertical",marginBottom:10}}/>
-          <label style={{fontSize:10,color:t.mut,display:"block",marginBottom:4}}>Notes</label>
-          <textarea value={draft.notes} onChange={e=>setDraft(p=>({...p,notes:e.target.value}))} style={{...inputS,minHeight:82,lineHeight:1.45,resize:"vertical",marginBottom:12}}/>
-          <button onClick={saveProfile} disabled={saving} style={{...btnS(t.ok),justifyContent:"center"}}>{saving?"Saving":"Save Profile"}</button>
-        </div>
-        <div style={{display:"flex",flexDirection:"column",gap:12}}>
-          <div style={{background:`${t.surface}F0`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
-            <div style={{fontSize:10,fontWeight:800,color:t.pink,textTransform:"uppercase",letterSpacing:.7,marginBottom:10}}>Add Memory</div>
-            <div style={{display:"grid",gridTemplateColumns:"160px 1fr",gap:8,alignItems:"start"}}>
-              <select value={newMemType} onChange={e=>setNewMemType(e.target.value)} style={inputS}><option value="semantic">Semantic</option><option value="episodic">Episodic</option><option value="procedural">Procedural</option></select>
-              <textarea value={newMemText} onChange={e=>setNewMemText(e.target.value)} placeholder="Add an accepted memory manually..." style={{...inputS,minHeight:78,lineHeight:1.5,resize:"vertical"}}/>
-            </div>
-            <button onClick={createManualMemory} disabled={!newMemText.trim()} style={{...btnS(t.ok),opacity:newMemText.trim()?1:.45,marginTop:8}}>Add Accepted Memory</button>
-          </div>
-          {suggested.length>0&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-            <div style={{fontSize:10,fontWeight:800,color:t.warm,textTransform:"uppercase",letterSpacing:.7}}>Suggestions ({suggested.length})</div>
-            {suggested.map(m=>card(m,"suggested"))}
-          </div>}
-          {Object.entries(typeMeta).map(([typ,[label,color]])=>{const items=accepted.filter(m=>m.type===typ);return <div key={typ} style={{display:"flex",flexDirection:"column",gap:8}}>
-            <div style={{fontSize:10,fontWeight:800,color,textTransform:"uppercase",letterSpacing:.7}}>{label} ({items.length})</div>
-            {items.length?items.map(m=>card(m,"accepted")):<div style={{fontSize:11,color:t.mut,padding:"12px 0"}}>No accepted {typ} memories.</div>}
-          </div>;})}
-          {hidden.length>0&&<details style={{borderTop:`1px solid ${t.brd}22`,paddingTop:10}}>
-            <summary style={{fontSize:10,color:t.mut,cursor:"pointer",fontWeight:800,textTransform:"uppercase",letterSpacing:.7}}>Rejected, archived, or superseded ({hidden.length})</summary>
-            <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:8}}>{hidden.map(m=>card(m,"hidden"))}</div>
-          </details>}
-        </div>
-      </div>
-    </div>
-  </div>;
-}
-
-function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onOpenReport,onRemoveReport,onPreview,models,wsModel,onPersonaCreated,notify}){
-  const [tab,setTab]=React.useState("convs");
-  const [editMode,setEditMode]=React.useState(false);
-  const [wsName,setWsName]=React.useState("");
-  const [wsDesc,setWsDesc]=React.useState("");
-  const [wsInstructions,setWsInstructions]=React.useState("");
-  const [addPanel,setAddPanel]=React.useState(false);
-  const [addSearch,setAddSearch]=React.useState("");
-  const [analyzing,setAnalyzing]=React.useState(false);
-  const [analyzeMsg,setAnalyzeMsg]=React.useState(null);
-  const [creatingKb,setCreatingKb]=React.useState(false);
-  const [memories,setMemories]=React.useState([]);
-  const [memBlocks,setMemBlocks]=React.useState([]);
-  const [memLoading,setMemLoading]=React.useState(false);
-  const [memEdit,setMemEdit]=React.useState(null);
-  const [memEditText,setMemEditText]=React.useState("");
-  const [newMemText,setNewMemText]=React.useState("");
-  const [newMemType,setNewMemType]=React.useState("semantic");
-  const [memScanning,setMemScanning]=React.useState(false);
-  React.useEffect(()=>{if(ws){setWsName(ws.name||"");setWsDesc(ws.description||"");setWsInstructions(ws.instructions||"");};},[ws?.id]);
-  const refreshMemory=React.useCallback(async()=>{
-    if(!ws?.id)return;
-    setMemLoading(true);
-    try{
-      const [mr,br]=await Promise.all([
-        fetch(`${API}/api/workspaces/${ws.id}/memories?status=all`).then(r=>r.json()),
-        fetch(`${API}/api/workspaces/${ws.id}/memory-blocks`).then(r=>r.json()),
-      ]);
-      setMemories(Array.isArray(mr.memories)?mr.memories:[]);
-      setMemBlocks(Array.isArray(br.blocks)?br.blocks:[]);
-    }catch(e){notify&&notify({type:"error",text:"Memory failed to load",detail:e.message||String(e)});}
-    setMemLoading(false);
-  },[API,ws?.id,notify]);
-  React.useEffect(()=>{if(ws?.id&&tab==="memory")refreshMemory();},[ws?.id,tab,refreshMemory]);
-  if(wsLoading)return<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.mut}}><div style={{textAlign:"center"}}><div style={{fontSize:24,marginBottom:8}}>⏳</div>Loading workspace...</div></div>;
-  if(!ws)return<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.mut}}><div style={{textAlign:"center"}}><div style={{fontSize:36,marginBottom:8}}>🗂</div>Select a workspace</div></div>;
-  const font="'JetBrains Mono',monospace";
-  const inputS={width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}40`,color:t.text,padding:"8px 10px",borderRadius:6,fontFamily:font,fontSize:12,outline:"none",boxSizing:"border-box"};
-  const btnS=(c,bg)=>({background:bg||`${c}22`,border:`1px solid ${c}44`,color:c,padding:"5px 10px",borderRadius:6,cursor:"pointer",fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:5});
-  const topics=Array.isArray(ws.topics)?ws.topics:(typeof ws.topics==="string"?JSON.parse(ws.topics||"[]"):[]);
-  const convIds=(ws.conversations||[]).map(c=>c.id);
-  const availableConvs=convs.filter(c=>!convIds.includes(c.id));
-  const filteredAvail=availableConvs.filter(c=>(c.title||"").toLowerCase().includes(addSearch.toLowerCase()));
-  const saveEdit=async()=>{
-    await fetch(`${API}/api/workspaces/${ws.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:wsName,description:wsDesc})}).catch(()=>{});
-    setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,name:wsName,description:wsDesc}:w));
-    setWsDetail(d=>({...d,name:wsName,description:wsDesc}));
-    setEditMode(false);
-  };
-  const analyzeTopics=async()=>{
-    const analyzableItems=[...(ws.conversations||[]).filter(c=>c.title&&c.title.trim()),...(ws.reports||[]).filter(r=>(r.title||r.query||"").trim())];
-    if(!analyzableItems.length){setAnalyzeMsg({ok:false,text:"No chats or reports to analyze. Add workspace content first."});setTimeout(()=>setAnalyzeMsg(null),4000);return;}
-    setAnalyzing(true);setAnalyzeMsg(null);
-    const useModel=wsModel||models[0]||"llama3.2:3b";
-    try{
-      const r=await fetch(`${API}/api/workspaces/${ws.id}/analyze`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:useModel})});
-      if(!r.ok)throw new Error(`Server error ${r.status}`);
-      const d=await r.json();
-      const newTopics=d.topics||[];
-      setWsDetail(prev=>({...prev,topics:newTopics}));
-      setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,topics:newTopics}:w));
-      setAnalyzeMsg(newTopics.length?{ok:true,text:`Found ${newTopics.length} topic${newTopics.length>1?"s":""}`}:{ok:false,text:"No topics detected. Try adding more varied conversations."});
-    }catch(e){setAnalyzeMsg({ok:false,text:`Analysis failed: ${e.message}. Check that model "${useModel}" is installed.`});}
-    setAnalyzing(false);
-    setTimeout(()=>setAnalyzeMsg(null),5000);
-  };
-  const createAgent=async()=>{
-    setCreatingKb(true);
-    try{
-      const r=await fetch(`${API}/api/workspaces/${ws.id}/create-kb`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:ws.name})});
-      const kb=await r.json();
-      const mcR=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:`${ws.name} Agent`,base_model:models[0]||"",system_prompt:`You are a specialized assistant with knowledge from: ${ws.name}`,tool_ids:[],kb_ids:[kb.id],parameters:{profile_type:"agent",description:`Workspace agent grounded in ${ws.name}.`}})});
-      const mc=await mcR.json();
-      onPersonaCreated(mc);
-    }catch{}
-    setCreatingKb(false);
-  };
-  const addConv=async(convId)=>{
-    await fetch(`${API}/api/workspaces/${ws.id}/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({conversation_id:convId})}).catch(()=>{});
-    const conv=convs.find(c=>c.id===convId);
-    if(conv){setWsDetail(d=>({...d,conversations:[...(d.conversations||[]),{id:conv.id,title:conv.title,model:conv.model,updated_at:conv.updated_at}]}));setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,conv_count:(w.conv_count||0)+1}:w));}
-  };
-  const removeConv=async(convId)=>{
-    await fetch(`${API}/api/workspaces/${ws.id}/conversations/${convId}`,{method:"DELETE"}).catch(()=>{});
-    setWsDetail(d=>({...d,conversations:(d.conversations||[]).filter(c=>c.id!==convId)}));
-    setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,conv_count:Math.max(0,(w.conv_count||0)-1)}:w));
-  };
-  const deleteWs=async()=>{
-    await fetch(`${API}/api/workspaces/${ws.id}`,{method:"DELETE"}).catch(()=>{});
-    setWorkspaces(p=>p.filter(w=>w.id!==ws.id));
-    setActiveWs(null);setWsDetail(null);
-  };
-  const patchWsMemory=async(fields)=>{
-    await fetch(`${API}/api/workspaces/${ws.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(fields)}).catch(()=>{});
-    setWsDetail(d=>({...d,...fields}));
-    setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,...fields}:w));
-  };
-  const toggleMemory=()=>patchWsMemory({memory_enabled:(ws.memory_enabled==="1"||ws.memory_enabled===1||ws.memory_enabled===true)?0:1});
-  const saveInstructions=async()=>{
-    await patchWsMemory({instructions:wsInstructions});
-    notify&&notify({type:"success",text:"Workspace instructions saved",duration:2200});
-  };
-  const scanMemory=async()=>{
-    if(!ws?.id)return;
-    setMemScanning(true);
-    try{
-      const r=await fetch(`${API}/api/workspaces/${ws.id}/memories/suggest`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})});
-      const d=await r.json();
-      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
-      await refreshMemory();
-      notify&&notify({type:d.created?"success":"info",text:d.created?`Queued ${d.created} memory suggestion${d.created===1?"":"s"}`:"No new memory suggestions",detail:d.message||"",duration:4200});
-    }catch(e){notify&&notify({type:"error",text:"Memory scan failed",detail:e.message||String(e)});}
-    setMemScanning(false);
-  };
-  const saveBlocks=async(blocks=memBlocks)=>{
-    try{
-      const r=await fetch(`${API}/api/workspaces/${ws.id}/memory-blocks`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({blocks})});
-      const d=await r.json();
-      setMemBlocks(d.blocks||[]);
-      notify&&notify({type:"success",text:"Memory blocks saved",duration:2200});
-    }catch(e){notify&&notify({type:"error",text:"Memory block save failed",detail:e.message||String(e)});}
-  };
-  const updateBlock=(id,patch)=>setMemBlocks(p=>p.map(b=>b.id===id?{...b,...patch}:b));
-  const updateMemoryLocal=(m)=>setMemories(p=>p.map(x=>x.id===m.id?m:x));
-  const acceptMemory=async(m)=>{
-    try{const r=await fetch(`${API}/api/workspaces/${ws.id}/memories/${m.id}/accept`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});updateMemoryLocal(await r.json());notify&&notify({type:"success",text:"Memory accepted",duration:2200});}
-    catch(e){notify&&notify({type:"error",text:"Accept failed",detail:e.message||String(e)});}
-  };
-  const rejectMemory=async(m)=>{
-    try{const r=await fetch(`${API}/api/workspaces/${ws.id}/memories/${m.id}/reject`,{method:"POST"});updateMemoryLocal(await r.json());}
-    catch(e){notify&&notify({type:"error",text:"Reject failed",detail:e.message||String(e)});}
-  };
-  const patchMemory=async(m,patch)=>{
-    try{const r=await fetch(`${API}/api/workspaces/${ws.id}/memories/${m.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)});updateMemoryLocal(await r.json());}
-    catch(e){notify&&notify({type:"error",text:"Memory update failed",detail:e.message||String(e)});}
-  };
-  const deleteMemory=async(m)=>{
-    try{await fetch(`${API}/api/workspaces/${ws.id}/memories/${m.id}`,{method:"DELETE"});setMemories(p=>p.filter(x=>x.id!==m.id));}
-    catch(e){notify&&notify({type:"error",text:"Delete failed",detail:e.message||String(e)});}
-  };
-  const startMemEdit=(m)=>{setMemEdit(m.id);setMemEditText(m.content||"");};
-  const saveMemEdit=async(m,accept=false)=>{
-    const r=await fetch(`${API}/api/workspaces/${ws.id}/memories/${m.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:memEditText})});
-    let updated=await r.json();
-    if(accept&&updated.status!=="accepted"){
-      const ar=await fetch(`${API}/api/workspaces/${ws.id}/memories/${m.id}/accept`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});
-      updated=await ar.json();
-    }
-    updateMemoryLocal(updated);setMemEdit(null);setMemEditText("");
-  };
-  const createManualMemory=async()=>{
-    const content=newMemText.trim();if(!content)return;
-    try{
-      const r=await fetch(`${API}/api/workspaces/${ws.id}/memories`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({content,type:newMemType,status:"accepted",importance:3})});
-      const m=await r.json();setMemories(p=>[m,...p]);setNewMemText("");notify&&notify({type:"success",text:"Memory added",duration:2200});
-    }catch(e){notify&&notify({type:"error",text:"Memory add failed",detail:e.message||String(e)});}
-  };
-  const fileIcon=(filename)=>{
-    const ext=(filename||"").split(".").pop().toLowerCase();
-    if(["py","js","ts","rs","go","java","c","cpp"].includes(ext))return "💻";
-    if(["md","txt","pdf","docx"].includes(ext))return "📄";
-    if(["csv","json","xml","yaml"].includes(ext))return "📊";
-    if(["tar","gz","zip"].includes(ext))return "📦";
-    return "📎";
-  };
-  const patchArtifact=async(id,patch)=>{
-    try{
-      const r=await fetch(`${API}/api/artifacts/${encodeURIComponent(id)}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)});
-      if(!r.ok)throw new Error(`HTTP ${r.status}`);
-      const d=await r.json();
-      setWsDetail(prev=>prev?{...prev,files:(prev.files||[]).map(f=>f.id===id?d:f)}:prev);
-      notify&&notify({type:"success",text:"Artifact updated",duration:1800});
-    }catch(e){notify&&notify({type:"error",text:"Artifact update failed",detail:e.message||String(e)});}
-  };
-  const deleteArtifact=async(id)=>{
-    try{
-      const r=await fetch(`${API}/api/artifacts/${encodeURIComponent(id)}`,{method:"DELETE"});
-      if(!r.ok)throw new Error(`HTTP ${r.status}`);
-      setWsDetail(prev=>prev?{...prev,files:(prev.files||[]).filter(f=>f.id!==id)}:prev);
-      setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,file_count:Math.max(0,(w.file_count||1)-1)}:w));
-    }catch(e){notify&&notify({type:"error",text:"Artifact delete failed",detail:e.message||String(e)});}
-  };
-  return<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}22`,background:`${t.surface}44`,flexShrink:0}}>
-      <div style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:8}}>
-        <span style={{fontSize:24,lineHeight:1}}>🗂</span>
-        <div style={{flex:1,minWidth:0}}>
-          {editMode?<input value={wsName} onChange={e=>setWsName(e.target.value)} style={{...inputS,fontSize:16,fontWeight:700,background:"transparent",border:`1px solid ${t.acc}44`,marginBottom:6}}/>
-            :<div style={{fontSize:16,fontWeight:700,color:t.text,marginBottom:4}}>{ws.name}</div>}
-          {editMode?<input value={wsDesc} onChange={e=>setWsDesc(e.target.value)} placeholder="Description..." style={{...inputS,fontSize:11,color:t.mut}}/>
-            :<div style={{fontSize:11,color:t.mut}}>{ws.description||"No description"}</div>}
-        </div>
-        <div style={{display:"flex",gap:4,flexShrink:0}}>
-          {editMode
-            ?<><button onClick={saveEdit} style={btnS(t.ok)}>💾 Save</button><button onClick={()=>setEditMode(false)} style={btnS(t.mut)}>Cancel</button></>
-            :<><button onClick={()=>setEditMode(true)} style={btnS(t.mut)}>✏️ Edit</button>
-              <button onClick={analyzeTopics} disabled={analyzing} style={btnS(t.acc)}>{analyzing?"⏳":"🔬"} Analyze</button>
-              <button onClick={createAgent} disabled={creatingKb} style={btnS(t.pink)}>{creatingKb?"⏳":"✦"} Create Agent</button>
-              <button onClick={deleteWs} style={btnS(t.err)}>🗑</button></>}
-        </div>
-      </div>
-      {analyzeMsg&&<div style={{fontSize:10,color:analyzeMsg.ok?t.ok:t.err,marginTop:4,padding:"4px 8px",background:analyzeMsg.ok?`${t.ok}15`:`${t.err}15`,borderRadius:6,border:`1px solid ${analyzeMsg.ok?t.ok:t.err}33`}}>{analyzeMsg.text}</div>}
-      {topics.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:analyzeMsg?4:0}}>
-        {topics.map((tp,i)=><span key={i} style={{fontSize:10,padding:"3px 8px",borderRadius:12,background:tp.color+"22",color:tp.color,border:`1px solid ${tp.color}44`,fontWeight:600}}>{tp.label}</span>)}
-      </div>}
-    </div>
-    <div style={{display:"flex",gap:0,borderBottom:`1px solid ${t.brd}22`,flexShrink:0}}>
-      {[["convs","💬 Conversations"],["memory","🧠 Memory"],["reports","📊 Reports"],["files","📎 Artifacts"]].map(([id,label])=><button key={id} onClick={()=>{setTab(id);setAddPanel(false);}} style={{padding:"10px 16px",background:tab===id?`${t.acc}15`:"transparent",border:"none",borderBottom:tab===id?`2px solid ${t.acc}`:"2px solid transparent",color:tab===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:tab===id?700:400}}>{label}</button>)}
-      {tab==="convs"&&<button onClick={()=>setAddPanel(p=>!p)} style={{marginLeft:"auto",padding:"10px 14px",background:addPanel?`${t.warm}15`:"transparent",border:"none",borderBottom:addPanel?`2px solid ${t.warm}`:"2px solid transparent",color:addPanel?t.warm:t.mut,cursor:"pointer",fontFamily:font,fontSize:11}}>+ Add Chats</button>}
-    </div>
-    {addPanel&&<div style={{padding:12,borderBottom:`1px solid ${t.brd}22`,background:`${t.warm}07`,animation:"fadeIn .2s",flexShrink:0}}>
-      <input value={addSearch} onChange={e=>setAddSearch(e.target.value)} placeholder="Search conversations..." style={{...inputS,marginBottom:8}}/>
-      <div style={{maxHeight:180,overflowY:"auto",display:"flex",flexDirection:"column",gap:3}}>
-        {filteredAvail.length===0&&<div style={{fontSize:11,color:t.mut,padding:8,textAlign:"center"}}>All conversations are already in this workspace.</div>}
-        {filteredAvail.map(c=><div key={c.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:`${t.surface}44`,borderRadius:8,cursor:"pointer",border:`1px solid ${t.brd}22`}} onClick={()=>addConv(c.id)}>
-          <span style={{fontSize:12,flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.title||"New Chat"}</span>
-          <span style={{fontSize:10,color:t.mut}}>{c.model||""}</span>
-          <span style={{color:t.ok,fontSize:10}}>+ Add</span>
-        </div>)}
-      </div>
-    </div>}
-    <div style={{flex:1,overflowY:"auto",padding:20}}>
-      {tab==="convs"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-        {!(ws.conversations||[]).length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No conversations yet.<br/>Click "+ Add Chats" to add some.</div>}
-        {(ws.conversations||[]).map(c=><div key={c.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}66`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
-          <span style={{fontSize:18}}>💬</span>
-          <div style={{flex:1,minWidth:0}}>
-            <div style={{fontSize:12,fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.title||"New Chat"}</div>
-            <div style={{fontSize:10,color:t.mut,marginTop:2}}>{c.model||""} {c.updated_at?new Date(c.updated_at).toLocaleDateString():""}</div>
-          </div>
-          <button onClick={()=>onOpenConv(c.id)} style={btnS(t.acc)}>Open →</button>
-          <button onClick={()=>removeConv(c.id)} style={btnS(t.err)}>✕</button>
-        </div>)}
-      </div>}
-      {tab==="memory"&&(()=>{const enabled=ws.memory_enabled==="1"||ws.memory_enabled===1||ws.memory_enabled===true;const byStatus=s=>memories.filter(m=>m.status===s);const accepted=byStatus("accepted").filter(m=>!m.valid_until);const suggested=byStatus("suggested");const hidden=memories.filter(m=>["rejected","archived"].includes(m.status)||m.valid_until);const typeMeta={semantic:["Facts & Preferences",t.acc],episodic:["Decisions & Events",t.warm],procedural:["Procedures",t.pink]};const card=(m,mode)=>{const meta=typeMeta[m.type]||typeMeta.semantic;const editing=memEdit===m.id;return <div key={m.id} style={{padding:"10px 12px",borderRadius:10,background:`${t.surface}66`,border:`1px solid ${meta[1]}33`,display:"flex",flexDirection:"column",gap:7}}>
-          <div style={{display:"flex",alignItems:"center",gap:6}}>
-            <span style={{fontSize:9,fontWeight:800,color:meta[1],textTransform:"uppercase",letterSpacing:.6}}>{meta[0]}</span>
-            <span style={{fontSize:9,color:t.mut}}>importance {m.importance||3}</span>
-            {m.pinned? <span style={{fontSize:9,color:t.warm}}>pinned</span>:null}
-            {m.confidence? <span style={{fontSize:9,color:t.mut}}>{Math.round((m.confidence||0)*100)}%</span>:null}
-          </div>
-          {editing?<textarea value={memEditText} onChange={e=>setMemEditText(e.target.value)} style={{...inputS,minHeight:72,lineHeight:1.5,resize:"vertical"}}/>:<div style={{fontSize:12,lineHeight:1.55,color:t.text,whiteSpace:"pre-wrap"}}>{m.content}</div>}
-          {m.metadata?.reason&&<div style={{fontSize:10,color:t.mut,lineHeight:1.4}}>Why: {m.metadata.reason}</div>}
-          <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
-            {editing?<><button onClick={()=>saveMemEdit(m,mode==="suggested")} style={btnS(t.ok)}>{mode==="suggested"?"Save + Accept":"Save"}</button><button onClick={()=>{setMemEdit(null);setMemEditText("");}} style={btnS(t.mut)}>Cancel</button></>
-            :mode==="suggested"?<><button onClick={()=>acceptMemory(m)} style={btnS(t.ok)}>Accept</button><button onClick={()=>startMemEdit(m)} style={btnS(t.acc)}>Edit</button><button onClick={()=>rejectMemory(m)} style={btnS(t.err)}>Reject</button></>
-            :<><button onClick={()=>patchMemory(m,{pinned:m.pinned?0:1})} style={btnS(m.pinned?t.warm:t.mut)}>{m.pinned?"Unpin":"Pin"}</button><button onClick={()=>startMemEdit(m)} style={btnS(t.acc)}>Edit</button><button onClick={()=>patchMemory(m,{status:"archived"})} style={btnS(t.mut)}>Archive</button><button onClick={()=>deleteMemory(m)} style={btnS(t.err)}>Delete</button></>}
-            {m.source_conversation_id&&<button onClick={()=>onOpenConv&&onOpenConv(m.source_conversation_id)} style={{...btnS(t.f1),marginLeft:"auto"}}>Source →</button>}
-          </div>
-        </div>;};return <div style={{display:"flex",flexDirection:"column",gap:14}}>
-        <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:10,background:`${enabled?t.ok:t.surface}10`,border:`1px solid ${enabled?t.ok:t.brd}33`}}>
-          <button onClick={toggleMemory} style={btnS(enabled?t.ok:t.mut)}>{enabled?"On":"Off"}</button>
-          <div style={{flex:1,minWidth:0}}>
-            <div style={{fontSize:12,fontWeight:700,color:enabled?t.ok:t.text}}>Workspace memory {enabled?"enabled":"disabled"}</div>
-            <div style={{fontSize:10,color:t.mut,marginTop:2}}>Accepted memories and enabled blocks are injected into workspace chats. Suggestions are never injected until accepted.</div>
-          </div>
-          <button onClick={scanMemory} disabled={memScanning} style={btnS(t.warm)}>{memScanning?"Scanning":"Scan Recent"}</button>
-          <button onClick={refreshMemory} disabled={memLoading} style={btnS(t.acc)}>{memLoading?"Loading":"Refresh"}</button>
-        </div>
-        <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(260px,.55fr)",gap:12,alignItems:"start"}}>
-          <div style={{display:"flex",flexDirection:"column",gap:8}}>
-            <div style={{fontSize:10,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.7}}>Workspace Instructions</div>
-            <textarea value={wsInstructions} onChange={e=>setWsInstructions(e.target.value)} placeholder="Stable project instructions, constraints, tone, or goals..." style={{...inputS,minHeight:92,lineHeight:1.5,resize:"vertical"}}/>
-            <button onClick={saveInstructions} style={{...btnS(t.ok),alignSelf:"flex-start"}}>Save Instructions</button>
-          </div>
-          <div style={{display:"flex",flexDirection:"column",gap:8}}>
-            <div style={{fontSize:10,fontWeight:800,color:t.pink,textTransform:"uppercase",letterSpacing:.7}}>Add Memory</div>
-            <select value={newMemType} onChange={e=>setNewMemType(e.target.value)} style={inputS}><option value="semantic">Semantic</option><option value="episodic">Episodic</option><option value="procedural">Procedural</option></select>
-            <textarea value={newMemText} onChange={e=>setNewMemText(e.target.value)} placeholder="Add an accepted memory manually..." style={{...inputS,minHeight:78,lineHeight:1.5,resize:"vertical"}}/>
-            <button onClick={createManualMemory} disabled={!newMemText.trim()} style={{...btnS(t.ok),opacity:newMemText.trim()?1:.45,alignSelf:"flex-start"}}>Add Accepted Memory</button>
-          </div>
-        </div>
-        {memBlocks.length>0&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{fontSize:10,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.7}}>Pinned Blocks</div><button onClick={()=>saveBlocks()} style={btnS(t.ok)}>Save Blocks</button></div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:8}}>
-            {memBlocks.map(b=><div key={b.id} style={{padding:10,borderRadius:10,background:`${t.surface}55`,border:`1px solid ${b.enabled?t.acc:t.brd}28`,display:"flex",flexDirection:"column",gap:6}}>
-              <div style={{display:"flex",alignItems:"center",gap:8}}><button onClick={()=>updateBlock(b.id,{enabled:b.enabled?0:1})} style={btnS(b.enabled?t.ok:t.mut)}>{b.enabled?"On":"Off"}</button><div style={{fontSize:11,fontWeight:800,color:t.text}}>{b.label}</div></div>
-              <div style={{fontSize:10,color:t.mut,lineHeight:1.35}}>{b.description}</div>
-              <textarea value={b.value||""} onChange={e=>updateBlock(b.id,{value:e.target.value})} style={{...inputS,minHeight:76,lineHeight:1.45,resize:"vertical"}}/>
-            </div>)}
-          </div>
-        </div>}
-        {suggested.length>0&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-          <div style={{fontSize:10,fontWeight:800,color:t.warm,textTransform:"uppercase",letterSpacing:.7}}>Suggestions ({suggested.length})</div>
-          {suggested.map(m=>card(m,"suggested"))}
-        </div>}
-        {Object.entries(typeMeta).map(([typ,[label,color]])=>{const items=accepted.filter(m=>m.type===typ);return <div key={typ} style={{display:"flex",flexDirection:"column",gap:8}}>
-          <div style={{fontSize:10,fontWeight:800,color,textTransform:"uppercase",letterSpacing:.7}}>{label} ({items.length})</div>
-          {items.length?items.map(m=>card(m,"accepted")):<div style={{fontSize:11,color:t.mut,padding:"12px 0"}}>No accepted {typ} memories.</div>}
-        </div>;})}
-        {hidden.length>0&&<details style={{borderTop:`1px solid ${t.brd}22`,paddingTop:10}}>
-          <summary style={{fontSize:10,color:t.mut,cursor:"pointer",fontWeight:800,textTransform:"uppercase",letterSpacing:.7}}>Rejected, archived, or superseded ({hidden.length})</summary>
-          <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:8}}>{hidden.map(m=>card(m,"hidden"))}</div>
-        </details>}
-      </div>;})()}
-      {tab==="reports"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-        {!(ws.reports||[]).length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No reports yet.<br/>Add reports from Deep Research.</div>}
-        {(ws.reports||[]).map(r=>{const sm={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]}[String(r.status||"queued").toLowerCase()]||[t.warm,"Queued"];return <div key={r.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}66`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
-          <span style={{fontSize:18}}>📊</span>
-          <div style={{flex:1,minWidth:0}}>
-            <div style={{fontSize:12,fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.title||r.query||"Research Report"}</div>
-            <div style={{fontSize:10,color:t.mut,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sm[1]} · {r.report_type||"report"} · {r.source_count||0} sources</div>
-          </div>
-          <button onClick={()=>onOpenReport&&onOpenReport(r.id)} style={btnS(t.acc)}>Open →</button>
-          <button onClick={()=>onRemoveReport&&onRemoveReport(ws.id,r.id)} style={btnS(t.err)}>✕</button>
-        </div>;})}
-      </div>}
-      {tab==="files"&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:10}}>
-        {!(ws.files||[]).length&&<div style={{width:"100%",textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No artifacts yet.<br/>Artifacts are tracked automatically when the AI downloads them in workspace chats.</div>}
-        {(ws.files||[]).map(f=><ArtifactCard key={f.id||`${f.filename}-${f.created_at}`} artifact={f} t={t} font={font} workspaces={workspaces} onPreview={onPreview} onOpenConv={onOpenConv} onPatch={patchArtifact} onDelete={deleteArtifact} compact/>)}
-      </div>}
-    </div>
-  </div>;
-}
-
-// ============================================================
-function SandboxSection({t,btnS,labelS,notify,addActivity,updateActivity}){
-  const [sbInfo,setSbInfo]=useState(null);
-  const [cleanupDays,setCleanupDays]=useState(30);
-  const [cleaning,setCleaning]=useState(false);
-  const [cleanResult,setCleanResult]=useState(null);
-  const [cbCleaning,setCbCleaning]=useState(false);
-  const [cbResult,setCbResult]=useState(null);
-  const fmtBytes=(b)=>{if(!b)return"0 B";if(b<1024)return`${b} B`;if(b<1048576)return`${(b/1024).toFixed(1)} KB`;return`${(b/1048576).toFixed(1)} MB`;};
-  useEffect(()=>{
-    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{setSbInfo(d);setCleanupDays(d.file_cleanup_days??30);}).catch(()=>{});
-  },[]);
-  const saveCleanupDays=async(v)=>{
-    setCleanupDays(v);
-    await fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({file_cleanup_days:v})})
-      .then(r=>notify&&notify({type:r.ok?"success":"error",text:r.ok?"Cleanup schedule saved":"Cleanup schedule failed",duration:2500}))
-      .catch(()=>notify&&notify({type:"error",text:"Cleanup schedule failed"}));
-  };
-  const cleanNow=async()=>{
-    setCleaning(true);setCleanResult(null);
-    const activityId=addActivity&&addActivity({name:"Sandbox cleanup",kind:"cleanup",message:"Cleaning sandbox outputs...",pct:25});
-    try{const r=await fetch(`${API}/api/settings/cleanup-now`,{method:"POST"});const d=await r.json();setCleanResult(d);
-      if(d.error)throw new Error(d.error);
-      updateActivity&&updateActivity(activityId,{status:"done",message:`Deleted ${d.deleted||0} files`,pct:100});
-      notify&&notify({type:"success",text:"Sandbox cleanup complete",detail:`Deleted ${d.deleted||0} files.`});
-      const r2=await fetch(`${API}/api/settings`);const d2=await r2.json();setSbInfo(d2);
-    }catch(e){setCleanResult({error:e.message||"Failed"});updateActivity&&updateActivity(activityId,{status:"error",error:e.message||"Failed",message:"Cleanup failed"});notify&&notify({type:"error",text:"Sandbox cleanup failed",detail:e.message||"Failed"});}
-    setCleaning(false);
-  };
-  const cleanCodebox=async()=>{
-    setCbCleaning(true);setCbResult(null);
-    const activityId=addActivity&&addActivity({name:"Codebox cleanup",kind:"cleanup",message:"Cleaning Codebox files...",pct:25});
-    try{const r=await fetch(`${API}/api/settings/cleanup-codebox`,{method:"POST"});const d=await r.json();setCbResult(d);
-      if(d.error)throw new Error(d.error);
-      updateActivity&&updateActivity(activityId,{status:"done",message:`Deleted ${d.deleted||0} files`,pct:100});
-      notify&&notify({type:"success",text:"Codebox cleanup complete",detail:`Deleted ${d.deleted||0} files.`});
-    }catch(e){setCbResult({error:e.message||"Failed"});updateActivity&&updateActivity(activityId,{status:"error",error:e.message||"Failed",message:"Cleanup failed"});notify&&notify({type:"error",text:"Codebox cleanup failed",detail:e.message||"Failed"});}
-    setCbCleaning(false);
-  };
-  const cleanAll=async()=>{
-    setCleaning(true);setCbCleaning(true);setCleanResult(null);setCbResult(null);
-    const activityId=addActivity&&addActivity({name:"Cleanup all",kind:"cleanup",message:"Cleaning sandbox and Codebox...",pct:20});
-    try{
-      const [r1,r2]=await Promise.all([
-        fetch(`${API}/api/settings/cleanup-now`,{method:"POST"}).then(r=>r.json()).catch(()=>({error:"Sandbox failed"})),
-        fetch(`${API}/api/settings/cleanup-codebox`,{method:"POST"}).then(r=>r.json()).catch(()=>({error:"Codebox failed"})),
-      ]);
-      setCleanResult(r1);setCbResult(r2);
-      const hasErr=r1.error||r2.error;
-      updateActivity&&updateActivity(activityId,{status:hasErr?"error":"done",message:hasErr?"Cleanup finished with errors":"Cleanup complete",error:hasErr||null,pct:100});
-      notify&&notify({type:hasErr?"warning":"success",text:hasErr?"Cleanup finished with errors":"Cleanup complete",detail:hasErr||"Sandbox and Codebox cleaned."});
-      const r3=await fetch(`${API}/api/settings`);const d3=await r3.json();setSbInfo(d3);
-    }catch(e){setCleanResult({error:e.message||"Failed"});updateActivity&&updateActivity(activityId,{status:"error",error:e.message||"Failed",message:"Cleanup failed"});notify&&notify({type:"error",text:"Cleanup failed",detail:e.message||"Failed"});}
-    setCleaning(false);setCbCleaning(false);
-  };
-  const INTERVALS=[
-    {label:"Every week",days:7},{label:"Every 2 weeks",days:14},
-    {label:"Monthly (default)",days:30},{label:"Every 3 months",days:90},
-    {label:"Every 6 months",days:180},{label:"Yearly",days:365},
-    {label:"Never",days:0},
-  ];
-  return <div style={{marginBottom:20}}>
-    <label style={labelS}>Sandbox & File Cleanup</label>
-    <div style={{background:`${t.surface}66`,border:`1px solid ${t.brd}22`,borderRadius:10,padding:"10px 14px",marginBottom:10,fontSize:11}}>
-      <div style={{display:"flex",flexWrap:"wrap",gap:"6px 20px",marginBottom:sbInfo?.sandbox_dir?6:0}}>
-        {sbInfo?.sandbox_dir&&<div style={{color:t.mut}}>
-          <span style={{color:t.acc}}>📁 </span>
-          <span style={{fontFamily:"monospace",fontSize:10,color:t.dim,wordBreak:"break-all"}}>{sbInfo.sandbox_dir}</span>
-        </div>}
-      </div>
-      <div style={{display:"flex",gap:20,flexWrap:"wrap"}}>
-        <div><span style={{color:t.mut}}>Files: </span><span style={{fontWeight:700,color:t.text}}>{sbInfo?.sandbox_file_count??"—"}</span></div>
-        <div><span style={{color:t.mut}}>Size: </span><span style={{fontWeight:700,color:t.text}}>{sbInfo!=null?fmtBytes(sbInfo.sandbox_size_bytes):"—"}</span></div>
-        <div><span style={{color:t.mut}}>Venv: </span><span style={{fontWeight:700,color:sbInfo?.sandbox_venv_ready?t.ok:t.mut}}>{sbInfo?.sandbox_venv_ready?"✓ Ready":"building..."}</span></div>
-      </div>
-    </div>
-    <div style={{marginBottom:8}}>
-      <div style={{fontSize:10,color:t.mut,marginBottom:5}}>Auto-delete tool output files after:</div>
-      <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-        {INTERVALS.map(iv=><button key={iv.days} onClick={()=>saveCleanupDays(iv.days)}
-          style={{...btnS(cleanupDays===iv.days?t.acc:t.mut),background:cleanupDays===iv.days?`${t.acc}22`:`${t.surface}55`,fontWeight:cleanupDays===iv.days?700:400,fontSize:10}}>
-          {iv.label}
-        </button>)}
-      </div>
-      {cleanupDays===0&&<div style={{fontSize:10,color:t.warm,marginTop:4}}>⚠ Files will never be cleaned automatically. Clean manually when needed.</div>}
-    </div>
-    <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-      <button onClick={cleanAll} disabled={cleaning||cbCleaning} style={{...btnS(t.err),opacity:(cleaning||cbCleaning)?0.6:1}}>
-        {(cleaning||cbCleaning)?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span> Cleaning...</>:"🗑 Clean All"}
-      </button>
-      {cleanResult&&!cleanResult.error&&<span style={{fontSize:11,color:t.ok}}>
-        ✓ Sandbox: {cleanResult.deleted} file{cleanResult.deleted!==1?"s":""}{cleanResult.freed_bytes>0?`, freed ${fmtBytes(cleanResult.freed_bytes)}`:""}
-      </span>}
-      {cbResult&&!cbResult.error&&<span style={{fontSize:11,color:t.ok}}>
-        ✓ Codebox: {cbResult.deleted} item{cbResult.deleted!==1?"s":""}{cbResult.freed_bytes>0?`, freed ${fmtBytes(cbResult.freed_bytes)}`:""}
-      </span>}
-      {cleanResult?.skipped&&<span style={{fontSize:11,color:t.mut}}>↷ {cleanResult.skipped}</span>}
-      {cleanResult?.error&&<span style={{fontSize:11,color:t.err}}>✕ {cleanResult.error}</span>}
-      {cbResult?.error&&<span style={{fontSize:11,color:t.err}}>✕ Codebox: {cbResult.error}</span>}
-    </div>
-    <div style={{fontSize:10,color:t.mut,marginTop:6,lineHeight:1.5}}>
-      Tool-generated files (code outputs, downloads) are stored in <code style={{background:`${t.surface}`,padding:"1px 5px",borderRadius:3,fontSize:9}}>{sbInfo?.sandbox_outputs_dir||"sandbox/outputs/"}</code> and cleaned automatically. User uploads and knowledge base files are never auto-deleted.
-    </div>
-  </div>;
-}
-
-// ============================================================
-// ModelPicker — custom dropdown replacing plain <select> for model selection
-const cloudModelProvider=(m)=>{
-  const s=String(m||"");
-  if(s.startsWith("openai:"))return"openai";
-  if(s.startsWith("anthropic:"))return"anthropic";
-  return"";
-};
-const isCloudModelName=(m)=>!!cloudModelProvider(m);
-const cloudModelName=(m)=>String(m||"").replace(/^(openai|anthropic):/,"");
-const modelInfo=(modelDetails,m)=>modelDetails?.[m]||{};
-const modelDetail=(modelDetails,m)=>modelInfo(modelDetails,m).details||{};
-const modelFamilies=(modelDetails,m)=>{
-  const d=modelDetail(modelDetails,m);
-  return [d.family,...(Array.isArray(d.families)?d.families:[])].filter(Boolean).map(x=>String(x).toLowerCase());
-};
-const modelContextLength=(modelDetails,m)=>{
-  const d=modelDetail(modelDetails,m);
-  const n=Number(d.context_length||d.num_ctx||d.context||0);
-  return Number.isFinite(n)&&n>0?n:0;
-};
-const formatModelCtx=n=>{
-  const v=Number(n)||0;
-  if(!v)return"";
-  if(v>=1000000)return`${Math.round(v/100000)/10}M`;
-  return`${Math.round(v/1000)}K`;
-};
-const isMoeModelName=(m,modelDetails={})=>{
-  const s=String(m||"").toLowerCase();
-  const fam=modelFamilies(modelDetails,m).join(" ");
-  return /\bmoe\b|a\d+b|qwen\d*moe|qwen3moe|qwen35moe|mixtral/.test(`${s} ${fam}`);
-};
-const isEmbeddingModelName=(m,modelDetails={})=>{
-  const s=String(m||"").toLowerCase();
-  const d=modelDetail(modelDetails,m);
-  const fam=modelFamilies(modelDetails,m).join(" ");
-  return /embed|embedding|nomic-bert/.test(`${s} ${fam}`)||Number(d.embedding_length||0)>0&&/embed|nomic/.test(s);
-};
-const researchModelOptions=(models,modelDetails={})=>(models||[]).filter(m=>m===""||!isEmbeddingModelName(m,modelDetails));
-const cleanResearchMarkdown=text=>{
-  let s=String(text||"");
-  if(!s)return"";
-  s=s.replace(/<think\b[^>]*>[\s\S]*?<\/think\s*>/gi,"");
-  const lower=s.toLowerCase();
-  const close=lower.lastIndexOf("</think>");
-  if(close>=0)s=s.slice(close+"</think>".length);
-  s=s.replace(/<think\b[^>]*>/gi,"").replace(/<\/think\s*>/gi,"");
-  s=s.replace(/^\s*thought\s*\n[\s\S]*?(?:<\|channel\|>|<channel\|>|<\|message\|>)/i,"");
-  return s.trim();
-};
-
-function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact=false,onRefresh}){
-  const [open,setOpen]=useState(false);
-  const [dropPos,setDropPos]=useState({top:0,left:0,width:220});
-  const triggerRef=useRef(null);
-  const dropRef=useRef(null);
-  useEffect(()=>{
-    if(!open)return;
-    const handler=(e)=>{
-      if(triggerRef.current&&triggerRef.current.contains(e.target))return;
-      if(dropRef.current&&dropRef.current.contains(e.target))return;
-      setOpen(false);
-    };
-    document.addEventListener("mousedown",handler);
-    return()=>document.removeEventListener("mousedown",handler);
-  },[open]);
-  const openDropdown=()=>{
-    if(triggerRef.current){
-      const r=triggerRef.current.getBoundingClientRect();
-      setDropPos({top:r.bottom+4,left:r.left,width:Math.max(r.width,240)});
-    }
-    const willOpen=!open;
-    setOpen(p=>!p);
-    if(willOpen&&onRefresh)onRefresh();
-  };
-  const famIcon=(n)=>{const b=(n||"").toLowerCase();if(b.startsWith("openai:")||b==="openai")return"◎";if(b.startsWith("anthropic:")||b==="anthropic")return"✦";if(b.includes("qwen"))return"🌸";if(b.includes("llama"))return"🦙";if(b.includes("mistral")||b.includes("mixtral"))return"💨";if(b.includes("gemma"))return"💎";if(b.includes("phi"))return"φ";if(b.includes("deepseek"))return"🔍";if(b.includes("coder")||b.includes("codestral"))return"💻";if(b.includes("wizard"))return"🧙";if(b.includes("hf.co"))return"🤗";return"🤖";};
-  const szCol=(tag)=>{const l=(tag||"").toLowerCase();if(l.match(/70b|65b|72b/))return t.err;if(l.match(/30b|32b|34b/))return t.warm;if(l.match(/13b|14b|27b/))return t.acc;if(l.match(/7b|8b/))return t.ok;if(l.match(/1b|3b|4b/))return t.f1;return t.mut;};
-  const modelCaps=(m)=>{const b=(m||"").toLowerCase();const caps=[];
-    if(b.startsWith("openai:")||b.startsWith("anthropic:"))return[{emoji:"☁",color:"#4aa3ff",label:"Cloud"}];
-    if(b.match(/embed/))return[{emoji:"🔢",color:"#9b59b6",label:"Embed"}];
-    if(isMoeModelName(m,modelDetails))caps.push({emoji:"MoE",color:"#66d9ef",label:"Expert"});
-    if(b.match(/llava|vision|[\-:]vl[\-:$]/)||b.match(/vl\b/))caps.push({emoji:"👁",color:"#e67e22",label:"Vision"});
-    if(b.match(/qwen3|deepseek-r1|r1[\-:]|qwq/))caps.push({emoji:"💭",color:"#c792ea",label:"Thinking"});
-    if(b.match(/coder|codestral|starcoder|deepseek-coder/))caps.push({emoji:"💻",color:"#2ecc71",label:"Code"});
-    if(!b.match(/embed/)&&b.match(/qwen|llama3|llama-3|mistral|mixtral|command|hermes|deepseek|phi3|phi-3|wizardlm|gemma|llama3\./))caps.push({emoji:"🔧",color:"#3498db",label:"Tools"});
-    return caps;};
-  const curProvider=cloudModelProvider(value);
-  const [name,tag="latest"]=curProvider?[curProvider,cloudModelName(value)]:(value||"").split(":");
-  const sc=szCol(tag);
-  const caps=modelCaps(value||"");
-  const md=modelDetails?.[value]||{};
-  const paramSz=md.details?.parameter_size||"";
-  const ctxLen=modelContextLength(modelDetails,value);
-  const isMissing=value&&models.length>0&&!models.includes(value);
-  return <div ref={triggerRef} style={{position:"relative",...style}}>
-    <div onClick={openDropdown} style={{display:"flex",alignItems:"center",gap:6,padding:compact?"3px 8px":"5px 10px",background:isMissing?`${t.err}15`:open?`${t.acc}15`:t.bgDeep,border:`1px solid ${isMissing?t.err:open?t.acc:t.brd}${open||isMissing?"55":"33"}`,borderRadius:8,cursor:"pointer",minWidth:compact?100:150,transition:"all .15s",userSelect:"none"}}>
-      <span style={{fontSize:compact?12:14,flexShrink:0}}>{isMissing?"⚠️":famIcon(name)}</span>
-      <div style={{flex:1,minWidth:0}}>
-        <div style={{fontSize:compact?10:11,fontWeight:600,color:isMissing?t.err:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{isMissing?`${curProvider?tag:name} (deleted)`:(curProvider?tag:(name||"Select model"))}</div>
-        {!compact&&<div style={{display:"flex",gap:3,flexWrap:"wrap",marginTop:1}}>
-          <span style={{fontSize:8,color:sc,fontWeight:700}}>{tag}</span>
-          {paramSz&&<span style={{fontSize:8,color:t.mut}}>{paramSz}</span>}
-          {ctxLen>0&&<span style={{fontSize:8,color:t.mut}}>{formatModelCtx(ctxLen)} ctx</span>}
-          {caps.map(c=><span key={c.label} style={{fontSize:7,padding:"0px 3px",borderRadius:3,background:`${c.color}20`,color:c.color,fontWeight:700,border:`1px solid ${c.color}33`}}>{c.emoji}</span>)}
-        </div>}
-      </div>
-      {onRefresh&&<span onClick={e=>{e.stopPropagation();onRefresh();}} style={{fontSize:12,color:t.mut,flexShrink:0,cursor:"pointer",opacity:.5,display:"flex",alignItems:"center",padding:"0 2px"}} title="Refresh models"><IC.Refresh/></span>}
-      <span style={{fontSize:9,color:t.mut,flexShrink:0,transition:"transform .2s",transform:open?"rotate(180deg)":"none"}}>▾</span>
-    </div>
-    {open&&(()=>{
-      const getMaker=(m)=>{
-        if(m.startsWith("openai:"))return"OpenAI";
-        if(m.startsWith("anthropic:"))return"Anthropic";
-        if(m.startsWith("hf.co/")){const parts=m.replace("hf.co/","").split("/");return parts[0]||"HuggingFace";}
-        const b=m.toLowerCase();
-        if(b.includes("qwen"))return"Alibaba";
-        if(b.includes("llama"))return"Meta";
-        if(b.includes("mistral")||b.includes("mixtral"))return"Mistral AI";
-        if(b.includes("gemma"))return"Google";
-        if(b.includes("phi"))return"Microsoft";
-        if(b.includes("deepseek"))return"DeepSeek";
-        if(b.includes("command"))return"Cohere";
-        if(b.includes("hermes"))return"NousResearch";
-        if(b.includes("wizard")||b.includes("vicuna"))return"WizardLM";
-        if(b.includes("codestral")||b.includes("starcoder"))return"Mistral AI";
-        return"Other";
-      };
-      const grouped={};
-      [...models].sort((a,b)=>a.localeCompare(b)).forEach(m=>{
-        const mk=getMaker(m);
-        if(!grouped[mk])grouped[mk]=[];
-        grouped[mk].push(m);
-      });
-      const sortedMakers=Object.keys(grouped).sort((a,b)=>{
-        // HuggingFace authors after main makers, "Other" last
-        if(a==="Other")return 1;if(b==="Other")return-1;
-        return a.localeCompare(b);
-      });
-      return ReactDOM.createPortal(<div ref={dropRef} style={{position:"fixed",top:dropPos.top,left:dropPos.left,minWidth:dropPos.width,maxWidth:380,background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:10,boxShadow:`0 8px 32px #00000077`,zIndex:99999,maxHeight:360,overflowY:"auto",padding:"4px",fontFamily:font}}>
-        {sortedMakers.map(maker=><div key={maker}>
-          <div style={{padding:"5px 10px 3px",fontSize:8,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.8,borderTop:maker===sortedMakers[0]?"none":`1px solid ${t.brd}22`,marginTop:maker===sortedMakers[0]?0:4,paddingTop:maker===sortedMakers[0]?5:7}}>{maker}</div>
-          {grouped[maker].map(m=>{
-            const isHF=m.startsWith("hf.co/");
-            const provider=cloudModelProvider(m);
-            const [mn,mt="latest"]=provider?[provider,cloudModelName(m)]:m.split(":");
-            const displayName=provider?mt:(isHF?m.replace("hf.co/","").split("/").pop()?.split(":")[0]||mn:mn);
-            const sc2=szCol(mt);const sel=m===value;
-            const mc=modelCaps(m);const mdi=modelDetails?.[m]||{};const ps=mdi.details?.parameter_size||"";
-            const ctx2=modelContextLength(modelDetails,m);
-            return <div key={m} onClick={()=>{onChange(m);setOpen(false);}}
-              style={{display:"flex",alignItems:"center",gap:8,padding:"6px 9px",borderRadius:7,cursor:"pointer",background:sel?`${t.acc}18`:isHF?`#ff660008`:"transparent",border:`1px solid ${sel?t.acc:isHF?"#ff660033":"transparent"}`,marginBottom:1,transition:"background .1s"}}
-              onMouseEnter={e=>{if(!sel)e.currentTarget.style.background=isHF?`#ff660015`:`${t.surface}88`;}}
-              onMouseLeave={e=>{if(!sel)e.currentTarget.style.background=isHF?`#ff660008`:"transparent";}}>
-              <span style={{fontSize:15,flexShrink:0}}>{isHF?"🤗":famIcon(provider||mn)}</span>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{display:"flex",alignItems:"center",gap:4}}>
-                  <div style={{fontSize:11,fontWeight:sel?700:500,color:sel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{displayName}</div>
-                  {isHF&&<span style={{fontSize:7,padding:"1px 4px",borderRadius:3,background:"#ff660022",color:"#ff6600",fontWeight:700,flexShrink:0,border:"1px solid #ff660033"}}>HF</span>}
-                  {provider&&<span style={{fontSize:7,padding:"1px 4px",borderRadius:3,background:`${provider==="openai"?t.ok:t.pink}22`,color:provider==="openai"?t.ok:t.pink,fontWeight:700,flexShrink:0,border:`1px solid ${provider==="openai"?t.ok:t.pink}33`}}>{provider==="openai"?"OpenAI":"Claude"}</span>}
-                </div>
-                <div style={{display:"flex",gap:3,alignItems:"center",marginTop:1,flexWrap:"wrap"}}>
-                  <span style={{fontSize:8,color:sc2,fontWeight:700}}>{mt}</span>
-                  {ps&&<span style={{fontSize:8,color:t.mut}}>{ps}</span>}
-                  {ctx2>0&&<span style={{fontSize:8,color:t.mut}}>{formatModelCtx(ctx2)} ctx</span>}
-                  {mc.map(c=><span key={c.label} style={{fontSize:8,padding:"1px 4px",borderRadius:4,background:`${c.color}20`,color:c.color,fontWeight:600,border:`1px solid ${c.color}33`}}>{c.emoji} {c.label}</span>)}
-                </div>
-              </div>
-              {sel&&<span style={{fontSize:10,color:t.acc,flexShrink:0}}>✓</span>}
-            </div>;
-          })}
-        </div>)}
-      </div>, document.body);
-    })()}
-  </div>;
-}
-
-// ============================================================
-// Mermaid diagram block — renders ```mermaid fences as SVG
-function sanitizeMermaidCode(src){
-  let out=String(src||"").replace(/\r\n/g,"\n");
-  out=out
-    .replace(/<\s*[—–-]+\s*>/g,"<-->")
-    .replace(/[—–]+>/g,"-->")
-    .replace(/<\s*[—–]+/g,"<--")
-    .replace(/\s+↔\s+/g," <--> ")
-    .replace(/\s+→\s+/g," --> ")
-    .replace(/\s+←\s+/g," <-- ")
-    .replace(/^\s*graph\s+(TD|TB|BT|LR|RL)\b/i,(m,dir)=>m.replace(/graph/i,"flowchart"));
-  out=out.replace(/(^|[^\w])([A-Za-z][\w-]*)\[([^\]\n"]+)\]/g,(m,prefix,id,label)=>{
-    const clean=label.replace(/\\"/g,'"').replace(/"/g,'\\"').trim();
-    return `${prefix}${id}["${clean}"]`;
-  });
-  out=out.split("\n").map(line=>{
-    const m=line.match(/^(\s*)([A-Za-z][\w-]*(?:\s*&\s*[A-Za-z][\w-]*)+)\s*(-->|<-->|---|--)\s*([A-Za-z][\w-]*)\s*$/);
-    if(!m)return line;
-    const [,indent,left,arrow,right]=m;
-    return left.split(/\s*&\s*/).map(node=>`${indent}${node} ${arrow} ${right}`).join("\n");
-  }).join("\n");
-  return out;
-}
-
-function initMermaidTheme(theme,font){
-  if(!window.mermaid)return;
-  const t=theme||{};
-  const bg=t.bgDeep||"#ffffff";
-  const surface=t.surface||"#f8fafc";
-  const brd=t.brd||"#d7dde8";
-  const acc=t.acc||"#175cd3";
-  const text=t.text||"#161b22";
-  const dim=t.dim||"#374151";
-  const mut=t.mut||"#667085";
-  const warm=t.warm||"#b7791f";
-  const err=t.err||"#b42318";
-  const sfHov=t.sfHov||"#eef4ff";
-  window.mermaid.initialize({
-    startOnLoad:false,
-    securityLevel:"strict",
-    theme:"base",
-    fontFamily:font,
-    // SVG <text> labels everywhere. The default htmlLabels mode puts flowchart/class/
-    // state labels in <foreignObject> HTML, which browsers (notably WebKit with a
-    // CSS-scaled svg) can fail to paint — boxes render but text is invisible — and
-    // html2canvas can't rasterize for PDF export. Sequence diagrams already use SVG
-    // text, which is why they were unaffected.
-    htmlLabels:false,
-    flowchart:{htmlLabels:false},
-    class:{htmlLabels:false},
-    themeVariables:{
-      background:bg,
-      primaryColor:surface,
-      primaryTextColor:text,
-      primaryBorderColor:brd,
-      secondaryColor:bg,
-      secondaryTextColor:dim,
-      secondaryBorderColor:brd,
-      tertiaryColor:sfHov,
-      tertiaryTextColor:text,
-      tertiaryBorderColor:brd,
-      lineColor:acc,
-      textColor:text,
-      mainBkg:surface,
-      nodeBorder:acc,
-      nodeTextColor:text,
-      clusterBkg:bg,
-      clusterBorder:brd,
-      titleColor:text,
-      // Edge labels (e.g. flowchart link text) sit on a solid panel-colored chip so
-      // they stay legible over any theme background.
-      edgeLabelBackground:surface,
-      // Class-diagram text — not covered by the default base-theme vars, which is why
-      // class diagrams previously rendered with empty/invisible boxes.
-      classText:text,
-      relationLabelColor:text,
-      relationLabelBackground:surface,
-      // State / pie diagram text
-      stateLabelColor:text,
-      pieTitleTextColor:text,
-      pieSectionTextColor:text,
-      noteBkgColor:`${warm}22`,
-      noteTextColor:text,
-      noteBorderColor:warm,
-      errorBkgColor:`${err}22`,
-      errorTextColor:err,
-      actorBkg:surface,
-      actorBorder:acc,
-      actorTextColor:text,
-      actorLineColor:mut,
-      signalColor:dim,
-      signalTextColor:text,
-      labelBoxBkgColor:surface,
-      labelBoxBorderColor:brd,
-      labelTextColor:text,
-      loopTextColor:text,
-      activationBkgColor:sfHov,
-      activationBorderColor:acc
-    }
-  });
-}
-
-function MermaidBlock({code,theme,font,epoch,printMode=false,streaming=false}){
-  const t=theme;
-  const containerRef=useRef(null);
-  const fsRef=useRef(null);
-  const panZoomRef=useRef(null);
-  const [err,setErr]=useState(null);
-  const [pending,setPending]=useState(false);
-  const [repaired,setRepaired]=useState(false);
-  const [cpd,setCpd]=useState(false);
-  const [showSrc,setShowSrc]=useState(false);
-  const [fs,setFs]=useState(false);
-  const [tick,setTick]=useState(0); // bumped when the lazy mermaid chunk loads
-  const id=useMemo(()=>`mmd-${Math.random().toString(36).slice(2,10)}`,[]);
-  useEffect(()=>{
-    if(!window.mermaid){window.ensureMermaid&&window.ensureMermaid().then(()=>setTick(x=>x+1));return;}
-    if(!containerRef.current||showSrc)return;
-    let cancelled=false;
-    setErr(null);
-    setRepaired(false);
-    setPending(true);
-    try{
-      // Apply the current theme before rendering. Mermaid is lazy-loaded now, so the
-      // app-level init effect may have run (and bailed) before mermaid existed — this
-      // guarantees the user's theme colors are set for the block that triggered the load
-      // and on every theme change (effect deps include t/font).
-      initMermaidTheme(t,font);
-      const repairedCode=sanitizeMermaidCode(code);
-      const renderOne=(src,suffix)=>window.mermaid.render(`${id}-${suffix}`,src);
-      renderOne(code,"raw").then(({svg})=>{
-        if(!cancelled&&containerRef.current){containerRef.current.innerHTML=svg;setPending(false);}
-      }).catch(firstErr=>{
-        if(repairedCode===code){
-          if(!cancelled){
-            if(streaming){setErr(null);setPending(true);}
-            else{setPending(false);setErr(String(firstErr?.message||firstErr));}
-          }
-          return;
-        }
-        renderOne(repairedCode,"fixed").then(({svg})=>{
-          if(!cancelled&&containerRef.current){containerRef.current.innerHTML=svg;setRepaired(true);setPending(false);}
-        }).catch(e=>{
-          if(!cancelled){
-            if(streaming){setErr(null);setPending(true);}
-            else{setPending(false);setErr(String(e?.message||firstErr?.message||e||firstErr));}
-          }
-        });
-      });
-    }catch(e){
-      if(streaming){setErr(null);setPending(true);}
-      else{setPending(false);setErr(String(e?.message||e));}
-    }
-    return()=>{cancelled=true;};
-  },[code,epoch,showSrc,id,printMode,t,font,streaming,tick]);
-  useEffect(()=>{
-    if(!fs||!fsRef.current||!containerRef.current)return;
-    const srcSvg=containerRef.current.querySelector("svg");
-    if(!srcSvg)return;
-    const clone=srcSvg.cloneNode(true);
-    clone.removeAttribute("style");
-    clone.setAttribute("width","100%");
-    clone.setAttribute("height","100%");
-    clone.style.maxWidth="none";
-    clone.style.display="block";
-    fsRef.current.innerHTML="";
-    fsRef.current.appendChild(clone);
-    try{
-      panZoomRef.current=window.svgPanZoom(clone,{
-        controlIconsEnabled:true,
-        fit:true,
-        center:true,
-        minZoom:0.3,
-        maxZoom:12,
-        zoomScaleSensitivity:0.35,
-        contain:false
-      });
-    }catch(e){console.warn("svg-pan-zoom failed",e);}
-    return()=>{
-      try{panZoomRef.current?.destroy();}catch{}
-      panZoomRef.current=null;
-    };
-  },[fs]);
-  useEffect(()=>{
-    if(!fs)return;
-    const onKey=e=>{if(e.key==="Escape")setFs(false);};
-    window.addEventListener("keydown",onKey);
-    return()=>window.removeEventListener("keydown",onKey);
-  },[fs]);
-  const copyCode=()=>{try{navigator.clipboard.writeText(code);setCpd(true);setTimeout(()=>setCpd(false),1500);}catch{}};
-  const headerBtn={background:"none",border:"none",cursor:"pointer",padding:"3px 6px",fontSize:10,fontFamily:font,borderRadius:5,display:"flex",alignItems:"center",gap:3};
-  const wrapStyle=printMode
-    ?{margin:"12pt 0",borderRadius:6,overflow:"hidden",border:`1px solid ${t.brd}`,background:"#ffffff",breakInside:"avoid",pageBreakInside:"avoid"}
-    :{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep};
-  const headStyle=printMode
-    ?{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5pt 8pt",background:"#f8fafc",borderBottom:`1px solid ${t.brd}`}
-    :{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`};
-  return <div className={printMode?"mermaid-print-block":undefined} style={wrapStyle}>
-    <div style={headStyle}>
-      <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ mermaid{repaired&&<span style={{color:t.warm,letterSpacing:0,textTransform:"none",fontWeight:600}}>repaired</span>}</span>
-      {!printMode&&<div style={{display:"flex",gap:4}}>
-        {!err&&!showSrc&&<button onClick={()=>setFs(true)} style={{...headerBtn,color:t.dim}} title="fullscreen / zoom">⛶ expand</button>}
-        <button onClick={()=>setShowSrc(s=>!s)} style={{...headerBtn,color:showSrc?t.acc:t.dim}} title={showSrc?"show diagram":"show source"}>{showSrc?"◱ diagram":"{ } source"}</button>
-        <button onClick={copyCode} style={{...headerBtn,color:cpd?t.ok:t.dim}} title="copy source">{cpd?"✓ copied":"⧉ copy"}</button>
-      </div>}
-    </div>
-    {err?<div>
-      <div style={{padding:"8px 12px",background:`${t.err}12`,color:t.err,fontSize:11,fontFamily:font,borderBottom:`1px solid ${t.err}33`}}>⚠ Mermaid render error: {err}</div>
-      <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
-    </div>
-    :showSrc?<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
-    :<div style={{position:"relative",background:printMode?"#ffffff":t.bgDeep}}>
-      <div ref={containerRef} className="mermaid-container" style={{background:printMode?"#ffffff":t.bgDeep,minHeight:streaming&&pending?120:undefined,opacity:streaming&&pending?0:1,transition:"opacity .18s ease"}}/>
-      {streaming&&pending&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",gap:8,color:t.mut,fontSize:11,fontFamily:font,background:t.bgDeep}}>
-        <span style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:"pulse 1.4s infinite"}}/>
-        rendering diagram...
-      </div>}
-    </div>}
-    {!printMode&&fs&&ReactDOM.createPortal(
-      <div style={{position:"fixed",inset:0,zIndex:200,background:"rgba(0,0,0,.82)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setFs(false);}}>
-        <div style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,width:"min(1600px,95vw)",height:"90vh",display:"flex",flexDirection:"column",boxShadow:`0 8px 48px #0008`,overflow:"hidden"}}>
-          <div style={{padding:"10px 16px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:10,flexShrink:0,background:`${t.surface}88`}}>
-            <span style={{fontSize:11,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ mermaid — fullscreen</span>
-            <span style={{fontSize:10,color:t.mut,flex:1}}>drag to pan · scroll to zoom · ESC to close</span>
-            <button onClick={()=>panZoomRef.current?.reset()} style={{...headerBtn,color:t.dim}} title="reset view">⟲ reset</button>
-            <button onClick={()=>setFs(false)} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:18,padding:"0 4px",lineHeight:1}} title="close">✕</button>
-          </div>
-          <div ref={fsRef} style={{flex:1,overflow:"hidden",background:t.bgDeep}}/>
-        </div>
-      </div>,
-      document.body
-    )}
-  </div>;
-}
-
-function parseChartConfig(code){
-  let cfg=typeof code==="string"?JSON.parse(code):code;
-  if(!cfg||typeof cfg!=="object"||Array.isArray(cfg))throw new Error("Chart config must be a JSON object");
-  const nativeData=(cfg.data&&typeof cfg.data==="object"&&!Array.isArray(cfg.data))?cfg.data:null;
-  if(nativeData&&(Array.isArray(nativeData.datasets)||Array.isArray(nativeData.labels))){
-    return {...cfg,labels:nativeData.labels||cfg.labels||[],datasets:nativeData.datasets||cfg.datasets||[]};
-  }
-  if(Array.isArray(cfg.data)&&!cfg.datasets)return {...cfg,datasets:[{label:cfg.label||"Value",data:cfg.data}]};
-  return {...cfg,datasets:cfg.datasets||[]};
-}
-function looksLikeChartConfig(code){
-  try{
-    const cfg=parseChartConfig(code);
-    const type=cfg.type||"";
-    const allowed=["bar","line","pie","doughnut","scatter","radar","polarArea","bubble"];
-    return allowed.includes(type)&&(
-      Array.isArray(cfg.datasets)||
-      Array.isArray(cfg.labels)||
-      (cfg.data&&typeof cfg.data==="object")
-    );
-  }catch{return false;}
-}
-
-// Chart.js block — renders ```chart / ```pygraph JSON fences as inline charts
-function ChartBlock({code,theme,font,epoch,kind="chart",printMode=false,streaming=false}){
-  const t=theme;
-  const canvasRef=useRef(null);
-  const chartRef=useRef(null);
-  const [err,setErr]=useState(null);
-  const [pending,setPending]=useState(false);
-  const [cpd,setCpd]=useState(false);
-  const [showSrc,setShowSrc]=useState(false);
-  const [tick,setTick]=useState(0); // bumped when the lazy chart.js chunk loads
-  useEffect(()=>{
-    if(!window.Chart){window.ensureChart&&window.ensureChart().then(()=>setTick(x=>x+1));if(streaming)setPending(true);return;}
-    if(!canvasRef.current||showSrc){if(streaming&&!showSrc)setPending(true);return;}
-    let cfg;
-    try{cfg=parseChartConfig(code);}
-    catch(e){
-      if(streaming){setErr(null);setPending(true);}
-      else{setPending(false);setErr("Invalid JSON: "+String(e.message));}
-      return;
-    }
-    setPending(false);
-    const palette=printMode
-      ?["#175cd3","#0f766e","#b7791f","#b42318","#7c3aed","#0891b2","#c2410c","#2563eb"]
-      :[t.acc,t.ok,t.warm,t.err||"#e06c75","#b39ddb","#80cbc4","#ffab91","#90caf9"];
-    const chartText=printMode?"#263238":t.text;
-    const chartDim=printMode?"#475467":t.dim;
-    const chartMut=printMode?"#667085":t.mut;
-    const chartGrid=printMode?"#d7dde8":t.brd+"33";
-    const tooltipBg=printMode?"#ffffff":t.surface+"EE";
-    const tooltipBorder=printMode?"#98a2b3":t.brd;
-    const type=cfg.type||"bar";
-    const isCircular=["pie","doughnut","polarArea"].includes(type);
-    const datasets=(cfg.datasets||[]).map((ds,i)=>{
-      const color=ds.color||ds.borderColor||palette[i%palette.length];
-      const out={label:ds.label||`Dataset ${i+1}`,data:ds.data||[],borderWidth:ds.borderWidth??2,tension:ds.tension??0.25,...ds};
-      if(isCircular){
-        out.backgroundColor=ds.backgroundColor||(ds.data||[]).map((_,k)=>palette[k%palette.length]+"CC");
-        out.borderColor=ds.borderColor||(printMode?"#ffffff":t.bgDeep);
-        out.borderWidth=ds.borderWidth??2;
-      }else{
-        out.backgroundColor=ds.backgroundColor||(type==="line"?color+"22":color+"AA");
-        out.borderColor=ds.borderColor||color;
-      }
-      return out;
-    });
-    if(chartRef.current){try{chartRef.current.destroy();}catch{}chartRef.current=null;}
-    try{
-      chartRef.current=new window.Chart(canvasRef.current,{
-        type,
-        data:{labels:cfg.labels||[],datasets},
-        options:{
-          responsive:true,
-          maintainAspectRatio:false,
-          plugins:{
-            legend:{labels:{color:chartDim,font:{family:font,size:11}}},
-            title:cfg.title?{display:true,text:cfg.title,color:chartText,font:{family:font,size:13,weight:"bold"},padding:{bottom:10}}:{display:false},
-            tooltip:{bodyFont:{family:font},titleFont:{family:font},backgroundColor:tooltipBg,borderColor:tooltipBorder,borderWidth:1,titleColor:chartText,bodyColor:chartDim}
-          },
-          scales:isCircular?{}:{
-            x:{ticks:{color:chartMut,font:{family:font,size:10}},grid:{color:chartGrid},title:cfg.xLabel?{display:true,text:cfg.xLabel,color:chartDim,font:{family:font,size:11}}:{display:false}},
-            y:{ticks:{color:chartMut,font:{family:font,size:10}},grid:{color:chartGrid},title:cfg.yLabel?{display:true,text:cfg.yLabel,color:chartDim,font:{family:font,size:11}}:{display:false}}
-          },
-          ...(cfg.options||{}),
-          animation:printMode?false:(cfg.options||{}).animation
-        }
-      });
-      setErr(null);
-    }catch(e){
-      if(streaming){setErr(null);setPending(true);}
-      else{setPending(false);setErr("Chart error: "+String(e.message));}
-    }
-    return()=>{if(chartRef.current){try{chartRef.current.destroy();}catch{}chartRef.current=null;}};
-  },[code,epoch,showSrc,t,font,printMode,streaming,tick]);
-  const copyCode=()=>{try{navigator.clipboard.writeText(code);setCpd(true);setTimeout(()=>setCpd(false),1500);}catch{}};
-  const headerBtn={background:"none",border:"none",cursor:"pointer",padding:"3px 6px",fontSize:10,fontFamily:font,borderRadius:5,display:"flex",alignItems:"center",gap:3};
-  const wrapStyle=printMode
-    ?{margin:"12pt 0",borderRadius:6,overflow:"hidden",border:`1px solid ${t.brd}`,background:"#ffffff",breakInside:"avoid",pageBreakInside:"avoid"}
-    :{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep};
-  const headStyle=printMode
-    ?{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5pt 8pt",background:"#f8fafc",borderBottom:`1px solid ${t.brd}`}
-    :{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`};
-  return <div className={printMode?"chart-print-block":undefined} style={wrapStyle}>
-    <div style={headStyle}>
-      <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ {kind}</span>
-      {!printMode&&<div style={{display:"flex",gap:4}}>
-        <button onClick={()=>setShowSrc(s=>!s)} style={{...headerBtn,color:showSrc?t.acc:t.dim}} title={showSrc?"show chart":"show source"}>{showSrc?"◱ chart":"{ } source"}</button>
-        <button onClick={copyCode} style={{...headerBtn,color:cpd?t.ok:t.dim}} title="copy source">{cpd?"✓ copied":"⧉ copy"}</button>
-      </div>}
-    </div>
-    {err?<div>
-      <div style={{padding:"8px 12px",background:`${t.err}12`,color:t.err,fontSize:11,fontFamily:font,borderBottom:`1px solid ${t.err}33`}}>⚠ Chart render error: {err}</div>
-      <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
-    </div>
-    :showSrc?<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
-    :<div style={{padding:printMode?"10pt":"14px",height:printMode?280:320,position:"relative",background:printMode?"#ffffff":t.bgDeep}}>
-      <canvas ref={canvasRef} style={{opacity:streaming&&pending?0:1,transition:"opacity .18s ease"}}/>
-      {streaming&&pending&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",gap:8,color:t.mut,fontSize:11,fontFamily:font,background:t.bgDeep}}>
-        <span style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:"pulse 1.4s infinite"}}/>
-        rendering chart...
-      </div>}
-    </div>}
-  </div>;
-}
-
-// Syntax-highlighted code block (Prism)
-function CodeBlock({code,lang,t,font}){
-  const ref=useRef(null);
-  useEffect(()=>{
-    if(!ref.current||!window.Prism)return;
-    try{window.Prism.highlightElement(ref.current);}catch{}
-  },[code,lang]);
-  const cls=lang?`language-${lang}`:"language-none";
-  return <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,background:"transparent"}}><code ref={ref} className={cls} style={{fontFamily:font,background:"transparent",color:t.dim,padding:0,textShadow:"none"}}>{code}</code></pre>;
-}
-
-function InlineMath({code,raw,theme,font,printMode=false}){
-  const html=useMemo(()=>{
-    if(!window.katex)return null;
-    try{
-      return window.katex.renderToString(code,{displayMode:false,throwOnError:false,strict:"ignore",trust:false});
-    }catch{return null;}
-  },[code]);
-  if(!html)return <span>{raw||`$${code}$`}</span>;
-  return <span style={{color:"inherit",fontFamily:printMode?undefined:font}} dangerouslySetInnerHTML={{__html:html}}/>;
-}
-
-function InlineColorSwatch({value,theme,font,printMode=false}){
-  const t=theme||{};
-  const bg=printMode?"#f8fafc":`${t.surface||"#0f172a"}BB`;
-  const brd=printMode?"#d7dde8":`${t.brd||"#334155"}55`;
-  const label=printMode?"#334155":(t.warm||"#facc15");
-  return <span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"1px 6px 1px 4px",background:bg,border:`1px solid ${brd}`,borderRadius:4,verticalAlign:"middle",margin:"0 1px"}}>
-    <span style={{width:10,height:10,borderRadius:2,background:value,border:`1px solid ${brd}`,flexShrink:0,boxShadow:"inset 0 0 0 1px rgba(255,255,255,.08)"}}/>
-    <code style={{fontSize:"0.85em",color:label,background:"none",padding:0,fontFamily:font}}>{value}</code>
-  </span>;
-}
-
-// Collapsible <details>/<summary> block
-function Collapsible({summary,children,theme,font,defaultOpen}){
-  const [open,setOpen]=useState(!!defaultOpen);
-  return <div style={{margin:"8px 0",border:`1px solid ${theme.brd}44`,borderRadius:8,background:`${theme.surface}44`,overflow:"hidden"}}>
-    <div onClick={()=>setOpen(o=>!o)} style={{padding:"6px 10px",cursor:"pointer",display:"flex",alignItems:"center",gap:6,fontSize:12,fontWeight:600,color:theme.dim,userSelect:"none",background:`${theme.surface}66`}}>
-      <span style={{display:"inline-block",transition:"transform .15s",transform:open?"rotate(90deg)":"rotate(0)",color:theme.acc,fontSize:10}}>▶</span>
-      <span>{summary||"Details"}</span>
-    </div>
-    {open&&<div style={{padding:"8px 12px",fontSize:13,lineHeight:1.6,color:theme.dim,borderTop:`1px solid ${theme.brd}28`}}>{children}</div>}
-  </div>;
-}
-
-// KaTeX post-render wrapper — runs renderMathInElement against mounted children
-// Memoized markdown render for FINALIZED messages. Every streamed token
-// rebuilds the conversation object, which re-runs md() for every message in
-// the list. md(content) is pure, so we skip the re-parse unless content (or
-// render opts) actually changed — `md` itself is excluded from the compare
-// because it's a fresh-but-pure closure each render.
-const MemoMD = React.memo(
-  function MemoMD({content, md, opts}){ return <MDWrap>{md(content, opts)}</MDWrap>; },
-  (prev, next)=> prev.content===next.content && prev.opts===next.opts
-);
-
-// Stable per-message citation opts. MemoMD compares opts by REFERENCE — a fresh
-// object each render would re-parse every message on every token. Cache keyed on
-// the metadata object (or the msg itself when metadata is a serialized string).
-const _citeOptsCache=new WeakMap();
-function citeOptsFor(msg){
-  if(!msg||typeof msg!=="object")return undefined;
-  const key=(msg.metadata&&typeof msg.metadata==="object")?msg.metadata:msg;
-  if(_citeOptsCache.has(key))return _citeOptsCache.get(key);
-  let meta=msg.metadata;
-  if(typeof meta==="string"){try{meta=JSON.parse(meta);}catch{meta=null;}}
-  const ev=(meta?.saved_events||[]).filter(e=>e.type==="kb_sources").pop();
-  const v=(ev?.data?.sources?.length)?{citations:ev.data.sources}:undefined;
-  _citeOptsCache.set(key,v);
-  return v;
-}
-
-// Inline KB citation chip [n] — click opens a small source popover.
-function CitationChip({n, src, theme, font}){
-  const [open,setOpen]=useState(false);
-  const ref=useRef(null);
-  useEffect(()=>{
-    if(!open)return;
-    const close=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};
-    document.addEventListener("mousedown",close);
-    return ()=>document.removeEventListener("mousedown",close);
-  },[open]);
-  if(!src)return <sup style={{fontSize:"0.75em",margin:"0 1px",color:theme.mut}}>[{n}]</sup>;
-  return <sup ref={ref} style={{fontSize:"0.72em",lineHeight:0,margin:"0 1px",position:"relative",display:"inline-block"}}>
-    <button onClick={()=>setOpen(o=>!o)} title={`${src.filename} (chunk ${src.chunk_index})`} style={{background:`${theme.acc}18`,border:"none",color:theme.acc,padding:"0 4px",borderRadius:3,fontWeight:700,cursor:"pointer",fontFamily:font,fontSize:"inherit",lineHeight:1.5}}>{n}</button>
-    {open&&<span style={{position:"absolute",bottom:"calc(100% + 6px)",left:"50%",transform:"translateX(-50%)",zIndex:30,width:300,maxWidth:"72vw",background:theme.bgDeep,border:`1px solid ${theme.brd}66`,borderRadius:8,padding:"9px 11px",boxShadow:"0 8px 24px rgba(0,0,0,.45)",textAlign:"left",fontSize:11,lineHeight:1.5,fontWeight:400,display:"block",whiteSpace:"normal"}}>
-      <span style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
-        <span style={{fontWeight:700,color:theme.acc,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>📄 {src.filename}</span>
-        <span style={{marginLeft:"auto",fontSize:9,color:theme.mut,flexShrink:0}}>chunk {src.chunk_index}{typeof src.score==="number"?` · ${Math.round(src.score*100)}%`:""}</span>
-      </span>
-      <span style={{display:"block",color:theme.dim,maxHeight:120,overflow:"auto"}}>{src.snippet||""}{src.snippet&&src.snippet.length>=300?"…":""}</span>
-    </span>}
-  </sup>;
-}
-
-function MDWrap({children}){
-  const ref=useRef(null);
-  useEffect(()=>{
-    if(!window.renderMathInElement||!ref.current)return;
-    try{
-      // Currency $-signs (e.g. "$94 ... $17.50") otherwise pair up as a math
-      // span. Swap them for a placeholder before auto-render, restore after.
-      const PH="";
-      const SKIP={SCRIPT:1,STYLE:1,CODE:1,PRE:1,TEXTAREA:1};
-      const walk=(n,fn)=>{
-        if(n.nodeType===3){fn(n);return;}
-        if(n.nodeType!==1||SKIP[n.tagName])return;
-        for(let c=n.firstChild;c;c=c.nextSibling)walk(c,fn);
-      };
-      walk(ref.current,n=>{
-        const v=n.nodeValue;
-        if(!v||v.indexOf("$")<0)return;
-        const out=v.replace(/(?<![\\$])\$(?=\d)/g,PH);
-        if(out!==v)n.nodeValue=out;
-      });
-      window.renderMathInElement(ref.current,{
-        delimiters:[
-          {left:"$$",right:"$$",display:true},
-          {left:"\\[",right:"\\]",display:true},
-          {left:"\\(",right:"\\)",display:false},
-          {left:"$",right:"$",display:false}
-        ],
-        throwOnError:false,
-        ignoredTags:["script","noscript","style","textarea","pre","code"]
-      });
-      walk(ref.current,n=>{
-        const v=n.nodeValue;
-        if(v&&v.indexOf(PH)>=0)n.nodeValue=v.split(PH).join("$");
-      });
-    }catch{}
-  });
-  return <div ref={ref}>{children}</div>;
-}
+const CHAT_HISTORY_RENDER_CHUNK = 80;
 
 // ============================================================
 function HyprChat(){
@@ -3608,6 +158,7 @@ function HyprChat(){
   const [aiderEnabled,setAiderEnabled]=useState(()=>{try{return localStorage.getItem("hc-aider-enabled")!=="false";}catch{return true;}});
   const [aiderModel,setAiderModel]=useState(()=>{try{return localStorage.getItem("hc-aider-model")||"";}catch{return "";}});
   const [aiderAutoTest,setAiderAutoTest]=useState(()=>{try{return localStorage.getItem("hc-aider-auto-test")!=="false";}catch{return true;}});
+  const [openhandsDisableThinking,setOpenhandsDisableThinking]=useState(()=>{try{return localStorage.getItem("hc-openhands-disable-thinking")!=="false";}catch{return true;}});
   const [quickSearchMode,setQuickSearchMode]=useState(()=>{try{return localStorage.getItem("hc-quick-search-mode")||"balanced";}catch{return "balanced";}});
   const [ctxTokens,setCtxTokens]=useState(0);
   const [genTokens,setGenTokens]=useState(0);
@@ -3764,20 +315,13 @@ function HyprChat(){
     if(settingsPulseTimer.current)clearTimeout(settingsPulseTimer.current);
     settingsPulseTimer.current=setTimeout(()=>setSettingsPulse(null),1800);
   };
-  const hydrateServerSetting=(settingKey,setter,value,current)=>{
-    if(value!==current)skipSettingPatchRef.current[settingKey]=true;
-    setter(value);
-  };
-  const persistServerSetting=(storageKey,settingKey,value,storageValue=String(value))=>{
-    const seen=!!seenSettingEffectRef.current[settingKey];
-    seenSettingEffectRef.current[settingKey]=true;
-    try{localStorage.setItem(storageKey,storageValue);}catch{}
-    if(skipSettingPatchRef.current[settingKey]){delete skipSettingPatchRef.current[settingKey];return;}
-    if(!settingsLoadedRef.current&&!seen)return;
-    fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({[settingKey]:value})})
-      .then(r=>{flashSettingsPulse(r.ok?"Saved":"Failed",r.ok?"success":"error");})
-      .catch(()=>flashSettingsPulse("Failed","error"));
-  };
+  const {hydrateServerSetting,persistServerSetting}=createSettingsSync({
+    api:API,
+    settingsLoadedRef,
+    seenSettingEffectRef,
+    skipSettingPatchRef,
+    flashSettingsPulse,
+  });
 
   // Mermaid init — re-runs when theme/font changes; bumps epoch to force diagram re-render
   const [mermaidEpoch,setMermaidEpoch]=useState(0);
@@ -3843,6 +387,7 @@ function HyprChat(){
   useEffect(()=>{persistServerSetting("hc-openhands-enabled","openhands_enabled",openhandsEnabled,String(openhandsEnabled));},[openhandsEnabled]);
   useEffect(()=>{persistServerSetting("hc-openhands-max-rounds","openhands_max_rounds",openhandsMaxRounds,String(openhandsMaxRounds));},[openhandsMaxRounds]);
   useEffect(()=>{persistServerSetting("hc-openhands-reasoning-effort","openhands_reasoning_effort",openhandsReasoningEffort);},[openhandsReasoningEffort]);
+  useEffect(()=>{persistServerSetting("hc-openhands-disable-thinking","openhands_disable_thinking",openhandsDisableThinking,String(openhandsDisableThinking));},[openhandsDisableThinking]);
   useEffect(()=>{persistServerSetting("hc-aider-enabled","aider_enabled",aiderEnabled,String(aiderEnabled));},[aiderEnabled]);
   useEffect(()=>{persistServerSetting("hc-aider-model","aider_model",aiderModel);},[aiderModel]);
   useEffect(()=>{persistServerSetting("hc-aider-auto-test","aider_auto_test",aiderAutoTest,String(aiderAutoTest));},[aiderAutoTest]);
@@ -3935,6 +480,7 @@ function HyprChat(){
   // Conversation id currently being streamed (null when idle). Set at sendMessages start, cleared on completion.
   const streamingCidRef=useRef(null);
   const [kbs,setKbs]=useState([]);
+  const kbSaveTimersRef=useRef(new Map());
   const [uploadProgress,setUploadProgress]=useState({});  // {kbId: {filename, progress, status, error}}
   const [tools,setTools]=useState([]);
   const [mcs,setMcs]=useState([]);
@@ -3958,6 +504,7 @@ function HyprChat(){
   const [connectorBusy,setConnectorBusy]=useState("");
   const [expandedPill,setExpandedPill]=useState(null);
   const [loadingConv,setLoadingConv]=useState(false);
+  const [visibleMessageCounts,setVisibleMessageCounts]=useState({});
   const [editingMsg,setEditingMsg]=useState(null); // {index, content}
   const [regenPopover,setRegenPopover]=useState(null); // {index, model, temperature, personaId}
   const [toasts,setToasts]=useState([]); // [{id,type,text,detail,action}]
@@ -4074,7 +621,7 @@ function HyprChat(){
   const [councilSuggestions,setCouncilSuggestions]=useState([]); // suggested prompts for council
   const [councilSugLoading,setCouncilSugLoading]=useState(false);
   const [editMember,setEditMember]=useState(null); // member id being edited
-  const [editMemberForm,setEditMemberForm]=useState({system_prompt:"",persona_name:""});
+  const [editMemberForm,setEditMemberForm]=useState({model:"",model_config_id:"",system_prompt:"",persona_name:""});
 
   const [quickResults,setQuickResults]=useState([]); // per send
   const [searchLoading,setSearchLoading]=useState(false);
@@ -4386,7 +933,7 @@ function HyprChat(){
       return "Roleplay persona focused on identity, voice, tone, scenario, and conversational style.";
     }
     if(n.includes("deep researcher"))return "Research-first agent for multi-source investigations, citations, and synthesized reports.";
-    if(n.includes("daedalus"))return "Agentic coding workflow for uploaded projects: plans, patches, reviews, and iterates toward a verified fix.";
+    if(n.includes("daedalus"))return "Agentic coding workflow for greenfield builds and existing projects: plans, builds, repairs, reviews, and delivers verified code.";
     if(n.includes("coder"))return "General coding agent for shell work, file edits, debugging, and implementation help.";
     if(n.includes("conspiracy"))return "Investigative research agent for hidden narratives, disputed claims, source comparison, and deep-dive synthesis.";
     const tools=(mc.tool_ids||[]);
@@ -4519,7 +1066,26 @@ function HyprChat(){
     setLastPersonaId(mc.id);localStorage.setItem("hc-last-persona",mc.id);setPanel("chat");
   };
   const clearPendingProfile=()=>{setPendingPersona(null);setPendingToolIds([]);setLastPersonaId(null);try{localStorage.removeItem("hc-last-persona");}catch{};};
-  const saveKb=(kb)=>{fetch(`${API}/api/knowledge-bases/${kb.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:kb.name,description:kb.description})}).catch(()=>{});};
+  const saveKb=(kb)=>{
+    if(!kb?.id)return Promise.resolve();
+    return fetch(`${API}/api/knowledge-bases/${kb.id}`,{
+      method:"PUT",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({name:kb.name||"",description:kb.description||""})
+    }).catch(()=>{});
+  };
+  const scheduleKbSave=(kb,delay=450)=>{
+    if(!kb?.id)return;
+    const timers=kbSaveTimersRef.current;
+    if(timers.has(kb.id))clearTimeout(timers.get(kb.id));
+    timers.set(kb.id,setTimeout(()=>{timers.delete(kb.id);saveKb(kb);},delay));
+  };
+  const flushKbSave=(kb)=>{
+    if(!kb?.id)return;
+    const timers=kbSaveTimersRef.current;
+    if(timers.has(kb.id)){clearTimeout(timers.get(kb.id));timers.delete(kb.id);}
+    saveKb(kb);
+  };
   const parseConnectorJson=(txt,fallback,label)=>{
     try{return (txt||"").trim()?JSON.parse(txt):fallback;}catch(e){notify({type:"error",text:`Invalid ${label}`,detail:e.message||String(e)});throw e;}
   };
@@ -4578,7 +1144,7 @@ function HyprChat(){
   };
 
   const resetUserScopedState=()=>{
-    setConvs([]);setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];
+    setConvs([]);setVisibleMessageCounts({});setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];
     setKbs([]);setTools([]);setMcs([]);setWorkspaces([]);setActiveWs(null);setWsDetail(null);setWsPanel(false);
     setConnectorTools([]);setMcpServers([]);setOpenapiConnectors([]);
     setResearchReports([]);setActiveResearchId(null);setActiveResearch(null);setResearchEvents([]);setResearchLiveMarkdown("");setResearchRunning(false);
@@ -4773,6 +1339,7 @@ function HyprChat(){
       if(d.openhands_enabled!=null)hydrateServerSetting("openhands_enabled",setOpenhandsEnabled,d.openhands_enabled,openhandsEnabled);
       if(d.openhands_max_rounds!=null)hydrateServerSetting("openhands_max_rounds",setOpenhandsMaxRounds,d.openhands_max_rounds,openhandsMaxRounds);
       if(d.openhands_reasoning_effort)hydrateServerSetting("openhands_reasoning_effort",setOpenhandsReasoningEffort,d.openhands_reasoning_effort,openhandsReasoningEffort);
+      if(d.openhands_disable_thinking!=null)hydrateServerSetting("openhands_disable_thinking",setOpenhandsDisableThinking,d.openhands_disable_thinking,openhandsDisableThinking);
       if(d.aider_enabled!=null)hydrateServerSetting("aider_enabled",setAiderEnabled,d.aider_enabled,aiderEnabled);
       if(d.aider_model!=null)hydrateServerSetting("aider_model",setAiderModel,d.aider_model,aiderModel);
       if(d.aider_auto_test!=null)hydrateServerSetting("aider_auto_test",setAiderAutoTest,d.aider_auto_test,aiderAutoTest);
@@ -5340,6 +1907,7 @@ function HyprChat(){
     setConvs(prev=>prev.filter(c=>!isGhostConv(c)));
     setGhostMode(false);
     setActId(id);setPanel("chat");setEvts([]);setExpandedPill(null);setQuickResults([]);
+    setVisibleMessageCounts(p=>({...p,[id]:CHAT_HISTORY_RENDER_CHUNK}));
     // Check if we're navigating back to an active council stream
     const activeStream=councilStreamRef.current;
     if(activeStream?.cid===id&&activeStream.running){
@@ -5503,6 +2071,16 @@ function HyprChat(){
       }
       return updated;
     }));
+  },[]);
+  const revealOlderMessages=useCallback((id,totalMessages)=>{
+    if(!id)return;
+    const el=chatScrollRef.current;
+    const beforeHeight=el?.scrollHeight||0;
+    setVisibleMessageCounts(p=>({...p,[id]:Math.min(totalMessages,(p[id]||CHAT_HISTORY_RENDER_CHUNK)+CHAT_HISTORY_RENDER_CHUNK)}));
+    requestAnimationFrame(()=>{
+      const next=chatScrollRef.current;
+      if(next&&beforeHeight)next.scrollTop+=next.scrollHeight-beforeHeight;
+    });
   },[]);
   const useModelFromManager=(modelName)=>{
     if(!modelName)return;
@@ -5767,7 +2345,7 @@ function HyprChat(){
       const r=await fetch(`${API}/api/conversations`,{method:"DELETE"});
       const d=await r.json().catch(()=>({}));
       if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
-      setConvs([]);setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];setCoderWorkflows([]);
+      setConvs([]);setVisibleMessageCounts({});setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];setCoderWorkflows([]);
       notify({type:"success",text:"Chats deleted",detail:`Deleted ${d.deleted||0} conversations.`});
     }catch(e){notify({type:"error",text:"Delete failed",detail:e.message});}
   };
@@ -5910,9 +2488,9 @@ function HyprChat(){
                 }).catch(()=>{});
               }
             }else if(d.type==="council_token"){
-              setCouncilResponses(p=>{const n={...p,[d.member_id]:{model:d.model,content:(p[d.member_id]?.content||"")+d.content,done:false,round:d.round}};sRef.responses=n;return n;});
+              setCouncilResponses(p=>{const n={...p,[d.member_id]:{model:d.model,member_name:d.member_name,content:(p[d.member_id]?.content||"")+d.content,done:false,round:d.round,round_label:d.round_label,responding_to:d.responding_to||[]}};sRef.responses=n;return n;});
             }else if(d.type==="council_done"){
-              setCouncilResponses(p=>{const n={...p,[d.member_id]:{...(p[d.member_id]||{model:d.model,content:""}),done:true,round:d.round}};sRef.responses=n;return n;});
+              setCouncilResponses(p=>{const n={...p,[d.member_id]:{...(p[d.member_id]||{model:d.model,content:""}),model:d.model,member_name:d.member_name,done:true,round:d.round,round_label:d.round_label,responding_to:d.responding_to||p[d.member_id]?.responding_to||[]}};sRef.responses=n;return n;});
             }else if(d.type==="council_voting"){
               setCouncilVoting(true);sRef.voting=true;
               setCouncilResponses({});sRef.responses={};
@@ -5975,7 +2553,8 @@ function HyprChat(){
     // User message persistence is handled server-side by chat_stream_generate's defensive save —
     // doing it from the client too would race and create duplicates.
     try{
-      const cv=convs.find(c=>c.id===cid)||{tool_ids:pendingToolIds,system_prompt:pendingPersona?.system_prompt||"",model_config_id:pendingPersona?.model_config_id||null,persona_name:pendingPersona?.persona_name||null,persona_avatar:pendingPersona?.persona_avatar||null,model:pendingPersona?.model};
+      const stateConv=convs.find(c=>c.id===cid);
+      const cv=overrides.conversation||stateConv||{tool_ids:pendingToolIds,system_prompt:pendingPersona?.system_prompt||"",model_config_id:pendingPersona?.model_config_id||null,persona_name:pendingPersona?.persona_name||null,persona_avatar:pendingPersona?.persona_avatar||null,model:pendingPersona?.model,use_memories:overrides.freshChat&&pendingUseMemories?"1":"0"};
       const isGhostSend=!!overrides.ephemeral||ghostMode||isGhostConv(cv)||String(cid||"").startsWith("ghost-");
       let am = messagesToSend.map(m=>{
         let baseContent=m._fullContent||m.content||"";
@@ -6085,6 +2664,7 @@ function HyprChat(){
       // Prefer the persistent stream-save buffer, which survives chat switches. Fall back to evtsRef for safety.
       const _rawEvts = streamSaveEvtsRef.current.length > 0 ? streamSaveEvtsRef.current : evtsRef.current;
       let _savedEvts = _rawEvts.filter(e=>["source_links","search_results","kb_sources","codeagent_note","tool_start","tool_end","tool_done","tool_error","thinking","thought_done","code_output","file_ready"].includes(e.type) && (e.data?.tool||"")!=="processing");
+      const _streamHasFullProductBuild = _eventsHaveDaedalusFullBuild(_savedEvts);
       // Bound the persisted metadata. `thinking` events are cumulative 3KB tail
       // snapshots emitted every ~100 chars — a long reasoning trace persists
       // ~100 overlapping copies (~300KB on one message, reloaded every fetch).
@@ -6095,13 +2675,14 @@ function HyprChat(){
         if(_lastThinkIdx>=0)_savedEvts=_savedEvts.filter((e,i)=>e.type!=="thinking"||i===_lastThinkIdx);
         if(_savedEvts.length>150)_savedEvts=_savedEvts.slice(-150);
       }
-      // Pluck run_ids out of the saved events so the RunCard component can find them
-      // even after a reload (when live evts are gone).
-      const _streamRunIds = _runIdsFromEvents(_savedEvts);
+      // Pluck run_ids out of the raw event stream so the Daedalus summary can
+      // find every run even when older status events are trimmed.
+      const _streamRunIds = _runIdsFromEvents(_rawEvts);
       const _msgMeta = (_savedEvts.length || refinementsCount > 0 || _streamRunIds.length) ? {
         ...(_savedEvts.length?{saved_events:_savedEvts}:{}),
         ...(refinementsCount>0?{refinements:refinementsCount}:{}),
         ...(_streamRunIds.length?{run_ids:_streamRunIds}:{}),
+        has_full_product_build: _streamHasFullProductBuild,
         in_progress: false,
       } : {in_progress: false};
       const finalFull=replacePersonaPlaceholdersForConversation(full,cv);
@@ -6187,7 +2768,10 @@ function HyprChat(){
     setInp("");setAttachments([]);if(inpRef.current){inpRef.current.style.height="auto";}
     setTimeout(()=>{if(chatScrollRef.current)chatScrollRef.current.scrollTop=chatScrollRef.current.scrollHeight;},0);
     const am=[...(cv?.messages||[]),um];
-    await sendMessages(cid, am, um._fullContent||um.content, pendingEffortForSend!==undefined?{effort:pendingEffortForSend}:undefined);
+    const sendOverrides={};
+    if(pendingEffortForSend!==undefined)sendOverrides.effort=pendingEffortForSend;
+    if(createdConv){sendOverrides.conversation=createdConv;sendOverrides.freshChat=true;}
+    await sendMessages(cid, am, um._fullContent||um.content, Object.keys(sendOverrides).length?sendOverrides:undefined);
   };
 
   const regenerate=async(msgIndex, overrides)=>{
@@ -7127,6 +3711,8 @@ function HyprChat(){
           </span>;
         }
         if(lu.startsWith("http://") || lu.startsWith("https://")){
+          const qsSrc=_quickSourceForUrl(lu,opts.quickSearch?.results);
+          if(qsSrc)return <QuickSourceInlineChip key={k} href={lu} label={lt} source={qsSrc} t={t} font={font} onPreview={openPreview}/>;
           const hn=(()=>{try{return new URL(lu).hostname.replace("www.","");}catch{return "";}})();
           return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"2px 0",verticalAlign:"middle"}}>
             <a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:11,fontWeight:700,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
@@ -7154,6 +3740,8 @@ function HyprChat(){
           </span>;
         }
         if(lu.startsWith("http://") || lu.startsWith("https://")){
+          const qsSrc=_quickSourceForUrl(lu,opts.quickSearch?.results);
+          if(qsSrc)return <QuickSourceInlineChip key={k} href={lu} label={lt} source={qsSrc} t={t} font={font} onPreview={openPreview}/>;
           const hn=(()=>{try{return new URL(lu).hostname.replace("www.","");}catch{return "";}})();
           return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"2px 0",verticalAlign:"middle"}}>
             <a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:11,fontWeight:600,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
@@ -7168,6 +3756,8 @@ function HyprChat(){
       // Bare URL — render as clickable link with favicon
       if(s.match(/^https?:\/\//)){
         const lu=s.replace(/[.,;:!?)]+$/,"");const trail=s.slice(lu.length);
+        const qsSrc=_quickSourceForUrl(lu,opts.quickSearch?.results);
+        if(qsSrc)return <span key={k}><QuickSourceInlineChip href={lu} label={_qsHost(lu)||lu} source={qsSrc} t={t} font={font} onPreview={openPreview}/>{trail}</span>;
         const hn=(()=>{try{return new URL(lu).hostname.replace("www.","");}catch{return "";}})();
         const display=lu.length>60?lu.slice(0,57)+"...":lu;
         return <span key={k}><a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 8px",background:`${t.warm}10`,border:`1px solid ${t.warm}28`,borderRadius:6,color:t.warm,textDecoration:"none",fontSize:11,maxWidth:340,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",verticalAlign:"middle"}}>
@@ -7192,7 +3782,7 @@ function HyprChat(){
   };
 
   // Streaming markdown sanitizer — closes unclosed fences/backticks before rendering
-  const mdStream=(text)=>{
+  const mdStream=(text,opts={})=>{
     if(!text)return null;
     let t2=text;
     // Only line-start ``` (allowing up to 3 spaces of CommonMark indent) counts as a fence delimiter.
@@ -7202,7 +3792,7 @@ function HyprChat(){
     const stripped=t2.replace(/```/g,"");
     const ticks=(stripped.match(/`/g)||[]).length;
     if(ticks%2!==0)t2+="`";
-    return md(t2,{streaming:true});
+    return md(t2,{...opts,streaming:true});
   };
 
   const md=(text,opts={})=>{
@@ -7214,6 +3804,7 @@ function HyprChat(){
     // Strip <think>...</think> blocks (model reasoning not for display)
     text = text.replace(/<think>[\s\S]*?<\/think>/g,'').trimStart();
     if(!text)return null;
+    text = normalizeRenderableFences(text);
     // Normalize bare /api/downloads/ paths to markdown download links
     text = text.replace(/(?<!\]\()\/api\/downloads\/([^\s)"'`\]]+)/g, '[📎 $1](/api/downloads/$1)');
     // Footnotes: extract [^label]: content defs (must start at line), collect, and replace [^label] refs with indexed placeholders
@@ -7250,7 +3841,7 @@ function HyprChat(){
           .trim();
         const open=/^<details[^>]*\bopen\b/i.test(p);
         if(printMode)return <div key={i} className="print-details"><div className="print-details-summary">{summary}</div>{md(body,opts)}</div>;
-        return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open}>{md(body,opts)}</Collapsible>;
+        return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open} variant={opts.changelog?"changelog":""}>{md(body,opts)}</Collapsible>;
       }
       if(/^[ \t]{0,3}```/.test(p)){
         const m=p.match(/^[ \t]*```(\w*)\n?([\s\S]*?)\n?[ \t]*```[ \t]*$/);
@@ -7949,8 +4540,8 @@ function HyprChat(){
       {kbs.map(kb=><div key={kb.id} style={cardS}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
           <div style={{flex:1}}>
-            <input value={kb.name} onChange={e=>setKbs(p=>p.map(k=>k.id===kb.id?{...k,name:e.target.value}:k))} style={{...inputS,fontSize:14,fontWeight:600,background:"transparent",border:"none",padding:"0 0 4px 0",color:t.text}}/>
-            <input value={kb.description||""} onChange={e=>setKbs(p=>p.map(k=>k.id===kb.id?{...k,description:e.target.value}:k))} placeholder="Description..." style={{...inputS,background:"transparent",border:"none",padding:0,fontSize:11,color:t.mut}}/>
+            <input value={kb.name} onChange={e=>{const next={...kb,name:e.target.value};setKbs(p=>p.map(k=>k.id===kb.id?next:k));scheduleKbSave(next);}} onBlur={e=>flushKbSave({...kb,name:e.target.value})} style={{...inputS,fontSize:14,fontWeight:600,background:"transparent",border:"none",padding:"0 0 4px 0",color:t.text}}/>
+            <input value={kb.description||""} onChange={e=>{const next={...kb,description:e.target.value};setKbs(p=>p.map(k=>k.id===kb.id?next:k));scheduleKbSave(next);}} onBlur={e=>flushKbSave({...kb,description:e.target.value})} placeholder="Description..." style={{...inputS,background:"transparent",border:"none",padding:0,fontSize:11,color:t.mut}}/>
           </div>
           <button onClick={async()=>{fetch(`${API}/api/knowledge-bases/${kb.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.filter(k=>k.id!==kb.id));}} style={btnS(t.err)}><IC.Trash/></button>
         </div>
@@ -8459,186 +5050,187 @@ function HyprChat(){
     </div>
   </div>;})()
 
-      :panel==="council"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Council/><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.pink}}>Council of AI</span></div>
+      :panel==="council"?(()=>{const personaProfiles=mcs.filter(isPersonaProfile);const panelS={flex:1,display:"flex",flexDirection:"column",overflow:"hidden"};const headerS={padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,background:`${t.surface}36`};const sectionS={background:`${t.surface}5C`,border:`1px solid ${t.brd}26`,borderRadius:8,padding:12};const kickerS={fontSize:10,fontWeight:900,color:t.mut,textTransform:"uppercase",letterSpacing:.7};const metaS={fontSize:10,color:t.mut,lineHeight:1.45};const chipS=(c=t.acc)=>({display:"inline-flex",alignItems:"center",gap:4,padding:"2px 7px",borderRadius:6,background:`${c}12`,border:`1px solid ${c}32`,color:c,fontSize:9,fontWeight:800,whiteSpace:"nowrap"});const segmentS=(on,c)=>({padding:"5px 9px",borderRadius:7,border:`1px solid ${on?c:t.brd}38`,background:on?`${c}16`:`${t.surface}55`,color:on?c:t.mut,cursor:"pointer",fontFamily:font,fontSize:10,fontWeight:800});const nativeSelectS={...inputS,fontSize:11,padding:"8px 10px",background:t.bgDeep,color:t.text};const memberProfile=m=>m?.model_config_id?personaProfiles.find(mc=>mc.id===m.model_config_id):null;const memberView=m=>{const mc=memberProfile(m);return{profile:mc,missing:!!m?.model_config_id&&!mc,name:mc?.name||m.persona_name||m.model?.split(":")[0]||"Council member",model:mc?.base_model||m.model||"",prompt:mc?.system_prompt||m.system_prompt||"",avatar:mc?profileAvatar(mc):"",linked:!!mc};};const updateMemberLocal=(cid,mid,patch)=>setCouncils(p=>p.map(c=>c.id===cid?{...c,members:(c.members||[]).map(m=>m.id===mid?{...m,...patch}:m)}:c));const saveMember=async(council,member)=>{const linked=editMemberForm.model_config_id?personaProfiles.find(mc=>mc.id===editMemberForm.model_config_id):null;const up={model:linked?.base_model||editMemberForm.model||member.model||models[0]||"",model_config_id:editMemberForm.model_config_id||"",system_prompt:linked?.system_prompt??editMemberForm.system_prompt??"",persona_name:linked?.name??editMemberForm.persona_name??""};await fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)}).catch(()=>{});updateMemberLocal(council.id,member.id,up);setEditMember(null);};const addCustomMember=async(council)=>{if(!models.length)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:models[0],model_config_id:"",system_prompt:"",persona_name:""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:m.model||models[0]||"",model_config_id:"",system_prompt:"",persona_name:""});};const addPersonaMember=async(council)=>{const mc=personaProfiles[0];if(!mc)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""});};return <div style={panelS}>
+    <div style={headerS}>
+      <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0}}>
+        <span style={{width:30,height:30,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.pink}14`,border:`1px solid ${t.pink}32`,color:t.pink}}><IC.Council/></span>
+        <div style={{minWidth:0}}>
+          <div style={{fontSize:14,fontWeight:900,letterSpacing:.8,textTransform:"uppercase",color:t.text}}>Council of AI</div>
+          <div style={{fontSize:10,color:t.mut,marginTop:2}}>Run moderated multi-model discussions with custom or persona-backed members.</div>
+        </div>
+      </div>
       <button onClick={async()=>{
         const r=await fetch(`${API}/api/councils`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New Council",host_model:models[0]||"qwen3.5:27b",host_system_prompt:""})});
-        const c=await r.json();setCouncils(p=>[...p,c]);setActiveCouncilId(c.id);
-      }} style={btnS(t.pink)}><IC.Plus/> New Council</button>
+        const c=await r.json();setCouncils(p=>[c,...p]);setActiveCouncilId(c.id);
+      }} style={{...btnS(t.pink),padding:"8px 12px",fontWeight:900}}><IC.Plus/> New Council</button>
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
-      {/* Preset council buttons */}
-      {councilPresets.length>0&&<div style={{marginBottom:16,padding:14,background:`${t.surface}66`,border:`1px solid ${t.brd}28`,borderRadius:14}}>
-        <div style={{fontSize:10,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:10}}>Quick Start Presets</div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:8}}>
+      {councilPresets.length>0&&<div style={{...sectionS,marginBottom:14,padding:12}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:10}}>
+          <div style={kickerS}>Quick Start Presets</div>
+          <span style={metaS}>{councilPresets.length} templates</span>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(190px,1fr))",gap:8}}>
           {councilPresets.map(p=><button key={p.id} onClick={async()=>{
-            try{const r=await fetch(`${API}/api/seed/council-preset/${p.id}`,{method:"POST"});if(!r.ok)throw new Error(`HTTP ${r.status}`);const c=await r.json();setCouncils(prev=>[...prev,c]);setActiveCouncilId(c.id);notify({type:"success",text:"Council preset added",detail:p.name});}catch(e){console.error("Preset error:",e);notify({type:"error",text:"Preset failed",detail:e.message||String(e)});}
-          }} style={{...cardS,cursor:"pointer",padding:"10px 12px",border:`1px solid ${t.pink}28`,background:`${t.pink}06`,textAlign:"left",transition:"all .2s",display:"flex",flexDirection:"column",gap:4}} onMouseOver={e=>e.currentTarget.style.borderColor=t.pink+"66"} onMouseOut={e=>e.currentTarget.style.borderColor=t.pink+"28"}>
-            <span style={{fontSize:13,fontWeight:700,color:t.text}}>{p.name}</span>
-            <span style={{fontSize:10,color:t.mut}}>{p.members.join(" · ")}</span>
+            try{const r=await fetch(`${API}/api/seed/council-preset/${p.id}`,{method:"POST"});if(!r.ok)throw new Error(`HTTP ${r.status}`);const c=await r.json();setCouncils(prev=>[c,...prev]);setActiveCouncilId(c.id);notify({type:"success",text:"Council preset added",detail:p.name});}catch(e){console.error("Preset error:",e);notify({type:"error",text:"Preset failed",detail:e.message||String(e)});}
+          }} style={{cursor:"pointer",padding:"10px 12px",border:`1px solid ${t.brd}34`,borderRadius:8,background:`${t.bgDeep}72`,textAlign:"left",display:"flex",flexDirection:"column",gap:4,fontFamily:font}}>
+            <span style={{fontSize:12,fontWeight:900,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</span>
+            <span style={{fontSize:10,color:t.mut,lineHeight:1.35,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{p.members.join(" · ")}</span>
           </button>)}
         </div>
       </div>}
-      {!councils.length&&!councilPresets.length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No councils yet.<br/>Create one to debate with multiple AIs.</div>}
-      {councils.map(council=>{
-        const isActive=activeCouncilId===council.id;
-        return <div key={council.id} style={{...cardS,border:`1px solid ${isActive?t.pink:t.brd}33`,background:isActive?`${t.pink}08`:`${t.surface}88`}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
-            <div style={{flex:1}}>
-              <input value={council.name} onChange={e=>setCouncils(p=>p.map(c=>c.id===council.id?{...c,name:e.target.value}:c))}
-                onBlur={()=>fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:council.name})}).catch(()=>{})}
-                style={{...inputS,fontSize:14,fontWeight:600,background:"transparent",border:"none",padding:"0 0 4px 0",color:t.text}}/>
+      {!councils.length&&!councilPresets.length&&<div style={{...sectionS,textAlign:"center",padding:34,color:t.mut,fontSize:12}}>No councils yet. Create one to debate with multiple AIs.</div>}
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      {councils.map(council=>{const isActive=activeCouncilId===council.id;const memberCount=(council.members||[]).length;const linkedCount=(council.members||[]).filter(m=>!!memberProfile(m)).length;return <div key={council.id} style={{background:isActive?`${t.pink}0B`:`${t.surface}72`,border:`1px solid ${isActive?t.pink:t.brd}${isActive?"52":"30"}`,borderRadius:8,overflow:"hidden",boxShadow:"none"}}>
+          <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:12,alignItems:"center",padding:"12px 14px",background:isActive?`${t.pink}08`:`${t.bgDeep}38`,borderBottom:isActive?`1px solid ${t.brd}24`:"none"}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0}}>
+              <span style={{display:"flex",color:isActive?t.pink:t.mut}}><IC.Council/></span>
+              <div style={{minWidth:0,flex:1}}>
+                <input value={council.name} onChange={e=>setCouncils(p=>p.map(c=>c.id===council.id?{...c,name:e.target.value}:c))}
+                  onBlur={()=>fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:council.name})}).catch(()=>{})}
+                  style={{...inputS,fontSize:14,fontWeight:900,background:"transparent",border:"none",padding:0,color:t.text}}/>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:5}}>
+                  <span style={chipS(t.acc)}>{memberCount} member{memberCount===1?"":"s"}</span>
+                  {linkedCount>0&&<span style={chipS(t.pink)}>{linkedCount} persona-linked</span>}
+                  <span style={chipS(t.warm)}>{(council.debate_rounds||0)===0?"single round":`${council.debate_rounds} rebuttal`}</span>
+                </div>
+              </div>
             </div>
-            <div style={{display:"flex",gap:4}}>
-              <button onClick={()=>setActiveCouncilId(isActive?null:council.id)} style={btnS(isActive?t.pink:t.mut)}>{isActive?"▲ Collapse":"▼ Expand"}</button>
+            <div style={{display:"flex",gap:5,alignItems:"center",justifyContent:"flex-end"}}>
+              <button onClick={()=>setActiveCouncilId(isActive?null:council.id)} style={btnS(isActive?t.pink:t.mut)}>{isActive?<><IC.ChevDown/> Collapse</>:<><IC.ChevDown/> Expand</>}</button>
               <button onClick={async()=>{await fetch(`${API}/api/councils/${council.id}`,{method:"DELETE"}).catch(()=>{});setCouncils(p=>p.filter(c=>c.id!==council.id));if(activeCouncilId===council.id)setActiveCouncilId(null);}} style={btnS(t.err)}><IC.Trash/></button>
             </div>
           </div>
-          {isActive&&<>
-            {/* Host model section */}
-            <div style={{marginBottom:14,padding:12,background:`${t.warm}08`,border:`1px solid ${t.warm}28`,borderRadius:10}}>
-              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8}}>
-                <IC.Crown/><span style={{fontSize:11,fontWeight:700,color:t.warm,textTransform:"uppercase",letterSpacing:.5}}>Host / Moderator</span>
+          {isActive&&<div style={{padding:14,display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12,alignItems:"stretch"}}>
+              <div style={sectionS}>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:9,color:t.warm}}><IC.Crown/><span style={kickerS}>Host / Moderator</span></div>
+                <ModelPicker value={council.host_model||models[0]||""} onChange={v=>{setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_model:v}:c));fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_model:v})}).catch(()=>{});}} models={models} modelDetails={modelDetails} t={t} font={font} style={{marginBottom:8}}/>
+                <textarea value={council.host_system_prompt||""} onChange={e=>{const v=e.target.value;setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_system_prompt:v}:c));}}
+                  onBlur={()=>fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_system_prompt:council.host_system_prompt||""})}).catch(()=>{})}
+                  placeholder="Moderator system prompt (optional)" rows={4}
+                  style={{...inputS,resize:"vertical",fontSize:11,color:t.dim,lineHeight:1.45,minHeight:88}}/>
               </div>
-              <ModelPicker value={council.host_model||models[0]||""} onChange={v=>{setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_model:v}:c));fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_model:v})}).catch(()=>{});}} models={models} modelDetails={modelDetails} t={t} font={font} style={{marginBottom:6}}/>
-              <textarea value={council.host_system_prompt||""} onChange={e=>{const v=e.target.value;setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_system_prompt:v}:c));}}
-                onBlur={()=>fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_system_prompt:council.host_system_prompt||""})}).catch(()=>{})}
-                placeholder="Host system prompt (optional)..." rows={2}
-                style={{...inputS,resize:"vertical",fontSize:11,color:t.mut}}/>
-            </div>
-            {/* Debate rounds setting */}
-            <div style={{marginBottom:14,padding:"10px 12px",background:`${t.pink}06`,border:`1px solid ${t.pink}22`,borderRadius:10,display:"flex",alignItems:"center",gap:10}}>
-              <span style={{fontSize:11,fontWeight:700,color:t.pink,whiteSpace:"nowrap"}}>⚔️ Debate Rounds</span>
-              <input type="range" min={0} max={5} value={council.debate_rounds||0}
-                onChange={e=>{const v=parseInt(e.target.value);setCouncils(p=>p.map(c=>c.id===council.id?{...c,debate_rounds:v}:c));}}
-                onMouseUp={e=>{const v=parseInt(e.target.value);fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({debate_rounds:v})}).catch(()=>{});}}
-                onTouchEnd={e=>{const v=council.debate_rounds||0;fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({debate_rounds:v})}).catch(()=>{});}}
-                style={{flex:1,accentColor:t.pink}}/>
-              <span style={{fontSize:13,fontWeight:800,color:t.text,minWidth:20,textAlign:"center"}}>{council.debate_rounds||0}</span>
-              <span style={{fontSize:9,color:t.mut}}>{(council.debate_rounds||0)===0?"No debate — single round":(council.debate_rounds||0)===1?"1 rebuttal round":`${council.debate_rounds} rebuttal rounds`}</span>
-            </div>
-            {/* Council members grid */}
-            <div style={{marginBottom:10}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                <span style={{fontSize:10,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Council Members</span>
-                <button onClick={async()=>{
-                  if(!models.length)return;
-                  const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:models[0],system_prompt:"",persona_name:""})});
-                  const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));
-                }} style={btnS(t.acc)}><IC.Plus/> Add Model</button>
+              <div style={{...sectionS,display:"flex",flexDirection:"column",justifyContent:"center",gap:10}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+                  <div>
+                    <div style={kickerS}>Debate Rounds</div>
+                    <div style={metaS}>{(council.debate_rounds||0)===0?"Members answer once, then the host synthesizes.":(council.debate_rounds||0)===1?"One rebuttal pass before synthesis.":`${council.debate_rounds} rebuttal passes before synthesis.`}</div>
+                  </div>
+                  <div style={{fontSize:26,fontWeight:900,color:t.pink,lineHeight:1,minWidth:36,textAlign:"right"}}>{council.debate_rounds||0}</div>
+                </div>
+                <input type="range" min={0} max={5} value={council.debate_rounds||0}
+                  onChange={e=>{const v=parseInt(e.target.value);setCouncils(p=>p.map(c=>c.id===council.id?{...c,debate_rounds:v}:c));}}
+                  onMouseUp={e=>{const v=parseInt(e.target.value);fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({debate_rounds:v})}).catch(()=>{});}}
+                  onTouchEnd={()=>{const v=council.debate_rounds||0;fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({debate_rounds:v})}).catch(()=>{});}}
+                  style={{width:"100%",accentColor:t.pink}}/>
               </div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:8}}>
-                {(council.members||[]).map(member=>{
-                  const isEditing=editMember===member.id;
-                  const pts=member.points||0;
-                  const ptsColor=pts>0?t.ok:pts<0?t.err:t.mut;
-                  return <div key={member.id} style={{background:`${t.surface}AA`,border:`1px solid ${t.brd}33`,borderRadius:14,padding:12,display:"flex",flexDirection:"column",gap:6,transition:"all .2s",position:"relative"}}>
-                    {/* Points badge */}
-                    <div style={{position:"absolute",top:8,right:8,background:pts>0?`${t.ok}20`:pts<0?`${t.err}20`:`${t.mut}10`,border:`1px solid ${ptsColor}40`,borderRadius:10,padding:"2px 7px",fontSize:10,fontWeight:700,color:ptsColor}}>
-                      {pts>0?"+":""}{pts} pts
+            </div>
+            <div style={sectionS}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,marginBottom:10}}>
+                <div>
+                  <div style={kickerS}>Council Members</div>
+                  <div style={metaS}>Use custom prompts or link members to Personas. Linked members use the latest Persona profile when the council runs.</div>
+                </div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
+                  <button onClick={()=>addCustomMember(council)} disabled={!models.length} style={{...btnS(t.acc),opacity:models.length?1:.45}}><IC.Plus/> Custom</button>
+                  <button onClick={()=>addPersonaMember(council)} disabled={!personaProfiles.length} title={personaProfiles.length?"Add a Persona member":"Create a Persona first"} style={{...btnS(t.pink),opacity:personaProfiles.length?1:.45}}><IC.User/> Persona</button>
+                </div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:9}}>
+                {(council.members||[]).map(member=>{const isEditing=editMember===member.id;const pts=member.points||0;const ptsColor=pts>0?t.ok:pts<0?t.err:t.mut;const view=memberView(member);const selectedProfile=editMemberForm.model_config_id?personaProfiles.find(mc=>mc.id===editMemberForm.model_config_id):null;return <div key={member.id} style={{background:`${t.bgDeep}78`,border:`1px solid ${view.linked?t.pink:t.brd}${view.linked?"40":"30"}`,borderRadius:8,padding:12,display:"flex",flexDirection:"column",gap:8,minHeight:isEditing?260:148}}>
+                  <div style={{display:"flex",alignItems:"flex-start",gap:9,minWidth:0}}>
+                    <div style={{width:34,height:34,borderRadius:8,background:`${view.linked?t.pink:t.acc}12`,border:`1px solid ${view.linked?t.pink:t.acc}35`,color:view.linked?t.pink:t.acc,display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",flexShrink:0}}>
+                      {view.avatar?<img src={avatarSrc(view.avatar)} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>:view.linked?<IC.User/>:<IC.Bot/>}
                     </div>
-                    <div style={{fontSize:10,color:t.mut,display:"flex",alignItems:"center",gap:4,marginBottom:2}}>
-                      <IC.Bot/>{member.persona_name||member.model.split(":")[0]}
+                    <div style={{minWidth:0,flex:1}}>
+                      <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+                        <span style={{fontSize:12,fontWeight:900,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{view.name}</span>
+                        {view.linked&&<span style={chipS(t.pink)}>Persona</span>}
+                        {view.missing&&<span style={chipS(t.err)}>Missing</span>}
+                      </div>
+                      <div style={{fontSize:10,color:view.missing?t.err:t.mut,marginTop:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{view.missing?"Persona profile not found":view.model||"No model selected"}</div>
                     </div>
-                    {isEditing?<>
-                      <ModelPicker value={member.model} onChange={v=>{setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.map(m=>m.id===member.id?{...m,model:v}:m)}:c));fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:v})}).catch(()=>{});}} models={models} modelDetails={modelDetails} t={t} font={font}/>
-                      <input value={editMemberForm.persona_name||""} onChange={e=>setEditMemberForm(p=>({...p,persona_name:e.target.value}))} placeholder="Display name (optional)" style={{...inputS,fontSize:11}}/>
-                      <textarea value={editMemberForm.system_prompt||""} onChange={e=>setEditMemberForm(p=>({...p,system_prompt:e.target.value}))} placeholder="System prompt..." rows={3} style={{...inputS,resize:"vertical",fontSize:11}}/>
-                      <div style={{display:"flex",gap:4}}>
-                        <button onClick={()=>{
-                          const up={system_prompt:editMemberForm.system_prompt,persona_name:editMemberForm.persona_name};
-                          fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)}).catch(()=>{});
-                          setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.map(m=>m.id===member.id?{...m,...up}:m)}:c));
-                          setEditMember(null);
-                        }} style={btnS(t.ok)}>Save</button>
-                        <button onClick={()=>setEditMember(null)} style={btnS(t.mut)}>Cancel</button>
+                    <span style={{...chipS(ptsColor),background:pts>0?`${t.ok}12`:pts<0?`${t.err}12`:`${t.mut}0D`}}>{pts>0?"+":""}{pts} pts</span>
+                  </div>
+                  {isEditing?<>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>{const v=memberView(member);setEditMemberForm({model:v.model||models[0]||"",model_config_id:"",system_prompt:v.prompt||"",persona_name:v.name||""});}} style={segmentS(!editMemberForm.model_config_id,t.acc)}><IC.Bot/> Custom</button>
+                      <button onClick={()=>{const mc=selectedProfile||memberProfile(member)||personaProfiles[0];if(mc)setEditMemberForm({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""});}} disabled={!personaProfiles.length} style={{...segmentS(!!editMemberForm.model_config_id,t.pink),opacity:personaProfiles.length?1:.45}}><IC.User/> Persona</button>
+                    </div>
+                    {editMemberForm.model_config_id?<>
+                      <select value={editMemberForm.model_config_id} onChange={e=>{const mc=personaProfiles.find(x=>x.id===e.target.value);setEditMemberForm({model:mc?.base_model||models[0]||"",model_config_id:mc?.id||"",system_prompt:mc?.system_prompt||"",persona_name:mc?.name||""});}} style={nativeSelectS}>
+                        {personaProfiles.map(mc=><option key={mc.id} value={mc.id}>{mc.name} · {mc.base_model||"no model"}</option>)}
+                      </select>
+                      <div style={{padding:9,borderRadius:8,border:`1px solid ${t.pink}24`,background:`${t.pink}08`,display:"flex",flexDirection:"column",gap:4}}>
+                        <div style={{fontSize:11,fontWeight:900,color:t.text}}>{selectedProfile?.name||"Persona"}</div>
+                        <div style={metaS}>Linked to Persona. This member will use the Persona's latest model and prompt each run.</div>
+                        <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                          <button onClick={()=>{if(selectedProfile){setPanel("personas");setProfileTab("personas");setEditMc(selectedProfile.id);}}} style={btnS(t.pink)}><IC.Pencil/> Edit Persona</button>
+                          <button onClick={()=>{const mc=selectedProfile||memberProfile(member);setEditMemberForm({model:mc?.base_model||member.model||models[0]||"",model_config_id:"",system_prompt:mc?.system_prompt||member.system_prompt||"",persona_name:mc?.name||member.persona_name||""});}} style={btnS(t.mut)}><IC.X/> Detach</button>
+                        </div>
                       </div>
                     </>:<>
-                      <div style={{fontSize:12,fontWeight:600,color:t.acc,wordBreak:"break-word"}}>{member.model}</div>
-                      {member.system_prompt&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={member.system_prompt}>{member.system_prompt.slice(0,60)}...</div>}
-                      <div style={{display:"flex",gap:4,marginTop:"auto"}}>
-                        <button onClick={()=>{setEditMember(member.id);setEditMemberForm({system_prompt:member.system_prompt||"",persona_name:member.persona_name||""});}} style={{...btnS(t.acc),flex:1,justifyContent:"center",fontSize:10}}><IC.Pencil/> Edit</button>
-                        <button onClick={async()=>{await fetch(`${API}/api/councils/members/${member.id}`,{method:"DELETE"}).catch(()=>{});setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.filter(m=>m.id!==member.id)}:c));}} style={btnS(t.err)}><IC.Trash/></button>
-                      </div>
+                      <ModelPicker value={editMemberForm.model||member.model||models[0]||""} onChange={v=>setEditMemberForm(p=>({...p,model:v}))} models={models} modelDetails={modelDetails} t={t} font={font}/>
+                      <input value={editMemberForm.persona_name||""} onChange={e=>setEditMemberForm(p=>({...p,persona_name:e.target.value}))} placeholder="Display name" style={{...inputS,fontSize:11}}/>
+                      <textarea value={editMemberForm.system_prompt||""} onChange={e=>setEditMemberForm(p=>({...p,system_prompt:e.target.value}))} placeholder="Member system prompt" rows={5} style={{...inputS,resize:"vertical",fontSize:11,lineHeight:1.45,minHeight:104}}/>
                     </>}
-                  </div>;
-                })}
-                {!(council.members||[]).length&&<div style={{gridColumn:"1/-1",textAlign:"center",padding:"20px 0",color:t.mut,fontSize:11,fontStyle:"italic"}}>Add models to the council to debate your questions.</div>}
+                    <div style={{display:"flex",gap:6,marginTop:"auto"}}>
+                      <button onClick={()=>saveMember(council,member)} style={{...btnS(t.ok),flex:1,justifyContent:"center",fontWeight:900}}>Save</button>
+                      <button onClick={()=>setEditMember(null)} style={btnS(t.mut)}>Cancel</button>
+                    </div>
+                  </>:<>
+                    <div style={{fontSize:10,color:t.dim,lineHeight:1.45,display:"-webkit-box",WebkitLineClamp:3,WebkitBoxOrient:"vertical",overflow:"hidden",minHeight:42}}>{view.prompt||"No member prompt set."}</div>
+                    <div style={{display:"flex",gap:5,marginTop:"auto"}}>
+                      <button onClick={()=>{const v=memberView(member);setEditMember(member.id);setEditMemberForm({model:v.model||member.model||models[0]||"",model_config_id:member.model_config_id||"",system_prompt:v.prompt||"",persona_name:v.name||""});}} style={{...btnS(t.acc),flex:1,justifyContent:"center",fontSize:10}}><IC.Pencil/> Edit</button>
+                      <button onClick={async()=>{await fetch(`${API}/api/councils/members/${member.id}`,{method:"DELETE"}).catch(()=>{});setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.filter(m=>m.id!==member.id)}:c));}} style={btnS(t.err)}><IC.Trash/></button>
+                    </div>
+                  </>}
+                </div>;})}
+                {!(council.members||[]).length&&<div style={{gridColumn:"1/-1",border:`1px dashed ${t.brd}45`,borderRadius:8,padding:"24px 12px",textAlign:"center",color:t.mut,fontSize:11}}>Add a custom member or link a Persona to start.</div>}
               </div>
             </div>
-            {/* Analyze + Start buttons */}
-            <div style={{display:"flex",gap:8,marginBottom:councilReport?.council_id===council.id?10:0}}>
-              <button onClick={async()=>{
-                if(councilReport?.council_id===council.id){setCouncilReport(null);return;}
-                setCouncilReportLoading(true);
-                try{const r=await fetch(`${API}/api/councils/${council.id}/analyze`);if(!r.ok)throw new Error(`HTTP ${r.status}`);const d=await r.json();setCouncilReport(d);}catch(e){console.error(e);notify({type:"error",text:"Council analysis failed",detail:e.message||String(e)});}
-                setCouncilReportLoading(false);
-              }} style={{...btnS(t.acc),flex:1,justifyContent:"center",padding:"9px 14px",fontSize:12,fontWeight:700}}>
-                {councilReportLoading?"Analyzing...":councilReport?.council_id===council.id?"▲ Hide Report":"📊 Analyze Performance"}
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8}}>
+              <button onClick={async()=>{if(councilReport?.council_id===council.id){setCouncilReport(null);return;}setCouncilReportLoading(true);try{const r=await fetch(`${API}/api/councils/${council.id}/analyze`);if(!r.ok)throw new Error(`HTTP ${r.status}`);const d=await r.json();setCouncilReport(d);}catch(e){console.error(e);notify({type:"error",text:"Council analysis failed",detail:e.message||String(e)});}setCouncilReportLoading(false);}} style={{...btnS(t.acc),justifyContent:"center",padding:"10px 14px",fontSize:12,fontWeight:900}}>
+                <IC.BarChart/> {councilReportLoading?"Analyzing...":councilReport?.council_id===council.id?"Hide Report":"Analyze Performance"}
               </button>
-              <button onClick={()=>startCouncilChat(council.id)} disabled={!(council.members||[]).length}
-                style={{...btnS(t.pink),flex:1,justifyContent:"center",padding:"9px 14px",fontSize:12,fontWeight:700,opacity:!(council.members||[]).length?0.4:1}}>
+              <button onClick={()=>startCouncilChat(council.id)} disabled={!memberCount} style={{...btnS(t.pink),justifyContent:"center",padding:"10px 14px",fontSize:12,fontWeight:900,opacity:memberCount?1:.4}}>
                 <IC.Council/> Start Council Chat
               </button>
             </div>
-            {/* Performance Report */}
-            {councilReport?.council_id===council.id&&<div style={{background:`${t.surface}88`,border:`1px solid ${t.acc}33`,borderRadius:12,padding:16,animation:"fadeIn .3s"}}>
-              <div style={{fontSize:12,fontWeight:700,color:t.acc,marginBottom:12,display:"flex",alignItems:"center",gap:6}}>📊 Performance Report</div>
-              <div style={{display:"flex",gap:12,marginBottom:14,alignItems:"stretch"}}>
-                <div style={{display:"flex",gap:1,background:`${t.bg}`,border:`1px solid ${t.brd}33`,borderRadius:10,overflow:"hidden",flexShrink:0}}>
-                  <div style={{padding:"12px 18px",textAlign:"center",borderRight:`1px solid ${t.brd}22`}}>
-                    <div style={{fontSize:22,fontWeight:800,color:t.pink,lineHeight:1}}>{councilReport.total_debates}</div>
-                    <div style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:1,marginTop:4}}>Debates</div>
-                  </div>
-                  <div style={{padding:"12px 18px",textAlign:"center"}}>
-                    <div style={{fontSize:22,fontWeight:800,color:t.acc,lineHeight:1}}>{councilReport.total_conversations}</div>
-                    <div style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:1,marginTop:4}}>Sessions</div>
-                  </div>
-                </div>
-                {(councilReport.recommendations||[]).length>0&&<div style={{flex:1,background:`${t.warm}06`,border:`1px solid ${t.warm}22`,borderRadius:10,padding:"8px 12px",display:"flex",flexDirection:"column",gap:3,overflow:"hidden"}}>
-                  <div style={{fontSize:9,fontWeight:700,color:t.warm,textTransform:"uppercase",letterSpacing:.5}}>Recommendations</div>
-                  {councilReport.recommendations.map((r,ri)=><div key={ri} style={{fontSize:10,color:t.dim,display:"flex",gap:5,alignItems:"baseline",lineHeight:1.4}}>
-                    <span style={{color:t.warm,flexShrink:0}}>→</span><span>{r}</span>
-                  </div>)}
+            {councilReport?.council_id===council.id&&<div style={{...sectionS,animation:"fadeIn .3s"}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:12,color:t.acc}}><IC.BarChart/><span style={kickerS}>Performance Report</span></div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:8,marginBottom:12}}>
+                <div style={{padding:12,borderRadius:8,border:`1px solid ${t.brd}24`,background:`${t.bgDeep}66`}}><div style={{fontSize:24,fontWeight:900,color:t.pink,lineHeight:1}}>{councilReport.total_debates}</div><div style={metaS}>Debates</div></div>
+                <div style={{padding:12,borderRadius:8,border:`1px solid ${t.brd}24`,background:`${t.bgDeep}66`}}><div style={{fontSize:24,fontWeight:900,color:t.acc,lineHeight:1}}>{councilReport.total_conversations}</div><div style={metaS}>Sessions</div></div>
+                {(councilReport.recommendations||[]).length>0&&<div style={{padding:12,borderRadius:8,border:`1px solid ${t.warm}24`,background:`${t.warm}08`,gridColumn:"span 2"}}>
+                  <div style={{...kickerS,color:t.warm,marginBottom:6}}>Recommendations</div>
+                  {councilReport.recommendations.map((r,ri)=><div key={ri} style={{fontSize:10,color:t.dim,lineHeight:1.45,marginBottom:3}}>{r}</div>)}
                 </div>}
               </div>
-              {/* Member rankings */}
-              <div style={{fontSize:10,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>Member Rankings</div>
-              <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:14}}>
-                {(councilReport.members||[]).map((m,i)=>{
-                  const barWidth=councilReport.total_debates>0?Math.max(m.votes_received/councilReport.total_debates*100,4):4;
-                  const medal=i===0?"🥇":i===1?"🥈":i===2?"🥉":"";
-                  return <div key={m.id} style={{background:`${t.bg}`,border:`1px solid ${t.brd}33`,borderRadius:10,padding:"10px 12px"}}>
-                    <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
-                      <span style={{fontSize:14}}>{medal||`#${i+1}`}</span>
-                      <span style={{fontSize:12,fontWeight:700,color:t.text,flex:1}}>{m.persona_name}</span>
-                      <span style={{fontSize:10,color:t.mut}}>{m.model}</span>
-                    </div>
-                    {/* Vote bar */}
-                    <div style={{background:`${t.brd}22`,borderRadius:6,height:14,marginBottom:6,overflow:"hidden",position:"relative"}}>
-                      <div style={{background:i===0?t.ok:i===1?t.acc:t.mut,height:"100%",width:`${barWidth}%`,borderRadius:6,transition:"width .5s",minWidth:20}}/>
-                      <span style={{position:"absolute",left:6,top:0,fontSize:9,fontWeight:700,color:"#fff",lineHeight:"14px"}}>{m.win_rate}% win rate</span>
-                    </div>
-                    <div style={{display:"flex",gap:10,flexWrap:"wrap",fontSize:10,color:t.dim}}>
-                      <span>🗳 <b style={{color:t.text}}>{m.votes_received}</b> votes received</span>
-                      <span>💬 <b style={{color:t.text}}>{m.responses}</b> responses</span>
-                      <span>📏 <b style={{color:t.text}}>{m.avg_response_length}</b> avg chars</span>
-                      <span style={{color:m.points>0?t.ok:m.points<0?t.err:t.mut}}>⭐ <b>{m.points>0?"+":""}{m.points}</b> pts</span>
-                    </div>
-                    {/* Who voted for this member */}
-                    {Object.keys(m.vote_sources||{}).length>0&&<div style={{marginTop:6,fontSize:10,color:t.mut}}>
-                      Voted by: {Object.entries(m.vote_sources).map(([name,count],vi)=><span key={vi} style={{background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:8,padding:"1px 6px",marginLeft:vi?4:0,fontSize:9,color:t.pink}}>{name} ({count})</span>)}
-                    </div>}
-                  </div>;
-                })}
+              <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                {(councilReport.members||[]).map((m,i)=>{const barWidth=councilReport.total_debates>0?Math.max(m.votes_received/councilReport.total_debates*100,4):4;return <div key={m.id} style={{background:`${t.bgDeep}66`,border:`1px solid ${t.brd}28`,borderRadius:8,padding:"9px 10px"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                    <span style={chipS(i===0?t.ok:i===1?t.acc:t.mut)}>#{i+1}</span>
+                    <span style={{fontSize:12,fontWeight:900,color:t.text,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.persona_name}</span>
+                    <span style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:260}}>{m.model}</span>
+                  </div>
+                  <div style={{background:`${t.brd}22`,borderRadius:6,height:14,overflow:"hidden",position:"relative",marginBottom:6}}>
+                    <div style={{background:i===0?t.ok:i===1?t.acc:t.mut,height:"100%",width:`${barWidth}%`,borderRadius:6,transition:"width .5s",minWidth:20}}/>
+                    <span style={{position:"absolute",left:6,top:0,fontSize:9,fontWeight:900,color:"#fff",lineHeight:"14px"}}>{m.win_rate}% win rate</span>
+                  </div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap",fontSize:10,color:t.dim}}>
+                    <span>{m.votes_received} votes</span><span>{m.responses} responses</span><span>{m.avg_response_length} avg chars</span><span style={{color:m.points>0?t.ok:m.points<0?t.err:t.mut}}>{m.points>0?"+":""}{m.points} pts</span>
+                  </div>
+                  {Object.keys(m.vote_sources||{}).length>0&&<div style={{marginTop:6,display:"flex",gap:4,flexWrap:"wrap"}}>{Object.entries(m.vote_sources).map(([name,count],vi)=><span key={vi} style={chipS(t.pink)}>{name} ({count})</span>)}</div>}
+                </div>;})}
               </div>
             </div>}
-          </>}
-        </div>;
-      })}
+          </div>}
+        </div>;})}
+      </div>
     </div>
-  </div>
+  </div>;})()
       :panel==="personas"?(()=>{const profiles=mcs.map(mc=>({...mc,parameters:normalizeProfileParams(mc)}));const agentProfiles=profiles.filter(isAgentProfile);const personaProfiles=profiles.filter(isPersonaProfile);const activeProfiles=profileTab==="personas"?personaProfiles:agentProfiles;const activeColor=profileTab==="personas"?t.pink:t.acc;const activeLabel=profileTab==="personas"?"Personas":"Agents";const activeEmpty=profileTab==="personas"?"Create a persona for roleplay, character chat, writing voice, or companion-style conversations.":"Create an agent for coding, research, automation, or specialized work.";const setName=(mc,value)=>updateProfileLocal(mc.id,x=>{const next={...x,name:value};if(getProfileType(x)==="persona"){const params=normalizeProfileParams(next);next.system_prompt=buildPersonaPrompt({name:value,...params.persona});}return next;});const setNumberParam=(id,key,value)=>setProfileParam(id,key,value===""?null:(key==="num_ctx"?parseInt(value)||null:parseFloat(value)));const modelWarning=(mc)=>{const missing=mc.base_model&&models.length&&!models.includes(mc.base_model);if(!mc.base_model||missing)return <div style={{display:"inline-flex",alignItems:"center",gap:5,marginTop:5,padding:"3px 7px",borderRadius:7,background:`${t.warm}12`,border:`1px solid ${t.warm}35`,color:t.warm,fontSize:9,fontWeight:700}}>{!mc.base_model?"No base model selected":`Missing model: ${mc.base_model}`}</div>;return null;};const avatarBox=(mc,isE,color,kind)=>{const avatar=profileAvatar(mc);return <label style={{cursor:isE?"pointer":"default",position:"relative",flexShrink:0}}>
         <div style={{width:44,height:44,borderRadius:kind==="persona"?12:9,background:`${color}18`,border:`1px solid ${color}40`,display:"flex",alignItems:"center",justifyContent:"center",color,overflow:"hidden",fontSize:20}}>
           {avatar?<img src={avatarSrc(avatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:kind==="persona"?<IC.User/>:<IC.Bot/>}
@@ -8846,60 +5438,7 @@ function HyprChat(){
     </div>
   </div>;})()
 
-      :panel==="prompts"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 18px",borderBottom:`1px solid ${t.brd}22`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
-      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Zap/><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.f1}}>Prompt Library</span></div>
-      <button onClick={()=>{const id=`p-${Date.now()}`;setPrompts(p=>[{id,title:"New Prompt",content:"",category:"General",is_system:false},...p]);}} style={btnS(t.f1)}><IC.Plus/> New Prompt</button>
-    </div>
-    <div style={{flex:1,overflowY:"auto",padding:20}}>
-      {!prompts.length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>
-        <div style={{fontSize:28,marginBottom:8}}>⚡</div>
-        <div style={{fontWeight:600,marginBottom:4}}>No saved prompts yet</div>
-        <div>Save reusable prompts here and insert them into any chat with one click.</div>
-        <button onClick={()=>{setPrompts([
-          {id:`p-${Date.now()}-1`,title:"Explain Simply",content:"Explain this as if I'm 12 years old, using simple language and analogies.",category:"Learning"},
-          {id:`p-${Date.now()}-2`,title:"Code Review",content:"Review this code for bugs, performance issues, security vulnerabilities, and suggest improvements.",category:"Coding"},
-          {id:`p-${Date.now()}-3`,title:"Summarize",content:"Summarize the key points from the above in bullet points.",category:"Writing"},
-          {id:`p-${Date.now()}-4`,title:"Pros & Cons",content:"List the pros and cons of this in a balanced way.",category:"Analysis"},
-        ]);}} style={{...btnS(t.f1),marginTop:12,justifyContent:"center"}}>Load Starter Prompts</button>
-      </div>}
-      {prompts.map(p=>{
-        const isEditing=editPrompt?.id===p.id;
-        return <div key={p.id} style={{...cardS,borderColor:isEditing?`${t.f1}55`:`${t.brd}44`}}>
-          {isEditing?<div style={{animation:"fadeIn .2s"}}>
-            <div style={{display:"flex",gap:8,marginBottom:8}}>
-              <input value={editPrompt.title} onChange={e=>setEditPrompt(ep=>({...ep,title:e.target.value}))} placeholder="Title" style={{...inputS,flex:2,fontWeight:600}}/>
-              <input value={editPrompt.category} onChange={e=>setEditPrompt(ep=>({...ep,category:e.target.value}))} placeholder="Category" style={{...inputS,flex:1,fontSize:10}}/>
-            </div>
-            <label style={{display:"flex",alignItems:"center",gap:6,fontSize:10,color:t.dim,cursor:"pointer",marginBottom:6}}>
-              <input type="checkbox" checked={!!editPrompt.is_system} onChange={e=>setEditPrompt(ep=>({...ep,is_system:e.target.checked}))} style={{accentColor:t.warm,cursor:"pointer"}}/>
-              Available as System Prompt
-            </label>
-            <textarea value={editPrompt.content} onChange={e=>setEditPrompt(ep=>({...ep,content:e.target.value}))} rows={5} placeholder="Your prompt text..." style={{...inputS,resize:"vertical",lineHeight:1.5,marginBottom:8}}/>
-            <div style={{display:"flex",gap:4,justifyContent:"flex-end"}}>
-              <button onClick={()=>{setPrompts(ps=>ps.map(x=>x.id===p.id?{...x,...editPrompt}:x));setEditPrompt(null);}} style={btnS(t.ok)}>Save</button>
-              <button onClick={()=>setEditPrompt(null)} style={btnS(t.mut)}>Cancel</button>
-            </div>
-          </div>:<div>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:13,fontWeight:600,color:t.text}}>{p.title}</div>
-                <div style={{fontSize:10,color:t.f1,marginTop:1,display:"flex",alignItems:"center",gap:4}}>{p.category||"General"}{p.is_system&&<span style={{fontSize:8,padding:"1px 5px",borderRadius:6,background:`${t.warm}18`,color:t.warm,fontWeight:600}}>System Prompt</span>}</div>
-              </div>
-              <div style={{display:"flex",gap:4,flexShrink:0}}>
-                <button onClick={()=>{setInp(p.content);setPanel("chat");}} style={{...btnS(t.f1),fontSize:9}}>⚡ Use</button>
-                <button onClick={()=>setEditPrompt({id:p.id,title:p.title,content:p.content,category:p.category||"General",is_system:!!p.is_system})} style={btnS(t.mut)}><IC.Pencil/></button>
-                <button onClick={()=>setPrompts(ps=>ps.filter(x=>x.id!==p.id))} style={btnS(t.err)}><IC.Trash/></button>
-              </div>
-            </div>
-            <div style={{fontSize:11,color:t.dim,lineHeight:1.5,maxHeight:80,overflow:"hidden"}}>
-              {p.content.slice(0,200)}{p.content.length>200?"...":""}
-            </div>
-          </div>}
-        </div>;
-      })}
-    </div>
-  </div>
+      :panel==="prompts"?<PromptLibraryPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} prompts={prompts} setPrompts={setPrompts} editPrompt={editPrompt} setEditPrompt={setEditPrompt} setInp={setInp} setPanel={setPanel}/>
 
       :panel==="models"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     {/* Toolbar */}
@@ -9682,85 +6221,7 @@ function HyprChat(){
     </div>}
   </div>
 
-      :panel==="analytics"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-        <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
-          <div style={{maxWidth:980}}>
-            <div style={{fontSize:20,fontWeight:900,marginBottom:4,display:"flex",alignItems:"center",gap:8,color:t.acc}}><IC.BarChart/> Statistics</div>
-            <div style={{fontSize:11,color:t.mut,marginBottom:16}}>Overall HyprChat usage from recorded chat token telemetry.</div>
-            <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap",alignItems:"center"}}>
-              {[7,30,90,0].map(d=><button key={d} onClick={()=>setAnalyticsDays(d)} style={{...btnS(analyticsDays===d?t.acc:t.mut),padding:"5px 12px"}}>{d===0?"All":`${d}d`}</button>)}
-              <div style={{flex:1}}/>
-              {["day","model","persona"].map(g=><button key={g} onClick={()=>setAnalyticsGroup(g)} style={{...btnS(analyticsGroup===g?t.acc:t.mut),padding:"5px 12px",textTransform:"capitalize"}}>{g==="persona"?"profile":g}</button>)}
-              <button onClick={loadAnalytics} style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
-            </div>
-            {analyticsData?(()=>{
-              const summary=analyticsData.summary||{};
-              const sumRows=rows=>(rows||[]).reduce((a,d)=>({
-                prompt:a.prompt+(d.prompt_tokens||0),
-                completion:a.completion+(d.completion_tokens||0),
-                total:a.total+(d.total_tokens||0),
-                requests:a.requests+(d.request_count||0)
-              }),{prompt:0,completion:0,total:0,requests:0});
-              const all=sumRows(summary.all_time||[]);
-              const today=sumRows(summary.today||[]);
-              const month=sumRows(summary.daily_30d||[]);
-              const allModels=summary.by_model_all||[];
-              const allProfiles=summary.by_persona_all||[];
-              const topModel=allModels[0];
-              const statCard=(label,value,detail,color=t.acc)=><div style={{...cardS,flex:"1 1 170px",minWidth:160,marginBottom:0}}>
-                <div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:1,marginBottom:6,fontWeight:800}}>{label}</div>
-                <div style={{fontSize:24,fontWeight:900,color,lineHeight:1.05,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{value}</div>
-                <div style={{fontSize:10,color:t.mut,marginTop:5,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{detail}</div>
-              </div>;
-              const rows=analyticsData.grouped||[];
-              return <>
-              <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap"}}>
-                {statCard("Total Tokens",all.total.toLocaleString(),`${all.requests.toLocaleString()} recorded requests`,t.acc)}
-                {statCard("Processed",all.prompt.toLocaleString(),"prompt/context tokens",t.warm)}
-                {statCard("Generated",all.completion.toLocaleString(),"assistant output tokens",t.ok)}
-                {statCard("Models Used",allModels.length.toLocaleString(),topModel?topModel.model:"no model telemetry",t.pink||t.acc)}
-              </div>
-              <div style={{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap"}}>
-                {statCard("Today",today.total.toLocaleString(),`${today.requests.toLocaleString()} requests`,t.acc2||t.acc)}
-                {statCard("Last 30 Days",month.total.toLocaleString(),`${month.requests.toLocaleString()} requests`,t.f1||t.acc)}
-                {statCard("Top Model",topModel?.model||"-",`${(topModel?.total_tokens||0).toLocaleString()} tokens`,t.pink||t.acc)}
-              </div>
-              {rows.length>0?<div style={{...cardS,padding:20}}>
-                <div style={{fontSize:12,fontWeight:800,marginBottom:12,color:t.mut}}>Tokens by {analyticsGroup==="persona"?"profile":analyticsGroup} {analyticsDays===0?"(all time)":`(${analyticsDays}d)`}</div>
-                <div style={{display:"flex",alignItems:"flex-end",gap:2,height:210,padding:"0 4px",overflowX:"auto",overflowY:"hidden"}}>
-                  {(()=>{const maxVal=Math.max(...rows.map(d=>d.total_tokens||0),1);return rows.map((d,i)=>{const h=Math.max(((d.total_tokens||0)/maxVal)*180,2);const label=d.date?d.date.slice(5):d.model||d.persona_name||"(none)";return <div key={i} style={{flex:"1 0 26px",display:"flex",flexDirection:"column",alignItems:"center",gap:4,minWidth:26}}>
-                    <div style={{fontSize:8,color:t.mut,textAlign:"center",lineHeight:1}}>{(d.total_tokens||0).toLocaleString()}</div>
-                    <div title={`${label}: ${(d.total_tokens||0).toLocaleString()} tokens, ${d.request_count||0} reqs`} style={{width:"80%",maxWidth:40,height:h,background:`linear-gradient(180deg,${t.acc},${t.acc}66)`,borderRadius:"4px 4px 0 0",transition:"height .3s",cursor:"pointer",minWidth:6}}/>
-                    <div style={{fontSize:7,color:t.mut,textAlign:"center",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:56,transform:"rotate(-30deg)",transformOrigin:"top center"}}>{label}</div>
-                  </div>;});})()}
-                </div>
-              </div>:<div style={{textAlign:"center",padding:40,color:t.mut}}>No statistics recorded yet. Start chatting to populate this page.</div>}
-              {allModels.length>0&&<div style={{...cardS,marginTop:16}}>
-                <div style={{fontSize:12,fontWeight:800,marginBottom:8,color:t.mut}}>All-Time Model Breakdown</div>
-                <div style={{display:"grid",gridTemplateColumns:"minmax(180px,2fr) repeat(4,minmax(80px,1fr))",gap:8,padding:"6px 0",borderBottom:`1px solid ${t.brd}33`,fontSize:10,fontWeight:800,color:t.mut}}>
-                  <div>Model</div><div style={{textAlign:"right"}}>Processed</div><div style={{textAlign:"right"}}>Generated</div><div style={{textAlign:"right"}}>Total</div><div style={{textAlign:"right"}}>Requests</div>
-                </div>
-                {allModels.slice(0,20).map((d,i)=><div key={i} style={{display:"grid",gridTemplateColumns:"minmax(180px,2fr) repeat(4,minmax(80px,1fr))",gap:8,padding:"6px 0",borderBottom:`1px solid ${t.brd}15`,fontSize:10,alignItems:"center"}}>
-                  <div style={{color:t.text,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.model}</div>
-                  <div style={{textAlign:"right",color:t.mut}}>{(d.prompt_tokens||0).toLocaleString()}</div>
-                  <div style={{textAlign:"right",color:t.mut}}>{(d.completion_tokens||0).toLocaleString()}</div>
-                  <div style={{textAlign:"right",color:t.acc,fontWeight:800}}>{(d.total_tokens||0).toLocaleString()}</div>
-                  <div style={{textAlign:"right",color:t.mut}}>{d.request_count||0}</div>
-                </div>)}
-              </div>}
-              {allProfiles.length>0&&<div style={{...cardS,marginTop:16}}>
-                <div style={{fontSize:12,fontWeight:800,marginBottom:8,color:t.mut}}>Top Profiles</div>
-                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                  {allProfiles.slice(0,10).map((d,i)=><span key={i} style={{fontSize:10,padding:"5px 8px",borderRadius:7,background:`${t.surface}66`,border:`1px solid ${t.brd}30`,color:t.dim}}>
-                    {d.persona_name||"Default"} · {(d.total_tokens||0).toLocaleString()}
-                  </span>)}
-                </div>
-              </div>}
-            </>;
-            })():<div style={{textAlign:"center",padding:40,color:t.mut}}>Loading statistics...</div>}
-          </div>
-        </div>
-      </div>
+      :panel==="analytics"?<AnalyticsPanel t={t} btnS={btnS} cardS={cardS} analyticsDays={analyticsDays} setAnalyticsDays={setAnalyticsDays} analyticsGroup={analyticsGroup} setAnalyticsGroup={setAnalyticsGroup} loadAnalytics={loadAnalytics} analyticsData={analyticsData}/>
 
       :panel==="settings"?ReactDOM.createPortal(<div style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)",fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)closeSettings();}}>
     <div style={{width:"min(1100px,95vw)",maxHeight:"85vh",height:"85vh",display:"grid",gridTemplateColumns:"260px minmax(0,1fr)",background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,boxShadow:"0 8px 48px #0008",overflow:"hidden",animation:"fadeIn .25s"}}>
@@ -10382,6 +6843,14 @@ function HyprChat(){
           </select>
           <div style={{fontSize:9,color:t.mut,marginTop:4}}>Controls how much the Builder LLM thinks before each tool call. Drop to <b>low</b> if generate_code is taking minutes per file.</div>
         </div>
+
+        <div style={{marginBottom:6,marginTop:12}}>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:t.dim,fontWeight:600,cursor:"pointer"}}>
+            <input type="checkbox" checked={openhandsDisableThinking} onChange={e=>setOpenhandsDisableThinking(e.target.checked)} style={{accentColor:t.acc}}/>
+            Disable model thinking during builds
+          </label>
+          <div style={{fontSize:9,color:t.mut,marginTop:4}}>Sends <b>think: false</b> to thinking-capable coder models (qwen3.5-class). Without it they reason with an unbounded budget before every tool call, making builds slow and tool calls flaky. Non-thinking models are unaffected.</div>
+        </div>
       </div>
 
       {/* TILE: Appearance */}
@@ -10698,12 +7167,12 @@ function HyprChat(){
 	      </div>
 
       {/* TILE: Changelog */}
-      <div style={{...settingsCardS,display:settingsTab==="changelog"?"block":"none",padding:0,overflow:"hidden"}}>
-        <div style={{maxHeight:"calc(85vh - 120px)",overflowY:"auto",padding:"20px 24px",lineHeight:1.7,fontSize:13,color:t.text}}>
+      <div style={{display:settingsTab==="changelog"?"block":"none",padding:0,overflow:"hidden",background:"transparent",border:"none",borderRadius:0,marginBottom:0}}>
+        <div style={{maxHeight:"calc(85vh - 120px)",overflowY:"auto",padding:"6px 4px 20px",lineHeight:1.7,fontSize:13,color:t.text}}>
           {!changelogContent?<div style={{textAlign:"center",padding:40,color:t.mut,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
             <div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
             Loading changelog...
-          </div>:<MDWrap>{md(changelogContent)}</MDWrap>}
+          </div>:<div className="changelog-markdown"><MDWrap>{md(changelogContent,{changelog:true})}</MDWrap></div>}
         </div>
       </div>
 
@@ -10806,10 +7275,9 @@ function HyprChat(){
               </div>
             </div>}
           </div>:act?.is_council?(()=>{
-            // ── COUNCIL CHAT VIEW ──
             const councilCfg=councils.find(c=>c.id===act.council_config_id);
             const getMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
-            // Group historical messages into turns, with rounds
+            const members=councilCfg?.members||[];
             const turns=[];let curTurn=null;
             for(const msg of(act.messages||[])){
               const meta=getMeta(msg);
@@ -10825,225 +7293,216 @@ function HyprChat(){
                 }
               }
             }
-            // Compat: flatten all rounds into .responses for voting display
-            for(const turn of turns){turn.responses=Object.values(turn.rounds).flat();}
-            const isLastTurn=(ti)=>ti===turns.length-1;
-              return <div key={actId||"empty"} style={{maxWidth:"100%",padding:"2px 20px 0",overflowY:"auto"}}>
-              {turns.map((turn,ti)=><div key={ti} style={{marginBottom:28,animation:`fadeIn .3s both`}}>
-                {/* User message */}
-                <div style={{display:"flex",gap:9,alignItems:"flex-start",marginBottom:12}}>
-                  <div style={{width:28,height:28,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:t.bgDeep,border:`1px solid ${t.f4}40`,color:t.f4,flexShrink:0,marginTop:2}}><IC.User/></div>
-                  <div style={{flex:1}}>
-                    <div style={{fontSize:10,color:t.mut,marginBottom:2,fontWeight:600,letterSpacing:.5}}>you</div>
-                    <div style={{background:`${t.surface}F0`,padding:"9px 13px",borderRadius:8,border:`1px solid ${t.brd}44`,lineHeight:1.65,fontSize:fontSize,color:t.text}}><MDWrap>{md(turn.user.content)}</MDWrap></div>
+            const isLastTurn=ti=>ti===turns.length-1;
+            const memberProfile=m=>m?.model_config_id?mcs.find(mc=>mc.id===m.model_config_id):null;
+            const memberById=id=>members.find(m=>m.id===id)||{};
+            const memberView=(id,meta={},live={})=>{
+              const member=memberById(id);
+              const mc=memberProfile(member);
+              const model=meta.council_model||live.model||mc?.base_model||member.model||"";
+              const name=meta.council_persona||live.member_name||mc?.name||member.persona_name||model.split(":")[0]||"Council member";
+              const avatar=mc?profileAvatar(mc):"";
+              const pts=member.points||0;
+              return {member,mc,model,name,avatar,pts};
+            };
+            const chip=(color,children,extra={})=><span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 7px",borderRadius:7,background:`${color}12`,border:`1px solid ${color}30`,color,fontSize:10,fontWeight:800,whiteSpace:"nowrap",...extra}}>{children}</span>;
+            const avatarNode=(view,size=34,color=t.acc)=><div style={{width:size,height:size,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",background:`${color}10`,border:`1px solid ${color}38`,color,overflow:"hidden",flexShrink:0}}>
+              {view.avatar?<img src={avatarSrc(view.avatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
+            </div>;
+            const tallyFromVotes=votes=>votes.reduce((a,v)=>({...a,[v.voted_for]:(a[v.voted_for]||0)+1}),{});
+            const sortedTally=tally=>Object.entries(tally).sort((a,b)=>b[1]-a[1]).map(([id,votes])=>({id,votes,view:memberView(id)}));
+            const livePhase=councilRunning?(councilVoting?"Peer vote":councilRound?.label||"Deliberating"):"Session history";
+            const responseCard=(resp,ri,roundKey,tally,live=false)=>{
+              const meta=live?resp.metadata:getMeta(resp);
+              const memberId=meta.council_member_id;
+              const view=memberView(memberId,meta,live?resp.live:{});
+              const votes=tally[memberId]||0;
+              const ptsColor=view.pts>0?t.ok:view.pts<0?t.err:t.mut;
+              const ckey=`council-card-${roundKey}-${ri}`;
+              const expanded=expandedRounds[ckey]===true;
+              const respondingTo=Array.isArray(meta.responding_to)?meta.responding_to:[];
+              const activeBorder=votes>0?t.ok:(roundKey===0?t.acc:t.pink);
+              return <div key={ckey} style={{background:`linear-gradient(180deg,${t.surface}E8,${t.bgDeep}D8)`,border:`1px solid ${activeBorder}${votes>0?"66":"30"}`,borderRadius:10,overflow:"hidden",boxShadow:votes>0?`0 0 0 1px ${activeBorder}18, 0 10px 30px #0002`:"0 10px 24px #0001",minWidth:0}}>
+                <div style={{padding:11,borderBottom:`1px solid ${t.brd}22`,display:"flex",gap:9,alignItems:"center"}}>
+                  {avatarNode(view,34,roundKey===0?t.acc:t.pink)}
+                  <div style={{minWidth:0,flex:1}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+                      <span style={{fontSize:12,fontWeight:900,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{view.name}</span>
+                      {view.mc&&chip(t.pink,"Persona",{fontSize:9,padding:"2px 6px"})}
+                    </div>
+                    <div style={{fontSize:9,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:2}}>{view.model||"model unavailable"}</div>
+                  </div>
+                  <div style={{display:"flex",gap:5,alignItems:"center",flexShrink:0}}>
+                    {votes>0&&chip(t.ok,<><IC.Trophy/>{votes}</>,{fontSize:9})}
+                    {chip(ptsColor,`${view.pts>0?"+":""}${view.pts} pt`,{fontSize:9})}
                   </div>
                 </div>
-                {/* Quick search results — show before last turn's responses */}
-                {quickResults.length>0&&isLastTurn(ti)&&<div style={{marginBottom:16,marginLeft:36,animation:"fadeIn .3s"}}>
-                  <div style={{fontSize:10,fontWeight:700,color:t.f1,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,display:"flex",alignItems:"center",gap:4}}>
-                    <IC.Flash/> Quick Search Results
-                    <button onClick={()=>setQuickResults([])} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"0 4px",fontSize:10,marginLeft:"auto"}}>✕</button>
-                  </div>
-                  <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:10}}>
-                    {quickResults.map((r,ri)=>{const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();const isYT=r.type==="youtube";const isImg=r.type==="image";const hasTh=!!r.thumbnail;const domLetter=(hn||"?")[0].toUpperCase();
-                      return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}F2`,border:`1px solid ${t.brd}55`,borderRadius:8,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}
-                        onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
-                        <div style={{width:"100%",height:110,background:hasTh?(isYT?"#0a0a0a":t.bgDeep):t.bgDeep,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                          {hasTh?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";e.target.nextSibling&&(e.target.nextSibling.style.display="flex");}}/>:null}
-                          {!hasTh&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-                            <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:32,height:32,borderRadius:4,display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
-                            <span style={{fontSize:10,color:t.mut,opacity:.6,letterSpacing:.5}}>{hn}</span>
-                          </div>}
-                          {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
-                            <div style={{width:34,height:34,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#fff",boxShadow:"0 2px 10px rgba(0,0,0,.5)"}}>▶</div>
-                          </div>}
-                          {hasTh&&hn&&<div style={{position:"absolute",top:6,right:6,background:`${t.bg}CC`,backdropFilter:"blur(6px)",borderRadius:6,padding:3,display:"flex",alignItems:"center",justifyContent:"center",border:`1px solid ${t.brd}33`}}>
-                            <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=32`} style={{width:18,height:18,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
-                          </div>}
-                        </div>
-                        <div style={{padding:"8px 10px",display:"flex",flexDirection:"column",gap:3}}>
-                          <div style={{fontSize:11,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.title}</div>
-                          {r.snippet&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
-                          <div style={{fontSize:9,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
-                        </div>
-                      </a>;})}
-                  </div>
+                {respondingTo.length>0&&<div style={{padding:"8px 11px 0",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                  <span style={{fontSize:9,textTransform:"uppercase",letterSpacing:.7,color:t.mut,fontWeight:900}}>Responding to</span>
+                  {respondingTo.slice(0,4).map(r=>chip(t.acc,r.name||r.id,{fontSize:9,padding:"2px 6px"}))}
                 </div>}
-                {/* Council response cards — grouped by round */}
-                <div style={{marginLeft:36}}>
-                  {(()=>{
-                    const hostMeta=turn.host?getMeta(turn.host):{};
-                    const isLive=councilRunning&&isLastTurn(ti);
-                    const turnVotes=isLive?councilVotes:(hostMeta.votes||[]);
-                    const turnTally=turnVotes.reduce((a,v)=>({...a,[v.voted_for]:(a[v.voted_for]||0)+1}),{});
-                    const roundNums=Object.keys(turn.rounds).map(Number).sort((a,b)=>a-b);
-                    const hasMultipleRounds=roundNums.length>1;
-                    const renderCard=(resp,ri,roundKey)=>{
-                      const meta=getMeta(resp);
-                      const model=meta.council_model||act.model||"";
-                      const memberId=meta.council_member_id;
-                      const member=councilCfg?.members?.find(m=>m.id===memberId)||{};
-                      const pts=member.points||0;
-                      const ptsColor=pts>0?t.ok:pts<0?t.err:t.mut;
-                      const votesReceived=turnTally[memberId]||0;
-                      const cid2=`cr${ti}-${roundKey}-${ri}`;
-                      return <div key={ri} style={{background:`${t.surface}AA`,border:`1px solid ${votesReceived>0?t.pink:t.brd}${votesReceived>0?"55":"33"}`,borderRadius:14,overflow:"hidden",transition:"all .2s"}}>
-                        <div style={{padding:"8px 12px",background:`${t.acc}08`,borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:6}}>
-                          <IC.Bot/>
-                          <span style={{fontSize:11,fontWeight:700,color:t.acc,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{meta.council_persona||model.split(":")[0]}</span>
-                          <span style={{fontSize:9,color:t.mut,flexShrink:0}}>{model.split(":")[1]||""}</span>
-                          {votesReceived>0&&<span style={{background:`${t.pink}20`,border:`1px solid ${t.pink}44`,borderRadius:10,padding:"2px 7px",fontSize:10,fontWeight:700,color:t.pink,flexShrink:0}}>{"🗳 ".repeat(Math.min(votesReceived,3))}{votesReceived}</span>}
-                          <span style={{background:pts>0?`${t.ok}20`:pts<0?`${t.err}20`:`${t.mut}10`,border:`1px solid ${ptsColor}40`,borderRadius:10,padding:"2px 7px",fontSize:10,fontWeight:700,color:ptsColor,flexShrink:0}}>{pts>0?"+":""}{pts}pt</span>
-                        </div>
-                        <div style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:320,overflowY:"auto"}}><MDWrap>{md(resp.content)}</MDWrap></div>
-                        {memberId&&<div style={{padding:"6px 10px",borderTop:`1px solid ${t.brd}18`,display:"flex",gap:4}}>
-                          <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,5)} title="Best answer (+5)" style={{...btnS(t.ok),flex:1,justifyContent:"center",padding:"4px 6px",fontSize:9}}><IC.Star/> Best</button>
-                          <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,2)} title="Good answer (+2)" style={{...btnS(t.acc),padding:"4px 6px",fontSize:9}}>👍</button>
-                          <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,-2)} title="Poor answer (-2)" style={{...btnS(t.err),padding:"4px 6px",fontSize:9}}>👎</button>
-                          <button onClick={()=>cp(resp.content,cid2)} style={{...btnS(t.mut),padding:"4px 6px",fontSize:9}}>{copied===cid2?<IC.Check/>:<IC.Copy/>}</button>
+                <div ref={el=>{if(live&&!resp.live.done&&el)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.7,color:t.dim,maxHeight:expanded?760:300,overflowY:"auto"}}>
+                  <MDWrap>{md(resp.content||"")}</MDWrap>
+                  {live&&!resp.live.done&&<span style={{display:"inline-block",width:2,height:13,background:t.acc,marginLeft:2,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
+                </div>
+                <div style={{padding:"7px 10px",borderTop:`1px solid ${t.brd}18`,display:"flex",gap:6,alignItems:"center"}}>
+                  <button onClick={()=>setExpandedRounds(p=>({...p,[ckey]:!expanded}))} style={{...btnS(t.mut),padding:"5px 7px",fontSize:9}}>{expanded?"Compact":"Expand"}</button>
+                  {memberId&&<>
+                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,5)} title="Mark best answer (+5)" style={{...btnS(t.ok),padding:"5px 7px",fontSize:9}}><IC.Star/> Best</button>
+                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,2)} title="Add points (+2)" style={{...btnS(t.acc),padding:"5px 7px",fontSize:9}}><IC.ChevDown style={{transform:"rotate(180deg)"}}/> Good</button>
+                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,-2)} title="Subtract points (-2)" style={{...btnS(t.err),padding:"5px 7px",fontSize:9}}><IC.ChevDown/> Weak</button>
+                  </>}
+                  <button onClick={()=>cp(resp.content,ckey)} style={{...btnS(t.mut),padding:"5px 7px",fontSize:9,marginLeft:"auto"}}>{copied===ckey?<IC.Check/>:<IC.Copy/>}</button>
+                </div>
+              </div>;
+            };
+            const ballotPanel=(votes,hostMeta={})=>{
+              if(!votes.length&&!councilVoting)return null;
+              const tally=tallyFromVotes(votes);
+              const leaders=hostMeta.winners||sortedTally(tally).map(x=>({id:x.id,name:x.view.name,votes:x.votes}));
+              return <div style={{background:`${t.surface}92`,border:`1px solid ${t.pink}32`,borderRadius:10,padding:12,margin:"12px 0",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
+                <div>
+                  <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8,color:t.pink,fontSize:11,fontWeight:900,textTransform:"uppercase",letterSpacing:.7}}><IC.Trophy/> Peer Ballot</div>
+                  {leaders.length?<div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {leaders.map((l,i)=><div key={l.id||i} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 8px",borderRadius:8,background:i===0?`${t.ok}12`:`${t.bgDeep}72`,border:`1px solid ${i===0?t.ok:t.brd}30`}}>
+                      <span style={{fontSize:10,color:i===0?t.ok:t.mut,fontWeight:900,width:18}}>{i+1}</span>
+                      <span style={{fontSize:11,color:t.text,fontWeight:800,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.name}</span>
+                      {chip(i===0?t.ok:t.mut,`${l.votes} vote${l.votes===1?"":"s"}`,{fontSize:9})}
+                    </div>)}
+                  </div>:<div style={{fontSize:11,color:t.mut,lineHeight:1.5}}>Waiting for council members to cast their peer votes.</div>}
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                  {votes.length?votes.map((v,vi)=><div key={vi} style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center",padding:"7px 8px",borderRadius:8,background:`${t.bgDeep}72`,border:`1px solid ${t.brd}22`}}>
+                    <span style={{fontSize:11,color:t.acc,fontWeight:800,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:90,maxWidth:150}}>{v.voter_name}</span>
+                    <span style={{height:1,background:`linear-gradient(90deg,${t.acc}55,${t.ok}55)`,width:28,flexShrink:0}}/>
+                    <span style={{fontSize:11,color:t.ok,fontWeight:900,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:100,maxWidth:170}}>{v.voted_for_name}</span>
+                    <span style={{fontSize:10,color:t.mut,lineHeight:1.45,flex:"1 1 220px",minWidth:0}}>{v.reason||"No reason supplied."}</span>
+                  </div>):<div style={{display:"flex",alignItems:"center",gap:5,color:t.pink,fontSize:11,fontWeight:800}}>
+                    {[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)} Voting in progress
+                  </div>}
+                </div>
+              </div>;
+            };
+            return <div key={actId||"empty"} style={{maxWidth:1540,margin:"0 auto",padding:"0 20px 8px",overflowY:"auto"}}>
+              <div style={{position:"sticky",top:0,zIndex:8,margin:"0 0 16px",padding:"10px 0 8px",background:`linear-gradient(180deg,${t.bg}F8,${t.bg}D8 70%,transparent)`,backdropFilter:"blur(8px)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10,background:`${t.surface}B8`,border:`1px solid ${t.brd}30`,borderRadius:10,padding:"10px 12px"}}>
+                  <div style={{width:34,height:34,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.pink}12`,border:`1px solid ${t.pink}35`,color:t.pink}}><IC.Council/></div>
+                  <div style={{minWidth:0,flex:1}}>
+                    <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                      <span style={{fontSize:13,fontWeight:900,color:t.text,letterSpacing:.4}}>{councilCfg?.name||"Council Session"}</span>
+                      {chip(t.pink,`${members.length} members`)}
+                      {chip(councilRunning?t.ok:t.mut,livePhase)}
+                      {councilRound?.total_rounds>1&&chip(t.acc,`Round ${(councilRound.round||0)+1}/${councilRound.total_rounds}`)}
+                    </div>
+                    <div style={{fontSize:10,color:t.mut,marginTop:3,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{members.map(m=>memberView(m.id).name).join(" / ")||"No council members configured"}</div>
+                  </div>
+                  {councilCfg?.host_model&&chip(t.warm,<><IC.Crown/>{councilCfg.host_model}</>)}
+                </div>
+              </div>
+              {turns.map((turn,ti)=>{
+                const hostMeta=turn.host?getMeta(turn.host):{};
+                const isLive=councilRunning&&isLastTurn(ti);
+                const turnVotes=isLive?councilVotes:(hostMeta.votes||[]);
+                const turnTally=tallyFromVotes(turnVotes);
+                const roundNums=Object.keys(turn.rounds).map(Number).sort((a,b)=>a-b);
+                return <div key={ti} style={{display:"grid",gridTemplateColumns:"26px minmax(0,1fr)",gap:12,marginBottom:28,animation:"fadeIn .3s both"}}>
+                  <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
+                    <div style={{width:26,height:26,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.f4}10`,border:`1px solid ${t.f4}35`,color:t.f4}}><IC.User/></div>
+                    <div style={{width:1,flex:1,minHeight:30,background:`linear-gradient(${t.f4}45,${t.pink}33,${t.warm}35)`}}/>
+                  </div>
+                  <div>
+                    <div style={{background:`${t.surface}D8`,border:`1px solid ${t.brd}38`,borderRadius:10,padding:"12px 14px",marginBottom:14}}>
+                      <div style={{fontSize:10,color:t.f4,fontWeight:900,textTransform:"uppercase",letterSpacing:.8,marginBottom:6}}>Address to the council</div>
+                      <div style={{fontSize:fontSize,lineHeight:1.65,color:t.text}}><MDWrap>{md(turn.user.content)}</MDWrap></div>
+                    </div>
+                    {roundNums.map(rnd=>{
+                      const rKey=`${ti}-${rnd}`;
+                      const resps=turn.rounds[rnd]||[];
+                      const label=getMeta(resps[0]||{}).round_label||(rnd===0?"Opening Statements":`Rebuttal Round ${rnd}`);
+                      const isExpanded=expandedRounds[rKey]!==undefined?expandedRounds[rKey]:true;
+                      return <div key={rnd} style={{marginBottom:14}}>
+                        <button onClick={()=>setExpandedRounds(p=>({...p,[rKey]:!isExpanded}))} style={{width:"100%",border:`1px solid ${rnd===0?t.acc:t.pink}28`,background:`${rnd===0?t.acc:t.pink}08`,borderRadius:9,padding:"8px 10px",display:"flex",alignItems:"center",gap:8,cursor:"pointer",color:rnd===0?t.acc:t.pink,fontFamily:font}}>
+                          <span style={{transform:isExpanded?"rotate(0deg)":"rotate(-90deg)",transition:"transform .15s"}}><IC.ChevDown/></span>
+                          {rnd===0?<IC.Council/>:<IC.GitBranch/>}
+                          <span style={{fontSize:11,fontWeight:900,textTransform:"uppercase",letterSpacing:.8}}>{label}</span>
+                          <span style={{fontSize:10,color:t.mut,marginLeft:"auto"}}>{resps.length} response{resps.length===1?"":"s"}</span>
+                        </button>
+                        {isExpanded&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12,marginTop:10}}>
+                          {resps.map((resp,ri)=>responseCard(resp,ri,rnd,turnTally,false))}
                         </div>}
                       </div>;
-                    };
-                    return <>
-                  {roundNums.map(rnd=>{
-                    const roundLabel=rnd===0?"Opening Statements":`⚔️ Rebuttal Round ${rnd}`;
-                    const rKey=`${ti}-${rnd}`;
-                    const isExpanded=expandedRounds[rKey]!==undefined?expandedRounds[rKey]:(rnd===roundNums[roundNums.length-1]);
-                    const resps=turn.rounds[rnd]||[];
-                    return <div key={rnd} style={{marginBottom:10}}>
-                      {/* Round header — always clickable when multiple rounds */}
-                      <button onClick={()=>setExpandedRounds(p=>({...p,[rKey]:!isExpanded}))}
-                        style={{background:"none",border:"none",cursor:"pointer",width:"100%",display:"flex",alignItems:"center",gap:8,padding:"6px 0",marginBottom:isExpanded?6:0}}>
-                        <div style={{flex:1,height:1,background:rnd===0?`${t.acc}33`:`${t.pink}33`}}/>
-                        <span style={{fontSize:10,fontWeight:700,color:rnd===0?t.acc:t.pink,textTransform:"uppercase",letterSpacing:1,whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:5}}>
-                          {hasMultipleRounds&&<span style={{fontSize:11,transition:"transform .2s",display:"inline-block",transform:isExpanded?"rotate(90deg)":"rotate(0deg)"}}>▶</span>}
-                          {roundLabel}
-                          <span style={{fontSize:9,color:t.mut,fontWeight:400,textTransform:"none",letterSpacing:0}}>({resps.length} responses)</span>
-                        </span>
-                        <div style={{flex:1,height:1,background:rnd===0?`${t.acc}33`:`${t.pink}33`}}/>
-                      </button>
-                      {isExpanded&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:10}}>
-                        {resps.map((resp,ri)=>renderCard(resp,ri,rnd))}
-                      </div>}
-                    </div>;
-                  })}
-                  {/* Live streaming round header + cards */}
-                  {isLive&&councilRound&&<div style={{marginBottom:10}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0",marginBottom:6}}>
-                      <div style={{flex:1,height:1,background:`${t.pink}33`}}/>
-                      <span style={{fontSize:10,fontWeight:700,color:t.pink,textTransform:"uppercase",letterSpacing:1,whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:5}}>
-                        ⚔️ {councilRound.label}{councilRound.total_rounds>1?` (${councilRound.round+1}/${councilRound.total_rounds})`:""}
-                      </span>
-                      <div style={{flex:1,height:1,background:`${t.pink}33`}}/>
-                    </div>
-                    {councilKbStatus&&<div style={{fontSize:10,color:t.dim,textAlign:"center",marginBottom:6}}>📚 {councilKbStatus}</div>}
-                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:10}}>
-                      {Object.entries(councilResponses).map(([mid,resp])=>{
-                        const member=councilCfg?.members?.find(m=>m.id===mid)||{};
-                        return <div key={mid} style={{background:`${t.surface}AA`,border:`1px solid ${t.acc}44`,borderRadius:14,overflow:"hidden"}}>
-                          <div style={{padding:"8px 12px",background:`${t.acc}10`,borderBottom:`1px solid ${t.acc}22`,display:"flex",alignItems:"center",gap:6}}>
-                            <span style={{display:"inline-block",animation:"bop 2s ease-in-out infinite"}}><IC.Bot/></span>
-                            <span style={{fontSize:11,fontWeight:700,color:t.acc,flex:1}}>{member.persona_name||resp.model?.split(":")[0]||mid}</span>
-                            {!resp.done?<div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>:<span style={{color:t.ok,fontSize:11}}>✓</span>}
-                          </div>
-                          <div ref={el=>{if(el&&!resp.done)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:320,overflowY:"auto"}}>
-                            <MDWrap>{md(resp.content||"")}</MDWrap>
-                            {!resp.done&&<span style={{display:"inline-block",width:2,height:13,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                          </div>
-                        </div>;
-                      })}
-                    </div>
-                  </div>}
-                  {/* Voting phase indicator */}
-                  {isLive&&councilVoting&&turnVotes.length===0&&<div style={{background:`${t.pink}08`,border:`1px solid ${t.pink}28`,borderRadius:12,padding:"10px 14px",marginBottom:10,animation:"fadeIn .3s",display:"flex",alignItems:"center",gap:8}}>
-                    <div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
-                    <span style={{fontSize:11,color:t.pink,fontWeight:600}}>🗳 AI members are voting...</span>
-                  </div>}
-                  {/* AI Peer Votes */}
-                  {turnVotes.length>0&&<div style={{background:`${t.pink}08`,border:`1px solid ${t.pink}28`,borderRadius:12,padding:"10px 14px",marginBottom:10,animation:"fadeIn .3s"}}>
-                    <div style={{fontSize:10,fontWeight:700,color:t.pink,textTransform:"uppercase",letterSpacing:.5,marginBottom:6,display:"flex",alignItems:"center",gap:4}}>
-                      🗳 AI Peer Votes
-                    </div>
-                    {turnVotes.map((v,vi)=><div key={vi} style={{fontSize:11,color:t.dim,padding:"3px 0",display:"flex",gap:5,alignItems:"baseline",flexWrap:"wrap",animation:"fadeIn .3s"}}>
-                      <span style={{color:t.acc,fontWeight:600,flexShrink:0}}>{v.voter_name}</span>
-                      <span style={{color:t.mut,fontSize:10}}>voted for</span>
-                      <span style={{color:t.ok,fontWeight:600,flexShrink:0}}>{v.voted_for_name}</span>
-                      {v.reason&&<span style={{color:t.mut,fontSize:10,flex:1}}>— {v.reason}</span>}
-                    </div>)}
-                  </div>}
-                  </>;})()}
-                  {/* Host synthesis */}
-                  {(turn.host||(councilRunning&&isLastTurn(ti)&&councilHostContent))&&<div style={{background:`${t.warm}08`,border:`1px solid ${t.warm}28`,borderRadius:14,padding:"12px 16px",marginTop:4,animation:"fadeIn .3s"}}>
-                    <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8}}>
-                      <IC.Crown/><span style={{fontSize:11,fontWeight:700,color:t.warm}}>Host Synthesis</span>
-                      {councilCfg?.host_model&&<span style={{fontSize:9,color:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:4}}>{councilCfg.host_model}</span>}
-                      {councilRunning&&isLastTurn(ti)&&!turn.host&&<div style={{display:"flex",gap:3,marginLeft:"auto"}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.warm,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
-                    </div>
-                    <div ref={el=>{if(el&&councilRunning&&isLastTurn(ti)&&!turn.host)el.scrollTop=el.scrollHeight;}} style={{fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:400,overflowY:"auto"}}>
-                      <MDWrap>{md(turn.host?.content||councilHostContent)}</MDWrap>
-                      {councilRunning&&isLastTurn(ti)&&councilHostContent&&!turn.host&&<span style={{display:"inline-block",width:2,height:13,background:t.warm,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                    </div>
-                  </div>}
-                </div>
-              </div>)}
-              {/* Initial streaming before first user message turn is built */}
-              {councilRunning&&!turns.length&&Object.keys(councilResponses).length>0&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:10}}>
-                {Object.entries(councilResponses).map(([mid,resp])=><div key={mid} style={{background:`${t.surface}AA`,border:`1px solid ${t.acc}44`,borderRadius:14,overflow:"hidden"}}>
-                  <div style={{padding:"8px 12px",background:`${t.acc}10`,borderBottom:`1px solid ${t.acc}22`,display:"flex",alignItems:"center",gap:6}}>
-                    <span style={{display:"inline-block",animation:"bop 2s ease-in-out infinite"}}><IC.Bot/></span>
-                    <span style={{fontSize:11,fontWeight:700,color:t.acc}}>{resp.model?.split(":")[0]||mid}</span>
-                    {!resp.done&&<div style={{display:"flex",gap:3,marginLeft:"auto"}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
+                    })}
+                    {isLive&&councilRound&&<div style={{marginBottom:14}}>
+                      <div style={{border:`1px solid ${t.pink}28`,background:`${t.pink}08`,borderRadius:9,padding:"8px 10px",display:"flex",alignItems:"center",gap:8,color:t.pink}}>
+                        <IC.GitBranch/><span style={{fontSize:11,fontWeight:900,textTransform:"uppercase",letterSpacing:.8}}>{councilRound.label}</span>
+                        <div style={{display:"flex",gap:4,marginLeft:"auto"}}>{[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
+                      </div>
+                      {councilKbStatus&&<div style={{fontSize:10,color:t.dim,margin:"7px 2px 0"}}>{councilKbStatus}</div>}
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12,marginTop:10}}>
+                        {Object.entries(councilResponses).map(([mid,resp],ri)=>responseCard({content:resp.content||"",metadata:{council_member_id:mid,council_model:resp.model,council_persona:resp.member_name,debate_round:resp.round,round_label:resp.round_label,responding_to:resp.responding_to||[]},live:resp},ri,`live-${resp.round||0}`,turnTally,true))}
+                      </div>
+                    </div>}
+                    {ballotPanel(turnVotes,hostMeta)}
+                    {(turn.host||(isLive&&councilHostContent))&&<div style={{background:`linear-gradient(180deg,${t.warm}10,${t.surface}C8)`,border:`1px solid ${t.warm}34`,borderRadius:10,padding:14,marginTop:12,animation:"fadeIn .3s"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+                        <div style={{width:28,height:28,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.warm}12`,border:`1px solid ${t.warm}34`,color:t.warm}}><IC.Crown/></div>
+                        <div style={{minWidth:0,flex:1}}>
+                          <div style={{fontSize:12,fontWeight:900,color:t.warm,textTransform:"uppercase",letterSpacing:.8}}>Moderator Verdict</div>
+                          <div style={{fontSize:10,color:t.mut}}>{councilCfg?.host_model||act.model||"host model"}</div>
+                        </div>
+                        {(hostMeta.winner||hostMeta.winners?.[0])&&chip(t.ok,<><IC.Trophy/>{(hostMeta.winner||hostMeta.winners[0]).name}</>)}
+                        {isLive&&!turn.host&&<div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.warm,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
+                      </div>
+                      <div ref={el=>{if(el&&isLive&&!turn.host)el.scrollTop=el.scrollHeight;}} style={{fontSize:fontSize-1,lineHeight:1.75,color:t.dim,maxHeight:520,overflowY:"auto"}}>
+                        <MDWrap>{md(turn.host?.content||councilHostContent)}</MDWrap>
+                        {isLive&&councilHostContent&&!turn.host&&<span style={{display:"inline-block",width:2,height:13,background:t.warm,marginLeft:2,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
+                      </div>
+                    </div>}
+                    {quickResults.length>0&&isLastTurn(ti)&&<QuickSearchSourcesPanel payload={_quickSearchPayloadFromEvents(evts,quickResults)} t={t} font={font}/>}
                   </div>
-                  <div ref={el=>{if(el&&!resp.done)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.6,color:t.dim,maxHeight:320,overflowY:"auto"}}><MDWrap>{md(resp.content||"")}</MDWrap></div>
-                </div>)}
+                </div>;
+              })}
+              {councilRunning&&!turns.length&&Object.keys(councilResponses).length>0&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12}}>
+                {Object.entries(councilResponses).map(([mid,resp],ri)=>responseCard({content:resp.content||"",metadata:{council_member_id:mid,council_model:resp.model,council_persona:resp.member_name,debate_round:resp.round,round_label:resp.round_label,responding_to:resp.responding_to||[]},live:resp},ri,`initial-${resp.round||0}`,{},true))}
               </div>}
               <div ref={chatEnd}/>
             </div>;
           })():<div key={actId||"empty"} style={{maxWidth:chatWidth,margin:"0 auto",padding:"2px 18px 0"}}>
-            {(()=>{const filteredMsgs=(act.messages||[]).filter(msg=>msg.role==="user"||msg.role==="assistant");
-              // Find the index of the last assistant message to place quick search results before it
-              let lastAssistantFilteredIdx=-1;
-              filteredMsgs.forEach((m,idx)=>{if(m.role==="assistant")lastAssistantFilteredIdx=idx;});
-              return filteredMsgs.map((msg,i)=>{const isU=msg.role==="user";const mid=`m${i}`;const isEditing=editingMsg?.index===i;
-              const showQS=quickResults.length>0&&i===lastAssistantFilteredIdx&&!isU;
+            {(()=>{const messageRows=(act.messages||[]).map((msg,index)=>({msg,index})).filter(({msg})=>msg.role==="user"||msg.role==="assistant");
+              const totalMessages=messageRows.length;
+              const visibleCount=Math.max(CHAT_HISTORY_RENDER_CHUNK,visibleMessageCounts[actId]||CHAT_HISTORY_RENDER_CHUNK);
+              const hiddenCount=Math.max(0,totalMessages-visibleCount);
+              const visibleRows=hiddenCount>0?messageRows.slice(hiddenCount):messageRows;
+              // Find the last assistant message once so live search/tool events attach to the active answer.
+              let lastAssistantMsgIdx=-1;
+              messageRows.forEach(({msg,index})=>{if(msg.role==="assistant")lastAssistantMsgIdx=index;});
+              return <>
+              {hiddenCount>0&&<div style={{display:"flex",justifyContent:"center",margin:"0 0 14px"}}>
+                <button onClick={()=>revealOlderMessages(actId,totalMessages)} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:8,border:`1px solid ${t.brd}44`,background:`${t.surface}B8`,color:t.mut,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:700}}>
+                  <span style={{display:"inline-flex",transform:"rotate(180deg)"}}><IC.ChevDown/></span>
+                  Show older ({hiddenCount})
+                </button>
+              </div>}
+              {visibleRows.map(({msg,index:i},visibleIdx)=>{const isU=msg.role==="user";const mid=`m${i}`;const isEditing=editingMsg?.index===i;
               const activeProfile=!isU?getProfileForConversation(act):null;
               const personaAvatar=!isU&&(act?.persona_avatar||profileAvatar(activeProfile));
               const personaName=!isU&&act?.persona_name;
               const msgProfileType=personaName?getConversationProfileType(act):null;
               const personaColor=!isU&&personaName?(msgProfileType==="persona"?t.pink:t.acc):t.acc;
               const renderedContent=!isU?replacePersonaPlaceholdersForConversation(msg.content||"",act):msg.content;
-              return <React.Fragment key={i}>
-              {showQS&&<div style={{marginBottom:16,animation:"fadeIn .3s"}}>
-                <div style={{fontSize:10,fontWeight:700,color:t.f1,textTransform:"uppercase",letterSpacing:.5,marginBottom:8,display:"flex",alignItems:"center",gap:4}}>
-                  <IC.Flash/> Quick Search Results
-                  <button onClick={()=>setQuickResults([])} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"0 4px",fontSize:10,marginLeft:"auto"}}>✕</button>
-                </div>
-                <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:10}}>
-                  {quickResults.map((r,ri)=>{const hn=(()=>{try{return new URL(r.url.startsWith("http")?r.url:"https://"+r.url).hostname.replace("www.","");}catch{return "";}})();const isYT=r.type==="youtube";const isImg=r.type==="image";const hasTh=!!r.thumbnail;const domLetter=(hn||"?")[0].toUpperCase();
-                    return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}F2`,border:`1px solid ${t.brd}55`,borderRadius:8,overflow:"hidden",cursor:"pointer",transition:"border-color .2s",minWidth:180,maxWidth:220,flexShrink:0}}
-                      onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
-                      <div style={{width:"100%",height:110,background:hasTh?(isYT?"#0a0a0a":t.bgDeep):t.bgDeep,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                        {hasTh?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";e.target.nextSibling&&(e.target.nextSibling.style.display="flex");}}/>:null}
-                        {!hasTh&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-                          <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:32,height:32,borderRadius:4,display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
-                          <span style={{fontSize:10,color:t.mut,opacity:.6,letterSpacing:.5}}>{hn}</span>
-                        </div>}
-                        {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
-                          <div style={{width:34,height:34,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#fff",boxShadow:"0 2px 10px rgba(0,0,0,.5)"}}>▶</div>
-                        </div>}
-                        {hasTh&&hn&&<div style={{position:"absolute",top:6,right:6,background:`${t.bg}CC`,backdropFilter:"blur(6px)",borderRadius:6,padding:3,display:"flex",alignItems:"center",justifyContent:"center",border:`1px solid ${t.brd}33`}}>
-                          <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=32`} style={{width:18,height:18,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
-                        </div>}
-                      </div>
-                      <div style={{padding:"8px 10px",display:"flex",flexDirection:"column",gap:3}}>
-                        <div style={{fontSize:11,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.title}</div>
-                        {r.snippet&&<div style={{fontSize:10,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
-                        <div style={{fontSize:9,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
-                      </div>
-                    </a>;})}
-                </div>
-              </div>}
-              <div style={{marginBottom:compactMode?7:18,display:"flex",gap:9,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(i*.04,.2)}s both`}}>
+              const meta=_metaObj(msg.metadata);
+              const savedEvents=Array.isArray(meta.saved_events)?meta.saved_events:[];
+              const isLastAssistant=!isU&&i===lastAssistantMsgIdx;
+              const liveEventsForMsg=isLastAssistant?evts:[];
+              const messageWorkflows=isLastAssistant&&Array.isArray(coderWorkflows)?coderWorkflows.slice(0,3):[];
+              const daedalusRunIds=!isU?_daedalusRunIdsForMessage(meta,isLastAssistant,evts):[];
+              const isDaedalusFullBuild=!isU&&_isDaedalusFullBuildOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
+              const isDaedalusOutput=!isU&&_isDaedalusOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
+              const liveQuickSearchPayload=isLastAssistant?_quickSearchPayloadFromEvents(evts,quickResults):null;
+              const renderOpts=citeOptsFor(msg,liveQuickSearchPayload);
+              const quickSearchPayload=renderOpts?.quickSearch;
+              return <React.Fragment key={msg.id?`${msg.id}-${i}`:i}>
+              <div style={{marginBottom:compactMode?7:18,display:"flex",gap:9,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(visibleIdx*.04,.2)}s both`}}>
                 <div style={{width:isU?28:40,height:isU?28:40,borderRadius:isU?7:10,display:"flex",alignItems:"center",justifyContent:"center",background:isU?t.bgDeep:`${personaColor}10`,border:`1px solid ${isU?t.f4:personaColor}38`,color:isU?t.f4:personaColor,flexShrink:0,marginTop:isU?3:1,overflow:"hidden",boxShadow:"none"}}>
                   {isU?<IC.User/>:personaAvatar?<img src={avatarSrc(personaAvatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
                 </div>
@@ -11069,7 +7528,7 @@ function HyprChat(){
                         <button onClick={()=>setEditingMsg(null)} style={btnS(t.mut)}>Cancel</button>
                       </div>
                     </div>
-                    :msg.isS?mdStream(renderedContent):<MemoMD content={renderedContent} md={md} opts={citeOptsFor(msg)}/>}
+                    :isDaedalusOutput?null:msg.isS?mdStream(renderedContent,renderOpts):<MemoMD content={renderedContent} md={md} opts={renderOpts}/>}
                     {isU&&msg.metadata?.images?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:msg.content?10:0}}>
                       {msg.metadata.images.map((img,ii)=><div key={ii} title={img.name} style={{display:"inline-flex",flexDirection:"column",gap:4,alignItems:"flex-start",maxWidth:260}}>
                         <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:8,border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:"none"}}/>
@@ -11084,21 +7543,20 @@ function HyprChat(){
                       </span>)}
                     </div>}
                     {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                    {msg.isS&&!msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
+                    {msg.isS&&!msg.content&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
                   </div>
-                  {msg.isS&&msg.content&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
-                  {!msg.isS&&(()=>{const msgs=act.messages||[];const lastAssistantIdx=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=!isU&&i===lastAssistantIdx;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
-                  {(()=>{if(isU||msg.isS||!msg.metadata?.saved_events?.length)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;const isLast=i===lastAI;if(isLast&&evts.length>0)return null;return <ToolStatus evts={msg.metadata.saved_events.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>;})()}
-                  {(()=>{if(isU)return null;const msgs=act.messages||[];const lastAI=msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;if(i!==lastAI||!coderWorkflows.length)return null;return coderWorkflows.slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
+                  {isDaedalusOutput&&<DaedalusSummary runIds={daedalusRunIds} savedEvents={savedEvents} liveEvts={liveEventsForMsg} workflows={messageWorkflows} t={t} font={font} md={md} msgContent={renderedContent} live={!!msg.isS} onPreview={openPreview} onOpenArtifact={openArtifact}/>}
+                  {msg.isS&&msg.content&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
+                  {!msg.isS&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
+                  {(()=>{if(isU||isDaedalusOutput||msg.isS||!savedEvents.length)return null;const isLast=isLastAssistant;if(isLast&&evts.length>0)return null;return <ToolStatus evts={savedEvents.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>;})()}
+                  {(()=>{if(isU||isDaedalusOutput)return null;if(!isLastAssistant||!coderWorkflows.length)return null;return coderWorkflows.slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
                   {/* Coder Bot v2 — durable run cards. Render one card per unique run_id.
                       Sources, in priority: explicit metadata.run_ids (written server-side at
                       each round boundary — survives mid-stream reload), then live events
                       (current message), then saved_events (history). */}
                   {(()=>{
-                    if(isU) return null;
-                    const msgs = act.messages||[];
-                    const lastAI = msgs.map((m,idx)=>({m,idx})).filter(x=>x.m.role==="assistant").pop()?.idx;
-                    const isLast = i===lastAI;
+                    if(isU||isDaedalusOutput) return null;
+                    const isLast = isLastAssistant;
                     // Merge run_ids from all three sources, dedup, preserve first-seen order.
                     const ridsFromMeta = Array.isArray(msg.metadata?.run_ids) ? msg.metadata.run_ids : [];
                     const ridsFromEvts = _runIdsFromEvents(isLast && evts.length>0 ? evts : (msg.metadata?.saved_events||[]));
@@ -11113,7 +7571,7 @@ function HyprChat(){
                     );
                   })()}
                   {/* Inline code execution output */}
-                  {(()=>{if(isU)return null;const savedEvts=msg.metadata?.saved_events||[];const codeOuts=savedEvts.filter(e=>e.type==="code_output");if(!codeOuts.length)return null;return codeOuts.map((e,ci)=>{const d=e.data||{};const ckey=`${i}-${ci}`;const collapsed=collapsedOutputs.has(ckey);const toggleCollapsed=()=>setCollapsedOutputs(s=>{const n=new Set(s);if(n.has(ckey))n.delete(ckey);else n.add(ckey);return n;});return <div key={ci} style={{margin:"8px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${d.success?`${t.ok}33`:`${t.err}33`}`,background:t.bgDeep}}>
+                  {(()=>{if(isU||isDaedalusOutput)return null;const savedEvts=savedEvents;const codeOuts=savedEvts.filter(e=>e.type==="code_output");if(!codeOuts.length)return null;return codeOuts.map((e,ci)=>{const d=e.data||{};const ckey=`${i}-${ci}`;const collapsed=collapsedOutputs.has(ckey);const toggleCollapsed=()=>setCollapsedOutputs(s=>{const n=new Set(s);if(n.has(ckey))n.delete(ckey);else n.add(ckey);return n;});return <div key={ci} style={{margin:"8px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${d.success?`${t.ok}33`:`${t.err}33`}`,background:t.bgDeep}}>
                     <div onClick={toggleCollapsed} title={collapsed?"Show output":"Hide output"} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${d.success?t.ok:t.err}10`,borderBottom:collapsed?"none":`1px solid ${d.success?t.ok:t.err}22`,cursor:"pointer",userSelect:"none"}}>
                       <span style={{display:"inline-block",transition:"transform .15s",transform:collapsed?"rotate(-90deg)":"rotate(0)",color:d.success?t.ok:t.err,fontSize:10}}>{"\u25BE"}</span>
                       <span>{d.success?"\u2705":"\u274C"}</span>
@@ -11125,9 +7583,10 @@ function HyprChat(){
                   </div>;});})()}
                   {/* KB sources strip — numbered citation sources for this reply */}
                   {(()=>{
-                    if(isU||msg.isS)return null;
-                    const co=citeOptsFor(msg);
+                    if(isU||msg.isS||isDaedalusOutput)return null;
+                    const co=renderOpts;
                     if(!co?.citations?.length)return null;
+                    if(co.quickSearch&&co.citations.every(s2=>s2?.kind==="quick_search"))return null;
                     return <Collapsible theme={t} font={font} summary={`Sources (${co.citations.length})`}>
                       <div style={{display:"flex",flexDirection:"column",gap:6}}>
                         {co.citations.map(s2=><div key={s2.n} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"6px 8px",background:`${t.surface}44`,border:`1px solid ${t.brd}33`,borderRadius:6}}>
@@ -11140,6 +7599,7 @@ function HyprChat(){
                       </div>
                     </Collapsible>;
                   })()}
+                  {!isU&&!isDaedalusOutput&&quickSearchPayload&&<QuickSearchSourcesPanel payload={quickSearchPayload} t={t} font={font}/>}
                   {!msg.isS&&!isEditing&&<div style={msgToolbarS}>
                     {!isU&&msg.content&&<button onClick={()=>cp(renderedContent,mid)} style={msgActionS(copied===mid?t.ok:t.mut)}>
                       {copied===mid?<><IC.Check/> copied</>:<><IC.Copy/> copy</>}
@@ -11203,7 +7663,7 @@ function HyprChat(){
                   </div>}
                 </div>
               </div></React.Fragment>;
-            });})()}
+            })}</>;})()}
             {evts.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}><ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/></div>}
             <div ref={chatEnd}/>
           </div>}

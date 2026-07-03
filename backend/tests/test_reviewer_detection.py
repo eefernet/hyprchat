@@ -73,6 +73,17 @@ class _FakeHTTP:
                 "stdout": "\n".join(top_level) if self.ls_exit == 0 else "",
                 "stderr": "" if self.ls_exit == 0 else "ls failed",
             })
+        if "-mindepth 2 -maxdepth 2" in command:
+            import fnmatch
+            hits = []
+            for path in self.files:
+                parts = path.split("/")
+                if len(parts) == 2 and any(
+                        fnmatch.fnmatch(parts[1], pat)
+                        for pat in reviewer._NESTED_MARKER_NAMES):
+                    hits.append(f"./{path}")
+            return _FakeResponse({"exit_code": 0, "stdout": "\n".join(sorted(hits)),
+                                  "stderr": ""})
         if "sort | uniq -c" in command:
             counts = {}
             for path in self.files:
@@ -266,6 +277,79 @@ def test_smoke_success_records_runtime_state_files():
     assert envelope["smoke_exit"] == 0
     assert envelope["smoke_new_files"] == ["snip.json"]
     assert any("-m snip --help" in c for c in envelope["smoke_cmds"])
+    assert envelope["isolated_status"] == "passed"
+    assert envelope["isolated_required"] is True
+
+
+class _IsolatedFailHTTP(_SmokeHTTP):
+    async def post(self, url, json=None, timeout=None):
+        command = (json or {}).get("command", "")
+        if "pip check" in command:
+            return _FakeResponse({
+                "exit_code": 1,
+                "stdout": "pygame 2.6.1 has broken font imports",
+                "stderr": "",
+            })
+        return await super().post(url, json=json, timeout=timeout)
+
+
+def test_isolated_verification_failure_blocks_clean_review():
+    http = _IsolatedFailHTTP(_SMOKE_FILES, smoke_exit=0)
+
+    envelope = _run(reviewer.run_review(
+        http, _NullEvents(), "conv-smoke", "/root/projects/snip",
+    ))
+
+    assert envelope["status"] == "issues"
+    assert envelope["isolated_status"] == "failed"
+    assert envelope["isolated_exit"] == 1
+    assert envelope["issues"][0]["severity"] == "packaging"
+    assert "Isolated verification verify phase failed" in envelope["issues"][0]["summary"]
+
+
+class _AdvisoryIsolatedFailHTTP(_SmokeHTTP):
+    async def post(self, url, json=None, timeout=None):
+        command = (json or {}).get("command", "")
+        if "advisory-isolated-fail" in command:
+            return _FakeResponse({
+                "exit_code": 1,
+                "stdout": "advisory check failed",
+                "stderr": "",
+            })
+        return await super().post(url, json=json, timeout=timeout)
+
+
+def test_advisory_isolated_verification_failure_does_not_block_clean_review(monkeypatch):
+    from agents import language_adapters as agent_language_adapters
+
+    def advisory_contract(_project_files, _language=""):
+        return {
+            "language": "python",
+            "smoke_cmds": [],
+            "isolated_verification": {
+                "applicable": True,
+                "required_for_delivery": False,
+                "setup_cmd": "",
+                "verify_cmds": ["advisory-isolated-fail"],
+                "runtime_smoke_cmds": [],
+                "cleanup_paths": [],
+                "reason": "advisory test check",
+            },
+        }
+
+    monkeypatch.setattr(agent_language_adapters, "detect_contract", advisory_contract)
+    http = _AdvisoryIsolatedFailHTTP(_SMOKE_FILES, smoke_exit=0)
+
+    envelope = _run(reviewer.run_review(
+        http, _NullEvents(), "conv-smoke", "/root/projects/snip",
+    ))
+
+    assert envelope["status"] == "clean"
+    assert envelope["issues"] == []
+    assert envelope["isolated_required"] is False
+    assert envelope["isolated_status"] == "failed"
+    assert envelope["isolated_exit"] == 1
+    assert "advisory check failed" in envelope["isolated_output_tail"]
 
 
 def test_extract_console_scripts():
@@ -289,7 +373,7 @@ class _ConsoleScriptSmokeHTTP(_SmokeHTTP):
                 "[project]\nname = \"snip\"\n\n"
                 "[project.scripts]\nsnip = \"snip.cli:main\"\n"
             ), "stderr": ""})
-        if "/root/venv/bin/snip --help" in command:
+        if "./.venv/bin/snip --help" in command:
             return _FakeResponse({"exit_code": self.smoke_exit,
                                   "stdout": self.smoke_stdout, "stderr": ""})
         return await super().post(url, json=json, timeout=timeout)
@@ -304,7 +388,7 @@ def test_console_script_smoke_runs_first_and_catches_runtime_state():
     ))
 
     assert envelope["status"] == "clean"
-    assert envelope["smoke_cmds"][0] == "/root/venv/bin/snip --help"
+    assert envelope["smoke_cmds"][0] == "./.venv/bin/snip --help"
     assert envelope["smoke_new_files"] == ["snip.json"]
 
 
@@ -319,3 +403,228 @@ def test_smoke_cleans_up_its_own_runtime_files():
     assert envelope["smoke_new_files"] == ["snip.json"]
     rm_cmds = [c for c in http.posts if "rm -f --" in c and "snip.json" in c]
     assert rm_cmds, "smoke must remove the runtime files it created"
+
+
+def test_detects_fullstack_monorepo_compound_contract():
+    """backend/pyproject.toml + frontend/package.json has NO top-level marker;
+    it must compose a compound contract instead of reviewing as plain python
+    (which left the frontend entirely unverified)."""
+    result = _run(reviewer._detect_project(
+        _FakeHTTP([
+            "backend/pyproject.toml", "backend/main.py",
+            "frontend/package.json", "frontend/src/App.tsx",
+        ]),
+        "/root/projects/recipe-manager",
+    ))
+
+    assert result["marker"].startswith("nested:")
+    assert "backend" in result["build_cmd"] and "pip install" in result["build_cmd"]
+    assert "frontend" in result["build_cmd"] and "npm install" in result["build_cmd"]
+    # Python side is primary: it owns tests and the reported language.
+    assert "backend" in result["test_cmd"]
+    assert result["language"] == "python"
+    assert len(result["subprojects"]) == 2
+    assert result["verification_level"] == "build-verified"
+
+
+def test_detects_csharp_solution_by_suffix():
+    """.sln/.csproj carry the project's own name — exact-name markers can't
+    match them, so the suffix pass must produce a dotnet contract."""
+    result = _run(reviewer._detect_project(
+        _FakeHTTP(["MyApp.sln", "MyApp/MyApp.csproj", "MyApp/Program.cs"]),
+        "/root/projects/myapp",
+    ))
+
+    assert result["marker"] == "MyApp.sln"
+    assert result["language"] == "csharp"
+    assert "dotnet build" in result["build_cmd"]
+    assert "/root/.dotnet" in result["build_cmd"]
+    assert result["verification_level"] == "build-verified"
+
+
+def test_single_top_level_marker_unchanged_by_nested_scan():
+    """A normal single-language project must keep the existing marker path."""
+    result = _run(reviewer._detect_project(
+        _FakeHTTP(["pyproject.toml", "app/main.py", "tests/test_app.py"]),
+        "/root/projects/tool",
+    ))
+
+    assert result["marker"] == "pyproject.toml"
+    assert result["language"] == "python"
+    assert result["profile"] == "marker:pyproject.toml"
+
+
+# ─── Environment-fault classification ──────────────────────────────────────
+# A build failure referencing a missing absolute path OUTSIDE the project that
+# no project file mentions is a sandbox environment fault (the
+# /root/pip-constraints.txt incident) — it must classify as status="error"
+# with deterministic_issue="environment_fault" and never reach the fix loop.
+
+_PIP_CONSTRAINT_FAILURE = (
+    "ERROR: Could not open requirements file: [Errno 2] "
+    "No such file or directory: '/root/pip-constraints.txt'"
+)
+
+
+class _EnvFaultHTTP:
+    """Sandbox stub for the classifier's confirmation calls."""
+
+    def __init__(self, *, missing=True, referenced=False, env_lines=None,
+                 transport_fail=False):
+        self.missing = missing
+        self.referenced = referenced
+        self.env_lines = env_lines or []
+        self.transport_fail = transport_fail
+        self.posts = []
+
+    async def post(self, url, json=None, timeout=None):
+        command = (json or {}).get("command", "")
+        self.posts.append(command)
+        if self.transport_fail:
+            raise RuntimeError("codebox unreachable")
+        if "test -e" in command:
+            return _FakeResponse({
+                "exit_code": 0,
+                "stdout": "__NO__" if self.missing else "__YES__",
+                "stderr": "",
+            })
+        if "grep -rlF" in command:
+            return _FakeResponse({
+                "exit_code": 0 if self.referenced else 1,
+                "stdout": "./tests/test_x.py" if self.referenced else "",
+                "stderr": "",
+            })
+        if "((env)" in command:
+            return _FakeResponse({
+                "exit_code": 0,
+                "stdout": "\n".join(self.env_lines),
+                "stderr": "",
+            })
+        return _FakeResponse({"exit_code": 0, "stdout": "", "stderr": ""})
+
+
+def test_candidate_env_fault_paths_filters_project_and_scratch():
+    text = "\n".join([
+        _PIP_CONSTRAINT_FAILURE,
+        "FileNotFoundError: No such file or directory: "
+        "'/root/projects/neon-pong-game/missing.py'",
+        "No such file or directory: '/tmp/daedalus-review-run-1/work/x'",
+        "some ordinary line mentioning /etc/hosts without an error phrase",
+    ])
+    paths = reviewer._candidate_env_fault_paths(text, "/root/projects/neon-pong-game")
+    assert paths == ["/root/pip-constraints.txt"]
+
+
+def test_environment_fault_classified_with_env_culprit():
+    http = _EnvFaultHTTP(env_lines=[
+        "PATH=/usr/bin",
+        "PIP_CONSTRAINT=/root/pip-constraints.txt",
+    ])
+    parsed = _run(reviewer._environment_fault_issue_from_failure(
+        http, _PIP_CONSTRAINT_FAILURE, "/root/projects/neon-pong-game", "build",
+    ))
+    assert parsed is not None
+    assert parsed["status"] == "error"
+    assert parsed["deterministic_issue"] == "environment_fault"
+    assert parsed["environment_fault_path"] == "/root/pip-constraints.txt"
+    assert parsed["environment_fault_env_vars"] == ["PIP_CONSTRAINT"]
+    issue = parsed["issues"][0]
+    assert issue["severity"] == "environment"
+    assert issue["suggested_fix_scope"] == []
+    assert "NOT a project code issue" in issue["summary"]
+
+
+def test_environment_fault_skipped_when_path_exists():
+    http = _EnvFaultHTTP(missing=False)
+    parsed = _run(reviewer._environment_fault_issue_from_failure(
+        http, _PIP_CONSTRAINT_FAILURE, "/root/projects/neon-pong-game", "build",
+    ))
+    assert parsed is None
+
+
+def test_environment_fault_skipped_when_project_references_path():
+    # A stale-path/state issue: the project itself mentions the missing path,
+    # so Aider CAN fix it — normal classification must run instead.
+    http = _EnvFaultHTTP(referenced=True)
+    parsed = _run(reviewer._environment_fault_issue_from_failure(
+        http, _PIP_CONSTRAINT_FAILURE, "/root/projects/neon-pong-game", "test",
+    ))
+    assert parsed is None
+
+
+def test_environment_fault_aborts_on_transport_failure():
+    # Guessing "environment fault" from an unreachable sandbox would be worse
+    # than a wasted fix cycle — classification must abort.
+    http = _EnvFaultHTTP(transport_fail=True)
+    parsed = _run(reviewer._environment_fault_issue_from_failure(
+        http, _PIP_CONSTRAINT_FAILURE, "/root/projects/neon-pong-game", "build",
+    ))
+    assert parsed is None
+
+
+def test_environment_fault_ignores_project_internal_missing_files():
+    text = ("FileNotFoundError: [Errno 2] No such file or directory: "
+            "'/root/projects/neon-pong-game/assets/sound.wav'")
+    http = _EnvFaultHTTP()
+    parsed = _run(reviewer._environment_fault_issue_from_failure(
+        http, text, "/root/projects/neon-pong-game", "test",
+    ))
+    assert parsed is None
+    assert http.posts == []  # no candidates → no sandbox round-trips
+
+
+# ─── Hermetic sandbox environment ───────────────────────────────────────────
+
+def test_run_in_sandbox_wraps_commands_hermetically():
+    http = _EnvFaultHTTP()
+    _run(reviewer._run_in_sandbox(http, "/root/projects/x", "echo hi"))
+    assert len(http.posts) == 1
+    assert "unset PIP_CONSTRAINT" in http.posts[0]
+    assert "(echo hi)" in http.posts[0]
+
+
+def test_run_in_sandbox_hermetic_false_leaves_env_alone():
+    http = _EnvFaultHTTP()
+    _run(reviewer._run_in_sandbox(http, "/root/projects/x", "env", hermetic=False))
+    assert len(http.posts) == 1
+    assert "unset" not in http.posts[0]
+
+
+def test_hermetic_prefix_covers_pip_constraint():
+    prefix = language_adapters.hermetic_prefix()
+    assert prefix.startswith("unset ")
+    for var in ("PIP_CONSTRAINT", "PIP_CONFIG_FILE"):
+        assert var in prefix
+
+
+class _IsolatedBlockedHTTP(_SmokeHTTP):
+    """codebox-api deny-list rejects the isolated setup command with HTTP 400
+    ("Blocked dangerous command pattern") — the transport-failure shape."""
+
+    async def post(self, url, json=None, timeout=None):
+        command = (json or {}).get("command", "")
+        if "tar cf -" in command:
+            resp = _FakeResponse({})
+            resp.status_code = 400
+            resp.text = '{"detail":"Blocked dangerous command pattern"}'
+            return resp
+        return await super().post(url, json=json, timeout=timeout)
+
+
+def test_isolated_transport_block_yields_infra_error_not_packaging_issue():
+    """A blocked/unreachable isolated setup means NOTHING was verified — the
+    review must be an infra error envelope, never a packaging issue pinned to
+    pyproject.toml (that laundering burned 4 fix cycles on an innocent
+    manifest once)."""
+    http = _IsolatedBlockedHTTP(_SMOKE_FILES, smoke_exit=0)
+
+    envelope = _run(reviewer.run_review(
+        http, _NullEvents(), "conv-smoke", "/root/projects/snip",
+    ))
+
+    assert envelope["status"] == "error"
+    issue = envelope["issues"][0]
+    assert issue["severity"] == "infra"
+    assert issue["suggested_fix_scope"] == []
+    assert issue["file"] == ""
+    assert "not a code issue" in issue["summary"]

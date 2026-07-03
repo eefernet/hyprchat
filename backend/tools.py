@@ -3,8 +3,6 @@ Tool definitions and execution dispatch for HyprChat's integrated CodeAgent.
 """
 import asyncio
 import base64
-import calendar
-import hashlib
 import json
 import os
 import re
@@ -18,8 +16,51 @@ import config
 import database as db
 import persona_images
 import cancel_registry
+from artifact_files import artifact_file_metadata as _artifact_file_metadata
+from artifact_files import extract_indexable_text
 from connectors import execute_connector_tool
 from research import fetch_bytes_safely, run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
+from tooling.codebox_tools import CODEBOX_TOOL_NAMES, run_codebox_tool
+from tooling.gate_decisions import (
+    FIX_ATTEMPT_HARD_CEILING,
+    NO_PROGRESS_LAST_SHOT,
+    NO_PROGRESS_RESEARCH_AT,
+    GateContext,
+    build_gate_context,
+    compute_fix_battle,
+    compute_fix_battle_ctx,
+    evaluate_gate,
+    issue_scoped_files,
+    normalize_issue_path,
+    paths_overlap,
+    preferred_fix_editor,
+    reconcile_workflow_state,
+)
+from tooling.workflow_gate import (
+    _RECENT_RESEARCH,
+    _RECENT_RESEARCH_MAX,
+    _RESEARCH_FRESH_SECONDS,
+    _WF_EVENT_TRANSITIONS,
+    _apply_workflow_event,
+    _deep_research_called_since as _wg_deep_research_called_since,
+    _environment_fault_notice,
+    _fix_budget_note,
+    _is_environment_fault,
+    _get_recent_research,
+    _is_v2_persona as _wg_is_v2_persona,
+    _latest_user_msg_ts,
+    _parse_ts_loose,
+    _prior_acceptance_issues_context,
+    _prior_fix_attempts_context,
+    _project_id_from_dir,
+    _runs_since,
+    _stash_research_result,
+    _uploaded_project_aider_context,
+    _uploaded_project_bootstrap_block_message,
+    _uploaded_project_manual_gate_state,
+    _uploaded_project_tool_allowed_during_bootstrap,
+    _v2_name_match,
+)
 
 # Strip ANSI escape codes from terminal output before feeding back to the model
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
@@ -27,194 +68,72 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub('', text)
 
 
-def _artifact_file_metadata(path: str) -> dict:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return {"size_bytes": os.path.getsize(path), "sha256": h.hexdigest()}
-
-
 def _artifact_index_text(path: str, filename: str, kind: str, mime_type: str = "", max_chars: int = 500000) -> str:
-    kind = (kind or db.artifact_kind_for_filename(filename, mime_type)).lower()
-    lower = (filename or "").lower()
-    try:
-        if kind in {"image", "pdf"}:
-            meta = _artifact_file_metadata(path)
-            return f"{filename}\n{kind.upper()} artifact\nsize_bytes={meta['size_bytes']}\nsha256={meta['sha256']}"
-        if kind == "archive":
-            import tarfile
-            import zipfile
-            lines = [f"Archive: {filename}"]
-            if tarfile.is_tarfile(path):
-                with tarfile.open(path, "r:*") as tf:
-                    for member in tf.getmembers()[:500]:
-                        lines.append(f"{member.name}{'/' if member.isdir() else ''} {member.size} bytes")
-            elif zipfile.is_zipfile(path):
-                with zipfile.ZipFile(path) as zf:
-                    for info in zf.infolist()[:500]:
-                        lines.append(f"{info.filename}{'/' if info.is_dir() else ''} {info.file_size} bytes")
-            return "\n".join(lines)[:max_chars]
-        text_exts = (
-            ".txt", ".log", ".md", ".markdown", ".html", ".htm", ".py", ".js", ".jsx",
-            ".ts", ".tsx", ".json", ".jsonl", ".csv", ".tsv", ".css", ".sh", ".rs",
-            ".go", ".java", ".c", ".cpp", ".yaml", ".yml", ".toml", ".xml", ".ini",
-            ".conf", ".cfg",
-        )
-        if kind in {"html", "markdown", "code", "data", "text"} or lower.endswith(text_exts):
-            with open(path, "rb") as f:
-                raw = f.read(min(max_chars * 4, 4 * 1024 * 1024))
-            text = raw.decode("utf-8", errors="replace")
-            if kind == "html" or lower.endswith((".html", ".htm")):
-                text = re.sub(r"<script[^>]*>.*?</script>", " ", text, flags=re.I | re.S)
-                text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.I | re.S)
-                text = re.sub(r"<[^>]+>", " ", text)
-                text = re.sub(r"\s+", " ", text).strip()
-            return text[:max_chars]
-    except Exception as e:
-        print(f"[ArtifactIndex] {e}")
-    return ""
+    return extract_indexable_text(path, kind, mime_type, max_chars, filename=filename)
 
 
-def _parse_ts_loose(s) -> "datetime | None":
-    """Parse timestamps from either Python isoformat (runs.started_at, has 'T'
-    and microseconds) or SQLite CURRENT_TIMESTAMP (messages.created_at, space
-    separator, no microseconds, sometimes a trailing 'Z'). Returns None on
-    unrecognized input rather than raising — callers treat missing as 'before
-    the current turn' which is the safe default."""
-    if not s:
-        return None
-    s = str(s).strip().rstrip("Z")
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
-                "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
-        try:
-            return datetime.strptime(s, fmt)
-        except ValueError:
-            continue
-    return None
+_PROJECT_ARCHIVE_TAR_EXCLUDE_PATTERNS = (
+    ".pytest_cache", "*/.pytest_cache/*",
+    "__pycache__", "*/__pycache__/*",
+    "*.pyc",
+    "*.egg-info", "*.egg-info/*",
+    ".mypy_cache", "*/.mypy_cache/*",
+    ".ruff_cache", "*/.ruff_cache/*",
+    ".cache", "*/.cache/*",
+    ".git", "*/.git/*",
+    "node_modules", "*/node_modules/*",
+    "dist", "*/dist/*",
+    "build", "*/build/*",
+    "target", "*/target/*",
+    ".next", "*/.next/*",
+    "venv", "*/venv/*",
+    ".venv", "*/.venv/*",
+    ".npm", "*/.npm/*",
+    # Aider repair metadata is useful for the agent loop but must not ship.
+    ".aider*", "./.aider*", "*/.aider*", "*/.aider*/*",
+)
+
+_PROJECT_ARCHIVE_FIND_EXCLUDE_TESTS = (
+    ("path", "*/.pytest_cache/*"),
+    ("path", "*/__pycache__/*"),
+    ("name", "*.pyc"),
+    ("path", "*.egg-info/*"),
+    ("path", "*/.mypy_cache/*"),
+    ("path", "*/.ruff_cache/*"),
+    ("path", "*/.cache/*"),
+    ("path", "*/.git/*"),
+    ("path", "*/node_modules/*"),
+    ("path", "*/dist/*"),
+    ("path", "*/build/*"),
+    ("path", "*/target/*"),
+    ("path", "*/.next/*"),
+    ("path", "*/venv/*"),
+    ("path", "*/.venv/*"),
+    ("path", "*/.npm/*"),
+    ("path", "*/.aider*"),
+    ("path", "*/.aider*/*"),
+)
 
 
-async def _latest_user_msg_ts(conv_id: str, conv_row: dict | None = None):
-    """Timestamp of the newest persisted user message, or None.
-
-    The cycle-cap / Q&A-terminal gates scope their counters to runs newer than
-    this so a new user request resets the budget instead of inheriting an
-    exhausted cap from earlier work on the same conversation."""
-    try:
-        conv = conv_row or await db.get_conversation(conv_id)
-        for m in reversed((conv or {}).get("messages") or []):
-            if m.get("role") == "user":
-                return _parse_ts_loose(m.get("created_at"))
-    except Exception as _e:
-        print(f"[v2-gate] latest-user-msg lookup failed (non-fatal): {_e}")
-    return None
+def _project_archive_tar_exclude_args() -> str:
+    return " ".join(
+        f"--exclude={shlex.quote(pattern)}"
+        for pattern in _PROJECT_ARCHIVE_TAR_EXCLUDE_PATTERNS
+    )
 
 
-def _runs_since(runs: list, ts) -> list:
-    """Runs whose started_at >= ts. ts=None keeps all runs (fail-safe: gates
-    fall back to the old whole-conversation behavior, never crash open)."""
-    if ts is None:
-        return runs
-    out = []
-    for r in runs:
-        rts = _parse_ts_loose(r.get("started_at"))
-        if rts is None or rts >= ts:
-            out.append(r)
-    return out
+def _project_archive_find_include_filter() -> str:
+    return " ".join(
+        f"! -{kind} {shlex.quote(pattern)}"
+        for kind, pattern in _PROJECT_ARCHIVE_FIND_EXCLUDE_TESTS
+    )
 
 
-def _v2_name_match(name: str) -> bool:
-    """Match v2/Daedalus persona names. Word-boundary 'v2' so unrelated names
-    that merely contain the substring (e.g. 'v2ray helper') don't enable the
-    workflow gate."""
-    n = (name or "").lower()
-    return "daedalus" in n or re.search(r"\bv2\b", n) is not None
-
-
-async def _prior_fix_attempts_context(conv_id: str, *, max_attempts: int = 3) -> str:
-    """Compact history of fix attempts since the latest user message.
-
-    Injected into Fixer/Aider prompts so attempt #2 knows what attempt #1
-    already changed — without it every fix call is stateless and the model's
-    most common failure is re-making the same edit that already didn't work."""
-    if not conv_id:
-        return ""
-    try:
-        runs = await db.get_runs_by_conversation(conv_id, limit=50)
-        uts = await _latest_user_msg_ts(conv_id)
-        attempts = [
-            r for r in _runs_since(runs, uts)
-            if (r.get("role") in {"fixer", "aider.fix"}
-                and r.get("status") in {"succeeded", "partial", "failed"})
-        ]
-        if not attempts:
-            return ""
-        lines = []
-        # runs come newest-first; show oldest attempt first.
-        for r in reversed(attempts[:max_attempts]):
-            env = r.get("result_envelope") or {}
-            files = ", ".join(
-                os.path.basename(f) or f for f in (env.get("files_touched") or [])[:6]
-            ) or "(no files written)"
-            summary = (env.get("summary") or "")[:160]
-            errs = "; ".join(str(e) for e in (env.get("errors") or [])[:2])[:200]
-            lines.append(
-                f"- {r.get('role')} [{env.get('status') or r.get('status')}] "
-                f"touched: {files}. {summary}"
-                + (f" Errors: {errs}" if errs else "")
-            )
-        return "\n".join(lines)
-    except Exception as e:
-        print(f"[v2-gate] prior-attempt context failed (non-fatal): {e}")
-        return ""
-
-
-async def _prior_acceptance_issues_context(conv_id: str) -> str:
-    """Most recent acceptance verdict (issues/error) for this user request —
-    fed back into the next acceptance run so it verifies its own prior
-    findings instead of moving the goalposts with brand-new nitpicks."""
-    if not conv_id:
-        return ""
-    try:
-        runs = await db.get_runs_by_conversation(conv_id, limit=50)
-        uts = await _latest_user_msg_ts(conv_id)
-        for r in _runs_since(runs, uts):
-            if r.get("role") != "acceptance":
-                continue
-            env = r.get("result_envelope") or {}
-            if (env.get("status") or "").lower() not in {"issues", "error"}:
-                return ""
-            lines = []
-            for i in (env.get("issues") or [])[:6]:
-                lines.append(
-                    f"- [{i.get('category', i.get('severity', '?'))}] "
-                    f"{i.get('file', '')}: {(i.get('summary') or '')[:140]}"
-                )
-            return "\n".join(lines)
-        return ""
-    except Exception as e:
-        print(f"[v2-gate] prior-acceptance context failed (non-fatal): {e}")
-        return ""
-
-
-async def _fix_budget_note(conv_id: str, source_role: str) -> str:
-    """One-line budget readout appended to fix results so the model can plan
-    its remaining cycles instead of discovering the cap by hitting it."""
-    try:
-        runs = await db.get_runs_by_conversation(conv_id, limit=50)
-        uts = await _latest_user_msg_ts(conv_id)
-        source_role = source_role or "reviewer"
-        succ = sum(
-            1 for r in _runs_since(runs, uts)
-            if (r.get("role") in {"fixer", "aider.fix"}
-                and r.get("status") == "succeeded"
-                and ((r.get("result_envelope") or {}).get("source_role") or "reviewer") == source_role)
-        )
-        cap = 2 if source_role == "acceptance" else 3
-        return (f"\n\nFix-cycle budget: {min(succ, cap)}/{cap} successful "
-                f"{source_role}-driven fix(es) used for this request.")
-    except Exception:
-        return ""
+def _project_archive_find_exclude_expr() -> str:
+    return " -o ".join(
+        f"-{kind} {shlex.quote(pattern)}"
+        for kind, pattern in _PROJECT_ARCHIVE_FIND_EXCLUDE_TESTS
+    )
 
 
 async def _git_checkpoint(http, project_dir: str, label: str) -> str:
@@ -250,187 +169,8 @@ async def _git_checkpoint(http, project_dir: str, label: str) -> str:
     return ""
 
 
-# Scoped FSM (#1 of the rebuild list): coder_workflows.state becomes
-# authoritative data driven by explicit events, instead of ad-hoc state
-# writes scattered across dispatchers. The exec_tool gate still derives its
-# blocking decisions from run history (battle-tested); this is the substrate
-# that lets it migrate to reading state directly later.
-_WF_EVENT_TRANSITIONS = {
-    "PLAN_DONE":     ("planning",  "not_ready"),
-    "BUILD_OK":      ("reviewing", "not_ready"),
-    "FIX_APPLIED":   ("reviewing", "not_ready"),
-    "REVIEW_CLEAN":  ("accepting", "not_ready"),
-    "REVIEW_ISSUES": ("fixing",    "not_ready"),
-    "ACCEPT_OK":     ("accepted",  "accepted"),
-    "ACCEPT_ISSUES": ("fixing",    "not_ready"),
-}
-
-
-async def _apply_workflow_event(conv_id: str, event: str, *,
-                                run_id: str = "", project_id: str = "",
-                                mode_hint: str = "build_from_prompt",
-                                user_task: str = "") -> str:
-    """Single transition point for coder_workflows state.
-
-    Ensures a workflow row exists (greenfield builds previously had none, so
-    WorkflowCard showed nothing and state lived only in run-history
-    archaeology). Never overwrites a user cancel. Returns workflow id."""
-    state_artifact = _WF_EVENT_TRANSITIONS.get(event)
-    if not state_artifact or not conv_id:
-        return ""
-    state, artifact = state_artifact
-    try:
-        wf = None
-        if project_id:
-            wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
-        if not wf:
-            wf = await db.get_latest_coder_workflow(conv_id)
-        if not wf:
-            wf_id = f"cw-{uuid.uuid4().hex[:12]}"
-            await db.create_coder_workflow(
-                wf_id, conv_id, project_id=project_id or "",
-                mode=mode_hint, state=state,
-                user_task=(user_task or "")[:500],
-                active_run_id=run_id, artifact_status=artifact,
-            )
-            print(f"[wf-fsm] {event}: created {wf_id} state={state}", flush=True)
-            return wf_id
-        if wf.get("state") == "cancelled":
-            return wf.get("id", "")
-        kwargs = dict(state=state, artifact_status=artifact)
-        if run_id:
-            kwargs["active_run_id"] = run_id
-        if project_id:
-            kwargs["project_id"] = project_id
-        await db.update_coder_workflow(wf["id"], **kwargs)
-        print(f"[wf-fsm] {event}: {wf.get('id')} {wf.get('state')}->{state}", flush=True)
-        return wf.get("id", "")
-    except Exception as e:
-        print(f"[wf-fsm] {event} failed (non-fatal): {e}")
-        return ""
-
-
-# In-process cache of the most recent deep_research result per conversation.
-# The full research report only exists in the orchestrator's in-memory tool
-# history for the current turn — saved_events keeps a summary but not the
-# body. Caching it here lets the Fixer dispatcher pick it up across the
-# orchestrator/fixer boundary without persisting research bodies to SQLite
-# or breaking the Fixer's network-free contract. Bounded to 32 entries with
-# LRU eviction (move-to-end on read); freshness window enforced at read time.
-from collections import OrderedDict
-_RECENT_RESEARCH: OrderedDict[str, dict] = OrderedDict()
-_RECENT_RESEARCH_MAX = 32
-_RESEARCH_FRESH_SECONDS = 600  # 10 min — drop on next read past this
-
-
-def _stash_research_result(conv_id: str, topic: str, report: str) -> None:
-    """Record the most recent deep_research result for this conv. LRU-bounded:
-    accessed entries move to the end; eviction drops the least-recently-used."""
-    if not conv_id or not report:
-        return
-    _RECENT_RESEARCH[conv_id] = {
-        "topic": topic or "",
-        "report": report,
-        "ts": time.time(),
-    }
-    _RECENT_RESEARCH.move_to_end(conv_id)
-    while len(_RECENT_RESEARCH) > _RECENT_RESEARCH_MAX:
-        _RECENT_RESEARCH.popitem(last=False)
-
-
-def _get_recent_research(conv_id: str) -> "dict | None":
-    """Return the cached research entry for conv_id if it's still within the
-    freshness window, else None. Stale entries are dropped on read. Accessed
-    entries are promoted (LRU)."""
-    entry = _RECENT_RESEARCH.get(conv_id)
-    if not entry:
-        return None
-    if (time.time() - entry.get("ts", 0)) > _RESEARCH_FRESH_SECONDS:
-        _RECENT_RESEARCH.pop(conv_id, None)
-        return None
-    _RECENT_RESEARCH.move_to_end(conv_id)
-    return entry
-
-
-def _issue_signatures(envelope: dict) -> set:
-    """Reduce a reviewer envelope to a set of (file, summary_prefix) tuples
-    suitable for set-overlap comparison. Used by the v2 gate to detect
-    'same problem returned' across run_review cycles. Summary prefix is
-    lowercased + stripped + truncated to 60 chars so trivial wording diffs
-    don't defeat the overlap check, but the file path must match exactly."""
-    sigs = set()
-    for iss in (envelope or {}).get("issues") or []:
-        f = (iss.get("file") or "").strip()
-        s = (iss.get("summary") or "").strip().lower()[:60]
-        if f and s:
-            sigs.add((f, s))
-    return sigs
-
-
 async def _deep_research_called_since(conv_id: str, since_iso: str | None) -> bool:
-    """Return True iff deep_research has run on this conversation since the
-    trigger event at `since_iso`. Checks two sources:
-
-      1. In-process `_RECENT_RESEARCH` cache (10-min freshness, populated
-         immediately when deep_research's dispatcher returns). This is what
-         catches mid-stream calls — a model that calls deep_research and
-         then run_fixer in the same turn won't have the deep_research event
-         persisted to the conversation yet (assistant message is only saved
-         at stream end), so the DB walk below misses it. Without this check,
-         the FINAL_CYCLE / STUCK_FIX gates fire a second time, the model
-         dutifully re-runs deep_research, and the user sees duplicate
-         carousels and ~3 minutes of wasted research.
-      2. Persisted assistant messages' saved_events (cross-stream / restart
-         survival). Only consulted when (1) returns nothing.
-    """
-    # In-stream check first — matches what's already populated via
-    # `_stash_research_result` on deep_research completion. The cache is
-    # keyed by conv_id. When since_iso is provided, we also verify the
-    # cached entry is newer than the trigger event — pre-build research
-    # done before the latest reviewer run must not satisfy the gate.
-    try:
-        _cached = _get_recent_research(conv_id) if conv_id else None
-        if _cached:
-            if since_iso:
-                _since_dt = _parse_ts_loose(since_iso)
-                if _since_dt:
-                    _since_unix = calendar.timegm(_since_dt.timetuple()) + _since_dt.microsecond / 1_000_000
-                    if _cached.get("ts", 0) >= _since_unix:
-                        return True
-                # Cached research is older than since_iso — fall through to DB
-            else:
-                return True
-    except Exception as _e:
-        print(f"[v2-gate] in-stream research cache check failed (non-fatal): {_e}")
-
-    if not since_iso:
-        return False
-    try:
-        conv = await db.get_conversation(conv_id)
-        msgs = (conv or {}).get("messages") or []
-        since_ts = _parse_ts_loose(since_iso)
-        for m in reversed(msgs):
-            if m.get("role") != "assistant":
-                continue
-            m_ts = _parse_ts_loose(m.get("created_at"))
-            if since_ts and m_ts and m_ts < since_ts:
-                # Once we walk past the trigger run, we can stop.
-                return False
-            md = m.get("metadata") or {}
-            if isinstance(md, str):
-                try:
-                    md = json.loads(md)
-                except Exception:
-                    md = {}
-            for ev in md.get("saved_events") or []:
-                if ev.get("type") != "tool_start":
-                    continue
-                if (ev.get("data") or {}).get("tool") == "deep_research":
-                    return True
-        return False
-    except Exception as _e:
-        print(f"[v2-gate] deep_research history check failed (non-fatal): {_e}")
-        return False
+    return await _wg_deep_research_called_since(conv_id, since_iso)
 
 
 _SHIP_ANYWAY_ACTION_RE = re.compile(
@@ -450,6 +190,142 @@ _SHIP_ANYWAY_DIRECT_RE = re.compile(
     r"|give\s+me\s+(?:a\s+)?download",
     re.I,
 )
+_DELIVERY_SHIP_TOOLS = {"download_project", "download_file"}
+
+# Manual work tools that get AUTO-DISPATCHED to the repair path (Aider first,
+# Fixer fallback) when a reviewer/acceptance issue is pending. Local chat
+# models flail on these instead of calling run_aider_fix; converting the call
+# turns a burned round into repair progress.
+_FIX_LOOP_MANUAL_TOOLS = {"read_file", "list_files", "write_file", "run_shell"}
+
+
+def _auto_dispatch_task(name: str, args: dict, pending_role: str,
+                        rid: str, pending_env: dict) -> str:
+    """Aider task text for an auto-dispatched manual-tool attempt."""
+    issue_bits = "; ".join(
+        (iss.get("summary") or "").strip()[:140]
+        for iss in (pending_env.get("issues") or [])[:3]
+        if (iss.get("summary") or "").strip()
+    )
+    detail = issue_bits or (pending_env.get("summary") or "").strip()[:220]
+    try:
+        arg_preview = ", ".join(
+            f"{k}={str(v)[:80]!r}" for k, v in list((args or {}).items())[:3])
+    except Exception:
+        arg_preview = ""
+    intent = f" (the orchestrator attempted {name}({arg_preview}) — fold that intent in if relevant)" if arg_preview else ""
+    return f"Fix the {pending_role} issues from {rid}: {detail}{intent}"
+_CAP_RELEASE_DIAGNOSTIC_TOOLS = {"read_file", "list_files"}
+_AIDER_HEALTH_CACHE = {"url": "", "ts": 0.0, "healthy": False}
+_AIDER_HEALTH_TTL_SECONDS = 30.0
+
+
+def _fix_cap_releases_tool(name: str) -> bool:
+    """After the fix cap, allow inspection but not delivery."""
+    return name in _CAP_RELEASE_DIAGNOSTIC_TOOLS
+
+
+def _project_id_from_project_dir(project_dir: str) -> str:
+    """Best-effort project id for both uploaded and OpenHands-built projects."""
+    project_dir = (project_dir or "").strip().rstrip("/")
+    if not project_dir:
+        return ""
+    return _project_id_from_dir(project_dir) or project_dir.rsplit("/", 1)[-1]
+
+
+async def _aider_worker_healthy(http, *, force: bool = False) -> bool:
+    """Cheap preflight for routing decisions; run_aider_fix still checks again."""
+    if not getattr(config, "AIDER_ENABLED", True):
+        return False
+    worker_url = (getattr(config, "AIDER_WORKER_URL", "") or config.OPENHANDS_URL).rstrip("/")
+    now = time.time()
+    if (not force and _AIDER_HEALTH_CACHE.get("url") == worker_url
+            and now - float(_AIDER_HEALTH_CACHE.get("ts") or 0) < _AIDER_HEALTH_TTL_SECONDS):
+        return bool(_AIDER_HEALTH_CACHE.get("healthy"))
+    healthy = False
+    try:
+        resp = await http.get(f"{worker_url}/aider/health", timeout=5)
+        healthy = resp.status_code == 200 and bool((resp.json() or {}).get("installed"))
+    except Exception as e:
+        print(f"[v2-gate] Aider health check failed (non-fatal): {e}")
+    _AIDER_HEALTH_CACHE.update({"url": worker_url, "ts": now, "healthy": healthy})
+    return healthy
+
+
+async def _aider_repair_context(conv_id: str, *, issue_run: dict | None = None,
+                                project_dir: str = "", project_id: str = "",
+                                include_greenfield: bool = True) -> dict | None:
+    """Resolve an existing project root for Aider repairs.
+
+    Uploaded projects keep their existing workflow-specific lookup. Greenfield
+    projects use the latest issue/build envelopes or the active coding project.
+    Aider never scaffolds a new project; it only edits an existing /root project.
+    """
+    if not conv_id or not getattr(config, "AIDER_ENABLED", True):
+        return None
+
+    env = (issue_run or {}).get("result_envelope") or {}
+    project_dir = (project_dir or env.get("project_dir") or "").strip()
+    project_id = (project_id or (issue_run or {}).get("project_id") or env.get("project_id") or "").strip()
+    if not project_id and project_dir:
+        project_id = _project_id_from_project_dir(project_dir)
+
+    try:
+        uploaded_ctx = await _uploaded_project_aider_context(
+            conv_id, issue_run=issue_run, project_dir=project_dir, project_id=project_id,
+        )
+        if uploaded_ctx:
+            return uploaded_ctx
+    except Exception as e:
+        print(f"[v2-gate] uploaded Aider context lookup failed (non-fatal): {e}")
+
+    if not include_greenfield or not getattr(config, "AIDER_FOR_GREENFIELD", True):
+        return None
+
+    if project_dir.startswith("/root/projects/"):
+        return {"workflow": None, "project_id": project_id, "project_dir": project_dir}
+
+    try:
+        runs = await db.get_runs_by_conversation(conv_id, limit=30)
+        for run in runs:
+            role = run.get("role") or ""
+            if role not in {"reviewer", "acceptance", "fixer", "aider.fix"} and not role.startswith("builder"):
+                continue
+            run_env = run.get("result_envelope") or {}
+            run_dir = (run_env.get("project_dir") or "").strip()
+            if run_dir.startswith("/root/projects/"):
+                run_pid = (run.get("project_id") or run_env.get("project_id") or
+                           _project_id_from_project_dir(run_dir) or "")
+                return {"workflow": None, "project_id": run_pid, "project_dir": run_dir}
+    except Exception as e:
+        print(f"[v2-gate] greenfield Aider run lookup failed (non-fatal): {e}")
+
+    try:
+        active = await db.get_coding_project_by_conv(conv_id)
+        if active:
+            active_pid = active.get("openhands_project_id") or active.get("id") or ""
+            if active_pid:
+                return {
+                    "workflow": None,
+                    "project_id": active_pid,
+                    "project_dir": f"/root/projects/{active_pid}",
+                }
+    except Exception as e:
+        print(f"[v2-gate] greenfield active project lookup failed (non-fatal): {e}")
+    return None
+
+
+async def _aider_first_context(http, conv_id: str, *, issue_run: dict | None = None,
+                               project_dir: str = "", project_id: str = "") -> dict | None:
+    """Aider repair context only when Aider is enabled and worker-preflight passes."""
+    ctx = await _aider_repair_context(
+        conv_id, issue_run=issue_run, project_dir=project_dir, project_id=project_id,
+    )
+    if not ctx:
+        return None
+    if not await _aider_worker_healthy(http):
+        return None
+    return ctx
 
 
 async def _latest_user_requested_ship_anyway(conv_id: str) -> bool:
@@ -480,14 +356,6 @@ async def _latest_user_requested_ship_anyway(conv_id: str) -> bool:
         return False
 
 
-def _project_id_from_dir(project_dir: str) -> str:
-    """Best-effort project id from a Codebox project path."""
-    if not project_dir:
-        return ""
-    name = os.path.basename(project_dir.rstrip("/"))
-    return name if name.startswith("proj-") else ""
-
-
 async def _latest_user_task_text(conv_id: str) -> str:
     if not conv_id:
         return ""
@@ -505,13 +373,17 @@ async def _latest_user_task_text(conv_id: str) -> str:
 
 
 async def _latest_actionable_issue_run(conv_id: str, requested_id: str = "") -> dict | None:
-    """Return the requested/latest reviewer or acceptance run with issues."""
+    """Return the requested/latest reviewer or acceptance run with issues.
+
+    Environment-fault envelopes are excluded: "actionable" here means
+    "dispatchable to Aider/Fixer", and an environment fault has no project
+    files to fix."""
     if not conv_id and not requested_id:
         return None
     if requested_id:
         try:
             run = await db.get_run(requested_id)
-            if run:
+            if run and not _is_environment_fault(run.get("result_envelope")):
                 return run
         except Exception as _e:
             print(f"[v2-gate] requested issue run lookup failed (non-fatal): {_e}")
@@ -522,7 +394,8 @@ async def _latest_actionable_issue_run(conv_id: str, requested_id: str = "") -> 
         return next(
             (r for r in runs
              if r.get("role") in {"reviewer", "acceptance"}
-             and ((r.get("result_envelope") or {}).get("status") or "").lower() in {"issues", "error"}),
+             and ((r.get("result_envelope") or {}).get("status") or "").lower() in {"issues", "error"}
+             and not _is_environment_fault(r.get("result_envelope"))),
             None,
         )
     except Exception as _e:
@@ -549,130 +422,337 @@ def _task_from_issue_run(user_task: str, issue_run: dict | None) -> str:
     return "\n\n".join(parts).strip() or "Fix the uploaded project reviewer issues."
 
 
-async def _uploaded_project_aider_context(conv_id: str, *,
-                                          issue_run: dict | None = None,
-                                          project_dir: str = "",
-                                          project_id: str = "") -> dict | None:
-    """Return routing context when this conversation is an uploaded-project fix.
+def _normalize_manifest_path(path: str) -> str:
+    path = str(path or "").replace("\\", "/").strip()
+    if not path:
+        return ""
+    path = re.sub(r"^/+", "", path)
+    if path.startswith("root/projects/"):
+        parts = path.split("/")
+        path = "/".join(parts[3:]) if len(parts) > 3 else ""
+    path = re.sub(r"/+", "/", path).strip("/")
+    if not path or path.endswith("/"):
+        return ""
+    return path
 
-    This intentionally does not classify all active coding projects as uploads:
-    greenfield OpenHands builds also create coding_projects rows. Uploaded
-    projects are identified by their workflow mode or upload-time description.
+
+def _required_files_from_manifest(manifest: list) -> list[str]:
+    required: list[str] = []
+    seen: set[str] = set()
+    for entry in manifest or []:
+        raw = entry.get("path") if isinstance(entry, dict) else entry
+        path = _normalize_manifest_path(raw)
+        if path and path not in seen:
+            seen.add(path)
+            required.append(path)
+    return required
+
+
+# Manifest entries for binary/generated assets the coder model genuinely cannot
+# author as text (raw audio, raster images, fonts, video, archives/compiled, PDFs).
+# Requiring these in the build-completeness gate would falsely mark every planned
+# build "incomplete", so they're excluded. Everything else — including .svg (XML
+# text), .json, .toml, .yaml, .md, .txt, .cfg, .ini, etc. — is a real deliverable
+# the model can write and MUST stay required.
+_BINARY_MANIFEST_EXTS = frozenset({
+    ".wav", ".mp3", ".ogg", ".flac", ".m4a", ".aac",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".tiff",
+    ".ttf", ".otf", ".woff", ".woff2",
+    ".mp4", ".webm", ".mov", ".avi", ".mkv",
+    ".bin", ".so", ".dll", ".dylib", ".o", ".a", ".class", ".jar",
+    ".zip", ".tar", ".gz", ".tgz", ".7z", ".rar", ".pdf",
+})
+
+
+def _manifest_required_code_files(manifest: list) -> list[str]:
+    """Required-file list from an Architect manifest, minus truly-binary assets.
+
+    Returns every planned NON-binary deliverable, not just code — config/data/text
+    files (.json, .toml, .yaml, .md, .svg, …) the model can author stay required.
+    Only formats the coder model cannot produce as text (see _BINARY_MANIFEST_EXTS:
+    raw audio/images/fonts/video/archives/PDF) are dropped, so requiring the rest
+    doesn't falsely flag a build incomplete. Do NOT narrow this to "code only".
     """
-    if not conv_id or not getattr(config, "AIDER_ENABLED", True):
-        return None
-    env = (issue_run or {}).get("result_envelope") or {}
-    project_dir = (project_dir or env.get("project_dir") or "").strip()
-    project_id = (project_id or (issue_run or {}).get("project_id") or "").strip()
-    project_id = project_id or _project_id_from_dir(project_dir)
-
-    try:
-        wf = await db.get_latest_coder_workflow(conv_id, project_id=project_id) if project_id else None
-        if not wf:
-            wf = await db.get_latest_coder_workflow(conv_id)
-        if wf and wf.get("mode") == "fix_uploaded_project" and not wf.get("cancel_requested"):
-            project_id = project_id or wf.get("project_id") or ""
-            project_dir = project_dir or (f"/root/projects/{project_id}" if project_id else "")
-            return {"workflow": wf, "project_id": project_id, "project_dir": project_dir}
-    except Exception as _e:
-        print(f"[v2-gate] uploaded workflow lookup failed (non-fatal): {_e}")
-
-    try:
-        active = await db.get_coding_project_by_conv(conv_id)
-        if active:
-            active_pid = active.get("openhands_project_id") or active.get("id") or ""
-            desc = active.get("description") or ""
-            if desc.startswith("Uploaded project:") and (not project_id or project_id == active_pid):
-                project_id = project_id or active_pid
-                project_dir = project_dir or (f"/root/projects/{project_id}" if project_id else "")
-                return {"workflow": None, "project_id": project_id, "project_dir": project_dir}
-    except Exception as _e:
-        print(f"[v2-gate] uploaded project lookup failed (non-fatal): {_e}")
-    return None
+    out: list[str] = []
+    for path in _required_files_from_manifest(manifest):
+        ext = ("." + path.rsplit(".", 1)[-1].lower()) if "." in path else ""
+        if ext in _BINARY_MANIFEST_EXTS:
+            continue
+        out.append(path)
+    return out
 
 
-_UPLOADED_PROJECT_BOOTSTRAP_ALLOWED_TOOLS = {
-    "run_aider_fix",
-    "run_review",
-    "run_acceptance_review",
-    "get_coder_workflow",
-    "cancel_coder_workflow",
-}
-_UPLOADED_PROJECT_TERMINAL_STATES = {
-    "accepted", "delivered", "complete", "completed", "cancelled", "blocked",
-}
-_UPLOADED_PROJECT_TERMINAL_ARTIFACTS = {
-    "accepted", "delivered", "partial_delivered", "cancelled",
-}
-_UPLOADED_PROJECT_ACTIVE_RUN_STATUSES = {"queued", "running", "pending"}
-_UPLOADED_PROJECT_AGENT_ROLES = {"aider.fix", "reviewer", "acceptance", "fixer"}
+def _arch_text(value, max_len: int = 500) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text[:max_len]
 
 
-def _uploaded_project_tool_allowed_during_bootstrap(name: str) -> bool:
-    return name in _UPLOADED_PROJECT_BOOTSTRAP_ALLOWED_TOOLS
+def _build_architect_context(arch_env: dict) -> str:
+    """Render the Architect plan for Builder context.
 
-
-def _uploaded_project_manual_gate_state(workflow: dict | None,
-                                        runs: list[dict] | None = None) -> str:
-    """Return bootstrap/inflight when an uploaded fix must not use manual tools."""
-    if not workflow or workflow.get("mode") != "fix_uploaded_project":
-        return ""
-    if workflow.get("cancel_requested"):
-        return ""
-    state = (workflow.get("state") or "").lower()
-    artifact = (workflow.get("artifact_status") or "").lower()
-    if state in _UPLOADED_PROJECT_TERMINAL_STATES:
-        return ""
-    if artifact in _UPLOADED_PROJECT_TERMINAL_ARTIFACTS:
+    This is guidance text only. Required-file / completeness behavior is still
+    derived exclusively from the manifest paths via _manifest_required_code_files.
+    """
+    manifest = arch_env.get("manifest") or []
+    if not manifest:
         return ""
 
-    runs = runs or []
-    active_run_id = workflow.get("active_run_id") or ""
-    for run in runs:
-        if active_run_id and run.get("id") == active_run_id:
-            if (run.get("status") or "").lower() in _UPLOADED_PROJECT_ACTIVE_RUN_STATUSES:
-                return "inflight"
-            break
-
-    for run in runs:
-        role = run.get("role") or ""
-        if role in _UPLOADED_PROJECT_AGENT_ROLES or role.startswith("builder"):
-            return ""
-    return "bootstrap"
-
-
-def _uploaded_project_bootstrap_block_message(name: str, workflow: dict,
-                                              project_dir: str,
-                                              task: str,
-                                              gate_state: str = "bootstrap") -> str:
-    project_id = (workflow or {}).get("project_id") or _project_id_from_dir(project_dir)
-    project_dir = project_dir or (f"/root/projects/{project_id}" if project_id else "/root/projects/<active-project>")
-    task_hint = (task or (workflow or {}).get("user_task") or "latest user request").strip()
-    task_hint = re.sub(r"\s+", " ", task_hint)[:700].replace("\\", "\\\\").replace("'", "\\'")
-    if gate_state == "inflight":
-        reason = (
-            "an uploaded-project Aider/Reviewer run is already in progress. "
-            "Wait for that run or inspect workflow status."
-        )
-        next_call = "get_coder_workflow(workflow_id='<workflow_id>')"
-    else:
-        reason = (
-            "uploaded-project fixes must start with Aider or Reviewer from the active "
-            "project root, not manual file tools."
-        )
-        next_call = (
-            f"run_aider_fix(project_dir='{project_dir}', task='{task_hint}')"
-        )
-    return (
-        f"BLOCKED — {reason}\n\n"
-        f"Active project path: `{project_dir}`"
-        + (f"\nProject id: `{project_id}`" if project_id else "")
-        + "\n\n"
-        f"Your VERY NEXT tool call MUST be:\n  {next_call}\n\n"
-        f"Do NOT call {name}, read_file, write_file, run_shell, execute_code, "
-        f"generate_code, run_fixer, list_files, or search_files for this uploaded-project "
-        f"fix. Aider owns the edit; Reviewer verifies it."
+    success = arch_env.get("success_criteria") or []
+    build_cmd = arch_env.get("build_cmd", "")
+    test_cmd = arch_env.get("test_cmd", "")
+    section = ["\n\n--- Architect Manifest (FOLLOW THIS PLAN) ---"]
+    section.append(
+        f"Project: {arch_env.get('project_id','?')} "
+        f"({arch_env.get('language','?')}, "
+        f"build_system={arch_env.get('build_system','?')})"
     )
+    if build_cmd:
+        section.append(f"Build command: {build_cmd}")
+    if test_cmd:
+        section.append(f"Test command: {test_cmd}")
+    section.append("")
+    section.append(f"Files to create ({len(manifest)}):")
+    for item in manifest[:30]:
+        section.append(
+            f"  - {item.get('path','?')} - {item.get('purpose','')}"
+        )
+    if success:
+        section.append("")
+        section.append("Success criteria (project is done when ALL pass):")
+        for criterion in success[:8]:
+            section.append(f"  - {criterion}")
+    deps = arch_env.get("external_deps") or []
+    if deps:
+        section.append("")
+        section.append("External dependencies:")
+        for dep in deps[:10]:
+            section.append(
+                f"  - {dep.get('name','?')} {dep.get('version','')}"
+            )
+    dep_policy = arch_env.get("dependency_policy") or {}
+    entrypoint = arch_env.get("entrypoint") or {}
+    constants = arch_env.get("shared_constants") or []
+    interfaces = arch_env.get("interfaces") or []
+    contracts = arch_env.get("cross_file_contracts") or []
+    if dep_policy or entrypoint or constants or interfaces or contracts:
+        section.append("")
+        section.append("--- Shared Interface Contract (use these EXACT names/signatures) ---")
+        if entrypoint:
+            if entrypoint.get("run_cmd"):
+                section.append(f"Entrypoint run command: {entrypoint.get('run_cmd')}")
+            if entrypoint.get("module"):
+                section.append(f"Entrypoint module/file: {entrypoint.get('module')}")
+        if dep_policy:
+            section.append("Dependency policy:")
+            if dep_policy.get("runtime"):
+                section.append(f"  - Runtime: {dep_policy.get('runtime')}")
+            for dep in (dep_policy.get("packages") or [])[:10]:
+                detail = dep.get("reason") or dep.get("constraint") or ""
+                spec = f"{dep.get('name','?')} {dep.get('version','')}".strip()
+                section.append(f"  - {spec}" + (f" - {detail}" if detail else ""))
+            for rule in (dep_policy.get("constraints") or [])[:8]:
+                section.append(f"  - {rule}")
+        if constants:
+            section.append("Shared constants:")
+            for const in constants[:15]:
+                used_by = ", ".join(const.get("used_by") or [])
+                details = []
+                if const.get("defined_in"):
+                    details.append(f"defined in {const.get('defined_in')}")
+                if used_by:
+                    details.append(f"used by {used_by}")
+                suffix = f" ({'; '.join(details)})" if details else ""
+                section.append(
+                    f"  - {_arch_text(const.get('name','?'), 120)} = "
+                    f"{_arch_text(const.get('value',''), 160)}{suffix}"
+                )
+        if interfaces:
+            section.append("Interfaces:")
+            for iface in interfaces[:20]:
+                label = iface.get("name") or iface.get("file") or "interface"
+                notes = iface.get("notes") or ""
+                section.append(
+                    f"  - {iface.get('file','?')}: {iface.get('signature','?')} "
+                    f"- {label}" + (f"; {notes}" if notes else "")
+                )
+        if contracts:
+            section.append("Cross-file contracts:")
+            for contract in contracts[:15]:
+                producer = contract.get("producer", "?")
+                consumer = contract.get("consumer", "?")
+                text = contract.get("contract") or contract.get("notes") or ""
+                section.append(f"  - {producer} -> {consumer}: {text}")
+    risks = arch_env.get("risk_notes") or []
+    if risks:
+        section.append("")
+        section.append("Risk notes:")
+        for risk in risks[:5]:
+            section.append(f"  - {risk}")
+    section.append(
+        "\nFollow the manifest exactly — create every listed file, "
+        "use the listed build/test commands, satisfy the success "
+        "criteria, and keep all Shared Interface Contract names/signatures "
+        "consistent across files. The Reviewer will verify against this plan."
+    )
+    return "\n".join(section)
+
+
+def _manifest_presence(files: list[str], project_dir: str,
+                       required_files: list[str]) -> tuple[list[str], list[str]]:
+    required = _required_files_from_manifest(required_files)
+    actual: set[str] = set()
+    project_prefix = (project_dir or "").rstrip("/") + "/" if project_dir else ""
+    for file_path in files or []:
+        path = str(file_path or "").replace("\\", "/").strip()
+        if not path:
+            continue
+        rel = ""
+        if project_prefix and path.startswith(project_prefix):
+            rel = path[len(project_prefix):]
+        elif "/root/projects/" in path:
+            parts = path.split("/")
+            rel = "/".join(parts[4:]) if len(parts) > 4 else ""
+        else:
+            rel = path.rsplit("/", 1)[-1]
+        rel = _normalize_manifest_path(rel)
+        if rel:
+            actual.add(rel)
+    present = [path for path in required if path in actual]
+    missing = [path for path in required if path not in actual]
+    return present, missing
+
+
+async def _scan_project_files(http, project_dir: str) -> list[str]:
+    if not project_dir or not project_dir.startswith("/root/projects/"):
+        return []
+    try:
+        qd = shlex.quote(project_dir)
+        cmd = (
+            f"find {qd} -type f "
+            "! -path '*/.git/*' ! -path '*/__pycache__/*' "
+            "! -path '*/node_modules/*' ! -path '*/venv/*' ! -path '*/.venv/*' "
+            "! -path '*/.pytest_cache/*' ! -name '*.pyc' "
+            "2>/dev/null | sort"
+        )
+        r = await http.post(
+            f"{config.CODEBOX_URL}/command",
+            json={"command": cmd, "timeout": 10},
+            timeout=15,
+        )
+        out = r.json().get("stdout", "").strip()
+        return [line.strip() for line in out.splitlines() if line.strip()]
+    except Exception as e:
+        print(f"[CODEGEN:OH] Project file scan failed (non-fatal): {e}")
+        return []
+
+
+async def _run_builder_continue_pass(http, openhands_url: str, base_payload: dict,
+                                     project_id: str, missing: list[str],
+                                     rounds: int) -> dict | None:
+    """Run ONE blocking OpenHands 'continue' pass to create missing manifest files.
+
+    Narrow by design: derives a continue payload from the original build payload and
+    calls the worker once (blocking /run), returning the raw worker result (or None).
+    Deliberately does NOT create a separate durable run row — the parent
+    generate_code run stays the single authoritative builder run so the workflow
+    gate's most-recent-builder walk sees the true final completeness state. This is
+    builder→builder continuation only, NOT the reverted architect→builder handoff.
+    """
+    _cont_run_id = f"run-{uuid.uuid4().hex[:12]}"
+    payload = dict(base_payload)
+    payload["project_id"] = project_id
+    payload["profile"] = "continue"
+    payload["manifest_missing"] = list(missing)
+    payload["max_rounds"] = rounds
+    payload["run_id"] = _cont_run_id
+    try:
+        resp = await http.post(f"{openhands_url}/run", json=payload, timeout=600)
+        if resp.status_code == 200:
+            return resp.json()
+        print(f"[CODEGEN:OH] continue pass HTTP {resp.status_code}: {resp.text[:200]}")
+        return None
+    except asyncio.CancelledError:
+        # User pressed Stop mid-continue — abort the worker-side run, then re-raise
+        # so the caller finalizes the parent run.
+        try:
+            await http.post(f"{openhands_url}/cancel/{_cont_run_id}", timeout=5)
+        except Exception:
+            pass
+        raise
+    except Exception as _ce:
+        print(f"[CODEGEN:OH] continue pass failed (non-fatal): {_ce}")
+        return None
+
+
+def _blocking_incomplete_builder(runs: list) -> dict | None:
+    """The builder run that should block review/acceptance/delivery, or None.
+
+    Returns the most-recent builder run iff it is `partial`/`stuck` with manifest
+    files still missing (after the backend auto-continue passes) — meaning the
+    project is provably incomplete and must be finished before it can advance.
+
+    Returns None when: a newer reviewer/fix/qa run supersedes the raw build state;
+    or the most recent builder is complete (succeeded, or no missing files).
+    Incomplete manifests do NOT auto-release after N attempts: review and delivery
+    stay blocked until OpenHands creates every planned file, or the latest user
+    message explicitly asks to ship the incomplete project.
+    """
+    blocker = None
+    seen_builder = False
+    for r in runs or []:
+        ro = r.get("role", "")
+        if not seen_builder and ro in {"reviewer", "acceptance", "qa", "fixer", "aider.fix"}:
+            return None  # newer review/fix run supersedes the build state
+        if ro.startswith("builder"):
+            env = r.get("result_envelope") or {}
+            is_partial = (
+                (r.get("status") or "").lower() in {"partial", "stuck"}
+                and bool(env.get("manifest_missing"))
+            )
+            if not seen_builder and not is_partial:
+                return None  # most recent builder is complete → nothing to block
+            seen_builder = True
+            if is_partial:
+                if blocker is None:
+                    blocker = r
+            else:
+                break  # an older complete builder ends the partial streak
+    return blocker
+
+
+def _builder_completion_allowed(name: str, args: dict, run: dict) -> bool:
+    """True when `generate_code` is the valid continuation for a partial build."""
+    env = run.get("result_envelope") or {}
+    return (
+        name == "generate_code"
+        and (run.get("status") or "").lower() in {"partial", "stuck"}
+        and bool(env.get("manifest_missing") or [])
+    )
+
+
+def _scaled_build_rounds(n_files: int, floor: int, cap: int = 100) -> int:
+    """OpenHands iteration ceiling scaled to the planned file count.
+
+    Generous on purpose — this is a CEILING, not a target (the agent stops when it
+    emits `finish`, not when it hits the cap), so a high value never slows a small
+    build. Base 30 + 5/file, never below the configured floor, capped to keep
+    one worker call bounded (higher for the first pass, lower for continue passes).
+    The bounded
+    auto-continue loop mops up anything still missing after the pass.
+    """
+    return min(max(floor, 30 + 5 * max(0, n_files)), cap)
+
+
+def _max_builder_continue_passes(planned_files: int) -> int:
+    """Scale backend-owned OpenHands continue passes for 3-20 file projects."""
+    return min(6, max(3, (max(0, planned_files) + 3) // 4))
+
+
+# NOTE: the Architect→Builder single-turn auto-handoff helpers were removed.
+# Daedalus uses the pre-refactor two-turn flow: plan_project runs the Architect
+# and returns the plan; the model then calls generate_code, which injects the
+# most recent succeeded Architect manifest from the DB on its own.
 
 
 # Pytest "FAILED tests/foo.py::test_x - reason" line, plus a fallback for
@@ -875,28 +955,7 @@ def _guess_fix_scope(test_file_abs: str, project_dir: str) -> list[str]:
 
 
 async def _is_v2_persona(conv_id: str, conv_row: dict | None = None) -> bool:
-    """Return True iff this conversation is using the v2 coding persona.
-
-    Centralised so the workflow gate doesn't repeat the same db lookup +
-    string match in five different places. Pass conv_row if the caller has
-    already fetched it to avoid a second db query. Uses a direct by-id
-    query instead of loading all configs. Failures are non-fatal and return
-    False (fail-safe — gate stays off rather than mis-firing on a v1 persona)."""
-    try:
-        if conv_row is None:
-            conv_row = await db.get_conversation(conv_id)
-        _mc_id = (conv_row or {}).get("model_config_id") if conv_row else None
-        if not _mc_id:
-            return False
-        _mc = await db.get_model_config(_mc_id)
-        # NOTE: chat.py detects v2 from req.persona_id's config name; this
-        # gate detects it from conversation.model_config_id. The matching
-        # rules are shared via _v2_name_match so the two can only diverge on
-        # *which* config they look at, not on how the name is interpreted.
-        return bool(_mc and _v2_name_match(_mc.get("name") or ""))
-    except Exception as _e:
-        print(f"[v2-gate] persona lookup failed (non-fatal): {_e}")
-        return False
+    return await _wg_is_v2_persona(conv_id, conv_row=conv_row)
 
 
 # ── Ollama-native tool definitions ──
@@ -1082,7 +1141,7 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "run_acceptance_review",
-            "description": "Final acceptance gate after run_review is clean. Statically inspects the project against the user's request, README/docs, manifests, tests, entrypoints, and generated artifacts. Normal delivery should wait for acceptance to pass; if it returns issues, call run_fixer with its run_id. If the user explicitly asks to ship/download anyway, disclose the known issues and package the current state.",
+            "description": "Final acceptance gate after run_review is clean. Statically inspects the project against the user's request, README/docs, manifests, tests, entrypoints, and generated artifacts. Normal delivery should wait for acceptance to pass; if it returns issues, call run_aider_fix when available, otherwise run_fixer with its run_id. If the user explicitly asks to ship/download anyway, disclose the known issues and package the current state.",
             "parameters": {"type": "object", "properties": {
                 "project_dir": {"type": "string", "description": "Absolute path to the project root in the sandbox. If omitted, uses the clean reviewer envelope."},
                 "reviewer_run_id": {"type": "string", "description": "Optional run_id from the clean run_review call."},
@@ -1094,7 +1153,7 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "run_fixer",
-            "description": "Fallback targeted editor for issues identified by run_review or run_acceptance_review. For uploaded-project fixes, prefer run_aider_fix; run_fixer is mainly for greenfield/OpenHands projects or when Aider is disabled/unavailable. After reviewer-driven fixes, call run_review again. After docs-only acceptance fixes, call run_acceptance_review again; otherwise call run_review. Hard caps per user request: 3 reviewer-driven and 2 acceptance-driven successful fix cycles (run_aider_fix counts toward the same budget); a new user message resets the budget.",
+            "description": "Fallback targeted editor for issues identified by run_review or run_acceptance_review. Prefer run_aider_fix for existing projects when Aider is available; use run_fixer when Aider is disabled/unavailable, has no project_dir, or failed/no-changed a repair. After reviewer-driven fixes, call run_review again. After docs-only acceptance fixes, call run_acceptance_review again; otherwise call run_review. Hard caps per user request: 3 reviewer-driven and 2 acceptance-driven base fix cycles (run_aider_fix counts toward the same budget); a new user message resets the budget.",
             "parameters": {"type": "object", "properties": {
                 "reviewer_run_id": {"type": "string", "description": "The run_id of the run_review or run_acceptance_review call whose issues you want to fix (e.g. 'run-bd6f9dc7b4e3'). If omitted, the most recent actionable review/acceptance run is used."},
             }, "required": []},
@@ -1117,12 +1176,12 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "run_aider_fix",
-            "description": "Apply surgical edits to an existing uploaded project using Aider in the Codebox worker. Use this for uploaded-project fixes instead of generate_code/OpenHands. After it returns, call run_review to verify. Counts toward the same per-user-request fix-cycle caps as run_fixer (3 reviewer-driven, 2 acceptance-driven).",
+            "description": "Primary repair editor for existing projects using Aider in the Codebox worker. Use this for reviewer/acceptance fixes on uploaded projects and OpenHands-built greenfield projects instead of generate_code/OpenHands or manual read_file/write_file. If Aider is unavailable or cannot produce a patch, the backend falls back to run_fixer. After it returns, call run_review or run_acceptance_review as appropriate to verify. Counts toward the same per-user-request fix-cycle caps as run_fixer.",
             "parameters": {"type": "object", "properties": {
-                "project_dir": {"type": "string", "description": "Absolute project root in Codebox, e.g. /root/projects/proj-... . If omitted, uses the active uploaded project."},
+                "project_dir": {"type": "string", "description": "Absolute project root in Codebox, e.g. /root/projects/neon-pong or /root/projects/proj-... . If omitted, uses the active/generated project."},
                 "task": {"type": "string", "description": "The user's requested fix/change, verbatim when possible."},
                 "issue_run_id": {"type": "string", "description": "Optional reviewer/acceptance run_id whose issues should guide Aider."},
-                "project_id": {"type": "string", "description": "Optional uploaded project id for workflow linkage."},
+                "project_id": {"type": "string", "description": "Optional project id for workflow linkage."},
                 "allowed_files": {"type": "array", "items": {"type": "string"}, "description": "Optional file scope Aider should focus on."},
             }, "required": ["task"]},
         },
@@ -1249,556 +1308,21 @@ CODEAGENT_TOOLS = {
 
 
 # ── Text-based tool call parsing ──
-# When models output tool calls as text instead of using native Ollama protocol,
-# these functions extract and clean them.
-
-def _extract_json_objects(text: str) -> list[str]:
-    """Extract top-level JSON objects from text using brace-depth tracking.
-    More reliable than regex for nested JSON structures."""
-    objects = []
-    i = 0
-    while i < len(text):
-        if text[i] == '{':
-            depth = 0
-            start = i
-            in_str = False
-            esc = False
-            j = i
-            while j < len(text):
-                c = text[j]
-                if esc:
-                    esc = False
-                elif c == '\\' and in_str:
-                    esc = True
-                elif c == '"' and not esc:
-                    in_str = not in_str
-                elif not in_str:
-                    if c == '{':
-                        depth += 1
-                    elif c == '}':
-                        depth -= 1
-                        if depth == 0:
-                            objects.append(text[start:j + 1])
-                            i = j
-                            break
-                j += 1
-        i += 1
-    return objects
-
-
-def _normalize_tool_args(args):
-    """Normalize tool arguments — handles string-encoded JSON from Ollama."""
-    if isinstance(args, str):
-        try:
-            args = json.loads(args)
-        except (json.JSONDecodeError, ValueError):
-            args = {}
-    if not isinstance(args, dict):
-        args = {}
-    return args
-
-
-def _fix_json_newlines(text: str) -> str:
-    """Fix JSON with unescaped newlines inside string values.
-    Models often output JSON with real newlines in 'code' fields."""
-    result = []
-    in_str = False
-    esc = False
-    for i, c in enumerate(text):
-        if esc:
-            result.append(c)
-            esc = False
-            continue
-        if c == '\\':
-            result.append(c)
-            if in_str:
-                esc = True
-            continue
-        if c == '"' and not esc:
-            in_str = not in_str
-            result.append(c)
-            continue
-        if in_str and c == '\n':
-            result.append('\\n')
-            continue
-        if in_str and c == '\t':
-            result.append('\\t')
-            continue
-        result.append(c)
-    return ''.join(result)
-
-
-def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
-    """Parse tool calls from model text when native Ollama tool protocol fails.
-    Handles: raw JSON, <tool_call> tags, JSON in code blocks, bare JSON objects."""
-    calls = []
-
-    # Strip markdown code fences and model-specific special tokens for parsing
-    stripped = re.sub(r'```(?:json|tool_call|tool)?\s*\n?', '', content).strip().rstrip('`')
-    # Strip GPT-OSS / other model special tokens that appear after JSON
-    stripped = re.sub(r'<\|(?:call|message|channel|im_end|im_start|eot_id|end)\|>.*', '', stripped, flags=re.DOTALL).strip()
-
-    # 1. Entire response is a single JSON tool call
-    for _try_str in (stripped, _fix_json_newlines(stripped)):
-        try:
-            obj = json.loads(_try_str)
-            if isinstance(obj, dict) and obj.get("name") in available_names and "arguments" in obj:
-                return [{"function": {"name": obj["name"], "arguments": _normalize_tool_args(obj["arguments"])}}]
-        except (json.JSONDecodeError, TypeError, KeyError):
-            pass
-
-    # 2. <tool_call>JSON</tool_call> tags (Qwen native format)
-    # Also match <|call|>JSON patterns (GPT-OSS format)
-    tag_matches = re.findall(
-        r'<(?:tool[_\-]?call[s]?|\|call\|)>\s*(.*?)\s*</(?:tool[_\-]?call[s]?|\|call\|)>',
-        content, re.DOTALL | re.IGNORECASE
-    )
-    for raw in tag_matches:
-        for json_str in _extract_json_objects(raw):
-            try:
-                obj = json.loads(json_str)
-                name = obj.get("name", "")
-                args = _normalize_tool_args(obj.get("arguments", obj.get("parameters", {})))
-                if name in available_names:
-                    calls.append({"function": {"name": name, "arguments": args}})
-            except (json.JSONDecodeError, TypeError):
-                pass
-    if calls:
-        return calls
-
-    # 2b. <function=NAME><parameter=KEY>VALUE</parameter>...</function> (qwen3-coder, Hermes XML-ish)
-    # Example:
-    #   <function=list_files>
-    #   <parameter=path>
-    #   /root/projects/proj-abc
-    #   </parameter>
-    #   </function>
-    for fn_match in re.finditer(
-        r'<function\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*>(.*?)</function\s*>',
-        content, re.DOTALL | re.IGNORECASE,
-    ):
-        fname = fn_match.group(1).strip()
-        body = fn_match.group(2)
-        if fname not in available_names:
-            continue
-        args: dict = {}
-        for p_match in re.finditer(
-            r'<parameter\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*>(.*?)</parameter\s*>',
-            body, re.DOTALL | re.IGNORECASE,
-        ):
-            pkey = p_match.group(1).strip()
-            pval = p_match.group(2).strip()
-            # Coerce obvious literals so numeric/bool params still work
-            if pval.lower() in ("true", "false"):
-                args[pkey] = (pval.lower() == "true")
-            else:
-                try:
-                    if re.fullmatch(r'-?\d+', pval):
-                        args[pkey] = int(pval)
-                    elif re.fullmatch(r'-?\d+\.\d+', pval):
-                        args[pkey] = float(pval)
-                    else:
-                        args[pkey] = pval
-                except (ValueError, TypeError):
-                    args[pkey] = pval
-        calls.append({"function": {"name": fname, "arguments": args}})
-    if calls:
-        return calls
-
-    # 3. JSON objects with name+arguments anywhere in text
-    for json_str in _extract_json_objects(stripped):
-        try:
-            obj = json.loads(json_str)
-            if isinstance(obj, dict) and obj.get("name") in available_names:
-                args = obj.get("arguments", obj.get("parameters", {}))
-                if args is not None:
-                    calls.append({"function": {"name": obj["name"], "arguments": _normalize_tool_args(args)}})
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-    # 4. Try extracting from code blocks specifically
-    if not calls:
-        code_blocks = re.findall(r'```(?:json|tool_call|tool)?\s*\n(.*?)\n\s*```', content, re.DOTALL)
-        for block in code_blocks:
-            for json_str in _extract_json_objects(block.strip()):
-                for _try in (json_str, _fix_json_newlines(json_str)):
-                    try:
-                        obj = json.loads(_try)
-                        if isinstance(obj, dict) and obj.get("name") in available_names:
-                            args = obj.get("arguments", obj.get("parameters", {}))
-                            if args is not None:
-                                calls.append({"function": {"name": obj["name"], "arguments": _normalize_tool_args(args)}})
-                                break
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-
-    # 5. Python function call syntax: run_shell("cmd"), write_file("path", "content"), etc.
-    #    Models sometimes write tool calls as Python code instead of using the protocol.
-    if not calls:
-        calls = _parse_python_tool_calls(content, available_names)
-
-    # 6. Loose roleplay-model syntax: <tools> "generate_image" (prompt: ...)
-    if not calls:
-        calls = _parse_loose_tool_calls(content, available_names)
-
-    return calls
-
-
-def _parse_python_tool_calls(content: str, available_names: set) -> list[dict]:
-    """Parse Python-style function calls from model output.
-    Catches patterns like: run_shell("pip install foo"), write_file("/root/app.py", '''code'''), etc."""
-    calls = []
-
-    # Extract all code blocks, or use full content if no code blocks
-    code_blocks = re.findall(r'```(?:\w*)\n(.*?)\n\s*```', content, re.DOTALL)
-    texts_to_scan = code_blocks if code_blocks else [content]
-
-    for text in texts_to_scan:
-        for name in available_names:
-            # Match tool_name( ... ) — find the opening paren after the tool name
-            pattern = rf'\b{re.escape(name)}\s*\('
-            for m in re.finditer(pattern, text):
-                start = m.end()  # position after opening (
-                args = _extract_balanced_parens(text, start)
-                if args is None:
-                    continue
-                parsed = _parse_python_args(name, args)
-                if parsed:
-                    calls.append({"function": {"name": name, "arguments": parsed}})
-    return calls
-
-
-def _extract_balanced_parens(text: str, start: int) -> str | None:
-    """Extract content between balanced parentheses starting at position after opening paren."""
-    depth = 1
-    i = start
-    in_str = False
-    str_char = None
-    in_triple = False
-    esc = False
-    while i < len(text):
-        c = text[i]
-        if esc:
-            esc = False
-            i += 1
-            continue
-        if c == '\\' and in_str and not in_triple:
-            esc = True
-            i += 1
-            continue
-        # Triple-quote detection
-        if not in_str and i + 2 < len(text) and text[i:i+3] in ("'''", '"""'):
-            in_str = True
-            in_triple = True
-            str_char = text[i:i+3]
-            i += 3
-            continue
-        if in_triple and i + 2 < len(text) and text[i:i+3] == str_char:
-            in_str = False
-            in_triple = False
-            str_char = None
-            i += 3
-            continue
-        if not in_str and c in ('"', "'"):
-            in_str = True
-            str_char = c
-            i += 1
-            continue
-        if in_str and not in_triple and c == str_char:
-            in_str = False
-            str_char = None
-            i += 1
-            continue
-        if not in_str:
-            if c == '(':
-                depth += 1
-            elif c == ')':
-                depth -= 1
-                if depth == 0:
-                    return text[start:i]
-        i += 1
-    return None
-
-
-def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
-    """Parse Python function arguments into a tool arguments dict."""
-    raw_args = raw_args.strip()
-    if not raw_args:
-        return {}
-
-    # ── Handle keyword arguments first: tool(key="value", key2="value2") ──
-    # Match patterns like: command="...", path="/root/...", task="..."
-    kw_pattern = re.findall(r'(\w+)\s*=\s*(?:"""(.*?)"""|\'\'\'(.*?)\'\'\'|"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\')', raw_args, re.DOTALL)
-    if kw_pattern:
-        result = {}
-        for kw_match in kw_pattern:
-            key = kw_match[0]
-            # Pick the first non-empty capture group (triple-double, triple-single, double, single)
-            val = kw_match[1] or kw_match[2] or kw_match[3] or kw_match[4]
-            val = val.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"').replace("\\'", "'").replace('\\\\', '\\')
-            result[key] = val
-        if result:
-            return result
-
-    # ── Positional arguments fallback ──
-    # Try to evaluate string literals safely
-    # We'll extract quoted string arguments
-    args_list = []
-    i = 0
-    while i < len(raw_args):
-        c = raw_args[i]
-        if c in (' ', ',', '\n', '\t'):
-            i += 1
-            continue
-        # Triple-quoted string
-        if i + 2 < len(raw_args) and raw_args[i:i+3] in ("'''", '"""'):
-            q = raw_args[i:i+3]
-            end = raw_args.find(q, i + 3)
-            if end == -1:
-                return None
-            args_list.append(raw_args[i+3:end])
-            i = end + 3
-            continue
-        # Single/double quoted string
-        if c in ('"', "'"):
-            j = i + 1
-            esc = False
-            while j < len(raw_args):
-                if esc:
-                    esc = False
-                elif raw_args[j] == '\\':
-                    esc = True
-                elif raw_args[j] == c:
-                    break
-                j += 1
-            if j < len(raw_args):
-                # Unescape basic escape sequences
-                s = raw_args[i+1:j].replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"').replace("\\'", "'").replace('\\\\', '\\')
-                args_list.append(s)
-                i = j + 1
-                continue
-            return None
-        # f-string — skip
-        if c == 'f' and i + 1 < len(raw_args) and raw_args[i+1] in ('"', "'"):
-            return None
-        # Bare word or number — skip to next comma
-        j = i
-        depth = 0
-        while j < len(raw_args):
-            if raw_args[j] == ',' and depth == 0:
-                break
-            if raw_args[j] in ('(', '[', '{'):
-                depth += 1
-            elif raw_args[j] in (')', ']', '}'):
-                depth -= 1
-            j += 1
-        token = raw_args[i:j].strip()
-        if token:
-            args_list.append(token)
-        i = j + 1
-
-    if not args_list:
-        return None
-
-    param_names = TOOL_PARAMS.get(tool_name)
-    if not param_names:
-        # Unknown tool — use first arg as "input"
-        return {"input": args_list[0]} if args_list else None
-
-    result = {}
-    for idx, val in enumerate(args_list):
-        if idx < len(param_names):
-            result[param_names[idx]] = val
-    return result if result else None
-
-
-# Map positional args to known tool parameter names (used by the python-call
-# and loose-call text parsers)
-TOOL_PARAMS = {
-    "execute_code": ["code", "language"],
-    "run_shell": ["command"],
-    "write_file": ["path", "content"],
-    "read_file": ["path"],
-    "list_files": ["path"],
-    "download_file": ["filename"],
-    "generate_image": ["prompt", "negative_prompt"],
-    "download_project": ["filenames", "project_name"],
-    "delete_file": ["path"],
-    "plan_project": ["task", "language", "constraints"],
-    "run_review": ["project_dir", "project_id"],
-    "run_acceptance_review": ["project_dir", "reviewer_run_id", "project_id"],
-    "search_files": ["pattern", "path", "file_pattern"],
-    "diff_files": ["path_a", "path_b"],
-    "git_init": ["path", "language"],
-    "git_diff": ["path"],
-    "git_commit": ["message", "path"],
-    "run_tests": ["path", "framework"],
-    "lint_code": ["path", "language"],
-    "resume_project": ["project_id"],
-    "research": ["query"],
-    "fetch_url": ["url"],
-    "generate_code": ["task", "language", "context"],
-    "start_coder_workflow": ["mode", "task", "project_id"],
-    "run_aider_fix": ["project_dir", "task", "issue_run_id"],
-    "get_coder_workflow": ["workflow_id"],
-    "cancel_coder_workflow": ["workflow_id"],
-}
-
-
-def _parse_loose_args(name: str, raw: str) -> dict | None:
-    """Parse the loose `key: value` / `key=value` arg style some roleplay
-    models invent (unquoted values, prose commas). Commas split a new arg only
-    when followed by a `key:`/`key=` token, so commas inside a prompt survive."""
-    raw = raw.strip()
-    if not raw:
-        return {}
-    parts = re.split(r',\s*(?=[A-Za-z_]\w*\s*[:=])', raw)
-    args: dict = {}
-    for part in parts:
-        pm = re.match(r'\s*([A-Za-z_]\w*)\s*[:=]\s*(.+?)\s*$', part, re.DOTALL)
-        if not pm:
-            args = {}
-            break
-        args[pm.group(1)] = pm.group(2).strip().strip('"\'').strip()
-    if args:
-        return args
-    # Bare single positional: the whole body is the first known param
-    params = TOOL_PARAMS.get(name)
-    if params:
-        val = raw.strip().strip('"\'').strip()
-        if val:
-            return {params[0]: val}
-    return None
-
-
-# Loose parsing is restricted to content-safe tools: a shredded key:value
-# body fed to execute_code/run_shell would EXECUTE garbage. These tools take
-# a single descriptive string, so a slightly-mangled arg is harmless.
-_LOOSE_PARSE_SAFE_TOOLS = {"generate_image", "research", "fetch_url"}
-
-
-def _parse_loose_tool_calls(content: str, available_names: set) -> list[dict]:
-    """Last-resort parser for mangled tool-call text — e.g. the roleplay-model
-    shape `<tools> "generate_image" (prompt: selfie of ...)`: quoted name,
-    space before the paren, unquoted key: value args. Only fires when the text
-    shows tool-call INTENT (quoted/backticked name, or a <tool...> tag in the
-    content) so plain prose mentioning a tool name can't trigger it."""
-    calls = []
-    has_tag = bool(re.search(r'<tools?\b|<tool[_\-]?call', content, re.IGNORECASE))
-    for name in available_names & _LOOSE_PARSE_SAFE_TOOLS:
-        for m in re.finditer(rf'(?<![\w.])(["\'`]?){re.escape(name)}(["\'`]?)\s*\(', content):
-            quoted = bool(m.group(1) or m.group(2))
-            if not (quoted or has_tag):
-                continue
-            raw = _extract_balanced_parens(content, m.end())
-            if raw is None:
-                continue
-            # Loose key:value style first — _parse_python_args mangles it
-            # (treats "prompt: text, more text" as comma-split positionals).
-            args = _parse_loose_args(name, raw)
-            if not args:
-                args = _parse_python_args(name, raw)
-            if args:
-                calls.append({"function": {"name": name, "arguments": args}})
-    return calls
-
-
-def strip_tool_calls(content: str) -> str:
-    """Remove tool call artifacts from content so the user sees clean text."""
-    # Remove <tool_call>...</tool_call>
-    content = re.sub(
-        r'<tool[_\-]?call[s]?\b[^>]*>\s*.*?\s*</tool[_\-]?call[s]?>',
-        '', content, flags=re.DOTALL | re.IGNORECASE
-    )
-    # Remove <tools>...</tools> wrappers used by some text-tool-call models.
-    content = re.sub(
-        r'<tools?\b[^>]*>\s*.*?\s*</tools?>',
-        '', content, flags=re.DOTALL | re.IGNORECASE
-    )
-    # If a model opens a tool tag and truncates before closing it, treat the
-    # rest of the response as tool junk. Keeping it visible leaks raw tool JSON.
-    content = re.sub(
-        r'<tool[_\-]?call[s]?\b[^>]*>.*$',
-        '', content, flags=re.DOTALL | re.IGNORECASE
-    )
-    content = re.sub(
-        r'<tools?\b[^>]*>.*$',
-        '', content, flags=re.DOTALL | re.IGNORECASE
-    )
-    # Remove qwen3-coder / Hermes-style <function=name>...<parameter=k>v</parameter>...</function>
-    content = re.sub(
-        r'<function\s*=\s*[A-Za-z_][A-Za-z0-9_]*\s*>.*?</function\s*>',
-        '', content, flags=re.DOTALL | re.IGNORECASE
-    )
-    # Remove ```json blocks containing tool calls
-    content = re.sub(
-        r'```(?:json|tool_call|tool)?\s*\n?\s*\{[^`]*"name"[^`]*\}\s*\n?\s*```',
-        '', content, flags=re.DOTALL
-    )
-    # Remove bare JSON tool call objects (name + arguments pattern)
-    content = re.sub(
-        r'\{\s*"name"\s*:\s*"[^"]*"\s*,\s*"arguments"\s*:\s*\{.*?\}\s*\}',
-        '', content, flags=re.DOTALL
-    )
-    # Remove loose roleplay-style calls: "tool_name" (args...) — only when the
-    # name is quote-wrapped (NOT backtick: `tool` (...) is normal prose) or a
-    # <tool...> tag is present, so 'you can use read_file (with a path)' and
-    # backtick-quoted explanations survive.
-    has_tag = bool(re.search(r'<tools?\b|<tool[_\-]?call', content, re.IGNORECASE))
-    spans = []
-    for name in CODEAGENT_TOOLS:
-        for m in re.finditer(rf'(?<![\w.])(["\']?){re.escape(name)}(["\']?)\s*\(', content):
-            if not (m.group(1) or m.group(2) or has_tag):
-                continue
-            inner = _extract_balanced_parens(content, m.end())
-            if inner is None:
-                # Unterminated call (model truncated mid-args) — junk runs to
-                # the end of the line; keep any following lines.
-                nl = content.find("\n", m.end())
-                spans.append((m.start(), nl if nl != -1 else len(content)))
-            else:
-                spans.append((m.start(), m.end() + len(inner) + 1))
-    # Merge overlapping/nested spans BEFORE splicing — removing an inner span
-    # first would leave the outer span's indices pointing at shifted text.
-    merged: list[list[int]] = []
-    for s, e in sorted(spans):
-        if merged and s <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], e)
-        else:
-            merged.append([s, e])
-    for s, e in reversed(merged):
-        content = content[:s] + content[e:]
-    # Stray wrapper tags (often unpaired)
-    content = re.sub(r'</?tools?\b[^>]*>', '', content, flags=re.IGNORECASE)
-    content = re.sub(r'</?tool[_\-]?call[s]?\b[^>]*>', '', content, flags=re.IGNORECASE)
-    return content.strip()
-
-
-# ── Sandbox venv management ──
-_sandbox_venv_ready = False
-
-async def _ensure_venv(http):
-    """Lazily create a Python venv in the CodeBox sandbox. Called once per server lifetime."""
-    global _sandbox_venv_ready
-    if _sandbox_venv_ready:
-        return True
-    try:
-        r = await http.post(f"{config.CODEBOX_URL}/command", json={
-            "command": (
-                "test -f /root/venv/bin/python3 || "
-                "(python3 -m venv /root/venv && /root/venv/bin/pip3 install --upgrade pip -q 2>/dev/null); "
-                "echo VENV_OK"
-            ),
-            "timeout": 30
-        }, timeout=35)
-        result = r.json()
-        if "VENV_OK" in result.get("stdout", ""):
-            _sandbox_venv_ready = True
-            print("[SANDBOX] venv ready at /root/venv")
-            return True
-    except Exception as e:
-        print(f"[SANDBOX] venv setup error: {e}")
-    return False
+# Public parser names stay available from tools.py for existing imports.
+from tooling.parser import (
+    TOOL_PARAMS,
+    _LOOSE_PARSE_SAFE_TOOLS,
+    _extract_balanced_parens,
+    _extract_json_objects,
+    _fix_json_newlines,
+    _normalize_tool_args,
+    _parse_loose_args,
+    _parse_loose_tool_calls,
+    _parse_python_args,
+    _parse_python_tool_calls,
+    parse_text_tool_calls,
+    strip_tool_calls,
+)
 
 
 # Language → filename substring hints for KB retrieval bias. Each entry lists the filename
@@ -2234,98 +1758,78 @@ async def exec_tool(
         #     said "Hard cap: 3 review/fix cycles" since Phase 2; this
         #     enforces it server-side instead of trusting the model to obey.
         #
+        async def _gate_research_since(since_iso=None) -> bool:
+            return await _deep_research_called_since(conv_id, since_iso)
+
+        async def _gate_ship_anyway() -> bool:
+            return await _latest_user_requested_ship_anyway(conv_id)
+
+        async def _gate_latest_user_task_text() -> str:
+            return await _latest_user_task_text(conv_id)
+
+        _gate_ctx: GateContext | None = await build_gate_context(
+            name,
+            args,
+            conv_id,
+            _is_v2_persona,
+            research_since=_gate_research_since,
+            ship_anyway=_gate_ship_anyway,
+            latest_user_task_text=_gate_latest_user_task_text,
+        )
+
         # Cache the v2 check result once per exec_tool call so the gate
         # doesn't hit the DB for each sub-state. Initialized to None =
         # "not checked yet"; False/True = cached result.
-        _v2_cached: bool | None = None
+        _v2_cached: bool | None = (
+            None if (_gate_ctx.snapshot_partial and not _gate_ctx.is_v2)
+            else _gate_ctx.is_v2
+        )
         async def _check_v2(cr=None) -> bool:
             nonlocal _v2_cached
             if _v2_cached is None:
                 _v2_cached = await _is_v2_persona(conv_id, conv_row=cr)
             return _v2_cached
 
-        # Q&A is read-only and terminal for the current turn. Some review/fix
-        # tools are whitelisted below so the normal state gate can allow the
-        # intended next step after builder/reviewer runs; block those explicitly
-        # when the most recent meaningful run is a non-change ProjectQA answer.
-        if conv_id and name not in {"ask_project", "get_coder_workflow", "cancel_coder_workflow"}:
-            try:
-                _runs_qt = await db.get_runs_by_conversation(conv_id, limit=12)
-                _terminal_qa_run = None
-                for _r in _runs_qt:
-                    _role_qt = _r.get("role", "")
-                    if _role_qt == "qa":
-                        _env_qt = _r.get("result_envelope") or {}
-                        if (_r.get("status") == "succeeded"
-                                and not _env_qt.get("looks_like_change_request", False)):
-                            _terminal_qa_run = _r
-                        break
-                    if (_role_qt in {"reviewer", "acceptance", "fixer", "aider.fix"}
-                            or _role_qt.startswith("builder")):
-                        break
-                if _terminal_qa_run is not None:
-                    # Turn-scoped: a QA answer is terminal only for the turn it
-                    # answered. A newer user message ("now run the tests")
-                    # releases the gate instead of blocking forever.
-                    _uts_qt = await _latest_user_msg_ts(conv_id)
-                    _qa_ts = _parse_ts_loose(_terminal_qa_run.get("started_at"))
-                    if (_uts_qt is not None and _qa_ts is not None
-                            and _qa_ts < _uts_qt):
-                        _terminal_qa_run = None
-                if _terminal_qa_run is not None and await _check_v2():
-                    _qid = _terminal_qa_run.get("id", "?")
+        if _gate_ctx.is_v2:
+            await reconcile_workflow_state(_gate_ctx)
+            _gate_decision = await evaluate_gate(_gate_ctx)
+            if _gate_decision is not None:
+                if _gate_decision.action == "redirect":
                     await events.emit(conv_id, "tool_end", {
-                        "tool": name, "icon": "code",
-                        "status": f"⛔ Blocked — answer the user (ask_project {_qid[:14]}… is terminal)",
+                        "tool": name,
+                        "icon": _gate_decision.event_icon,
+                        "status": _gate_decision.event_status,
                     })
-                    print(f"[v2-gate] state=qa-terminal blocked tool={name} "
-                          f"trigger={_qid}", flush=True)
-                    return (
-                        f"BLOCKED — ask_project ({_qid}) just answered the user's question. "
-                        f"The user asked something; you have the answer. Your VERY NEXT output "
-                        f"MUST be plain text relaying that answer to the user.\n\n"
-                        f"Do NOT call run_review, run_fixer, run_aider_fix, generate_code, "
-                        f"read_file, write_file, run_shell, download_project, or any other "
-                        f"tool. The project Q&A path is read-only.\n\n"
-                        f"If the user follows up with another question, call ask_project again. "
-                        f"If they explicitly request a change, route that new turn through "
-                        f"fix_uploaded_project or a write workflow."
+                    if _gate_decision.log:
+                        print(_gate_decision.log, flush=True)
+                    return await exec_tool(
+                        http,
+                        events,
+                        _gate_decision.tool,
+                        _gate_decision.args,
+                        conv_id,
+                        custom_tool_map=custom_tool_map,
+                        connector_tool_name_map=connector_tool_name_map,
+                        conv_model=conv_model,
+                        kb_ids=kb_ids,
+                        artifact_message_id=artifact_message_id,
+                        persona_context=persona_context,
                     )
-            except Exception as _qte:
-                print(f"[v2-gate] qa-terminal check failed (non-fatal): {_qte}")
-
-        if (conv_id
-                and not _uploaded_project_tool_allowed_during_bootstrap(name)
-                and await _check_v2()):
-            try:
-                _wf_up = await db.get_latest_coder_workflow(conv_id)
-                _runs_up = await db.get_runs_by_conversation(conv_id, limit=20)
-                _gate_state_up = _uploaded_project_manual_gate_state(_wf_up, _runs_up)
-                if _gate_state_up:
-                    _pid_up = (_wf_up or {}).get("project_id") or ""
-                    _project_dir_up = f"/root/projects/{_pid_up}" if _pid_up else ""
-                    _task_up = await _latest_user_task_text(conv_id)
-                    _body_up = _uploaded_project_bootstrap_block_message(
-                        name,
-                        _wf_up or {},
-                        _project_dir_up,
-                        _task_up,
-                        _gate_state_up,
-                    )
-                    await events.emit(conv_id, "tool_end", {
-                        "tool": name, "icon": "code",
-                        "status": (
-                            "⛔ Blocked — uploaded-project fixes use Aider first"
-                            if _gate_state_up == "bootstrap"
-                            else "⛔ Blocked — uploaded-project run already in progress"
-                        ),
-                    })
-                    print(f"[v2-gate] state=uploaded-project-{_gate_state_up} "
-                          f"blocked tool={name} workflow={(_wf_up or {}).get('id','?')}",
-                          flush=True)
-                    return _body_up
-            except Exception as _upe:
-                print(f"[v2-gate] uploaded-project bootstrap check failed (non-fatal): {_upe}")
+                await events.emit(conv_id, "tool_end", {
+                    "tool": name,
+                    "icon": _gate_decision.event_icon,
+                    "status": _gate_decision.event_status,
+                })
+                if _gate_decision.log:
+                    print(_gate_decision.log, flush=True)
+                return _gate_decision.message
+        # A partial snapshot must never feed the gates below — even when the
+        # v2 lookup fell back to False, a later _check_v2() re-check can flip
+        # to True, and the gates would then run against an empty runs list
+        # (phantom-fixer blocking real fixes, the main walk missing pending
+        # states). Null the ctx so every consumer refetches from the DB.
+        if _gate_ctx is not None and _gate_ctx.snapshot_partial:
+            _gate_ctx = None
 
         _runs_for_cap = None
         _uts_cap = None
@@ -2335,8 +1839,37 @@ async def exec_tool(
                 # limit=50 so the cap window isn't silently truncated by run
                 # scroll; counters below are additionally scoped to the
                 # current user request via _runs_since.
-                _runs_for_cap = await db.get_runs_by_conversation(conv_id, limit=50)
-                _uts_cap = await _latest_user_msg_ts(conv_id)
+                _runs_for_cap = (_gate_ctx.runs if _gate_ctx is not None
+                                 else await db.get_runs_by_conversation(conv_id, limit=50))
+                _uts_cap = (_gate_ctx.latest_user_ts if _gate_ctx is not None
+                            else await _latest_user_msg_ts(conv_id))
+
+                # Environment faults cannot be repaired from inside the
+                # project — block the fix tools outright before any cap or
+                # redirect logic runs, so no budget/research cycle is spent.
+                _ef_requested = (args.get("reviewer_run_id")
+                                 or args.get("issue_run_id") or "").strip()
+                _ef_run = None
+                if _ef_requested:
+                    _ef_run = next((r for r in _runs_for_cap
+                                    if r.get("id") == _ef_requested), None)
+                    if _ef_run is None:
+                        try:
+                            _ef_run = await db.get_run(_ef_requested)
+                        except Exception:
+                            _ef_run = None
+                else:
+                    _ef_run = next(
+                        (r for r in _runs_for_cap
+                         if r.get("role") in {"reviewer", "acceptance"}
+                         and ((r.get("result_envelope") or {}).get("status") or "").lower()
+                         in {"issues", "error"}),
+                        None)
+                if _ef_run and _is_environment_fault(_ef_run.get("result_envelope")):
+                    print(f"[v2-gate] BLOCKED {name}: environment fault "
+                          f"run={_ef_run.get('id')}", flush=True)
+                    return _environment_fault_notice(_ef_run.get("result_envelope"))
+
                 _run_role_by_id_cap = {r.get("id"): r.get("role") for r in _runs_for_cap}
                 _requested_parent_id = (args.get("reviewer_run_id") or "").strip()
                 _parent_role_for_cap = ""
@@ -2353,37 +1886,57 @@ async def exec_tool(
                 if not _parent_role_for_cap:
                     _parent_role_for_cap = "reviewer"
 
-                # Uploaded-project fixes are owned by Aider. This redirect is
+                # Progress-scored unified budget: one battle state drives the
+                # Aider/Fixer routing AND the caps below. Verified progress
+                # (the fix's follow-up verification no longer flags the same
+                # files) resets the streak; the hard ceiling never resets.
+                _battle_cap = compute_fix_battle(_runs_for_cap, _uts_cap)
+                try:
+                    _battle_cap.research_done = await _gate_research_since(_uts_cap)
+                except Exception as _re:
+                    print(f"[v2-gate] research flag lookup failed (non-fatal): {_re}")
+
+                # Existing-project repairs are owned by Aider first. This redirect is
                 # deliberately before cycle/research gates so stale personas
                 # that still call run_fixer do not get stuck in the old scoped
                 # Fixer loop. v2-only: a v1 persona's run_fixer must not be
-                # silently rerouted.
-                if (name == "run_fixer" and _parent_role_for_cap == "reviewer"
+                # silently rerouted. Internal `_aider_fallback` calls bypass this
+                # so Fixer can be the second editor when Aider can't fix — and
+                # the escalation policy (2 consecutive no-progress Aider
+                # attempts → a 2-attempt Fixer block) keeps run_fixer local.
+                if (name == "run_fixer" and _parent_role_for_cap in {"reviewer", "acceptance"}
                         and getattr(config, "AIDER_ENABLED", True)
+                        and not args.get("_aider_fallback")
                         and await _check_v2()):
                     _requested_parent_id = (args.get("reviewer_run_id") or "").strip()
                     _issue_run_for_aider = await _latest_actionable_issue_run(conv_id, _requested_parent_id)
-                    _aider_ctx = await _uploaded_project_aider_context(
-                        conv_id, issue_run=_issue_run_for_aider,
-                    )
+                    _aider_ctx = None
+                    if preferred_fix_editor(_battle_cap) == "aider":
+                        _aider_ctx = await _aider_first_context(
+                            http,
+                            conv_id, issue_run=_issue_run_for_aider,
+                        )
                     if _issue_run_for_aider and _aider_ctx:
                         _issue_run_id = _issue_run_for_aider.get("id", "")
                         _project_dir = _aider_ctx.get("project_dir") or ""
                         _task = _task_from_issue_run(
-                            await _latest_user_task_text(conv_id),
+                            (await _gate_ctx.latest_user_task_text()
+                             if _gate_ctx is not None
+                             else await _latest_user_task_text(conv_id)),
                             _issue_run_for_aider,
                         )
                         await events.emit(conv_id, "tool_end", {
                             "tool": "run_fixer", "icon": "wrench",
-                            "status": "↪ Routing uploaded-project fix to Aider",
+                            "status": "↪ Routing repair to Aider",
                         })
                         print(f"[v2-gate] redirecting run_fixer to run_aider_fix "
-                              f"for uploaded project issue_run={_issue_run_id}", flush=True)
+                              f"for {_parent_role_for_cap} issue_run={_issue_run_id}", flush=True)
                         return await exec_tool(
                             http, events, "run_aider_fix",
                             {
                                 "task": _task,
                                 "project_dir": _project_dir,
+                                "project_id": _aider_ctx.get("project_id") or "",
                                 "issue_run_id": _issue_run_id,
                             },
                             conv_id,
@@ -2394,23 +1947,16 @@ async def exec_tool(
                             artifact_message_id=artifact_message_id,
                         )
 
-                def _fixer_source_role_cap(_fr):
-                    _fenv = _fr.get("result_envelope") or {}
-                    return (_fenv.get("source_role")
-                            or _run_role_by_id_cap.get(_fr.get("parent_run_id"))
-                            or "reviewer")
-
-                # Turn-scoped (G1) and Aider-inclusive (G2): only successful
-                # fix runs since the latest user message count, and aider.fix
-                # consumes the same budget as the scoped Fixer.
-                _fixer_succ = sum(
-                    1 for r in _runs_since(_runs_for_cap, _uts_cap)
-                    if (r.get("role") in {"fixer", "aider.fix"}
-                        and r.get("status") == "succeeded"
-                        and _fixer_source_role_cap(r) == _parent_role_for_cap)
+                # ─── Unified progress budget — ceiling / streak / research ──
+                _streak_cap = _battle_cap.no_progress_streak
+                _total_cap = _battle_cap.total_attempts
+                _research_done_for_cap = _battle_cap.research_done
+                _at_ceiling = _total_cap >= FIX_ATTEMPT_HARD_CEILING
+                _streak_exhausted = _streak_cap >= NO_PROGRESS_LAST_SHOT
+                _needs_research_cap = (
+                    _streak_cap >= NO_PROGRESS_RESEARCH_AT and not _research_done_for_cap
                 )
-                _cap_limit = 2 if _parent_role_for_cap == "acceptance" else 3
-                if _fixer_succ >= _cap_limit:
+                if _at_ceiling or _streak_exhausted or _needs_research_cap:
                     # v1 doesn't run this loop, so cap only applies to v2.
                     if await _check_v2():
                         # Pull the latest actionable summary so the model has
@@ -2433,152 +1979,79 @@ async def exec_tool(
                                 + (f":{','.join(str(x) for x in _iss.get('lines') or [])}" if _iss.get('lines') else "")
                                 + f" — {(_iss.get('summary','') or '')[:160]}"
                             )
+                        if _needs_research_cap and not _at_ceiling and not _streak_exhausted:
+                            _topic_seed = (
+                                _rev_sum
+                                or (_issue_lines[0] if _issue_lines else "project repair loop")
+                            )[:240]
+                            _topic_seed = re.sub(r"\s+", " ", _topic_seed).strip()
+                            _topic_seed = _topic_seed.replace("\\", "\\\\").replace("'", "\\'")
+                            await events.emit(conv_id, "tool_end", {
+                                "tool": name, "icon": "search",
+                                "status": (f"⛔ {_streak_cap} attempts without progress "
+                                           f"— call deep_research"),
+                            })
+                            print(f"[v2-gate] NO-PROGRESS STREAK: blocking {name}; "
+                                  f"forcing deep_research before more repair attempts", flush=True)
+                            return (
+                                f"BLOCKED — {_streak_cap} consecutive repair attempts have not "
+                                f"made verified progress on the reported issues. The next step "
+                                f"must gather outside guidance before another editor runs.\n\n"
+                                f"Your VERY NEXT tool call MUST be:\n"
+                                f"  deep_research(topic='{_parent_role_for_cap} issue still failing: "
+                                f"{_topic_seed}', "
+                                f"depth=2)\n\n"
+                                f"Do NOT call run_fixer, run_aider_fix, read_file, write_file, "
+                                f"run_shell, run_review, run_acceptance_review, download_project, "
+                                f"or download_file until deep_research has completed."
+                                + (f"\n\nLatest issue summary: \"{_rev_sum}\"" if _rev_sum else "")
+                                + (("\nRemaining issue(s):\n" + "\n".join(_issue_lines)) if _issue_lines else "")
+                            )
+                        if _at_ceiling:
+                            _cap_reason = (
+                                f"BLOCKED — the hard ceiling of {FIX_ATTEMPT_HARD_CEILING} total "
+                                f"fix attempts for this user request is reached ({_total_cap} "
+                                f"attempts, Aider + Fixer combined — fixes kept resolving some "
+                                f"issues while new ones appeared). The full automated repair "
+                                f"budget is exhausted and another automated repair call will "
+                                f"not help."
+                            )
+                            _cap_status = (f"⛔ Hard ceiling reached "
+                                           f"({_total_cap}/{FIX_ATTEMPT_HARD_CEILING} attempts) "
+                                           f"— summarize and stop")
+                        else:
+                            _cap_reason = (
+                                f"BLOCKED — {_streak_cap} consecutive fix attempts without "
+                                f"verified progress, including the post-research attempt "
+                                f"(Aider + Fixer combined). The full automated repair budget "
+                                f"is exhausted and another automated repair call will not help."
+                            )
+                            _cap_status = (f"⛔ No progress after {_streak_cap} attempts "
+                                           f"— summarize and stop")
                         await events.emit(conv_id, "tool_end", {
                             "tool": name, "icon": "wrench",
-                            "status": f"⛔ Cycle cap reached ({_fixer_succ}/{_cap_limit}) — summarize and stop",
+                            "status": _cap_status,
                         })
-                        print(f"[v2-gate] CYCLE CAP: blocking {name} (already "
-                              f"{_fixer_succ} succeeded {_parent_role_for_cap}-driven fix runs "
-                              f"since the latest user message)", flush=True)
+                        print(f"[v2-gate] BUDGET EXHAUSTED: blocking {name} "
+                              f"(streak={_streak_cap}, total={_total_cap}, "
+                              f"research_done={_research_done_for_cap})", flush=True)
                         return (
-                            f"BLOCKED — Hard cap of {_cap_limit} {_parent_role_for_cap}/fix "
-                            f"cycles already attempted for this user request "
-                            f"({_fixer_succ} successful fix runs).\n\n"
-                            f"The same class of issue is persisting and another fixer call "
-                            f"will not help. Your VERY NEXT output MUST be plain text to the "
-                            f"user that:\n"
-                            f"  1. Summarizes what was changed across the {_fixer_succ} fix cycles\n"
+                            _cap_reason
+                            + "\n\nYour VERY NEXT output MUST be plain text to the user that:\n"
+                            f"  1. Summarizes what was changed across the {_total_cap} fix attempt(s)\n"
                             f"  2. States the remaining issue with file:line references"
-                            + (f"\n     (latest reviewer: \"{_rev_sum}\")" if _rev_sum else "")
+                            + (f"\n     (latest {_parent_role_for_cap}: \"{_rev_sum}\")" if _rev_sum else "")
                             + (("\n" + "\n".join(_issue_lines)) if _issue_lines else "")
                             + "\n  3. Asks the user for guidance — what behavior they actually "
                             f"want, or whether to skip this issue and ship anyway.\n\n"
                             f"Do NOT call run_fixer, run_aider_fix, run_review, generate_code, "
-                            f"write_file, run_shell, or plan_project. You MAY call download_project / "
-                            f"download_file to deliver what was built so far if the user wants "
-                            f"to ship as-is. Otherwise, respond to the user with text."
+                            f"read_file, list_files, write_file, run_shell, download_project, "
+                            f"download_file, or plan_project. Respond to the user with text and "
+                            f"ask whether they want to ship as-is or authorize manual intervention."
                         )
             except Exception as _ce:
                 print(f"[v2-gate] cycle cap check failed (non-fatal): {_ce}")
 
-            # ─── State 5+6 — STUCK_FIX / FINAL_CYCLE — research nudge ───────
-            # If the model is about to call run_fixer for the 2nd or 3rd time
-            # AND either (a) the same issue signatures returned across reviewer
-            # cycles, or (b) this would be the 3rd (last-allowed) fixer run,
-            # block until deep_research has been called. The persona prompt
-            # tells the model to do this; the gate enforces it server-side.
-            #
-            # Uses the same _runs_for_cap walk as the cycle cap — cheap because
-            # we already paid for that db hit above. _runs_for_cap is
-            # initialized to None before the first try block so it's always
-            # in scope here.
-            try:
-                _runs_sf = _runs_for_cap
-                if _runs_sf is None:
-                    _runs_sf = await db.get_runs_by_conversation(conv_id, limit=50)
-                if _parent_role_for_cap == "acceptance":
-                    raise StopAsyncIteration("acceptance fixes do not use research nudge")
-                # Same turn-scoped window as the cycle cap, counting both fix
-                # paths — the gates must agree on how many cycles happened.
-                _fsucc_sf = sum(
-                    1 for r in _runs_since(_runs_sf, _uts_cap)
-                    if (r.get("role") in {"fixer", "aider.fix"}
-                        and r.get("status") == "succeeded"
-                        and ((r.get("result_envelope") or {}).get("source_role")
-                             or "reviewer") != "acceptance")
-                )
-                # 1 ≤ fixer_succ ≤ 2: between first failure and final cycle.
-                # 0 = first attempt, no gate. ≥3 = cap (handled above).
-                # Research nudge text is fixer-specific; Aider already requires
-                # a follow-up run_review, so only run_fixer is gated here.
-                if name == "run_fixer" and 1 <= _fsucc_sf <= 2 and await _check_v2():
-                    _latest_rev_sf = next(
-                        (r for r in _runs_sf if r.get("role") == "reviewer"),
-                        None,
-                    )
-                    if _latest_rev_sf:
-                        _cur_iss = _issue_signatures(_latest_rev_sf.get("result_envelope") or {})
-                        _research_done = await _deep_research_called_since(
-                            conv_id, _latest_rev_sf.get("started_at")
-                        )
-
-                        # State 5 — STUCK: same issue signature seen in a prior
-                        # reviewer run AND no research call since.
-                        _is_stuck = False
-                        if _cur_iss:
-                            _prior_revs_sf = [
-                                r for r in _runs_sf
-                                if r.get("role") == "reviewer"
-                                and r.get("id") != _latest_rev_sf.get("id")
-                            ]
-                            if _prior_revs_sf:
-                                _prior_rev_sf = _prior_revs_sf[0]
-                                _prior_iss = _issue_signatures(
-                                    _prior_rev_sf.get("result_envelope") or {}
-                                )
-                                if _cur_iss & _prior_iss:
-                                    _is_stuck = True
-
-                        # State 6 — FINAL CYCLE: about to use the last fixer
-                        # slot (3rd attempt). Research before the last shot.
-                        _is_final = (_fsucc_sf == 2)
-
-                        if (_is_stuck or _is_final) and not _research_done:
-                            _why_label = ("STUCK" if _is_stuck else "FINAL_CYCLE")
-                            _gate_status = (
-                                "⛔ Same issue returned — call Agent Research first"
-                                if _is_stuck else
-                                "⛔ Final fixer cycle — call Agent Research first"
-                            )
-                            # Pull a representative error to seed the research topic.
-                            _seed_iss = (_latest_rev_sf.get("result_envelope") or {}).get("issues") or []
-                            _seed_lines = []
-                            for _i, _iss in enumerate(_seed_iss[:2], 1):
-                                _seed_lines.append(
-                                    f"  {_i}. [{_iss.get('severity','?')}] "
-                                    f"{_iss.get('file','?')}"
-                                    + (f":{','.join(str(x) for x in _iss.get('lines') or [])}" if _iss.get('lines') else "")
-                                    + f" — {(_iss.get('summary','') or '')[:160]}"
-                                )
-                            _seed_block = ("\n" + "\n".join(_seed_lines)) if _seed_lines else ""
-
-                            await events.emit(conv_id, "tool_end", {
-                                "tool": "run_fixer", "icon": "wrench",
-                                "status": _gate_status,
-                            })
-                            print(f"[v2-gate] {_why_label}: blocking run_fixer "
-                                  f"(fixer_succ={_fsucc_sf}, stuck={_is_stuck}, "
-                                  f"final={_is_final}, research_done={_research_done})", flush=True)
-
-                            if _is_stuck:
-                                _reason = (
-                                    f"BLOCKED — run_review returned the same issue(s) you already "
-                                    f"attempted to fix in a previous run_fixer cycle ({_fsucc_sf} fixer "
-                                    f"run(s) so far). Calling run_fixer again without new information "
-                                    f"will produce the same result.\n"
-                                )
-                            else:
-                                _reason = (
-                                    f"BLOCKED — this would be your 3rd (final) run_fixer call. "
-                                    f"After it, the cycle cap blocks any further fixer runs. "
-                                    f"Spend one round on web research before the last shot.\n"
-                                )
-
-                            return (
-                                _reason
-                                + "\nRecurring issue(s):" + _seed_block + "\n\n"
-                                + "Your VERY NEXT tool call MUST be:\n"
-                                + "  deep_research(topic='<exact error message + library/version>', depth=2)\n\n"
-                                + "After Agent Research (`deep_research`) returns, call run_fixer — the Fixer will see the "
-                                + "research result in your conversation and use it to ground the next "
-                                + "edit. Use depth=2 (fast); only use depth=3 if the issue is genuinely "
-                                + "obscure. Do NOT call run_fixer, generate_code, write_file, run_shell, "
-                                + "or run_review until deep_research has run."
-                            )
-            except StopAsyncIteration:
-                pass
-            except Exception as _sfe:
-                print(f"[v2-gate] stuck/final-cycle check failed (non-fatal): {_sfe}")
 
             # Phantom run_fixer guard: block run_fixer when the latest run
             # isn't a reviewer/acceptance run with status='issues'/'error'. Without this,
@@ -2591,7 +2064,8 @@ async def exec_tool(
             # case; this guard handles every other case.
             try:
                 if await _check_v2():
-                    _runs_pf = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _runs_pf = (_gate_ctx.runs_window(20) if _gate_ctx is not None
+                                else await db.get_runs_by_conversation(conv_id, limit=20))
                     _latest_meaningful = None
                     _MEANINGFUL_STATUSES = {"succeeded", "issues", "clean", "partial",
                                             "stuck", "failed", "error"}
@@ -2653,12 +2127,24 @@ async def exec_tool(
         # always produces a worse result than 2 surgical write_file edits.
         if conv_id and name == "generate_code":
             try:
-                _conv_full = await db.get_conversation(conv_id)
+                _conv_full = (_gate_ctx.conv_row if _gate_ctx is not None
+                              else await db.get_conversation(conv_id))
                 if await _check_v2(cr=_conv_full):
-                    _latest_user_ts = await _latest_user_msg_ts(conv_id, conv_row=_conv_full)
+                    if args.get("manifest_completion_retry"):
+                        print("[v2-gate] allowing manifest completion retry through anti-rebuild guard", flush=True)
+                        raise StopAsyncIteration("manifest completion retry allowed")
+                    _runs_rb = (_gate_ctx.runs_window(20) if _gate_ctx is not None
+                                else await db.get_runs_by_conversation(conv_id, limit=20))
+                    for _r in _runs_rb:
+                        if _builder_completion_allowed(name, args, _r):
+                            print("[v2-gate] allowing generate_code to complete partial builder", flush=True)
+                            raise StopAsyncIteration("builder completion allowed")
+                        if _r.get("role") in {"reviewer", "acceptance", "qa", "fixer", "aider.fix"}:
+                            break
+                    _latest_user_ts = (_gate_ctx.latest_user_ts if _gate_ctx is not None
+                                       else await _latest_user_msg_ts(conv_id, conv_row=_conv_full))
 
                     if _latest_user_ts is not None:
-                        _runs_rb = await db.get_runs_by_conversation(conv_id, limit=20)
                         _builder_succ_this_turn = 0
                         _last_builder_role = ""
                         for _r in _runs_rb:
@@ -2705,17 +2191,60 @@ async def exec_tool(
                                 f"don't silently rebuild what's already there."
                             )
             except Exception as _rbe:
-                print(f"[v2-gate] anti-rebuild check failed (non-fatal): {_rbe}")
+                if not isinstance(_rbe, StopAsyncIteration):
+                    print(f"[v2-gate] anti-rebuild check failed (non-fatal): {_rbe}")
+
+        # ── Build-incomplete pre-gate (for tools exempt from the main gate) ──
+        # run_review / run_acceptance_review are exempt from the workflow gate
+        # below (they're the normal progression tools). But a partial build with
+        # planned files STILL missing (after the backend auto-continue passes) must
+        # not advance to review or acceptance — every planned deliverable has to
+        # exist first. Delivery (download_*) and manual tools are non-exempt and are
+        # handled by the main gate's build-incomplete branch.
+        if conv_id and name in {"run_review", "run_acceptance_review"}:
+            try:
+                if await _check_v2():
+                    _runs_bi = (_gate_ctx.runs_window(20) if _gate_ctx is not None
+                                else await db.get_runs_by_conversation(conv_id, limit=20))
+                    _bi = _blocking_incomplete_builder(_runs_bi)
+                    if _bi is not None:
+                        _bi_env = _bi.get("result_envelope") or {}
+                        _bi_missing = _bi_env.get("manifest_missing") or []
+                        _bi_pid = _bi_env.get("project_id") or ""
+                        _bi_disp = ", ".join(_bi_missing[:10]) + (
+                            "…" if len(_bi_missing) > 10 else "")
+                        await events.emit(conv_id, "tool_end", {
+                            "tool": name, "icon": "code",
+                            "status": f"⛔ Blocked — build incomplete, "
+                                      f"{len(_bi_missing)} file(s) missing",
+                        })
+                        print(f"[v2-gate] state=build-incomplete blocked "
+                              f"tool={name} missing={len(_bi_missing)}", flush=True)
+                        return (
+                            f"BLOCKED — the build is INCOMPLETE: {len(_bi_missing)} "
+                            f"planned file(s) were never created — {_bi_disp}.\n\n"
+                            f"Your VERY NEXT tool call MUST be:\n"
+                            f"  generate_code(project_id='{_bi_pid}', task='create the missing "
+                            f"files: {_bi_disp}')\n\n"
+                            f"{name} cannot run until every planned deliverable exists. "
+                            f"If the latest user message explicitly asks to ship the "
+                            f"incomplete project as-is, call download_project (and "
+                            f"disclose the missing files) instead."
+                        )
+            except Exception as _bie:
+                print(f"[v2-gate] build-incomplete pre-gate failed (non-fatal): {_bie}")
 
         if conv_id and name not in ("run_review", "run_acceptance_review", "run_fixer",
                                     "run_aider_fix", "ask_project", "get_coder_workflow",
                                     "cancel_coder_workflow"):
             try:
-                _runs_for_v2_gate = await db.get_runs_by_conversation(conv_id, limit=20)
+                _runs_for_v2_gate = (_gate_ctx.runs_window(20) if _gate_ctx is not None
+                                     else await db.get_runs_by_conversation(conv_id, limit=20))
                 _pending_run = None    # state 1 trigger
                 _pending_kind = ""
                 _pending_review = None  # state 2 trigger
                 _pending_acceptance_needed = None  # clean review must be accepted before delivery
+                _env_fault_run = None  # sandbox env fault — nothing in the project to fix
 
                 # Walk newest-first.
                 # Builder/fixer runs in ANY non-trivial state require verification.
@@ -2734,9 +2263,13 @@ async def exec_tool(
                         break
                     if _role == "reviewer":
                         # Most recent reviewer: issues need fixer; clean needs acceptance.
+                        # Environment faults need neither — the sandbox is broken,
+                        # not the project; report to the user instead of fixing.
                         _env_r = _r.get("result_envelope") or {}
                         _rstatus = (_env_r.get("status") or "").lower()
-                        if _rstatus in ("issues", "error"):
+                        if _is_environment_fault(_env_r):
+                            _env_fault_run = _r
+                        elif _rstatus in ("issues", "error"):
                             _pending_review = _r
                         elif _rstatus == "clean":
                             _pending_acceptance_needed = _r
@@ -2746,15 +2279,34 @@ async def exec_tool(
                         # accepted releases the delivery gate.
                         _env_a = _r.get("result_envelope") or {}
                         _astatus = (_env_a.get("status") or "").lower()
-                        if _astatus in ("issues", "error"):
+                        if _is_environment_fault(_env_a):
+                            _env_fault_run = _r
+                        elif _astatus in ("issues", "error"):
                             _pending_review = _r
                         break
                     if _role.startswith("builder") and _r.get("status") in _BUILDER_GATING:
+                        if _builder_completion_allowed(name, args, _r):
+                            # generate_code is the completion path for a partial
+                            # manifest build. Let it through immediately instead
+                            # of walking back to older builder runs and blocking.
+                            break
                         _pending_run = _r
                         _pending_kind = "builder"
                         break
                     if _role in {"fixer", "aider.fix"} and _r.get("status") in _FIXER_GATING:
                         _env_f = _r.get("result_envelope") or {}
+                        _ft_keys = [k for k in ("files_touched", "files_written")
+                                    if k in _env_f]
+                        if _ft_keys and not any(_env_f.get(k) for k in _ft_keys):
+                            # The fix run EXPLICITLY reports it changed nothing
+                            # on disk (Aider no_changes, or a fixer that failed
+                            # before any write — both always set files_touched).
+                            # An unchanged tree can't have invalidated the prior
+                            # review state, so forcing run_review here just
+                            # ping-pongs against the research gates. Let the
+                            # older reviewer/acceptance run keep driving.
+                            # Envelopes MISSING the key (legacy rows) still gate.
+                            continue
                         if (_env_f.get("source_role") == "acceptance"
                                 and _env_f.get("docs_only")):
                             _pending_acceptance_needed = _r
@@ -2765,15 +2317,73 @@ async def exec_tool(
 
                 # If neither state triggers, fall through and run normally.
                 _gate_msg = None
-                if _pending_run is not None:
+                _auto_dispatch_gate = None  # ("run_aider_fix"|"run_fixer", args)
+                if _env_fault_run is not None:
+                    # Sandbox environment fault: no fix routing, no budget, no
+                    # research forcing — the model's forward action is telling
+                    # the user to remediate the Codebox. Ship-as-is stays
+                    # available when the latest user message asks for it.
+                    _efr_env = _env_fault_run.get("result_envelope") or {}
+                    _efr_id = _env_fault_run.get("id", "?")
+                    if (name in _DELIVERY_SHIP_TOOLS
+                            and (await _gate_ctx.ship_anyway()
+                                 if _gate_ctx is not None
+                                 else await _latest_user_requested_ship_anyway(conv_id))):
+                        print(f"[v2-gate] ship-anyway: allowing {name} despite "
+                              f"environment fault because latest user requested "
+                              f"delivery", flush=True)
+                    else:
+                        _gate_msg = (
+                            "state", "environment-fault",
+                            _environment_fault_notice(_efr_env),
+                            "⛔ Blocked — sandbox environment fault (not a code issue)",
+                            _efr_id,
+                        )
+                elif _pending_run is not None:
                     _env = _pending_run.get("result_envelope") or {}
                     _pd = (_env.get("project_dir") or "").strip()
                     _pid = _pending_run.get("id", "?")
                     _why = ("generate_code" if _pending_kind == "builder" else "run_fixer")
+                    # Same logic as the run_review/acceptance pre-gate:
+                    # block delivery/manual tools while the build is genuinely
+                    # incomplete.
+                    _b_missing = _env.get("manifest_missing") or []
+                    _build_incomplete = (
+                        _pending_kind == "builder"
+                        and _blocking_incomplete_builder(_runs_for_v2_gate) is not None
+                    )
                     if (name in {"download_project", "download_file"}
-                            and await _latest_user_requested_ship_anyway(conv_id)):
+                            and (await _gate_ctx.ship_anyway()
+                                 if _gate_ctx is not None
+                                 else await _latest_user_requested_ship_anyway(conv_id))):
                         print(f"[v2-gate] ship-anyway: allowing {name} before "
-                              f"review because latest user requested delivery", flush=True)
+                              f"{'completion' if _build_incomplete else 'review'} "
+                              f"because latest user requested delivery", flush=True)
+                    elif _build_incomplete:
+                        # The build is provably incomplete — planned files are still
+                        # missing after the backend auto-continue passes. Do NOT route
+                        # to run_review (it checks build/test/lint, not manifest
+                        # completeness): review / acceptance / delivery must wait until
+                        # every planned deliverable exists. The model's forward action
+                        # is another generate_code continue pass.
+                        _cont_pid = _env.get("project_id") or (_pd.rsplit("/", 1)[-1] if _pd else "")
+                        _miss_disp = ", ".join(_b_missing[:10]) + ("…" if len(_b_missing) > 10 else "")
+                        _gate_msg = (
+                            "state", "build-incomplete",
+                            f"BLOCKED — the build is INCOMPLETE: {len(_b_missing)} planned "
+                            f"file(s) were never created — {_miss_disp}.\n\n"
+                            f"Your VERY NEXT tool call MUST be:\n"
+                            f"  generate_code(project_id='{_cont_pid}', task='create the missing files: "
+                            f"{_miss_disp}')\n\n"
+                            f"Do not call {name}, run_review, run_acceptance_review, "
+                            f"download_project, read_file, write_file, or run_shell — the project "
+                            f"is missing required deliverables. Only after EVERY planned file "
+                            f"exists can it be reviewed, accepted, or delivered. If the latest user "
+                            f"message explicitly asks to ship the incomplete project as-is, you may "
+                            f"download_project and disclose the missing files.",
+                            f"⛔ Blocked — build incomplete, {len(_b_missing)} file(s) missing",
+                            _pid,
+                        )
                     else:
                         _gate_msg = (
                             "state", "review-needed",
@@ -2795,7 +2405,9 @@ async def exec_tool(
                     _source_role = _pending_acceptance_needed.get("role", "")
                     _reviewer_id = (_env.get("reviewer_run_id") or _rid)
                     if (name in {"download_project", "download_file"}
-                            and await _latest_user_requested_ship_anyway(conv_id)):
+                            and (await _gate_ctx.ship_anyway()
+                                 if _gate_ctx is not None
+                                 else await _latest_user_requested_ship_anyway(conv_id))):
                         print(f"[v2-gate] ship-anyway: allowing {name} before "
                               f"acceptance because latest user requested delivery", flush=True)
                     else:
@@ -2827,102 +2439,156 @@ async def exec_tool(
                     _pending_role = _pending_review.get("role", "reviewer")
                     _pending_env = _pending_review.get("result_envelope") or {}
                     _rstatus_disp = _pending_env.get("status", "?")
-                    # Cap-aware release: once the fixer cycle budget is
-                    # exhausted, the same review issues will keep blocking
-                    # the conversation forever. Allow the model to deliver
-                    # what was built (download_project / download_file) and
-                    # inspect the tree (read_file / list_files) so the user
-                    # gets the partial result instead of a dead session.
+                    # Cap-aware diagnostic release: once the fixer cycle budget
+                    # is exhausted, allow read-only inspection so the model can
+                    # explain the remaining issue. Delivery still requires an
+                    # explicit latest-user ship-as-is request.
                     # Count total fixer attempts (succeeded + failed/no_op)
                     # for the release — a fixer that declined still represents
                     # an exhausted attempt. The cycle-cap check (which gates
                     # run_fixer itself) still counts only successes.
-                    _FIXER_TERMINAL = {"succeeded", "failed", "partial", "no_op"}
-                    _run_role_by_id = {r.get("id"): r.get("role") for r in _runs_for_v2_gate}
-                    def _fixer_source_role(_fr):
-                        _fenv = _fr.get("result_envelope") or {}
-                        return (_fenv.get("source_role")
-                                or _run_role_by_id.get(_fr.get("parent_run_id"))
-                                or "reviewer")
                     # Same turn-scoped window as the cycle cap, so cap and
                     # cap-release agree on how many attempts happened.
-                    _uts_gate = await _latest_user_msg_ts(conv_id)
-                    _runs_gate_window = _runs_since(_runs_for_v2_gate, _uts_gate)
-                    _fixer_attempts_gate = sum(
-                        1 for _r in _runs_gate_window
-                        if (_r.get("role") in {"fixer", "aider.fix"} and _r.get("status") in _FIXER_TERMINAL
-                            and _fixer_source_role(_r) == _pending_role)
-                    )
-                    _fixer_succ_gate = sum(
-                        1 for _r in _runs_gate_window
-                        if (_r.get("role") in {"fixer", "aider.fix"} and _r.get("status") == "succeeded"
-                            and _fixer_source_role(_r) == _pending_role)
-                    )
-                    _DELIVERY_OK_AFTER_CAP = {
-                        "download_project", "download_file",
-                        "read_file", "list_files",
-                    }
-                    _DELIVERY_SHIP_TOOLS = {"download_project", "download_file"}
+                    _uts_gate = (_gate_ctx.latest_user_ts if _gate_ctx is not None
+                                 else await _latest_user_msg_ts(conv_id))
+                    _battle_gate = compute_fix_battle(_runs_for_v2_gate, _uts_gate)
+                    try:
+                        _battle_gate.research_done = await _gate_research_since(_uts_gate)
+                    except Exception as _rge:
+                        print(f"[v2-gate] research flag lookup failed (non-fatal): {_rge}")
+                    _fixer_attempts_gate = _battle_gate.total_attempts
+                    _streak_gate = _battle_gate.no_progress_streak
                     _ship_anyway_gate = (
                         name in _DELIVERY_SHIP_TOOLS
-                        and await _latest_user_requested_ship_anyway(conv_id)
+                        and (await _gate_ctx.ship_anyway()
+                             if _gate_ctx is not None
+                             else await _latest_user_requested_ship_anyway(conv_id))
                     )
                     _aider_ctx_gate = None
-                    if _pending_role == "reviewer" and getattr(config, "AIDER_ENABLED", True):
-                        _aider_ctx_gate = await _uploaded_project_aider_context(
-                            conv_id, issue_run=_pending_review,
+                    if (getattr(config, "AIDER_ENABLED", True)
+                            and preferred_fix_editor(_battle_gate) == "aider"):
+                        _aider_ctx_gate = await _aider_first_context(
+                            http, conv_id, issue_run=_pending_review,
                         )
-                    # Deadlock break: the FINAL_CYCLE gate (2 successful fixers,
-                    # no research since the last reviewer) blocks run_fixer with
-                    # the message "call Agent Research first". The STUCK_FIX gate
-                    # does the same when issues recur after a fix cycle. But this
-                    # post-review gate then blocks deep_research itself ("call
-                    # run_fixer first") — circular. Whitelist deep_research once
-                    # at least one fixer cycle has run, so the model can satisfy
-                    # the research-first requirement and then retry run_fixer on
-                    # the next round. Below 1 fixer attempt the model should
-                    # actually try fixing before researching.
-                    _cap_limit_gate = 2 if _pending_role == "acceptance" else 3
-                    # Anchor on started_at to match the STUCK/FINAL gates —
-                    # research stashed while the review was still running must
-                    # satisfy both, or the gates disagree and loop.
+                    # Deadlock break: the no-progress streak gate blocks
+                    # run_fixer/run_aider_fix with the message "call
+                    # deep_research first", but this post-review gate would
+                    # then block deep_research itself ("call run_fixer first")
+                    # — circular. Whitelist deep_research once at least one
+                    # fix attempt has run, so the model can satisfy the
+                    # research-first requirement and retry the fix tool on the
+                    # next round. Below 1 attempt the model should actually
+                    # try fixing before researching.
+                    # Repair ladder: force research at 4 consecutive
+                    # no-progress attempts, allow one research-informed last
+                    # shot at 5, hard-stop at the total-attempt ceiling.
+                    # Never auto-release manual write_file/run_shell.
+                    _research_done_gate = _battle_gate.research_done
+                    _needs_research_gate = (
+                        _streak_gate >= NO_PROGRESS_RESEARCH_AT
+                        and not _research_done_gate
+                    )
+                    _exhausted_after_research_gate = (
+                        _streak_gate >= NO_PROGRESS_LAST_SHOT
+                        or _fixer_attempts_gate >= FIX_ATTEMPT_HARD_CEILING
+                    )
+                    # Anchor on started_at so research stashed while the
+                    # review was still running satisfies both gates — or the
+                    # gates disagree and loop. Both reviewer- and
+                    # acceptance-driven loops may research now.
                     if (name == "deep_research"
-                            and _pending_role != "acceptance"
                             and _fixer_attempts_gate >= 1
                             and not await _deep_research_called_since(
                                 conv_id, _pending_review.get("started_at"))):
                         print(f"[v2-gate] research-release: allowing deep_research "
-                              f"despite fix-needed (fixer_attempts={_fixer_attempts_gate}, "
-                              f"required by FINAL_CYCLE/STUCK_FIX)", flush=True)
+                              f"despite fix-needed (fix_attempts={_fixer_attempts_gate}, "
+                              f"streak={_streak_gate})", flush=True)
                         # Skip _gate_msg → deep_research runs.
                     elif _ship_anyway_gate:
                         print(f"[v2-gate] ship-anyway: allowing {name} despite "
                               f"fix-needed because latest user requested delivery", flush=True)
                         # Skip _gate_msg entirely → delivery tool runs normally.
-                    elif _fixer_attempts_gate >= _cap_limit_gate and name in _DELIVERY_OK_AFTER_CAP:
-                        print(f"[v2-gate] cap-release: allowing {name} despite "
-                              f"fix-needed (attempts={_fixer_attempts_gate}, "
-                              f"succ={_fixer_succ_gate})", flush=True)
-                        # Skip _gate_msg entirely → tool runs normally.
+                    elif _needs_research_gate:
+                        _topic_seed = (
+                            _pending_env.get("summary")
+                            or " ".join(
+                                (iss.get("summary") or "")
+                                for iss in (_pending_env.get("issues") or [])[:2]
+                            )
+                            or f"{_pending_role} issue in generated project"
+                        )
+                        _topic_seed = re.sub(r"\s+", " ", _topic_seed).strip()[:260]
+                        _topic_seed = _topic_seed.replace("\\", "\\\\").replace("'", "\\'")
+                        _gate_msg = (
+                            "state", "fix-needed-research",
+                            f"BLOCKED — {_pending_role} ({_rid}) still has issues after "
+                            f"{_streak_gate} repair attempt(s) without verified progress. Before "
+                            f"another Aider/Fixer pass, gather targeted guidance.\n\n"
+                            f"Your VERY NEXT tool call MUST be:\n"
+                            f"  deep_research(topic='{_pending_role} repair issue: {_topic_seed}', depth=2)\n\n"
+                            f"Do NOT call {name}, read_file, list_files, write_file, run_shell, "
+                            f"run_review, run_acceptance_review, run_fixer, run_aider_fix, "
+                            f"download_project, or download_file until deep_research completes.",
+                            f"⛔ Blocked — call deep_research before more {_pending_role} repairs",
+                            _rid,
+                        )
+                    elif _exhausted_after_research_gate:
+                        _gate_msg = (
+                            "state", "fix-needed-exhausted",
+                            f"BLOCKED — {_pending_role} ({_rid}) still has issues after "
+                            f"deep_research and the full automated repair budget "
+                            f"({_streak_gate} attempt(s) without verified progress; "
+                            f"{_fixer_attempts_gate} total, Aider + Fixer combined).\n\n"
+                            f"Your VERY NEXT output MUST be plain text to the user: summarize the "
+                            f"remaining issue, say the automated repair budget is exhausted, and "
+                            f"ask whether to ship as-is or authorize manual intervention.\n\n"
+                            f"Do NOT call {name}, read_file, list_files, write_file, run_shell, "
+                            f"run_review, run_acceptance_review, run_fixer, run_aider_fix, "
+                            f"download_project, or download_file unless the latest user message "
+                            f"explicitly asks to ship/download anyway.",
+                            f"⛔ Blocked — automated repair budget exhausted for {_pending_role}",
+                            _rid,
+                        )
                     elif _aider_ctx_gate:
                         _project_dir = _aider_ctx_gate.get("project_dir") or _pending_env.get("project_dir") or ""
+                        # Manual work tools in fix-needed state get AUTO-DISPATCHED
+                        # to the repair path instead of a BLOCKED lecture — local
+                        # chat models kept flailing (write_file/run_shell/list_files)
+                        # until the duplicate-blocked stop killed the turn. Bounded
+                        # by the same attempt budget as the caps above.
+                        if (name in _FIX_LOOP_MANUAL_TOOLS
+                                and not _needs_research_gate
+                                and not _exhausted_after_research_gate):
+                            _auto_dispatch_gate = ("run_aider_fix", {
+                                "issue_run_id": _rid,
+                                "project_dir": _project_dir,
+                                "task": _auto_dispatch_task(
+                                    name, args, _pending_role, _rid, _pending_env),
+                            })
                         _gate_msg = (
                             "state", "fix-needed",
                             f"BLOCKED — {_pending_role} ({_rid}) returned status='{_rstatus_disp}' "
-                            f"for an uploaded project.\n\n"
+                            f"for an existing project.\n\n"
                             f"Your VERY NEXT tool call MUST be:\n"
                             f"  run_aider_fix(issue_run_id='{_rid}', project_dir='{_project_dir}', "
                             f"task='<latest user request + reviewer summary>')\n\n"
-                            f"Uploaded-project fixes are handled by Aider from the project root. "
+                            f"Existing-project repairs are handled by Aider first from the project root. "
                             f"Do NOT call run_fixer, read_file, write_file, generate_code, or "
-                            f"run_shell for this reviewer issue. After Aider returns, call "
-                            f"run_review to verify build/tests.",
+                            f"run_shell for this {_pending_role} issue. If Aider cannot fix it, "
+                            f"the backend will fall back to Fixer. After repair returns, verify "
+                            f"with the appropriate review/acceptance step.",
                             f"⛔ Blocked — call run_aider_fix first ({_pending_role} {_rid[:14]}… has issues)",
                             _rid,
                         )
                     else:
                         _tool_name = "run_acceptance_review" if _pending_role == "acceptance" else "run_review"
                         _issue_label = "run_acceptance_review" if _pending_role == "acceptance" else "run_review"
+                        if (name in _FIX_LOOP_MANUAL_TOOLS
+                                and not _needs_research_gate
+                                and not _exhausted_after_research_gate):
+                            _auto_dispatch_gate = ("run_fixer", {
+                                "reviewer_run_id": _rid,
+                            })
                         _gate_msg = (
                             "state", "fix-needed",
                             f"BLOCKED — {_issue_label} ({_rid}) returned status='{_rstatus_disp}' "
@@ -2943,6 +2609,27 @@ async def exec_tool(
                     # the gate only blocks v2 personas.
                     if await _check_v2():
                         _, _state_label, _body, _short_status, _trigger_id = _gate_msg
+                        if _auto_dispatch_gate is not None:
+                            _ad_tool, _ad_args = _auto_dispatch_gate
+                            await events.emit(conv_id, "tool_end", {
+                                "tool": name, "icon": "wrench",
+                                "status": f"↪ Auto-dispatched {name} → {_ad_tool} "
+                                          f"({_pending_role} {_trigger_id[:14]}… has issues)",
+                            })
+                            print(f"[v2-gate] auto-dispatch: {name} → {_ad_tool} "
+                                  f"trigger={_trigger_id}", flush=True)
+                            _ad_result = await exec_tool(
+                                http, events, _ad_tool, _ad_args, conv_id,
+                                custom_tool_map=custom_tool_map,
+                                connector_tool_name_map=connector_tool_name_map,
+                                conv_model=conv_model,
+                                kb_ids=kb_ids,
+                                artifact_message_id=artifact_message_id,
+                            )
+                            return (f"AUTO-DISPATCH: your {name} call was converted into "
+                                    f"{_ad_tool} (manual tools are blocked while "
+                                    f"{_pending_role} issues are pending) — act on the "
+                                    f"result below; do NOT retry {name}.\n\n{_ad_result}")
                         await events.emit(conv_id, "tool_end", {
                             "tool": name, "icon": "code",
                             "status": _short_status,
@@ -2955,109 +2642,10 @@ async def exec_tool(
                 # runs/persona lookup fails. Log and proceed.
                 print(f"[v2-gate] gate check failed (non-fatal): {_gge}")
 
-        if name == "execute_code":
-            code = args.get("code", "")
-            language = args.get("language", "python")
-            await events.emit(conv_id, "tool_start", {
-                "tool": "execute_code", "icon": "code",
-                "status": f"Running {language} code...",
-            })
-            start_time = time.time()
-
-            # All execution goes through /command for consistent CWD at /root/
-            b64_code = base64.b64encode(code.encode()).decode()
-            lang_lower = language.lower()
-            if lang_lower in ("python", "python3", "py"):
-                await _ensure_venv(http)
-                exec_cmd = (
-                    f"cd /root && printf '%s' {shlex.quote(b64_code)} | base64 -d > /tmp/_hc_exec.py && "
-                    f"/root/venv/bin/python3 /tmp/_hc_exec.py"
-                )
-            elif lang_lower in ("bash", "sh", "zsh"):
-                exec_cmd = f"cd /root && printf '%s' {shlex.quote(b64_code)} | base64 -d | bash"
-            elif lang_lower in ("javascript", "js", "node"):
-                exec_cmd = f"cd /root && printf '%s' {shlex.quote(b64_code)} | base64 -d > /tmp/_hc_exec.js && node /tmp/_hc_exec.js"
-            else:
-                # Fallback: use /execute endpoint for compiled languages
-                exec_task = asyncio.create_task(http.post(
-                    f"{config.CODEBOX_URL}/execute",
-                    json={"code": code, "language": language, "timeout": config.EXECUTION_TIMEOUT},
-                    timeout=config.EXECUTION_TIMEOUT + 15,
-                ))
-                exec_cmd = None
-
-            if exec_cmd:
-                exec_task = asyncio.create_task(http.post(
-                    f"{config.CODEBOX_URL}/command",
-                    json={"command": exec_cmd, "timeout": config.EXECUTION_TIMEOUT},
-                    timeout=config.EXECUTION_TIMEOUT + 15,
-                ))
-            while not exec_task.done():
-                await asyncio.sleep(3)
-                if not exec_task.done():
-                    elapsed = int(time.time() - start_time)
-                    await events.emit(conv_id, "tool_start", {
-                        "tool": "execute_code", "icon": "code",
-                        "status": f"Running {language}... {elapsed}s elapsed",
-                    })
-            try:
-                r = exec_task.result()
-                result = r.json()
-            except Exception as ce:
-                await events.emit(conv_id, "tool_end", {
-                    "tool": "execute_code", "icon": "code",
-                    "status": f"CodeBox unreachable: {str(ce)[:80]}",
-                })
-                return f"ERROR: CodeBox connection failed: {ce}\nMake sure CodeBox is running at {config.CODEBOX_URL}"
-            success = result.get("exit_code", -1) == 0 or result.get("success", False)
-            stdout = _strip_ansi(result.get("stdout", "")).strip()
-            stderr = _strip_ansi(result.get("stderr", "")).strip()
-            exec_time = result.get("execution_time", 0)
-            exit_code = result.get("exit_code", -1)
-
-            status_text = f"{'OK' if success else 'FAILED'} ({exec_time:.1f}s)"
-            await events.emit(conv_id, "tool_end", {
-                "tool": "execute_code", "icon": "code",
-                "status": status_text,
-                "detail": json.dumps({
-                    "code": code[:2000], "language": language,
-                    "stdout": stdout[:3000], "stderr": stderr[:2000],
-                    "success": success,
-                }),
-            })
-
-            if stdout or stderr:
-                await events.emit(conv_id, "code_output", {
-                    "language": language, "stdout": stdout[:3000],
-                    "stderr": stderr[:1500] if not success else "",
-                    "success": success, "exec_time": exec_time,
-                })
-
-            parts = [f"**{'SUCCESS' if success else 'FAILED'}** | {language} | exit {exit_code} | {exec_time:.1f}s"]
-            if result.get("compile_output"):
-                parts.append(f"\nCompiler:\n```\n{result['compile_output'][:2000]}\n```")
-            if stdout:
-                parts.append(f"\nstdout:\n```\n{stdout[:5000]}\n```")
-            if stderr and not success:
-                parts.append(f"\nstderr:\n```\n{stderr[:3000]}\n```")
-
-            # Action hints — give specific guidance for common errors
-            if not success:
-                combined_err = (stderr + stdout).lower()
-                if "eoferror" in combined_err or "eof when reading" in combined_err:
-                    parts.append("\n---\n⚠️ input() does NOT work in this sandbox (no stdin). Remove all input() calls. Use hardcoded test values, function parameters, or sys.argv with write_file + run_shell.")
-                elif "indexerror" in combined_err and "argv" in combined_err:
-                    parts.append("\n---\n⚠️ sys.argv has no arguments in execute_code. To test scripts with arguments: 1) write_file to save the script, 2) run_shell to execute it with args (e.g., python3 /root/script.py arg1 arg2).")
-                elif ("no such file" in combined_err or "not found" in combined_err) and "command" not in combined_err:
-                    parts.append("\n---\n⚠️ File not found. Working directory is /root/. Use absolute paths (/root/filename) or save files with write_file first.")
-                elif "modulenotfounderror" in combined_err or "no module named" in combined_err:
-                    parts.append("\n---\n⚠️ Missing package. Install it first: run_shell(command='pip3 install <package>'), then retry.")
-                else:
-                    parts.append("\n---\nEXECUTION FAILED. Read the error above. Fix the root cause (do NOT retry the same code).")
-            elif not stdout.strip():
-                parts.append("\n---\nCode ran successfully with no output. Add print() statements if you need to verify results.")
-
-            return "\n".join(parts)
+        if name in CODEBOX_TOOL_NAMES:
+            return await run_codebox_tool(
+                name, args, http=http, events=events, conv_id=conv_id,
+            )
 
         elif name == "research":
             query = args.get("query", "")
@@ -3172,83 +2760,6 @@ async def exec_tool(
             text = re.sub(r'\s+', ' ', text).strip()
             await events.emit(conv_id, "tool_end", {"tool": "fetch_url", "icon": "globe", "status": f"Read {len(text)} chars"})
             return f"**Content from {final_url}:**\n\n{text[:config.MAX_FETCH_CHARS]}"
-
-        elif name == "run_shell" or name == "install_package":
-            command = args.get("command", args.get("package", ""))
-            shell_timeout = config.EXECUTION_TIMEOUT
-            if name == "install_package":
-                pkg = command
-                command = f"pip3 install {pkg} 2>&1; echo \"EXIT:$?\""
-                shell_timeout = max(shell_timeout, 120)
-            # Route pip/python commands through the venv
-            cmd_stripped = command.strip()
-            if any(cmd_stripped.startswith(p) for p in ("pip ", "pip3 ", "python ", "python3 ")):
-                venv_ok = await _ensure_venv(http)
-                if venv_ok:
-                    command = f"export PATH=/root/venv/bin:$PATH && {command}"
-            await events.emit(conv_id, "tool_start", {"tool": name, "icon": "terminal", "status": f"$ {command[:70]}"})
-            r = await http.post(
-                f"{config.CODEBOX_URL}/command",
-                json={"command": command, "timeout": shell_timeout},
-                timeout=shell_timeout + 10,
-            )
-            result = r.json()
-            stdout = _strip_ansi(result.get("stdout", "")).strip()
-            stderr = _strip_ansi(result.get("stderr", "")).strip()
-            exit_code = result.get("exit_code", result.get("returncode", 0))
-            success = exit_code == 0
-            status_icon = "OK" if success else "FAILED"
-            await events.emit(conv_id, "tool_end", {
-                "tool": name, "icon": "terminal",
-                "status": f"{status_icon} exit {exit_code}: {command[:50]}",
-                "detail": json.dumps({"command": command, "stdout": stdout[:2000], "stderr": stderr[:1000], "exit_code": exit_code}),
-            })
-            out = f"```\n{stdout}\n```" if stdout else ""
-            err = f"\nstderr:\n```\n{stderr}\n```" if stderr and not success else ""
-            result_text = f"exit code: {exit_code}\n{out}{err}" if (stdout or stderr) else f"(exit code: {exit_code}, no output)"
-            if not success:
-                result_text += "\n---\nCommand failed. Check the error above and try a different approach or fix the command."
-
-            # Detect dev server commands that time out — warn the model not to retry
-            _dev_server_cmds = ("npm start", "npm run dev", "npm run serve", "npx vite", "yarn dev", "yarn start", "python3 -m http.server", "python -m http.server", "flask run", "uvicorn")
-            if any(ds in cmd_stripped for ds in _dev_server_cmds) and (not stdout.strip() or len(stdout.strip()) < 50):
-                result_text += (
-                    "\n---\n⚠️ This looks like a dev server command. Dev servers run forever and WILL time out in this sandbox. "
-                    "Do NOT retry this command. The project files are already built and ready — "
-                    "use download_project to deliver them to the user instead."
-                )
-            return result_text
-
-        elif name == "write_file":
-            path = args.get("path", "")
-            content = args.get("content", "")
-            await events.emit(conv_id, "tool_start", {"tool": "write_file", "icon": "code", "status": f"Writing: {path}"})
-            b64 = base64.b64encode(content.encode()).decode()
-            quoted_path = shlex.quote(path)
-            cmd = f"mkdir -p $(dirname {quoted_path}) && printf '%s' {shlex.quote(b64)} | base64 -d > {quoted_path} && echo OK"
-            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 30}, timeout=40)
-            result = r.json()
-            ok = "OK" in result.get("stdout", "") or result.get("exit_code", 1) == 0
-            status = f"Written: {path}" if ok else f"Write failed: {path}"
-            await events.emit(conv_id, "tool_end", {"tool": "write_file", "icon": "code", "status": status})
-            return f"File written: {path} ({len(content)} bytes)" if ok else f"ERROR: Failed to write {path}: {result.get('stderr', '')[:200]}"
-
-        elif name == "read_file":
-            path = args.get("path", "/root")
-            await events.emit(conv_id, "tool_start", {"tool": "read_file", "icon": "code", "status": f"Reading: {path}"})
-            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": f"cat {shlex.quote(path)} 2>&1", "timeout": 10}, timeout=15)
-            result = r.json()
-            content_out = result.get("stdout", "")
-            await events.emit(conv_id, "tool_end", {"tool": "read_file", "icon": "code", "status": f"Read {len(content_out)} chars: {path}"})
-            return f"**{path}** ({len(content_out)} chars):\n```\n{content_out[:10000]}\n```"
-
-        elif name == "list_files":
-            path = args.get("path", "/root")
-            await events.emit(conv_id, "tool_start", {"tool": "list_files", "icon": "terminal", "status": f"ls {path}"})
-            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": f"ls -lahF {shlex.quote(path)} 2>&1", "timeout": 10}, timeout=15)
-            result = r.json()
-            await events.emit(conv_id, "tool_end", {"tool": "list_files", "icon": "terminal", "status": f"Listed: {path}"})
-            return f"```\n{result.get('stdout', '(empty)')}\n```"
 
         elif name == "download_file":
             path = args.get("path", "")
@@ -3521,25 +3032,6 @@ async def exec_tool(
             if conv_id:
                 try:
                     _runs_for_gate = await db.get_runs_by_conversation(conv_id, limit=20)
-                    _FIXER_TERMINAL_FOR_DELIVERY = {"succeeded", "failed", "partial", "no_op"}
-                    _run_role_by_id_for_delivery = {
-                        r.get("id"): r.get("role") for r in _runs_for_gate
-                    }
-
-                    def _fixer_source_role_for_delivery(_fr):
-                        _fenv = _fr.get("result_envelope") or {}
-                        return (_fenv.get("source_role")
-                                or _run_role_by_id_for_delivery.get(_fr.get("parent_run_id"))
-                                or "reviewer")
-
-                    def _fixer_attempts_for_delivery(_role: str) -> int:
-                        return sum(
-                            1 for _r in _runs_for_gate
-                            if (_r.get("role") in {"fixer", "aider.fix"}
-                                and _r.get("status") in _FIXER_TERMINAL_FOR_DELIVERY
-                                and _fixer_source_role_for_delivery(_r) == _role)
-                        )
-
                     _latest_reviewer = None
                     _latest_acceptance = None
                     for _r in _runs_for_gate:
@@ -3555,10 +3047,7 @@ async def exec_tool(
                         if _astatus != "accepted":
                             issues = _env.get("issues") or []
                             n = len(issues)
-                            _acceptance_cap_exhausted = (
-                                _fixer_attempts_for_delivery("acceptance") >= 2
-                            )
-                            if _ship_anyway_requested or _acceptance_cap_exhausted:
+                            if _ship_anyway_requested:
                                 _download_warning_lines = [
                                     "WARNING: Shipped despite unresolved acceptance issues.",
                                     f"Acceptance status: {_astatus or '?'}; issue count: {n}.",
@@ -3566,8 +3055,7 @@ async def exec_tool(
                                 print(f"[CHAT] download_project allowing ship-anyway "
                                       f"despite acceptance={_latest_acceptance.get('id')} "
                                       f"status={_astatus} issues={n} "
-                                      f"requested={_ship_anyway_requested} "
-                                      f"cap={_acceptance_cap_exhausted}")
+                                      f"requested={_ship_anyway_requested}")
                             else:
                                 lines = [
                                     f"BLOCKED — last run_acceptance_review returned status='{_astatus}'.",
@@ -3601,10 +3089,7 @@ async def exec_tool(
                         if _rstatus in ("issues", "error"):
                             issues = _env.get("issues") or []
                             n = len(issues)
-                            _reviewer_cap_exhausted = (
-                                _fixer_attempts_for_delivery("reviewer") >= 3
-                            )
-                            if _ship_anyway_requested or _reviewer_cap_exhausted:
+                            if _ship_anyway_requested:
                                 _download_warning_lines = [
                                     "WARNING: Shipped despite unresolved review/test issues.",
                                     f"Review status: {_rstatus}; issue count: {n}.",
@@ -3620,8 +3105,21 @@ async def exec_tool(
                                 print(f"[CHAT] download_project allowing ship-anyway "
                                       f"despite reviewer={_latest_reviewer.get('id')} "
                                       f"status={_rstatus} issues={n} "
-                                      f"requested={_ship_anyway_requested} "
-                                      f"cap={_reviewer_cap_exhausted}")
+                                      f"requested={_ship_anyway_requested}")
+                            elif _is_environment_fault(_env):
+                                # Unverified because the SANDBOX is broken, not
+                                # the project — don't lecture about fix workers.
+                                await events.emit(conv_id, "tool_end", {
+                                    "tool": "download_project", "icon": "code",
+                                    "status": "⛔ Blocked — project unverified (sandbox environment fault)",
+                                })
+                                return (
+                                    _environment_fault_notice(_env)
+                                    + "\n\nDelivery stays blocked because the project was "
+                                      "never verified. If the user explicitly asks to ship "
+                                      "anyway, call download_project again and disclose that "
+                                      "the build is unverified."
+                                )
                             else:
                                 lines = [
                                     f"BLOCKED — last run_review on this project returned status='{_rstatus}'.",
@@ -3711,46 +3209,14 @@ async def exec_tool(
             tarname = f"{dirname}.tar.gz"
             qdir = shlex.quote(directory)
             qtarname = shlex.quote(f"/tmp/{tarname}")
-            exclude_args = (
-                "--exclude='.pytest_cache' --exclude='*/.pytest_cache/*' "
-                "--exclude='__pycache__' --exclude='*/__pycache__/*' "
-                "--exclude='*.pyc' --exclude='*.egg-info' --exclude='*.egg-info/*' "
-                "--exclude='.mypy_cache' --exclude='*/.mypy_cache/*' "
-                "--exclude='.ruff_cache' --exclude='*/.ruff_cache/*' "
-                "--exclude='.cache' --exclude='*/.cache/*' "
-                "--exclude='.git' --exclude='*/.git/*' "
-                "--exclude='node_modules' --exclude='*/node_modules/*' "
-                "--exclude='dist' --exclude='*/dist/*' "
-                "--exclude='build' --exclude='*/build/*' "
-                "--exclude='target' --exclude='*/target/*' "
-                "--exclude='.next' --exclude='*/.next/*' "
-                "--exclude='venv' --exclude='*/venv/*' "
-                "--exclude='.venv' --exclude='*/.venv/*' "
-                "--exclude='.npm' --exclude='*/.npm/*'"
-            )
+            exclude_args = _project_archive_tar_exclude_args()
+            include_filter = _project_archive_find_include_filter()
+            exclude_expr = _project_archive_find_exclude_expr()
             summary_cmd = (
                 f"cd {qdir} && "
-                "included=$(find . -type f "
-                "! -path '*/.pytest_cache/*' ! -path '*/__pycache__/*' ! -name '*.pyc' "
-                "! -path '*.egg-info/*' ! -path '*/.mypy_cache/*' ! -path '*/.ruff_cache/*' "
-                "! -path '*/.cache/*' ! -path '*/.git/*' ! -path '*/node_modules/*' "
-                "! -path '*/dist/*' ! -path '*/build/*' ! -path '*/target/*' "
-                "! -path '*/.next/*' ! -path '*/venv/*' ! -path '*/.venv/*' "
-                "! -path '*/.npm/*' | wc -l); "
-                "excluded=$(find . \\( "
-                "-path '*/.pytest_cache/*' -o -path '*/__pycache__/*' -o -name '*.pyc' "
-                "-o -path '*.egg-info/*' -o -path '*/.mypy_cache/*' -o -path '*/.ruff_cache/*' "
-                "-o -path '*/.cache/*' -o -path '*/.git/*' -o -path '*/node_modules/*' "
-                "-o -path '*/dist/*' -o -path '*/build/*' -o -path '*/target/*' "
-                "-o -path '*/.next/*' -o -path '*/venv/*' -o -path '*/.venv/*' "
-                "-o -path '*/.npm/*' \\) -print | wc -l); "
-                "excluded_list=$(find . \\( "
-                "-path '*/.pytest_cache/*' -o -path '*/__pycache__/*' -o -name '*.pyc' "
-                "-o -path '*.egg-info/*' -o -path '*/.mypy_cache/*' -o -path '*/.ruff_cache/*' "
-                "-o -path '*/.cache/*' -o -path '*/.git/*' -o -path '*/node_modules/*' "
-                "-o -path '*/dist/*' -o -path '*/build/*' -o -path '*/target/*' "
-                "-o -path '*/.next/*' -o -path '*/venv/*' -o -path '*/.venv/*' "
-                "-o -path '*/.npm/*' \\) -print | sort | head -20); "
+                f"included=$(find . -type f {include_filter} | wc -l); "
+                f"excluded=$(find . \\( {exclude_expr} \\) -print | wc -l); "
+                f"excluded_list=$(find . \\( {exclude_expr} \\) -print | sort | head -20); "
                 "printf 'PACKAGING_SUMMARY:%s:%s\\n' \"$included\" \"$excluded\"; "
                 "printf '%s\n' \"$excluded_list\" | sed '/^$/d' | sed 's/^/EXCLUDED_EXAMPLE:/'"
             )
@@ -3896,9 +3362,13 @@ async def exec_tool(
                 })
                 try:
                     if _wf:
+                        # `partial_delivered` is an ARTIFACT status, not a
+                        # workflow state — gates and the frontend key partial
+                        # delivery off artifact_status; writing it into state
+                        # bypassed the FSM vocabulary.
                         await db.update_coder_workflow(
                             _wf["id"],
-                            state="partial_delivered" if _partial else "accepted",
+                            state="accepted",
                             artifact_status="partial_delivered" if _partial else "delivered",
                         )
                 except Exception as _wfe:
@@ -3916,109 +3386,6 @@ async def exec_tool(
             else:
                 await events.emit(conv_id, "tool_end", {"tool": "download_project", "icon": "code", "status": f"Could not package: {directory}"})
                 return f"ERROR: Could not package directory: {directory}"
-
-        elif name == "delete_file":
-            path = args.get("path", "")
-            if not path or path in ("/", "/root", "/etc", "/usr", "/bin", "/tmp"):
-                return f"ERROR: Refusing to delete protected path: {path}"
-            await events.emit(conv_id, "tool_start", {"tool": "delete_file", "icon": "terminal", "status": f"Deleting: {path}"})
-            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": f"rm -rf {shlex.quote(path)}", "timeout": 10}, timeout=15)
-            result = r.json()
-            exit_code = result.get("exit_code", 0)
-            ok = exit_code == 0
-            await events.emit(conv_id, "tool_end", {"tool": "delete_file", "icon": "terminal", "status": f"{'Deleted' if ok else 'Failed'}: {path}"})
-            return f"Deleted: {path}" if ok else f"ERROR: Delete failed (exit {exit_code}): {result.get('stderr', '')[:200]}"
-
-        elif name == "search_files":
-            pattern = args.get("pattern", "")
-            if not pattern:
-                return "ERROR: pattern is required"
-            search_path = args.get("path", "/root")
-            file_pattern = args.get("file_pattern", "")
-            await events.emit(conv_id, "tool_start", {"tool": "search_files", "icon": "search", "status": f"Searching: {pattern[:40]}"})
-            cmd = f"grep -rn"
-            if file_pattern:
-                cmd += f" --include={shlex.quote(file_pattern)}"
-            cmd += f" {shlex.quote(pattern)} {shlex.quote(search_path)} 2>/dev/null | head -60"
-            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 15}, timeout=20)
-            result = r.json()
-            output = result.get("stdout", "").strip()
-            match_count = len(output.splitlines()) if output else 0
-            await events.emit(conv_id, "tool_end", {"tool": "search_files", "icon": "search", "status": f"Found {match_count} matches"})
-            return output if output else f"No matches found for '{pattern}' in {search_path}"
-
-        elif name == "diff_files":
-            path_a = args.get("path_a", "")
-            path_b = args.get("path_b", "")
-            if not path_a or not path_b:
-                return "ERROR: path_a and path_b are required"
-            await events.emit(conv_id, "tool_start", {"tool": "diff_files", "icon": "terminal", "status": f"Diffing files..."})
-            cmd = f"diff -u {shlex.quote(path_a)} {shlex.quote(path_b)}"
-            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 10}, timeout=15)
-            result = r.json()
-            output = result.get("stdout", "").strip()
-            exit_code = result.get("exit_code", 0)
-            await events.emit(conv_id, "tool_end", {"tool": "diff_files", "icon": "terminal", "status": "Diff complete"})
-            if exit_code == 0:
-                return "Files are identical."
-            elif exit_code == 1:
-                return output[:8000] if output else "Files differ but no diff output."
-            else:
-                return f"ERROR: diff failed: {result.get('stderr', '')[:200]}"
-
-        elif name == "git_init":
-            path = args.get("path", "/root")
-            language = args.get("language", "python").lower()
-            await events.emit(conv_id, "tool_start", {"tool": "git_init", "icon": "terminal", "status": f"Initializing git repo in {path}"})
-            gitignore_map = {
-                "python": "__pycache__/\n*.pyc\n*.pyo\nvenv/\n.env\n*.egg-info/\ndist/\nbuild/\n.pytest_cache/\n",
-                "javascript": "node_modules/\n.env\ndist/\nbuild/\n*.log\n.cache/\ncoverage/\n",
-                "typescript": "node_modules/\n.env\ndist/\nbuild/\n*.log\n.cache/\ncoverage/\n",
-                "rust": "target/\nCargo.lock\n",
-                "go": "bin/\n*.exe\nvendor/\n",
-                "java": "*.class\ntarget/\n.idea/\n*.jar\nbuild/\n",
-            }
-            gitignore = gitignore_map.get(language, "__pycache__/\nnode_modules/\n.env\nvenv/\n")
-            b64_gi = base64.b64encode(gitignore.encode()).decode()
-            cmd = (
-                f"cd {shlex.quote(path)} && "
-                f"git init && "
-                f"printf '%s' {shlex.quote(b64_gi)} | base64 -d > .gitignore && "
-                f"git add -A && "
-                f"git -c user.email='bot@hyprchat' -c user.name='HyprCoder' commit -m 'Initial commit' 2>&1"
-            )
-            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 15}, timeout=20)
-            result = r.json()
-            output = result.get("stdout", "").strip()
-            ok = result.get("exit_code", -1) == 0
-            await events.emit(conv_id, "tool_end", {"tool": "git_init", "icon": "terminal", "status": f"{'Initialized' if ok else 'Failed'}"})
-            return output[:3000] if output else ("Git repo initialized." if ok else f"ERROR: {result.get('stderr', '')[:200]}")
-
-        elif name == "git_diff":
-            path = args.get("path", "/root")
-            await events.emit(conv_id, "tool_start", {"tool": "git_diff", "icon": "terminal", "status": "Checking changes..."})
-            cmd = f"cd {shlex.quote(path)} && git diff && git diff --cached && git status --short"
-            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 10}, timeout=15)
-            result = r.json()
-            output = result.get("stdout", "").strip()
-            await events.emit(conv_id, "tool_end", {"tool": "git_diff", "icon": "terminal", "status": "Done"})
-            return output[:8000] if output else "No changes detected."
-
-        elif name == "git_commit":
-            message = args.get("message", "Update")
-            path = args.get("path", "/root")
-            await events.emit(conv_id, "tool_start", {"tool": "git_commit", "icon": "terminal", "status": f"Committing: {message[:40]}"})
-            cmd = (
-                f"cd {shlex.quote(path)} && "
-                f"git add -A && "
-                f"git -c user.email='bot@hyprchat' -c user.name='HyprCoder' commit -m {shlex.quote(message)} 2>&1"
-            )
-            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 15}, timeout=20)
-            result = r.json()
-            output = result.get("stdout", "").strip()
-            ok = result.get("exit_code", -1) == 0
-            await events.emit(conv_id, "tool_end", {"tool": "git_commit", "icon": "terminal", "status": f"{'Committed' if ok else 'Failed'}"})
-            return output[:3000] if output else ("Committed." if ok else f"ERROR: {result.get('stderr', '')[:200]}")
 
         elif name == "run_tests":
             path = args.get("path", "/root")
@@ -4054,15 +3421,20 @@ async def exec_tool(
                 else:
                     framework = "pytest"  # fallback
 
+            # Project .venv first (per-project isolation); fall back to the
+            # shared scratch venv for pre-.venv projects and loose test dirs.
+            _pytest_py = ("if [ -x .venv/bin/python3 ]; then PY=.venv/bin/python3; "
+                          "else PY=/root/venv/bin/python3; fi; $PY")
             test_cmds = {
-                "pytest": f"cd {shlex.quote(path)} && /root/venv/bin/python3 -m pytest -v --tb=short 2>&1",
+                "pytest": f"cd {shlex.quote(path)} && {_pytest_py} -m pytest -v --tb=short 2>&1",
                 "jest": f"cd {shlex.quote(path)} && npx jest --verbose 2>&1",
                 "vitest": f"cd {shlex.quote(path)} && npx vitest run 2>&1",
                 "npm": f"cd {shlex.quote(path)} && npm test 2>&1",
                 "cargo": f"cd {shlex.quote(path)} && cargo test 2>&1",
                 "go": f"cd {shlex.quote(path)} && go test ./... -v 2>&1",
             }
-            cmd = test_cmds.get(framework, test_cmds["pytest"])
+            from agents.language_adapters import hermetic_prefix as _hp
+            cmd = _hp() + test_cmds.get(framework, test_cmds["pytest"])
             await events.emit(conv_id, "tool_start", {"tool": "run_tests", "icon": "code", "status": f"Running {framework} tests..."})
             start = time.time()
             r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 120}, timeout=130)
@@ -4103,45 +3475,6 @@ async def exec_tool(
                 except Exception as _twe:
                     print(f"[TRIPWIRE] synthesize failed (non-fatal): {_twe}")
 
-            return "\n".join(parts)
-
-        elif name == "lint_code":
-            path = args.get("path", "/root")
-            language = args.get("language", "").lower()
-            await events.emit(conv_id, "tool_start", {"tool": "lint_code", "icon": "code", "status": "Detecting language..."})
-
-            if not language:
-                detect_cmd = f"ls {shlex.quote(path)}/*.py {shlex.quote(path)}/**/*.py {shlex.quote(path)}/Cargo.toml {shlex.quote(path)}/go.mod {shlex.quote(path)}/package.json 2>/dev/null | head -10"
-                detect_r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": detect_cmd, "timeout": 5}, timeout=10)
-                detect_out = detect_r.json().get("stdout", "")
-                if "Cargo.toml" in detect_out:
-                    language = "rust"
-                elif "go.mod" in detect_out:
-                    language = "go"
-                elif "package.json" in detect_out:
-                    language = "javascript"
-                elif ".py" in detect_out:
-                    language = "python"
-                else:
-                    language = "python"
-
-            lint_cmds = {
-                "python": f"cd {shlex.quote(path)} && pip3 install -q ruff 2>/dev/null && ruff check --fix . 2>&1 && ruff format . 2>&1",
-                "javascript": f"cd {shlex.quote(path)} && npx prettier --write '**/*.{{js,jsx,ts,tsx,json,css}}' 2>&1",
-                "typescript": f"cd {shlex.quote(path)} && npx prettier --write '**/*.{{js,jsx,ts,tsx,json,css}}' 2>&1",
-                "rust": f"cd {shlex.quote(path)} && cargo fmt 2>&1",
-                "go": f"cd {shlex.quote(path)} && gofmt -w . 2>&1",
-            }
-            cmd = lint_cmds.get(language, lint_cmds["python"])
-            await events.emit(conv_id, "tool_start", {"tool": "lint_code", "icon": "code", "status": f"Linting {language}..."})
-            r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 60}, timeout=70)
-            result = r.json()
-            output = _strip_ansi(result.get("stdout", "")).strip()
-            ok = result.get("exit_code", -1) == 0
-            await events.emit(conv_id, "tool_end", {"tool": "lint_code", "icon": "code", "status": f"{'Done' if ok else 'Issues found'} ({language})"})
-            parts = [f"**Lint/Format: {language}** {'✅ Clean' if ok else '⚠️ Issues'}\n"]
-            if output:
-                parts.append(f"```\n{output[:6000]}\n```")
             return "\n".join(parts)
 
         elif name == "resume_project":
@@ -4241,7 +3574,6 @@ async def exec_tool(
                 return "ERROR: start_coder_workflow requires task"
             if mode not in {"build_from_prompt", "fix_uploaded_project", "ask_uploaded_project"}:
                 return "ERROR: mode must be build_from_prompt, fix_uploaded_project, or ask_uploaded_project"
-
             if not project_id and mode != "build_from_prompt" and conv_id:
                 active = await db.get_coding_project_by_conv(conv_id)
                 if active:
@@ -4309,7 +3641,11 @@ async def exec_tool(
                 kb_ids=kb_ids,
                 artifact_message_id=artifact_message_id,
             )
-            await db.update_coder_workflow(workflow_id, state="planning", artifact_status="not_ready")
+            if await _check_v2():
+                return f"workflow_id: {workflow_id}\n\n{plan}"
+            latest_wf = await db.get_coder_workflow(workflow_id)
+            if latest_wf and (latest_wf.get("state") or "") != "building":
+                await db.update_coder_workflow(workflow_id, state="planning", artifact_status="not_ready")
             return (
                 f"workflow_id: {workflow_id}\n\n"
                 f"{plan}\n\n"
@@ -4321,11 +3657,18 @@ async def exec_tool(
         elif name == "run_aider_fix":
             from agents import aider_fixer, language_adapters
 
-            if not getattr(config, "AIDER_ENABLED", True):
+            async def _fallback_to_fixer(reason: str) -> str:
                 issue_run_id = (args.get("issue_run_id") or args.get("reviewer_run_id") or "").strip()
+                if not issue_run_id and issue_run:
+                    issue_run_id = issue_run.get("id", "")
+                print(f"[run_aider_fix] falling back to run_fixer: {reason}")
+                await events.emit(conv_id, "tool_progress", {
+                    "tool": "run_aider_fix", "icon": "wrench",
+                    "status": f"Aider unavailable/ineffective — falling back to Fixer ({reason[:80]})",
+                })
                 return await exec_tool(
                     http, events, "run_fixer",
-                    {"reviewer_run_id": issue_run_id} if issue_run_id else {},
+                    {"reviewer_run_id": issue_run_id, "_aider_fallback": True} if issue_run_id else {"_aider_fallback": True},
                     conv_id,
                     custom_tool_map=custom_tool_map,
                     connector_tool_name_map=connector_tool_name_map,
@@ -4333,6 +3676,10 @@ async def exec_tool(
                     kb_ids=kb_ids,
                     artifact_message_id=artifact_message_id,
                 )
+
+            issue_run = None
+            if not getattr(config, "AIDER_ENABLED", True):
+                return await _fallback_to_fixer("Aider disabled")
 
             task = (args.get("task") or args.get("description") or "").strip()
             project_dir = (args.get("project_dir") or "").strip()
@@ -4343,7 +3690,6 @@ async def exec_tool(
             if not task:
                 return "ERROR: run_aider_fix requires task"
 
-            issue_run = None
             if issue_run_id:
                 try:
                     issue_run = await db.get_run(issue_run_id)
@@ -4354,7 +3700,8 @@ async def exec_tool(
                 issue_run = next(
                     (r for r in runs
                      if r.get("role") in {"reviewer", "acceptance"}
-                     and ((r.get("result_envelope") or {}).get("status") or "").lower() in {"issues", "error"}),
+                     and ((r.get("result_envelope") or {}).get("status") or "").lower() in {"issues", "error"}
+                     and not _is_environment_fault(r.get("result_envelope"))),
                     None,
                 )
                 if issue_run:
@@ -4363,6 +3710,25 @@ async def exec_tool(
             issue_env = (issue_run or {}).get("result_envelope") or {}
             if issue_run:
                 issue_env = {**issue_env, "_source_role": issue_run.get("role", "")}
+
+            # Escalation: after 2 consecutive Aider attempts without verified
+            # progress, hand the battle to the in-house Fixer for a 2-attempt
+            # block — enforced here so a model following a stale
+            # "call run_aider_fix" hint still gets rerouted. Internal
+            # fallback dispatches never loop back (run_fixer honors
+            # _aider_fallback).
+            if conv_id:
+                try:
+                    _esc_runs = await db.get_runs_by_conversation(conv_id, limit=50)
+                    _esc_battle = compute_fix_battle(
+                        _esc_runs, await _latest_user_msg_ts(conv_id))
+                    if preferred_fix_editor(_esc_battle) == "fixer":
+                        return await _fallback_to_fixer(
+                            "escalation: 2 consecutive Aider attempts without "
+                            "verified progress — Fixer takes the next block")
+                except Exception as _esc_e:
+                    print(f"[run_aider_fix] escalation check failed (non-fatal): {_esc_e}")
+
             if not project_dir:
                 project_dir = (issue_env.get("project_dir") or "").strip()
 
@@ -4376,7 +3742,10 @@ async def exec_tool(
                     project_dir = project_dir or (f"/root/projects/{project_id}" if project_id else "")
 
             if not project_dir:
-                return "ERROR: run_aider_fix needs project_dir or an active uploaded project on this conversation."
+                return await _fallback_to_fixer("no project_dir for Aider")
+
+            if not await _aider_worker_healthy(http, force=True):
+                return await _fallback_to_fixer("Aider worker unhealthy")
 
             contract = {}
             workflow_id = ""
@@ -4393,10 +3762,18 @@ async def exec_tool(
                             active_project.get("file_manifest") or [],
                             active_project.get("language") or "",
                         )
+                    # Only genuinely uploaded projects get the uploaded-fix mode;
+                    # the bootstrap/inflight gates key on it. A greenfield
+                    # OpenHands build being repaired stays a build workflow.
+                    _is_uploaded_proj = (
+                        (active_project or {}).get("description") or ""
+                    ).startswith("Uploaded project:")
                     workflow_id = f"cw-{uuid.uuid4().hex[:12]}"
                     await db.create_coder_workflow(
                         workflow_id, conv_id, project_id=project_id,
-                        mode="fix_uploaded_project", state="fixing",
+                        mode=("fix_uploaded_project" if _is_uploaded_proj
+                              else "build_from_prompt"),
+                        state="fixing",
                         user_task=task, contract=contract, artifact_status="not_ready",
                     )
                 if workflow_id:
@@ -4404,6 +3781,23 @@ async def exec_tool(
 
             # Prior fix attempts this turn — folded into the task text so the
             # Aider prompt (built worker-side) sees them without a worker change.
+            _research_for_aider = ""
+            try:
+                _r_entry = _get_recent_research(conv_id)
+                if _r_entry:
+                    _research_for_aider = (_r_entry.get("report") or "")[:5000]
+                    if _research_for_aider:
+                        task = (
+                            f"{task}\n\n"
+                            f"Recent deep_research context for this repair. Use it as reference, "
+                            f"but still verify against the project files:\n{_research_for_aider}"
+                        )
+                        print(f"[run_aider_fix] injecting research context "
+                              f"({len(_research_for_aider)} chars, "
+                              f"topic={(_r_entry.get('topic') or '')[:60]!r})")
+            except Exception as _re:
+                print(f"[run_aider_fix] research lookup failed (non-fatal): {_re}")
+
             _attempts_for_aider = await _prior_fix_attempts_context(conv_id)
             if _attempts_for_aider:
                 task = (
@@ -4429,31 +3823,45 @@ async def exec_tool(
             )
             files = envelope.get("files_touched") or []
             status = envelope.get("status", "?")
-            if status == "applied":
+            if status in {"applied", "partial"}:
+                # "partial" = Aider reported success but touched none of the
+                # issue-scoped files (downgraded in aider_fixer). The tree
+                # still changed, so verification review must run — that review
+                # is what feeds the no-progress verdict.
                 _ckpt = await _git_checkpoint(
                     http, envelope.get("project_dir", "") or project_dir,
-                    f"aider applied: {(envelope.get('summary') or task or '')[:60]} "
+                    f"aider {status}: {(envelope.get('summary') or task or '')[:60]} "
                     f"({envelope.get('run_id', '')})",
                 )
                 _auto_review_note = ""
-                try:
-                    _arv = await exec_tool(
-                        http, events, "run_review",
-                        {"project_dir": envelope.get("project_dir", "") or project_dir},
-                        conv_id,
-                        custom_tool_map=custom_tool_map,
-                        connector_tool_name_map=connector_tool_name_map,
-                        conv_model=conv_model,
-                        kb_ids=kb_ids,
-                        artifact_message_id=artifact_message_id,
-                    )
+                if (envelope.get("source_role") == "acceptance"
+                        and envelope.get("docs_only")):
+                    # Same routing as run_fixer: docs-only acceptance fixes go
+                    # straight back to Acceptance instead of burning a full
+                    # build/test review cycle on a README/doc edit.
                     _auto_review_note = (
-                        "\n\n=== AUTOMATIC VERIFICATION — run_review already ran; "
-                        "do NOT call it again, act on this result ===\n" + _arv
+                        "\n\nREQUIRED NEXT TOOL CALL: run_acceptance_review "
+                        "(docs-only fix; build review may be skipped)."
                     )
-                except Exception as _are:
-                    _auto_review_note = (f"\n\n(automatic run_review failed: {_are} — "
-                                         f"call run_review manually)")
+                else:
+                    try:
+                        _arv = await exec_tool(
+                            http, events, "run_review",
+                            {"project_dir": envelope.get("project_dir", "") or project_dir},
+                            conv_id,
+                            custom_tool_map=custom_tool_map,
+                            connector_tool_name_map=connector_tool_name_map,
+                            conv_model=conv_model,
+                            kb_ids=kb_ids,
+                            artifact_message_id=artifact_message_id,
+                        )
+                        _auto_review_note = (
+                            "\n\n=== AUTOMATIC VERIFICATION — run_review already ran; "
+                            "do NOT call it again, act on this result ===\n" + _arv
+                        )
+                    except Exception as _are:
+                        _auto_review_note = (f"\n\n(automatic run_review failed: {_are} — "
+                                             f"call run_review manually)")
                 _auto_redeliver_note = await _maybe_auto_redeliver(
                     http, events, conv_id,
                     envelope.get("project_dir", "") or project_dir,
@@ -4462,8 +3870,14 @@ async def exec_tool(
                     conv_model=conv_model, kb_ids=kb_ids,
                     artifact_message_id=artifact_message_id,
                 )
-                return (
+                _applied_header = (
                     f"AIDER APPLIED EDITS to {len(files)} file(s).\n"
+                    if status == "applied" else
+                    f"AIDER PARTIAL: edits applied to {len(files)} file(s), but none "
+                    f"touched the issue-scoped files — verification review follows.\n"
+                )
+                return (
+                    _applied_header
                     + "\n".join(f"  - {f}" for f in files[:12])
                     + f"\nworkflow_id: {workflow_id or '(none)'}\n"
                     + (f"Git checkpoint: {_ckpt}\n" if _ckpt else "")
@@ -4472,16 +3886,19 @@ async def exec_tool(
                     + _auto_redeliver_note
                 )
             if status == "no_changes":
-                return (
-                    f"AIDER MADE NO CHANGES. {envelope.get('summary','')}\n"
-                    "Run review if you need to verify current state, or explain to the user why no patch was produced."
-                )
+                return await _fallback_to_fixer(f"Aider made no changes: {envelope.get('summary','')[:160]}")
+            # Fallback is for "Aider produced nothing" only. An error run that
+            # DID write files (non-zero exit, failing auto-test) already changed
+            # the tree — a second editor without a Reviewer pass in between
+            # would edit blind against the stale pre-Aider issue envelope, so
+            # that case falls through to the run_review routing below.
+            if status in {"error", "failed"} and not (envelope.get("files_touched") or []):
+                return await _fallback_to_fixer(f"Aider failed: {envelope.get('summary','')[:160]}")
             return (
                 f"AIDER FAILED ({status}): {envelope.get('summary','')}\n"
                 f"stderr: {(envelope.get('stderr_tail') or '')[-800:]}\n"
-                "REQUIRED NEXT TOOL CALL: run_review. Do not call read_file/write_file/run_shell "
-                "or run_fixer for uploaded-project fixes; Reviewer must classify the remaining "
-                "failure and then Aider gets the next scoped repair."
+                "REQUIRED NEXT TOOL CALL: run_review. Do not call read_file/write_file/run_shell; "
+                "Reviewer must classify the remaining failure before another scoped repair."
             )
 
         elif name == "run_review":
@@ -4555,15 +3972,39 @@ async def exec_tool(
                         "or an active project on this conversation. Pass it explicitly: "
                         "run_review(project_dir='/root/projects/<name>')")
 
+            # Architect plan commands as LLM context (never executed — on-disk
+            # detection stays authoritative; plan text may be hallucinated).
+            _plan_cmds = None
+            if conv_id:
+                try:
+                    _runs_for_plan = await db.get_runs_by_conversation(conv_id, limit=20)
+                    _plan_run = next(
+                        (r for r in _runs_for_plan
+                         if r.get("role") == "architect" and r.get("status") == "succeeded"),
+                        None,
+                    )
+                    if _plan_run:
+                        _pe = _plan_run.get("result_envelope") or {}
+                        _plan_cmds = {
+                            "build_cmd": (_pe.get("build_cmd") or "").strip(),
+                            "test_cmd": (_pe.get("test_cmd") or "").strip(),
+                            "run_cmd": ((_pe.get("entrypoint") or {}).get("run_cmd") or "").strip(),
+                        }
+                except Exception as _pce:
+                    print(f"[run_review] plan-cmd lookup failed (non-fatal): {_pce}")
+
             envelope = await reviewer.run_review(http, events, conv_id,
                                                   project_dir=project_dir,
                                                   project_id=project_id,
-                                                  conv_model=conv_model)
+                                                  conv_model=conv_model,
+                                                  plan_cmds=_plan_cmds)
             _rev_status_wf = (envelope.get("status") or "").lower()
             if _rev_status_wf not in ("cancelled", ""):
                 await _apply_workflow_event(
                     conv_id,
-                    "REVIEW_CLEAN" if _rev_status_wf == "clean" else "REVIEW_ISSUES",
+                    ("REVIEW_ENV_FAULT" if _is_environment_fault(envelope)
+                     else "REVIEW_CLEAN" if _rev_status_wf == "clean"
+                     else "REVIEW_ISSUES"),
                     run_id=envelope.get("run_id", ""),
                     project_id=project_id,
                 )
@@ -4580,6 +4021,12 @@ async def exec_tool(
                         f"reviewer_run_id: {reviewer_run_id}\n"
                         f"REQUIRED NEXT TOOL CALL: run_acceptance_review(reviewer_run_id='{reviewer_run_id}'). "
                         f"Do not call download_project until acceptance is accepted unless the latest user message explicitly asks to ship/download anyway.")
+            if _is_environment_fault(envelope):
+                # No FIX PROCEDURE: there is nothing in the project to fix.
+                return (
+                    _environment_fault_notice(envelope)
+                    + f"\n\nreviewer_run_id: {reviewer_run_id}"
+                )
             lines = [f"REVIEW FOUND {len(issues)} ISSUE(S). {summary}",
                      f"Build: `{envelope.get('build_cmd','')}` exit={envelope.get('build_exit','?')}. "
                      f"Tests: `{envelope.get('test_cmd','')}` exit={envelope.get('test_exit','?')}.",
@@ -4593,23 +4040,32 @@ async def exec_tool(
                 if scope:
                     lines.append(f"   fix scope: {', '.join(scope[:5])}")
             lines.append("")
-            _use_aider_next = False
+            _aider_next_ctx = None
             if getattr(config, "AIDER_ENABLED", True) and conv_id:
                 try:
-                    _wf_next = await db.get_latest_coder_workflow(conv_id, project_id=project_id)
-                    if not _wf_next:
-                        _wf_next = await db.get_latest_coder_workflow(conv_id)
-                    _use_aider_next = bool(_wf_next and _wf_next.get("mode") == "fix_uploaded_project")
-                except Exception as _wf_next_e:
-                    print(f"[run_review] next-fix workflow lookup failed: {_wf_next_e}")
-            if _use_aider_next:
+                    _aider_next_ctx = await _aider_first_context(
+                        http,
+                        conv_id,
+                        issue_run={
+                            "id": reviewer_run_id,
+                            "role": "reviewer",
+                            "project_id": project_id,
+                            "result_envelope": envelope,
+                        },
+                        project_dir=project_dir,
+                        project_id=project_id,
+                    )
+                except Exception as _aider_next_e:
+                    print(f"[run_review] next-fix Aider context lookup failed: {_aider_next_e}")
+            if _aider_next_ctx:
                 lines.append(
                     f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
                     f"  run_aider_fix(issue_run_id='{reviewer_run_id}', project_dir='{project_dir}', "
                     f"task='Fix the reviewer issues from {reviewer_run_id}')\n"
-                    f"This runs Aider from the uploaded project root. AFTER run_aider_fix returns, "
-                    f"call run_review again to verify the project is now CLEAN. Do NOT manually "
-                    f"read_file / write_file or call run_fixer for uploaded-project reviewer issues."
+                    f"This runs Aider from the existing project root. If Aider cannot resolve the "
+                    f"issue, the backend will fall back to Fixer. AFTER repair returns, call "
+                    f"run_review again to verify the project is now CLEAN. Do NOT manually "
+                    f"read_file / write_file for reviewer issues."
                 )
             else:
                 lines.append(
@@ -4636,11 +4092,11 @@ async def exec_tool(
                     _runs_pre = await db.get_runs_by_conversation(conv_id, limit=10)
                     _latest_pre = next(
                         (r for r in _runs_pre
-                         if r.get("role") in {"fixer", "reviewer", "acceptance"}
+                         if r.get("role") in {"fixer", "aider.fix", "reviewer", "acceptance"}
                          and (r.get("status") or "").lower() in {"succeeded", "failed", "partial"}),
                         None,
                     )
-                    if _latest_pre and _latest_pre.get("role") == "fixer":
+                    if _latest_pre and _latest_pre.get("role") in {"fixer", "aider.fix"}:
                         _env_pre = _latest_pre.get("result_envelope") or {}
                         if not (_env_pre.get("source_role") == "acceptance"
                                 and _env_pre.get("docs_only")):
@@ -4748,16 +4204,46 @@ async def exec_tool(
                 if scope:
                     lines.append(f"   fix scope: {', '.join(scope[:5])}")
             lines.append("")
-            lines.append(
-                f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
-                f"  run_fixer(reviewer_run_id='{acceptance_run_id}')\n"
-                f"If the Fixer touches only docs, call run_acceptance_review again. "
-                f"If it touches source, tests, or manifests, call run_review first, "
-                f"then run_acceptance_review again. Do not call download_project until "
-                f"acceptance is accepted unless the latest user message explicitly asks "
-                f"to ship/download anyway; in that case disclose these issues and package "
-                f"the current state."
-            )
+            _aider_accept_ctx = None
+            if getattr(config, "AIDER_ENABLED", True) and conv_id:
+                try:
+                    _aider_accept_ctx = await _aider_first_context(
+                        http,
+                        conv_id,
+                        issue_run={
+                            "id": acceptance_run_id,
+                            "role": "acceptance",
+                            "project_id": project_id,
+                            "result_envelope": envelope,
+                        },
+                        project_dir=project_dir,
+                        project_id=project_id,
+                    )
+                except Exception as _aider_acc_e:
+                    print(f"[run_acceptance_review] next-fix Aider context lookup failed: {_aider_acc_e}")
+            if _aider_accept_ctx:
+                lines.append(
+                    f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
+                    f"  run_aider_fix(issue_run_id='{acceptance_run_id}', project_dir='{project_dir}', "
+                    f"task='Fix the acceptance issues from {acceptance_run_id}')\n"
+                    f"This runs Aider from the existing project root. If Aider cannot resolve the "
+                    f"issue, the backend will fall back to Fixer. If repair touches only docs, "
+                    f"call run_acceptance_review again. If it touches source, tests, or manifests, "
+                    f"call run_review first, then run_acceptance_review again. Do not call "
+                    f"download_project until acceptance is accepted unless the latest user message "
+                    f"explicitly asks to ship/download anyway."
+                )
+            else:
+                lines.append(
+                    f"FIX PROCEDURE: your VERY NEXT tool call MUST be:\n"
+                    f"  run_fixer(reviewer_run_id='{acceptance_run_id}')\n"
+                    f"If the Fixer touches only docs, call run_acceptance_review again. "
+                    f"If it touches source, tests, or manifests, call run_review first, "
+                    f"then run_acceptance_review again. Do not call download_project until "
+                    f"acceptance is accepted unless the latest user message explicitly asks "
+                    f"to ship/download anyway; in that case disclose these issues and package "
+                    f"the current state."
+                )
             return "\n".join(lines)
 
         elif name == "run_fixer":
@@ -4778,7 +4264,8 @@ async def exec_tool(
                         if _r.get("role") not in {"reviewer", "acceptance"}:
                             continue
                         _env = _r.get("result_envelope") or {}
-                        if (_env.get("status") or "").lower() in {"issues", "error"}:
+                        if ((_env.get("status") or "").lower() in {"issues", "error"}
+                                and not _is_environment_fault(_env)):
                             return _r["id"]
                 except Exception as _re:
                     print(f"[run_fixer] actionable run lookup failed: {_re}")
@@ -5121,10 +4608,16 @@ async def exec_tool(
                 conv_model=conv_model,
             )
             if (plan.get("status") or "") == "ok":
-                await _apply_workflow_event(
+                plan_project_id = (
+                    (plan.get("project_id") or "")
+                    if isinstance(plan, dict) else ""
+                )
+                if not plan_project_id and isinstance(plan.get("plan"), dict):
+                    plan_project_id = plan.get("plan", {}).get("project_id", "")
+                workflow_id = await _apply_workflow_event(
                     conv_id, "PLAN_DONE",
                     run_id=plan.get("run_id", ""),
-                    project_id=plan.get("plan", {}).get("project_id", "") if isinstance(plan.get("plan"), dict) else "",
+                    project_id=plan_project_id,
                     user_task=architect_task,
                 )
             return architect.format_plan_for_chat(plan)
@@ -5236,10 +4729,44 @@ async def exec_tool(
             return await run_conspiracy_research(http, config.OLLAMA_URL, config.DEFAULT_MODEL, config.SEARXNG_URL, events, topic, angle, depth, conv_id, kb_context=kb_prior)
 
         elif name == "generate_code":
+            # Daedalus discipline: a fresh greenfield build must start with the
+            # Architect. Block a v2 persona that jumped straight to generate_code
+            # with no completed plan and no existing project to build on.
+            if conv_id and await _check_v2():
+                _gc_project_id = (args.get("project_id") or "").strip()
+                _gc_has_project = bool(_gc_project_id)
+                _gc_has_arch = False
+                try:
+                    _gc_runs = await db.get_runs_by_conversation(conv_id, limit=30)
+                    _gc_has_arch = any(
+                        r.get("role") == "architect" and r.get("status") == "succeeded"
+                        for r in _gc_runs
+                    )
+                    if not _gc_has_project:
+                        _gc_active = await db.get_coding_project_by_conv(conv_id)
+                        _gc_has_project = bool(_gc_active)
+                except Exception as _gce:
+                    print(f"[v2-gate] plan-first check failed (non-fatal): {_gce}")
+                    _gc_has_arch = True  # fail open — never block on a lookup error
+                if not _gc_has_arch and not _gc_has_project:
+                    await events.emit(conv_id, "tool_end", {
+                        "tool": "generate_code", "icon": "wand",
+                        "status": "Blocked: call plan_project first",
+                    })
+                    return (
+                        "BLOCKED: Daedalus builds must start with the Architect. Call "
+                        "plan_project(task='...', language='...') first to produce the structured "
+                        "plan, then call generate_code to build it."
+                    )
             # Models sometimes use wrong arg names (description/code instead of task)
             task = args.get("task", "") or args.get("description", "") or args.get("prompt", "")
             language = args.get("language", "python")
             context = args.get("context", "")
+            required_files = _required_files_from_manifest(args.get("required_files") or [])
+            build_cmd_arg = (args.get("build_cmd") or "").strip()
+            test_cmd_arg = (args.get("test_cmd") or "").strip()
+            lint_cmd_arg = (args.get("lint_cmd") or "").strip()
+            architect_run_id = (args.get("architect_run_id") or "").strip()
             # If model stuffed actual code into args, append it as context
             if not task and args.get("code"):
                 task = "Review, fix, and complete this code"
@@ -5410,10 +4937,18 @@ async def exec_tool(
             _has_active_project = bool(_oh_project_id)
             _builder_profile = "scaffold"
             _profile_continue_missing: list[str] = []
+            _latest_arch_env: dict = {}
 
             if conv_id:
                 try:
                     _runs_for_profile = await db.get_runs_by_conversation(conv_id, limit=30)
+                    _latest_arch_run = next(
+                        (r for r in _runs_for_profile
+                         if r.get("role") == "architect" and r.get("status") == "succeeded"),
+                        None,
+                    )
+                    if _latest_arch_run:
+                        _latest_arch_env = _latest_arch_run.get("result_envelope") or {}
                     # Find the most recent builder run with a MEANINGFUL state.
                     # Skip running/queued (in-flight, has no envelope yet),
                     # cancelled (operator killed before it produced anything),
@@ -5533,6 +5068,11 @@ async def exec_tool(
                                     project_id=_oh_project_id or "",
                                     status="running")
                 _run_row_created = True
+                await _apply_workflow_event(
+                    conv_id, "BUILD_STARTED",
+                    run_id=_run_id, project_id=_oh_project_id or "",
+                    user_task=task,
+                )
             except Exception as _re:
                 print(f"[RUN] create_run failed (non-fatal): {_re}")
                 _run_id = ""
@@ -5554,56 +5094,52 @@ async def exec_tool(
                         _arch_env = _arch_run.get("result_envelope") or {}
                         _manifest = _arch_env.get("manifest") or []
                         _success = _arch_env.get("success_criteria") or []
-                        _build_cmd = _arch_env.get("build_cmd", "")
-                        _test_cmd = _arch_env.get("test_cmd", "")
                         if _manifest:
-                            _arch_section = ["\n\n--- Architect Manifest (FOLLOW THIS PLAN) ---"]
-                            _arch_section.append(
-                                f"Project: {_arch_env.get('project_id','?')} "
-                                f"({_arch_env.get('language','?')}, "
-                                f"build_system={_arch_env.get('build_system','?')})"
-                            )
-                            if _build_cmd:
-                                _arch_section.append(f"Build command: {_build_cmd}")
-                            if _test_cmd:
-                                _arch_section.append(f"Test command: {_test_cmd}")
-                            _arch_section.append("")
-                            _arch_section.append(f"Files to create ({len(_manifest)}):")
-                            for _m in _manifest[:30]:
-                                _arch_section.append(
-                                    f"  - {_m.get('path','?')} — {_m.get('purpose','')}"
-                                )
-                            if _success:
-                                _arch_section.append("")
-                                _arch_section.append("Success criteria (project is done when ALL pass):")
-                                for _c in _success[:8]:
-                                    _arch_section.append(f"  - {_c}")
-                            _deps = _arch_env.get("external_deps") or []
-                            if _deps:
-                                _arch_section.append("")
-                                _arch_section.append("External dependencies:")
-                                for _d in _deps[:10]:
-                                    _arch_section.append(
-                                        f"  - {_d.get('name','?')} {_d.get('version','')}"
-                                    )
-                            _risks = _arch_env.get("risk_notes") or []
-                            if _risks:
-                                _arch_section.append("")
-                                _arch_section.append("Risk notes:")
-                                for _r in _risks[:5]:
-                                    _arch_section.append(f"  - {_r}")
-                            _arch_section.append(
-                                "\nFollow the manifest exactly — create every listed file, "
-                                "use the listed build/test commands, satisfy the success "
-                                "criteria. The Reviewer will verify against this plan."
-                            )
-                            _arch_text = "\n".join(_arch_section)
+                            _arch_text = _build_architect_context(_arch_env)
                             context = (context + _arch_text) if context else _arch_text.strip()
                             print(f"[CODEGEN] Injected architect manifest from "
                                   f"{_arch_run.get('id')}: {len(_manifest)} files, "
                                   f"{len(_success)} criteria")
+                            # Wire the manifest into the build-completeness gate.
+                            # Without this, the "did it create every planned file?"
+                            # check (_expected_files at the undershoot block below)
+                            # is empty unless the model passed required_files — so a
+                            # partial build (e.g. 4/9 files) sails through as
+                            # "succeeded". The Architect plan is the authoritative
+                            # file list, so treat it as the strict manifest here.
+                            # tests_required rides along: the plan lists test files
+                            # SEPARATELY from the file tree, and leaving them out
+                            # meant the Builder never wrote them — Acceptance then
+                            # burned its whole fix budget adding tests after the fact.
+                            if not required_files:
+                                _planned_files = list(_manifest)
+                                _planned_files.extend(
+                                    _arch_env.get("tests_required") or [])
+                                required_files = _manifest_required_code_files(_planned_files)
+                                if required_files:
+                                    print(f"[CODEGEN] Manifest → completeness gate: "
+                                          f"{len(required_files)} required code file(s) "
+                                          f"(incl. planned tests)")
+                            if not architect_run_id:
+                                architect_run_id = _arch_run.get("id") or ""
                 except Exception as _ame:
                     print(f"[CODEGEN] Architect manifest injection failed (non-fatal): {_ame}")
+
+            # ── Scale the round budget off the plan's file count ──
+            # max_rounds is the agent's per-run iteration CEILING (worker
+            # max_iteration_per_run), not a target — the agent stops when it
+            # emits `finish`. The default 20 was far too low for multi-file
+            # builds (each file ≈ 2 iterations + setup/verify), so the agent
+            # ran out at ~4 files. Scale generously off the planned file count
+            # (floored at the configurable default, capped to keep a single
+            # worker call bounded). The auto-continue loop below mops up any
+            # files still missing after this pass.
+            if required_files:
+                max_rounds = _scaled_build_rounds(
+                    len(required_files), config.OPENHANDS_MAX_ROUNDS, cap=140,
+                )
+                print(f"[CODEGEN:OH] Scaled max_rounds={max_rounds} "
+                      f"for {len(required_files)} planned file(s)")
 
             oh_payload = {
                 "task": task, "model": coder_model,
@@ -5621,9 +5157,17 @@ async def exec_tool(
                 # other profiles ignore it.
                 "profile": _builder_profile,
                 "manifest_missing": _profile_continue_missing,
+                # Full Architect manifest — the worker nudges the agent (same
+                # conversation) until every planned file exists, so a text-only
+                # early finish no longer ends the build at 2/8 files.
+                "required_files": list(required_files or []),
                 # User-tunable reasoning_effort — drops think-token overhead
                 # significantly on slow local models when set to "low".
                 "reasoning_effort": getattr(config, "OPENHANDS_REASONING_EFFORT", "medium"),
+                # Send think:false to thinking-capable coder models (worker
+                # gates on /api/show capabilities). Without it qwen3.5-class
+                # merges reason with an unbounded budget before every tool call.
+                "disable_thinking": bool(getattr(config, "OPENHANDS_DISABLE_THINKING", True)),
             }
 
             async def _signal_oh_cancel(reason: str):
@@ -5843,7 +5387,17 @@ async def exec_tool(
                     elif len(dirs) == 1:
                         project_dir = dirs.pop()
 
-                _project_id = result.get("project_id", "")
+                _project_id = _oh_project_id or result.get("project_id", "")
+                if required_files and project_dir and project_dir.startswith("/root/projects/"):
+                    scanned_files = await _scan_project_files(http, project_dir)
+                    if scanned_files:
+                        files = scanned_files
+                elif required_files and _project_id:
+                    planned_dir = f"/root/projects/{_project_id}"
+                    scanned_files = await _scan_project_files(http, planned_dir)
+                    if scanned_files:
+                        project_dir = planned_dir
+                        files = scanned_files
                 file_list = "\n".join(f"  - {f}" for f in files) if files else "  (no files detected)"
                 await events.emit(conv_id, "tool_end", {
                     "tool": "generate_code", "icon": "wand",
@@ -5922,45 +5476,154 @@ async def exec_tool(
                 # significantly fewer, flag the result as INCOMPLETE so the chat agent
                 # fixes it before delivering. Catches coder models that call `finish` early.
                 undershoot_warning = ""
-                _expected_files = []
-                try:
-                    # Parse task body for filenames in "File structure:" / "- foo.java" / "├── foo.java" patterns
-                    _task_text = task or ""
-                    # Match basenames with common code extensions in list-like positions.
-                    _ext_re = r"\.(?:java|py|js|ts|tsx|jsx|go|rs|c|cpp|h|hpp|rb|php|cs|kt|swift|html|css|sql|sh|toml|yaml|yml|json|md|xml)"
-                    _name_re = re.compile(
-                        r"(?:^|[\s├└│─\-\*•])([A-Za-z][\w\-]*" + _ext_re + r")\b",
-                        re.MULTILINE,
-                    )
-                    for _m in _name_re.finditer(_task_text):
-                        _fn = _m.group(1)
-                        if _fn not in _expected_files:
-                            _expected_files.append(_fn)
-                except Exception as _ef_e:
-                    print(f"[CODEGEN:OH] Expected-file parse failed (non-fatal): {_ef_e}")
+                _expected_files = list(required_files)
+                _manifest_strict = bool(_expected_files)
+                _missing: list[str] = []
+                _satisfied: list[str] = []
+                if not _expected_files:
+                    try:
+                        # Parse task body for filenames in "File structure:" / "- foo.java" / "├── foo.java" patterns
+                        _task_text = task or ""
+                        # Match basenames with common code extensions in list-like positions.
+                        _ext_re = r"\.(?:java|py|js|ts|tsx|jsx|go|rs|c|cpp|h|hpp|rb|php|cs|kt|swift|html|css|sql|sh|toml|yaml|yml|json|md|xml)"
+                        _name_re = re.compile(
+                            r"(?:^|[\s├└│─\-\*•])([A-Za-z][\w\-]*" + _ext_re + r")\b",
+                            re.MULTILINE,
+                        )
+                        for _m in _name_re.finditer(_task_text):
+                            _fn = _m.group(1)
+                            if _fn not in _expected_files:
+                                _expected_files.append(_fn)
+                    except Exception as _ef_e:
+                        print(f"[CODEGEN:OH] Expected-file parse failed (non-fatal): {_ef_e}")
+
+                if result.get("arg_drop_detected"):
+                    print("[CODEGEN:OH] Worker reported repeated dropped file_text "
+                          "args — model demoted to prompt-based tool calling for "
+                          "future runs")
 
                 if _expected_files:
-                    _actual_basenames = {(f.rsplit("/", 1)[-1] if "/" in f else f) for f in (files or [])}
-                    _missing = [n for n in _expected_files if n not in _actual_basenames]
+                    if _manifest_strict:
+                        _satisfied, _missing = _manifest_presence(
+                            files, project_dir, _expected_files,
+                        )
+                        worker_missing = result.get("missing_required_files") or []
+                        for path in worker_missing:
+                            norm = _normalize_manifest_path(path)
+                            if norm and norm not in _missing and norm in _expected_files:
+                                _missing.append(norm)
+                                if norm in _satisfied:
+                                    _satisfied.remove(norm)
+                    else:
+                        _actual_basenames = {(f.rsplit("/", 1)[-1] if "/" in f else f) for f in (files or [])}
+                        _missing = [n for n in _expected_files if n not in _actual_basenames]
+                        _satisfied = [n for n in _expected_files if n not in _missing]
                     _present = len(_expected_files) - len(_missing)
                     print(f"[CODEGEN:OH] Manifest check: {_present}/{len(_expected_files)} expected files present, missing={_missing[:8]}")
-                    # Trigger if any of: <50% present, or 3+ missing files
-                    if _expected_files and (_present / len(_expected_files) < 0.5 or len(_missing) >= 3):
-                        undershoot_warning = (
-                            f"⚠ INCOMPLETE: agent created {_present}/{len(_expected_files)} expected files. "
-                            f"Missing: {', '.join(_missing[:12])}{'…' if len(_missing) > 12 else ''}. "
-                            f"DO NOT deliver the project to the user yet. Either: "
-                            f"(a) call generate_code again with project_id='{_project_id}' and a task that "
-                            f"explicitly lists ONLY the missing files to create, or "
-                            f"(b) write each missing file directly with write_file. "
-                            f"After all expected files exist, re-verify with run_shell (e.g. compile/parse) "
-                            f"before download_project. If the user explicitly asks for the incomplete "
-                            f"artifact anyway, disclose the missing files and package the current state."
+
+                    # ── Backend-owned bounded auto-continue ──
+                    # The build stopped before writing every planned file. Rather
+                    # than rely on the model to notice and call generate_code again
+                    # (it usually jumps to run_review instead), the BACKEND drives up
+                    # to a manifest-size-scaled number of "continue" passes that
+                    # create ONLY the missing files, re-checking the manifest after
+                    # each. Builder→builder
+                    # continuation on the same project — not the reverted
+                    # architect→builder handoff, and not a blocking gate: it actively
+                    # builds, then the undershoot decision below uses the final state.
+                    _continue_passes = 0
+                    _max_continue_passes = _max_builder_continue_passes(len(_expected_files))
+                    while (_manifest_strict and _missing and _project_id
+                           and _continue_passes < _max_continue_passes):
+                        _continue_passes += 1
+                        _missing_before = set(_missing)
+                        _cont_rounds = _scaled_build_rounds(
+                            len(_missing), config.OPENHANDS_MAX_ROUNDS,
                         )
                         await events.emit(conv_id, "tool_progress", {
                             "tool": "generate_code", "icon": "wand",
-                            "status": f"⚠ Agent undershot: {_present}/{len(_expected_files)} files",
+                            "status": (f"🔁 Continue pass {_continue_passes}/"
+                                       f"{_max_continue_passes}: building "
+                                       f"{len(_missing)} missing file(s)…"),
                         })
+                        print(f"[CODEGEN:OH] Auto-continue pass {_continue_passes}: "
+                              f"{len(_missing)} missing, rounds={_cont_rounds}, "
+                              f"limit={_max_continue_passes}, "
+                              f"missing={_missing[:8]}")
+                        try:
+                            _cont_result = await _run_builder_continue_pass(
+                                http, openhands_url, oh_payload, _project_id,
+                                list(_missing), _cont_rounds,
+                            )
+                        except asyncio.CancelledError:
+                            await _signal_oh_cancel("chat stream cancelled during continue pass")
+                            await _finalize_run("cancelled", {"error": "Run cancelled by user"})
+                            raise
+                        if not (_cont_result and _cont_result.get("status") in ("ok", "stuck")):
+                            print(f"[CODEGEN:OH] Continue pass {_continue_passes} "
+                                  f"produced no usable result; stopping")
+                            break
+                        _rescanned = await _scan_project_files(http, project_dir)
+                        if _rescanned:
+                            files = _rescanned
+                        _satisfied, _missing = _manifest_presence(
+                            files, project_dir, _expected_files,
+                        )
+                        _present = len(_expected_files) - len(_missing)
+                        print(f"[CODEGEN:OH] After continue pass {_continue_passes}: "
+                              f"{_present}/{len(_expected_files)} present, "
+                              f"missing={_missing[:8]}")
+                        if not _missing:
+                            await events.emit(conv_id, "tool_progress", {
+                                "tool": "generate_code", "icon": "wand",
+                                "status": (f"✅ Continue filled all "
+                                           f"{len(_expected_files)} planned files"),
+                            })
+                            break
+                        if set(_missing) == _missing_before:
+                            print(f"[CODEGEN:OH] Continue pass {_continue_passes} "
+                                  f"made no manifest progress; stopping backend loop")
+                            await events.emit(conv_id, "tool_progress", {
+                                "tool": "generate_code", "icon": "wand",
+                                "status": (f"⚠ Continue pass {_continue_passes} made "
+                                           f"no progress on {len(_missing)} missing file(s)"),
+                            })
+                            break
+
+                    # Architect manifests are exact: any missing planned file keeps the build partial.
+                    # Fallback task-scraped manifests keep the older broad undershoot heuristic.
+                    _is_incomplete = bool(_missing) if _manifest_strict else (
+                        _expected_files and (_present / len(_expected_files) < 0.5 or len(_missing) >= 3)
+                    )
+                    if _is_incomplete:
+                        undershoot_warning = (
+                            f"⚠ INCOMPLETE: agent created {_present}/{len(_expected_files)} expected files. "
+                            f"Missing: {', '.join(_missing[:12])}{'…' if len(_missing) > 12 else ''}. "
+                            f"Do not review, accept, or deliver this project until the Build phase "
+                            f"creates every planned file."
+                        )
+                        await events.emit(conv_id, "tool_progress", {
+                            "tool": "generate_code", "icon": "wand",
+                            "status": f"⚠ Builder missing {_present}/{len(_expected_files)} planned files",
+                        })
+
+                # Guard: a build that never reached a proper `finish` (truncated
+                # mid-generation, hit the round cap, etc.) must not be reported as
+                # a complete success even if it wrote a file or two. Skipped for
+                # manifest-strict builds — there `_missing` (after the auto-continue
+                # loop) is authoritative, so a manifest-complete project isn't
+                # flagged just because the FIRST pass stopped without finishing.
+                if (not undershoot_warning and not _manifest_strict
+                        and not result.get("agent_finished", True)):
+                    undershoot_warning = (
+                        "⚠ INCOMPLETE: the build agent stopped without finishing (it was "
+                        "likely truncated or hit the round limit), so the project is probably "
+                        "partial. Continue the build before review, acceptance, or delivery."
+                    )
+                    await events.emit(conv_id, "tool_progress", {
+                        "tool": "generate_code", "icon": "wand",
+                        "status": "⚠ Builder stopped without finishing — build incomplete",
+                    })
 
                 # ── Independent critic pass: catch runtime bugs that pass syntax/compile checks ──
                 # Uses a separate model from the coder so it can't rationalize its own mistakes.
@@ -6115,15 +5778,15 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                         except Exception as _rag_e:
                             print(f"[CODEGEN] Code RAG indexing failed (non-fatal): {_rag_e}")
                     # Finalize the durable run with a structured envelope summarising
-                    # what got built. Mark partial when the agent undershot the manifest;
-                    # the build itself can still be considered a success otherwise.
+                    # what got built. A strict Architect manifest makes missing files
+                    # a Build-phase partial, not a review/acceptance issue.
                     _final_status = "partial" if undershoot_warning else "succeeded"
-                    await _finalize_run(_final_status, {
+                    _builder_envelope = {
                         "files_written": files,
-                        "manifest_satisfied": [n for n in _expected_files
-                                                if n in {(f.rsplit("/", 1)[-1] if "/" in f else f)
-                                                         for f in (files or [])}],
+                        "manifest_required": _expected_files if _expected_files else [],
+                        "manifest_satisfied": _satisfied if _expected_files else [],
                         "manifest_missing": _missing if _expected_files else [],
+                        "manifest_strict": _manifest_strict,
                         "build_summary": summary,
                         "project_id": _project_id,
                         "project_dir": project_dir,
@@ -6131,13 +5794,26 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                         "critique": critique,
                         "model": coder_model,
                         "language": language,
-                    })
+                        "architect_run_id": architect_run_id,
+                        "build_cmd": build_cmd_arg,
+                        "test_cmd": test_cmd_arg,
+                        "lint_cmd": lint_cmd_arg,
+                    }
+                    await _finalize_run(_final_status, _builder_envelope)
                     _ckpt = await _git_checkpoint(
                         http, project_dir,
                         f"builder {_final_status}: {task[:60]} ({_run_id})",
                     )
                     if _ckpt:
                         print(f"[git-checkpoint] {_ckpt}")
+                    if undershoot_warning:
+                        return (
+                            resp
+                            + "\n\nBUILD INCOMPLETE — the build did not finish or is missing "
+                            "expected files. Continue the build (call generate_code again with "
+                            f"project_id='{_project_id}' and a detailed task describing what is "
+                            "still missing) before review, acceptance, or delivery."
+                        )
                     await _apply_workflow_event(
                         conv_id, "BUILD_OK",
                         run_id=_run_id, project_id=_project_id,
@@ -6156,6 +5832,23 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                         )
                         resp += ("\n\n=== AUTOMATIC VERIFICATION — run_review already ran; "
                                  "do NOT call it again, act on this result ===\n" + _arv)
+                        if await _check_v2() and _arv.startswith("REVIEW CLEAN"):
+                            try:
+                                _aav = await exec_tool(
+                                    http, events, "run_acceptance_review",
+                                    {"project_dir": project_dir},
+                                    conv_id,
+                                    custom_tool_map=custom_tool_map,
+                                    connector_tool_name_map=connector_tool_name_map,
+                                    conv_model=conv_model,
+                                    kb_ids=kb_ids,
+                                    artifact_message_id=artifact_message_id,
+                                )
+                                resp += ("\n\n=== AUTOMATIC ACCEPTANCE — run_acceptance_review already ran; "
+                                         "do NOT call it again, act on this result ===\n" + _aav)
+                            except Exception as _aae:
+                                resp += (f"\n\n(automatic run_acceptance_review failed: {_aae} — "
+                                         f"call run_acceptance_review manually after clean review)")
                     except Exception as _are:
                         resp += (f"\n\n(automatic run_review failed: {_are} — "
                                  f"call run_review manually)")

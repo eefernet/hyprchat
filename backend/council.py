@@ -37,9 +37,85 @@ def _is_gibberish(text: str, threshold: float = 0.3) -> bool:
     return ratio < threshold
 
 
+def _is_persona_config(mc: dict) -> bool:
+    params = mc.get("parameters") or {}
+    if isinstance(params, str):
+        try:
+            params = json.loads(params)
+        except Exception:
+            params = {}
+    profile_type = params.get("profile_type")
+    if profile_type == "persona":
+        return True
+    if profile_type == "agent":
+        return False
+    persona = params.get("persona") or {}
+    persona_keys = ("personality", "scenario", "first_message", "example_dialogue", "lore", "rating")
+    return any(str(persona.get(k) or params.get(k) or "").strip() for k in persona_keys)
+
+
+async def _resolve_member_personas(members: list[dict]) -> list[dict]:
+    """Apply linked Persona profiles to council members without mutating DB rows."""
+    resolved = []
+    for member in members:
+        m = dict(member)
+        mc_id = (m.get("model_config_id") or "").strip()
+        if mc_id:
+            try:
+                mc = await db.get_model_config(mc_id)
+                if mc and _is_persona_config(mc):
+                    m["model"] = mc.get("base_model") or m.get("model") or config.DEFAULT_MODEL
+                    m["system_prompt"] = mc.get("system_prompt") or m.get("system_prompt") or ""
+                    m["persona_name"] = mc.get("name") or m.get("persona_name") or ""
+                elif mc:
+                    print(f"[COUNCIL] Ignoring non-persona model_config_id for member {m.get('id')}: {mc_id}")
+                else:
+                    print(f"[COUNCIL] Persona model_config_id not found for member {m.get('id')}: {mc_id}")
+            except Exception as e:
+                print(f"[COUNCIL] Persona resolution failed for member {m.get('id')}: {e}")
+        resolved.append(m)
+    return resolved
+
+
+def _member_display_name(member: dict) -> str:
+    return member.get("persona_name") or (member.get("model") or "Council member").split(":")[0]
+
+
+def _round_label(round_num: int, debate_rounds: int) -> str:
+    if round_num == 0:
+        return "Opening Statements"
+    return f"Rebuttal Round {round_num}" if debate_rounds > 1 else "Rebuttal Round"
+
+
+def _responding_to_members(member: dict, members: list[dict], member_responses: dict) -> list[dict]:
+    """Return other members with usable prior responses for rebuttal metadata."""
+    mid = member.get("id")
+    responding_to = []
+    for other in members:
+        oid = other.get("id")
+        if oid == mid:
+            continue
+        prev = member_responses.get(oid, "")
+        if prev and not _is_gibberish(prev):
+            responding_to.append({"id": oid, "name": _member_display_name(other)})
+    return responding_to
+
+
+def _vote_winners(vote_tally: dict, members: list[dict]) -> list[dict]:
+    member_by_id = {m.get("id"): m for m in members}
+    ranked = []
+    for mid, votes in vote_tally.items():
+        member = member_by_id.get(mid)
+        if not member:
+            continue
+        ranked.append({"id": mid, "name": _member_display_name(member), "votes": votes})
+    ranked.sort(key=lambda item: (-item["votes"], item["name"].lower()))
+    return ranked
+
+
 async def stream_council_chat(http, events, council, req_messages, conv_id, quick_search: bool = False, kb_ids: list = None):
     """Async generator that streams council member responses, voting, and host synthesis."""
-    members = council.get("members", [])
+    members = await _resolve_member_personas(council.get("members", []))
     host_model = council.get("host_model", config.DEFAULT_MODEL)
     host_sys = council.get("host_system_prompt", "")
     debate_rounds = council.get("debate_rounds", 0) or 0
@@ -146,23 +222,28 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
         """Query all members in parallel for a given round. extra_context_fn(member) returns additional context."""
         output_q: asyncio.Queue = asyncio.Queue()
         round_responses = {}
+        label = _round_label(round_num, debate_rounds)
 
         async def query_member(member: dict):
             mid = member.get("id")
             model = member.get("model", "")
+            member_name = _member_display_name(member)
+            responding_to = _responding_to_members(member, members, member_responses) if round_num > 0 else []
             # The council_done sentinel MUST fire for every member or the
             # consumer loop spins forever (done_count never reaches total).
             # Wrap the whole body so even a CancelledError / payload error
             # still emits it. `except Exception` below misses BaseException.
             try:
-                await _query_member_inner(member, mid, model)
+                await _query_member_inner(member, mid, model, member_name, responding_to)
             except BaseException as e:  # incl. CancelledError
                 print(f"[COUNCIL] Member {model} aborted: {type(e).__name__}: {e}")
             finally:
                 await output_q.put({"type": "council_done", "member_id": mid,
-                                    "model": model, "round": round_num})
+                                    "model": model, "member_name": member_name,
+                                    "round": round_num, "round_label": label,
+                                    "responding_to": responding_to})
 
-        async def _query_member_inner(member: dict, mid, model):
+        async def _query_member_inner(member: dict, mid, model, member_name, responding_to):
             sys_p = member.get("system_prompt", "")
             if kb_context:
                 kb_section = (
@@ -213,7 +294,10 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                                 full += content
                                 await output_q.put({"type": "council_token",
                                                     "member_id": mid, "model": model,
-                                                    "content": content, "round": round_num})
+                                                    "member_name": member_name,
+                                                    "content": content, "round": round_num,
+                                                    "round_label": label,
+                                                    "responding_to": responding_to})
                             if chunk.get("done"):
                                 break
                 except Exception as e:
@@ -222,7 +306,10 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                         await asyncio.sleep(2)
                         continue
                     await output_q.put({"type": "council_token", "member_id": mid,
-                                        "model": model, "content": f"\n[Error: {e}]", "round": round_num})
+                                        "model": model, "member_name": member_name,
+                                        "content": f"\n[Error: {e}]", "round": round_num,
+                                        "round_label": label,
+                                        "responding_to": responding_to})
                 # Got a non-empty response, break retry loop
                 if full.strip():
                     break
@@ -266,7 +353,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             all_round_responses[mid].append(content if content.strip() else member_responses.get(mid, ""))
 
     # ── Round 0: Initial responses ──
-    yield f"data: {json.dumps({'type': 'council_round', 'round': 0, 'total_rounds': debate_rounds + 1, 'label': 'Opening Statements'})}\n\n"
+    yield f"data: {json.dumps({'type': 'council_round', 'round': 0, 'total_rounds': debate_rounds + 1, 'label': _round_label(0, debate_rounds), 'stage': 'opening', 'member_count': len(members)})}\n\n"
 
     async for item in run_round(0):
         yield f"data: {json.dumps(item)}\n\n"
@@ -280,12 +367,16 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                                  metadata={"council_member_id": mid,
                                            "council_model": member["model"],
                                            "council_persona": member.get("persona_name", ""),
-                                           "debate_round": 0})
+                                           "debate_round": 0,
+                                           "round_label": _round_label(0, debate_rounds),
+                                           "responding_to": [],
+                                           "response_order": members.index(member)})
 
     # ── Debate rounds ──
     for rnd in range(1, debate_rounds + 1):
-        round_label = f"Rebuttal Round {rnd}" if debate_rounds > 1 else "Rebuttal Round"
-        yield f"data: {json.dumps({'type': 'council_round', 'round': rnd, 'total_rounds': debate_rounds + 1, 'label': round_label})}\n\n"
+        round_label = _round_label(rnd, debate_rounds)
+        prior_member_responses = dict(member_responses)
+        yield f"data: {json.dumps({'type': 'council_round', 'round': rnd, 'total_rounds': debate_rounds + 1, 'label': round_label, 'stage': 'rebuttal', 'member_count': len(members)})}\n\n"
 
         def make_debate_context(member):
             mid = member["id"]
@@ -301,13 +392,17 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             if not others_text:
                 return None
             your_prev = member_responses.get(mid, "")[:500]
+            other_names = ", ".join(item["name"] for item in _responding_to_members(member, members, member_responses)[:3])
             return (
                 f"This is debate round {rnd}. The other council members have responded.\n\n"
                 f"Their responses:\n" + "\n\n".join(others_text) + "\n\n"
                 f"Your previous response was:\n{your_prev}\n\n"
-                f"Now respond to the other members' arguments. Challenge weak points, "
-                f"defend your position, acknowledge good arguments, and refine your answer. "
-                f"Be direct and engage specifically with what others said. Keep it concise."
+                f"Now answer as a council member, not as an isolated chatbot. Directly engage "
+                f"at least two other members by name when possible"
+                f"{f' (for example: {other_names})' if other_names else ''}. "
+                f"Challenge weak points, acknowledge the strongest opposing point, defend or revise "
+                f"your position, and make clear how your view changed after hearing the council. "
+                f"Keep it concise."
             )
 
         async for item in run_round(rnd, extra_context_fn=make_debate_context):
@@ -318,11 +413,15 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             mid = member["id"]
             content = member_responses.get(mid, "")
             if content:
+                responding_to = _responding_to_members(member, members, prior_member_responses)
                 await db.add_message(conv_id, "assistant", content,
                                      metadata={"council_member_id": mid,
                                                "council_model": member["model"],
                                                "council_persona": member.get("persona_name", ""),
-                                               "debate_round": rnd})
+                                               "debate_round": rnd,
+                                               "round_label": round_label,
+                                               "responding_to": responding_to,
+                                               "response_order": members.index(member)})
 
     # ── AI Peer Voting Phase ──
     vote_details = []
@@ -331,7 +430,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
 
     responding_members = [m for m in members if member_responses.get(m["id"]) and not _is_gibberish(member_responses[m["id"]])]
     if len(responding_members) > 1:
-        yield f"data: {json.dumps({'type': 'council_voting'})}\n\n"
+        yield f"data: {json.dumps({'type': 'council_voting', 'stage': 'peer_vote', 'member_count': len(responding_members)})}\n\n"
 
         async def query_member_vote(member: dict):
             mid = member["id"]
@@ -351,12 +450,14 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             vote_prompt = (
                 f'The council was asked: "{last_user_msg[:300]}"\n\n'
                 f'Your final response{round_info}: "{member_responses.get(mid, "")[:300]}"\n\n'
-                f'Now vote for the BEST response from the other council members. '
-                f'You CANNOT vote for yourself.\n\n'
+                f'Now vote as a council peer. Choose the strongest response from the other council members, '
+                f'weighing clarity, direct engagement with the question, use of the debate, and practical value. '
+                f'You CANNOT vote for yourself. Do not choose a response just because you agree with its conclusion; '
+                f'choose the response that argued best.\n\n'
                 f'Other final responses:\n{options_text}\n\n'
                 f'Reply in EXACTLY this format (nothing else):\n'
                 f'VOTE: [exact name from above]\n'
-                f'REASON: [one sentence explaining your choice]'
+                f'REASON: [one specific sentence comparing the chosen response to at least one alternative]'
             )
             try:
                 r = await http.post(f"{config.OLLAMA_URL}/api/chat", json={
@@ -415,7 +516,8 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             except Exception as e:
                 print(f"[COUNCIL] Points update error: {e}")
 
-        yield f"data: {json.dumps({'type': 'council_votes', 'votes': vote_details, 'tally': vote_tally, 'updated_points': updated_points})}\n\n"
+        winners = _vote_winners(vote_tally, members)
+        yield f"data: {json.dumps({'type': 'council_votes', 'votes': vote_details, 'tally': vote_tally, 'winners': winners, 'updated_points': updated_points})}\n\n"
 
     # Host synthesis
     if host_model and member_responses:
@@ -440,12 +542,16 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                 for member in members if member_responses.get(member["id"]) and not _is_gibberish(member_responses[member["id"]])
             )
         vote_summary = ""
+        winners = _vote_winners(vote_tally, members)
         if vote_details:
             vote_lines = [
                 f"- {v['voter_name']} voted for {v['voted_for_name']}: \"{v['reason']}\""
                 for v in vote_details
             ]
-            vote_summary = "\n\nPeer vote results:\n" + "\n".join(vote_lines)
+            winner_line = ""
+            if winners:
+                winner_line = f"\nLeading peer vote result: {winners[0]['name']} with {winners[0]['votes']} vote(s)."
+            vote_summary = "\n\nPeer vote results:" + winner_line + "\n" + "\n".join(vote_lines)
         debate_note = f" The council debated for {debate_rounds + 1} rounds." if debate_rounds > 0 else ""
         host_system = (host_sys or "You are the council moderator. Synthesize the council responses and provide a final verdict or summary.") + " Always respond in English."
         if kb_context:
@@ -487,6 +593,10 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             await db.add_message(conv_id, "assistant", host_full,
                                  metadata={"council_host": True, "council_id": council_id,
                                            "votes": vote_details, "tally": vote_tally,
-                                           "debate_rounds": debate_rounds})
+                                           "winners": winners,
+                                           "winner": winners[0] if winners else None,
+                                           "debate_rounds": debate_rounds,
+                                           "round_count": debate_rounds + 1,
+                                           "round_label": "Moderator Verdict"})
 
     yield f"data: {json.dumps({'type': 'council_complete'})}\n\n"

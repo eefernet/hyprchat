@@ -38,6 +38,9 @@ CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".deploy_
 # ── Remote paths ──
 REMOTE_BACKEND = "/opt/hyprchat/backend/"
 REMOTE_AGENTS = REMOTE_BACKEND + "agents/"
+REMOTE_DB = REMOTE_BACKEND + "db/"
+REMOTE_ROUTES = REMOTE_BACKEND + "routes/"
+REMOTE_TOOLING = REMOTE_BACKEND + "tooling/"
 REMOTE_FRONTEND = "/opt/hyprchat/frontend/dist/"
 REMOTE_OPENHANDS_WORKER = "/opt/openhands-worker/"
 REMOTE_AIDER_VENV = REMOTE_OPENHANDS_WORKER + "aider-venv"
@@ -50,6 +53,32 @@ WATCHED = {
     "backend/config.py":            ("Config",           REMOTE_BACKEND,            True),
     "backend/database.py":          ("Database",         REMOTE_BACKEND,            True),
     "backend/tools.py":             ("Tools",            REMOTE_BACKEND,            True),
+    "backend/artifact_files.py":    ("Artifact Files",   REMOTE_BACKEND,            True),
+    "backend/artifact_service.py":  ("Artifact Service", REMOTE_BACKEND,            True),
+    "backend/research_config.py":   ("Research Config",  REMOTE_BACKEND,            True),
+    "backend/model_management.py":  ("Model Management", REMOTE_BACKEND,            True),
+    "backend/db/__init__.py":       ("Database Package", REMOTE_DB,                 True),
+    "backend/db/schema.py":         ("Database Schema",  REMOTE_DB,                 True),
+    "backend/db/artifacts.py":      ("Artifact DB",      REMOTE_DB,                 True),
+    "backend/routes/__init__.py":   ("Routes Package",   REMOTE_ROUTES,             True),
+    "backend/routes/context.py":    ("Route Context",    REMOTE_ROUTES,             True),
+    "backend/routes/health.py":     ("Health Routes",    REMOTE_ROUTES,             True),
+    "backend/routes/settings.py":   ("Settings Routes",  REMOTE_ROUTES,             True),
+    "backend/routes/users.py":      ("User Routes",      REMOTE_ROUTES,             True),
+    "backend/routes/audio.py":      ("Audio Routes",     REMOTE_ROUTES,             True),
+    "backend/routes/artifacts.py":  ("Artifact Routes",  REMOTE_ROUTES,             True),
+    "backend/routes/catalog.py":    ("Catalog Routes",   REMOTE_ROUTES,             True),
+    "backend/routes/downloads.py":  ("Download Routes",  REMOTE_ROUTES,             True),
+    "backend/routes/model_providers.py": ("Provider Routes", REMOTE_ROUTES,          True),
+    "backend/routes/hf.py":         ("HF Routes",        REMOTE_ROUTES,             True),
+    "backend/routes/tools_connectors.py": ("Tools/Connector Routes", REMOTE_ROUTES,  True),
+    "backend/routes/model_configs.py": ("Model Config Routes", REMOTE_ROUTES,        True),
+    "backend/routes/ollama_models.py": ("Ollama Model Routes", REMOTE_ROUTES,        True),
+    "backend/tooling/__init__.py":  ("Tooling Package",  REMOTE_TOOLING,            True),
+    "backend/tooling/parser.py":    ("Tool Parser",      REMOTE_TOOLING,            True),
+    "backend/tooling/codebox_tools.py": ("Codebox Tools", REMOTE_TOOLING,            True),
+    "backend/tooling/workflow_gate.py": ("Workflow Gate",  REMOTE_TOOLING,            True),
+    "backend/tooling/gate_decisions.py": ("Gate Decisions", REMOTE_TOOLING,           True),
     "backend/connectors.py":        ("Connectors",       REMOTE_BACKEND,            True),
     "backend/model_providers.py":   ("Model Providers",  REMOTE_BACKEND,            True),
     "backend/cancel_registry.py":   ("Cancel Registry",  REMOTE_BACKEND,            True),
@@ -85,6 +114,18 @@ WATCHED = {
     # and _build_and_deploy_frontend). The built dist/index.html is no longer
     # hand-edited or watched directly.
     "frontend/src/main.jsx":        ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/session.js":      ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/theme.js":        ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/modelHelpers.js": ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/settingsSync.js": ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/ModelPicker.jsx": ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/components/BackgroundCanvas.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/artifactComponents.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/hyprChatWidgets.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/icons.jsx": ("Frontend (build)", REMOTE_FRONTEND,      False),
+    "frontend/src/components/markdownBlocks.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/panels/AnalyticsPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/panels/PromptLibraryPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/vendor.js":       ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/src/prism-setup.js":  ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/index.html":          ("Frontend (build)", REMOTE_FRONTEND,           False),
@@ -100,6 +141,18 @@ WATCHED = {
 # labelled "Frontend (build)".
 FRONTEND_SRC_FILES = {
     "frontend/src/main.jsx",
+    "frontend/src/session.js",
+    "frontend/src/theme.js",
+    "frontend/src/modelHelpers.js",
+    "frontend/src/settingsSync.js",
+    "frontend/src/ModelPicker.jsx",
+    "frontend/src/components/BackgroundCanvas.jsx",
+    "frontend/src/components/artifactComponents.jsx",
+    "frontend/src/components/hyprChatWidgets.jsx",
+    "frontend/src/components/icons.jsx",
+    "frontend/src/components/markdownBlocks.jsx",
+    "frontend/src/panels/AnalyticsPanel.jsx",
+    "frontend/src/panels/PromptLibraryPanel.jsx",
     "frontend/src/vendor.js",
     "frontend/src/prism-setup.js",
     "frontend/index.html",
@@ -267,6 +320,18 @@ _PW_AUTH_OPTS = [
     "-o", "NumberOfPasswordPrompts=1",
 ]
 
+_SSH_RETRYABLE_ERRORS = (
+    "Permission denied (publickey,password)",
+    "Connection reset by",
+    "Connection closed by",
+    "kex_exchange_identification",
+)
+
+
+def _ssh_retryable_failure(stdout, stderr):
+    msg = f"{stdout or ''}\n{stderr or ''}"
+    return any(token in msg for token in _SSH_RETRYABLE_ERRORS)
+
 
 def scp(local, remote_host, remote_path, user, password):
     """Copy a file to remote via scp. Returns (ok, msg)."""
@@ -321,7 +386,7 @@ def scp_recursive(local, remote_host, remote_path, user, password, timeout=120):
         return False, str(e)
 
 
-def ssh_cmd(host, user, password, command, timeout=30):
+def ssh_cmd(host, user, password, command, timeout=30, attempts=3):
     """Run a command on remote via ssh. Returns (ok, stdout, stderr)."""
     if password:
         cmd = [
@@ -332,9 +397,22 @@ def ssh_cmd(host, user, password, command, timeout=30):
     else:
         cmd = ["ssh", "-o", "StrictHostKeyChecking=no", f"{user}@{host}", command]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return r.returncode == 0, r.stdout.strip(), r.stderr.strip()
+        last = None
+        for attempt in range(max(1, attempts)):
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            out = r.stdout.strip()
+            err = r.stderr.strip()
+            if r.returncode == 0:
+                return True, out, err
+            last = (out, err)
+            if not password or attempt >= attempts - 1 or not _ssh_retryable_failure(out, err):
+                break
+            time.sleep(1 + attempt)
+        out, err = last or ("", "")
+        return False, out, err
     except FileNotFoundError:
+        if password:
+            return False, "", "sshpass not installed; install sshpass or configure SSH keys and remove the password for this host"
         cmd2 = ["ssh", "-o", "StrictHostKeyChecking=no", f"{user}@{host}", command]
         r = subprocess.run(cmd2, capture_output=True, text=True, timeout=timeout)
         return r.returncode == 0, r.stdout.strip(), r.stderr.strip()

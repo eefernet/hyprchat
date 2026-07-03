@@ -16,7 +16,7 @@ import config
 import quick_search as _qs
 
 
-_VALID_CATEGORIES = ("news", "code", "recipe", "general")
+_VALID_CATEGORIES = ("news", "code", "recipe", "game", "general")
 _REFINE_THRESHOLD_DEFAULT = 0.30
 
 @dataclass
@@ -36,6 +36,7 @@ class SearchPlan:
     canonical_question: str
     queries: list[str]
     category: str
+    anchor_terms: list[str]
     freshness_mode: str
     resolved_date: str | None
     source_mode: str
@@ -50,6 +51,14 @@ class SearchPlan:
     time_range: str | None
     generated_at: str
     embed_rerank: bool
+
+
+@dataclass
+class SearchFrame:
+    category: str | None
+    anchor_terms: list[str]
+    local_entities: list[str]
+    confidence: float = 0.0
 
 
 def _configured_search_provider() -> str:
@@ -148,10 +157,224 @@ _RELATIVE_DAY_RE = re.compile(
     r"\b(today|tonight|this morning|this afternoon|this evening|yesterday)\b",
     re.IGNORECASE,
 )
+_ATTACHMENT_PLACEHOLDER_RE = re.compile(r"\s*\[Attached[^\]]+\]\s*", re.IGNORECASE)
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
+_SEARCH_CONTEXT_RE = re.compile(
+    r"\n+===\s*(?:QUICK WEB SEARCH|WEB SEARCH|SEARCH)\b[\s\S]*$",
+    re.IGNORECASE,
+)
+_HISTORICAL_RE = re.compile(
+    r"\b(?:historical|historically|history|real\s+life|real-world|irl|actual\s+history)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_GAME_RE = re.compile(
+    r"\b(?:game|gaming|gameplay|video\s+game|steam|xbox|playstation|nintendo|"
+    r"switch|wiki\.gg|fandom|speedrun|walkthrough|patch\s+notes?|dlc|mods?|"
+    r"nerf|buff|meta|eu4|hoi4|ck3|civ\s*[456]|bg3|rpg|mmo|fps|rts)\b",
+    re.IGNORECASE,
+)
+_GAME_CONTEXT_RE = re.compile(
+    r"\b(?:plays?|playing|game|gaming|gameplay|video\s+game|strategy\s+game|"
+    r"grand\s+strategy|campaign|save\s+file|steam|xbox|playstation|nintendo|"
+    r"wiki\.gg|fandom|modded?|dlc|patch)\b",
+    re.IGNORECASE,
+)
+_GAME_STATE_RE = re.compile(
+    r"\b(?:play|playing|campaign|save|nation|nations|country|countries|war|"
+    r"invade|invasion|ally|allies|alliance|favor|favors|favour|favours|"
+    r"curry|province|quest|level|boss|build|class|character|turn|map|mission|"
+    r"achievement|start|strategy|meta|patch|dlc|mod|server|join)\b",
+    re.IGNORECASE,
+)
+_CODE_CONTEXT_RE = re.compile(
+    r"\b(?:project|repo|repository|codebase|library|framework|package|api|"
+    r"backend|frontend|database|server|app|component|function|class|module)\b",
+    re.IGNORECASE,
+)
+_TRUE_RECENCY_RE = re.compile(
+    r"\b(?:today|tonight|this\s+(?:morning|afternoon|evening|week)|yesterday|"
+    r"latest|breaking|recent(?:ly)?|news|updates?|release[sd]?|launch(?:ed)?|"
+    r"announc(?:ed|ement)|new\s+version|patch\s+notes?|dev\s+diar(?:y|ies)|"
+    r"current\s+patch|cve|vulnerabilit(?:y|ies)|20[2-3]\d)\b",
+    re.IGNORECASE,
+)
+_DOMAIN_FRESH_RE: dict[str, re.Pattern] = {
+    "game": re.compile(
+        r"\b(?:latest|new|recent(?:ly)?|patch(?:\s+notes?)?|dlc|update|updates|"
+        r"dev\s+diar(?:y|ies)|version|release[sd]?|meta|tier\s+list|current\s+patch)\b",
+        re.IGNORECASE,
+    ),
+    "code": re.compile(
+        r"\b(?:latest|new|recent(?:ly)?|release[sd]?|version|changelog|"
+        r"deprecat(?:ed|ion)|cve|vulnerabilit(?:y|ies)|security\s+advisory|"
+        r"breaking\s+change|update|updates?)\b",
+        re.IGNORECASE,
+    ),
+    "recipe": re.compile(r"\b(?:latest|recent(?:ly)?|new|trend|viral)\b", re.IGNORECASE),
+}
+_LOCAL_ACTOR_RE = re.compile(
+    r"\b(?:should|can|could|would|will|does|do|did|is|was)\s+([A-Z][a-z]{2,30})\s+"
+    r"(?=(?:try|play|use|pick|choose|switch|start|join|make|build|run|buy|watch|read|learn)\b)"
+)
+_TITLE_PHRASE_RE = re.compile(
+    r"\b(?:[A-Z][A-Za-z0-9'.-]+|[A-Z]{2,6}\d?|[IVX]{2,5})"
+    r"(?:\s+(?:[A-Z][A-Za-z0-9'.-]+|[A-Z]{2,6}\d?|[IVX]{2,5}|[0-9]+)){0,4}\b"
+)
+_ANCHOR_ALIAS_PAIRS = (
+    ("Europa Universalis IV", "EU4"),
+    ("Hearts of Iron IV", "HOI4"),
+    ("Crusader Kings III", "CK3"),
+    ("Victoria 3", "VIC3"),
+    ("Civilization VI", "Civ 6"),
+    ("Civilization V", "Civ 5"),
+    ("Baldur's Gate 3", "BG3"),
+)
+_ANCHOR_ALIAS_LOOKUP: dict[str, str] = {}
+for _full, _alias in _ANCHOR_ALIAS_PAIRS:
+    _ANCHOR_ALIAS_LOOKUP[_full.lower()] = _alias
+    _ANCHOR_ALIAS_LOOKUP[_alias.lower()] = _full
+_ANCHOR_DROP = frozenset({
+    "the", "this", "that", "user", "assistant", "current", "attached", "image",
+    "quick", "search", "web", "sources", "source", "context", "memory",
+})
+
+
+def _strip_search_noise(text: str) -> str:
+    q = _SEARCH_CONTEXT_RE.sub(" ", text or "")
+    q = _MARKDOWN_IMAGE_RE.sub(" ", q)
+    q = _ATTACHMENT_PLACEHOLDER_RE.sub(" ", q)
+    q = re.sub(r"\s+", " ", q).strip()
+    return q
+
+
+def _dedupe_preserve(items: list[str], *, limit: int = 8) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        value = re.sub(r"\s+", " ", (item or "").strip(" .,:;!?\"'()[]{}")).strip()
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _alias_terms(term: str) -> list[str]:
+    key = (term or "").strip().lower()
+    if not key:
+        return []
+    alias = _ANCHOR_ALIAS_LOOKUP.get(key)
+    if alias:
+        return [term, alias]
+    return [term]
+
+
+def _title_phrases(text: str) -> list[str]:
+    phrases: list[str] = []
+    for match in _TITLE_PHRASE_RE.finditer(text or ""):
+        phrase = match.group(0).strip()
+        words = phrase.split()
+        if not words:
+            continue
+        low_words = [w.strip(".,:;!?()[]{}\"'").lower() for w in words]
+        if all(w in _ANCHOR_DROP for w in low_words):
+            continue
+        if len(words) == 1 and low_words[0] in _ANCHOR_DROP:
+            continue
+        if len(words) == 1 and phrase[0].isupper() and phrase[1:].islower():
+            # Single title-case words are often local names; keep acronyms and
+            # multi-word subjects as safer anchors.
+            continue
+        phrases.extend(_alias_terms(phrase))
+    for key, counterpart in _ANCHOR_ALIAS_LOOKUP.items():
+        if len(key) > 8:
+            continue
+        if re.search(rf"\b{re.escape(key)}\b", text or "", re.IGNORECASE):
+            phrases.extend(_alias_terms(key.upper()))
+            phrases.extend(_alias_terms(counterpart))
+    return _dedupe_preserve(phrases)
+
+
+def _extract_context_anchors(text: str, category: str | None) -> list[str]:
+    cleaned = _strip_search_noise(text)
+    anchors = _title_phrases(cleaned)
+    if category == "code":
+        for token in re.findall(
+            r"\b(?:React|Vue|Angular|FastAPI|Django|Flask|SQLite|Postgres|"
+            r"PostgreSQL|MySQL|Redis|Docker|Kubernetes|Node\.?js|TypeScript|"
+            r"JavaScript|Python|Rust|Go|Golang|HyprChat)\b",
+            cleaned,
+            flags=re.IGNORECASE,
+        ):
+            anchors.extend(_alias_terms(token))
+    return _dedupe_preserve(anchors)
+
+
+def _extract_local_entities(text: str, anchors: list[str] | None = None) -> list[str]:
+    anchor_lows = {a.lower() for a in (anchors or [])}
+    local: list[str] = []
+    for match in _LOCAL_ACTOR_RE.finditer(text or ""):
+        name = match.group(1).strip()
+        if name.lower() in anchor_lows:
+            continue
+        local.append(name)
+    return _dedupe_preserve(local, limit=4)
+
+
+def _context_category(prior: str, hint: str) -> tuple[str | None, float]:
+    context = " ".join([prior, hint])
+    if _EXPLICIT_GAME_RE.search(context) or _GAME_CONTEXT_RE.search(context):
+        return "game", 0.72
+    if _qs._CODE_RE.search(context) or _CODE_CONTEXT_RE.search(context):
+        return "code", 0.64
+    if _qs._RECIPE_RE.search(context):
+        return "recipe", 0.60
+    return None, 0.0
+
+
+def _infer_search_frame(latest: str, turns: list[str], context_hint: str = "") -> SearchFrame:
+    latest_clean = _strip_search_noise(latest)
+    prior = " ".join(_strip_search_noise(t) for t in turns[-4:])
+    hint = _strip_search_noise(context_hint)
+    context_cat, context_conf = _context_category(prior, hint)
+    context_anchors = _extract_context_anchors(" ".join([prior, hint]), context_cat)
+    latest_anchors = _extract_context_anchors(latest_clean, None)
+    explicit_game = bool(_EXPLICIT_GAME_RE.search(latest_clean))
+
+    if _HISTORICAL_RE.search(latest_clean) and not explicit_game:
+        local = _extract_local_entities(latest_clean, context_anchors + latest_anchors)
+        return SearchFrame("general", [], local, 0.80)
+    if _qs._CODE_RE.search(latest_clean):
+        anchors = _dedupe_preserve(latest_anchors + context_anchors)
+        return SearchFrame("code", anchors, _extract_local_entities(latest_clean, anchors), 0.88)
+    if _qs._RECIPE_RE.search(latest_clean):
+        anchors = _dedupe_preserve(latest_anchors + context_anchors)
+        return SearchFrame("recipe", anchors, _extract_local_entities(latest_clean, anchors), 0.86)
+    if explicit_game:
+        anchors = _dedupe_preserve(latest_anchors + context_anchors)
+        return SearchFrame("game", anchors, _extract_local_entities(latest_clean, anchors), 0.88)
+    if context_cat == "game" and (_GAME_STATE_RE.search(latest_clean) or len(_qs._content_tokens(latest_clean)) <= 7):
+        anchors = _dedupe_preserve(context_anchors + latest_anchors)
+        return SearchFrame("game", anchors, _extract_local_entities(latest_clean, anchors), context_conf)
+    if context_cat == "code" and (_CODE_CONTEXT_RE.search(latest_clean) or len(_qs._content_tokens(latest_clean)) <= 7):
+        anchors = _dedupe_preserve(context_anchors + latest_anchors)
+        return SearchFrame("code", anchors, _extract_local_entities(latest_clean, anchors), context_conf)
+    if context_cat == "recipe" and len(_qs._content_tokens(latest_clean)) <= 7:
+        anchors = _dedupe_preserve(context_anchors + latest_anchors)
+        return SearchFrame("recipe", anchors, _extract_local_entities(latest_clean, anchors), context_conf)
+
+    local = _extract_local_entities(latest_clean, context_anchors + latest_anchors)
+    return SearchFrame(None, [], local, 0.0)
 
 
 def _clean_query_phrase(text: str) -> str:
-    q = re.sub(r"https?://\S+", " ", text or "")
+    q = _strip_search_noise(text)
+    q = re.sub(r"https?://\S+", " ", q)
     q = _QUESTION_PREFIX_RE.sub("", q)
     q = re.sub(r"\b(please|for me)\b", " ", q, flags=re.I)
     q = re.sub(r"[?!.,;:]+", " ", q)
@@ -220,6 +443,119 @@ def _query_variants(base: str, category: str, freshness_mode: str, resolved_labe
     return out or [base]
 
 
+def _remove_terms(text: str, terms: list[str]) -> str:
+    q = text or ""
+    for term in sorted((t for t in terms if t), key=len, reverse=True):
+        q = re.sub(rf"\b{re.escape(term)}\b", " ", q, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", q).strip()
+
+
+def _subject_for_frame(text: str, frame: SearchFrame) -> str:
+    q = _strip_search_noise(text)
+    q = _remove_terms(q, frame.local_entities)
+    q = _remove_terms(q, frame.anchor_terms)
+    q = re.sub(r"https?://\S+", " ", q)
+    q = re.sub(
+        r"\b(?:should|can|could|would|will|do|does|did|is|are|was|were)\s+"
+        r"(?:i|we|you|he|she|they|it)?\b",
+        " ",
+        q,
+        flags=re.IGNORECASE,
+    )
+    q = re.sub(r"\bhow\s+(?:do|can|could|would|should)\s+(?:i|we|you|he|she|they)?\b", " ", q, flags=re.I)
+    q = re.sub(r"\b(?:currently|current|already|just|really|please|for me)\b", " ", q, flags=re.I)
+    q = re.sub(r"\b(?:won'?t|will not|refusing|refuse)\b", " refuses ", q, flags=re.I)
+    q = re.sub(r"\b\d+\+?", " ", q)
+    q = re.sub(r"[?!.,;:]+", " ", q)
+    q = re.sub(r"\s+", " ", q).strip()
+    words = [
+        w for w in q.split()
+        if w.lower() not in {
+            "the", "a", "an", "to", "with", "them", "me", "my", "your", "our",
+            "i", "we", "you", "he", "she", "they", "it", "and", "or", "have",
+            "has", "had", "how", "do", "does", "did", "in", "on", "at",
+        }
+    ]
+    if len(words) > 10:
+        words = words[:10]
+    return " ".join(words) or _clean_query_phrase(_remove_terms(text, frame.local_entities))
+
+
+def _contains_any_term(text: str, terms: list[str]) -> bool:
+    low = (text or "").lower()
+    return any(term and re.search(rf"\b{re.escape(term.lower())}\b", low) for term in terms)
+
+
+def _frame_query_variants(
+    base: str,
+    frame: SearchFrame,
+    category: str,
+    freshness_mode: str,
+    resolved_label: str,
+    max_queries: int,
+) -> list[str]:
+    if not frame.anchor_terms and not frame.local_entities:
+        return _query_variants(base, category, freshness_mode, resolved_label, max_queries)
+
+    subject = _clean_fresh_subject_phrase(base) if freshness_mode == "day" else _subject_for_frame(base, frame)
+    if not frame.anchor_terms:
+        return _query_variants(_remove_terms(base, frame.local_entities), category, freshness_mode, resolved_label, max_queries)
+
+    anchors = _dedupe_preserve(frame.anchor_terms, limit=4)
+    first_anchor = anchors[0]
+    anchored_subject = subject if _contains_any_term(subject, anchors) else f"{first_anchor} {subject}".strip()
+    variants = [anchored_subject]
+    if freshness_mode == "day":
+        year = _year_from_resolved_label(resolved_label)
+        variants.extend([
+            _clean_query_phrase(f"{anchored_subject} {resolved_label}") if resolved_label else anchored_subject,
+            _clean_query_phrase(f"{anchored_subject} {year}") if year and year not in anchored_subject else anchored_subject,
+            _clean_query_phrase(f"{anchored_subject} today"),
+        ])
+    elif category == "game":
+        variants.extend([
+            _clean_query_phrase(f"{anchors[min(1, len(anchors) - 1)]} {subject} strategy"),
+            _clean_query_phrase(f"{first_anchor} {subject} guide"),
+            _clean_query_phrase(f"{anchors[min(1, len(anchors) - 1)]} wiki {subject}"),
+        ])
+    elif category == "code":
+        variants.extend([
+            _clean_query_phrase(f"{anchored_subject} documentation"),
+            _clean_query_phrase(f"{anchored_subject} examples"),
+            _clean_query_phrase(f"{anchored_subject} issue"),
+        ])
+    elif category == "recipe":
+        variants.extend([
+            _clean_query_phrase(f"{anchored_subject} recipe"),
+            _clean_query_phrase(f"{anchored_subject} technique"),
+        ])
+    elif category == "news":
+        variants.extend([
+            _clean_query_phrase(f"{anchored_subject} latest"),
+            _clean_query_phrase(f"{anchored_subject} news"),
+            _clean_query_phrase(f"{anchored_subject} updates"),
+        ])
+    else:
+        variants.extend([
+            _clean_query_phrase(f"{anchored_subject} overview"),
+            _clean_query_phrase(f"{anchored_subject} sources"),
+        ])
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for q in variants:
+        q = _clean_query_phrase(q)
+        q = _remove_terms(q, frame.local_entities)
+        key = q.lower()
+        if not q or key in seen or not _qs._content_tokens(q):
+            continue
+        seen.add(key)
+        out.append(q)
+        if len(out) >= max_queries:
+            break
+    return out or [subject]
+
+
 def _context_topic(turns: list[str]) -> str:
     for turn in reversed(turns):
         if not turn.startswith("user:"):
@@ -231,9 +567,34 @@ def _context_topic(turns: list[str]) -> str:
     return ""
 
 
-def _deterministic_plan(messages: list, latest: str, mode_cfg: SearchModeConfig) -> SearchPlan:
+def _adjust_freshness_for_frame(
+    category: str,
+    text: str,
+    freshness_mode: str,
+    resolved_date: str | None,
+    time_range: str | None,
+    resolved_label: str,
+) -> tuple[str, str | None, str | None, str]:
+    if freshness_mode == "none":
+        return freshness_mode, resolved_date, time_range, resolved_label
+    if category == "news":
+        return freshness_mode, resolved_date, time_range, resolved_label
+    if freshness_mode == "day" and _TRUE_RECENCY_RE.search(text):
+        return freshness_mode, resolved_date, time_range, resolved_label
+    domain_fresh = _DOMAIN_FRESH_RE.get(category)
+    if domain_fresh and domain_fresh.search(text):
+        return freshness_mode, resolved_date, time_range, resolved_label
+    if category in {"game", "code", "recipe"}:
+        return "none", None, None, ""
+    if _TRUE_RECENCY_RE.search(text):
+        return freshness_mode, resolved_date, time_range, resolved_label
+    return "none", None, None, ""
+
+
+def _deterministic_plan(messages: list, latest: str, mode_cfg: SearchModeConfig, context_hint: str = "") -> SearchPlan:
     now = datetime.now().astimezone()
     latest, forced_online = _strip_online_prefix(latest)
+    latest = _strip_search_noise(latest)
     search_provider = _configured_search_provider()
     scraper_provider = _configured_scraper_provider()
     reranker_type = _configured_reranker_type() if mode_cfg.embed_rerank else "none"
@@ -244,10 +605,16 @@ def _deterministic_plan(messages: list, latest: str, mode_cfg: SearchModeConfig)
         if topic and not (_qs._content_tokens(latest) & _qs._content_tokens(topic)):
             base = f"{topic} {latest}"
 
+    frame = _infer_search_frame(latest, turns, context_hint)
+    if frame.category and frame.anchor_terms and not _contains_any_term(base, frame.anchor_terms):
+        base = f"{frame.anchor_terms[0]} {base}"
     freshness_mode, resolved_date, time_range, resolved_label = _freshness_from_text(base, now)
-    category = _qs._classify_query(base)
+    category = frame.category or _qs._classify_query(base)
     if freshness_mode != "none" and category == "general":
         category = "news"
+    freshness_mode, resolved_date, time_range, resolved_label = _adjust_freshness_for_frame(
+        category, base, freshness_mode, resolved_date, time_range, resolved_label,
+    )
 
     canonical = latest
     if resolved_label:
@@ -260,7 +627,9 @@ def _deterministic_plan(messages: list, latest: str, mode_cfg: SearchModeConfig)
     if base != latest and _qs._content_tokens(base):
         canonical = f"{canonical} (context: {_clean_query_phrase(base)})"
 
-    queries = _query_variants(base, category, freshness_mode, resolved_label, mode_cfg.max_queries)
+    queries = _frame_query_variants(
+        base, frame, category, freshness_mode, resolved_label, mode_cfg.max_queries,
+    )
     if forced_online and latest and latest not in queries:
         queries.insert(0, _clean_query_phrase(latest))
         queries = queries[:mode_cfg.max_queries]
@@ -278,6 +647,7 @@ def _deterministic_plan(messages: list, latest: str, mode_cfg: SearchModeConfig)
         canonical_question=canonical[:400],
         queries=queries,
         category=category,
+        anchor_terms=frame.anchor_terms,
         freshness_mode=freshness_mode,
         resolved_date=resolved_date,
         source_mode=";".join(source_bits),
@@ -306,6 +676,7 @@ def _searxng_engines_for_category(category: str) -> str:
         "news": getattr(config, "QUICK_SEARCH_SEARXNG_NEWS_ENGINES", ""),
         "code": getattr(config, "QUICK_SEARCH_SEARXNG_CODE_ENGINES", ""),
         "recipe": getattr(config, "QUICK_SEARCH_SEARXNG_RECIPE_ENGINES", ""),
+        "game": getattr(config, "QUICK_SEARCH_SEARXNG_GAME_ENGINES", ""),
     }.get(category, "")
     return (specific or getattr(config, "QUICK_SEARCH_SEARXNG_ENGINES", "") or "").strip()
 
@@ -468,7 +839,7 @@ def _build_prior_tokens(messages: list, latest: str) -> tuple[list[str], set[str
     turns: list[str] = []
     for m in messages[-6:]:
         role = m.get("role", "")
-        content = (m.get("content") or "").strip()
+        content = _strip_search_noise((m.get("content") or "").strip())
         if role not in ("user", "assistant") or not content:
             continue
         if content == latest:
@@ -563,6 +934,7 @@ async def run_search_agent(
     http, ollama_url: str, refine_model: str,
     events, conv_id: str, messages: list,
     *, default_model: str = "",
+    context_hint: str = "",
     max_rounds: int = 2,
     relevance_threshold: float = _REFINE_THRESHOLD_DEFAULT,
 ) -> dict:
@@ -577,6 +949,7 @@ async def run_search_agent(
         return {"context": "", "rewritten_query": "", "skipped": True, "reason": "no user message"}
 
     clean_latest, _ = _strip_online_prefix(latest)
+    clean_latest = _strip_search_noise(clean_latest)
     skip, reason = _qs._should_skip(clean_latest)
     if skip:
         await _emit(events, conv_id, "tool_done", {
@@ -585,7 +958,7 @@ async def run_search_agent(
         return {"context": "", "rewritten_query": "", "skipped": True, "reason": reason}
 
     mode_cfg = _mode_config()
-    plan = _deterministic_plan(messages, latest, mode_cfg)
+    plan = _deterministic_plan(messages, latest, mode_cfg, context_hint=context_hint)
 
     await _emit(events, conv_id, "tool_start", {
         "tool": "quick_search", "icon": "search",
