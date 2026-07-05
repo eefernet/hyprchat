@@ -1218,6 +1218,18 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
 
 const Chip=({l,c,bg,onX})=><span style={{display:"inline-flex",alignItems:"center",gap:4,background:bg,color:c,padding:"3px 8px",borderRadius:20,fontSize:10,fontWeight:600}}>{l}{onX&&<span onClick={onX} style={{cursor:"pointer",opacity:.7}}>&times;</span>}</span>;
 
+// Shared designed empty state — icon + title + hint + optional action button.
+function EmptyState({t,font,icon,title,hint,action,compact}){
+  return <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8,textAlign:"center",
+    padding:compact?"18px 14px":"36px 20px",border:`1px dashed ${t.brd}44`,borderRadius:10,
+    background:`${t.surface}30`,color:t.mut,fontFamily:font}}>
+    <div style={{fontSize:compact?22:30,lineHeight:1,opacity:.9,animation:"float 4s ease-in-out infinite",display:"flex",justifyContent:"center"}}>{icon}</div>
+    <div style={{fontSize:compact?11:13,fontWeight:800,color:t.dim}}>{title}</div>
+    {hint&&<div style={{fontSize:compact?10:11,lineHeight:1.55,maxWidth:420}}>{hint}</div>}
+    {action||null}
+  </div>;
+}
+
 const TIPS={
   chunk_size:"Characters per text chunk when indexing KB files. Smaller = more precise retrieval, larger = more context per chunk. Default: 500",
   chunk_overlap:"Overlap between adjacent chunks in characters. Preserves context at boundaries. Default: 50",
@@ -2806,6 +2818,7 @@ export {
   _baseRole,
   _basename,
   DaedalusSummary,
+  EmptyState,
   MemoMD,
   citeOptsFor,
   CitationChip,

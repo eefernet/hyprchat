@@ -930,7 +930,11 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       {loading&&<div style={{fontSize:12,color:t.mut,padding:18}}>Loading artifacts...</div>}
-      {!loading&&!items.length&&<div style={{textAlign:"center",padding:44,color:t.mut,fontSize:12}}>No artifacts found.</div>}
+      {!loading&&!items.length&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8,textAlign:"center",padding:"36px 20px",border:`1px dashed ${t.brd}44`,borderRadius:10,background:`${t.surface}30`,color:t.mut,fontFamily:font}}>
+        <div style={{fontSize:30,lineHeight:1,opacity:.9,animation:"float 4s ease-in-out infinite",display:"flex",justifyContent:"center"}}><IC.Layers/></div>
+        <div style={{fontSize:13,fontWeight:800,color:t.dim}}>No artifacts yet</div>
+        <div style={{fontSize:11,lineHeight:1.55,maxWidth:420}}>Files the assistant delivers with download_file or download_project are collected here.</div>
+      </div>}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:12}}>
         {items.map(a=><ArtifactCard key={a.id} artifact={a} t={t} font={font} workspaces={workspaces} onPreview={onPreview} onOpenConv={onOpenConv} onPatch={patchArtifact} onDelete={deleteArtifact} onDetails={openDetail} onSelect={toggleSelected} selected={selected.has(a.id)}/>)}
       </div>

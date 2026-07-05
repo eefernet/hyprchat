@@ -1,4 +1,36 @@
 <details open>
+<summary>Alpha v17.3.2 — July 3, 2026</summary>
+
+> Deep Research gets a full-page report composer, Settings gets a unified
+> card-based redesign, animated backgrounds get glow, depth, and parallax,
+> and PDF exports stop cutting content at page breaks.
+
+## Deep Research
+- Starting a new report now opens a dedicated full-page composer — a large topic box up top with report, model, context, and sources settings organized into cards below — instead of cramming the form into the sidebar.
+- The panel opens on the Reports view when reports exist and switches to the running report automatically after Start.
+- Export and rerun actions now appear only while viewing reports.
+
+## Settings
+- Every settings tab now uses one titled-card design system with consistent headings, cards, and spacing.
+- The densest tabs — Daedalus, Model & Generation, and Connections — are regrouped into logical cards (Models / Repair Engines / Build Limits, Generation Defaults, Service Status / Cloud Models / Endpoints).
+- Repeated model-picker, toggle, slider, and chip-row markup was collapsed into shared helpers.
+
+## Animated Backgrounds
+- All canvas effects gained glow sprites, depth layers, and a subtle pointer parallax that makes the background drift toward the cursor.
+- Flagship effects were rewritten as showpieces: Neural Constellation fires signal pulses along its edges, Star Drift adds parallax depth planes and occasional shooting stars, Aurora Lines became layered gradient curtains, Soft Flow leaves comet trails colored by the flow field, and Circuit Drift sends glowing data packets along its traces.
+- New performance guardrails: animations cap near 60fps, pause entirely when the tab is hidden, and stay speed-consistent across refresh rates. Reduced-motion still renders a static frame.
+
+## Bug fixes
+- PDF and Print exports of research reports no longer slice source entries or headings across page boundaries, and overly long source snippets are clamped so a single source always fits on one page.
+
+## Internal
+- Deduplicated `research.py`: one shared HTML-cleaning helper and one shared batched-search helper replace copy-pasted logic across the research pipelines, with no behavior change.
+
+</details>
+
+---
+
+<details>
 <summary>Alpha v17.3.1 — July 3, 2026</summary>
 
 > UI readability and reliability polish for Quick Search, Daedalus, Council
