@@ -280,16 +280,26 @@ _NEWS_RE = re.compile(
     r"died|killed|elected|resigned|appointed|sworn\s+in)\b",
     re.IGNORECASE,
 )
-_CODE_RE = re.compile(
+# Category signals are split into STRONG (near-unambiguous on their own) and
+# WEAK (common English words that only count when two distinct ones co-occur).
+# This is what keeps "Taylor Swift new album" out of `code` (bare `swift`) and
+# "who won the Celtics game last night" out of `game` (bare `game`).
+_CODE_STRONG_RE = re.compile(
     r"\b(function|method|variable|exception|stack\s+trace|traceback|"
     r"compile|debug|syntax\s+error|regex|pip\b|npm\b|cargo|docker|kubernetes|k8s|"
-    r"python|javascript|typescript|rust|golang|kotlin|swift|ruby|"
-    r"react|vue|angular|node\.?js|django|flask|rails|spring|fastapi|"
-    r"github|gitlab|repo|commit|branch|merge|pull\s+request|"
+    r"python|javascript|typescript|golang|kotlin|"
+    r"vue|angular|node\.?js|django|flask|rails|fastapi|"
+    r"github|gitlab|repo|commit|pull\s+request|"
     r"sql|postgres|mysql|sqlite|mongodb|redis|"
     r"endpoint|http\b|json|xml|yaml|"
     r"linux|ubuntu|bash|zsh|terminal|"
     r"\.py\b|\.js\b|\.ts\b|\.rs\b|\.cpp|\.java\b)\b",
+    re.IGNORECASE,
+)
+_CODE_WEAK_RE = re.compile(
+    r"\b(rust|swift|ruby|spring|react|branch|merge|"
+    r"library|framework|package|api|backend|frontend|database|server|"
+    r"class|module|script|bug|deploy)\b",
     re.IGNORECASE,
 )
 _RECIPE_RE = re.compile(
@@ -298,13 +308,56 @@ _RECIPE_RE = re.compile(
     r"vegetarian|vegan|gluten[\s-]free|keto|paleo)\b",
     re.IGNORECASE,
 )
-_GAME_RE = re.compile(
-    r"\b(?:game|gaming|gameplay|video\s+game|steam|xbox|playstation|nintendo|"
-    r"switch|wiki\.gg|fandom|walkthrough|speedrun|strategy\s+game|campaign|"
-    r"quest|level|boss|build|patch\s+notes?|dlc|mods?|nerf|buff|meta|"
+_GAME_STRONG_RE = re.compile(
+    r"\b(?:gaming|gameplay|video\s+game|steam|xbox|playstation|nintendo|"
+    r"wiki\.gg|fandom|walkthrough|speedrun|strategy\s+game|"
+    r"patch\s+notes?|dlc|"
     r"eu4|hoi4|ck3|civ\s*[456]|bg3|rpg|mmo|fps|rts)\b",
     re.IGNORECASE,
 )
+_GAME_WEAK_RE = re.compile(
+    r"\b(?:game|switch|campaign|quest|level|boss|build|"
+    r"mods?|nerf|buff|meta)\b",
+    re.IGNORECASE,
+)
+# Real-world sports questions share vocabulary with video games ("game",
+# "match", "season") but want news treatment, not wiki.gg/fandom bias.
+_SPORTS_LEAGUE_RE = re.compile(
+    r"\b(?:nba|nfl|mlb|nhl|mls|wnba|ncaa|fifa\s+world\s+cup|uefa|"
+    r"premier\s+league|la\s+liga|serie\s+a|bundesliga|champions\s+league|"
+    r"world\s+cup|super\s+bowl|world\s+series|stanley\s+cup|playoffs?|"
+    r"standings|grand\s+slam|wimbledon|formula\s+1|f1|nascar|olympics?)\b",
+    re.IGNORECASE,
+)
+_SPORTS_CONTEXT_RE = re.compile(
+    r"\b(?:game|match|series|season|finals?)\b[^.?!]{0,40}?"
+    r"\b(?:won|win|wins|winning|lost|lose|beat|scored?|scores|schedule|tonight|last\s+night)\b"
+    r"|\b(?:won|win|beat|scored?|scores)\b[^.?!]{0,40}?\b(?:game|match|series)s?\b",
+    re.IGNORECASE,
+)
+
+
+def _distinct_hits(pattern: re.Pattern, text: str) -> int:
+    """Count distinct alternatives a signal regex matched (plural-folded)."""
+    hits: set[str] = set()
+    for m in pattern.finditer(text or ""):
+        tok = m.group(0).lower()
+        if tok.endswith("s") and not tok.endswith("ss") and len(tok) > 3:
+            tok = tok[:-1]
+        hits.add(tok)
+    return len(hits)
+
+
+def _is_code_query(q: str) -> bool:
+    return bool(_CODE_STRONG_RE.search(q)) or _distinct_hits(_CODE_WEAK_RE, q) >= 2
+
+
+def _is_game_query(q: str) -> bool:
+    return bool(_GAME_STRONG_RE.search(q)) or _distinct_hits(_GAME_WEAK_RE, q) >= 2
+
+
+def _is_sports_query(q: str) -> bool:
+    return bool(_SPORTS_LEAGUE_RE.search(q) or _SPORTS_CONTEXT_RE.search(q))
 _GAME_RESULT_RE = re.compile(
     r"\b(?:game|gaming|gameplay|steam|wiki\.gg|fandom|walkthrough|campaign|"
     r"quest|level|boss|achievement|strategy|guide|dev\s+diar(?:y|ies)|"
@@ -351,13 +404,15 @@ _DOWNRANK_DOMAINS: dict[str, frozenset[str]] = {
 
 def _classify_query(q: str) -> str:
     """Rough query category for domain-aware ranking."""
+    if _is_sports_query(q) and not _GAME_STRONG_RE.search(q):
+        return "news"
     if _NEWS_RE.search(q):
         return "news"
-    if _CODE_RE.search(q):
+    if _is_code_query(q):
         return "code"
     if _RECIPE_RE.search(q):
         return "recipe"
-    if _GAME_RE.search(q):
+    if _is_game_query(q):
         return "game"
     return "general"
 
@@ -888,6 +943,9 @@ async def _fetch_clean_page(http, url: str) -> dict | None:
     return {"url": url, "content": text[:6000]}
 
 
+_PAGE_FETCH_DEADLINE = 8.0
+
+
 async def _enrich_with_pages(http, results: list, top_n: int = 3) -> dict[str, str]:
     top_n = max(0, int(top_n or 0))
     targets: list[str] = []
@@ -911,15 +969,18 @@ async def _enrich_with_pages(http, results: list, top_n: int = 3) -> dict[str, s
     if not targets:
         return {}
 
-    try:
-        fetched = await asyncio.wait_for(
-            asyncio.gather(*[_fetch_clean_page(http, u) for u in targets], return_exceptions=True),
-            timeout=8.0,
-        )
-    except asyncio.TimeoutError:
-        return {}
+    # asyncio.wait (not wait_for+gather) so one slow site can't discard the
+    # page text of fetches that already completed within the deadline.
+    tasks = [asyncio.ensure_future(_fetch_clean_page(http, u)) for u in targets]
+    done, pending = await asyncio.wait(tasks, timeout=_PAGE_FETCH_DEADLINE)
+    for t in pending:
+        t.cancel()
     out: dict[str, str] = {}
-    for f in fetched:
+    for t in done:
+        try:
+            f = t.result()
+        except Exception:
+            continue
         if isinstance(f, dict) and f.get("url") and f.get("content"):
             out[f["url"]] = f["content"][:1500]
     return out
@@ -1052,6 +1113,8 @@ def _build_context(
     page_text: dict[str, str],
     allowed_image_urls: set[str],
     plan=None,
+    *,
+    low_relevance: bool = False,
 ) -> str:
     now = _format_now()
     resolved = _plan_get(plan, "resolved_date", "") or "none"
@@ -1082,6 +1145,13 @@ def _build_context(
             "FRESHNESS WARNING:",
             f"- These sources do not prove activity on {resolved}.",
             "- If the user asked what happened on that date, say the search only found older or undated evidence.",
+            "",
+        ]
+    if low_relevance:
+        lines += [
+            "RELEVANCE WARNING:",
+            "- These sources have weak topical overlap with the user's question and may be off-topic.",
+            "- Only use a source that clearly addresses the question; otherwise say the search did not find a direct answer.",
             "",
         ]
     for i, r in enumerate(results, 1):
@@ -1257,9 +1327,10 @@ async def run_quick_search_for_chat(
 ) -> dict:
     """Used by `agents/chat.py` to inject fresh search context.
 
-    Dispatches to `search_agent.run_search_agent` for the deterministic-first
-    pipeline. The model parameter is now only used for optional quality-mode
-    refinement, not for the normal planning path.
+    Dispatches to `search_agent.run_search_agent`, which runs the deterministic
+    plan immediately and (in balanced/quality modes) a small-LLM query planner
+    in parallel with the first search wave. The model parameter feeds that
+    planner and the low-relevance refinement round.
 
     Returns: {"context": str, "rewritten_query": str, "skipped": bool, "reason": str}
     """
@@ -1267,16 +1338,16 @@ async def run_quick_search_for_chat(
     # from this module.
     import model_providers
     from search_agent import run_search_agent
-    # The refine call goes to Ollama; never inherit a cloud-prefixed chat model
-    # (it would 404). Cloud is honored only via an explicit triage/workspace model.
-    refine_model = (
+    # Planner/refine calls go to Ollama; never inherit a cloud-prefixed model
+    # (it would 404). Cloud is honored only via an explicit triage model.
+    planner_model = (
         getattr(config, "QUICK_SEARCH_TRIAGE_MODEL", "")
-        or workspace_model
+        or model_providers.reject_cloud(workspace_model)
         or model_providers.reject_cloud(chat_model)
         or model_providers.reject_cloud(default_model)
     )
     return await run_search_agent(
-        http, ollama_url, refine_model,
+        http, ollama_url, planner_model,
         events, conv_id, messages,
         default_model=default_model or workspace_model,
         context_hint=context_hint,

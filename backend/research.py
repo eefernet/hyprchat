@@ -102,6 +102,38 @@ _RESEARCH_PAGE_MAX_CLEAN_CHARS = 400_000       # decoded-text cap before regex c
 _SEARCH_BATCH_DELAY_DEEP = 2.0          # seconds between batches in deep research
 _SEARCH_BATCH_DELAY_CONSPIRACY = 2.5    # seconds between batches in conspiracy research
 
+
+async def _batched_searches(queries, search_fn, *, delay,
+                            before_batch=None, prepare=None, on_batch_done=None, sink=None):
+    """Run search_fn over queries in _SEARCH_BATCH_SIZE batches with a rate-limit
+    sleep between batches.
+
+    before_batch: async () -> None, awaited at each batch start (cancel checks).
+    prepare: (q) -> bool claim/dedup filter; a batch where every query is
+        rejected is skipped entirely (no on_batch_done, no sleep).
+    on_batch_done: async (done: int) -> None, done = queries attempted so far.
+    sink: list extended in place per batch so partial results survive a
+        mid-run cancellation raised from before_batch.
+    """
+    out = sink if sink is not None else []
+    total = len(queries)
+    for batch_start in range(0, total, _SEARCH_BATCH_SIZE):
+        if before_batch is not None:
+            await before_batch()
+        batch = queries[batch_start:batch_start + _SEARCH_BATCH_SIZE]
+        run = [q for q in batch if prepare is None or prepare(q)]
+        if prepare is not None and not run:
+            continue
+        results = await asyncio.gather(*[search_fn(q) for q in run], return_exceptions=True)
+        for res in results:
+            if isinstance(res, list):
+                out.extend(res)
+        if on_batch_done is not None:
+            await on_batch_done(batch_start + len(batch))
+        if batch_start + _SEARCH_BATCH_SIZE < total:
+            await asyncio.sleep(delay)
+    return out
+
 _THINK_BLOCK_RE = re.compile(r"(?is)<think\b[^>]*>.*?</think\s*>")
 _THINK_OPEN_RE = re.compile(r"(?is)<think\b[^>]*>")
 _THINK_CLOSE_RE = re.compile(r"(?is)</think\s*>")
@@ -598,8 +630,7 @@ async def _search_wikileaks(http, searxng_url: str, query: str, count: int = 15)
                     })
             except Exception:
                 text = r.text
-                import re as _re2
-                for m in _re2.finditer(r'href="(https?://wikileaks\.org/[^"]+)"[^>]*>([^<]{5,200})<', text):
+                for m in re.finditer(r'href="(https?://wikileaks\.org/[^"]+)"[^>]*>([^<]{5,200})<', text):
                     url, title = m.group(1), m.group(2).strip()
                     if url not in [x["url"] for x in results]:
                         results.append({
@@ -818,6 +849,36 @@ async def _fetch_github_repo_snapshot(http, url: str) -> dict | None:
         return None
 
 
+def _clean_html_text(text: str, *,
+                     tags=("script", "style", "nav", "header", "footer", "aside", "noscript"),
+                     structure: bool = True) -> str:
+    """Strip boilerplate tags and normalize HTML into plain text.
+
+    structure=True also converts h1-3/li/p/br into markdown-ish markers,
+    decodes common entities, and removes PGP blocks (the _fetch_page /
+    _fetch_wikileaks_page behavior); structure=False is the lighter
+    _fetch_gov_doc_index variant (tag strip + whitespace collapse only).
+    """
+    for tag in tags:
+        text = re.sub(rf"<{tag}[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    if structure:
+        text = re.sub(r"<h[1-3][^>]*>(.*?)</h[1-3]>", r"\n## \1\n", text, flags=re.IGNORECASE)
+        text = re.sub(r"<li[^>]*>(.*?)</li>", r"\n• \1", text, flags=re.IGNORECASE | re.DOTALL)
+        text = re.sub(r"<p[^>]*>", "\n", text, flags=re.IGNORECASE)
+        text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    if structure:
+        text = re.sub(r"&amp;", "&", text)
+        text = re.sub(r"&lt;", "<", text)
+        text = re.sub(r"&gt;", ">", text)
+        text = re.sub(r"&nbsp;", " ", text)
+        text = re.sub(r"&\w+;", " ", text)
+        text = re.sub(r"-----BEGIN PGP [A-Z ]+-----.*?-----END PGP [A-Z ]+-----", "[PGP block removed]", text, flags=re.DOTALL)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n\s*\n+" if structure else r"\n\s*\n+", "\n\n", text)
+    return text.strip()
+
+
 async def _fetch_page(http, url: str) -> dict | None:
     """Fetch and clean a web page."""
     skip = ["youtube.com", "twitter.com", "x.com", "facebook.com", "instagram.com",
@@ -838,21 +899,7 @@ async def _fetch_page(http, url: str) -> dict | None:
         ct = hdrs.get("content-type", "")
         if "text" not in ct and "json" not in ct:
             return None
-        for tag in ["script", "style", "nav", "header", "footer", "aside", "noscript"]:
-            text = re.sub(rf"<{tag}[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<h[1-3][^>]*>(.*?)</h[1-3]>", r"\n## \1\n", text, flags=re.IGNORECASE)
-        text = re.sub(r"<li[^>]*>(.*?)</li>", r"\n• \1", text, flags=re.IGNORECASE | re.DOTALL)
-        text = re.sub(r"<p[^>]*>", "\n", text, flags=re.IGNORECASE)
-        text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = re.sub(r"&amp;", "&", text)
-        text = re.sub(r"&lt;", "<", text)
-        text = re.sub(r"&gt;", ">", text)
-        text = re.sub(r"&nbsp;", " ", text)
-        text = re.sub(r"&\w+;", " ", text)
-        text = re.sub(r"-----BEGIN PGP [A-Z ]+-----.*?-----END PGP [A-Z ]+-----", "[PGP block removed]", text, flags=re.DOTALL)
-        text = re.sub(r"[ \t]+", " ", text)
-        text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text).strip()
+        text = _clean_html_text(text)
         if len(text) < 200:
             return None
         return {"url": _normalize_url(final_url), "content": text[:6000]}
@@ -876,11 +923,7 @@ async def _fetch_gov_doc_index(http, url: str) -> dict | None:
             return None
         pdf_links = re.findall(r'href=["\']([^"\']*\.pdf[^"\']*)["\']', text, re.IGNORECASE)
         doc_links = re.findall(r'href=["\']([^"\']*(?:document|file|exhibit|report)[^"\']*)["\']', text, re.IGNORECASE)
-        for tag in ["script", "style", "nav", "header", "footer"]:
-            text = re.sub(rf"<{tag}[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = re.sub(r"[ \t]+", " ", text)
-        text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
+        text = _clean_html_text(text, tags=("script", "style", "nav", "header", "footer"), structure=False)
         result = {"url": _normalize_url(final_url), "content": text[:5000], "pdf_links": [], "doc_links": []}
         for lnk in pdf_links[:20]:
             result["pdf_links"].append(urllib.parse.urljoin(final_url, lnk))
@@ -967,21 +1010,7 @@ async def _fetch_wikileaks_page(http, url: str) -> dict | None:
         for lnk in pdf_links[:15]:
             pdf_full.append(urllib.parse.urljoin(final_url, lnk))
 
-        for tag in ["script", "style", "nav", "header", "footer", "aside", "noscript"]:
-            text = re.sub(rf"<{tag}[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<h[1-3][^>]*>(.*?)</h[1-3]>", r"\n## \1\n", text, flags=re.IGNORECASE)
-        text = re.sub(r"<li[^>]*>(.*?)</li>", r"\n• \1", text, flags=re.IGNORECASE | re.DOTALL)
-        text = re.sub(r"<p[^>]*>", "\n", text, flags=re.IGNORECASE)
-        text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = re.sub(r"&amp;", "&", text)
-        text = re.sub(r"&lt;", "<", text)
-        text = re.sub(r"&gt;", ">", text)
-        text = re.sub(r"&nbsp;", " ", text)
-        text = re.sub(r"&\w+;", " ", text)
-        text = re.sub(r"-----BEGIN PGP [A-Z ]+-----.*?-----END PGP [A-Z ]+-----", "[PGP block removed]", text, flags=re.DOTALL)
-        text = re.sub(r"[ \t]+", " ", text)
-        text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text).strip()
+        text = _clean_html_text(text)
 
         if len(text) < 100:
             return None
@@ -2416,32 +2445,30 @@ Use the current date above as authoritative; do not infer "current real-world kn
         async def run_search_queries(queries: list[str], pct_base: int, pct_span: int, detail_prefix: str):
             if not queries:
                 return
-            for batch_start in range(0, len(queries), _SEARCH_BATCH_SIZE):
-                await check_cancel()
-                batch = queries[batch_start:batch_start + _SEARCH_BATCH_SIZE]
-                tasks = []
-                for q in batch:
-                    if q in searched:
-                        continue
-                    searched.add(q)
-                    time_range = "year" if re.search(r"\b(latest|recent|current|today|202[5-9]|news)\b", q, re.I) else None
-                    tasks.append((q, _search_searxng(http, searxng_url, q, count=budget["results_per_query"], time_range=time_range, fallback_state=google_fallback_state)))
-                if not tasks:
-                    continue
-                results = await asyncio.gather(*[t[1] for t in tasks], return_exceptions=True)
-                for (q, _task), res in zip(tasks, results):
-                    if not isinstance(res, list):
-                        continue
-                    for item in res:
-                        item["query"] = q
-                        all_results.append(item)
+
+            def claim(q):
+                if q in searched:
+                    return False
+                searched.add(q)
+                return True
+
+            async def one(q):
+                time_range = "year" if re.search(r"\b(latest|recent|current|today|202[5-9]|news)\b", q, re.I) else None
+                items = await _search_searxng(http, searxng_url, q, count=budget["results_per_query"], time_range=time_range, fallback_state=google_fallback_state)
+                for item in items:
+                    item["query"] = q
+                return items
+
+            async def progress(done):
                 await _emit_report_event(events, report_id, "research_phase", {
                     "phase": "search", "label": "Searching the web",
-                    "detail": f"{detail_prefix}: {min(batch_start + len(batch), len(queries))}/{len(queries)} queries complete",
-                    "pct": pct_base + int(pct_span * (batch_start + len(batch)) / max(len(queries), 1)),
+                    "detail": f"{detail_prefix}: {min(done, len(queries))}/{len(queries)} queries complete",
+                    "pct": pct_base + int(pct_span * done / max(len(queries), 1)),
                 })
-                if batch_start + _SEARCH_BATCH_SIZE < len(queries):
-                    await asyncio.sleep(_SEARCH_BATCH_DELAY_DEEP)
+
+            await _batched_searches(queries, one, delay=_SEARCH_BATCH_DELAY_DEEP,
+                                    before_batch=check_cancel, prepare=claim,
+                                    on_batch_done=progress, sink=all_results)
 
         def remap_page_source_indices(current_sources: list[dict]) -> None:
             by_url = {_normalize_url(s.get("url", "")): s for s in current_sources if s.get("url")}
@@ -2927,17 +2954,7 @@ async def run_deep_research(http, ollama_url: str, default_model: str, events,
         return results
 
     async def parallel_search(queries):
-        flat = []
-        for batch_start in range(0, len(queries), _SEARCH_BATCH_SIZE):
-            batch = queries[batch_start:batch_start + _SEARCH_BATCH_SIZE]
-            tasks = [do_search(q) for q in batch]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for r in results:
-                if isinstance(r, list):
-                    flat.extend(r)
-            if batch_start + _SEARCH_BATCH_SIZE < len(queries):
-                await asyncio.sleep(_SEARCH_BATCH_DELAY_DEEP)
-        return flat
+        return await _batched_searches(queries, do_search, delay=_SEARCH_BATCH_DELAY_DEEP)
 
     async def parallel_fetch(urls, limit=5):
         pages = []
@@ -3233,15 +3250,7 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
         stats["searches"] += 1
         return await _search_searxng(http, searxng_url, q, 12, categories=categories)
 
-    for batch_start in range(0, len(base_queries), _SEARCH_BATCH_SIZE):
-        batch = base_queries[batch_start:batch_start + _SEARCH_BATCH_SIZE]
-        tasks = [_csearch(q) for q in batch]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for r in results:
-            if isinstance(r, list):
-                all_findings.extend(r)
-        if batch_start + _SEARCH_BATCH_SIZE < len(base_queries):
-            await asyncio.sleep(_SEARCH_BATCH_DELAY_CONSPIRACY)
+    await _batched_searches(base_queries, _csearch, delay=_SEARCH_BATCH_DELAY_CONSPIRACY, sink=all_findings)
 
     if not all_findings:
         await events.emit(conv_id, "tool_end", {
@@ -3297,15 +3306,7 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
         f"{topic} data dump hack exposed internal documents",
         f"{topic} email dump hacked internal memo revealed",
     ]
-    for batch_start in range(0, len(wave2), _SEARCH_BATCH_SIZE):
-        batch = wave2[batch_start:batch_start + _SEARCH_BATCH_SIZE]
-        t2 = [_csearch(q) for q in batch]
-        r2 = await asyncio.gather(*t2, return_exceptions=True)
-        for r in r2:
-            if isinstance(r, list):
-                all_findings.extend(r)
-        if batch_start + _SEARCH_BATCH_SIZE < len(wave2):
-            await asyncio.sleep(_SEARCH_BATCH_DELAY_CONSPIRACY)
+    await _batched_searches(wave2, _csearch, delay=_SEARCH_BATCH_DELAY_CONSPIRACY, sink=all_findings)
 
     _candidate_urls2 = [f["url"] for f in all_findings if f.get("url") and f["url"] not in fetched]
     _candidate_urls2.sort(key=_source_tier)
@@ -3551,16 +3552,7 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
 
     # ── Execute wave 3 queries in batches ──
     if wave3_queries:
-        for batch_start in range(0, len(wave3_queries), _SEARCH_BATCH_SIZE):
-            batch = wave3_queries[batch_start:batch_start + _SEARCH_BATCH_SIZE]
-            tasks = [_csearch(q) for q in batch if q not in searched]
-            if tasks:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for r in results:
-                    if isinstance(r, list):
-                        all_findings.extend(r)
-            if batch_start + _SEARCH_BATCH_SIZE < len(wave3_queries):
-                await asyncio.sleep(_SEARCH_BATCH_DELAY_CONSPIRACY)
+        await _batched_searches(wave3_queries, _csearch, delay=_SEARCH_BATCH_DELAY_CONSPIRACY, sink=all_findings)
 
     direct_urls += [
         "https://vault.fbi.gov/",

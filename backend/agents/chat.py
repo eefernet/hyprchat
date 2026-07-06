@@ -151,7 +151,8 @@ _TOOL_JUNK_MARKER_RE = re.compile(
 
 async def _compose_persona_photo_prompt(http, appearance: str, user_request: str,
                                          reply_text: str, *, model: str = "",
-                                         rating_text: str = "") -> str:
+                                         rating_text: str = "",
+                                         rating_key: str = "") -> str:
     """Rescue tier 2: structured image prompt composition.
 
     The caller picks the model (normally the conversation's own chat model). The
@@ -160,7 +161,9 @@ async def _compose_persona_photo_prompt(http, appearance: str, user_request: str
     failures return "" so the caller's last-resort deterministic tier runs.
     """
     model = model or model_providers.reject_cloud(config.WORKSPACE_MODEL or "") or config.DEFAULT_MODEL
-    rating_key = next(
+    # Prefix-matching the guidance string is only a legacy fallback — callers
+    # should pass the normalized rating_key directly.
+    rating_key = rating_key or next(
         (k for k in sorted(_PERSONA_RATING_GUIDANCE, key=len, reverse=True)
          if str(rating_text or "").startswith(k)),
         rating_text or "PG-13",
@@ -237,21 +240,8 @@ def _replace_persona_placeholders(text: str, *, user_name: str, char_name: str) 
     return _PERSONA_PLACEHOLDER_RE.sub(repl, str(text))
 
 
-def _normalize_persona_rating(value) -> str:
-    s = re.sub(r"[\s_]+", "", str(value or "PG-13").strip().lower())
-    if s in {"g", "general", "allages"}:
-        return "G"
-    if s == "pg":
-        return "PG"
-    if s in {"pg13", "pg-13", "teen"}:
-        return "PG-13"
-    if s in {"r", "mature"}:
-        return "R"
-    if s in {"nc17", "nc-17"}:
-        return "NC-17"
-    if s in {"unrated", "xxx", "maxxxx"}:
-        return "Unrated"
-    return "PG-13"
+# Rating normalization is shared with the image pipeline — one source of truth.
+_normalize_persona_rating = persona_images.normalize_persona_rating
 
 
 def _normalize_persona_thinking_mode(value) -> str:
@@ -298,6 +288,52 @@ def _extract_json_array(text: str) -> list:
         return []
 
 
+def _helper_num_ctx(prompt: str, num_predict: int = 700) -> int:
+    """Bounded num_ctx for helper-model extraction calls. Scales with prompt
+    size so long turns don't silently truncate the instructions out of the
+    window, but stays hard-capped so a small helper model never reserves a
+    model-native huge KV cache."""
+    est = len(prompt) // 3 + num_predict + 256
+    for cap in (4096, 6144, 8192):
+        if est <= cap:
+            return cap
+    return 8192
+
+
+def _recent_turns_context(req, max_msgs: int = 6, max_chars: int = 2400) -> str:
+    """Compact tail of the conversation BEFORE the latest user turn so the
+    memory extractor can resolve cross-turn references ('yes, that's right',
+    'actually it's the 6th') that are meaningless in a single-turn view."""
+    msgs = list(getattr(req, "messages", None) or [])[:-1]
+    parts = []
+    for m in msgs[-max_msgs:]:
+        if not isinstance(m, dict) or m.get("role") not in {"user", "assistant"}:
+            continue
+        text = re.sub(r"\s+", " ", str(m.get("content") or "")).strip()
+        if not text:
+            continue
+        parts.append(("User: " if m["role"] == "user" else "Assistant: ") + text[:400])
+    return "\n".join(parts)[-max_chars:]
+
+
+def _existing_memories_hint(existing: list, max_items: int = 20, max_chars: int = 2200) -> str:
+    """Short list of current accepted/suggested memories for the extractor
+    prompt, so it proposes updates instead of near-duplicates."""
+    lines, total = [], 0
+    for m in existing:
+        if (m.get("status") or "") not in {"accepted", "suggested"}:
+            continue
+        text = re.sub(r"\s+", " ", str(m.get("content") or "").strip())[:140]
+        if not text:
+            continue
+        line = "- " + text
+        if total + len(line) > max_chars or len(lines) >= max_items:
+            break
+        lines.append(line)
+        total += len(line) + 1
+    return "\n".join(lines)
+
+
 async def _suggest_workspace_memories(
     req,
     http,
@@ -318,6 +354,13 @@ async def _suggest_workspace_memories(
     model = (getattr(config, "WORKSPACE_MODEL", "")
              or model_providers.reject_cloud(getattr(req, "model", ""))
              or config.DEFAULT_MODEL)
+    existing = []
+    try:
+        existing = await db.list_workspace_memories(ws_id, status="all")
+    except Exception as _le:
+        print(f"[CHAT] workspace memory prefetch failed (non-fatal): {_le}")
+    mem_hint = _existing_memories_hint(existing)
+    prior_ctx = _recent_turns_context(req)
     prompt = (
         "You extract useful long-term workspace memories from one chat turn.\n"
         "Return ONLY a JSON array with 0-5 objects. Do not include markdown.\n"
@@ -334,7 +377,17 @@ async def _suggest_workspace_memories(
         "- Do not save generic facts that are obvious from the chat app.\n"
         "- Prefer fewer high-value memories over many weak ones.\n\n"
         f"Workspace: {workspace.get('name') or ws_id}\n"
-        f"User turn:\n{(user_text or '')[:5000]}\n\n"
+        + (
+            "\nAlready saved memories (do NOT re-suggest these or near-duplicates; "
+            "if the latest turn corrects or updates one, suggest the corrected version):\n"
+            f"{mem_hint}\n" if mem_hint else ""
+        )
+        + (
+            "\nEarlier conversation (context ONLY — use it to resolve references in "
+            "the latest turn; extract new facts only from the latest turn):\n"
+            f"{prior_ctx}\n" if prior_ctx else ""
+        )
+        + f"\nUser turn:\n{(user_text or '')[:5000]}\n\n"
         f"Assistant answer:\n{(assistant_text or '')[:7000]}"
     )
     try:
@@ -349,7 +402,7 @@ async def _suggest_workspace_memories(
                 "prompt": prompt,
                 "stream": False,
                 "think": False,
-                "options": {"temperature": 0.1, "num_ctx": 4096, "num_predict": 700},
+                "options": {"temperature": 0.1, "num_ctx": _helper_num_ctx(prompt), "num_predict": 700},
             },
             timeout=45,
         )
@@ -366,7 +419,6 @@ async def _suggest_workspace_memories(
                 "status": "No new workspace memories suggested.",
             })
             return
-        existing = await db.list_workspace_memories(ws_id, status="all")
         existing_norm = {re.sub(r"\s+", " ", (m.get("content") or "").strip().lower()) for m in existing}
         created = 0
         for item in suggestions[:5]:
@@ -422,6 +474,13 @@ async def _suggest_global_memories(
     model = (getattr(config, "WORKSPACE_MODEL", "")
              or model_providers.reject_cloud(getattr(req, "model", ""))
              or config.DEFAULT_MODEL)
+    existing = []
+    try:
+        existing = await db.list_global_memories(status="all")
+    except Exception as _le:
+        print(f"[CHAT] global memory prefetch failed (non-fatal): {_le}")
+    mem_hint = _existing_memories_hint(existing)
+    prior_ctx = _recent_turns_context(req)
     prompt = (
         "You extract useful long-term personal memories for a cross-chat AI assistant.\n"
         "Return ONLY a JSON array with 0-5 objects. Do not include markdown.\n"
@@ -437,8 +496,18 @@ async def _suggest_global_memories(
         "- Do not save secrets, credentials, private keys, passwords, raw tokens, or credential-bearing URLs.\n"
         "- Do not infer sensitive facts; only save what the user clearly states or confirms.\n"
         "- Do not save generic assistant claims or one-off trivia.\n"
-        "- Prefer fewer high-value memories over many weak ones.\n\n"
-        f"User turn:\n{(user_text or '')[:5000]}\n\n"
+        "- Prefer fewer high-value memories over many weak ones.\n"
+        + (
+            "\nAlready saved memories (do NOT re-suggest these or near-duplicates; "
+            "if the latest turn corrects or updates one, suggest the corrected version):\n"
+            f"{mem_hint}\n" if mem_hint else ""
+        )
+        + (
+            "\nEarlier conversation (context ONLY — use it to resolve references in "
+            "the latest turn; extract new facts only from the latest turn):\n"
+            f"{prior_ctx}\n" if prior_ctx else ""
+        )
+        + f"\nUser turn:\n{(user_text or '')[:5000]}\n\n"
         f"Assistant answer:\n{(assistant_text or '')[:7000]}"
     )
     try:
@@ -453,7 +522,7 @@ async def _suggest_global_memories(
                 "prompt": prompt,
                 "stream": False,
                 "think": False,
-                "options": {"temperature": 0.1, "num_ctx": 4096, "num_predict": 700},
+                "options": {"temperature": 0.1, "num_ctx": _helper_num_ctx(prompt), "num_predict": 700},
             },
             timeout=45,
         )
@@ -470,7 +539,6 @@ async def _suggest_global_memories(
                 "status": "No new HyprChat memories suggested.",
             })
             return
-        existing = await db.list_global_memories(status="all")
         existing_norm = {re.sub(r"\s+", " ", (m.get("content") or "").strip().lower()) for m in existing}
         created = 0
         for item in suggestions[:5]:
@@ -1308,9 +1376,15 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 "scenes), call `generate_image` with a descriptive prompt — it runs local Stable "
                 "Diffusion and the result displays inline automatically. Use it ONLY for pictures: "
                 "charts stay in ```chart fences and diagrams stay in ```mermaid fences.\n"
-                "A tuned image model and style/quality tags are applied automatically by the server — "
-                "your `prompt` should describe the CONTENT: subject, scene, pose, clothing, setting, "
-                "mood. Do not pad it with quality boilerplate (masterpiece, 8k, best quality...).\n"
+                "The server applies the configured image model plus its saved style/quality and "
+                "negative-prompt defaults on top of your prompt — your `prompt` should describe the "
+                "CONTENT: subject, scene, pose, clothing, setting, mood. Do not pad it with quality "
+                "boilerplate (masterpiece, 8k, best quality...).\n"
+                + (
+                    "An automatic enhancer expands your prompt with photographic detail before "
+                    "rendering — keep the prompt short and focused on what to depict.\n"
+                    if config.IMAGE_CHAT_AUTO_ENHANCE else ""
+                ) +
                 "If you are roleplaying a persona with a described appearance, you can send photos of "
                 "yourself: call `generate_image` describing yourself (matching your persona's "
                 "appearance) in the scene or activity being discussed.\n"
@@ -1495,6 +1569,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             ollama_tools.append(CODEAGENT_TOOLS[_vt])
             available_tool_names.add(_vt)
 
+    # save_memory: available in any persisted chat so "remember this" works
+    # directly instead of relying on the background suggester + review queue.
+    if not ephemeral and "save_memory" not in available_tool_names and "save_memory" in CODEAGENT_TOOLS:
+        ollama_tools.append(CODEAGENT_TOOLS["save_memory"])
+        available_tool_names.add("save_memory")
+
     print(f"[CHAT]   Tools: {sorted(available_tool_names)}")
 
     # ── Quick Search: gate → rewrite → search → rank → fetch → inject ──
@@ -1563,6 +1643,19 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             messages[0]["content"] += _viz_hint
         else:
             messages.insert(0, {"role": "system", "content": _viz_hint.strip()})
+
+    if "save_memory" in available_tool_names:
+        _mem_hint = (
+            "\n\n## Remembering Things\n"
+            "When the user asks you to remember something, or states a lasting fact, "
+            "preference, or standing instruction clearly worth keeping, call save_memory "
+            "with one concise self-contained sentence. Never save secrets or credentials. "
+            "Do not call it for one-off task details.\n"
+        )
+        if messages and messages[0]["role"] == "system":
+            messages[0]["content"] += _mem_hint
+        else:
+            messages.insert(0, {"role": "system", "content": _mem_hint.strip()})
 
     # Research-only sessions (deep_research / conspiracy_research enabled without
     # codeagent) need an explicit nudge — without it the model sees the tool but
@@ -1763,6 +1856,14 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
         if round_num > 0:
             await events.emit(conv_id, "tool_start", {"tool": "processing", "status": "🔄 Processing tool results...", "icon": "activity"})
+            # Round texts concatenate into one message on the frontend; without
+            # a separator they run together mid-sentence ("...planning the
+            # architecture.Now I'll generate..."). Emit a paragraph break
+            # before this round's tokens when prior rounds left visible text.
+            if _turn_text.strip() and not _turn_text.endswith("\n"):
+                _turn_text += "\n\n"
+                _sep_evt = json.dumps({"type": "token", "content": "\n\n"})
+                yield f"data: {_sep_evt}\n\n"
 
         payload = {
             "model": _provider_model_name if _model_provider == "ollama" else req.model,
@@ -2430,8 +2531,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         if (not tool_calls and not _selfie_rescued and not _gen_image_called
                 and persona_appearance and config.COMFYUI_URL
                 and "generate_image" in available_tool_names
-                and (_SELFIE_REQUEST_RE.search(_latest_user_text)
-                     or re.search(r"\b(?:photo|photos|pic|pics|picture|pictures|image|images|snapshot|snap)\b", _latest_user_text, re.I))):
+                and _SELFIE_REQUEST_RE.search(_latest_user_text)):
             _selfie_rescued = True
             _gen_image_called = True
             # Build a prompt that fits THIS request and scene — never a fixed
@@ -2463,7 +2563,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                       or config.DEFAULT_MODEL)
                 _photo_prompt = await _compose_persona_photo_prompt(
                     http, persona_appearance, _latest_user_text, content or "",
-                    model=_compose_model, rating_text=persona_rating_guidance)
+                    model=_compose_model, rating_text=persona_rating_guidance,
+                    rating_key=persona_rating_key)
             # Tier 3: deterministic — appearance (+ the request's distinctive
             # words only for adult-rated personas; SFW stays appearance-only)
             if not _photo_prompt:

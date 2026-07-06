@@ -1,11 +1,16 @@
-"""Prompt-enhancer response parsing for Image Studio.
+"""Prompt enhancement for image generation.
 
+Owns the SDXL prompt-enhancer LLM call (`enhance_prompt`, shared by the
+Image Studio route and the chat auto-enhance path) and its response parsing.
 The local model is asked for strict JSON, but smaller models sometimes wrap the
 answer in explanations. This module salvages the useful SDXL prompt without
 letting assistant prose leak into the UI.
 """
 import json
 import re
+
+import config
+import model_providers
 
 
 _DEFAULT_NEGATIVE_TAGS = (
@@ -20,6 +25,12 @@ _DEFAULT_NEGATIVE_TAGS = (
     "worst quality",
     "deformed",
 )
+
+# Baseline applied to non-persona chat images when neither a per-checkpoint
+# preset nor the global image_chat_* prefixes are configured — a bare prompt
+# on plain SDXL otherwise renders with no quality tags and no negative at all.
+DEFAULT_QUALITY_PREFIX = "masterpiece, best quality, highly detailed, sharp focus"
+DEFAULT_NEGATIVE_PROMPT = ", ".join(_DEFAULT_NEGATIVE_TAGS)
 
 _JSON_DECODER = json.JSONDecoder()
 _LABEL_RE = re.compile(
@@ -184,3 +195,73 @@ def normalize_enhancer_response(raw: str) -> tuple[str, str]:
                 existing.add(tag)
     negative = ", ".join(neg_tags[:15])
     return prompt[:1500], negative[:1500]
+
+
+# NOTE: uses <IDEA> token replacement, not str.format — the JSON example's
+# braces would otherwise need escaping and a stray { breaks .format at runtime.
+_ENHANCE_PROMPT_TEMPLATE = """You are an expert Stable Diffusion XL prompt writer. Expand the user's idea into a high-quality SDXL generation prompt that stays tightly focused on the user's request.
+
+Rules:
+- Keep the user's subject and intent exactly — never replace or reinterpret the subject, and do not add people unless the user asked for them.
+- Add concrete details that clarify the requested subject, pose, orientation, action, setting, materials, expression, lighting, color palette, and composition/camera. Prioritize details directly implied by the user's idea over generic style filler.
+- If the user requests a specific pose, viewpoint, location, or activity, preserve it explicitly in the prompt. Do not turn a specific request into a generic portrait.
+- Do not add unrelated props, phones, selfie framing, mirror framing, extra people, or extra actions unless the user asked for them.
+- Write the positive prompt as comma-separated descriptive tags/phrases (roughly 40-90 words): request-specific subject details first, then scene/composition/lighting, then a few quality tags.
+- Write a negative prompt of 5-15 short comma-separated tags: standard SDXL negatives plus anything that contradicts the user's idea. Never more than 15 tags, never prose.
+- Both fields must be non-empty. No prose, no explanations. No Midjourney-style parameters (--ar, --v, --style) — SDXL does not understand them.
+
+Example:
+Idea: a fox in snow
+{"prompt": "a red fox standing in deep fresh snow, winter forest clearing, fluffy orange fur with frost details, soft overcast daylight, gentle falling snowflakes, shallow depth of field, photorealistic wildlife photography, muted cool palette with warm orange accent, masterpiece, best quality, highly detailed, sharp focus", "negative_prompt": "lowres, bad anatomy, blurry, watermark, text, jpeg artifacts, worst quality, deformed, oversaturated"}
+
+Now expand this idea. Respond with ONLY the JSON object, nothing else.
+Idea: <IDEA>"""
+
+
+async def enhance_prompt(http, idea: str, *, model: str = "",
+                         timeout: int = 45) -> tuple[str, str, str] | None:
+    """Expand a short idea into an (prompt, negative, model) SDXL triple via
+    the local LLM. Pure LLM call — works even when ComfyUI is unconfigured.
+
+    Returns None when the model is unreachable or produced nothing usable, so
+    callers fail open (chat keeps the raw prompt; the Studio route raises).
+    Pass http=None to run on a transient client (the chat tool path has no
+    long-lived one).
+    """
+    idea = (idea or "").strip()[:600]
+    if not idea:
+        return None
+    model = (model_providers.reject_cloud((model or "").strip())
+             or model_providers.reject_cloud(config.IMAGE_CHAT_COMPOSE_MODEL or "")
+             or model_providers.reject_cloud(config.WORKSPACE_MODEL or "")
+             or config.DEFAULT_MODEL)
+    prompt_text = _ENHANCE_PROMPT_TEMPLATE.replace("<IDEA>", idea)
+    try:
+        if http is None:
+            import httpx
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=10, read=timeout + 15, write=10, pool=10)
+            ) as transient:
+                raw = await model_providers.complete_chat(
+                    transient, model, prompt_text,
+                    temperature=0.7, num_ctx=2048, num_predict=400,
+                    format_json=True, timeout=timeout, ollama_url=config.OLLAMA_URL,
+                )
+        else:
+            raw = await model_providers.complete_chat(
+                http, model, prompt_text,
+                temperature=0.7, num_ctx=2048, num_predict=400,
+                format_json=True, timeout=timeout, ollama_url=config.OLLAMA_URL,
+            )
+    except Exception:
+        return None
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    enhanced, negative = normalize_enhancer_response(raw)
+    # Small models sometimes echo the schema with empty/placeholder values or
+    # ignore JSON instructions entirely. Never fall back to raw text here,
+    # because assistant reasoning becomes literal SDXL prompt tokens.
+    if enhanced in ("", "...", "…"):
+        return None
+    return enhanced, negative, model

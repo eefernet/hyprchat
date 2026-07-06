@@ -44,7 +44,7 @@ import comfyui
 import voice
 import model_management
 import model_providers
-from image_prompt_enhancer import normalize_enhancer_response
+import image_prompt_enhancer
 from research import (
     REPORT_TEMPLATES,
     REPORT_TEMPLATE_MAP,
@@ -414,6 +414,9 @@ async def lifespan(app: FastAPI):
         config.IMAGE_CHAT_NEGATIVE = str(_settings["image_chat_negative"] or "").strip()[:500]
     if "image_chat_compose_model" in _settings:
         config.IMAGE_CHAT_COMPOSE_MODEL = str(_settings["image_chat_compose_model"] or "").strip()[:200]
+    if "image_chat_auto_enhance" in _settings:
+        # Stored as a real bool, but tolerate a hand-edited "false" string.
+        config.IMAGE_CHAT_AUTO_ENHANCE = str(_settings["image_chat_auto_enhance"]).strip().lower() in ("1", "true", "yes", "on")
     # Run cleanup once on startup to clear any stale files
     _run_cleanup_sync()
     # Start background cleanup loop
@@ -2211,12 +2214,21 @@ async def generate_image_job(body: dict = Body(...)):
         if valid_vaes and vae not in valid_vaes:
             raise HTTPException(400, f"Unknown VAE: {vae}")
     count = config.coerce_int(body.get("count"), 1, minimum=1, maximum=4)
+    loras = comfyui.coerce_lora_chain(body.get("loras"))[:4]
+    if loras:
+        valid_loras = await comfyui.list_loras()
+        if valid_loras:
+            loras = [l for l in loras if l["name"] in valid_loras]
     wf_name = (body.get("workflow") or "").strip()
     template = None
     if wf_name:
         template = comfyui.load_workflow(wf_name)
         if template is None:
             raise HTTPException(404, f"Workflow not found: {wf_name}")
+    # Omitted sampling fields fall back to the checkpoint's saved preset. The
+    # Image Studio UI always sends explicit values, so this only changes
+    # sparse API calls (which previously sampled with the wrong objective).
+    merged = comfyui.merge_generation_preset(body, checkpoint)
     try:
         workflow, seed = comfyui.build_workflow(
             template or comfyui.load_template(),
@@ -2224,16 +2236,17 @@ async def generate_image_job(body: dict = Body(...)):
             negative_prompt=(body.get("negative_prompt") or ""),
             width=body.get("width") or 1024,
             height=body.get("height") or 1024,
-            steps=body.get("steps") or 25,
-            cfg=body.get("cfg") or 7.0,
+            steps=merged["steps"],
+            cfg=merged["cfg"],
             seed=body.get("seed"),
             checkpoint=checkpoint,
             batch_size=count,
-            sampler_name=(body.get("sampler") or "").strip(),
-            scheduler=(body.get("scheduler") or "").strip(),
+            sampler_name=merged["sampler"],
+            scheduler=merged["scheduler"],
             v_prediction=bool(body.get("v_prediction")),
-            model_sampling=(body.get("model_sampling") or "").strip(),
+            model_sampling=merged["model_sampling"],
             vae=vae,
+            loras=loras,
         )
         prompt_id = await comfyui.submit(workflow)
     except ValueError as e:
@@ -2243,14 +2256,15 @@ async def generate_image_job(body: dict = Body(...)):
     params = {
         "prompt": prompt, "negative_prompt": (body.get("negative_prompt") or ""),
         "width": body.get("width") or 1024, "height": body.get("height") or 1024,
-        "steps": body.get("steps") or 25, "cfg": body.get("cfg") or 7.0,
+        "steps": merged["steps"], "cfg": merged["cfg"],
         "seed": seed, "checkpoint": checkpoint, "count": count,
-        "sampler": (body.get("sampler") or "").strip(),
-        "scheduler": (body.get("scheduler") or "").strip(),
+        "sampler": merged["sampler"],
+        "scheduler": merged["scheduler"],
         "v_prediction": bool(body.get("v_prediction")),
-        "model_sampling": (body.get("model_sampling") or "").strip(),
+        "model_sampling": merged["model_sampling"],
         "vae": vae,
         "workflow": wf_name,
+        "loras": loras,
     }
     _image_jobs[prompt_id] = {"status": "queued", "params": params, "created": time.time()}
     return {"job_id": prompt_id, "seed": seed, "params": params}
@@ -2260,6 +2274,9 @@ async def generate_image_job(body: dict = Body(...)):
 async def get_image_job(job_id: str):
     if not config.COMFYUI_URL:
         raise HTTPException(503, "ComfyUI is not configured")
+    # was_known=False means the in-memory registry lost this job to a backend
+    # restart — params get recovered from ComfyUI history on the done path.
+    was_known = job_id in _image_jobs
     job = _image_jobs.get(job_id) or {"status": "queued", "params": {}, "created": time.time()}
     if job.get("status") == "done":
         return {"status": "done", "images": job.get("images", []), "params": job.get("params", {})}
@@ -2289,6 +2306,9 @@ async def get_image_job(job_id: str):
     os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
     images = []
     params = job.get("params", {})
+    if not was_known and not params:
+        params = comfyui.params_from_history(history)
+        job["params"] = params
     for i, img in enumerate(outputs):
         filename = f"comfy_{job_id[:8]}_{i}.png"
         filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, filename)
@@ -2303,20 +2323,27 @@ async def get_image_job(job_id: str):
         url = f"/api/downloads/{filename}"
         artifact_id = None
         try:
-            file_meta = await asyncio.to_thread(_artifact_file_metadata, filepath)
-            artifact = await db.add_artifact(
-                filename=filename,
-                url=url,
-                kind="image",
-                mime_type="image/png",
-                storage_path=filepath,
-                size_bytes=file_meta["size_bytes"],
-                sha256=file_meta["sha256"],
-                exists_status="present",
-                status="draft",
-                metadata={"source_tool": "image_studio", **params},
-            )
-            artifact_id = (artifact or {}).get("id")
+            # A done-poll arriving after a restart re-enters this block; the
+            # file check above skips the download but the artifact row would
+            # duplicate without this guard.
+            existing = await db.find_artifact_by_storage_path(filepath)
+            if existing:
+                artifact_id = existing.get("id")
+            else:
+                file_meta = await asyncio.to_thread(_artifact_file_metadata, filepath)
+                artifact = await db.add_artifact(
+                    filename=filename,
+                    url=url,
+                    kind="image",
+                    mime_type="image/png",
+                    storage_path=filepath,
+                    size_bytes=file_meta["size_bytes"],
+                    sha256=file_meta["sha256"],
+                    exists_status="present",
+                    status="draft",
+                    metadata={"source_tool": "image_studio", **params},
+                )
+                artifact_id = (artifact or {}).get("id")
         except Exception as e:
             print(f"[IMAGE STUDIO] artifact create failed: {e}")
         images.append({"filename": filename, "url": url, "artifact_id": artifact_id})
@@ -2444,12 +2471,18 @@ async def list_image_checkpoints():
     if time.time() - _image_checkpoints_cache["ts"] > 60:
         _image_checkpoints_cache["checkpoints"] = await comfyui.list_checkpoints()
         _image_checkpoints_cache["vaes"] = await comfyui.list_vaes()
+        _image_checkpoints_cache["loras"] = await comfyui.list_loras()
         _image_checkpoints_cache["ts"] = time.time()
     cks = _image_checkpoints_cache["checkpoints"]
     return {
         "checkpoints": cks,
         "default": cks[0] if cks else "",
         "vaes": _image_checkpoints_cache.get("vaes", []),
+        "loras": _image_checkpoints_cache.get("loras", []),
+        # Ordered allow-lists so the UI dropdowns track the backend instead
+        # of hardcoding a subset.
+        "samplers": list(comfyui.SAMPLER_CHOICES),
+        "schedulers": list(comfyui.SCHEDULER_CHOICES),
         # Resolved per-model generation settings (built-in family defaults
         # merged with user-saved overrides) so the UI can auto-configure.
         "settings": {c: comfyui.settings_for_checkpoint(c) for c in cks},
@@ -2499,27 +2532,6 @@ async def clear_model_settings_ep(checkpoint: str):
     return {"status": "cleared", "settings": comfyui.settings_for_checkpoint(checkpoint)}
 
 
-# NOTE: uses <IDEA> token replacement, not str.format — the JSON example's
-# braces would otherwise need escaping and a stray { breaks .format at runtime.
-_ENHANCE_PROMPT_TEMPLATE = """You are an expert Stable Diffusion XL prompt writer. Expand the user's idea into a high-quality SDXL generation prompt that stays tightly focused on the user's request.
-
-Rules:
-- Keep the user's subject and intent exactly — never replace or reinterpret the subject, and do not add people unless the user asked for them.
-- Add concrete details that clarify the requested subject, pose, orientation, action, setting, materials, expression, lighting, color palette, and composition/camera. Prioritize details directly implied by the user's idea over generic style filler.
-- If the user requests a specific pose, viewpoint, location, or activity, preserve it explicitly in the prompt. Do not turn a specific request into a generic portrait.
-- Do not add unrelated props, phones, selfie framing, mirror framing, extra people, or extra actions unless the user asked for them.
-- Write the positive prompt as comma-separated descriptive tags/phrases (roughly 40-90 words): request-specific subject details first, then scene/composition/lighting, then a few quality tags.
-- Write a negative prompt of 5-15 short comma-separated tags: standard SDXL negatives plus anything that contradicts the user's idea. Never more than 15 tags, never prose.
-- Both fields must be non-empty. No prose, no explanations. No Midjourney-style parameters (--ar, --v, --style) — SDXL does not understand them.
-
-Example:
-Idea: a fox in snow
-{"prompt": "a red fox standing in deep fresh snow, winter forest clearing, fluffy orange fur with frost details, soft overcast daylight, gentle falling snowflakes, shallow depth of field, photorealistic wildlife photography, muted cool palette with warm orange accent, masterpiece, best quality, highly detailed, sharp focus", "negative_prompt": "lowres, bad anatomy, blurry, watermark, text, jpeg artifacts, worst quality, deformed, oversaturated"}
-
-Now expand this idea. Respond with ONLY the JSON object, nothing else.
-Idea: <IDEA>"""
-
-
 @app.post("/api/images/enhance-prompt")
 async def enhance_image_prompt(body: dict = Body(...)):
     """Expand a short user prompt into a detailed SDXL-style prompt via the
@@ -2527,25 +2539,13 @@ async def enhance_image_prompt(body: dict = Body(...)):
     idea = (body.get("prompt") or "").strip()[:600]
     if not idea:
         raise HTTPException(400, "prompt is required")
-    model = (model_providers.reject_cloud((body.get("model") or "").strip())
-             or model_providers.reject_cloud(config.IMAGE_CHAT_COMPOSE_MODEL or "")
-             or model_providers.reject_cloud(config.WORKSPACE_MODEL or "")
-             or config.DEFAULT_MODEL)
-    raw = await model_providers.complete_chat(
-        http, model, _ENHANCE_PROMPT_TEMPLATE.replace("<IDEA>", idea),
-        temperature=0.7, num_ctx=2048, num_predict=400,
-        format_json=True, timeout=45, ollama_url=config.OLLAMA_URL,
-    )
-    raw = (raw or "").strip()
-    if not raw:
-        raise HTTPException(502, "Prompt enhancer unavailable — check that Ollama is reachable")
-    enhanced, negative = normalize_enhancer_response(raw)
-    # Small models sometimes echo the schema with empty/placeholder values or
-    # ignore JSON instructions entirely. Never fall back to raw text here,
-    # because assistant reasoning becomes literal SDXL prompt tokens.
-    if enhanced in ("", "...", "…"):
-        raise HTTPException(502, "Prompt enhancer returned no usable prompt — try again")
-    return {"prompt": enhanced[:1500], "negative_prompt": negative[:1500], "model": model}
+    result = await image_prompt_enhancer.enhance_prompt(
+        http, idea, model=(body.get("model") or "").strip(), timeout=45)
+    if result is None:
+        raise HTTPException(502, "Prompt enhancer returned no usable prompt — "
+                                 "check that Ollama is reachable and try again")
+    enhanced, negative, model = result
+    return {"prompt": enhanced, "negative_prompt": negative, "model": model}
 
 
 @app.post("/api/images/purge")
@@ -2749,6 +2749,36 @@ def _looks_like_secret_memory(text: str) -> bool:
     return bool(re.search(r"(password|api[_ -]?key|secret|private key|token)\s*[:=]", text or "", re.I))
 
 
+def _memory_scan_num_ctx(prompt: str, num_predict: int = 900) -> int:
+    """Bounded num_ctx for memory-scan helper calls. The scan transcript can
+    reach ~18K chars, which silently overflows a fixed 4096 window and
+    truncates the extraction instructions. Scales up as needed but stays
+    hard-capped so the helper model never reserves a model-native KV cache."""
+    est = len(prompt) // 3 + num_predict + 256
+    for cap in (_WORKSPACE_HELPER_NUM_CTX, 6144, 8192):
+        if est <= cap:
+            return cap
+    return 8192
+
+
+def _existing_memories_scan_hint(existing: list, max_items: int = 20, max_chars: int = 2200) -> str:
+    """Short list of current accepted/suggested memories for scan prompts, so
+    the model proposes updates instead of near-duplicates."""
+    lines, total = [], 0
+    for m in existing:
+        if (m.get("status") or "") not in {"accepted", "suggested"}:
+            continue
+        text = re.sub(r"\s+", " ", str(m.get("content") or "").strip())[:140]
+        if not text:
+            continue
+        line = "- " + text
+        if total + len(line) > max_chars or len(lines) >= max_items:
+            break
+        lines.append(line)
+        total += len(line) + 1
+    return "\n".join(lines)
+
+
 @app.get("/api/memory/profile")
 async def get_memory_profile_ep():
     return await db.get_user_profile()
@@ -2877,6 +2907,8 @@ async def suggest_global_memories_ep(body: dict = Body(default={})):
         "interests": profile.get("interests", []),
         "bio": profile.get("bio", ""),
     }, ensure_ascii=False)[:2000]
+    existing = await db.list_global_memories(status="all")
+    mem_hint = _existing_memories_scan_hint(existing)
     model = body.get("model") or getattr(config, "WORKSPACE_MODEL", "") or config.DEFAULT_MODEL
     prompt = (
         "You extract useful long-term personal memories for a cross-chat AI assistant.\n"
@@ -2894,7 +2926,13 @@ async def suggest_global_memories_ep(body: dict = Body(default={})):
         "- Do not infer sensitive facts; only save what the user clearly states or confirms.\n"
         "- Do not save generic assistant claims or one-off trivia.\n"
         "- Prefer fewer high-value memories over many weak ones.\n\n"
-        f"Existing user profile summary: {profile_hint}\n\n{transcript}"
+        f"Existing user profile summary: {profile_hint}\n"
+        + (
+            "\nAlready saved memories (do NOT re-suggest these or near-duplicates; "
+            "if the transcript corrects or updates one, suggest the corrected version):\n"
+            f"{mem_hint}\n" if mem_hint else ""
+        )
+        + f"\n{transcript}"
     )
 
     try:
@@ -2905,7 +2943,7 @@ async def suggest_global_memories_ep(body: dict = Body(default={})):
                 "prompt": prompt,
                 "stream": False,
                 "think": False,
-                "options": {"temperature": 0.1, "num_ctx": _WORKSPACE_HELPER_NUM_CTX, "num_predict": 900},
+                "options": {"temperature": 0.1, "num_ctx": _memory_scan_num_ctx(prompt), "num_predict": 900},
             },
             timeout=60,
         )
@@ -2918,7 +2956,6 @@ async def suggest_global_memories_ep(body: dict = Body(default={})):
     except Exception as e:
         raise HTTPException(500, f"Memory scan failed: {e}")
 
-    existing = await db.list_global_memories(status="all")
     existing_norm = {re.sub(r"\s+", " ", (m.get("content") or "").strip().lower()) for m in existing}
     created = []
     for item in suggestions[:8]:
@@ -3005,6 +3042,8 @@ async def suggest_workspace_memories_ep(ws_id: str, body: dict = Body(default={}
     if len(transcript) < 80:
         return {"created": 0, "memories": [], "message": "No recent workspace chat content to scan."}
 
+    existing = await db.list_workspace_memories(ws_id, status="all")
+    mem_hint = _existing_memories_scan_hint(existing)
     model = body.get("model") or getattr(config, "WORKSPACE_MODEL", "") or config.DEFAULT_MODEL
     prompt = (
         "You extract useful long-term workspace memories from recent chat transcript.\n"
@@ -3021,7 +3060,13 @@ async def suggest_workspace_memories_ep(ws_id: str, body: dict = Body(default={}
         "- Do not save secrets, credentials, private keys, passwords, or raw tokens.\n"
         "- Do not save generic facts that are obvious from the chat app.\n"
         "- Prefer fewer high-value memories over many weak ones.\n\n"
-        f"Workspace: {ws.get('name') or ws_id}\n\n{transcript}"
+        f"Workspace: {ws.get('name') or ws_id}\n"
+        + (
+            "\nAlready saved memories (do NOT re-suggest these or near-duplicates; "
+            "if the transcript corrects or updates one, suggest the corrected version):\n"
+            f"{mem_hint}\n" if mem_hint else ""
+        )
+        + f"\n{transcript}"
     )
 
     try:
@@ -3032,7 +3077,7 @@ async def suggest_workspace_memories_ep(ws_id: str, body: dict = Body(default={}
                 "prompt": prompt,
                 "stream": False,
                 "think": False,
-                "options": {"temperature": 0.1, "num_ctx": _WORKSPACE_HELPER_NUM_CTX, "num_predict": 900},
+                "options": {"temperature": 0.1, "num_ctx": _memory_scan_num_ctx(prompt), "num_predict": 900},
             },
             timeout=60,
         )
@@ -3045,7 +3090,6 @@ async def suggest_workspace_memories_ep(ws_id: str, body: dict = Body(default={}
     except Exception as e:
         raise HTTPException(500, f"Memory scan failed: {e}")
 
-    existing = await db.list_workspace_memories(ws_id, status="all")
     existing_norm = {re.sub(r"\s+", " ", (m.get("content") or "").strip().lower()) for m in existing}
     created = []
     for item in suggestions[:8]:

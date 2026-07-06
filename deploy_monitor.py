@@ -5,6 +5,7 @@ Watches project files and deploys changes to remote servers.
 Saves server config after first setup so you never re-enter IPs.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -118,6 +119,7 @@ WATCHED = {
     "frontend/src/theme.js":        ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/src/modelHelpers.js": ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/src/settingsSync.js": ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/daedalusTimeline.js": ("Frontend (build)", REMOTE_FRONTEND,       False),
     "frontend/src/ModelPicker.jsx": ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/src/components/BackgroundCanvas.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/components/artifactComponents.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
@@ -145,6 +147,7 @@ FRONTEND_SRC_FILES = {
     "frontend/src/theme.js",
     "frontend/src/modelHelpers.js",
     "frontend/src/settingsSync.js",
+    "frontend/src/daedalusTimeline.js",
     "frontend/src/ModelPicker.jsx",
     "frontend/src/components/BackgroundCanvas.jsx",
     "frontend/src/components/artifactComponents.jsx",
@@ -162,7 +165,18 @@ FRONTEND_SRC_FILES = {
 }
 
 CHECK_INTERVAL = 1
-BATCH_WINDOW = 2  # seconds to wait for additional changes before prompting
+
+
+def file_digest(path):
+    """SHA-256 of file contents; None if unreadable."""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
 
 # ── Terminal helpers ──
 
@@ -796,6 +810,7 @@ def deploy_changes(changed, cfg):
     needs_restart = False
     needs_pip = False
     results = []
+    pushed = {}  # filepath -> sha256 of the content actually sent
 
     cb = cfg["codebox"]
     ensured_dirs = set()
@@ -830,8 +845,15 @@ def deploy_changes(changed, cfg):
             if frontend_built:
                 continue
             frontend_built = True
+            # Digest every changed src file BEFORE the build reads them, so all
+            # batch members re-baseline (not just the one that triggered the build).
+            fe_digests = {fp2: file_digest(fp2) for fp2, _i in changed if fp2 in FRONTEND_SRC_FILES}
             ok, err = _build_and_deploy_frontend(hypr)
             results.append(("Frontend (build)", filepath, ok, err, hypr))
+            if ok:
+                for fp2, d2 in fe_digests.items():
+                    if d2 is not None:
+                        pushed[fp2] = d2
             continue
 
         target, remote_dir = _deploy_target(filepath, remote_dir, hypr, cb)
@@ -846,8 +868,11 @@ def deploy_changes(changed, cfg):
                                 target))
                 continue
 
+        digest = file_digest(filepath)
         ok, err = scp(filepath, target["ip"], remote_dir, target["user"], target["pass"])
         results.append((label, filepath, ok, err, target))
+        if ok and digest is not None:
+            pushed[filepath] = digest
         if restart_flag:
             needs_restart = True
 
@@ -968,6 +993,7 @@ def deploy_changes(changed, cfg):
     print(f"  {BLD}{G}Deploy complete{RST} {DIM}at {now}{RST}")
     print(f"  {bar('═', G)}")
     input(f"\n  {DIM}Press Enter to continue...{RST}")
+    return pushed
 
 
 # ── Main UI ──
@@ -1047,9 +1073,31 @@ def push_all(cfg, file_states):
     ], M))
     print()
 
-    deploy_changes(all_files, cfg)
+    pushed = deploy_changes(all_files, cfg)
     for fp, *_ in all_files:
         file_states[fp] = "deployed"
+    return pushed
+
+
+def scan_for_changes(prev_times, baseline_hash, file_states, pending):
+    """mtime pre-filter + content-hash confirm. Appends genuinely changed files
+    to `pending` (deduped). Returns the list of newly added filepaths."""
+    new = []
+    for filepath, info in WATCHED.items():
+        if not os.path.exists(filepath):
+            continue
+        mtime = os.path.getmtime(filepath)
+        if mtime == prev_times.get(filepath, 0):
+            continue
+        prev_times[filepath] = mtime  # always advance the cheap filter
+        digest = file_digest(filepath)
+        if digest is None or digest == baseline_hash.get(filepath):
+            continue  # touched, but content identical — suppress
+        if not any(fp == filepath for fp, _ in pending):
+            pending.append((filepath, info))
+            new.append(filepath)
+        file_states[filepath] = "changed"
+    return new
 
 
 def main():
@@ -1089,10 +1137,13 @@ def main():
             push_all(cfg, file_states)
 
     # Initialize tracking
-    prev_times  = {}
-    file_states = {}
+    prev_times    = {}
+    baseline_hash = {}
+    file_states   = {}
     for filepath in WATCHED:
-        prev_times[filepath] = os.path.getmtime(filepath) if os.path.exists(filepath) else 0
+        exists = os.path.exists(filepath)
+        prev_times[filepath] = os.path.getmtime(filepath) if exists else 0
+        baseline_hash[filepath] = file_digest(filepath) if exists else None
         file_states[filepath] = "idle"
 
     if first_setup:
@@ -1120,12 +1171,13 @@ def main():
                 key = sys.stdin.read(1).lower()
                 if key == "p":
                     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-                    push_all(cfg, file_states)
+                    pushed = push_all(cfg, file_states) or {}
                     last_event = f"{G}\u2713 Pushed all at {datetime.now().strftime('%H:%M:%S')}{RST}"
-                    # Re-snapshot mtimes so pushed files don't re-trigger
+                    # Re-baseline mtimes + content hashes so pushed files don't re-trigger
                     for filepath in WATCHED:
                         if os.path.exists(filepath):
                             prev_times[filepath] = os.path.getmtime(filepath)
+                            baseline_hash[filepath] = pushed.get(filepath) or file_digest(filepath)
                     tty.setcbreak(sys.stdin.fileno())
                     draw_monitor(file_states, prev_times, cfg, last_event)
                 elif key == "r":
@@ -1139,62 +1191,67 @@ def main():
 
             time.sleep(CHECK_INTERVAL)
 
-            # Check for changes
-            changed = []
-            for filepath, info in WATCHED.items():
-                if not os.path.exists(filepath):
-                    continue
-                mtime = os.path.getmtime(filepath)
-                if mtime != prev_times.get(filepath, 0):
-                    changed.append((filepath, info))
-                    file_states[filepath] = "changed"
-                    prev_times[filepath] = mtime
+            # Check for changes (mtime pre-filter + content-hash confirm)
+            pending = []
+            scan_for_changes(prev_times, baseline_hash, file_states, pending)
 
-            if changed:
-                # Wait briefly to collect any additional file changes
-                last_event = f"{Y}\u25b6 Change detected, collecting...{RST}"
-                draw_monitor(file_states, prev_times, cfg, last_event)
-                time.sleep(BATCH_WINDOW)
+            if pending:
+                def show_pending_box():
+                    last = f"{Y}\u25b6 {len(pending)} file(s) changed{RST}"
+                    draw_monitor(file_states, prev_times, cfg, last)
+                    print()
+                    print(box([
+                        f"{BLD}{Y}  Changes Detected{RST}",
+                        "",
+                    ] + [
+                        f"  {Y}\u2022{RST} {info[0]:18} {DIM}{fp}{RST}"
+                        for fp, info in pending
+                    ] + [
+                        "",
+                        f"  {DIM}Still watching \u2014 new changes join this batch{RST}",
+                    ], Y))
+                    print()
+                    print(f"  {BLD}Deploy?{RST} [{G}y{RST}{DIM}/Enter{RST} deploy \u00b7 {R}n{RST} skip]")
+                show_pending_box()
 
-                # Re-scan for any files that changed during the window
-                for filepath, info in WATCHED.items():
-                    if not os.path.exists(filepath):
+                # Single-key prompt that keeps scanning while it waits.
+                decision = None
+                while decision is None:
+                    if select.select([sys.stdin], [], [], 0)[0]:
+                        key = sys.stdin.read(1).lower()
+                        if key in ("y", "\n", "\r"):
+                            decision = True
+                        elif key == "n":
+                            decision = False
                         continue
-                    mtime = os.path.getmtime(filepath)
-                    if mtime != prev_times.get(filepath, 0):
-                        if not any(fp == filepath for fp, *_ in changed):
-                            changed.append((filepath, info))
-                        file_states[filepath] = "changed"
-                        prev_times[filepath] = mtime
+                    time.sleep(CHECK_INTERVAL)
+                    if scan_for_changes(prev_times, baseline_hash, file_states, pending):
+                        show_pending_box()
 
-                last_event = f"{Y}\u25b6 {len(changed)} file(s) changed{RST}"
-                draw_monitor(file_states, prev_times, cfg, last_event)
-
-                # Show change summary
-                print()
-                print(box([
-                    f"{BLD}{Y}  Changes Detected{RST}",
-                    "",
-                ] + [
-                    f"  {Y}\u2022{RST} {info[0]:18} {DIM}{fp}{RST}"
-                    for fp, info in changed
-                ], Y))
-                print()
-
-                # Restore terminal for input prompt
-                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-                choice = input(f"  {BLD}Deploy? {RST}[{G}y{RST}/{R}n{RST}] > ").strip().lower()
-                tty.setcbreak(sys.stdin.fileno())
-
-                if choice in ("y", "yes", ""):
+                if decision:
                     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-                    deploy_changes(changed, cfg)
+                    pushed = deploy_changes(pending, cfg) or {}
                     tty.setcbreak(sys.stdin.fileno())
-                    for fp, *_ in changed:
-                        file_states[fp] = "deployed"
+                    for fp, *_ in pending:
+                        if fp in pushed:
+                            baseline_hash[fp] = pushed[fp]
+                            cur = file_digest(fp) if os.path.exists(fp) else None
+                            if cur is not None and cur != pushed[fp]:
+                                # Edited while the deploy ran \u2014 force re-detection
+                                prev_times[fp] = 0
+                                file_states[fp] = "changed"
+                            else:
+                                prev_times[fp] = os.path.getmtime(fp) if os.path.exists(fp) else 0
+                                file_states[fp] = "deployed"
+                        else:
+                            # Push failed \u2014 leave it flagged so it re-prompts
+                            prev_times[fp] = 0
+                            file_states[fp] = "changed"
                     last_event = f"{G}\u2713 Last deploy: {datetime.now().strftime('%H:%M:%S')}{RST}"
                 else:
-                    for fp, *_ in changed:
+                    for fp, *_ in pending:
+                        # Declining acknowledges the current content
+                        baseline_hash[fp] = file_digest(fp) if os.path.exists(fp) else None
                         file_states[fp] = "idle"
                     last_event = f"{DIM}Skipped deploy at {datetime.now().strftime('%H:%M:%S')}{RST}"
 

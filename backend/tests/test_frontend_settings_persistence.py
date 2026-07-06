@@ -52,6 +52,7 @@ def test_server_persisted_settings_use_guarded_persistence():
         ("hc-openhands-enabled", "openhands_enabled"),
         ("hc-openhands-max-rounds", "openhands_max_rounds"),
         ("hc-openhands-reasoning-effort", "openhands_reasoning_effort"),
+        ("hc-img-chat-auto-enhance", "image_chat_auto_enhance"),
     ]
 
     for storage_key, setting_key in expected_pairs:
@@ -79,6 +80,7 @@ def test_settings_fetch_hydrates_server_values_without_echo_patch():
         "openhands_enabled",
         "openhands_max_rounds",
         "openhands_reasoning_effort",
+        "image_chat_auto_enhance",
     ]
 
     for key in hydrated_keys:

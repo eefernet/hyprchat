@@ -25,16 +25,17 @@ _ADULT_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 
+_MIRROR_SELFIE_RE = re.compile(r"\bmirror\s+(?:selfie|shot|photo|pic|picture)\b", re.I)
+
 _INTENT_PATTERNS = (
     ("another", re.compile(r"\b(?:another|one\s+more|again|new\s+(?:one|photo|pic|picture)|different\s+(?:one|photo|pic|picture))\b", re.I)),
     ("consistency", re.compile(r"\b(?:same\s+face|consistent|identity|reference|ref\s+image|faceid|ipadapter|ip-adapter|keep\s+(?:her|his|their|your)\s+look)\b", re.I)),
-    ("mirror_selfie", re.compile(r"\bmirror\s+(?:selfie|shot|photo|pic|picture)\b", re.I)),
+    ("mirror_selfie", _MIRROR_SELFIE_RE),
     ("selfie", re.compile(r"\b(?:selfie|front\s+camera)\b", re.I)),
     ("full_body", re.compile(r"\b(?:full\s+body|head\s+to\s+toe|standing\s+pose|whole\s+body)\b", re.I)),
     ("outfit", re.compile(r"\b(?:outfit|clothes|clothing|wearing|dressed|wardrobe|costume|uniform|fit\s+check)\b", re.I)),
     ("action", re.compile(r"\b(?:action|doing|running|walking|dancing|fighting|working|cooking|driving|playing|holding|sitting|kneeling|crouching|lying|laying|reclining|arms?\s+up)\b", re.I)),
     ("location", re.compile(r"\b(?:at|in|inside|outside|near|by|on)\s+(?:a\s+|the\s+)?(?:cafe|bar|bed|bedroom|kitchen|street|office|studio|forest|beach|city|room|car|park|school|library|restaurant|club|pool|gym|shop|store)\b", re.I)),
-    ("identity", re.compile(r"\b(?:same\s+face|consistent|identity|reference|ref\s+image|faceid|ipadapter|ip-adapter)\b", re.I)),
     ("pose", re.compile(r"\b(?:pose|posing|posture|standing|sitting|kneeling|crouching|lying|laying|reclining|facing\s+away|turned\s+away|back\s+to\s+(?:the\s+)?camera|from\s+behind|back\s+view|rear\s+view|profile\s+view|arms?\s+up)\b", re.I)),
     ("portrait", re.compile(r"\b(?:portrait|headshot|face\s+shot|close[\s-]?up)\b", re.I)),
     ("realism", re.compile(r"\b(?:realistic|photoreal|photo[\s-]?real|dslr|cinematic|real\s+photo|lifelike)\b", re.I)),
@@ -52,7 +53,6 @@ _INTENT_PROFILE_KEYS = {
     "outfit": ["outfit_photo", "full_body_photo", "pose_photo", "sfw_photo"],
     "action": ["action_photo", "pose_photo", "control_photo", "sfw_photo"],
     "location": ["location_photo", "environment_photo", "portrait_photo", "sfw_photo"],
-    "identity": ["identity_photo", "ipadapter_photo", "reference_photo", "persona_consistency_photo"],
     "pose": ["pose_photo", "control_photo", "controlnet_photo"],
     "portrait": ["portrait_photo", "closeup_photo", "selfie_photo"],
     "realism": ["realism_photo", "photo_realism", "photoreal_photo"],
@@ -102,7 +102,6 @@ _REQUEST_ONLY_STOPWORDS = _TOKEN_STOPWORDS | {
     "setting", "one", "more", "different", "variation", "variant", "selfie",
 }
 
-_MIRROR_SELFIE_RE = re.compile(r"\bmirror\s+(?:selfie|shot|photo|pic|picture)\b", re.I)
 _VISIBLE_PHONE_RE = re.compile(
     r"\b(?:holding\s+(?:a\s+)?(?:smart)?phone|visible\s+(?:smart)?phone|"
     r"(?:smart)?phone\s+in\s+(?:her|his|their|the)\s+hand|phone\s+prop)\b",
@@ -447,7 +446,13 @@ def build_visual_context(
         safe_tool_prompt,
     ])
     intents = detect_image_intents(combined)
-    adult_request = is_adult_request(combined)
+    # Adult cues in the user's own words always count; the model's tool prompt
+    # counts only when the persona's appearance text isn't itself the source of
+    # the adult tokens (tool prompts embed an appearance slice per the system
+    # prompt template, so "sexy"/"lingerie" appearances would flip every request).
+    adult_request = is_adult_request(latest_request) or (
+        is_adult_request(safe_tool_prompt) and not is_adult_request(appearance)
+    )
     normalized_rating = normalize_persona_rating(rating)
     return {
         "persona_id": _clip_text(persona_id, 80),
@@ -565,6 +570,10 @@ def compose_persona_image_prompt(
     while leaving the generate_image tool schema unchanged.
     """
     context = visual_context or {}
+    # SFW+adult gate: an SFW-rated persona facing an adult-cue request never
+    # trusts model-authored wording — the deterministic rebuild neutralizes it.
+    if context.get("sfw_rating") and context.get("adult_request"):
+        structured = None
     parsed = parse_structured_prompt(structured) if structured is not None else None
     fallback_used = parsed is None
     intents = context.get("intents") or detect_image_intents(
@@ -585,6 +594,14 @@ def compose_persona_image_prompt(
         neg = parsed.get("negative_prompt") or ""
         framing = parsed.get("framing") or framing
         continuity = parsed.get("continuity_notes") or continuity
+        # Appearance guard: a model-authored prompt that dropped the persona's
+        # described look loses character consistency — fold it back in first.
+        appearance = str(context.get("appearance") or "").strip()
+        if appearance:
+            app_tokens = _token_set(appearance)
+            overlap = app_tokens & _token_set(prompt)
+            if len(overlap) < min(2, len(app_tokens)):
+                prompt = f"{appearance}, {prompt}"
     else:
         request = _safe_request_text(context, raw_prompt)
         prompt_parts = [
@@ -745,6 +762,7 @@ def select_persona_image_profile(
     persona_rating: str = "PG-13",
     prompt: str = "",
     user_request: str = "",
+    adult_request: bool | None = None,
 ) -> dict | None:
     """Return a selected profile envelope, or None to use chat defaults.
 
@@ -760,7 +778,9 @@ def select_persona_image_profile(
 
     text = f"{user_request or ''}\n{prompt or ''}"
     rating = normalize_persona_rating(persona_rating)
-    adult_request = is_adult_request(text)
+    if adult_request is None:
+        adult_request = is_adult_request(text)
+    adult_request = bool(adult_request)
     intents = detect_image_intents(text)
     if adult_request:
         intents = ["adult", *[i for i in intents if i != "adult"]]

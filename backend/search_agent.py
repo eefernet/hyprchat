@@ -1,11 +1,14 @@
 """
 Quick Search answer-grounding agent.
 
-Each chat turn runs a deterministic-first SearchPlan, then parallel SearXNG
-fanout, heuristic freshness/source ranking, selective page reads, and prompt
-context injection. The LLM helpers below are retained for explicit tests and
-for the optional quality-mode refinement round; they are not on the default
-balanced critical path.
+Each chat turn builds a deterministic SearchPlan immediately and (in
+balanced/quality modes) runs a small-LLM query planner in parallel with the
+first SearXNG wave — the deterministic results are the guaranteed floor; the
+LLM plan adds queries / reroutes category only when it lands within
+QUICK_SEARCH_PLANNER_TIMEOUT and validates. Then: heuristic freshness/source
+ranking, optional embedding rerank, a literal-query fallback plus an LLM
+refine round when relevance is low, selective page reads, and prompt context
+injection. Speed mode stays fully deterministic.
 """
 import asyncio
 import json
@@ -103,7 +106,7 @@ def _mode_config() -> SearchModeConfig:
         )
     return SearchModeConfig(
         mode, min_results, configured_target, _qs.CHAT_MAX_RESULTS,
-        _qs.CHAT_PAGE_FETCH_COUNT, 4, False, embed_rerank,
+        _qs.CHAT_PAGE_FETCH_COUNT, 4, True, embed_rerank,
     )
 
 
@@ -129,12 +132,16 @@ def _freshness_from_text(text: str, now: datetime) -> tuple[str, str | None, str
     low = text.lower()
     if re.search(r"\btoday|tonight|this morning|this afternoon|this evening\b", low):
         return "day", now.date().isoformat(), "day", _display_date(now.date())
-    if re.search(r"\byesterday\b", low):
+    if re.search(r"\byesterday\b|\blast\s+night\b", low):
         d = now.date() - timedelta(days=1)
         return "day", d.isoformat(), "day", _display_date(d)
     if re.search(r"\bthis\s+week\b", low):
         return "week", None, "week", ""
+    if re.search(r"\bthis\s+month\b", low):
+        return "month", None, "month", ""
     if re.search(r"\b(latest|current|currently|breaking|recent|recently|updates?|happening|going on)\b", low):
+        return "month", None, "month", ""
+    if re.search(r"\b(?:right\s+now|as\s+of\s+now)\b", low):
         return "month", None, "month", ""
     if str(now.year) in low or str(now.year - 1) in low:
         return "month", None, "month", ""
@@ -154,7 +161,7 @@ _EVENT_FILLER_RE = re.compile(
     re.IGNORECASE,
 )
 _RELATIVE_DAY_RE = re.compile(
-    r"\b(today|tonight|this morning|this afternoon|this evening|yesterday)\b",
+    r"\b(today|tonight|this morning|this afternoon|this evening|yesterday|last\s+night)\b",
     re.IGNORECASE,
 )
 _ATTACHMENT_PLACEHOLDER_RE = re.compile(r"\s*\[Attached[^\]]+\]\s*", re.IGNORECASE)
@@ -165,12 +172,6 @@ _SEARCH_CONTEXT_RE = re.compile(
 )
 _HISTORICAL_RE = re.compile(
     r"\b(?:historical|historically|history|real\s+life|real-world|irl|actual\s+history)\b",
-    re.IGNORECASE,
-)
-_EXPLICIT_GAME_RE = re.compile(
-    r"\b(?:game|gaming|gameplay|video\s+game|steam|xbox|playstation|nintendo|"
-    r"switch|wiki\.gg|fandom|speedrun|walkthrough|patch\s+notes?|dlc|mods?|"
-    r"nerf|buff|meta|eu4|hoi4|ck3|civ\s*[456]|bg3|rpg|mmo|fps|rts)\b",
     re.IGNORECASE,
 )
 _GAME_CONTEXT_RE = re.compile(
@@ -328,9 +329,9 @@ def _extract_local_entities(text: str, anchors: list[str] | None = None) -> list
 
 def _context_category(prior: str, hint: str) -> tuple[str | None, float]:
     context = " ".join([prior, hint])
-    if _EXPLICIT_GAME_RE.search(context) or _GAME_CONTEXT_RE.search(context):
+    if _qs._is_game_query(context) or _GAME_CONTEXT_RE.search(context):
         return "game", 0.72
-    if _qs._CODE_RE.search(context) or _CODE_CONTEXT_RE.search(context):
+    if _qs._is_code_query(context) or _CODE_CONTEXT_RE.search(context):
         return "code", 0.64
     if _qs._RECIPE_RE.search(context):
         return "recipe", 0.60
@@ -344,12 +345,19 @@ def _infer_search_frame(latest: str, turns: list[str], context_hint: str = "") -
     context_cat, context_conf = _context_category(prior, hint)
     context_anchors = _extract_context_anchors(" ".join([prior, hint]), context_cat)
     latest_anchors = _extract_context_anchors(latest_clean, None)
-    explicit_game = bool(_EXPLICIT_GAME_RE.search(latest_clean))
+    explicit_game = _qs._is_game_query(latest_clean)
 
     if _HISTORICAL_RE.search(latest_clean) and not explicit_game:
         local = _extract_local_entities(latest_clean, context_anchors + latest_anchors)
         return SearchFrame("general", [], local, 0.80)
-    if _qs._CODE_RE.search(latest_clean):
+    if (
+        context_cat != "game"
+        and not explicit_game
+        and _qs._is_sports_query(latest_clean)
+    ):
+        anchors = _dedupe_preserve(latest_anchors)
+        return SearchFrame("news", anchors, _extract_local_entities(latest_clean, anchors), 0.80)
+    if _qs._is_code_query(latest_clean):
         anchors = _dedupe_preserve(latest_anchors + context_anchors)
         return SearchFrame("code", anchors, _extract_local_entities(latest_clean, anchors), 0.88)
     if _qs._RECIPE_RE.search(latest_clean):
@@ -381,7 +389,11 @@ def _clean_query_phrase(text: str) -> str:
     q = re.sub(r"\s+", " ", q).strip()
     words = q.split()
     if len(words) > 12:
-        q = " ".join(words[:12])
+        # Over budget: drop stopwords first so the subject at the tail of a
+        # long question survives, instead of blind head truncation.
+        content = [w for w in words if w.lower() not in _qs._STOPWORDS]
+        words = content[:12] if len(content) >= 4 else words[:12]
+        q = " ".join(words)
     return q or (text or "").strip()[:120]
 
 
@@ -428,7 +440,15 @@ def _query_variants(base: str, category: str, freshness_mode: str, resolved_labe
     elif category == "recipe":
         variants = [base, _clean_query_phrase(f"{base} recipe"), _clean_query_phrase(f"{base} technique")]
     else:
-        variants = [base, _clean_query_phrase(f"{base} overview"), _clean_query_phrase(f"{base} sources")]
+        # General: the cleaned message plus a keyword-only variant (content
+        # words in original order) — "X overview"/"X sources" filler suffixes
+        # skewed engines toward meta/aggregator pages.
+        variants = [base]
+        keyword_q = " ".join(
+            [w for w in base.split() if w.lower() not in _qs._STOPWORDS][:10]
+        )
+        if keyword_q and keyword_q.lower() != base.lower():
+            variants.append(keyword_q)
     out: list[str] = []
     seen: set[str] = set()
     for q in variants:
@@ -536,10 +556,11 @@ def _frame_query_variants(
             _clean_query_phrase(f"{anchored_subject} updates"),
         ])
     else:
-        variants.extend([
-            _clean_query_phrase(f"{anchored_subject} overview"),
-            _clean_query_phrase(f"{anchored_subject} sources"),
-        ])
+        keyword_q = " ".join(
+            [w for w in anchored_subject.split() if w.lower() not in _qs._STOPWORDS][:10]
+        )
+        if keyword_q and keyword_q.lower() != anchored_subject.lower():
+            variants.append(keyword_q)
 
     out: list[str] = []
     seen: set[str] = set()
@@ -557,13 +578,32 @@ def _frame_query_variants(
 
 
 def _context_topic(turns: list[str]) -> str:
-    for turn in reversed(turns):
-        if not turn.startswith("user:"):
-            continue
-        body = turn.split(":", 1)[-1]
+    """Compact topic phrase from prior turns for follow-up query fusion.
+
+    Prefers the most recent user turn; falls back to the most recent
+    assistant turn when no user turn yields content (so "tell me more about
+    that" after an assistant-introduced topic still resolves). Returns
+    title-phrase anchors when present, else the first few content-bearing
+    words — fusing a whole prior message into the query buries the actual
+    follow-up question past the query-length cap.
+    """
+    def _compact(body: str) -> str:
         cleaned = _clean_query_phrase(body)
-        if _qs._content_tokens(cleaned):
-            return cleaned
+        if not _qs._content_tokens(cleaned):
+            return ""
+        phrases = _title_phrases(cleaned)
+        if phrases:
+            return " ".join(phrases[:2])
+        words = [w for w in cleaned.split() if w.lower() not in _qs._STOPWORDS]
+        return " ".join(words[:6])
+
+    for prefix in ("user:", "assistant:"):
+        for turn in reversed(turns):
+            if not turn.startswith(prefix):
+                continue
+            topic = _compact(turn.split(":", 1)[-1])
+            if topic:
+                return topic
     return ""
 
 
@@ -929,17 +969,125 @@ async def refine_query(
     return q
 
 
+# ── Hybrid LLM query planner ──
+# Runs in parallel with the deterministic first search wave. The deterministic
+# plan is the guaranteed floor; the LLM plan only adds queries / reroutes the
+# category when it returns valid output within QUICK_SEARCH_PLANNER_TIMEOUT.
+_PLANNER_CATEGORY_MAP = {
+    "news": "news", "sports": "news", "code": "code",
+    "recipe": "recipe", "game": "game", "general": "general",
+}
+_PLANNER_FRESHNESS = ("day", "week", "month", "none")
+
+
+def _planner_enabled(mode_cfg: SearchModeConfig) -> bool:
+    if mode_cfg.mode == "speed":
+        return False
+    planner = (getattr(config, "QUICK_SEARCH_PLANNER", "llm") or "llm").strip().lower()
+    return planner == "llm"
+
+
+async def llm_plan(
+    http, ollama_url: str, model: str,
+    latest: str, turns: list[str], context_hint: str, now: datetime,
+    *, max_queries: int = 3,
+) -> dict | None:
+    """Ask a small local model for a search plan: standalone question, 1-3
+    queries, category, freshness. Returns a validated partial dict or None.
+
+    Every field is optional — callers keep the deterministic value for
+    anything missing or invalid, so garbage output can only ever no-op.
+    """
+    if not model:
+        return None
+    convo = "\n".join(turns[-4:])
+    hint = (context_hint or "").strip()[:600]
+    prompt = (
+        f"Current date/time: {now.strftime('%A, %B %d, %Y %H:%M %Z')}\n"
+        + (f"Conversation so far:\n{convo}\n" if convo else "")
+        + (f"Background notes about the user:\n{hint}\n" if hint else "")
+        + f"\nLatest user message: {latest}\n\n"
+        "Write web search queries that would find sources answering the "
+        "latest message. Resolve pronouns and vague references using the "
+        "conversation.\n"
+        'Output JSON: {"question": "the standalone question being asked", '
+        '"queries": ["query 1", "query 2"], "category": "...", '
+        '"freshness": "..."}\n'
+        f"Rules: 1-{max_queries} queries; each ≤12 words, self-contained, "
+        "no quotes or URLs. category: one of news, sports, code, recipe, "
+        "game, general. freshness: day (today/yesterday events), week, "
+        "month (recent developments), or none (evergreen facts). "
+        "Output JSON only."
+    )
+    out = await _ask_ollama_json(http, ollama_url, prompt, model, max_tokens=240, timeout=30.0)
+    if not isinstance(out, dict):
+        return None
+    plan: dict = {}
+    question = out.get("question")
+    if isinstance(question, str) and question.strip():
+        plan["question"] = question.strip()[:400]
+    queries: list[str] = []
+    raw_queries = out.get("queries")
+    if isinstance(raw_queries, list):
+        seen: set[str] = set()
+        for item in raw_queries:
+            if not isinstance(item, str):
+                continue
+            cleaned = _clean_query_phrase(item)
+            key = cleaned.lower()
+            if (
+                not cleaned or key in seen or "http" in key
+                or not _qs._content_tokens(cleaned)
+            ):
+                continue
+            seen.add(key)
+            queries.append(cleaned)
+            if len(queries) >= max_queries:
+                break
+    if queries:
+        plan["queries"] = queries
+    cat = out.get("category")
+    if isinstance(cat, str) and cat.strip().lower() in _PLANNER_CATEGORY_MAP:
+        plan["category"] = _PLANNER_CATEGORY_MAP[cat.strip().lower()]
+    fresh = out.get("freshness")
+    if isinstance(fresh, str) and fresh.strip().lower() in _PLANNER_FRESHNESS:
+        plan["freshness"] = fresh.strip().lower()
+    return plan or None
+
+
+def _merge_llm_plan(plan: SearchPlan, llm_out: dict) -> list[str]:
+    """Fold validated planner output into the deterministic plan in place.
+
+    Returns the planner queries not already present in `plan.queries`.
+    Freshness is only ever raised from "none" to week/month — explicit
+    day/week cues are reliably regex-detectable, so the LLM adds value on
+    implicit recency ("who is the UK PM") without being allowed to flip an
+    explicit date question.
+    """
+    if llm_out.get("question"):
+        plan.canonical_question = llm_out["question"]
+    if llm_out.get("category") and llm_out["category"] != plan.category:
+        plan.category = llm_out["category"]
+        plan.searxng_engines = _searxng_engines_for_category(plan.category)
+    if plan.freshness_mode == "none" and llm_out.get("freshness") in ("week", "month"):
+        plan.freshness_mode = llm_out["freshness"]
+        plan.time_range = llm_out["freshness"]
+    existing = {q.lower() for q in plan.queries}
+    return [q for q in llm_out.get("queries", []) if q.lower() not in existing]
+
+
 # ── Orchestrator ──
 async def run_search_agent(
-    http, ollama_url: str, refine_model: str,
+    http, ollama_url: str, planner_model: str,
     events, conv_id: str, messages: list,
     *, default_model: str = "",
     context_hint: str = "",
     max_rounds: int = 2,
     relevance_threshold: float = _REFINE_THRESHOLD_DEFAULT,
 ) -> dict:
-    """Orchestrate skip → deterministic plan → multi-query search →
-    heuristic rank → optional quality refine → page/OG enrichment → context.
+    """Orchestrate skip → deterministic plan + parallel LLM planner →
+    multi-query search → heuristic rank → literal fallback / LLM refine on
+    low relevance → page/OG enrichment → context.
 
     Returns the same shape as `run_quick_search_for_chat`:
       {"context", "rewritten_query", "skipped", "reason"}
@@ -959,6 +1107,20 @@ async def run_search_agent(
 
     mode_cfg = _mode_config()
     plan = _deterministic_plan(messages, latest, mode_cfg, context_hint=context_hint)
+    turns, prior_tokens = _build_prior_tokens(messages, clean_latest)
+
+    # Start the LLM planner now so it overlaps the first search wave.
+    planner_task = None
+    if _planner_enabled(mode_cfg) and planner_model:
+        planner_task = asyncio.create_task(asyncio.wait_for(
+            llm_plan(
+                http, ollama_url, planner_model,
+                clean_latest, turns, context_hint,
+                datetime.now().astimezone(),
+                max_queries=min(3, mode_cfg.max_queries),
+            ),
+            timeout=float(getattr(config, "QUICK_SEARCH_PLANNER_TIMEOUT", 6.0)),
+        ))
 
     await _emit(events, conv_id, "tool_start", {
         "tool": "quick_search", "icon": "search",
@@ -975,9 +1137,37 @@ async def run_search_agent(
         "status": f"→ {progress_label[:120]}",
     })
 
-    _, prior_tokens = _build_prior_tokens(messages, clean_latest)
     rounds_used = 1
     raw, search_errors = await _search_provider(http, plan, queries)
+
+    # Fold in the LLM plan if it landed: adopt question/category/freshness,
+    # then run a second wave for the genuinely new queries.
+    planner_outcome = "deterministic"
+    if planner_task is not None:
+        llm_out = None
+        try:
+            llm_out = await planner_task
+            planner_outcome = "used" if llm_out else "invalid"
+        except asyncio.TimeoutError:
+            planner_outcome = "timeout"
+        except Exception as e:
+            planner_outcome = f"error:{type(e).__name__}"
+        if llm_out:
+            new_queries = _merge_llm_plan(plan, llm_out)
+            if new_queries:
+                new_queries = _qs._filter_novel_queries(conv_id, new_queries)
+            if new_queries:
+                await _emit(events, conv_id, "tool_progress", {
+                    "tool": "quick_search", "icon": "search",
+                    "status": f"Planner → {' | '.join(q[:40] for q in new_queries[:2])[:120]}",
+                })
+                wave2, wave2_errors = await _search_provider(http, plan, new_queries)
+                search_errors += wave2_errors
+                if wave2:
+                    raw = _merge_unique([wave2, raw])
+                queries = new_queries + queries
+                plan.queries = queries
+    plan.source_mode = f"{plan.source_mode};planner={planner_outcome}"
 
     if not raw:
         reason_text = "search unavailable or no results"
@@ -993,18 +1183,46 @@ async def run_search_agent(
     score = relevance_score(clean_latest, queries, top, prior_tokens)
     print(
         f"[SA]   plan mode={mode_cfg.mode} round={rounds_used} "
-        f"freshness={plan.freshness_mode} time_range={plan.time_range} "
-        f"q={queries!r} relevance={score:.2f} errors={search_errors}"
+        f"planner={planner_outcome} freshness={plan.freshness_mode} "
+        f"time_range={plan.time_range} q={queries!r} "
+        f"relevance={score:.2f} errors={search_errors}"
     )
 
-    # ── Optional quality refinement ──
+    # ── Free deterministic fallback: retry the raw user message ──
+    # Catches the case where anchoring/fusion/subject-stripping mangled the
+    # query. No LLM cost, so it runs before spending the refine round.
+    if score < relevance_threshold and len(_qs._content_tokens(clean_latest)) >= 3:
+        literal = _clean_query_phrase(clean_latest)
+        if literal and literal.lower() not in {q.lower() for q in queries}:
+            try:
+                more = await _qs._cached_search(
+                    http, literal,
+                    count=_search_count_for_plan(plan, len(queries) + 1),
+                    time_range=plan.time_range,
+                    categories=_searxng_categories(plan.category, plan.freshness_mode),
+                )
+            except Exception:
+                more = []
+            if more:
+                more = [{**r, "query_origin": literal} for r in more if isinstance(r, dict)]
+                raw = _merge_unique([raw, more])
+                queries = queries + [literal]
+                plan.queries = queries
+                top = await _select_top_results(http, ollama_url, raw, primary, plan)
+                score = relevance_score(clean_latest, queries, top, prior_tokens)
+                print(f"[SA]   literal fallback {literal!r} relevance={score:.2f}")
+
+    # ── Optional LLM refinement when results still look off-topic ──
+    # QUICK_SEARCH_PLANNER=deterministic is the kill switch for ALL planner-
+    # model LLM calls, refine included.
     if (
         mode_cfg.allow_refine
+        and _planner_enabled(mode_cfg)
         and score < relevance_threshold
         and rounds_used < max_rounds
         and len(_qs._content_tokens(clean_latest)) >= 3
     ):
-        refined = await refine_query(http, ollama_url, refine_model, clean_latest, queries, top)
+        refined = await refine_query(http, ollama_url, planner_model, clean_latest, queries, top)
         if refined and refined not in queries:
             await _emit(events, conv_id, "tool_progress", {
                 "tool": "quick_search", "icon": "search",
@@ -1026,8 +1244,8 @@ async def run_search_agent(
                 plan.queries = queries
                 top = await _select_top_results(http, ollama_url, raw, primary, plan)
                 rounds_used = 2
-                new_score = relevance_score(clean_latest, queries, top, prior_tokens)
-                print(f"[SA]   round={rounds_used} refined={refined!r} relevance={new_score:.2f}")
+                score = relevance_score(clean_latest, queries, top, prior_tokens)
+                print(f"[SA]   round={rounds_used} refined={refined!r} relevance={score:.2f}")
 
     # ── Page-fetch + OG-image enrichment (parallel) ──
     page_text, _ = await asyncio.gather(
@@ -1073,7 +1291,8 @@ async def run_search_agent(
         "queries": plan.queries,
     })
 
-    ctx = _qs._build_context(top, primary, page_text, allowed, plan)
+    low_relevance = score < relevance_threshold and len(_qs._content_tokens(clean_latest)) >= 3
+    ctx = _qs._build_context(top, primary, page_text, allowed, plan, low_relevance=low_relevance)
 
     await _emit(events, conv_id, "tool_done", {
         "tool": "quick_search", "icon": "search",

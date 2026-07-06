@@ -66,6 +66,7 @@ import {
 import {
   Chip,
   DaedalusSummary,
+  EmptyState,
   MDWrap,
   MemoMD,
   MemoryProfilePanel,
@@ -224,6 +225,7 @@ function HyprChat(){
   const [imgChatPrefix,setImgChatPrefix]=useState("");
   const [imgChatNeg,setImgChatNeg]=useState("");
   const [imgChatComposeModel,setImgChatComposeModel]=useState(()=>lsGet("hc-img-chat-compose",""));
+  const [imgChatAutoEnhance,setImgChatAutoEnhance]=useState(()=>lsGet("hc-img-chat-auto-enhance","")==="true");
   const [imgChatLists,setImgChatLists]=useState(null); // {checkpoints,vaes,settings} lazy-fetched for the dropdowns
   const [mdlPrefix,setMdlPrefix]=useState(""); // per-model prompt prefix being edited for imgChatCkpt
   const [mdlNeg,setMdlNeg]=useState("");
@@ -397,6 +399,7 @@ function HyprChat(){
   useEffect(()=>{persistServerSetting("hc-img-chat-vae","image_chat_vae",imgChatVae);},[imgChatVae]);
   useEffect(()=>{persistServerSetting("hc-img-chat-workflow","image_chat_workflow",imgChatWorkflow);},[imgChatWorkflow]);
   useEffect(()=>{persistServerSetting("hc-img-chat-compose","image_chat_compose_model",imgChatComposeModel);},[imgChatComposeModel]);
+  useEffect(()=>{persistServerSetting("hc-img-chat-auto-enhance","image_chat_auto_enhance",imgChatAutoEnhance,String(imgChatAutoEnhance));},[imgChatAutoEnhance]);
   // Per-model prompt fields track the selected default image model
   useEffect(()=>{
     const s=(imgChatCkpt&&imgChatLists?.settings?.[imgChatCkpt])||{};
@@ -1086,6 +1089,10 @@ function HyprChat(){
     if(timers.has(kb.id)){clearTimeout(timers.get(kb.id));timers.delete(kb.id);}
     saveKb(kb);
   };
+  const createKb=async()=>{
+    const r=await fetch(`${API}/api/knowledge-bases`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New KB",description:""})}).catch(()=>null);
+    if(r){const kb=await r.json();setKbs(p=>[...p,{...kb,files:[]}]);}else{setKbs(p=>[...p,{id:`kb-${Date.now()}`,name:"New KB",description:"",files:[]}]);}
+  };
   const parseConnectorJson=(txt,fallback,label)=>{
     try{return (txt||"").trim()?JSON.parse(txt):fallback;}catch(e){notify({type:"error",text:`Invalid ${label}`,detail:e.message||String(e)});throw e;}
   };
@@ -1351,13 +1358,14 @@ function HyprChat(){
       if(d.image_chat_prompt_prefix!=null)setImgChatPrefix(d.image_chat_prompt_prefix);
       if(d.image_chat_negative!=null)setImgChatNeg(d.image_chat_negative);
       if(d.image_chat_compose_model!=null)hydrateServerSetting("image_chat_compose_model",setImgChatComposeModel,d.image_chat_compose_model,imgChatComposeModel);
+      if(d.image_chat_auto_enhance!=null)hydrateServerSetting("image_chat_auto_enhance",setImgChatAutoEnhance,d.image_chat_auto_enhance,imgChatAutoEnhance);
       if(d.model_hardware_profile)setHyprfitProfile(d.model_hardware_profile);
       settingsLoadedRef.current=true;
     }).catch(()=>{settingsLoadedRef.current=true;});
     fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
     fetch(`${API}/api/workspaces`).then(r=>r.json()).then(setWorkspaces).catch(()=>{});
     fetch(`${API}/api/research/templates`).then(r=>r.json()).then(d=>{const tm=d.templates||[];setResearchTemplates(tm);if(tm[0])setResearchDraft(p=>({...p,report_type:p.report_type||tm[0].id,depth:p.depth||tm[0].default_depth||3}));}).catch(()=>{});
-    fetch(`${API}/api/research/reports`).then(r=>r.json()).then(d=>{setResearchReports(d||[]);if((d||[])[0])setActiveResearchId((d||[])[0].id);}).catch(()=>{});
+    fetch(`${API}/api/research/reports`).then(r=>r.json()).then(d=>{setResearchReports(d||[]);if((d||[])[0]){setActiveResearchId((d||[])[0].id);setResearchView("reports");}}).catch(()=>{});
     fetch(`${API}/api/councils`).then(r=>r.json()).then(setCouncils).catch(()=>{});
     fetch(`${API}/api/council-presets`).then(r=>r.json()).then(setCouncilPresets).catch(()=>{});
     const quickSearchEntry={id:"quick_search",name:"⚡ Quick Search",description:"SearXNG instant search with inline YouTube, image & web previews",icon:"flash"};
@@ -1511,6 +1519,7 @@ function HyprChat(){
       setResearchDraft(p=>({...p,query:"",focus:"",inputs:[]}));
       setResearchInputText("");
       setPanel("research");
+      setResearchView("reports");
     }catch(e){setResearchRunning(false);notify({type:"error",text:"Research failed to start",detail:e.message||String(e)});}
     setResearchLoading(false);
   };
@@ -1683,7 +1692,9 @@ function HyprChat(){
       h2{font-size:14.5pt;line-height:1.25;margin:20pt 0 7pt;color:#1f2937;border-top:1px solid #d7dde8;padding-top:10pt}
       h3{font-size:12pt;line-height:1.3;margin:13pt 0 5pt;color:#1f2937}
       h4,h5,h6{font-size:10.5pt;line-height:1.3;margin:10pt 0 4pt;color:#374151}
+      h1,h2,h3,h4{page-break-inside:avoid;break-inside:avoid;page-break-after:avoid;break-after:avoid}
       p{margin:0 0 8pt}
+      p,li{orphans:2;widows:2}
       ul,ol{margin:0 0 9pt 18pt;padding:0}
       li{margin:0 0 4pt;padding-left:2pt}
       code{font-family:"SFMono-Regular",Menlo,Consolas,monospace;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:3pt;padding:0 3pt;color:#334155;font-size:.92em}
@@ -1709,7 +1720,7 @@ function HyprChat(){
       .print-details{border:1px solid #d7dde8;background:#f8fafc;border-radius:5pt;padding:7pt 9pt;margin:8pt 0}
       .print-details-summary{font-size:8.5pt;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#475467;margin-bottom:4pt}
       .sources{margin-top:22pt;border-top:1px solid #d7dde8;padding-top:12pt}
-      .sources li{margin-bottom:6pt}
+      .sources li{margin-bottom:6pt;page-break-inside:avoid;break-inside:avoid}
       .source-title{font-weight:700;color:#1f2937}
       .source-url{font-size:8.5pt;color:#57606a;overflow-wrap:anywhere}
       @page{size:letter;margin:.58in}
@@ -1732,7 +1743,7 @@ function HyprChat(){
       const idx=src.index||src.source_index||"";
       const title=escapePrintHtml(src.title||src.url||"Source");
       const url=escapePrintHtml(src.url||"");
-      const snippet=escapePrintHtml(src.snippet||"");
+      const snippet=escapePrintHtml(String(src.snippet||"").slice(0,600));
       return `<li><div class="source-title">${idx?`[S${idx}] `:""}${title}</div>${url?`<div class="source-url">${url}</div>`:""}${snippet?`<p>${snippet}</p>`:""}</li>`;
     }).join("")}</ol></section>`:"";
     return `<div class="research-print-page">
@@ -1777,7 +1788,7 @@ function HyprChat(){
             <div className="source-title">[S{idx}] {src.title||src.url||"Source"}</div>
             {src.url&&<div className="source-url">{src.url}</div>}
             {src.credibility_score!==undefined&&<div className="source-url">Credibility: {src.credibility_score}/100{(src.credibility_factors||[]).length?` — ${(src.credibility_factors||[]).join(", ")}`:""}</div>}
-            {src.snippet&&<p>{src.snippet}</p>}
+            {src.snippet&&<p>{String(src.snippet).slice(0,600)}</p>}
           </li>;
         })}</ol>
       </section>}
@@ -1830,7 +1841,7 @@ function HyprChat(){
         image:{type:"png",quality:1},
         html2canvas:{scale:2,backgroundColor:"#ffffff",useCORS:true,logging:false},
         jsPDF:{unit:"in",format:"letter",orientation:"portrait"},
-        pagebreak:{mode:["css","legacy"],avoid:["pre","blockquote",".chart-print-block",".mermaid-print-block"]}
+        pagebreak:{mode:["css","legacy"],avoid:["pre","blockquote",".chart-print-block",".mermaid-print-block",".sources li","h1","h2","h3","h4"]}
       }).from(host.querySelector(".research-print-page")).save();
     }catch(e){
       notify({type:"error",text:"PDF export failed",detail:e.message||String(e)});
@@ -2766,7 +2777,7 @@ function HyprChat(){
     const um={role:"user",content:displayContent,_fullContent:modelContent,_images:imageBase64s.length?imageBase64s:undefined,metadata:{pdfs:pdfAttachments.length?pdfAttachments:undefined,images:imageAttachments.length?imageAttachments:undefined},created_at:_now};
     uConv(cid,c=>{const existing=c.messages||[];const hasRealMessages=existing.some(m=>!(m.metadata&&m.metadata.persona_first_message));return{...c,title:!hasRealMessages?(displayContent||pdfAttachments.map(p=>p.name).join(", ")).slice(0,40):c.title,messages:[...existing,um,{role:"assistant",content:"",isS:true,created_at:_now}]};});
     setInp("");setAttachments([]);if(inpRef.current){inpRef.current.style.height="auto";}
-    setTimeout(()=>{if(chatScrollRef.current)chatScrollRef.current.scrollTop=chatScrollRef.current.scrollHeight;},0);
+    setTimeout(()=>{if(chatScrollRef.current)chatScrollRef.current.scrollTo({top:chatScrollRef.current.scrollHeight,behavior:"smooth"});},0);
     const am=[...(cv?.messages||[]),um];
     const sendOverrides={};
     if(pendingEffortForSend!==undefined)sendOverrides.effort=pendingEffortForSend;
@@ -3689,7 +3700,7 @@ function HyprChat(){
         // to NYT/Wikipedia/etc), hotlink bypass (proxy sends domain-matched Referer), and
         // mixed-content fix. /api/img-proxy URLs and same-origin /api/ URLs pass through.
         const finalSrc = proxiedImageUrl(src);
-        return <img key={k} src={finalSrc} alt={alt||""} referrerPolicy="no-referrer" loading="lazy" style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`}} onError={e=>e.target.style.display="none"}/>;}
+        return <img key={k} src={finalSrc} alt={alt||""} referrerPolicy="no-referrer" loading="lazy" onClick={()=>{const base=decodeURIComponent(src.split("?")[0].split("/").pop()||"");openPreview(base||alt||"image",src);}} title="Click to preview" style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`,cursor:"zoom-in"}} onError={e=>e.target.style.display="none"}/>;}
       if(s.startsWith("`")&&s.endsWith("`")&&s.length>1)
         return <code key={k} style={{background:`${t.surface}CC`,padding:"1px 5px",borderRadius:3,fontFamily:font,fontSize:"0.88em",color:t.warm}}>{s.slice(1,-1)}</code>;
       if(s.charCodeAt(0)===0xE010){
@@ -4042,8 +4053,74 @@ function HyprChat(){
   const settingsCardS={background:`${t.surface}40`,border:`1px solid ${t.brd}24`,borderRadius:12,padding:"16px 18px",marginBottom:14};
   const settingsKickerS={fontSize:10,color:t.mut,lineHeight:1.45};
   const btnS=(c,bg)=>({background:bg||`${c}18`,border:`1px solid ${c}4D`,color:c,padding:"6px 12px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:11,display:"flex",alignItems:"center",gap:5,boxShadow:"none"});
-  const msgToolbarS={display:"inline-flex",alignItems:"center",gap:1,marginTop:5,background:`${t.surface}5c`,border:`1px solid ${t.brd}20`,borderRadius:7,padding:2};
+  // ── Settings design system: one titled-card language for every settings tab ──
+  const secS={background:`${t.surface}40`,border:`1px solid ${t.brd}24`,borderRadius:10,padding:"14px 16px",marginBottom:12,display:"flex",flexDirection:"column",gap:12};
+  const subSecS={background:`${t.bgDeep}70`,border:`1px solid ${t.brd}24`,borderRadius:8,padding:12,display:"flex",flexDirection:"column",gap:10};
+  const secHeadRowS={display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:10,borderBottom:`1px solid ${t.brd}18`,paddingBottom:8};
+  const secTitleS={fontSize:10,fontWeight:900,color:t.acc,textTransform:"uppercase",letterSpacing:.75};
+  const secHintS={fontSize:10,color:t.mut,lineHeight:1.45};
+  const secFieldLabelS={fontSize:10,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.55,display:"flex",flexDirection:"column",gap:5,minWidth:0};
+  const secGridS={display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:10,alignItems:"end"};
+  const secResetBtnS={padding:"6px 10px",background:`${t.err}14`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:700,whiteSpace:"nowrap",fontFamily:font};
+  const secInheritRowS={display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer"};
+  // Render helpers below are PLAIN FUNCTIONS called as {fn(...)} — never JSX element
+  // types. Defining components here would mint a new type each App render and
+  // remount the subtree, dropping input focus mid-keystroke.
+  const settingSection=(title,extras,children,hint,color)=>(
+    <section style={color?{...secS,background:`${color}08`,border:`1px solid ${color}26`}:secS}>
+      <div style={secHeadRowS}>
+        <div style={color?{...secTitleS,color}:secTitleS}>{title}</div>
+        {extras||null}
+      </div>
+      {hint?<div style={secHintS}>{hint}</div>:null}
+      {children}
+    </section>
+  );
+  const modelField=({label,icon,value,set,inheritTitle,inheritDesc,activateValue,hint})=>(<div>
+    {label&&<div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>{label}</div>}
+    {value?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+      <div style={{flex:1,minWidth:0}}><ModelPicker value={value} onChange={set} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
+      <button onClick={()=>set("")} style={secResetBtnS}>Reset</button>
+    </div>:<div onClick={()=>set(activateValue!==undefined?activateValue:(models[0]||""))} style={secInheritRowS}>
+      <span style={{fontSize:14}}>{icon}</span>
+      <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>{inheritTitle}</div><div style={{fontSize:9,color:t.dim}}>{inheritDesc}</div></div>
+      <span style={{fontSize:9,color:t.mut}}>▾</span>
+    </div>}
+    {hint?<div style={{...secHintS,marginTop:6}}>{hint}</div>:null}
+  </div>);
+  const toggleField=(label,enabled,onToggle,statusText)=>(
+    <div style={{display:"flex",alignItems:"center",gap:10}}>
+      <label style={{fontSize:12,color:t.dim,fontWeight:600,whiteSpace:"nowrap"}}>{label}</label>
+      <div onClick={onToggle} style={{width:36,height:20,borderRadius:10,background:enabled?t.acc:`${t.mut}44`,cursor:"pointer",position:"relative",transition:"all .2s",flexShrink:0}}>
+        <div style={{width:16,height:16,borderRadius:8,background:t.text,position:"absolute",top:2,left:enabled?18:2,transition:"all .2s"}}/>
+      </div>
+      <span style={{fontSize:10,color:t.mut}}>{statusText}</span>
+    </div>);
+  const sliderField=({label,value,set,min,max,step,display,minLabel,maxLabel,color=t.acc,hint})=>(<div>
+    <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>{label}: <span style={{color,fontFamily:"monospace"}}>{display!==undefined?display:value}</span></label>
+    <input type="range" min={min} max={max} step={step} value={value} onChange={e=>set(parseFloat(e.target.value))} style={{width:"100%",accentColor:color}}/>
+    <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>{minLabel??min}</span><span>{maxLabel??max}</span></div>
+    {hint?<div style={{fontSize:9,color:t.mut,marginTop:4,lineHeight:1.5}}>{hint}</div>:null}
+  </div>);
+  const chipRow=(options,value,onSelect,{color=t.acc,stretch=false}={})=>(
+    <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+      {options.map(o=>{const active=value===o.v;return <button key={String(o.v)} title={o.title} onClick={()=>onSelect(o.v)} style={{...(stretch?{flex:1}:{}),padding:"6px 12px",borderRadius:7,border:`1px solid ${active?color:t.brd}44`,background:active?`${color}22`:t.bgDeep,color:active?color:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:active?700:400,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:5,transition:"background .15s ease,border-color .15s ease,color .15s ease"}}>{o.label}</button>;})}
+    </div>);
+  const msgToolbarS={display:"inline-flex",alignItems:"center",gap:1,marginTop:5,background:`${t.surface}5c`,border:`1px solid ${t.brd}20`,borderRadius:7,padding:2,animation:"fadeIn .18s ease"};
   const msgActionS=(c=t.mut)=>({background:"transparent",border:"none",color:c,cursor:"pointer",padding:"3px 7px",borderRadius:5,fontFamily:font,fontSize:9,display:"flex",alignItems:"center",gap:3});
+  // Shared panel header recipe (Research pattern). Plain function — call as {panelHeader(...)}.
+  const panelHeader=(icon,title,extras,{color=t.acc,left,subtitle}={})=>(
+    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexShrink:0}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
+        <span style={{display:"flex",color}}>{icon}</span>
+        <div style={{minWidth:0}}>
+          <div style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color}}>{title}</div>
+          {subtitle?<div style={{fontSize:10,color:t.mut,marginTop:2}}>{subtitle}</div>:null}
+        </div>
+        {left||null}
+      </div>
+      {extras?<div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>{extras}</div>:null}
+    </div>);
   const isEmptyChatSurface=panel==="chat"&&!loadingConv&&!councilRunning&&!streaming&&(!act||(!(act.messages||[]).length&&!act.is_council));
   const emptyComposerLift=isEmptyChatSurface?"translate3d(0,clamp(-410px,calc(-50vh + 165px),-205px),0)":"translate3d(0,0,0)";
   useEffect(()=>{
@@ -4256,11 +4333,11 @@ function HyprChat(){
             <div style={{fontSize:10,color:t.mut,marginTop:2,display:"flex",gap:4,alignItems:"center"}}><span style={{fontSize:8,padding:"1px 4px",borderRadius:3,background:`${t.brd}22`,color:t.dim}}>{r.role}</span></div>
             <div style={{fontSize:10,color:t.dim,marginTop:2,lineHeight:1.4,maxHeight:40,overflow:"hidden"}} dangerouslySetInnerHTML={{__html:(r.snippet||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/&lt;(\/?mark)&gt;/g,"<$1>")}}/>
           </div>)}
-        </div>:(()=>{const pinnedC=filtC.filter(c=>c.pinned==="1"||c.pinned===1);const unpinnedC=filtC.filter(c=>c.pinned!=="1"&&c.pinned!==1);const renderConv=(c)=>{const isCouncil=c.is_council==="1"||c.is_council===1||c.is_council===true;const hasPersona=!!c.persona_name&&!isCouncil;const profileType=hasPersona?getConversationProfileType(c):null;const convProfile=hasPersona?getProfileForConversation(c):null;const convAvatar=hasPersona?(c.persona_avatar||profileAvatar(convProfile)):null;const tags=convTags[c.id]||[];const isAct=c.id===actId&&panel==="chat";const accentColor=isCouncil?t.pink:profileType==="persona"?t.pink:hasPersona?t.acc:t.acc;const isPinned=c.pinned==="1"||c.pinned===1;const title=c.title||"New Chat";const rowBg=isAct?`${accentColor}14`:(isCouncil||hasPersona)?`${accentColor}0C`:"transparent";const effectiveRowBg=rowBg==="transparent"?`${t.bgDeep}F2`:rowBg;const hoverRowBg=isAct?effectiveRowBg:`${t.sfBri}1f`;const measureTitle=e=>{const row=e.currentTarget;const clip=row.querySelector(".conv-title-clip");const text=row.querySelector(".conv-title-text");if(!clip||!text)return;const overflow=Math.max(0,text.scrollWidth-clip.clientWidth);row.style.setProperty("--conv-title-marquee",`${overflow+18}px`);row.setAttribute("data-title-overflow",overflow>3?"1":"0");};const resetTitle=e=>{e.currentTarget.setAttribute("data-title-overflow","0");};return <div key={c.id} style={{marginBottom:1}}>
-        <div className={`conv-row${isAct?" is-act":""}`} data-sticky-actions={isPinned||tags.length?"1":"0"} onClick={()=>loadConversation(c.id)} onMouseEnter={measureTitle} onFocus={measureTitle} onMouseLeave={resetTitle} onBlur={resetTitle} style={{padding:"9px 7px 9px 9px",borderRadius:8,cursor:"pointer",background:rowBg,border:isAct?`1px solid ${accentColor}50`:(isCouncil||hasPersona)?`1px solid ${accentColor}25`:"1px solid transparent",display:"flex",alignItems:"center",gap:0,borderLeft:`3px solid ${isAct?accentColor:(isCouncil||hasPersona)?`${accentColor}66`:"transparent"}`,position:"relative",overflow:"hidden","--conv-row-bg":effectiveRowBg,"--conv-row-hover-bg":hoverRowBg,"--conv-action-bg":effectiveRowBg}}>
+        </div>:(()=>{const pinnedC=filtC.filter(c=>c.pinned==="1"||c.pinned===1);const unpinnedC=filtC.filter(c=>c.pinned!=="1"&&c.pinned!==1);const renderConv=(c)=>{const isCouncil=c.is_council==="1"||c.is_council===1||c.is_council===true;const hasPersona=!!c.persona_name&&!isCouncil;const profileType=hasPersona?getConversationProfileType(c):null;const convProfile=hasPersona?getProfileForConversation(c):null;const convAvatar=hasPersona?(c.persona_avatar||profileAvatar(convProfile)):null;const tags=convTags[c.id]||[];const isAct=c.id===actId&&panel==="chat";const accentColor=isCouncil?t.pink:profileType==="persona"?t.pink:hasPersona?t.acc:t.acc;const isPinned=c.pinned==="1"||c.pinned===1;const title=c.title||"New Chat";const rowBg=isAct?`${accentColor}14`:"transparent";const effectiveRowBg=rowBg==="transparent"?`${t.bgDeep}F2`:rowBg;const hoverRowBg=isAct?effectiveRowBg:`${t.sfBri}1f`;const measureTitle=e=>{const row=e.currentTarget;const clip=row.querySelector(".conv-title-clip");const text=row.querySelector(".conv-title-text");if(!clip||!text)return;const overflow=Math.max(0,text.scrollWidth-clip.clientWidth);row.style.setProperty("--conv-title-marquee",`${overflow+18}px`);row.setAttribute("data-title-overflow",overflow>3?"1":"0");};const resetTitle=e=>{e.currentTarget.setAttribute("data-title-overflow","0");};return <div key={c.id} style={{marginBottom:2}}>
+        <div className={`conv-row${isAct?" is-act":""}`} data-sticky-actions={isPinned||tags.length?"1":"0"} onClick={()=>loadConversation(c.id)} onMouseEnter={measureTitle} onFocus={measureTitle} onMouseLeave={resetTitle} onBlur={resetTitle} style={{padding:"0 7px 0 9px",minHeight:36,boxSizing:"border-box",borderRadius:8,cursor:"pointer",background:rowBg,border:isAct?`1px solid ${accentColor}50`:"1px solid transparent",display:"flex",alignItems:"center",gap:0,borderLeft:`3px solid ${isAct?accentColor:(isCouncil||hasPersona)?`${accentColor}55`:"transparent"}`,position:"relative",overflow:"hidden","--conv-row-bg":effectiveRowBg,"--conv-row-hover-bg":hoverRowBg,"--conv-action-bg":effectiveRowBg}}>
           <div style={{overflow:"hidden",whiteSpace:"nowrap",fontSize:13,color:isAct?t.text:t.dim,flex:1,minWidth:0,fontWeight:isAct?500:400,display:"flex",alignItems:"center",gap:6}}>
             {isCouncil&&<span style={{flexShrink:0,color:t.pink,display:"flex",opacity:isAct?1:.7}}><IC.Council/></span>}
-            {hasPersona&&(convAvatar?<img src={avatarSrc(convAvatar)} style={{width:isAct?24:16,height:isAct?24:16,borderRadius:isAct?7:5,objectFit:"cover",flexShrink:0,opacity:isAct?1:.85}} alt=""/>:<span style={{flexShrink:0,color:accentColor,display:"flex",alignItems:"center",justifyContent:"center",width:isAct?24:16,height:isAct?24:16,opacity:isAct?1:.75}}>{profileType==="persona"?<IC.User/>:<IC.Bot/>}</span>)}
+            {hasPersona&&(convAvatar?<img src={avatarSrc(convAvatar)} style={{width:18,height:18,borderRadius:6,objectFit:"cover",flexShrink:0,opacity:isAct?1:.85}} alt=""/>:<span style={{flexShrink:0,color:accentColor,display:"flex",alignItems:"center",justifyContent:"center",width:18,height:18,opacity:isAct?1:.75}}>{profileType==="persona"?<IC.User/>:<IC.Bot/>}</span>)}
             {c.forked_from&&<span style={{flexShrink:0,color:t.f1||t.acc,display:"flex",opacity:.6}} title="Forked conversation"><IC.GitBranch/></span>}
             <span className="conv-title-clip" title={title} style={{minWidth:0,flex:1,overflow:"hidden",whiteSpace:"nowrap"}}>
               <span className="conv-title-text">{title}</span>
@@ -4511,9 +4588,10 @@ function HyprChat(){
 
       {/* Status pills - removed from here, now in chat area */}
 
-      {/* Panels + Preview wrapper */}
+      {/* Panels + Preview wrapper. Keyed on the active panel so a panel switch remounts
+          this column and replays the entry fade; key is stable while chatting. */}
       <div style={{flex:1,display:"flex",overflow:"hidden"}}>
-      <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",minWidth:0}}>
+      <div key={wsPanel&&activeWs?"ws":panel} style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",minWidth:0,animation:"fadeIn .18s ease"}}>
       {/* Panels */}
       {wsPanel&&activeWs
         ?<WorkspaceDetail ws={wsDetail} wsLoading={wsLoading} t={t} API={API}
@@ -4526,16 +4604,10 @@ function HyprChat(){
             notify={notify}
             onPersonaCreated={mc=>{const norm={...mc,parameters:normalizeProfileParams(mc)};setMcs(p=>[...p,norm]);setProfileTab(getProfileType(norm)==="persona"?"personas":"agents");setPanel("personas");setEditMc(mc.id);}}/>
       :panel==="artifacts"?<ArtifactStudioPanel t={t} font={font} workspaces={workspaces} kbs={kbs} onPreview={openPreview} onOpenConv={id=>loadConversation(id)} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Artifact added to composer",duration:1800});}}} focusId={artifactFocusId} onFocusConsumed={()=>setArtifactFocusId(null)} notify={notify}/>
-      :panel==="images"?<ImageStudioPanel t={t} font={font} configured={!!comfyuiUrl} onPreview={openPreview} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Image added to composer",duration:1800});}}} notify={notify} confirmAction={confirmAction}/>
+      :panel==="images"?<ImageStudioPanel t={t} font={font} configured={!!comfyuiUrl} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Image added to composer",duration:1800});}}} notify={notify} confirmAction={confirmAction} inputS={inputS} fieldLabelS={secFieldLabelS} sliderField={sliderField}/>
       :panel==="memory"?<MemoryProfilePanel t={t} API={API} font={font} notify={notify} onOpenConv={id=>loadConversation(id)} models={models} wsModel={wsModel}/>
       :panel==="kb"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-      <div style={{display:"flex",alignItems:"center",gap:8}}><IC.Database/><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Knowledge Bases</span></div>
-      <button onClick={async()=>{
-        const r=await fetch(`${API}/api/knowledge-bases`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New KB",description:""})}).catch(()=>null);
-        if(r){const kb=await r.json();setKbs(p=>[...p,{...kb,files:[]}]);}else{setKbs(p=>[...p,{id:`kb-${Date.now()}`,name:"New KB",description:"",files:[]}]);}
-      }} style={btnS(t.acc)}><IC.Plus/> New KB</button>
-    </div>
+    {panelHeader(<IC.Database/>,"Knowledge Bases",<button onClick={createKb} style={btnS(t.acc)}><IC.Plus/> New KB</button>)}
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       {kbs.map(kb=><div key={kb.id} style={cardS}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
@@ -4543,10 +4615,13 @@ function HyprChat(){
             <input value={kb.name} onChange={e=>{const next={...kb,name:e.target.value};setKbs(p=>p.map(k=>k.id===kb.id?next:k));scheduleKbSave(next);}} onBlur={e=>flushKbSave({...kb,name:e.target.value})} style={{...inputS,fontSize:14,fontWeight:600,background:"transparent",border:"none",padding:"0 0 4px 0",color:t.text}}/>
             <input value={kb.description||""} onChange={e=>{const next={...kb,description:e.target.value};setKbs(p=>p.map(k=>k.id===kb.id?next:k));scheduleKbSave(next);}} onBlur={e=>flushKbSave({...kb,description:e.target.value})} placeholder="Description..." style={{...inputS,background:"transparent",border:"none",padding:0,fontSize:11,color:t.mut}}/>
           </div>
-          <button onClick={async()=>{fetch(`${API}/api/knowledge-bases/${kb.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.filter(k=>k.id!==kb.id));}} style={btnS(t.err)}><IC.Trash/></button>
+          <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
+            <label htmlFor={`kb-upload-${kb.id}`} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${t.f1}10`,border:`1px dashed ${t.f1}44`,borderRadius:8,cursor:"pointer",fontSize:11,color:t.f1}}><IC.Upload/> Upload files</label>
+            <button onClick={async()=>{fetch(`${API}/api/knowledge-bases/${kb.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.filter(k=>k.id!==kb.id));}} style={btnS(t.err)}><IC.Trash/></button>
+          </div>
         </div>
-        <div style={{maxHeight:240,overflowY:"auto",marginBottom:10,display:"flex",flexDirection:"column",gap:3}}>
-          {(kb.files||[]).map((f,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 10px",background:`${t.surface}44`,borderRadius:8,border:`1px solid ${t.brd}18`,fontSize:11}}>
+        <div style={{maxHeight:240,overflowY:"auto",marginBottom:10,display:"flex",flexDirection:"column",gap:6}}>
+          {(kb.files||[]).map((f,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:`${t.surface}44`,borderRadius:8,border:`1px solid ${t.brd}22`,fontSize:11}}>
             <span style={{color:t.f1,flexShrink:0}}>{(()=>{const ext=((f.filename||f.name||"").split(".").pop()||"").toLowerCase();if(ext==="pdf")return"📕";if(["doc","docx"].includes(ext))return"📘";if(["xls","xlsx","csv"].includes(ext))return"📊";if(["json","xml","yaml","yml"].includes(ext))return"🗂";if(["py","js","ts","rs","go","java","c","cpp","h","rb","sh"].includes(ext))return"💻";if(["md"].includes(ext))return"📝";if(["txt","text","log"].includes(ext))return"📝";if(["html","htm"].includes(ext))return"🌐";if(["png","jpg","jpeg","gif","svg","webp"].includes(ext))return"🖼";if(["zip","tar","gz","rar","7z"].includes(ext))return"📦";return"📄";})()}</span>
             <span style={{flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:500}}>{f.filename||f.name}</span>
             <span style={{fontSize:9,color:t.mut,flexShrink:0}}>{((f.file_size||f.size||0)/1024).toFixed(1)}KB</span>
@@ -4556,8 +4631,10 @@ function HyprChat(){
           {!(kb.files||[]).length&&<span style={{fontSize:11,color:t.mut,fontStyle:"italic",padding:"4px 0"}}>No files uploaded</span>}
         </div>
         {/* Upload progress bars */}
+        {Object.keys(uploadProgress).some(k=>k.startsWith(kb.id+":"))&&<div style={{border:`1px solid ${t.brd}22`,borderRadius:8,padding:"8px 10px",marginBottom:8,display:"flex",flexDirection:"column",gap:6}}>
+          <div style={{fontSize:9,fontWeight:800,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Uploading</div>
         {Object.entries(uploadProgress).filter(([k])=>k.startsWith(kb.id+":")).map(([key,info])=>(
-          <div key={key} style={{marginBottom:8,padding:"6px 10px",background:`${t.surface||t.bg}`,borderRadius:6,border:`1px solid ${t.brd}22`}}>
+          <div key={key} style={{padding:"6px 10px",background:`${t.surface||t.bg}`,borderRadius:6,border:`1px solid ${t.brd}22`}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:10,marginBottom:4}}>
               <span style={{color:t.text,fontWeight:600}}>{info.filename}</span>
               <span style={{color:info.status==="error"?t.err:info.status==="done"?"#4caf50":t.mut,fontWeight:500}}>
@@ -4569,9 +4646,8 @@ function HyprChat(){
             </div>
           </div>
         ))}
-        <label style={{display:"flex",alignItems:"center",gap:6,padding:"8px 14px",background:`${t.f1}10`,border:`1px dashed ${t.f1}44`,borderRadius:8,cursor:"pointer",fontSize:11,color:t.f1}}>
-          <IC.Upload/> Upload files
-          <input type="file" multiple accept=".pdf,.md,.txt,.json,.csv,.docx,.html,.py,.js,.ts,.yaml,.yml" style={{display:"none"}} onChange={e=>{
+        </div>}
+        <input id={`kb-upload-${kb.id}`} type="file" multiple accept=".pdf,.md,.txt,.json,.csv,.docx,.html,.py,.js,.ts,.yaml,.yml" style={{display:"none"}} onChange={e=>{
             const files=[...e.target.files];e.target.value="";if(!files.length)return;
             const kbId=kb.id;
             const uploadOne=f=>{
@@ -4628,16 +4704,13 @@ function HyprChat(){
             // Fire all uploads in parallel
             files.forEach(uploadOne);
           }}/>
-        </label>
       </div>)}
-      {!kbs.length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No knowledge bases yet.</div>}
+      {!kbs.length&&<EmptyState t={t} font={font} icon={<IC.Database/>} title="No knowledge bases yet" hint="Create a knowledge base and upload documents to ground chats with cited sources." action={<button onClick={createKb} style={btnS(t.acc)}><IC.Plus/> New KB</button>}/>}
     </div>
   </div>
 
       :panel==="tools"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Tool/><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.warm}}>Tools</span></div>
-      <div style={{display:"flex",gap:5}}>
+    {panelHeader(<IC.Tool/>,"Tools",<>
         <button onClick={()=>{setPasteMode(p=>!p);setPasteCode("");setPasteToolName("");setPasteToolDesc("");}} style={btnS(pasteMode?t.warm:t.mut)}>
           {pasteMode?"✕ Cancel":"✦ Paste Code"}
         </button>
@@ -4652,8 +4725,7 @@ function HyprChat(){
           try{const r=await fetch(`${API}/api/tools`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(tl)});const d=await r.json();setTools(p=>[...p,d]);setEditTool(d.id);}
           catch{const id=`t-${Date.now()}`;setTools(p=>[...p,{id,...tl}]);setEditTool(id);}
         }} style={btnS(t.acc)}><IC.Plus/> New</button>
-      </div>
-    </div>
+      </>,{color:t.warm})}
     {pasteMode&&<div style={{padding:16,borderBottom:`1px solid ${t.brd}22`,background:`${t.warm}07`,animation:"fadeIn .2s"}}>
       <div style={{fontSize:11,fontWeight:700,color:t.warm,marginBottom:8,letterSpacing:.5,textTransform:"uppercase"}}>Paste Python Tool</div>
       <textarea value={pasteCode} rows={10} placeholder={"def my_tool(query: str) -> str:\n    \"\"\"Brief description of what this tool does.\"\"\"\n    # your code here\n    return result"}
@@ -4829,11 +4901,7 @@ function HyprChat(){
           {connectorTools.length>40&&<span style={{fontSize:10,color:t.mut,padding:"3px 8px"}}>+{connectorTools.length-40} more</span>}
         </div>}
       </div>
-      {!tools.length&&!pasteMode&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>
-        <div style={{fontSize:28,marginBottom:8}}>⚙️</div>
-        <div style={{fontWeight:600,marginBottom:4}}>No custom tools yet</div>
-        <div>Paste Python code or upload a .py file to create a tool the AI can call.</div>
-      </div>}
+      {!tools.length&&!pasteMode&&<EmptyState t={t} font={font} icon="⚙️" title="No custom tools yet" hint="Paste Python code or upload a .py file to create a tool the AI can call." action={<button onClick={()=>{setPasteMode(true);setPasteCode("");setPasteToolName("");setPasteToolDesc("");}} style={btnS(t.warm)}><IC.Plus/> Paste Code</button>}/>}
       {tools.map(tl=>{
         const snippet=(tl.code||"").split("\n").slice(0,2).join("\n");
         return <div key={tl.id} style={{...cardS,borderColor:editTool===tl.id?`${t.warm}55`:`${t.brd}44`}}>
@@ -4864,28 +4932,35 @@ function HyprChat(){
     </div>
   </div>
 
-      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return `Audit complete${d.coverage_score!==undefined?` - coverage ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return d.summary?`Report complete - ${d.summary}`:"Report complete";if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=[...(report?.outline?.sections||[])].map(s=>s.heading||s).filter(Boolean);return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return `Audit complete${d.coverage_score!==undefined?` - coverage ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return d.summary?`Report complete - ${d.summary}`:"Report complete";if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=[...(report?.outline?.sections||[])].map(s=>s.heading||s).filter(Boolean);const cardS={background:`${t.surface}80`,border:`1px solid ${t.brd}33`,borderRadius:10,padding:14,display:"flex",flexDirection:"column",gap:9};const cardHeadS={fontSize:11,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.6};return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}>
-      <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}><IC.Search/><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Deep Research</span>{researchRunning&&<span style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.acc}14`,border:`1px solid ${t.acc}33`,color:t.acc}}>live</span>}<div style={{display:"flex",gap:3,marginLeft:8,padding:3,border:`1px solid ${t.brd}28`,borderRadius:8,background:`${t.bgDeep}88`}}>{[["new","New"],["reports",researchReports.length?`Reports ${researchReports.length}`:"Reports"]].map(([id,label])=><button key={id} onClick={()=>setResearchView(id)} style={{fontSize:10,padding:"5px 9px",borderRadius:6,border:"none",background:researchView===id?`${t.acc}22`:"transparent",color:researchView===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontWeight:researchView===id?800:600}}>{label}</button>)}</div></div>
-      <div style={{display:"flex",gap:6,alignItems:"center"}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}><IC.Search/><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Deep Research</span>{researchRunning&&<span style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.acc}14`,border:`1px solid ${t.acc}33`,color:t.acc}}>live</span>}<div style={{display:"flex",gap:3,marginLeft:8,padding:3,border:`1px solid ${t.brd}28`,borderRadius:8,background:`${t.bgDeep}88`}}>{[["new","New"],["reports",researchReports.length?`Reports ${researchReports.length}`:"Reports"]].map(([id,label])=><button key={id} onClick={()=>setResearchView(id)} style={{fontSize:10,padding:"5px 9px",borderRadius:6,border:"none",background:researchView===id?`${t.acc}22`:"transparent",color:researchView===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontWeight:researchView===id?800:600,transition:"background .15s ease,color .15s ease"}}>{label}</button>)}</div></div>
+      {researchView==="reports"&&<div style={{display:"flex",gap:6,alignItems:"center"}}>
         {activeResearchId&&researchRunning&&<button onClick={()=>cancelResearchReport(activeResearchId)} style={btnS(t.err)}><IC.Stop/> Stop</button>}
         {activeResearchId&&<button onClick={()=>rerunResearchReport(activeResearchId)} style={btnS(t.acc)}><IC.Refresh/> Rerun</button>}
         {body&&<button onClick={exportResearchMarkdown} style={btnS(t.warm)}><IC.Download/> Markdown</button>}
         {body&&<button onClick={exportResearchPdf} style={btnS(t.mut)}><IC.Download/> PDF</button>}
         {body&&<button onClick={printResearchReport} style={btnS(t.mut)}><IC.External/> Print</button>}
-      </div>
+      </div>}
     </div>
-    <div style={{flex:1,display:"grid",gridTemplateColumns:"290px minmax(0,1fr) 320px",overflow:"hidden",minHeight:0}}>
-      <div style={{borderRight:`1px solid ${t.brd}24`,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:12}}>
-        {researchView==="new"?<>
-        <div style={{background:`${t.surface}80`,border:`1px solid ${t.brd}33`,borderRadius:8,padding:12,display:"flex",flexDirection:"column",gap:9}}>
+    {researchView==="new"?
+    <div style={{flex:1,overflowY:"auto",minHeight:0,padding:"28px 24px"}}>
+      <div style={{maxWidth:960,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}}>
+        <div style={cardS}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
-            <span style={{fontSize:11,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.6}}>New Report</span>
-            <span style={{fontSize:9,color:t.mut}}>{tmpl.label}</span>
+            <span style={cardHeadS}>New Report</span>
+            <span style={{fontSize:10,color:t.mut}}>{tmpl.label}</span>
           </div>
-          <textarea value={researchDraft.query} onChange={e=>setResearchDraft(p=>({...p,query:e.target.value}))} placeholder="Research topic or question" rows={3} style={{...inputS,resize:"vertical",fontSize:12,lineHeight:1.45}}/>
+          <textarea value={researchDraft.query} onChange={e=>setResearchDraft(p=>({...p,query:e.target.value}))} placeholder="Research topic or question" rows={4} style={{...inputS,resize:"vertical",fontSize:14,lineHeight:1.45}}/>
           <input value={researchDraft.focus||""} onChange={e=>setResearchDraft(p=>({...p,focus:e.target.value}))} placeholder="Optional focus" style={{...inputS,fontSize:12}}/>
-          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{display:"flex",justifyContent:"flex-end"}}>
+            <button onClick={startResearchReport} disabled={researchLoading||researchRunning} style={{...btnS(t.acc),justifyContent:"center",minWidth:160,padding:"9px 18px",opacity:(researchLoading||researchRunning)?0.55:1}}><IC.Zap/> Start</button>
+          </div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))",gap:12,alignItems:"start"}}>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={cardS}>
+            <span style={cardHeadS}>Report</span>
             <select value={researchDraft.report_type} onChange={e=>{const nt=researchTemplates.find(x=>x.id===e.target.value);setResearchDraft(p=>({...p,report_type:e.target.value,depth:nt?.default_depth||p.depth||3}));}} style={{...inputS,fontSize:12}}>
               {(researchTemplates.length?researchTemplates:[tmpl]).map(rt=>{const ico={analyst:"📊",academic:"🎓",decision:"⚖️",market:"📈",technical:"🛠️",timeline:"🗓️",digest:"🗂️"}[rt.id]||"🔬";return <option key={rt.id} value={rt.id}>{ico} {rt.label}</option>;})}
             </select>
@@ -4897,6 +4972,30 @@ function HyprChat(){
               <option value={5}>🧠 Exhaustive</option>
             </select>
           </div>
+          <div style={cardS}>
+            <span style={cardHeadS}>Sources & Notes</span>
+          <textarea value={researchInputText} onChange={e=>setResearchInputText(e.target.value)} placeholder="Optional pasted notes, constraints, or source excerpts" rows={4} style={{...inputS,resize:"vertical",fontSize:11,lineHeight:1.45}}/>
+          <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+            <label style={{...btnS(t.f1),justifyContent:"center",flex:1}}><IC.Upload/> Add Files<input ref={researchFileRef} type="file" multiple accept=".pdf,.txt,.md,.csv,.json,.html,.py,.js,.ts" style={{display:"none"}} onChange={e=>{handleResearchFiles(e.target.files);e.target.value="";}}/></label>
+          </div>
+          {(researchDraft.inputs||[]).length>0&&<div style={{display:"flex",flexDirection:"column",gap:4}}>
+            {(researchDraft.inputs||[]).map((inp,i)=><div key={`${inp.name}-${i}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 7px",border:`1px solid ${t.brd}22`,borderRadius:7,background:`${t.surface}55`}}>
+              <span style={{fontSize:10,color:t.f1,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{inp.name}</span>
+              <span style={{fontSize:9,color:t.mut}}>{Math.round((inp.content||"").length/1000)}k</span>
+              <button onClick={()=>setResearchDraft(p=>({...p,inputs:(p.inputs||[]).filter((_,ix)=>ix!==i)}))} style={{background:"none",border:"none",color:t.err,cursor:"pointer",display:"flex",padding:2}}><IC.X/></button>
+            </div>)}
+          </div>}
+          {kbs.length>0&&<div style={{display:"flex",flexDirection:"column",gap:4}}>
+            <div style={{fontSize:9,fontWeight:800,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Knowledge Bases</div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+              {kbs.slice(0,8).map(kb=>{const on=(researchDraft.kb_ids||[]).includes(kb.id);return <button key={kb.id} onClick={()=>setResearchDraft(p=>({...p,kb_ids:on?(p.kb_ids||[]).filter(x=>x!==kb.id):[...(p.kb_ids||[]),kb.id]}))} style={{fontSize:9,padding:"4px 7px",borderRadius:7,border:`1px solid ${on?t.acc:t.brd}33`,background:on?`${t.acc}18`:`${t.surface}55`,color:on?t.acc:t.mut,cursor:"pointer",fontFamily:font}}>{kb.name}</button>;})}
+            </div>
+          </div>}
+          </div>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={cardS}>
+            <span style={cardHeadS}>Model</span>
           <ModelPicker value={researchDraft.model||researchSelectableModels[0]||""} onChange={v=>setResearchDraft(p=>({...p,model:v}))} models={researchSelectableModels} modelDetails={modelDetails} t={t} font={font}/>
           <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
             {localMoeResearchModels.length>0&&<button onClick={()=>applyResearchPreset("balanced_moe")} style={{...btnS(t.acc),fontSize:9}}>Balanced MoE</button>}
@@ -4913,8 +5012,11 @@ function HyprChat(){
               <ModelPicker value={researchDraft.auditor_model||""} onChange={v=>setResearchDraft(p=>({...p,auditor_model:v}))} models={["",...researchSelectableModels]} modelDetails={modelDetails} t={t} font={font}/>
             </div>
           </details>
-          <div style={{border:`1px solid ${t.brd}22`,borderRadius:8,padding:"7px 9px",background:`${t.bgDeep}88`}}>
-            <label style={{fontSize:10,fontWeight:800,color:t.mut,textTransform:"uppercase",letterSpacing:.5,display:"block",marginBottom:5}}>Context Window: <span style={{color:t.acc}}>{researchNumCtx.toLocaleString()}</span></label>
+          </div>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={cardS}>
+            <label style={{...cardHeadS,color:t.mut,display:"block"}}>Context Window: <span style={{color:t.acc}}>{researchNumCtx.toLocaleString()}</span></label>
             <input type="range" min="8192" max="131072" step="2048" value={researchNumCtx} onChange={e=>setResearchNumCtx(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
             <div style={{fontSize:9,color:t.mut,marginTop:4,lineHeight:1.4}}>
               {researchNumCtx<=16384?<><b style={{color:t.acc}}>Compact (&le;16K)</b> — evidence is clamped hard; fine for depth 1–2 reports.</>
@@ -4929,32 +5031,18 @@ function HyprChat(){
               :<>Selected model context: {selectedResearchCtx?`${formatModelCtx(selectedResearchCtx)} ctx`:"unknown"}.</>}
             </div>
           </div>
-          <textarea value={researchInputText} onChange={e=>setResearchInputText(e.target.value)} placeholder="Optional pasted notes, constraints, or source excerpts" rows={4} style={{...inputS,resize:"vertical",fontSize:11,lineHeight:1.45}}/>
-          <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
-            <label style={{...btnS(t.f1),justifyContent:"center",flex:1}}><IC.Upload/> Add Files<input ref={researchFileRef} type="file" multiple accept=".pdf,.txt,.md,.csv,.json,.html,.py,.js,.ts" style={{display:"none"}} onChange={e=>{handleResearchFiles(e.target.files);e.target.value="";}}/></label>
-            <button onClick={startResearchReport} disabled={researchLoading||researchRunning} style={{...btnS(t.acc),justifyContent:"center",flex:1,opacity:(researchLoading||researchRunning)?0.55:1}}><IC.Zap/> Start</button>
           </div>
-          {(researchDraft.inputs||[]).length>0&&<div style={{display:"flex",flexDirection:"column",gap:4}}>
-            {(researchDraft.inputs||[]).map((inp,i)=><div key={`${inp.name}-${i}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 7px",border:`1px solid ${t.brd}22`,borderRadius:7,background:`${t.surface}55`}}>
-              <span style={{fontSize:10,color:t.f1,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{inp.name}</span>
-              <span style={{fontSize:9,color:t.mut}}>{Math.round((inp.content||"").length/1000)}k</span>
-              <button onClick={()=>setResearchDraft(p=>({...p,inputs:(p.inputs||[]).filter((_,ix)=>ix!==i)}))} style={{background:"none",border:"none",color:t.err,cursor:"pointer",display:"flex",padding:2}}><IC.X/></button>
-            </div>)}
-          </div>}
-          {kbs.length>0&&<div style={{display:"flex",flexDirection:"column",gap:4}}>
-            <div style={{fontSize:9,fontWeight:800,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Knowledge Bases</div>
-            <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-              {kbs.slice(0,8).map(kb=>{const on=(researchDraft.kb_ids||[]).includes(kb.id);return <button key={kb.id} onClick={()=>setResearchDraft(p=>({...p,kb_ids:on?(p.kb_ids||[]).filter(x=>x!==kb.id):[...(p.kb_ids||[]),kb.id]}))} style={{fontSize:9,padding:"4px 7px",borderRadius:7,border:`1px solid ${on?t.acc:t.brd}33`,background:on?`${t.acc}18`:`${t.surface}55`,color:on?t.acc:t.mut,cursor:"pointer",fontFamily:font}}>{kb.name}</button>;})}
-            </div>
-          </div>}
         </div>
-        </>:<>
+      </div>
+    </div>
+    :<div style={{flex:1,display:"grid",gridTemplateColumns:"290px minmax(0,1fr) 320px",overflow:"hidden",minHeight:0}}>
+      <div style={{borderRight:`1px solid ${t.brd}24`,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:12}}>
         <div style={{display:"flex",alignItems:"center",gap:6}}>
           <input value={researchReportFilter} onChange={e=>setResearchReportFilter(e.target.value)} placeholder="Filter reports" style={{...inputS,fontSize:11,padding:"7px 9px"}}/>
           <button onClick={()=>refreshResearchReports()} style={btnS(t.mut)}><IC.Refresh/></button>
         </div>
         <div style={{display:"flex",flexDirection:"column",gap:7}}>
-          {filteredReports.map(r=>{const sm=statusMeta(r.status);const active=r.id===activeResearchId;return <div key={r.id} onClick={()=>loadResearchReport(r.id)} style={{padding:10,borderRadius:8,border:`1px solid ${active?sm[0]:t.brd}33`,background:active?`${sm[0]}10`:`${t.surface}66`,cursor:"pointer",display:"flex",flexDirection:"column",gap:5}}>
+          {filteredReports.map(r=>{const sm=statusMeta(r.status);const active=r.id===activeResearchId;return <div key={r.id} onClick={()=>loadResearchReport(r.id)} style={{padding:10,borderRadius:8,border:`1px solid ${active?sm[0]:t.brd}33`,background:active?`${sm[0]}10`:`${t.surface}66`,cursor:"pointer",display:"flex",flexDirection:"column",gap:5,transition:"background .15s ease,border-color .15s ease"}}>
             <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
               <span style={{width:7,height:7,borderRadius:"50%",background:sm[0],boxShadow:r.status==="running"?`0 0 8px ${sm[0]}99`:"none",flexShrink:0}}/>
               <span style={{fontSize:12,fontWeight:800,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{r.title||r.query}</span>
@@ -4966,9 +5054,8 @@ function HyprChat(){
               <span>{sm[1]}</span><span>·</span><span>{r.report_type}</span><span>·</span><span>{r.source_count||0} sources</span>
             </div>
           </div>;})}
-          {!filteredReports.length&&<div style={{textAlign:"center",padding:18,color:t.mut,fontSize:11,border:`1px dashed ${t.brd}33`,borderRadius:8}}>No research reports yet.</div>}
+          {!filteredReports.length&&<EmptyState t={t} font={font} compact icon={<IC.Search/>} title="No research reports yet" hint="Run a deep research report and it will be saved here." action={<button onClick={()=>setResearchView("new")} style={{...btnS(t.acc),fontSize:10}}><IC.Plus/> New Report</button>}/>}
         </div>
-        </>}
       </div>
       <div style={{overflowY:"auto",padding:"18px 26px",minWidth:0}}>
         {report?<div style={{maxWidth:960,margin:"0 auto"}}>
@@ -5047,7 +5134,7 @@ function HyprChat(){
           </div>
         </div>
       </div>
-    </div>
+    </div>}
   </div>;})()
 
       :panel==="council"?(()=>{const personaProfiles=mcs.filter(isPersonaProfile);const panelS={flex:1,display:"flex",flexDirection:"column",overflow:"hidden"};const headerS={padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,background:`${t.surface}36`};const sectionS={background:`${t.surface}5C`,border:`1px solid ${t.brd}26`,borderRadius:8,padding:12};const kickerS={fontSize:10,fontWeight:900,color:t.mut,textTransform:"uppercase",letterSpacing:.7};const metaS={fontSize:10,color:t.mut,lineHeight:1.45};const chipS=(c=t.acc)=>({display:"inline-flex",alignItems:"center",gap:4,padding:"2px 7px",borderRadius:6,background:`${c}12`,border:`1px solid ${c}32`,color:c,fontSize:9,fontWeight:800,whiteSpace:"nowrap"});const segmentS=(on,c)=>({padding:"5px 9px",borderRadius:7,border:`1px solid ${on?c:t.brd}38`,background:on?`${c}16`:`${t.surface}55`,color:on?c:t.mut,cursor:"pointer",fontFamily:font,fontSize:10,fontWeight:800});const nativeSelectS={...inputS,fontSize:11,padding:"8px 10px",background:t.bgDeep,color:t.text};const memberProfile=m=>m?.model_config_id?personaProfiles.find(mc=>mc.id===m.model_config_id):null;const memberView=m=>{const mc=memberProfile(m);return{profile:mc,missing:!!m?.model_config_id&&!mc,name:mc?.name||m.persona_name||m.model?.split(":")[0]||"Council member",model:mc?.base_model||m.model||"",prompt:mc?.system_prompt||m.system_prompt||"",avatar:mc?profileAvatar(mc):"",linked:!!mc};};const updateMemberLocal=(cid,mid,patch)=>setCouncils(p=>p.map(c=>c.id===cid?{...c,members:(c.members||[]).map(m=>m.id===mid?{...m,...patch}:m)}:c));const saveMember=async(council,member)=>{const linked=editMemberForm.model_config_id?personaProfiles.find(mc=>mc.id===editMemberForm.model_config_id):null;const up={model:linked?.base_model||editMemberForm.model||member.model||models[0]||"",model_config_id:editMemberForm.model_config_id||"",system_prompt:linked?.system_prompt??editMemberForm.system_prompt??"",persona_name:linked?.name??editMemberForm.persona_name??""};await fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)}).catch(()=>{});updateMemberLocal(council.id,member.id,up);setEditMember(null);};const addCustomMember=async(council)=>{if(!models.length)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:models[0],model_config_id:"",system_prompt:"",persona_name:""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:m.model||models[0]||"",model_config_id:"",system_prompt:"",persona_name:""});};const addPersonaMember=async(council)=>{const mc=personaProfiles[0];if(!mc)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""});};return <div style={panelS}>
@@ -5081,7 +5168,7 @@ function HyprChat(){
       </div>}
       {!councils.length&&!councilPresets.length&&<div style={{...sectionS,textAlign:"center",padding:34,color:t.mut,fontSize:12}}>No councils yet. Create one to debate with multiple AIs.</div>}
       <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      {councils.map(council=>{const isActive=activeCouncilId===council.id;const memberCount=(council.members||[]).length;const linkedCount=(council.members||[]).filter(m=>!!memberProfile(m)).length;return <div key={council.id} style={{background:isActive?`${t.pink}0B`:`${t.surface}72`,border:`1px solid ${isActive?t.pink:t.brd}${isActive?"52":"30"}`,borderRadius:8,overflow:"hidden",boxShadow:"none"}}>
+      {councils.map(council=>{const isActive=activeCouncilId===council.id;const memberCount=(council.members||[]).length;const linkedCount=(council.members||[]).filter(m=>!!memberProfile(m)).length;return <div key={council.id} style={{background:isActive?`${t.pink}0B`:`${t.surface}72`,border:`1px solid ${isActive?t.pink:t.brd}${isActive?"52":"30"}`,borderRadius:8,overflow:"hidden",boxShadow:"none",transition:"background .15s ease,border-color .15s ease"}}>
           <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:12,alignItems:"center",padding:"12px 14px",background:isActive?`${t.pink}08`:`${t.bgDeep}38`,borderBottom:isActive?`1px solid ${t.brd}24`:"none"}}>
             <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0}}>
               <span style={{display:"flex",color:isActive?t.pink:t.mut}}><IC.Council/></span>
@@ -5433,7 +5520,7 @@ function HyprChat(){
         <span style={{display:"flex",color:activeColor}}>{profileTab==="personas"?<IC.User/>:<IC.Cube/>}</span>
         <span style={{fontSize:12,fontWeight:800,textTransform:"uppercase",letterSpacing:.8,color:activeColor}}>{activeLabel}</span>
       </div>
-      {!activeProfiles.length&&<div style={{textAlign:"center",padding:42,color:t.mut,fontSize:12,border:`1px dashed ${t.brd}44`,borderRadius:8,background:`${t.surface}33`}}>{activeEmpty}</div>}
+      {!activeProfiles.length&&<EmptyState t={t} font={font} icon={profileTab==="personas"?"🎭":"🤖"} title={`No ${activeLabel.toLowerCase()} yet`} hint={activeEmpty} action={<button onClick={profileTab==="personas"?createPersona:createAgent} style={btnS(activeColor)}><IC.Plus/> New {profileTab==="personas"?"Persona":"Agent"}</button>}/>}
       {activeProfiles.map(mc=>profileTab==="personas"?renderPersona(mc):renderAgent(mc))}
     </div>
   </div>;})()
@@ -5442,11 +5529,11 @@ function HyprChat(){
 
       :panel==="models"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     {/* Toolbar */}
-    <div style={{padding:"14px 20px",flexShrink:0,display:"flex",alignItems:"center",gap:14,borderBottom:`1px solid ${t.brd}24`,background:`${t.bgDeep}E8`,minHeight:62,boxSizing:"border-box",flexWrap:"wrap"}}>
+    <div style={{padding:"14px 20px",flexShrink:0,display:"flex",alignItems:"center",gap:14,borderBottom:`1px solid ${t.brd}28`,background:`${t.bgDeep}E8`,minHeight:62,boxSizing:"border-box",flexWrap:"wrap"}}>
       <div style={{display:"flex",alignItems:"center",gap:10,minWidth:180}}>
         <span style={{display:"flex",color:t.acc}}><IC.Database/></span>
         <div>
-          <div style={{fontSize:15,fontWeight:900,color:t.acc,letterSpacing:1.2,textTransform:"uppercase",lineHeight:1}}>Models</div>
+          <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:1,textTransform:"uppercase",lineHeight:1}}>Models</div>
           <div style={{fontSize:10,color:t.mut,marginTop:3}}>{installedModelCount} installed · {hfModelCount} from Hugging Face</div>
         </div>
       </div>
@@ -5506,7 +5593,7 @@ function HyprChat(){
             const icon=(n)=>{const b=n.toLowerCase();if(b.startsWith("hf.co/"))return"🤗";if(b.includes("qwen"))return"🌸";if(b.includes("llama"))return"🦙";if(b.includes("mistral")||b.includes("mixtral"))return"💨";if(b.includes("gemma"))return"💎";if(b.includes("phi"))return"φ";if(b.includes("deepseek"))return"🔍";if(b.includes("coder")||b.includes("code"))return"💻";if(b.includes("wizard"))return"🧙";return"🤖";};
             const famEmoji={HuggingFace:"🤗",Qwen:"🌸",Llama:"🦙",Mistral:"💨",Gemma:"💎",Phi:"φ",DeepSeek:"🔍",Command:"⚡",WizardLM:"🧙",Hermes:"🏛",Other:"🤖"};
             const allItems=Object.values(families).flat();
-            if(!visibleModels.length)return <div style={{...mmPanelS,padding:"28px 14px",color:t.mut,fontSize:12,textAlign:"center",lineHeight:1.6}}>No installed models yet.<br/>Pull one from Ollama to start.</div>;
+            if(!visibleModels.length)return <div style={{...mmPanelS,padding:14}}><EmptyState t={t} font={font} compact icon={<IC.Layers/>} title="No installed models yet" hint="Pull a model from Ollama to get started." action={<button onClick={()=>{try{pullInputRef.current?.scrollIntoView({block:"center",behavior:"smooth"});pullInputRef.current?.focus();}catch{}}} style={{...btnS(t.acc),fontSize:10}}><IC.Download/> Pull a Model</button>}/></div>;
             if(allItems.length===0&&searchLower)return <div style={{...mmPanelS,padding:"28px 14px",color:t.mut,fontSize:12,textAlign:"center"}}>No models matching "{modelSearch}"</div>;
             return Object.entries(families).map(([fam,items])=><div key={fam} style={{marginBottom:16}}>
               <div style={{fontSize:11,color:t.mut,textTransform:"uppercase",letterSpacing:.7,margin:"0 2px 7px",display:"flex",alignItems:"center",gap:7}}>
@@ -6233,7 +6320,7 @@ function HyprChat(){
           </div>
         </div>
         <div style={{flex:1,minHeight:0,overflowY:"auto",display:"flex",flexDirection:"column",gap:8,paddingRight:2}}>
-          {settingsTabs.filter(([id])=>id!=="changelog").map(([id,icon,label,hint])=>{const active=settingsTab===id;return <button key={id} onClick={()=>{setSettingsTab(id);if(id!=="connections")setShowHealthMonitor(false);}} style={{width:"100%",display:"flex",alignItems:"center",gap:10,textAlign:"left",padding:"10px 11px",borderRadius:10,border:`1px solid ${active?t.acc:t.brd}33`,background:active?`${t.acc}18`:`${t.bgDeep}88`,color:active?t.acc:t.dim,cursor:"pointer",fontFamily:font,boxShadow:"none"}}>
+          {settingsTabs.filter(([id])=>id!=="changelog").map(([id,icon,label,hint])=>{const active=settingsTab===id;return <button key={id} onClick={()=>{setSettingsTab(id);if(id!=="connections")setShowHealthMonitor(false);}} style={{width:"100%",display:"flex",alignItems:"center",gap:10,textAlign:"left",padding:"10px 11px",borderRadius:10,border:`1px solid ${active?t.acc:t.brd}33`,background:active?`${t.acc}18`:`${t.bgDeep}88`,color:active?t.acc:t.dim,cursor:"pointer",fontFamily:font,boxShadow:"none",transition:"background .15s ease,border-color .15s ease,color .15s ease"}}>
             <span style={{fontSize:16,width:20,textAlign:"center",flexShrink:0}}>{icon}</span>
             <span style={{minWidth:0,flex:1}}>
               <span style={{display:"block",fontSize:12,fontWeight:800,color:active?t.acc:t.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{label}</span>
@@ -6262,42 +6349,25 @@ function HyprChat(){
       </div>
 
       {/* TILE: Users */}
-      <div style={{...settingsCardS,display:settingsTab==="users"?"block":"none"}}>
-        <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"flex-start",marginBottom:14}}>
-          <div>
-            <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:.5,display:"flex",alignItems:"center",gap:8}}>👤 Users</div>
-            <div style={{...settingsKickerS,marginTop:4}}>Local profiles for keeping HyprChat data separate on this install.</div>
+      <div style={{display:settingsTab==="users"?"block":"none",animation:"fadeIn .18s ease"}}>
+        {settingSection("Current Session",<button onClick={logoutCurrentUser} style={{...btnS(t.warm),fontSize:12,padding:"8px 14px",whiteSpace:"nowrap"}}>Log Out</button>,
+          <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
+            <span style={{fontSize:14,color:t.text,fontWeight:900,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{currentUser?.name||"None"}</span>
+            {currentUser?.password_enabled&&<span style={{fontSize:9,color:t.warm,border:`1px solid ${t.warm}33`,background:`${t.warm}12`,borderRadius:999,padding:"1px 7px",fontWeight:800}}>Password</span>}
           </div>
-          <button onClick={refreshUsers} style={{...btnS(t.mut),fontSize:11,padding:"5px 10px"}}><IC.Refresh/> Refresh</button>
-        </div>
-        <div style={{display:"flex",flexDirection:"column",gap:14}}>
-          <section style={{background:t.bgDeep,border:`1px solid ${t.brd}24`,borderRadius:9,padding:"12px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:14}}>
-            <div style={{minWidth:0}}>
-              <div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:800,marginBottom:4}}>Current Session</div>
-              <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
-                <span style={{fontSize:14,color:t.text,fontWeight:900,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{currentUser?.name||"None"}</span>
-                {currentUser?.password_enabled&&<span style={{fontSize:9,color:t.warm,border:`1px solid ${t.warm}33`,background:`${t.warm}12`,borderRadius:999,padding:"1px 7px",fontWeight:800}}>Password</span>}
-              </div>
-            </div>
-            <button onClick={logoutCurrentUser} style={{...btnS(t.warm),fontSize:12,padding:"8px 14px",whiteSpace:"nowrap"}}>Log Out</button>
-          </section>
+        ,"Local profiles for keeping HyprChat data separate on this install.")}
 
-          {loginError&&<div style={{fontSize:11,color:t.err,background:`${t.err}12`,border:`1px solid ${t.err}24`,borderRadius:7,padding:"7px 9px"}}>{loginError}</div>}
+        {loginError&&<div style={{fontSize:11,color:t.err,background:`${t.err}12`,border:`1px solid ${t.err}24`,borderRadius:7,padding:"7px 9px",marginBottom:12}}>{loginError}</div>}
 
-          <section style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14}}>
-            <div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:800,marginBottom:8}}>Create Profile</div>
-            <div style={{display:"grid",gridTemplateColumns:"minmax(180px,1fr) minmax(180px,1fr) 96px",gap:8,alignItems:"center"}}>
-              <input value={newUserName} onChange={e=>setNewUserName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="New user name" style={{...inputS,fontSize:12}}/>
-              <input type="password" value={newUserPassword} onChange={e=>setNewUserPassword(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="Optional password" style={{...inputS,fontSize:12}}/>
-              <button onClick={createManagedUser} disabled={!newUserName.trim()} style={{...btnS(t.ok),fontSize:12,padding:"8px 13px",height:38,opacity:newUserName.trim()?1:.45,whiteSpace:"nowrap",justifyContent:"center"}}><IC.Plus/> Create</button>
-            </div>
-          </section>
+        {settingSection("Create Profile",null,
+          <div style={{display:"grid",gridTemplateColumns:"minmax(180px,1fr) minmax(180px,1fr) 96px",gap:8,alignItems:"center"}}>
+            <input value={newUserName} onChange={e=>setNewUserName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="New user name" style={{...inputS,fontSize:12}}/>
+            <input type="password" value={newUserPassword} onChange={e=>setNewUserPassword(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="Optional password" style={{...inputS,fontSize:12}}/>
+            <button onClick={createManagedUser} disabled={!newUserName.trim()} style={{...btnS(t.ok),fontSize:12,padding:"8px 13px",height:38,opacity:newUserName.trim()?1:.45,whiteSpace:"nowrap",justifyContent:"center"}}><IC.Plus/> Create</button>
+          </div>
+        )}
 
-          <section style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14}}>
-            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,marginBottom:8}}>
-              <div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:800}}>Manage Profiles</div>
-              <div style={{fontSize:10,color:t.dim}}>{users.length} profile{users.length===1?"":"s"}</div>
-            </div>
+        {settingSection("Manage Profiles",<div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:10,color:t.dim}}>{users.length} profile{users.length===1?"":"s"}</span><button onClick={refreshUsers} style={{...btnS(t.mut),fontSize:10,padding:"4px 9px"}}><IC.Refresh/> Refresh</button></div>,
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
               {users.map(u=>{const isCurrent=u.id===currentUserId;const nameDraft=userNameDrafts[u.id]??u.name??"";const pwdDraft=userPasswordDrafts[u.id]||"";return <div key={u.id} style={{background:t.bgDeep,border:`1px solid ${isCurrent?t.acc:t.brd}30`,borderRadius:9,padding:"11px 12px"}}>
                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:10}}>
@@ -6318,28 +6388,19 @@ function HyprChat(){
                 </div>
               </div>;})}
             </div>
-          </section>
-        </div>
+        )}
       </div>
 
       {/* TILE: Connections */}
-      <div style={{...settingsCardS,display:settingsTab==="connections"?"block":"none"}}>
-        <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"flex-start",marginBottom:12}}>
-          <div>
-            <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:.5,display:"flex",alignItems:"center",gap:8}}>🔌 Connections</div>
-            <div style={{...settingsKickerS,marginTop:4}}>Runtime endpoints and live service status.</div>
-          </div>
-          <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
+      <div style={{display:settingsTab==="connections"?"block":"none",animation:"fadeIn .18s ease"}}>
+        {settingSection("Service Status",
             <button onClick={async()=>{
               const next=!showHealthMonitor;
               setShowHealthMonitor(next);
               if(next&&!healthHistory){try{const r=await fetch(`${API}/api/health/history?days=90`);if(!r.ok)throw new Error(`HTTP ${r.status}`);const d=await r.json();setHealthHistory(d);}catch(e){console.error("Health history:",e);notify({type:"warning",text:"Health history failed",detail:e.message||String(e),duration:5000});}}
             }} style={{padding:"5px 11px",borderRadius:7,border:`1px solid ${showHealthMonitor?t.acc:t.brd}44`,background:showHealthMonitor?`${t.acc}22`:t.bgDeep,color:showHealthMonitor?t.acc:t.dim,fontSize:11,cursor:"pointer",fontFamily:font,fontWeight:700,display:"flex",alignItems:"center",gap:5}}>
               <span style={{fontSize:13}}>{showHealthMonitor?"◂":"▸"}</span> Monitor
-            </button>
-          </div>
-        </div>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:14}}>
+            </button>,
           <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
             {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?"#f0a030":s?.status?t.err:t.mut;const label={ollama:"Ollama",codebox:"Codebox",n8n:"N8N",searxng:"SearXNG",comfyui:"ComfyUI",stt:"Voice STT",tts:"Voice TTS"}[n];return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:7,border:`1px solid ${rl?`#f0a030`:t.brd}24`,fontSize:12}}>
               <div style={{width:8,height:8,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}66`}}/>
@@ -6348,15 +6409,8 @@ function HyprChat(){
               {rl&&<span style={{padding:"1px 6px",borderRadius:4,background:"#f0a03020",border:"1px solid #f0a03044",fontSize:9,fontWeight:800,color:"#f0a030"}}>Limited</span>}
             </div>;})}
           </div>
-        </div>
-        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
-          <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"baseline",marginBottom:10}}>
-            <div>
-              <div style={{fontSize:12,fontWeight:900,color:t.dim,textTransform:"uppercase",letterSpacing:.7}}>Cloud Models</div>
-              <div style={{fontSize:10,color:t.mut,marginTop:3}}>API keys are stored for the current HyprChat user.</div>
-            </div>
-            <button onClick={async()=>{await refreshModelProviders();await refreshModels();}} style={{...btnS(t.f1),fontSize:10,padding:"5px 9px"}}><IC.Refresh/> Refresh</button>
-          </div>
+        ,"Runtime endpoint health at a glance.")}
+        {settingSection("Cloud Models",<button onClick={async()=>{await refreshModelProviders();await refreshModels();}} style={{...btnS(t.f1),fontSize:10,padding:"5px 9px"}}><IC.Refresh/> Refresh</button>,
           <div style={{display:"grid",gridTemplateColumns:"1fr",gap:10}}>
             {[["openai","OpenAI","sk-...","ChatGPT / GPT models"],["anthropic","Anthropic","sk-ant-...","Claude models"]].map(([provider,label,placeholder,hint])=>{
               const st=modelProviders[provider]||{provider,label,enabled:false,has_key:false,key_source:"none",key_hint:""};
@@ -6364,7 +6418,7 @@ function HyprChat(){
               const enabled=!!st.enabled;
               const key=providerKeys[provider]||"";
               const statusColor=enabled&&st.has_key?t.ok:st.has_key?t.warm:t.mut;
-              return <div key={provider} style={{display:"grid",gridTemplateColumns:"120px minmax(0,1fr) auto",gap:10,alignItems:"center",background:t.bgDeep,border:`1px solid ${t.brd}24`,borderRadius:8,padding:"10px 11px"}}>
+              return <div key={provider} style={{...subSecS,display:"grid",gridTemplateColumns:"120px minmax(0,1fr) auto",gap:10,alignItems:"center"}}>
                 <div>
                   <div style={{display:"flex",alignItems:"center",gap:7,fontSize:12,fontWeight:900,color:t.text}}><span>{provider==="openai"?"◎":"✦"}</span>{label}</div>
                   <div style={{fontSize:9,color:t.mut,marginTop:3}}>{hint}</div>
@@ -6390,9 +6444,9 @@ function HyprChat(){
               </div>;
             })}
           </div>
-        </div>
-        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14}}>
-          <div style={{display:"grid",gridTemplateColumns:"1fr",gap:12}}>
+        ,"API keys are stored for the current HyprChat user.")}
+        {settingSection("Endpoints",null,
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))",gap:12}}>
             {[
               ["Ollama",ollamaUrl,setOllamaUrl,"http://192.168.1.110:11434","Model inference and model manager"],
               ["Codebox",codeboxUrl,setCodeboxUrl,"http://192.168.1.201:8585","Tool execution and project upload bridge"],
@@ -6412,16 +6466,11 @@ function HyprChat(){
               </div>
             </label>)}
           </div>
-          <div style={{marginTop:14,padding:"12px 13px",background:`${t.surface}44`,border:`1px solid ${t.brd}33`,borderRadius:8}}>
-            <div style={{display:"flex",justifyContent:"space-between",gap:10,alignItems:"center",marginBottom:10}}>
-              <div>
-                <div style={{fontSize:11,fontWeight:900,color:t.warm,textTransform:"uppercase",letterSpacing:.7}}>Ollama Hardware Scan SSH</div>
-                <div style={{fontSize:9,color:t.mut,marginTop:3}}>Used only by HyprFit Rescan Hardware for remote Ollama hosts.</div>
-              </div>
+        ,<>Bare <code>IP:port</code> is accepted; HyprChat stores it as an HTTP URL.</>)}
+        {settingSection("Ollama Hardware Scan SSH",
               <span style={mmChipS(ollamaScanSshAuthMode==="password"&&ollamaScanSshHasPassword?t.ok:ollamaScanSshAuthMode==="key"&&ollamaScanSshKeyPath?t.ok:t.mut,`${t.bgDeep}AA`)}>
                 {ollamaScanSshAuthMode==="password"?(ollamaScanSshHasPassword?"password saved":"password needed"):(ollamaScanSshKeyPath?"key configured":"key needed")}
-              </span>
-            </div>
+              </span>,<>
             <div style={{display:"grid",gridTemplateColumns:"minmax(130px,1fr) 90px minmax(100px,.8fr) 120px",gap:9,alignItems:"end"}}>
               <label>
                 <span style={{display:"block",fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:800,marginBottom:4}}>Host</span>
@@ -6453,9 +6502,9 @@ function HyprChat(){
               </label>
               <button type="button" onClick={()=>{setOllamaScanSshPassword("");setOllamaScanSshHasPassword(false);setOllamaScanSshClearPassword(true);}} disabled={!ollamaScanSshHasPassword&&!ollamaScanSshPassword} style={{...btnS(t.err),fontSize:10,padding:"7px 10px",opacity:(!ollamaScanSshHasPassword&&!ollamaScanSshPassword)?0.45:1}}>Clear</button>
             </div>}
-          </div>
-          {(ttsUrl||sttUrl)&&<div style={{marginTop:12,padding:"10px 12px",background:`${t.surface}44`,border:`1px solid ${t.brd}33`,borderRadius:8,display:"flex",gap:16,alignItems:"center",flexWrap:"wrap"}}>
-            <span style={{fontSize:11,fontWeight:700,color:t.dim}}>🎙 Voice</span>
+        </>,"Used only by HyprFit Rescan Hardware for remote Ollama hosts.",t.warm)}
+        {(ttsUrl||sttUrl)&&settingSection("🎙 Voice",null,
+          <div style={{display:"flex",gap:16,alignItems:"center",flexWrap:"wrap"}}>
             {ttsUrl&&<label style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:t.dim}}>
               Voice:
               <select value={ttsVoice} onChange={e=>setTtsVoice(e.target.value)} style={{...inputS,width:"auto",fontSize:11,padding:"4px 8px"}}>
@@ -6468,9 +6517,9 @@ function HyprChat(){
               Auto-play replies
             </label>}
             <span style={{fontSize:9,color:t.mut}}>Mic capture needs a secure context — over plain HTTP, allow this origin in chrome://flags/#unsafely-treat-insecure-origin-as-secure</span>
-          </div>}
-          <div style={{display:"flex",justifyContent:"space-between",gap:10,alignItems:"center",marginTop:12}}>
-            <div style={settingsKickerS}>Bare <code>IP:port</code> is accepted; HyprChat stores it as an HTTP URL.</div>
+          </div>
+        )}
+        <div style={{display:"flex",justifyContent:"flex-end",gap:10,alignItems:"center",marginTop:12}}>
             <button disabled={connectionsSaving} onClick={async()=>{
               setConnectionsSaving(true);setConnectionsSaveState("saving");
               try{
@@ -6504,103 +6553,78 @@ function HyprChat(){
             }} style={{...btnS(t.ok),opacity:connectionsSaving ? .6 : 1,fontSize:12,padding:"8px 16px",whiteSpace:"nowrap"}}>
               {connectionsSaving?"Saving...":"Save Connections"}
             </button>
-          </div>
-          {connectionsSaveState&&<div style={{fontSize:10,color:connectionsSaveState==="failed"?t.err:connectionsSaveState==="saved"?t.ok:t.mut,marginTop:6,textAlign:"right"}}>{connectionsSaveState==="saving"?"Saving...":connectionsSaveState==="saved"?"Saved":"Failed"}</div>}
         </div>
+        {connectionsSaveState&&<div style={{fontSize:10,color:connectionsSaveState==="failed"?t.err:connectionsSaveState==="saved"?t.ok:t.mut,marginTop:6,textAlign:"right"}}>{connectionsSaveState==="saving"?"Saving...":connectionsSaveState==="saved"?"Saved":"Failed"}</div>}
       </div>
 
       {/* TILE: Model & Generation */}
-      <div style={{...settingsCardS,display:settingsTab==="generation"?"block":"none"}}>
-        <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:.5,marginBottom:4,display:"flex",alignItems:"center",gap:8}}>Model & Generation</div>
-        <div style={{...settingsKickerS,marginBottom:14}}>Global model behavior. Individual chats can still override effort and tools.</div>
-
-        <div style={{marginBottom:14}}>
+      <div style={{display:settingsTab==="generation"?"block":"none",animation:"fadeIn .18s ease"}}>
+        {settingSection("Generation Defaults",null,<>
+        <div>
           <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Default Context Window</div>
-          <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-            {[0,4096,8192,16384,32768,65536,131072,262144].map(v=><button key={v} onClick={()=>setNumCtx(v)} style={{padding:"6px 14px",borderRadius:7,border:`1px solid ${numCtx===v?t.acc:t.brd}44`,background:numCtx===v?`${t.acc}22`:t.bgDeep,color:numCtx===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:numCtx===v?700:400}}>
-              {v===0?"Auto":v>=1024?`${(v/1024).toFixed(0)}K`:v}
-            </button>)}
-          </div>
+          {chipRow([0,4096,8192,16384,32768,65536,131072,262144].map(v=>({v,label:v===0?"Auto":v>=1024?`${(v/1024).toFixed(0)}K`:String(v)})),numCtx,setNumCtx)}
           {numCtx>0&&<div style={{fontSize:11,color:t.acc,marginTop:4,fontWeight:600}}>{numCtx>=1024?`${(numCtx/1024).toFixed(0)}K`:numCtx} tokens</div>}
           <div style={{fontSize:10,color:t.mut,marginTop:4}}>Sets num_ctx for all chats. Per-model overrides in Model Manager.</div>
         </div>
-
-        <div style={{marginBottom:14}}>
+        <div>
           <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Thinking Mode</div>
-          <div style={{display:"flex",gap:4}}>
-            {["auto","on","off"].map(v=><button key={v} onClick={()=>setThinkMode(v)} style={{padding:"5px 12px",borderRadius:7,border:`1px solid ${thinkMode===v?t.acc:t.brd}44`,background:thinkMode===v?`${t.acc}22`:t.bgDeep,color:thinkMode===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:thinkMode===v?700:400}}>{v==="auto"?"Auto":v==="on"?"On":"Off"}</button>)}
-          </div>
+          {chipRow(["auto","on","off"].map(v=>({v,label:v==="auto"?"Auto":v==="on"?"On":"Off"})),thinkMode,setThinkMode)}
           <div style={{fontSize:10,color:t.mut,marginTop:4}}>Controls whether models use thinking tokens. Auto lets the model decide.</div>
         </div>
-
-        <div style={{marginBottom:14}}>
+        <div>
           <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Default Effort Level</div>
-          <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-            {EFFORT_LEVELS.map((lv,v)=><button key={v} title={lv.desc} onClick={()=>setGlobalEffort(v)} style={{padding:"6px 12px",borderRadius:7,border:`1px solid ${globalEffort===v?t.pink:t.brd}44`,background:globalEffort===v?`${t.pink}22`:t.bgDeep,color:globalEffort===v?t.pink:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:globalEffort===v?700:400,display:"inline-flex",alignItems:"center",gap:5}}>
-              <span style={{fontSize:14}}>{lv.emoji}</span>{lv.name}
-            </button>)}
-          </div>
+          {chipRow(EFFORT_LEVELS.map((lv,v)=>({v,title:lv.desc,label:<><span style={{fontSize:14}}>{lv.emoji}</span>{lv.name}</>})),globalEffort,setGlobalEffort,{color:t.pink})}
           <div style={{fontSize:10,color:t.mut,marginTop:4}}>After the initial answer, the model re-examines and refines it. {EFFORT_LEVELS[globalEffort].name} = {globalEffort===0?"no review":`${globalEffort} review pass${globalEffort>1?"es":""}`}. Each chat can override this.</div>
         </div>
+        </>,"Global model behavior. Individual chats can still override effort and tools.")}
 
-        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:6}}>
-          <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Workspace Analysis Model</div>
+        {settingSection("Workspace Analysis Model",null,<div>
           <ModelPicker value={wsModel} onChange={setWsModel} models={models} modelDetails={modelDetails} t={t} font={font}/>
           <div style={{fontSize:10,color:t.mut,marginTop:6}}>Small, fast model for workspace topic auto-detection.</div>
-        </div>
+        </div>)}
 
-        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:6}}>
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
-            <span style={{display:"flex",color:t.acc}}><IC.Image/></span>
-            <div style={{fontSize:12,color:t.dim,fontWeight:800,letterSpacing:.35}}>Chat Image Generation</div>
-            <span style={{fontSize:9,color:t.acc,background:`${t.acc}12`,border:`1px solid ${t.acc}28`,borderRadius:6,padding:"2px 6px",fontWeight:800}}>ComfyUI</span>
-          </div>
-          <div style={{fontSize:10,color:t.mut,marginBottom:10,lineHeight:1.5}}>Defaults for the in-chat <code>generate_image</code> tool. Image Studio ★ presets still apply automatically; this section controls the chat-facing model, workflow, prompt defaults, and optional prompt-writer model.</div>
+        {settingSection("Chat Image Generation",<span style={{fontSize:9,color:t.acc,background:`${t.acc}12`,border:`1px solid ${t.acc}28`,borderRadius:6,padding:"2px 6px",fontWeight:800}}>ComfyUI</span>,<>
           {!comfyuiUrl
             ?<div style={{fontSize:11,color:t.mut}}>ComfyUI is not configured — set its URL in Settings → Connections first.</div>
             :(()=>{
-              const sel={background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"8px 10px",borderRadius:7,fontFamily:font,fontSize:12,outline:"none",boxSizing:"border-box"};
-              const inp={...sel,width:"100%"};
-              const imagePanelS={background:`${t.surface}44`,border:`1px solid ${t.brd}26`,borderRadius:10,padding:12};
-              const imageSectionS={background:`${t.bgDeep}70`,border:`1px solid ${t.brd}24`,borderRadius:8,padding:12,display:"flex",flexDirection:"column",gap:10};
-              const imageHeadS={display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:10,borderBottom:`1px solid ${t.brd}18`,paddingBottom:8};
-              const imageTitleS={fontSize:10,fontWeight:900,color:t.acc,textTransform:"uppercase",letterSpacing:.75};
-              const imageHintS={fontSize:9.5,color:t.mut,lineHeight:1.45};
-              const fieldLabelS={fontSize:10,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.55,display:"flex",flexDirection:"column",gap:5,minWidth:0};
-              const fieldGridS={display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:10,alignItems:"end"};
+              const sel={...inputS,padding:"8px 10px",fontSize:12};
+              const inp=sel;
               const cks=imgChatLists?.checkpoints||[];
               const vaeList=imgChatLists?.vaes||[];
               const hasPreset=!!(imgChatLists?.settings?.[imgChatCkpt]?.user_override);
               const selectedModelLabel=imgChatCkpt?imgChatCkpt.replace(/\.(safetensors|ckpt)$/i,""):"global fallback";
-              return <div style={imagePanelS}>
-                <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr)",gap:10}}>
-                  <section style={imageSectionS}>
-                    <div style={imageHeadS}>
-                      <div style={imageTitleS}>Generation Target</div>
+              return <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr)",gap:10}}>
+                  <section style={subSecS}>
+                    <div style={secHeadRowS}>
+                      <div style={secTitleS}>Generation Target</div>
                       {hasPreset&&<div title="Has saved Image Studio defaults" style={{fontSize:9,color:t.acc,fontWeight:800}}>★ preset</div>}
                     </div>
-                    <div style={fieldGridS}>
-                      <label style={fieldLabelS}>Image model
+                    <div style={secGridS}>
+                      <label style={secFieldLabelS}>Image model
                         <select value={imgChatCkpt} onChange={e=>setImgChatCkpt(e.target.value)} style={{...sel,width:"100%"}}>
                       <option value="">(none — built-in SDXL template)</option>
                       {cks.map(c=><option key={c} value={c}>{c.replace(/\.(safetensors|ckpt)$/i,"")}</option>)}
                       {imgChatCkpt&&imgChatLists&&!cks.includes(imgChatCkpt)&&<option value={imgChatCkpt}>{imgChatCkpt} (missing!)</option>}
                     </select>
                       </label>
-                      <label style={fieldLabelS}>Resolution
+                      <label style={secFieldLabelS}>Resolution
                         <select value={imgChatRes} onChange={e=>setImgChatRes(e.target.value)} style={{...sel,width:"100%"}}>
                       <option value="1024x1024">Square — 1024 × 1024</option>
                       <option value="1216x832">Landscape — 1216 × 832</option>
                       <option value="832x1216">Portrait — 832 × 1216</option>
+                      <option value="1152x896">Landscape — 1152 × 896</option>
+                      <option value="896x1152">Portrait — 896 × 1152</option>
+                      <option value="1344x768">Wide — 1344 × 768</option>
+                      <option value="768x1344">Tall — 768 × 1344</option>
                     </select>
                       </label>
-                      <label style={fieldLabelS}>VAE
+                      <label style={secFieldLabelS}>VAE
                         <select value={imgChatVae} onChange={e=>setImgChatVae(e.target.value)} style={{...sel,width:"100%"}}>
                       <option value="">Baked (checkpoint)</option>
                       {vaeList.map(v=><option key={v} value={v}>{v.replace(/\.(safetensors|pt|ckpt)$/i,"")}</option>)}
                     </select>
                       </label>
-                      <label style={fieldLabelS}>Workflow
+                      <label style={secFieldLabelS}>Workflow
                         <select value={imgChatWorkflow} onChange={e=>setImgChatWorkflow(e.target.value)} style={{...sel,width:"100%"}}>
                       <option value="">Default (built-in SDXL)</option>
                       {imgChatWorkflows.map(w=><option key={w.name} value={w.name}>{w.name}{w.has_lora?" ⚡":""}</option>)}
@@ -6608,12 +6632,12 @@ function HyprChat(){
                     </select>
                       </label>
                     </div>
-                    <div style={imageHintS}>A saved workflow renders every chat image instead of the built-in template. Persona-specific image workflows still take priority.</div>
+                    <div style={secHintS}>A saved workflow renders every chat image instead of the built-in template. Persona-specific image workflows still take priority.</div>
                   </section>
 
-                  <section style={imageSectionS}>
-                    <div style={imageHeadS}>
-                      <div style={imageTitleS}>Prompt Defaults</div>
+                  <section style={subSecS}>
+                    <div style={secHeadRowS}>
+                      <div style={secTitleS}>Prompt Defaults</div>
                       <div style={{fontSize:9,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:260}}>{selectedModelLabel}</div>
                     </div>
                     {imgChatCkpt?<>
@@ -6628,74 +6652,42 @@ function HyprChat(){
                 </>:<>
                   <div>
                     <div style={{fontSize:10,color:t.mut,marginBottom:5}}>Default prompt (global fallback)</div>
-                    <input value={imgChatPrefix} onChange={e=>setImgChatPrefix(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-prefix","image_chat_prompt_prefix",imgChatPrefix)} placeholder="style/quality tags prepended to every chat image" style={inp}/>
+                    <input value={imgChatPrefix} onChange={e=>setImgChatPrefix(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-prefix","image_chat_prompt_prefix",imgChatPrefix)} placeholder="empty = standard quality tags (masterpiece, best quality, …)" style={inp}/>
                   </div>
                   <div>
                     <div style={{fontSize:10,color:t.mut,marginBottom:5}}>Default negative prompt (global fallback)</div>
-                    <input value={imgChatNeg} onChange={e=>setImgChatNeg(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-neg","image_chat_negative",imgChatNeg)} placeholder="things to avoid in every chat image" style={inp}/>
+                    <input value={imgChatNeg} onChange={e=>setImgChatNeg(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-neg","image_chat_negative",imgChatNeg)} placeholder="empty = standard negatives (lowres, bad anatomy, watermark, …)" style={inp}/>
                   </div>
                 </>}
-                    <div style={imageHintS}>Text fields save when you click away. Pony-family models get score-tag prompts automatically unless overridden here.</div>
+                    <div style={secHintS}>Text fields save when you click away. Pony-family models get score-tag prompts automatically unless overridden here.</div>
                   </section>
 
-                  <section style={imageSectionS}>
-                    <div style={imageHeadS}>
-                      <div style={imageTitleS}>Prompt Model</div>
+                  <section style={subSecS}>
+                    <div style={secHeadRowS}>
+                      <div style={secTitleS}>Prompt Model</div>
                       <div style={{fontSize:9,color:t.mut}}>persona photos + enhance</div>
                     </div>
-                  {imgChatComposeModel?<div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:8,alignItems:"center"}}>
-                    <div style={{flex:1}}><ModelPicker value={imgChatComposeModel} onChange={setImgChatComposeModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
-                    <button onClick={()=>setImgChatComposeModel("")} style={{padding:"7px 10px",background:`${t.err}14`,border:`1px solid ${t.err}35`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:800,whiteSpace:"nowrap",fontFamily:font}}>Reset</button>
-                  </div>:<div onClick={()=>setImgChatComposeModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer"}}>
-                    <span style={{fontSize:14}}>📷</span>
-                    <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Same as the conversation's chat model</div><div style={{fontSize:9,color:t.dim}}>Click to pick a dedicated model</div></div>
-                    <span style={{fontSize:9,color:t.mut}}>▾</span>
-                  </div>}
-                  <div style={imageHintS}>Empty uses the chat's own model, which is usually best for matching conversation tone and content rating.</div>
+                  {modelField({icon:"📷",value:imgChatComposeModel,set:setImgChatComposeModel,inheritTitle:"Same as the conversation's chat model",inheritDesc:"Click to pick a dedicated model"})}
+                  {toggleField("Auto-enhance chat prompts",imgChatAutoEnhance,()=>setImgChatAutoEnhance(v=>!v),imgChatAutoEnhance?"the prompt model expands every chat image prompt (adds up to ~20s per image)":"off — raw prompt + default quality tags")}
+                  <div style={secHintS}>Empty uses the chat's own model, which is usually best for matching conversation tone and content rating. Auto-enhance applies to regular chats only — persona photos already compose their own prompts.</div>
                   </section>
-                </div>
               </div>;
             })()}
-        </div>
+        </>,<>Defaults for the in-chat <code>generate_image</code> tool. Image Studio ★ presets still apply automatically; this section controls the chat-facing model, workflow, prompt defaults, and optional prompt-writer model.</>)}
       </div>
 
       {/* TILE: Daedalus — all coder-agent-related settings live here.
           Includes the umbrella Planning/Coder model pickers, the new collapsible
           per-agent model overrides card, and OpenHands runtime knobs. */}
-      <div style={{...settingsCardS,display:settingsTab==="daedalus"?"block":"none"}}>
-        <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:.5,marginBottom:4,display:"flex",alignItems:"center",gap:8}}>🏛️ Daedalus</div>
-        <div style={{...settingsKickerS,marginBottom:14}}>Coder-agent routing, model inheritance, and uploaded-project repair behavior.</div>
-
-        <div style={{marginBottom:14}}>
-          <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Code Planning Model</div>
-          {planningModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
-            <div style={{flex:1}}><ModelPicker value={planningModel} onChange={setPlanningModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
-            <button onClick={()=>setPlanningModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
-          </div>:<div onClick={()=>setPlanningModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
-            <span style={{fontSize:14}}>🧠</span>
-            <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Same as chat model</div><div style={{fontSize:9,color:t.dim}}>Click to select a dedicated planning model</div></div>
-            <span style={{fontSize:9,color:t.mut}}>▾</span>
-          </div>}
-          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Used by Architect + Reviewer + Acceptance agents. Empty = uses the active chat model.</div>
-        </div>
-
-        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
-          <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Code Generator Model</div>
-          {coderModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
-            <div style={{flex:1}}><ModelPicker value={coderModel} onChange={setCoderModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
-            <button onClick={()=>setCoderModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
-          </div>:<div onClick={()=>setCoderModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
-            <span style={{fontSize:14}}>🧬</span>
-            <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Same as chat model</div><div style={{fontSize:9,color:t.dim}}>Click to select a dedicated coder model</div></div>
-            <span style={{fontSize:9,color:t.mut}}>▾</span>
-          </div>}
-          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Used by Builder + Fixer agents. Empty = uses the active chat model.</div>
-        </div>
+      <div style={{display:settingsTab==="daedalus"?"block":"none",animation:"fadeIn .18s ease"}}>
+        {settingSection("Models",null,<>
+        {modelField({label:"Code Planning Model",icon:"🧠",value:planningModel,set:setPlanningModel,inheritTitle:"Same as chat model",inheritDesc:"Click to select a dedicated planning model",hint:"Used by Architect + Reviewer + Acceptance agents. Empty = uses the active chat model."})}
+        {modelField({label:"Code Generator Model",icon:"🧬",value:coderModel,set:setCoderModel,inheritTitle:"Same as chat model",inheritDesc:"Click to select a dedicated coder model",hint:"Used by Builder + Fixer agents. Empty = uses the active chat model."})}
 
         {/* Per-agent model overrides — collapsible advanced card.
             Each picker defaults to "Inherits from <umbrella>" until clicked.
             The reset button clears the override (returns to inheritance). */}
-        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
+        <div>
           <div onClick={()=>setCoderBotModelsOpen(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",userSelect:"none"}}>
             <span style={{fontSize:14}}>🎛</span>
             <span style={{fontSize:12,fontWeight:700,color:t.text,letterSpacing:.3}}>Per-Agent Model Overrides</span>
@@ -6704,137 +6696,38 @@ function HyprChat(){
           </div>
           <div style={{fontSize:10,color:t.mut,marginTop:4}}>Optional. Pin a specific model per agent; empty rows inherit from the umbrella above.</div>
 
-          {coderBotModelsOpen && <div style={{marginTop:14,paddingLeft:10,borderLeft:`2px solid ${t.acc}33`}}>
-            {/* Architect — inherits from Planning Model */}
-            <div style={{marginBottom:14}}>
-              <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>📐 Architect Model</div>
-              {architectModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
-                <div style={{flex:1}}><ModelPicker value={architectModel} onChange={setArchitectModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
-                <button onClick={()=>setArchitectModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
-              </div>:<div onClick={()=>setArchitectModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
-                <span style={{fontSize:14}}>📐</span>
-                <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from Planning Model</div><div style={{fontSize:9,color:t.dim}}>Click to override for the Architect agent only</div></div>
-                <span style={{fontSize:9,color:t.mut}}>▾</span>
-              </div>}
-            </div>
-
-            {/* Reviewer — inherits from Planning Model */}
-            <div style={{marginBottom:14}}>
-              <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>🔍 Reviewer Model</div>
-              {reviewerModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
-                <div style={{flex:1}}><ModelPicker value={reviewerModel} onChange={setReviewerModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
-                <button onClick={()=>setReviewerModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
-              </div>:<div onClick={()=>setReviewerModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
-                <span style={{fontSize:14}}>🔍</span>
-                <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from Planning Model</div><div style={{fontSize:9,color:t.dim}}>Click to override for the Reviewer agent only</div></div>
-                <span style={{fontSize:9,color:t.mut}}>▾</span>
-              </div>}
-            </div>
-
-            {/* Acceptance — inherits from Planning Model */}
-            <div style={{marginBottom:14}}>
-              <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>✅ Acceptance Model</div>
-              {acceptanceModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
-                <div style={{flex:1}}><ModelPicker value={acceptanceModel} onChange={setAcceptanceModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
-                <button onClick={()=>setAcceptanceModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
-              </div>:<div onClick={()=>setAcceptanceModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
-                <span style={{fontSize:14}}>✅</span>
-                <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from Planning Model</div><div style={{fontSize:9,color:t.dim}}>Click to override for the Acceptance agent only</div></div>
-                <span style={{fontSize:9,color:t.mut}}>▾</span>
-              </div>}
-            </div>
-
-            {/* Builder — inherits from Coder Model */}
-            <div style={{marginBottom:14}}>
-              <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>🏗 Builder Model</div>
-              {builderModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
-                <div style={{flex:1}}><ModelPicker value={builderModel} onChange={setBuilderModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
-                <button onClick={()=>setBuilderModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
-              </div>:<div onClick={()=>setBuilderModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
-                <span style={{fontSize:14}}>🏗</span>
-                <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from Coder Model</div><div style={{fontSize:9,color:t.dim}}>Click to override the Builder (OpenHands) agent only</div></div>
-                <span style={{fontSize:9,color:t.mut}}>▾</span>
-              </div>}
-            </div>
-
-            {/* Fixer — inherits from Coder Model */}
-            <div style={{marginBottom:14}}>
-              <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>🛠 Fixer Model</div>
-              {fixerModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
-                <div style={{flex:1}}><ModelPicker value={fixerModel} onChange={setFixerModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
-                <button onClick={()=>setFixerModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
-              </div>:<div onClick={()=>setFixerModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
-                <span style={{fontSize:14}}>🛠</span>
-                <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from Coder Model</div><div style={{fontSize:9,color:t.dim}}>Click to override the Fixer agent only</div></div>
-                <span style={{fontSize:9,color:t.mut}}>▾</span>
-              </div>}
-            </div>
-
-            {/* ProjectQA — inherits from chat/profile model */}
-            <div style={{marginBottom:6}}>
-              <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>❓ ProjectQA Model</div>
-              {qaModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
-                <div style={{flex:1}}><ModelPicker value={qaModel} onChange={setQaModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
-                <button onClick={()=>setQaModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
-              </div>:<div onClick={()=>setQaModel(models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
-                <span style={{fontSize:14}}>❓</span>
-                <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from chat model</div><div style={{fontSize:9,color:t.dim}}>Click to override the ProjectQA agent only</div></div>
-                <span style={{fontSize:9,color:t.mut}}>▾</span>
-              </div>}
-            </div>
+          {coderBotModelsOpen && <div style={{marginTop:14,paddingLeft:10,borderLeft:`2px solid ${t.acc}33`,display:"flex",flexDirection:"column",gap:14}}>
+            {modelField({label:"📐 Architect Model",icon:"📐",value:architectModel,set:setArchitectModel,inheritTitle:"Inherits from Planning Model",inheritDesc:"Click to override for the Architect agent only"})}
+            {modelField({label:"🔍 Reviewer Model",icon:"🔍",value:reviewerModel,set:setReviewerModel,inheritTitle:"Inherits from Planning Model",inheritDesc:"Click to override for the Reviewer agent only"})}
+            {modelField({label:"✅ Acceptance Model",icon:"✅",value:acceptanceModel,set:setAcceptanceModel,inheritTitle:"Inherits from Planning Model",inheritDesc:"Click to override for the Acceptance agent only"})}
+            {modelField({label:"🏗 Builder Model",icon:"🏗",value:builderModel,set:setBuilderModel,inheritTitle:"Inherits from Coder Model",inheritDesc:"Click to override the Builder (OpenHands) agent only"})}
+            {modelField({label:"🛠 Fixer Model",icon:"🛠",value:fixerModel,set:setFixerModel,inheritTitle:"Inherits from Coder Model",inheritDesc:"Click to override the Fixer agent only"})}
+            {modelField({label:"❓ ProjectQA Model",icon:"❓",value:qaModel,set:setQaModel,inheritTitle:"Inherits from chat model",inheritDesc:"Click to override the ProjectQA agent only"})}
           </div>}
         </div>
-
-        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14,display:"flex",alignItems:"center",gap:10}}>
-          <label style={{fontSize:12,color:t.dim,fontWeight:600,whiteSpace:"nowrap"}}>OpenHands Enabled</label>
-          <div onClick={()=>setOpenhandsEnabled(!openhandsEnabled)} style={{width:36,height:20,borderRadius:10,background:openhandsEnabled?t.acc:`${t.mut}44`,cursor:"pointer",position:"relative",transition:"all .2s"}}>
-            <div style={{width:16,height:16,borderRadius:8,background:t.text,position:"absolute",top:2,left:openhandsEnabled?18:2,transition:"all .2s"}}/>
-          </div>
-          <span style={{fontSize:10,color:t.mut}}>{openhandsEnabled?"On":"Off"}</span>
-        </div>
-
-        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14,marginBottom:14}}>
-          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
-            <label style={{fontSize:12,color:t.dim,fontWeight:600,whiteSpace:"nowrap"}}>Aider Enabled</label>
-            <div onClick={()=>setAiderEnabled(!aiderEnabled)} style={{width:36,height:20,borderRadius:10,background:aiderEnabled?t.acc:`${t.mut}44`,cursor:"pointer",position:"relative",transition:"all .2s"}}>
-              <div style={{width:16,height:16,borderRadius:8,background:t.text,position:"absolute",top:2,left:aiderEnabled?18:2,transition:"all .2s"}}/>
-            </div>
-            <span style={{fontSize:10,color:t.mut}}>{aiderEnabled?"Uploaded-project fixes use Aider":"Fallback Fixer"}</span>
-          </div>
-          <div style={{fontSize:12,color:t.dim,marginBottom:8,fontWeight:600}}>Aider/Fix Model</div>
-          {aiderModel?<div style={{display:"flex",gap:6,alignItems:"center"}}>
-            <div style={{flex:1}}><ModelPicker value={aiderModel} onChange={setAiderModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
-            <button onClick={()=>setAiderModel("")} style={{padding:"6px 10px",background:`${t.err}18`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>Reset</button>
-          </div>:<div onClick={()=>setAiderModel(fixerModel||coderModel||models[0]||"")} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
-            <span style={{fontSize:14}}>🛠</span>
-            <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>Inherits from Fixer/Coder Model</div><div style={{fontSize:9,color:t.dim}}>Click to pin the Aider edit model</div></div>
-            <span style={{fontSize:9,color:t.mut}}>▾</span>
-          </div>}
-          <label style={{display:"flex",alignItems:"center",gap:8,marginTop:10,fontSize:11,color:t.mut,cursor:"pointer"}}>
+        </>,"Coder-agent routing and model inheritance.")}
+        {settingSection("Repair Engines",null,<>
+        {toggleField("OpenHands Enabled",openhandsEnabled,()=>setOpenhandsEnabled(!openhandsEnabled),openhandsEnabled?"On":"Off")}
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {toggleField("Aider Enabled",aiderEnabled,()=>setAiderEnabled(!aiderEnabled),aiderEnabled?"Uploaded-project fixes use Aider":"Fallback Fixer")}
+          {modelField({label:"Aider/Fix Model",icon:"🛠",value:aiderModel,set:setAiderModel,activateValue:fixerModel||coderModel||models[0]||"",inheritTitle:"Inherits from Fixer/Coder Model",inheritDesc:"Click to pin the Aider edit model"})}
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:11,color:t.mut,cursor:"pointer"}}>
             <input type="checkbox" checked={aiderAutoTest} onChange={e=>setAiderAutoTest(e.target.checked)} style={{accentColor:t.acc}}/>
             Auto-run safe test command after Aider edits
           </label>
         </div>
+        </>,"Which build and repair engines Daedalus may dispatch to.")}
 
-        <div style={{marginBottom:14}}>
-          <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Daedalus Context Window: <span style={{color:t.acc}}>{coderNumCtx.toLocaleString()}</span></label>
-          <input type="range" min="2048" max="262144" step="2048" value={coderNumCtx} onChange={e=>setCoderNumCtx(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>2048</span><span>262144</span></div>
-          <div style={{fontSize:9,color:t.mut,marginTop:4,lineHeight:1.5}}>
+        {settingSection("Build Limits",null,<>
+        {sliderField({label:"Daedalus Context Window",value:coderNumCtx,set:setCoderNumCtx,min:2048,max:262144,step:2048,display:coderNumCtx.toLocaleString(),hint:<>
             {coderNumCtx<=16384?<><b style={{color:t.acc}}>Compact (≤16K)</b> — small tasks, single-function edits. Fits comfortably with 3 models warm.</>
             :coderNumCtx<=65536?<><b style={{color:t.acc}}>Recommended (32–64K)</b> — sweet spot for most Daedalus work. Multi-file refactors fit, VRAM stays comfortable.</>
             :coderNumCtx<=131072?<><b style={{color:t.acc}}>Large (64–128K)</b> — whole-file analysis, big refactors. Keep only 1–2 models warm or you may hit VRAM limits.</>
             :<><b style={{color:t.err}}>Maximum (128–256K)</b> — whole-codebase context. Drop <code>OLLAMA_MAX_LOADED_MODELS</code> to 1 or expect OOM. First run after slider change reloads the model.</>}
-          </div>
-        </div>
+        </>})}
+        {sliderField({label:"Max Agent Rounds",value:openhandsMaxRounds,set:setOpenhandsMaxRounds,min:5,max:40,step:1})}
 
-        <div style={{marginBottom:14}}>
-          <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Max Agent Rounds: <span style={{color:t.acc}}>{openhandsMaxRounds}</span></label>
-          <input type="range" min="5" max="40" step="1" value={openhandsMaxRounds} onChange={e=>setOpenhandsMaxRounds(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>5</span><span>40</span></div>
-        </div>
-
-        <div style={{marginBottom:6}}>
+        <div>
           <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Reasoning Effort: <span style={{color:t.acc}}>{openhandsReasoningEffort}</span></label>
           <select value={openhandsReasoningEffort} onChange={e=>setOpenhandsReasoningEffort(e.target.value)} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"8px 12px",borderRadius:8,fontFamily:font,fontSize:12,outline:"none",cursor:"pointer"}}>
             <option value="low">Low — fastest, minimal think tokens</option>
@@ -6844,21 +6737,19 @@ function HyprChat(){
           <div style={{fontSize:9,color:t.mut,marginTop:4}}>Controls how much the Builder LLM thinks before each tool call. Drop to <b>low</b> if generate_code is taking minutes per file.</div>
         </div>
 
-        <div style={{marginBottom:6,marginTop:12}}>
+        <div>
           <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:t.dim,fontWeight:600,cursor:"pointer"}}>
             <input type="checkbox" checked={openhandsDisableThinking} onChange={e=>setOpenhandsDisableThinking(e.target.checked)} style={{accentColor:t.acc}}/>
             Disable model thinking during builds
           </label>
           <div style={{fontSize:9,color:t.mut,marginTop:4}}>Sends <b>think: false</b> to thinking-capable coder models (qwen3.5-class). Without it they reason with an unbounded budget before every tool call, making builds slow and tool calls flaky. Non-thinking models are unaffected.</div>
         </div>
+        </>,"Runtime budgets for the Builder agent loop.")}
       </div>
 
       {/* TILE: Appearance */}
-      <div style={{...settingsCardS,display:settingsTab==="appearance"?"block":"none"}}>
-        <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:.5,marginBottom:4,display:"flex",alignItems:"center",gap:8}}>🎨 Appearance</div>
-        <div style={{...settingsKickerS,marginBottom:14}}>Theme, background animation, font, and density preferences.</div>
-        <div style={{marginBottom:12}}>
-          {(()=>{
+      <div style={{display:settingsTab==="appearance"?"block":"none",animation:"fadeIn .18s ease"}}>
+        {settingSection("Theme & Background",null,(()=>{
             const previewKey=pendingTheme||tm;
             const pTh=THEMES[previewKey]||t;
             return <div>
@@ -6897,11 +6788,8 @@ function HyprChat(){
                 <button onClick={()=>setPendingTheme(null)} style={{padding:"6px 12px",borderRadius:7,background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.dim,cursor:"pointer",fontFamily:font,fontSize:12}}>Cancel</button></>}
               </div>
             </div>;
-          })()}
-        </div>
-        <div style={{marginBottom:12}}>
-          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Font</div>
-          {(()=>{
+          })())}
+        {settingSection("Font",null,(()=>{
             const previewIdx=pendingFont!==null?pendingFont:fi;
             const pF=FONTS[previewIdx]||FONTS[0];
             return <div>
@@ -6931,15 +6819,12 @@ function HyprChat(){
                 <button onClick={()=>setPendingFont(null)} style={{padding:"6px 12px",borderRadius:7,background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.dim,cursor:"pointer",fontFamily:font,fontSize:12}}>Cancel</button></>}
               </div>
             </div>;
-          })()}
-        </div>
-        <div style={{marginBottom:12}}>
-          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Chat Width</div>
-          <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-            {[560,640,720,800,880,960,1040,1120,1200].map(v=><button key={v} onClick={()=>{setChatWidth(v);flashSettingsPulse("Saved locally","success");}} style={{padding:"5px 10px",borderRadius:7,border:`1px solid ${chatWidth===v?t.acc:t.brd}44`,background:chatWidth===v?`${t.acc}22`:t.bgDeep,color:chatWidth===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:chatWidth===v?700:400}}>{v}</button>)}
-          </div>
-        </div>
-        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          })())}
+        {settingSection("Chat Width",null,
+          chipRow([560,640,720,800,880,960,1040,1120,1200].map(v=>({v,label:String(v)})),chatWidth,v=>{setChatWidth(v);flashSettingsPulse("Saved locally","success");})
+        )}
+        {settingSection("Behavior",null,
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
           {[
             [compactMode,setCompactMode,"Compact"],
             [autoExpandThink,setAutoExpandThink,"Auto-think"],
@@ -6949,13 +6834,13 @@ function HyprChat(){
             <span style={{color:val?t.acc:t.mut,fontSize:14}}>{val?<IC.ToggleOn/>:<IC.ToggleOff/>}</span>
             <span style={{color:val?t.acc:t.dim,fontWeight:600}}>{label}</span>
           </div>)}
-        </div>
+          </div>
+        )}
       </div>
 
       {/* TILE: RAG Pipeline */}
-      <div style={{...settingsCardS,display:settingsTab==="rag"?"block":"none"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-          <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:.5,display:"flex",alignItems:"center",gap:8}}>🧠 RAG Pipeline</div>
+      <div style={{display:settingsTab==="rag"?"block":"none",animation:"fadeIn .18s ease"}}>
+        <div style={{display:"flex",justifyContent:"flex-end",alignItems:"center",marginBottom:12}}>
           <div style={{display:"flex",gap:8}}>
             <button onClick={()=>setRagSettings({embed_model:"nomic-embed-text",chunk_size:500,chunk_overlap:50,top_k:6,max_context_chars:6000,research_top_k:4,research_max_chars:3000})} style={{...btnS(t.mut),fontSize:12,padding:"5px 12px"}}>Default</button>
             <button disabled={ragSaving} onClick={async()=>{
@@ -6987,16 +6872,12 @@ function HyprChat(){
         </div>
         {ragSaveState&&<div style={{fontSize:10,color:ragSaveState==="failed"?t.err:ragSaveState==="saved"?t.ok:t.mut,marginTop:-8,marginBottom:10,textAlign:"right"}}>{ragSaveState==="saving"?"Saving...":ragSaveState==="saved"?"Saved":"Failed"}</div>}
 
-        {/* Embedding Model */}
-        <div style={{marginBottom:14}}>
-          <div style={{fontSize:11,color:t.mut,marginBottom:5,fontWeight:600,textTransform:"uppercase",letterSpacing:.5,display:"flex",alignItems:"center",gap:4}}>Embedding Model <Tip k="embed_model" t={t}/></div>
+        {settingSection(<>Embedding Model <Tip k="embed_model" t={t}/></>,null,
           <input value={ragSettings.embed_model} onChange={e=>setRagSettings(p=>({...p,embed_model:e.target.value}))} placeholder="nomic-embed-text" style={{...inputS,fontFamily:"monospace",fontSize:13,width:"100%",padding:"8px 12px"}}/>
-        </div>
+        )}
 
-        {/* Chunking Preview */}
-        <div style={{background:t.bgDeep,borderRadius:10,border:`1px solid ${t.brd}22`,padding:"12px 14px",marginBottom:14}}>
-          <div style={{fontSize:11,fontWeight:700,color:t.warm,textTransform:"uppercase",letterSpacing:.5,marginBottom:10,display:"flex",alignItems:"center",gap:6}}>📐 Chunking</div>
-          <div style={{display:"flex",gap:16,marginBottom:12}}>
+        {settingSection("📐 Chunking",null,<>
+          <div style={{display:"flex",gap:16}}>
             <div style={{flex:1}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
                 <span style={{fontSize:10,color:t.dim,fontWeight:600}}>Chunk Size <Tip k="chunk_size" t={t}/></span>
@@ -7030,12 +6911,10 @@ function HyprChat(){
               <span style={{fontSize:9,color:t.mut,marginLeft:4}}>...</span>
             </div>
           </div>
-        </div>
+        </>,null,t.warm)}
 
-        {/* Retrieval Settings */}
-        <div style={{background:t.bgDeep,borderRadius:10,border:`1px solid ${t.brd}22`,padding:"12px 14px",marginBottom:14}}>
-          <div style={{fontSize:11,fontWeight:700,color:t.f1,textTransform:"uppercase",letterSpacing:.5,marginBottom:10,display:"flex",alignItems:"center",gap:6}}>🔍 Retrieval</div>
-          <div style={{display:"flex",gap:16,marginBottom:12}}>
+        {settingSection("🔍 Retrieval",null,<>
+          <div style={{display:"flex",gap:16}}>
             <div style={{flex:1}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
                 <span style={{fontSize:10,color:t.dim,fontWeight:600}}>Max Context <Tip k="max_context" t={t}/></span>
@@ -7059,14 +6938,10 @@ function HyprChat(){
               </div>
             </div>
           </div>
-        </div>
+        </>,null,t.f1)}
 
-        {/* Stats */}
-        {ragStats&&<div style={{background:t.bgDeep,borderRadius:10,border:`1px solid ${t.brd}22`,padding:"12px 14px"}}>
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-            <span style={{fontSize:11,fontWeight:700,color:t.ok,textTransform:"uppercase",letterSpacing:.5}}>📊 Index Stats</span>
-            <div style={{flex:1}}/>
-            {ragStats.collections&&ragStats.collections.length>0&&<button onClick={async()=>{
+        {ragStats&&settingSection("📊 Index Stats",
+            ragStats.collections&&ragStats.collections.length>0?<button onClick={async()=>{
               const ok=await confirmAction({title:"Purge RAG collections",body:`Delete all ${ragStats.collections.length} RAG collections? This removes indexed chunks. You can reindex later.`,confirmLabel:"Purge Collections",tone:"danger"});
               if(!ok)return;
               const activityId=addActivity({name:"RAG purge",kind:"cleanup",message:"Deleting indexed collections...",pct:30});
@@ -7076,8 +6951,7 @@ function HyprChat(){
                 updateActivity(activityId,{status:"done",message:`Purged ${d.deleted} collections`,pct:100});
                 notify({type:"success",text:"RAG collections purged",detail:`Deleted ${d.deleted} collections.`});
               }catch(e){updateActivity(activityId,{status:"error",error:e.message,message:"Purge failed"});notify({type:"error",text:"Purge failed",detail:e.message});}
-            }} style={{...btnS(t.err),padding:"3px 10px",fontSize:9}}>🗑 Purge</button>}
-          </div>
+            }} style={{...btnS(t.err),padding:"3px 10px",fontSize:9}}>🗑 Purge</button>:null,<>
           <div style={{display:"flex",gap:0,marginBottom:ragStats.collections?.length?10:0}}>
             {[
               {label:"Collections",value:ragStats.total_collections||0,color:t.acc},
@@ -7097,19 +6971,14 @@ function HyprChat(){
                 {isRes?"🧠":"📚"} {c.name.replace("research-","").slice(0,20)} <span style={{fontWeight:700,color:t.mut}}>{c.count}</span>
               </span>;})}
           </div>}
-        </div>}
+        </>,null,t.ok)}
       </div>
 
       {/* TILE: Loading Quotes */}
-      <div style={{...settingsCardS,display:settingsTab==="quotes"?"block":"none"}}>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,marginBottom:12}}>
-          <div>
-            <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,display:"flex",alignItems:"center",gap:8}}>💬 Loading Quotes <span style={{fontSize:11,color:t.mut,fontWeight:400}}>({customQuotes.length})</span></div>
-            <div style={{...settingsKickerS,marginTop:4}}>Shown on the startup loading screen. Edit, remove, or add quotes below.</div>
-          </div>
-          <button onClick={async()=>{const ok=await confirmAction({title:"Restore loading quotes",body:"Replace the current loading quotes with the built-in defaults?",confirmLabel:"Restore Defaults",tone:"warning"});if(!ok)return;setCustomQuotes(DEFAULT_LOADING_QUOTES);setEditQuoteIdx(null);notify({type:"success",text:"Loading quotes saved locally"});flashSettingsPulse("Saved locally","success");}} style={{...btnS(t.mut),fontSize:12,padding:"6px 12px",whiteSpace:"nowrap"}}>Restore Defaults</button>
-        </div>
-        <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:"min(48vh,460px)",overflowY:"auto",paddingRight:4,marginBottom:14}}>
+      <div style={{display:settingsTab==="quotes"?"block":"none",animation:"fadeIn .18s ease"}}>
+        {settingSection(<>Loading Quotes <span style={{color:t.mut,fontWeight:400}}>({customQuotes.length})</span></>,
+          <button onClick={async()=>{const ok=await confirmAction({title:"Restore loading quotes",body:"Replace the current loading quotes with the built-in defaults?",confirmLabel:"Restore Defaults",tone:"warning"});if(!ok)return;setCustomQuotes(DEFAULT_LOADING_QUOTES);setEditQuoteIdx(null);notify({type:"success",text:"Loading quotes saved locally"});flashSettingsPulse("Saved locally","success");}} style={{...btnS(t.mut),fontSize:11,padding:"5px 11px",whiteSpace:"nowrap"}}>Restore Defaults</button>,<>
+        <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:"min(48vh,460px)",overflowY:"auto",paddingRight:4}}>
           {customQuotes.map((q,i)=>editQuoteIdx===i?<div key={i} style={{background:t.bgDeep,border:`1px solid ${t.acc}33`,borderRadius:10,padding:12}}>
             <textarea value={editQuoteText} onChange={e=>setEditQuoteText(e.target.value)} style={{...inputS,minHeight:72,resize:"vertical",fontSize:12,lineHeight:1.5,marginBottom:8}}/>
             <input value={editQuoteAttr} onChange={e=>setEditQuoteAttr(e.target.value)} placeholder="Attribution" style={{...inputS,fontSize:12,padding:"8px 10px",marginBottom:10}}/>
@@ -7135,18 +7004,18 @@ function HyprChat(){
           <button onClick={()=>{if(!newQuoteText.trim())return;setCustomQuotes(p=>[...p,{t:newQuoteText.trim(),a:newQuoteAttr.trim()}]);setNewQuoteText("");setNewQuoteAttr("");notify({type:"success",text:"Loading quotes saved locally",duration:2500});flashSettingsPulse("Saved locally","success");}}
             disabled={!newQuoteText.trim()} style={{...btnS(t.f1),opacity:newQuoteText.trim()?1:.4,flexShrink:0,fontSize:12,padding:"7px 14px",whiteSpace:"nowrap"}}>+ Add</button>
         </div>
+        </>,"Shown on the startup loading screen. Edit, remove, or add quotes below.")}
       </div>
 
       {/* TILE: Sandbox & Cleanup */}
-      <div style={{...settingsCardS,display:settingsTab==="cleanup"?"block":"none"}}>
+      <div style={{...settingsCardS,display:settingsTab==="cleanup"?"block":"none",animation:"fadeIn .18s ease"}}>
         <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:10,display:"flex",alignItems:"center",gap:8}}>🗃️ Sandbox & Cleanup</div>
         <SandboxSection t={t} btnS={btnS} labelS={labelS} notify={notify} addActivity={addActivity} updateActivity={updateActivity}/>
       </div>
 
 	      {/* TILE: Danger Zone */}
-	      <div style={{display:settingsTab==="danger"?"block":"none",background:`${t.err}06`,border:`1px solid ${t.err}22`,borderRadius:12,padding:"16px 18px",marginBottom:14}}>
-	        <div style={{fontSize:14,fontWeight:700,color:t.err,letterSpacing:.5,marginBottom:12,display:"flex",alignItems:"center",gap:8}}>⚠️ Danger Zone</div>
-	        <div style={{fontSize:11,color:t.dim,lineHeight:1.55,marginBottom:14}}>Each action opens a warning before anything is deleted. The strongest actions require typed confirmation.</div>
+	      <div style={{display:settingsTab==="danger"?"block":"none",animation:"fadeIn .18s ease"}}>
+	        {settingSection("⚠️ Danger Zone",null,
 	        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(210px,1fr))",gap:10}}>
 	          {[
 	            ["🗑️","Clear All Chats","Current user's conversations",clearAllChats,false],
@@ -7164,10 +7033,11 @@ function HyprChat(){
 	            </span>
 	          </button>)}
 	        </div>
+	        ,"Each action opens a warning before anything is deleted. The strongest actions require typed confirmation.",t.err)}
 	      </div>
 
       {/* TILE: Changelog */}
-      <div style={{display:settingsTab==="changelog"?"block":"none",padding:0,overflow:"hidden",background:"transparent",border:"none",borderRadius:0,marginBottom:0}}>
+      <div style={{display:settingsTab==="changelog"?"block":"none",padding:0,overflow:"hidden",background:"transparent",border:"none",borderRadius:0,marginBottom:0,animation:"fadeIn .18s ease"}}>
         <div style={{maxHeight:"calc(85vh - 120px)",overflowY:"auto",padding:"6px 4px 20px",lineHeight:1.7,fontSize:13,color:t.text}}>
           {!changelogContent?<div style={{textAlign:"center",padding:40,color:t.mut,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
             <div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
@@ -7322,7 +7192,7 @@ function HyprChat(){
               const expanded=expandedRounds[ckey]===true;
               const respondingTo=Array.isArray(meta.responding_to)?meta.responding_to:[];
               const activeBorder=votes>0?t.ok:(roundKey===0?t.acc:t.pink);
-              return <div key={ckey} style={{background:`linear-gradient(180deg,${t.surface}E8,${t.bgDeep}D8)`,border:`1px solid ${activeBorder}${votes>0?"66":"30"}`,borderRadius:10,overflow:"hidden",boxShadow:votes>0?`0 0 0 1px ${activeBorder}18, 0 10px 30px #0002`:"0 10px 24px #0001",minWidth:0}}>
+              return <div key={ckey} style={{background:`${t.surface}66`,border:`1px solid ${activeBorder}${votes>0?"66":"30"}`,borderRadius:10,overflow:"hidden",boxShadow:votes>0?`0 0 0 1px ${activeBorder}18`:"none",minWidth:0,transition:"border-color .15s ease,box-shadow .15s ease"}}>
                 <div style={{padding:11,borderBottom:`1px solid ${t.brd}22`,display:"flex",gap:9,alignItems:"center"}}>
                   {avatarNode(view,34,roundKey===0?t.acc:t.pink)}
                   <div style={{minWidth:0,flex:1}}>
@@ -7360,7 +7230,7 @@ function HyprChat(){
               if(!votes.length&&!councilVoting)return null;
               const tally=tallyFromVotes(votes);
               const leaders=hostMeta.winners||sortedTally(tally).map(x=>({id:x.id,name:x.view.name,votes:x.votes}));
-              return <div style={{background:`${t.surface}92`,border:`1px solid ${t.pink}32`,borderRadius:10,padding:12,margin:"12px 0",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
+              return <div style={{background:`${t.surface}66`,border:`1px solid ${t.pink}32`,borderRadius:10,padding:12,margin:"12px 0",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
                 <div>
                   <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8,color:t.pink,fontSize:11,fontWeight:900,textTransform:"uppercase",letterSpacing:.7}}><IC.Trophy/> Peer Ballot</div>
                   {leaders.length?<div style={{display:"flex",flexDirection:"column",gap:6}}>
@@ -7545,7 +7415,7 @@ function HyprChat(){
                     {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
                     {msg.isS&&!msg.content&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
                   </div>
-                  {isDaedalusOutput&&<DaedalusSummary runIds={daedalusRunIds} savedEvents={savedEvents} liveEvts={liveEventsForMsg} workflows={messageWorkflows} t={t} font={font} md={md} msgContent={renderedContent} live={!!msg.isS} onPreview={openPreview} onOpenArtifact={openArtifact}/>}
+                  {isDaedalusOutput&&<DaedalusSummary runIds={daedalusRunIds} savedEvents={savedEvents} liveEvts={liveEventsForMsg} workflows={messageWorkflows} t={t} font={font} md={md} msgContent={renderedContent} live={!!msg.isS} onPreview={openPreview} onOpenArtifact={openArtifact} onQuickAction={text=>{setInp(text);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);}}/>}
                   {msg.isS&&msg.content&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
                   {!msg.isS&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
                   {(()=>{if(isU||isDaedalusOutput||msg.isS||!savedEvents.length)return null;const isLast=isLastAssistant;if(isLast&&evts.length>0)return null;return <ToolStatus evts={savedEvents.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>;})()}
@@ -7612,7 +7482,7 @@ function HyprChat(){
                         <IC.Refresh/> regenerate
                       </button>
                       <button onClick={()=>setRegenPopover(p=>p?.index===i?null:{index:i,model:"",temperature:"",personaId:""})} title="Regenerate with different model / temperature / profile" style={{...msgActionS(regenPopover?.index===i?t.acc:t.mut),padding:"3px 5px",borderRadius:"0 5px 5px 0"}}>▾</button>
-                      {regenPopover?.index===i&&<div style={{position:"absolute",top:"calc(100% + 4px)",left:0,background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:8,padding:10,zIndex:20,minWidth:240,boxShadow:`0 8px 24px rgba(0,0,0,.4)`}}>
+                      {regenPopover?.index===i&&<div style={{position:"absolute",top:"calc(100% + 4px)",left:0,background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:8,padding:10,zIndex:20,minWidth:240,boxShadow:`0 8px 24px rgba(0,0,0,.4)`,animation:"fadeIn .16s ease"}}>
                         <div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:1,marginBottom:8,fontWeight:700}}>Regenerate with</div>
                         <div style={{marginBottom:6}}>
                           <div style={{fontSize:9,color:t.mut,marginBottom:2}}>Model</div>
@@ -7686,7 +7556,7 @@ function HyprChat(){
                 <IC.Tool/> Connectors{activeConnectorCount?` ${activeConnectorCount}`:""}
               </button>}
             </div>
-            {!act?.is_council&&showConnectorPicker&&connectorOperationTools.length>0&&<div style={{position:"absolute",bottom:"calc(100% + 6px)",left:0,zIndex:310,width:300,maxWidth:"calc(100vw - 32px)",maxHeight:260,overflow:"hidden",background:`${t.bgDeep}F7`,border:`1px solid ${t.brd}55`,borderRadius:10,boxShadow:`0 10px 28px #0009`,padding:8,display:"flex",flexDirection:"column",gap:7,backdropFilter:"blur(8px)"}}>
+            {!act?.is_council&&showConnectorPicker&&connectorOperationTools.length>0&&<div style={{position:"absolute",bottom:"calc(100% + 6px)",left:0,zIndex:310,width:300,maxWidth:"calc(100vw - 32px)",maxHeight:260,overflow:"hidden",background:`${t.bgDeep}F7`,border:`1px solid ${t.brd}55`,borderRadius:10,boxShadow:`0 10px 28px #0009`,padding:8,display:"flex",flexDirection:"column",gap:7,backdropFilter:"blur(8px)",animation:"fadeIn .16s ease"}}>
               <div style={{display:"flex",alignItems:"center",gap:7}}>
                 <div style={{fontSize:10,fontWeight:900,color:t.acc,textTransform:"uppercase",letterSpacing:.7,whiteSpace:"nowrap"}}>Connectors</div>
                 <div style={{fontSize:9,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{activeConnectorCount} active · {connectorOperationTools.length} available</div>
@@ -7771,7 +7641,7 @@ function HyprChat(){
             </div>}
             {!act?.is_council&&<><div ref={quickMenuRef} style={{position:"relative",flexShrink:0}}>
               <button onClick={()=>{setShowQuickMenu(p=>!p);setShowPromptPicker(false);}} title="Quick actions" style={{background:showQuickMenu?`${t.acc}18`:"none",border:showQuickMenu?`1px solid ${t.acc}44`:"none",color:showQuickMenu?t.acc:t.mut,cursor:"pointer",padding:"4px 6px",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,opacity:showQuickMenu?1:.75,borderRadius:7,fontSize:17,lineHeight:1}}><IC.Plus/></button>
-              {showQuickMenu&&<div style={{position:"absolute",bottom:"115%",left:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:220,padding:7,display:"flex",flexDirection:"column",gap:4}}>
+              {showQuickMenu&&<div style={{position:"absolute",bottom:"115%",left:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:220,padding:7,display:"flex",flexDirection:"column",gap:4,animation:"fadeIn .16s ease"}}>
                 <button onClick={()=>{fileRef.current?.click();setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:`${t.surface}66`,color:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}><IC.Paperclip/> Attach files</button>
                 {prompts.length>0&&<button onClick={()=>{setShowPromptPicker(true);setPromptSearch("");setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:showPromptPicker?`${t.f1}18`:`${t.surface}66`,color:showPromptPicker?t.f1:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}>⚡ Prompt Library</button>}
                 {(()=>{const coderMc=mcs.find(m=>isCoderPersonaName(m.name));const isCoderActive=isCoderPersonaName(act?.persona_name)||(!actId&&isCoderPersonaName(pendingPersona?.persona_name));return coderMc?<button onClick={()=>{setShowQuickMenu(false);if(!actId){if(isCoderActive){setPendingPersona(null);setPendingToolIds([]);setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}const persona={model:coderMc.base_model||models[0]||"qwen3.5:27b",system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)};modelChoiceRef.current.pending=persona.model||"";setPendingPersona(persona);setPendingToolIds(persona.tool_ids||[]);setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);return;}if(isCoderActive){uConv(actId,{model_config_id:null,persona_name:null,persona_avatar:null,system_prompt:"",tool_ids:[]});setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:isCoderActive?`${t.ok}18`:`${t.surface}66`,color:isCoderActive?t.ok:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}>&lt;/&gt; {isCoderActive?"Disable Daedalus":"Activate Daedalus"}</button>:null;})()}
@@ -7779,7 +7649,7 @@ function HyprChat(){
             </div>
             <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>{if(e.target.files?.length)handleFileUpload(Array.from(e.target.files));e.target.value="";}}/>
             {prompts.length>0&&<div ref={promptPickerRef} style={{position:"relative",flexShrink:0}}>
-              {showPromptPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:310,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8}}>
+              {showPromptPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:310,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8,animation:"fadeIn .16s ease"}}>
                 <input value={promptSearch} onChange={e=>setPromptSearch(e.target.value)} placeholder="Search prompts..." style={{...inputS,marginBottom:6,padding:"5px 8px",fontSize:11}} autoFocus/>
                 <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
                   {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={(e)=>{e.stopPropagation();setInp(p.content);setShowPromptPicker(false);setShowQuickMenu(false);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
@@ -7805,7 +7675,7 @@ function HyprChat(){
               <button onClick={()=>setShowEffortPicker(p=>!p)} title={`Effort: ${L.name} — ${L.desc}${overridden?" (overrides global)":""}`} style={{background:showEffortPicker?`${t.pink}15`:"none",border:overridden?`1px solid ${t.pink}55`:"none",color:lvl>0?t.pink:t.mut,cursor:"pointer",padding:"3px 8px",borderRadius:8,display:"flex",alignItems:"center",gap:4,fontSize:11,flexShrink:0,opacity:lvl>0?1:.65,fontWeight:600}}>
                 <span style={{fontSize:13}}>{L.emoji}</span><span style={{fontSize:10}}>{L.name}</span>
               </button>
-              {showEffortPicker&&<div style={{position:"absolute",bottom:"110%",right:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.pink}33`,borderRadius:10,boxShadow:`0 4px 24px #0008`,minWidth:200,padding:6}}>
+              {showEffortPicker&&<div style={{position:"absolute",bottom:"110%",right:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.pink}33`,borderRadius:10,boxShadow:`0 4px 24px #0008`,minWidth:200,padding:6,animation:"fadeIn .16s ease"}}>
                 <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,padding:"3px 6px 5px",fontWeight:700}}>Effort — this chat</div>
                 {EFFORT_LEVELS.map((lv,v)=><button key={v} onClick={()=>{if(actId){setEffortPerChat(p=>({...p,[actId]:v}));}else{setPendingEffort(v);}setShowEffortPicker(false);}} style={{display:"flex",alignItems:"center",gap:6,width:"100%",textAlign:"left",padding:"6px 8px",borderRadius:6,background:lvl===v?`${t.pink}18`:"transparent",border:"none",color:lvl===v?t.pink:t.dim,cursor:"pointer",fontSize:11,fontFamily:font,marginBottom:2}}>
                   <span style={{fontSize:14}}>{lv.emoji}</span>

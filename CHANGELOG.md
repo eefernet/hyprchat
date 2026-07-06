@@ -1,4 +1,54 @@
 <details open>
+<summary>Alpha v17.3.2 — July 5, 2026</summary>
+
+> Combined polish release for persona photos, image generation, Quick Search,
+> Deep Research, Settings, animated backgrounds, and export reliability.
+
+## Persona Chat Photos
+- Persona photo prompts now use the model's validated scene-aware wording when safe, with deterministic composition as fallback.
+- "Keep your look" photo requests reuse the prior image seed for character continuity.
+- Adult routing now ignores adult words that only came from the persona appearance, and selfie rescue only fires on explicit photo-of-you requests.
+
+## Image Generation
+- Chat images now get default quality/negative prompts, plus optional LLM auto-enhancement for non-persona prompts.
+- Image Studio adds LoRAs, seed lock/randomize, more SDXL aspect ratios, slider-based steps/CFG, and backend-driven sampler lists.
+- Sparse image API calls fall back to checkpoint presets, restarted jobs avoid duplicate artifacts, and chat images open in preview.
+
+## Quick Search
+- Balanced/quality search now runs a small-LLM query planner alongside deterministic search, with speed mode still deterministic.
+- Category detection is less trigger-happy for ambiguous words, sports questions route better, and weak results trigger raw-query/refinement recovery.
+- Embedding rerank is on by default, follow-up/freshness handling is cleaner, and completed page fetches are kept even when one source times out.
+
+## Deep Research
+- Starting a new report now opens a dedicated full-page composer — a large topic box up top with report, model, context, and sources settings organized into cards below — instead of cramming the form into the sidebar.
+- The panel opens on the Reports view when reports exist and switches to the running report automatically after Start.
+- Export and rerun actions now appear only while viewing reports.
+
+## Settings
+- Every settings tab now uses one titled-card design system with consistent headings, cards, and spacing.
+- The densest tabs — Daedalus, Model & Generation, and Connections — are regrouped into logical cards (Models / Repair Engines / Build Limits, Generation Defaults, Service Status / Cloud Models / Endpoints).
+- Repeated model-picker, toggle, slider, and chip-row markup was collapsed into shared helpers.
+
+## Animated Backgrounds
+- All canvas effects gained glow sprites, depth layers, and a subtle pointer parallax that makes the background drift toward the cursor.
+- Flagship effects were rewritten as showpieces: Neural Constellation fires signal pulses along its edges, Star Drift adds parallax depth planes and occasional shooting stars, Aurora Lines became layered gradient curtains, Soft Flow leaves comet trails colored by the flow field, and Circuit Drift sends glowing data packets along its traces.
+- New performance guardrails: animations cap near 60fps, pause entirely when the tab is hidden, and stay speed-consistent across refresh rates. Reduced-motion still renders a static frame.
+
+## UI
+- Daedalus workflow messages now render as one unified progress card — a header plus phase stepper rail with a single detail panel for the selected phase — replacing the old stacked per-phase cards, with noisy step output trimmed to readable summaries.
+- Conversation sidebar rows now share one consistent cell style: uniform height and avatar size for every chat, with persona/council identity shown by the icon and a colored accent bar, and only the active chat highlighted.
+
+## Bug fixes
+- PDF and Print exports of research reports no longer slice source entries or headings across page boundaries, and overly long source snippets are clamped so a single source always fits on one page.
+
+## Internal
+- Deduplicated `research.py`: one shared HTML-cleaning helper and one shared batched-search helper replace copy-pasted logic across the research pipelines, with no behavior change.
+
+</details>
+
+---
+
+<details>
 <summary>Alpha v17.3.1 — July 3, 2026</summary>
 
 > UI readability and reliability polish for Quick Search, Daedalus, Council

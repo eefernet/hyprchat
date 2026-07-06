@@ -161,6 +161,22 @@ def settings_for_checkpoint(checkpoint: str) -> dict:
     return resolved
 
 
+def merge_generation_preset(body: dict, checkpoint: str) -> dict:
+    """Fill omitted sampling fields from the checkpoint's resolved preset
+    (request values win). The Image Studio UI always sends explicit values;
+    this protects sparse API callers from silently sampling a flow/vpred
+    checkpoint with the wrong objective."""
+    body = body or {}
+    preset = settings_for_checkpoint(checkpoint) if checkpoint else {}
+    return {
+        "steps": body.get("steps") or preset.get("steps") or 25,
+        "cfg": body.get("cfg") or preset.get("cfg") or 7.0,
+        "sampler": str(body.get("sampler") or "").strip() or (preset.get("sampler") or ""),
+        "scheduler": str(body.get("scheduler") or "").strip() or (preset.get("scheduler") or ""),
+        "model_sampling": str(body.get("model_sampling") or "").strip() or (preset.get("model_sampling") or ""),
+    }
+
+
 # ── Saved workflow library (API-format JSONs uploaded via Image Studio) ──
 
 def workflows_dir() -> str:
@@ -323,12 +339,16 @@ def _clamp_dim(v, default: int) -> int:
     return (v // 8) * 8
 
 
-ALLOWED_SAMPLERS = {
+# Ordered for UI dropdowns (served via /api/images/checkpoints); the sets
+# below are what validation checks against.
+SAMPLER_CHOICES = (
     "euler", "euler_ancestral", "heun", "dpm_2", "dpm_2_ancestral", "lms",
     "dpmpp_2s_ancestral", "dpmpp_sde", "dpmpp_2m", "dpmpp_2m_sde",
     "dpmpp_3m_sde", "ddim", "uni_pc", "lcm",
-}
-ALLOWED_SCHEDULERS = {"normal", "karras", "exponential", "sgm_uniform", "simple", "ddim_uniform", "beta"}
+)
+SCHEDULER_CHOICES = ("normal", "karras", "exponential", "sgm_uniform", "simple", "ddim_uniform", "beta")
+ALLOWED_SAMPLERS = set(SAMPLER_CHOICES)
+ALLOWED_SCHEDULERS = set(SCHEDULER_CHOICES)
 
 
 def _is_link(value) -> bool:
@@ -384,6 +404,10 @@ def _coerce_lora_chain(loras) -> list[dict]:
                 "strength_clip": strength_clip,
             })
     return out
+
+
+# Public name for route-level validation of user-supplied lora chains.
+coerce_lora_chain = _coerce_lora_chain
 
 
 def _new_node_id(workflow: dict, prefix: str) -> str:
@@ -715,6 +739,46 @@ def outputs_from_history(history: dict) -> list[dict]:
     return images
 
 
+def params_from_history(history: dict) -> dict:
+    """Best-effort UI params recovered from a ComfyUI history entry — used
+    when a restart wiped the in-memory job registry mid-render. The history
+    "prompt" field is [priority, prompt_id, graph, extra, outputs]."""
+    try:
+        graph = (history or {}).get("prompt", [None, None, None])[2]
+    except (TypeError, IndexError, KeyError):
+        return {}
+    if not isinstance(graph, dict):
+        return {}
+    params: dict = {}
+    sampler = None
+    for node in graph.values():
+        if not isinstance(node, dict):
+            continue
+        ct = node.get("class_type")
+        inputs = node.get("inputs") or {}
+        if ct in ("KSampler", "KSamplerAdvanced") and sampler is None:
+            sampler = node
+            params["seed"] = inputs.get("noise_seed" if ct == "KSamplerAdvanced" else "seed")
+            params["steps"] = inputs.get("steps")
+            params["cfg"] = inputs.get("cfg")
+            params["sampler"] = inputs.get("sampler_name") or ""
+            params["scheduler"] = inputs.get("scheduler") or ""
+        elif ct in ("EmptyLatentImage", "EmptySD3LatentImage"):
+            params["width"] = inputs.get("width")
+            params["height"] = inputs.get("height")
+            params["count"] = inputs.get("batch_size") or 1
+        elif ct == "CheckpointLoaderSimple":
+            params["checkpoint"] = inputs.get("ckpt_name") or ""
+    if sampler is not None:
+        for key, out in (("positive", "prompt"), ("negative", "negative_prompt")):
+            link = (sampler.get("inputs") or {}).get(key)
+            if isinstance(link, list) and link:
+                enc = graph.get(str(link[0])) or {}
+                if enc.get("class_type") == "CLIPTextEncode":
+                    params[out] = str((enc.get("inputs") or {}).get("text") or "")
+    return {k: v for k, v in params.items() if v is not None}
+
+
 async def fetch_image(image: dict) -> bytes:
     """Download one output image's bytes via GET /view."""
     params = {
@@ -915,6 +979,22 @@ async def list_vaes() -> list[str]:
             return [str(v) for v in opts[0]]
     except Exception as e:
         print(f"[COMFYUI] list_vaes error: {e}")
+    return []
+
+
+async def list_loras() -> list[str]:
+    """Available LoRA names from /object_info (models/loras dir)."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(f"{_base()}/object_info/LoraLoader")
+            r.raise_for_status()
+            info = r.json()
+        opts = (info.get("LoraLoader", {})
+                    .get("input", {}).get("required", {}).get("lora_name", []))
+        if opts and isinstance(opts[0], list):
+            return [str(l) for l in opts[0]]
+    except Exception as e:
+        print(f"[COMFYUI] list_loras error: {e}")
     return []
 
 

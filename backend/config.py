@@ -36,12 +36,14 @@ IMAGE_CHAT_NEGATIVE = os.getenv("IMAGE_CHAT_NEGATIVE", "")
 # Model that writes persona photo prompts (selfie-rescue compose tier) and
 # Image Studio enhancements. Empty = the conversation's own chat model.
 IMAGE_CHAT_COMPOSE_MODEL = os.getenv("IMAGE_CHAT_COMPOSE_MODEL", "")
+# Run the LLM prompt enhancer on every non-persona chat generate_image call
+# (fail-open, bounded budget). Persona prompts are composed by persona_images.
+IMAGE_CHAT_AUTO_ENHANCE = os.getenv("IMAGE_CHAT_AUTO_ENHANCE", "false").lower() == "true"
 STT_URL = os.getenv("STT_URL", "")  # empty = voice transcription disabled (OpenAI-compatible, e.g. Speaches)
 TTS_URL = os.getenv("TTS_URL", "")  # empty = speech synthesis disabled (OpenAI-compatible, e.g. kokoro-fastapi)
 STT_MODEL = os.getenv("STT_MODEL", "Systran/faster-distil-whisper-large-v3")
 TTS_VOICE = os.getenv("TTS_VOICE", "af_heart")
 N8N_WEBHOOK_PATH = os.getenv("N8N_WEBHOOK_PATH", "/webhook/execute-code")
-N8N_RESEARCH_PATH = os.getenv("N8N_RESEARCH_PATH", "/webhook/deep-research")
 HTTP_VERIFY_SSL = os.getenv("HTTP_VERIFY_SSL", "true").lower() == "true"
 OUTBOUND_PROXY_URL = (
     os.getenv("HYPRCHAT_OUTBOUND_PROXY")
@@ -97,6 +99,7 @@ DEFAULT_SETTINGS = {
     "image_chat_prompt_prefix": "",
     "image_chat_negative": "",
     "image_chat_compose_model": "",  # empty = the conversation's chat model
+    "image_chat_auto_enhance": False,  # LLM-expand non-persona chat image prompts
     "stt_url": "",  # empty = use STT_URL from env (voice input disabled when both empty)
     "tts_url": "",  # empty = use TTS_URL from env (voice output disabled when both empty)
     "tts_voice": "af_heart",
@@ -135,13 +138,14 @@ EXECUTION_TIMEOUT = int(os.getenv("EXECUTION_TIMEOUT", "60"))
 SEARCH_RESULTS_COUNT = int(os.getenv("SEARCH_RESULTS_COUNT", "15"))
 MAX_FETCH_CHARS = int(os.getenv("MAX_FETCH_CHARS", "8000"))
 
-# Quick Search answer-grounding pipeline. Default "balanced" targets enough
-# sources for grounded answers without making LLM triage or embeddings part of
-# every turn's critical path.
+# Quick Search answer-grounding pipeline. Default "balanced" runs the
+# deterministic plan immediately and a small-LLM query planner in parallel
+# with the first search wave — the deterministic results are the guaranteed
+# floor; the LLM plan only adds/reroutes when it lands within the timeout.
 QUICK_SEARCH_MODE = os.getenv("QUICK_SEARCH_MODE", "balanced").strip().lower()
 QUICK_SEARCH_PROVIDER = os.getenv("QUICK_SEARCH_PROVIDER", "searxng").strip().lower()
 QUICK_SEARCH_SCRAPER = os.getenv("QUICK_SEARCH_SCRAPER", "local").strip().lower()
-QUICK_SEARCH_RERANKER = os.getenv("QUICK_SEARCH_RERANKER", "none").strip().lower()
+QUICK_SEARCH_RERANKER = os.getenv("QUICK_SEARCH_RERANKER", "ollama").strip().lower()
 QUICK_SEARCH_MIN_RESULTS = int(os.getenv("QUICK_SEARCH_MIN_RESULTS", "10"))
 QUICK_SEARCH_TARGET_RESULTS = int(os.getenv("QUICK_SEARCH_TARGET_RESULTS", "24"))
 QUICK_SEARCH_MAX_RESULTS = int(os.getenv("QUICK_SEARCH_MAX_RESULTS", "35"))
@@ -151,10 +155,15 @@ QUICK_SEARCH_SEARXNG_NEWS_ENGINES = os.getenv("QUICK_SEARCH_SEARXNG_NEWS_ENGINES
 QUICK_SEARCH_SEARXNG_CODE_ENGINES = os.getenv("QUICK_SEARCH_SEARXNG_CODE_ENGINES", "").strip()
 QUICK_SEARCH_SEARXNG_RECIPE_ENGINES = os.getenv("QUICK_SEARCH_SEARXNG_RECIPE_ENGINES", "").strip()
 QUICK_SEARCH_EMBED_RERANK = os.getenv("QUICK_SEARCH_EMBED_RERANK", "false").lower() == "true"
-QUICK_SEARCH_EMBED_TIMEOUT = float(os.getenv("QUICK_SEARCH_EMBED_TIMEOUT", "1.5"))
+QUICK_SEARCH_EMBED_TIMEOUT = float(os.getenv("QUICK_SEARCH_EMBED_TIMEOUT", "4.0"))
 
-# Optional LLM model for the quality-mode refinement round. The normal planner
-# is deterministic-first; this override is only used when refinement is allowed.
+# Hybrid LLM query planner: "llm" runs it in balanced/quality modes (speed
+# mode is always deterministic-only); "deterministic" is the kill switch.
+QUICK_SEARCH_PLANNER = os.getenv("QUICK_SEARCH_PLANNER", "llm").strip().lower()
+QUICK_SEARCH_PLANNER_TIMEOUT = float(os.getenv("QUICK_SEARCH_PLANNER_TIMEOUT", "6.0"))
+
+# Optional LLM model for the query planner and refinement rounds. Falls back
+# to the workspace model, then the (cloud-rejected) chat/default model.
 QUICK_SEARCH_TRIAGE_MODEL = os.getenv("QUICK_SEARCH_TRIAGE_MODEL", "")
 
 # ============================================================
@@ -188,7 +197,6 @@ OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "30"))
 OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", "32768"))
 AIDER_ENABLED = os.getenv("AIDER_ENABLED", "true").lower() == "true"
 AIDER_FOR_GREENFIELD = os.getenv("AIDER_FOR_GREENFIELD", "true").lower() == "true"
-GATE_RECONCILE_AUTOCORRECT = os.getenv("GATE_RECONCILE_AUTOCORRECT", "false").lower() == "true"
 AIDER_MODEL = os.getenv("AIDER_MODEL", "")  # Empty = use FIXER_MODEL, then CODER_MODEL
 # 0 = inherit the Daedalus context-window slider (OPENHANDS_NUM_CTX) at call
 # time. The old int default (16384) silently pinned Aider below the slider and

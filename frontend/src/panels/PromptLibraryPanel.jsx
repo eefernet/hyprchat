@@ -15,8 +15,8 @@ export default function PromptLibraryPanel({
   setPanel,
 }){
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 18px",borderBottom:`1px solid ${t.brd}22`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
-      <div style={{display:"flex",alignItems:"center",gap:7}}><IC.Zap/><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.f1}}>Prompt Library</span></div>
+    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
+      <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{display:"flex",color:t.f1}}><IC.Zap/></span><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.f1}}>Prompt Library</span></div>
       <button onClick={()=>{const id=`p-${Date.now()}`;setPrompts(p=>[{id,title:"New Prompt",content:"",category:"General",is_system:false},...p]);}} style={btnS(t.f1)}><IC.Plus/> New Prompt</button>
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>

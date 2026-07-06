@@ -572,9 +572,8 @@ def test_persona_selfie_and_phone_framing_are_explicit():
 
 
 def test_enhance_prompt_template_prioritizes_request_fidelity():
-    main_path = os.path.join(os.path.dirname(__file__), "..", "main.py")
-    with open(main_path, "r", encoding="utf-8") as f:
-        template = f.read().lower()
+    from image_prompt_enhancer import _ENHANCE_PROMPT_TEMPLATE
+    template = _ENHANCE_PROMPT_TEMPLATE.lower()
     assert "pose, orientation, action, setting" in template
     assert "do not turn a specific request into a generic portrait" in template
     assert "do not add unrelated props, phones, selfie framing, mirror framing, extra people" in template
@@ -881,6 +880,189 @@ def test_chat_image_recipe_global_resolution_overrides_profile_and_tool_args(tmp
     assert recipe["profile_metadata"]["active"] is True
 
 
+def test_chat_image_recipe_uses_model_prompt_via_structured_path(tmp_path, monkeypatch):
+    import comfyui
+    import config
+    import tools
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(config, "IMAGE_CHAT_CHECKPOINT", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_RESOLUTION", "640x640")
+    monkeypatch.setattr(config, "IMAGE_CHAT_PROMPT_PREFIX", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_NEGATIVE", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_VAE", "")
+    monkeypatch.setattr(comfyui, "settings_for_checkpoint", lambda _ckpt: {})
+
+    recipe = tools._resolve_chat_image_recipe(
+        {"prompt": "short silver hair, green jacket, reading a novel at the library, warm lamp light, candid framing"},
+        persona_context={
+            "persona_id": "persona-1",
+            "persona_rating": "PG-13",
+            "appearance": "short silver hair, green jacket",
+            "user_request": "send me a photo of you reading at the library",
+        },
+    )
+
+    # The model's scene wording survives instead of being rebuilt.
+    assert "warm lamp light" in recipe["prompt"]
+    assert "novel" in recipe["prompt"]
+    assert recipe["profile_metadata"]["prompt_fallback"] is False
+
+
+def test_persona_structured_prompt_ignored_for_sfw_adult_request():
+    import persona_images
+
+    ctx = persona_images.build_visual_context(
+        persona_id="persona-1",
+        appearance="short silver hair, green jacket",
+        rating="PG-13",
+        user_request="send me a naughty lingerie photo",
+        tool_prompt="lingerie photo, bedroom",
+    )
+    assert ctx["adult_request"] is True
+
+    payload = persona_images.compose_persona_image_prompt(
+        raw_prompt="lingerie photo, bedroom",
+        visual_context=ctx,
+        structured={"prompt": "short silver hair, green jacket, lingerie in the bedroom, soft light"},
+    )
+    assert payload["fallback_used"] is True
+    assert "lingerie" not in payload["prompt"].lower()
+    assert "safe-for-work" in payload["prompt"]
+    assert "explicit content" in payload["negative_prompt"]
+
+
+def test_persona_structured_prompt_gets_appearance_prepended():
+    import persona_images
+
+    ctx = persona_images.build_visual_context(
+        persona_id="persona-1",
+        appearance="short silver hair, green jacket",
+        rating="PG-13",
+        user_request="send a photo of you hiking a mountain trail",
+        tool_prompt="woman hiking a mountain trail at sunrise, misty ridgeline",
+    )
+    payload = persona_images.compose_persona_image_prompt(
+        raw_prompt="woman hiking a mountain trail at sunrise, misty ridgeline",
+        visual_context=ctx,
+        structured={"prompt": "woman hiking a mountain trail at sunrise, misty ridgeline"},
+    )
+    assert payload["fallback_used"] is False
+    assert payload["prompt"].startswith("short silver hair, green jacket")
+    assert "mountain trail" in payload["prompt"]
+
+
+def test_persona_appearance_adult_words_do_not_flip_adult_routing():
+    import persona_images
+
+    appearance = "long red hair, sexy black lingerie under a silk robe"
+    cfg = {
+        "profiles": {
+            "sfw_photo": {"prompt_prefix": "dummy-sfw-prefix"},
+            "adult_photo": {"adult": True, "prompt_prefix": "dummy-adult-prefix"},
+        }
+    }
+
+    # Innocent request + adult words in the appearance (echoed into the tool
+    # prompt per the system-prompt template) must not route to adult profiles.
+    ctx = persona_images.build_visual_context(
+        persona_id="persona-2",
+        appearance=appearance,
+        rating="NC-17",
+        user_request="send me a photo of you drinking coffee at the cafe",
+        tool_prompt=f"photo of {appearance}, drinking coffee at the cafe",
+    )
+    assert ctx["adult_request"] is False
+    selection = persona_images.select_persona_image_profile(
+        cfg,
+        persona_id="persona-2",
+        persona_rating="NC-17",
+        prompt=f"photo of {appearance}, drinking coffee at the cafe",
+        user_request="send me a photo of you drinking coffee at the cafe",
+        adult_request=ctx["adult_request"],
+    )
+    assert selection["key"] == "sfw_photo"
+
+    # A genuine adult request in the user's own words still routes adult.
+    adult_ctx = persona_images.build_visual_context(
+        persona_id="persona-2",
+        appearance=appearance,
+        rating="NC-17",
+        user_request="send me a naughty lingerie photo",
+        tool_prompt="lingerie photo",
+    )
+    assert adult_ctx["adult_request"] is True
+    adult_sel = persona_images.select_persona_image_profile(
+        cfg,
+        persona_id="persona-2",
+        persona_rating="NC-17",
+        prompt="lingerie photo",
+        user_request="send me a naughty lingerie photo",
+        adult_request=adult_ctx["adult_request"],
+    )
+    assert adult_sel["key"] == "adult_photo"
+
+
+def test_chat_image_recipe_reuses_prior_seed_for_consistency(tmp_path, monkeypatch):
+    import comfyui
+    import config
+    import tools
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(config, "IMAGE_CHAT_CHECKPOINT", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_RESOLUTION", "640x640")
+    monkeypatch.setattr(comfyui, "settings_for_checkpoint", lambda _ckpt: {})
+
+    persona_context = {
+        "persona_id": "persona-1",
+        "persona_rating": "PG-13",
+        "appearance": "short silver hair, green jacket",
+        "user_request": "another photo, keep your look the same",
+        "prior_images": [
+            {"metadata": {"prompt": "previous dummy photo", "seed": 4242}},
+            {"metadata": {"prompt": "older dummy photo", "seed": 1111}},
+        ],
+    }
+    recipe = tools._resolve_chat_image_recipe(
+        {"prompt": "photo of short silver hair, green jacket, smiling"},
+        persona_context=persona_context,
+    )
+    assert recipe["seed"] == 4242
+    assert recipe["profile_metadata"]["continuity_seed"] is True
+
+    # An explicit tool-arg seed always wins over the continuity seed.
+    explicit = tools._resolve_chat_image_recipe(
+        {"prompt": "photo of short silver hair, green jacket, smiling", "seed": 777},
+        persona_context=persona_context,
+    )
+    assert explicit["seed"] == 777
+    assert "continuity_seed" not in explicit["profile_metadata"]
+
+
+def test_chat_image_recipe_fresh_seed_without_consistency_request(tmp_path, monkeypatch):
+    import comfyui
+    import config
+    import tools
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(config, "IMAGE_CHAT_CHECKPOINT", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_RESOLUTION", "640x640")
+    monkeypatch.setattr(comfyui, "settings_for_checkpoint", lambda _ckpt: {})
+
+    recipe = tools._resolve_chat_image_recipe(
+        {"prompt": "photo of short silver hair, green jacket, smiling"},
+        persona_context={
+            "persona_id": "persona-1",
+            "persona_rating": "PG-13",
+            "appearance": "short silver hair, green jacket",
+            "user_request": "send me another photo",
+            "prior_images": [{"metadata": {"prompt": "previous dummy photo", "seed": 4242}}],
+        },
+    )
+    assert recipe["seed"] is None
+    assert "continuity_seed" not in recipe["profile_metadata"]
+
+
 class _FakeComfyResponse:
     def __init__(self, status_code=200, payload=None):
         self.status_code = status_code
@@ -911,6 +1093,10 @@ def _patch_comfy_client(monkeypatch, responses):
 
         async def post(self, url, json=None):
             calls.append(("POST", url, json))
+            return responses.pop(0)
+
+        async def get(self, url, params=None):
+            calls.append(("GET", url, params))
             return responses.pop(0)
 
     monkeypatch.setattr(comfyui.config, "COMFYUI_URL", "http://comfy.local:8188")
@@ -997,6 +1183,205 @@ def test_hyprchat_restart_reports_missing_route(monkeypatch):
     assert calls == [("POST", "http://comfy.local:8188/hyprchat/restart", None)]
 
 
+# ── Pure-unit: chat quality baseline, preset merge, loras, enhancer ────────
+
+def test_chat_image_recipe_default_quality_baseline(monkeypatch):
+    import config
+    import tools
+    from image_prompt_enhancer import DEFAULT_QUALITY_PREFIX, _DEFAULT_NEGATIVE_TAGS
+
+    monkeypatch.setattr(config, "IMAGE_CHAT_CHECKPOINT", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_WORKFLOW", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_PROMPT_PREFIX", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_NEGATIVE", "")
+
+    recipe = tools._resolve_chat_image_recipe({"prompt": "a cat"})
+
+    assert recipe["prompt"].startswith(DEFAULT_QUALITY_PREFIX)
+    assert recipe["prompt"].endswith("a cat")
+    for tag in _DEFAULT_NEGATIVE_TAGS:
+        assert tag in recipe["negative_prompt"]
+
+
+def test_chat_image_recipe_config_prefix_beats_baseline(monkeypatch):
+    import config
+    import tools
+
+    monkeypatch.setattr(config, "IMAGE_CHAT_CHECKPOINT", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_WORKFLOW", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_PROMPT_PREFIX", "custom-style-tags")
+    monkeypatch.setattr(config, "IMAGE_CHAT_NEGATIVE", "custom-negative")
+
+    recipe = tools._resolve_chat_image_recipe({"prompt": "a cat"})
+
+    assert recipe["prompt"] == "custom-style-tags, a cat"
+    assert "masterpiece" not in recipe["prompt"]
+    assert recipe["negative_prompt"] == "custom-negative"
+
+
+def test_chat_image_recipe_baseline_skipped_for_persona(tmp_path, monkeypatch):
+    import config
+    import tools
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(config, "IMAGE_CHAT_CHECKPOINT", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_WORKFLOW", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_PROMPT_PREFIX", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_NEGATIVE", "")
+
+    recipe = tools._resolve_chat_image_recipe(
+        {"prompt": "selfie in a cafe"},
+        persona_context={
+            "persona_id": "persona-1",
+            "persona_rating": "PG-13",
+            "appearance": "short silver hair, green jacket",
+            "user_request": "send a selfie",
+        },
+    )
+
+    assert "masterpiece" not in recipe["prompt"]
+    assert "lowres" not in recipe["negative_prompt"]
+
+
+def test_chat_image_recipe_dedupes_negative_tags(monkeypatch):
+    import config
+    import tools
+
+    monkeypatch.setattr(config, "IMAGE_CHAT_CHECKPOINT", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_WORKFLOW", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_PROMPT_PREFIX", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_NEGATIVE", "")
+
+    recipe = tools._resolve_chat_image_recipe(
+        {"prompt": "a cat", "negative_prompt": "blurry, Watermark, motion streaks"})
+
+    assert recipe["negative_prompt"].lower().count("blurry") == 1
+    assert recipe["negative_prompt"].lower().count("watermark") == 1
+    assert "motion streaks" in recipe["negative_prompt"]
+
+
+def test_merge_generation_preset(monkeypatch):
+    import comfyui
+
+    monkeypatch.setattr(comfyui, "settings_for_checkpoint", lambda _c: {
+        "steps": 32, "cfg": 5, "sampler": "euler", "scheduler": "beta",
+        "model_sampling": "flow",
+    })
+
+    merged = comfyui.merge_generation_preset({}, "bigaspV25_v25.safetensors")
+    assert merged == {"steps": 32, "cfg": 5, "sampler": "euler",
+                      "scheduler": "beta", "model_sampling": "flow"}
+
+    merged = comfyui.merge_generation_preset(
+        {"steps": 12, "cfg": 2.0, "sampler": "dpmpp_2m", "scheduler": "karras",
+         "model_sampling": "vpred"},
+        "bigaspV25_v25.safetensors")
+    assert merged == {"steps": 12, "cfg": 2.0, "sampler": "dpmpp_2m",
+                      "scheduler": "karras", "model_sampling": "vpred"}
+
+    merged = comfyui.merge_generation_preset({}, "")
+    assert merged == {"steps": 25, "cfg": 7.0, "sampler": "", "scheduler": "",
+                      "model_sampling": ""}
+
+
+def test_list_loras_parses_object_info(monkeypatch):
+    import comfyui
+
+    calls = _patch_comfy_client(monkeypatch, [
+        _FakeComfyResponse(200, {"LoraLoader": {"input": {"required": {
+            "lora_name": [["style-a.safetensors", "style-b.safetensors"]],
+        }}}}),
+    ])
+    loras = asyncio.run(comfyui.list_loras())
+
+    assert loras == ["style-a.safetensors", "style-b.safetensors"]
+    assert calls == [("GET", "http://comfy.local:8188/object_info/LoraLoader", None)]
+
+
+def test_coerce_lora_chain_public_alias():
+    import comfyui
+
+    chain = comfyui.coerce_lora_chain([
+        "plain.safetensors",
+        {"name": "tuned.safetensors", "strength": 0.6},
+        {"no_name": True},
+    ])
+    assert chain == [
+        {"name": "plain.safetensors", "strength_model": 1.0, "strength_clip": 1.0},
+        {"name": "tuned.safetensors", "strength_model": 0.6, "strength_clip": 0.6},
+    ]
+
+
+def test_enhance_prompt_helper_fail_open(monkeypatch):
+    import image_prompt_enhancer as ipe
+    import model_providers
+
+    async def ok_chat(http, model, prompt, **kw):
+        return json.dumps({"prompt": "a red fox in snow, detailed fur, winter light",
+                           "negative_prompt": "blurry, lowres, watermark, text, deformed"})
+    monkeypatch.setattr(model_providers, "complete_chat", ok_chat)
+    result = asyncio.run(ipe.enhance_prompt(object(), "a fox"))
+    assert result is not None
+    prompt, negative, model = result
+    assert "red fox" in prompt
+    assert "blurry" in negative
+    assert model
+
+    async def broken_chat(http, model, prompt, **kw):
+        raise RuntimeError("ollama down")
+    monkeypatch.setattr(model_providers, "complete_chat", broken_chat)
+    assert asyncio.run(ipe.enhance_prompt(object(), "a fox")) is None
+
+    async def empty_chat(http, model, prompt, **kw):
+        return ""
+    monkeypatch.setattr(model_providers, "complete_chat", empty_chat)
+    assert asyncio.run(ipe.enhance_prompt(object(), "a fox")) is None
+
+    async def placeholder_chat(http, model, prompt, **kw):
+        return json.dumps({"prompt": "...", "negative_prompt": ""})
+    monkeypatch.setattr(model_providers, "complete_chat", placeholder_chat)
+    assert asyncio.run(ipe.enhance_prompt(object(), "a fox")) is None
+
+    assert asyncio.run(ipe.enhance_prompt(object(), "")) is None
+
+
+def test_persona_intent_detection_after_dedupe():
+    import persona_images
+
+    intents = persona_images.detect_image_intents("keep the same face as the reference")
+    assert "consistency" in intents
+    assert "identity" not in intents
+
+    intents = persona_images.detect_image_intents("send a mirror selfie")
+    assert "mirror_selfie" in intents
+
+    assert "identity" not in persona_images._INTENT_PROFILE_KEYS
+
+
+def test_params_from_history_recovers_sdxl_graph():
+    import comfyui
+
+    wf, seed = comfyui.build_workflow(
+        comfyui.SDXL_T2I_TEMPLATE,
+        prompt="a lighthouse at dusk",
+        negative_prompt="blurry",
+        width=1216, height=832, steps=20, cfg=6.5, seed=777,
+        checkpoint="dummy.safetensors",
+    )
+    params = comfyui.params_from_history({"prompt": [0, "job-1", wf, {}, []]})
+
+    assert params["prompt"] == "a lighthouse at dusk"
+    assert params["negative_prompt"] == "blurry"
+    assert params["seed"] == 777
+    assert params["steps"] == 20 and params["cfg"] == 6.5
+    assert params["width"] == 1216 and params["height"] == 832
+    assert params["checkpoint"] == "dummy.safetensors"
+
+    assert comfyui.params_from_history({}) == {}
+    assert comfyui.params_from_history({"prompt": "garbage"}) == {}
+    assert comfyui.params_from_history(None) == {}
+
+
 # ── Live integration (needs a healthy ComfyUI behind the server) ──────────
 
 @pytest.fixture(scope="module")
@@ -1021,6 +1406,9 @@ def test_checkpoints_endpoint(client, comfyui_live):
     assert r.status_code == 200
     d = r.json()
     assert isinstance(d.get("checkpoints"), list)
+    assert isinstance(d.get("loras"), list)
+    assert isinstance(d.get("samplers"), list) and "euler" in d["samplers"]
+    assert isinstance(d.get("schedulers"), list) and "normal" in d["schedulers"]
 
 
 def test_generate_job_lifecycle(long_client, comfyui_live):

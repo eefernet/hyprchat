@@ -1,6 +1,7 @@
 import React from 'react';
 
 import { IC } from '../components/icons.jsx';
+import { EmptyState } from '../components/hyprChatWidgets.jsx';
 
 export default function AnalyticsPanel({
   t,
@@ -14,10 +15,15 @@ export default function AnalyticsPanel({
   analyticsData,
 }){
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+          <span style={{display:"flex",color:t.acc}}><IC.BarChart/></span>
+          <div>
+            <div style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Statistics</div>
+            <div style={{fontSize:10,color:t.mut,marginTop:2}}>Overall HyprChat usage from recorded chat token telemetry.</div>
+          </div>
+        </div>
         <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
           <div style={{maxWidth:980}}>
-            <div style={{fontSize:20,fontWeight:900,marginBottom:4,display:"flex",alignItems:"center",gap:8,color:t.acc}}><IC.BarChart/> Statistics</div>
-            <div style={{fontSize:11,color:t.mut,marginBottom:16}}>Overall HyprChat usage from recorded chat token telemetry.</div>
             <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap",alignItems:"center"}}>
               {[7,30,90,0].map(d=><button key={d} onClick={()=>setAnalyticsDays(d)} style={{...btnS(analyticsDays===d?t.acc:t.mut),padding:"5px 12px"}}>{d===0?"All":`${d}d`}</button>)}
               <div style={{flex:1}}/>
@@ -65,7 +71,7 @@ export default function AnalyticsPanel({
                     <div style={{fontSize:7,color:t.mut,textAlign:"center",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:56,transform:"rotate(-30deg)",transformOrigin:"top center"}}>{label}</div>
                   </div>;});})()}
                 </div>
-              </div>:<div style={{textAlign:"center",padding:40,color:t.mut}}>No statistics recorded yet. Start chatting to populate this page.</div>}
+              </div>:<EmptyState t={t} icon={<IC.BarChart/>} title="No statistics recorded yet" hint="Start chatting to record token telemetry and populate this page."/>}
               {allModels.length>0&&<div style={{...cardS,marginTop:16}}>
                 <div style={{fontSize:12,fontWeight:800,marginBottom:8,color:t.mut}}>All-Time Model Breakdown</div>
                 <div style={{display:"grid",gridTemplateColumns:"minmax(180px,2fr) repeat(4,minmax(80px,1fr))",gap:8,padding:"6px 0",borderBottom:`1px solid ${t.brd}33`,fontSize:10,fontWeight:800,color:t.mut}}>
