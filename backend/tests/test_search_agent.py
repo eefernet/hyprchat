@@ -653,10 +653,14 @@ def test_run_search_agent_low_relevance_refines():
         cached_calls["n"] += 1
         return on_topic_after_refine if query == "UK Reform Party 2026 election" else off_topic
 
+    # Refine shares the planner kill switch — opt in, with the parallel
+    # planner itself no-oped so only the refine round is exercised.
     with patch.object(quick_search, "_cached_search", new=fake_cached_search), \
          patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
          patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
          patch.object(config, "QUICK_SEARCH_MODE", "quality"), \
+         patch.object(config, "QUICK_SEARCH_PLANNER", "llm"), \
+         patch.object(search_agent, "llm_plan", new=AsyncMock(return_value=None)), \
          patch.object(search_agent, "refine_query", new=AsyncMock(return_value="UK Reform Party 2026 election")) as mock_refine:
         out = _run(search_agent.run_search_agent(
             http, "http://ollama", "test-model",
@@ -681,6 +685,8 @@ def test_run_search_agent_max_rounds_caps():
          patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
          patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
          patch.object(config, "QUICK_SEARCH_MODE", "quality"), \
+         patch.object(config, "QUICK_SEARCH_PLANNER", "llm"), \
+         patch.object(search_agent, "llm_plan", new=AsyncMock(return_value=None)), \
          patch.object(search_agent, "refine_query", new=AsyncMock(return_value="another query")) as mock_refine:
         out = _run(search_agent.run_search_agent(
             http, "http://ollama", "test-model",
@@ -976,6 +982,8 @@ def test_run_search_agent_balanced_mode_refines_on_low_relevance():
          patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
          patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
          patch.object(config, "QUICK_SEARCH_MODE", "balanced"), \
+         patch.object(config, "QUICK_SEARCH_PLANNER", "llm"), \
+         patch.object(search_agent, "llm_plan", new=AsyncMock(return_value=None)), \
          patch.object(search_agent, "refine_query",
                       new=AsyncMock(return_value="UK Reform Party polling surge")) as mock_refine:
         out = _run(search_agent.run_search_agent(
@@ -984,3 +992,29 @@ def test_run_search_agent_balanced_mode_refines_on_low_relevance():
         ))
     assert out["skipped"] is False
     assert mock_refine.await_count == 1
+
+
+def test_run_search_agent_kill_switch_suppresses_refine():
+    """QUICK_SEARCH_PLANNER=deterministic disables ALL planner-model LLM
+    calls, including the low-relevance refine round."""
+    http = _FakeHTTP([])
+    off_topic = _searxng_results(("chocolate chip cookies", "https://example.com/c"))
+    messages = [{"role": "user", "content": "tell me about UK Reform Party 2026 politics"}]
+
+    async def fake_cached_search(http, query, count=10, time_range=None, categories="general", engines=None):
+        return off_topic  # always off topic → refine would normally fire
+
+    with patch.object(quick_search, "_cached_search", new=fake_cached_search), \
+         patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
+         patch.object(config, "QUICK_SEARCH_MODE", "balanced"), \
+         patch.object(config, "QUICK_SEARCH_PLANNER", "deterministic"), \
+         patch.object(search_agent, "refine_query",
+                      new=AsyncMock(return_value="should not run")) as mock_refine:
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "test-model",
+            events=None, conv_id=None, messages=messages,
+        ))
+    assert out["skipped"] is False
+    assert mock_refine.await_count == 0
+    assert http.calls == []  # zero LLM calls end to end

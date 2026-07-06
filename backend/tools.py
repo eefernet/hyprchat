@@ -1683,7 +1683,7 @@ def _resolve_chat_image_recipe(args: dict, persona_context: dict | None = None) 
         _profile_text(active_profile, "prompt_suffix", "positive_suffix")
         if active_profile else ""
     )
-    gi_full_prompt = _join_prompt_parts(base_prompt_prefix, profile_prompt_prefix, gi_prompt, profile_prompt_suffix)
+    gi_full_prompt = _dedupe_prompt_tags(_join_prompt_parts(base_prompt_prefix, profile_prompt_prefix, gi_prompt, profile_prompt_suffix))
     gi_negative = _dedupe_prompt_tags(_join_prompt_parts(
         (gi_preset.get("negative_prefix") or config.IMAGE_CHAT_NEGATIVE or "").strip()
         or ("" if is_persona else image_prompt_enhancer.DEFAULT_NEGATIVE_PROMPT),

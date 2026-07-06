@@ -1338,12 +1338,11 @@ async def run_quick_search_for_chat(
     # from this module.
     import model_providers
     from search_agent import run_search_agent
-    # Planner/refine calls go to Ollama; never inherit a cloud-prefixed chat
-    # model (it would 404). Cloud is honored only via an explicit triage/
-    # workspace model.
+    # Planner/refine calls go to Ollama; never inherit a cloud-prefixed model
+    # (it would 404). Cloud is honored only via an explicit triage model.
     planner_model = (
         getattr(config, "QUICK_SEARCH_TRIAGE_MODEL", "")
-        or workspace_model
+        or model_providers.reject_cloud(workspace_model)
         or model_providers.reject_cloud(chat_model)
         or model_providers.reject_cloud(default_model)
     )

@@ -1213,8 +1213,11 @@ async def run_search_agent(
                 print(f"[SA]   literal fallback {literal!r} relevance={score:.2f}")
 
     # ── Optional LLM refinement when results still look off-topic ──
+    # QUICK_SEARCH_PLANNER=deterministic is the kill switch for ALL planner-
+    # model LLM calls, refine included.
     if (
         mode_cfg.allow_refine
+        and _planner_enabled(mode_cfg)
         and score < relevance_threshold
         and rounds_used < max_rounds
         and len(_qs._content_tokens(clean_latest)) >= 3

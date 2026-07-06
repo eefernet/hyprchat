@@ -1,5 +1,5 @@
 <details open>
-<summary>Alpha v17.3.2 — July 3, 2026</summary>
+<summary>Alpha v17.3.2 — July 5, 2026</summary>
 
 > Combined polish release for persona photos, image generation, Quick Search,
 > Deep Research, Settings, animated backgrounds, and export reliability.
@@ -33,6 +33,10 @@
 - All canvas effects gained glow sprites, depth layers, and a subtle pointer parallax that makes the background drift toward the cursor.
 - Flagship effects were rewritten as showpieces: Neural Constellation fires signal pulses along its edges, Star Drift adds parallax depth planes and occasional shooting stars, Aurora Lines became layered gradient curtains, Soft Flow leaves comet trails colored by the flow field, and Circuit Drift sends glowing data packets along its traces.
 - New performance guardrails: animations cap near 60fps, pause entirely when the tab is hidden, and stay speed-consistent across refresh rates. Reduced-motion still renders a static frame.
+
+## UI
+- Daedalus workflow messages now render as one unified progress card — a header plus phase stepper rail with a single detail panel for the selected phase — replacing the old stacked per-phase cards, with noisy step output trimmed to readable summaries.
+- Conversation sidebar rows now share one consistent cell style: uniform height and avatar size for every chat, with persona/council identity shown by the icon and a colored accent bar, and only the active chat highlighted.
 
 ## Bug fixes
 - PDF and Print exports of research reports no longer slice source entries or headings across page boundaries, and overly long source snippets are clamped so a single source always fits on one page.
