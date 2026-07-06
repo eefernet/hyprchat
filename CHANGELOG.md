@@ -1,4 +1,26 @@
 <details open>
+<summary>Alpha v17.5.1 — July 6, 2026</summary>
+
+> Persona photos get smarter: the roleplay model's own scene-aware prompt is
+> finally used (instead of being silently rebuilt), "keep your look" reuses
+> the previous photo's seed for consistent characters, and adult words in a
+> persona's appearance no longer flip innocent requests into adult routing.
+
+## Persona Chat Photos
+- The model's `generate_image` prompt now flows through the structured validation path (leakage scrub, request-fidelity check, framing cleanup) and is used when it validates — persona photos finally reflect the scene the roleplay described instead of a deterministic `appearance + request` rebuild. The deterministic composer remains the fallback, and artifact metadata `prompt_fallback` now actually distinguishes the two.
+- If the model's prompt drops the persona's described look, the appearance is folded back in automatically (character consistency guard).
+- SFW-rated personas (G/PG/PG-13) facing an adult-cue request always use the conservative deterministic rebuild — model-authored wording is never trusted for that combination.
+- **Continuity seed**: "another photo, keep your look / same face" requests reuse the most recent photo's seed (`continuity_seed` in artifact metadata) so the character stays recognizable; "another/different one" keeps a fresh seed. Explicit tool-arg seeds always win.
+- Adult-cue detection is appearance-aware: adult words in the persona's appearance text (echoed into every tool prompt by design) no longer route innocent requests to adult profiles or replace them with a generic safe-for-work prompt — only the user's own words (or genuinely novel prompt cues) count.
+- Profile selection now reads the raw model prompt instead of the composed one (which always started with the appearance).
+- The selfie-rescue only fires on explicit photo-of-you requests again — "make me an image of a sunset" answered in prose no longer force-generates a persona selfie.
+- Cleanup: persona rating normalization is shared with the image pipeline (one source of truth), and the rescue composer receives the normalized rating key directly instead of prefix-matching guidance text.
+
+</details>
+
+---
+
+<details>
 <summary>Alpha v17.5.0 — July 5, 2026</summary>
 
 > Image generation levels up: chat images now look good with any prompt

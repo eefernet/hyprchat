@@ -151,7 +151,8 @@ _TOOL_JUNK_MARKER_RE = re.compile(
 
 async def _compose_persona_photo_prompt(http, appearance: str, user_request: str,
                                          reply_text: str, *, model: str = "",
-                                         rating_text: str = "") -> str:
+                                         rating_text: str = "",
+                                         rating_key: str = "") -> str:
     """Rescue tier 2: structured image prompt composition.
 
     The caller picks the model (normally the conversation's own chat model). The
@@ -160,7 +161,9 @@ async def _compose_persona_photo_prompt(http, appearance: str, user_request: str
     failures return "" so the caller's last-resort deterministic tier runs.
     """
     model = model or model_providers.reject_cloud(config.WORKSPACE_MODEL or "") or config.DEFAULT_MODEL
-    rating_key = next(
+    # Prefix-matching the guidance string is only a legacy fallback — callers
+    # should pass the normalized rating_key directly.
+    rating_key = rating_key or next(
         (k for k in sorted(_PERSONA_RATING_GUIDANCE, key=len, reverse=True)
          if str(rating_text or "").startswith(k)),
         rating_text or "PG-13",
@@ -237,21 +240,8 @@ def _replace_persona_placeholders(text: str, *, user_name: str, char_name: str) 
     return _PERSONA_PLACEHOLDER_RE.sub(repl, str(text))
 
 
-def _normalize_persona_rating(value) -> str:
-    s = re.sub(r"[\s_]+", "", str(value or "PG-13").strip().lower())
-    if s in {"g", "general", "allages"}:
-        return "G"
-    if s == "pg":
-        return "PG"
-    if s in {"pg13", "pg-13", "teen"}:
-        return "PG-13"
-    if s in {"r", "mature"}:
-        return "R"
-    if s in {"nc17", "nc-17"}:
-        return "NC-17"
-    if s in {"unrated", "xxx", "maxxxx"}:
-        return "Unrated"
-    return "PG-13"
+# Rating normalization is shared with the image pipeline — one source of truth.
+_normalize_persona_rating = persona_images.normalize_persona_rating
 
 
 def _normalize_persona_thinking_mode(value) -> str:
@@ -2533,8 +2523,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         if (not tool_calls and not _selfie_rescued and not _gen_image_called
                 and persona_appearance and config.COMFYUI_URL
                 and "generate_image" in available_tool_names
-                and (_SELFIE_REQUEST_RE.search(_latest_user_text)
-                     or re.search(r"\b(?:photo|photos|pic|pics|picture|pictures|image|images|snapshot|snap)\b", _latest_user_text, re.I))):
+                and _SELFIE_REQUEST_RE.search(_latest_user_text)):
             _selfie_rescued = True
             _gen_image_called = True
             # Build a prompt that fits THIS request and scene — never a fixed
@@ -2566,7 +2555,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                       or config.DEFAULT_MODEL)
                 _photo_prompt = await _compose_persona_photo_prompt(
                     http, persona_appearance, _latest_user_text, content or "",
-                    model=_compose_model, rating_text=persona_rating_guidance)
+                    model=_compose_model, rating_text=persona_rating_guidance,
+                    rating_key=persona_rating_key)
             # Tier 3: deterministic — appearance (+ the request's distinctive
             # words only for adult-rated personas; SFW stays appearance-only)
             if not _photo_prompt:

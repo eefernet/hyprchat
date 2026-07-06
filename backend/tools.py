@@ -1589,21 +1589,29 @@ def _resolve_chat_image_recipe(args: dict, persona_context: dict | None = None) 
     prompt_payload = {}
     if persona_context.get("persona_id"):
         visual_context = _persona_visual_context(args, persona_context)
+        # The model's own tool prompt goes through the structured path so its
+        # scene wording survives (validated + leakage-scrubbed); the
+        # deterministic rebuild remains the fallback when it doesn't validate.
         prompt_payload = persona_images.compose_persona_image_prompt(
             raw_prompt=gi_prompt,
             negative_prompt=gi_negative_arg,
             visual_context=visual_context,
+            structured={"prompt": gi_prompt} if gi_prompt else None,
         )
         gi_prompt = prompt_payload.get("prompt") or gi_prompt
         gi_negative_arg = prompt_payload.get("negative_prompt") or gi_negative_arg
         config_data = persona_images.load_persona_image_profiles()
+        # Selection reads the RAW model prompt (not the composed one, which
+        # starts with appearance text) and the appearance-aware adult signal —
+        # otherwise adult words in the persona's appearance flip every request.
         selection = persona_images.select_persona_image_profile(
             config_data,
             persona_id=_clean_text(persona_context.get("persona_id")),
             persona_name=_clean_text(persona_context.get("persona_name")),
             persona_rating=_clean_text(persona_context.get("persona_rating") or "PG-13"),
-            prompt=gi_prompt,
+            prompt=_clean_text(args.get("prompt")),
             user_request=_clean_text(persona_context.get("user_request")),
+            adult_request=visual_context.get("adult_request") if isinstance(visual_context, dict) else None,
         )
         if selection:
             profile = selection.get("profile") or {}
@@ -1682,7 +1690,25 @@ def _resolve_chat_image_recipe(args: dict, persona_context: dict | None = None) 
         _profile_text(active_profile, "negative_prefix", "negative_prompt") if active_profile else "",
         gi_negative_arg,
     ))
+    # Continuity seed: "same face / keep your look" requests reuse the newest
+    # prior image's seed so the character stays recognizable. "another/different
+    # one" intents keep a fresh seed — those want a new composition.
+    gi_seed = args.get("seed")
+    continuity_seed = False
+    if is_persona and not gi_seed and "consistency" in (
+        visual_context.get("intents") or [] if isinstance(visual_context, dict) else []
+    ):
+        for _prior in (persona_context.get("prior_images") or []):
+            _prior_meta = _prior.get("metadata") if isinstance(_prior, dict) else None
+            _prior_seed = (_prior_meta or {}).get("seed") if isinstance(_prior_meta, dict) else None
+            if _prior_seed:
+                gi_seed = _prior_seed
+                continuity_seed = True
+                break
+
     profile_metadata = _profile_metadata(selection, active=bool(active_profile), fallback_reason=fallback_reason)
+    if continuity_seed:
+        profile_metadata["continuity_seed"] = True
     if prompt_payload:
         profile_metadata.update({
             "prompt_intent": prompt_payload.get("primary_intent") or "",
@@ -1704,7 +1730,7 @@ def _resolve_chat_image_recipe(args: dict, persona_context: dict | None = None) 
         "height": gi_height,
         "steps": gi_steps,
         "cfg": gi_cfg,
-        "seed": args.get("seed"),
+        "seed": gi_seed,
         "checkpoint": gi_ckpt,
         "sampler_name": gi_sampler,
         "scheduler": gi_scheduler,

@@ -880,6 +880,189 @@ def test_chat_image_recipe_global_resolution_overrides_profile_and_tool_args(tmp
     assert recipe["profile_metadata"]["active"] is True
 
 
+def test_chat_image_recipe_uses_model_prompt_via_structured_path(tmp_path, monkeypatch):
+    import comfyui
+    import config
+    import tools
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(config, "IMAGE_CHAT_CHECKPOINT", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_RESOLUTION", "640x640")
+    monkeypatch.setattr(config, "IMAGE_CHAT_PROMPT_PREFIX", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_NEGATIVE", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_VAE", "")
+    monkeypatch.setattr(comfyui, "settings_for_checkpoint", lambda _ckpt: {})
+
+    recipe = tools._resolve_chat_image_recipe(
+        {"prompt": "short silver hair, green jacket, reading a novel at the library, warm lamp light, candid framing"},
+        persona_context={
+            "persona_id": "persona-1",
+            "persona_rating": "PG-13",
+            "appearance": "short silver hair, green jacket",
+            "user_request": "send me a photo of you reading at the library",
+        },
+    )
+
+    # The model's scene wording survives instead of being rebuilt.
+    assert "warm lamp light" in recipe["prompt"]
+    assert "novel" in recipe["prompt"]
+    assert recipe["profile_metadata"]["prompt_fallback"] is False
+
+
+def test_persona_structured_prompt_ignored_for_sfw_adult_request():
+    import persona_images
+
+    ctx = persona_images.build_visual_context(
+        persona_id="persona-1",
+        appearance="short silver hair, green jacket",
+        rating="PG-13",
+        user_request="send me a naughty lingerie photo",
+        tool_prompt="lingerie photo, bedroom",
+    )
+    assert ctx["adult_request"] is True
+
+    payload = persona_images.compose_persona_image_prompt(
+        raw_prompt="lingerie photo, bedroom",
+        visual_context=ctx,
+        structured={"prompt": "short silver hair, green jacket, lingerie in the bedroom, soft light"},
+    )
+    assert payload["fallback_used"] is True
+    assert "lingerie" not in payload["prompt"].lower()
+    assert "safe-for-work" in payload["prompt"]
+    assert "explicit content" in payload["negative_prompt"]
+
+
+def test_persona_structured_prompt_gets_appearance_prepended():
+    import persona_images
+
+    ctx = persona_images.build_visual_context(
+        persona_id="persona-1",
+        appearance="short silver hair, green jacket",
+        rating="PG-13",
+        user_request="send a photo of you hiking a mountain trail",
+        tool_prompt="woman hiking a mountain trail at sunrise, misty ridgeline",
+    )
+    payload = persona_images.compose_persona_image_prompt(
+        raw_prompt="woman hiking a mountain trail at sunrise, misty ridgeline",
+        visual_context=ctx,
+        structured={"prompt": "woman hiking a mountain trail at sunrise, misty ridgeline"},
+    )
+    assert payload["fallback_used"] is False
+    assert payload["prompt"].startswith("short silver hair, green jacket")
+    assert "mountain trail" in payload["prompt"]
+
+
+def test_persona_appearance_adult_words_do_not_flip_adult_routing():
+    import persona_images
+
+    appearance = "long red hair, sexy black lingerie under a silk robe"
+    cfg = {
+        "profiles": {
+            "sfw_photo": {"prompt_prefix": "dummy-sfw-prefix"},
+            "adult_photo": {"adult": True, "prompt_prefix": "dummy-adult-prefix"},
+        }
+    }
+
+    # Innocent request + adult words in the appearance (echoed into the tool
+    # prompt per the system-prompt template) must not route to adult profiles.
+    ctx = persona_images.build_visual_context(
+        persona_id="persona-2",
+        appearance=appearance,
+        rating="NC-17",
+        user_request="send me a photo of you drinking coffee at the cafe",
+        tool_prompt=f"photo of {appearance}, drinking coffee at the cafe",
+    )
+    assert ctx["adult_request"] is False
+    selection = persona_images.select_persona_image_profile(
+        cfg,
+        persona_id="persona-2",
+        persona_rating="NC-17",
+        prompt=f"photo of {appearance}, drinking coffee at the cafe",
+        user_request="send me a photo of you drinking coffee at the cafe",
+        adult_request=ctx["adult_request"],
+    )
+    assert selection["key"] == "sfw_photo"
+
+    # A genuine adult request in the user's own words still routes adult.
+    adult_ctx = persona_images.build_visual_context(
+        persona_id="persona-2",
+        appearance=appearance,
+        rating="NC-17",
+        user_request="send me a naughty lingerie photo",
+        tool_prompt="lingerie photo",
+    )
+    assert adult_ctx["adult_request"] is True
+    adult_sel = persona_images.select_persona_image_profile(
+        cfg,
+        persona_id="persona-2",
+        persona_rating="NC-17",
+        prompt="lingerie photo",
+        user_request="send me a naughty lingerie photo",
+        adult_request=adult_ctx["adult_request"],
+    )
+    assert adult_sel["key"] == "adult_photo"
+
+
+def test_chat_image_recipe_reuses_prior_seed_for_consistency(tmp_path, monkeypatch):
+    import comfyui
+    import config
+    import tools
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(config, "IMAGE_CHAT_CHECKPOINT", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_RESOLUTION", "640x640")
+    monkeypatch.setattr(comfyui, "settings_for_checkpoint", lambda _ckpt: {})
+
+    persona_context = {
+        "persona_id": "persona-1",
+        "persona_rating": "PG-13",
+        "appearance": "short silver hair, green jacket",
+        "user_request": "another photo, keep your look the same",
+        "prior_images": [
+            {"metadata": {"prompt": "previous dummy photo", "seed": 4242}},
+            {"metadata": {"prompt": "older dummy photo", "seed": 1111}},
+        ],
+    }
+    recipe = tools._resolve_chat_image_recipe(
+        {"prompt": "photo of short silver hair, green jacket, smiling"},
+        persona_context=persona_context,
+    )
+    assert recipe["seed"] == 4242
+    assert recipe["profile_metadata"]["continuity_seed"] is True
+
+    # An explicit tool-arg seed always wins over the continuity seed.
+    explicit = tools._resolve_chat_image_recipe(
+        {"prompt": "photo of short silver hair, green jacket, smiling", "seed": 777},
+        persona_context=persona_context,
+    )
+    assert explicit["seed"] == 777
+    assert "continuity_seed" not in explicit["profile_metadata"]
+
+
+def test_chat_image_recipe_fresh_seed_without_consistency_request(tmp_path, monkeypatch):
+    import comfyui
+    import config
+    import tools
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(config, "IMAGE_CHAT_CHECKPOINT", "")
+    monkeypatch.setattr(config, "IMAGE_CHAT_RESOLUTION", "640x640")
+    monkeypatch.setattr(comfyui, "settings_for_checkpoint", lambda _ckpt: {})
+
+    recipe = tools._resolve_chat_image_recipe(
+        {"prompt": "photo of short silver hair, green jacket, smiling"},
+        persona_context={
+            "persona_id": "persona-1",
+            "persona_rating": "PG-13",
+            "appearance": "short silver hair, green jacket",
+            "user_request": "send me another photo",
+            "prior_images": [{"metadata": {"prompt": "previous dummy photo", "seed": 4242}}],
+        },
+    )
+    assert recipe["seed"] is None
+    assert "continuity_seed" not in recipe["profile_metadata"]
+
+
 class _FakeComfyResponse:
     def __init__(self, status_code=200, payload=None):
         self.status_code = status_code
