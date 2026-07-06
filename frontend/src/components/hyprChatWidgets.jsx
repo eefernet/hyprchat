@@ -1982,14 +1982,50 @@ const _eventPlanDetail = (events=[])=>{
   return plans.length?plans[plans.length-1].plan:"";
 };
 
-// Disabled legacy prototype from the Daedalus timeline refactor. The active
-// renderer is DaedalusSummary below, and only that implementation is exported.
-function DaedalusSummaryTabbed({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,font,md,msgContent="",live=false,onOpenArtifact,onPreview}){
+// ── Daedalus step-text sanitizer ──
+// Run/step details can carry raw shell commands, internal infra errors, and
+// mid-sentence truncations from worker log tails. Clean them before they reach
+// user-facing activity lines; Developer details still shows the raw text.
+const _DAEDALUS_NOISE_RES=[
+  /^(?:cd|export|source)\s+\S*\//i,                        // cd/export/source with a path
+  /^(?:if|for|while)\s.*(?:;\s*(?:then|do)\b|&&|\|\|)/,    // shell control flow (not prose "If the game...")
+  /^(?:grep|find|ls|cat|mkdir|rm|mv|cp)\s+-/i,             // commands with flags (not prose "find the bug")
+  /^python\d?\s+-m\s/i,                                    // python -m module invocations
+  /^[/~][\w@.\/-]*$/,                                      // bare path line
+  /\s&&\s\S*\//,                                           // command chains touching paths
+  /(?:>\/dev\/null|2>&1|\$\()/,                            // redirections / substitutions
+  /summarizer unexpectedly failed/i,
+  /^exit=\d+$/,                                            // bare exit codes (facts strip shows these)
+  /^pending\.?$/i,
+  /^\d+\s*s elapsed…?$/i,
+  /^[A-Z_]{3,}=\S+/,                                       // ENV=val command prefixes
+];
+const _sanitizeStepDetail=(text)=>{
+  const lines=String(text||"").split("\n").map(s=>s.trim()).filter(Boolean)
+    .filter(line=>!_DAEDALUS_NOISE_RES.some(re=>re.test(line)));
+  let out=lines.join(" ").replace(/\s+/g," ").trim();
+  if(!out)return"";
+  if(out.length>150){
+    const cut=out.slice(0,150);
+    const stop=Math.max(cut.lastIndexOf(". "),cut.lastIndexOf("! "),cut.lastIndexOf("? "));
+    if(stop>50)out=cut.slice(0,stop+1);
+    else{const sp=cut.lastIndexOf(" ");out=`${cut.slice(0,sp>80?sp:150).trimEnd()}…`;}
+  }else if(!/[.!?…:)\]]$/.test(out)){
+    // Source text arrived pre-truncated mid-sentence ("Let me check what") —
+    // fall back to the last complete sentence when there is one.
+    const stop=Math.max(out.lastIndexOf(". "),out.lastIndexOf("! "),out.lastIndexOf("? "));
+    if(stop>30)out=out.slice(0,stop+1);
+  }
+  return out;
+};
+
+// Unified Daedalus progress card: header + phase stepper rail + one detail
+// panel for the selected phase. Replaces the old six stacked phase cards.
+function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,font,md,msgContent="",live=false,onOpenArtifact,onPreview,onQuickAction}){
   const [runs,setRuns]=useState([]);
   const [loadErr,setLoadErr]=useState("");
+  const [pickedPhase,setPickedPhase]=useState("");
   const [rawPill,setRawPill]=useState(null);
-  const [selectedPhase,setSelectedPhase]=useState("");
-  const [selectedTab,setSelectedTab]=useState("summary");
   const runIdsKey=runIds.join("|");
   useEffect(()=>{
     let stop=false;
@@ -2018,15 +2054,13 @@ function DaedalusSummaryTabbed({runIds=[],savedEvents=[],liveEvts=[],workflows=[
     }
     return out;
   },[savedEvents,liveEvts]);
+
   const tools=new Set(events.map(e=>e?.data?.tool).filter(Boolean));
   const artifactEvents=_artifactEventsFromDaedalus(events);
   const latestArtifact=artifactEvents[artifactEvents.length-1]||null;
   const wf=Array.isArray(workflows)&&workflows.length?workflows[0]:null;
   const wfAccepted=(workflows||[]).some(w=>w.state==="accepted"||w.artifact_status==="delivered"||w.artifact_status==="partial_delivered");
   const delivered=wfAccepted||tools.has("download_project")||tools.has("download_file")||artifactEvents.length>0;
-  const active=live||runs.some(_runIsActive)||(workflows||[]).some(w=>["queued","pending","running","planning","reviewing","fixing","accepting"].includes(String(w.state||"").toLowerCase()));
-  const problemRuns=runs.filter(_runHasProblem);
-  const needsAttention=!delivered&&!active&&(problemRuns.length||(workflows||[]).some(w=>["blocked","cancelled","canceled"].includes(String(w.state||"").toLowerCase())));
   const projectName=wf?.project_id
     || runs.map(r=>r.project_id||_runEnv(r).project_id||_basename(_runEnv(r).project_dir)).find(Boolean)
     || (latestArtifact?.filename||"").replace(/(\.tar\.gz|\.tgz|\.zip|\.gz)$/i,"")
@@ -2034,19 +2068,19 @@ function DaedalusSummaryTabbed({runIds=[],savedEvents=[],liveEvts=[],workflows=[
   const phaseRuns={plan:[],build:[],review:[],fixes:[],acceptance:[],work:[]};
   runs.forEach(r=>{const k=_phaseKeyForRun(r);(phaseRuns[k]||(phaseRuns[k]=[])).push(r);});
   const phaseDefs=[
-    ["plan","Plan","📐",tools.has("plan_project")||phaseRuns.plan.length],
-    ["build","Build","🏗",tools.has("generate_code")||phaseRuns.build.length],
-    ["review","Review","🔍",tools.has("run_review")||phaseRuns.review.length],
-    ["fixes",phaseRuns.fixes.length===1?"Fix":"Fixes","🛠",tools.has("run_fixer")||tools.has("run_aider_fix")||phaseRuns.fixes.length],
-    ["acceptance","Acceptance","✅",tools.has("run_acceptance_review")||phaseRuns.acceptance.length],
-    ["package","Package","📦",delivered],
+    ["plan","Plan"],
+    ["build","Build"],
+    ["review","Review"],
+    ["fixes","Fixes"],
+    ["acceptance","Accept"],
+    ["package","Package"],
   ];
-  const phases=phaseDefs.filter(([, , ,present])=>present).map(([key,label,icon])=>{
+  const phases=phaseDefs.map(([key,label])=>{
     const rs=phaseRuns[key]||[];
     const fallback=key==="package"&&delivered?"succeeded":"queued";
     const state=key==="package"?fallback:_phaseState(rs,fallback);
     return {
-      key,label,icon,state,runs:rs,
+      key,label,state,runs:rs,
       color:_phaseColor(state,t),
       duration:key==="package"?"":_runsDurationLabel(rs),
       outcome:_phaseOutcome(key,rs,{latestArtifact,delivered}),
@@ -2061,318 +2095,23 @@ function DaedalusSummaryTabbed({runIds=[],savedEvents=[],liveEvts=[],workflows=[
   const planRun=phaseRuns.plan[phaseRuns.plan.length-1]||null;
   const planEnv=_runEnv(planRun);
   const planText=_eventPlanDetail(events);
-  const hasPlan=!!(planRun||planText);
-  const defaultPhaseKey=(phases.find(p=>p.state==="running")||phases.find(p=>p.state==="attention")||phases.find(p=>p.key==="package"&&delivered)||phases.find(p=>p.key==="acceptance")||phases[phases.length-1]||{key:"plan"}).key;
-  const phaseKeys=phases.map(p=>p.key).join("|");
-  useEffect(()=>{
-    if(!phases.length)return;
-    if(!selectedPhase||!phases.some(p=>p.key===selectedPhase)){
-      setSelectedPhase(defaultPhaseKey);
-      setSelectedTab(defaultPhaseKey==="plan"&&hasPlan?"plan":"summary");
-    }
-  },[phaseKeys,defaultPhaseKey,hasPlan]);
-  const selectedPhaseKey=selectedPhase||defaultPhaseKey;
-  const selected=phases.find(p=>p.key===selectedPhaseKey)||phases[0]||{key:"summary",label:"Summary",runs:[],state:"queued",color:t.mut,outcome:"No Daedalus phase data yet."};
-  const tabs=[
-    ["summary","Summary"],
-    ...(hasPlan?[["plan","Plan"]]:[]),
-    ["files","Files"],
-    ["logs","Logs"],
-    ["raw","Raw"],
-  ];
-  const tabIds=tabs.map(([id])=>id);
-  useEffect(()=>{
-    if(!tabIds.includes(selectedTab))setSelectedTab("summary");
-  },[selectedPhaseKey,hasPlan]);
+
+  const activeNow=live||runs.some(_runIsActive)||(workflows||[]).some(w=>["queued","pending","running","planning","reviewing","fixing","accepting"].includes(String(w.state||"").toLowerCase()));
+  const wfBlocked=(workflows||[]).some(w=>["blocked","cancelled","canceled"].includes(String(w.state||"").toLowerCase()));
+  const attentionPhase=phases.find(p=>p.state==="attention");
+  const runningPhase=phases.find(p=>p.state==="running");
+  const overall=activeNow?{label:"working",color:t.acc}
+    :(attentionPhase||wfBlocked)?{label:"needs attention",color:t.err}
+    :delivered?{label:"delivered",color:t.ok}
+    :runs.length?{label:"complete",color:t.ok}
+    :{label:"waiting",color:t.mut};
+
+  const lastTouchedPhase=[...phases].reverse().find(p=>p.runs.length||(p.key==="package"&&delivered));
+  const defaultKey=(runningPhase||attentionPhase||lastTouchedPhase||phases[0]).key;
+  const selected=phases.find(p=>p.key===pickedPhase)||phases.find(p=>p.key===defaultKey)||phases[0];
+
   const totalDuration=_runsSpanLabel(runs)||_runsDurationLabel(runs);
-  const title=active?"Daedalus is working":needsAttention?"Daedalus needs attention":delivered?"Project ready":"Daedalus complete";
-  const accent=active?t.acc:needsAttention?t.err:delivered?t.ok:t.mut;
-  const statusLine=active
-    ?`Currently in ${selected.label.toLowerCase()} for ${projectName}.`
-    :needsAttention
-      ?(problemRuns.map(r=>_runEnv(r).error||_runEnv(r).summary).find(Boolean)||"A Daedalus phase needs attention.")
-      :(delivered?"Accepted and packaged.":"Workflow finished without a delivered artifact.");
   const artifactHref=latestArtifact?(latestArtifact.artifact_id?`${API}/api/artifacts/${latestArtifact.artifact_id}/download`:`${API}${latestArtifact.url||""}`):"";
-  const phaseClick=(p)=>{
-    setSelectedPhase(p.key);
-    setSelectedTab(p.key==="plan"&&hasPlan?"plan":"summary");
-  };
-  const pillS=(color)=>({fontSize:9,fontWeight:800,color,border:`1px solid ${color}33`,background:`${color}0f`,borderRadius:999,padding:"3px 8px",lineHeight:1.35,whiteSpace:"nowrap"});
-  const sectionTitle=(label,color=t.acc)=><div style={{fontSize:9,color,textTransform:"uppercase",letterSpacing:.7,fontWeight:900,marginBottom:8}}>{label}</div>;
-  const renderSummary=()=>{
-    const rs=selected.runs||[];
-    const last=_lastRun(rs);
-    const env=_runEnv(last);
-    const issues=rs.flatMap(r=>_runEnv(r).issues||[]);
-    return <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:12,alignItems:"start"}}>
-      <div style={{minWidth:0}}>
-        {sectionTitle(`${selected.label} outcome`,selected.color)}
-        <div style={{fontSize:13,lineHeight:1.58,color:t.text,marginBottom:10}}>{selected.outcome}</div>
-        {msgContent&&selected.key==="package"&&<div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:10,color:t.dim,lineHeight:1.65}}>
-          {sectionTitle("Assistant note",t.mut)}
-          {md?<MDWrap>{md(msgContent)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit"}}>{msgContent}</pre>}
-        </div>}
-        {issues.length>0&&<div style={{marginTop:10}}>
-          {sectionTitle("Issues",t.err)}
-          <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            {issues.slice(0,6).map((issue,i)=><div key={i} style={{border:`1px solid ${t.err}24`,background:`${t.err}08`,borderRadius:7,padding:"7px 9px",fontSize:11,color:t.dim,lineHeight:1.45}}>
-              <span style={{color:t.err,fontWeight:900}}>{issue.file||issue.path||`Issue ${i+1}`}</span>{issue.summary||issue.message?` — ${issue.summary||issue.message}`:""}
-            </div>)}
-          </div>
-        </div>}
-      </div>
-      <div style={{display:"flex",flexDirection:"column",gap:7}}>
-        {sectionTitle("Phase details",t.mut)}
-        {[
-          ["State",_phaseStatusLabel(selected.state)],
-          ["Duration",selected.duration||"—"],
-          ["Runs",rs.length||"—"],
-          ["Model",env.model||env.architect_model||env.acceptance_model||""],
-          ["Directory",env.project_dir||""],
-          ["Verification",env.verification_level||env.status||""],
-        ].filter(([,v])=>v!==""&&v!==undefined&&v!==null).map(([k,v])=><div key={k} style={{display:"grid",gridTemplateColumns:"82px minmax(0,1fr)",gap:8,fontSize:10,lineHeight:1.4}}>
-          <span style={{color:t.mut,fontWeight:800}}>{k}</span>
-          <span style={{color:t.dim,wordBreak:"break-word"}}>{v}</span>
-        </div>)}
-      </div>
-    </div>;
-  };
-  const renderPlan=()=>{
-    if(!hasPlan)return <div style={{fontSize:12,color:t.mut}}>No completed Architect plan is available yet.</div>;
-    const manifest=Array.isArray(planEnv.manifest)?planEnv.manifest:[];
-    const criteria=Array.isArray(planEnv.success_criteria)?planEnv.success_criteria:[];
-    const deps=Array.isArray(planEnv.external_deps)?planEnv.external_deps:[];
-    const risks=Array.isArray(planEnv.risk_notes)?planEnv.risk_notes:[];
-    return <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:8}}>
-        {[
-          ["Project",planEnv.project_id||projectName],
-          ["Language",planEnv.language||"—"],
-          ["Build",planEnv.build_system||"none"],
-          ["Files",manifest.length||"—"],
-          ["Criteria",criteria.length||"—"],
-        ].map(([k,v])=><div key={k} style={{border:`1px solid ${t.brd}24`,borderRadius:7,padding:"8px 9px",background:`${t.surface}35`,minWidth:0}}>
-          <div style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.55,fontWeight:900,marginBottom:3}}>{k}</div>
-          <div style={{fontSize:12,color:t.text,fontWeight:800,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v}</div>
-        </div>)}
-      </div>
-      {manifest.length>0&&<div>
-        {sectionTitle("Manifest",t.acc)}
-        <div style={{display:"flex",flexDirection:"column",border:`1px solid ${t.brd}22`,borderRadius:8,overflow:"hidden"}}>
-          {manifest.map((f,i)=><div key={`${f.path}-${i}`} style={{display:"grid",gridTemplateColumns:"minmax(130px,.28fr) minmax(0,1fr) 76px",gap:8,padding:"8px 10px",borderBottom:i<manifest.length-1?`1px solid ${t.brd}16`:"none",fontSize:11,alignItems:"start"}}>
-            <span style={{color:t.acc,fontWeight:900,wordBreak:"break-word"}}>{f.path||"file"}</span>
-            <span style={{color:t.dim,lineHeight:1.45}}>{f.purpose||"No purpose recorded."}</span>
-            <span style={{color:t.mut,textAlign:"right"}}>{f.estimated_loc?`~${f.estimated_loc} LOC`:""}</span>
-          </div>)}
-        </div>
-      </div>}
-      {criteria.length>0&&<div>
-        {sectionTitle("Success criteria",t.ok)}
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:6}}>
-          {criteria.map((c,i)=><div key={i} style={{display:"grid",gridTemplateColumns:"18px minmax(0,1fr)",gap:7,fontSize:11,color:t.dim,lineHeight:1.45}}>
-            <span style={{color:t.ok,fontWeight:900}}>✓</span><span>{c}</span>
-          </div>)}
-        </div>
-      </div>}
-      {(deps.length>0||risks.length>0)&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:12}}>
-        {deps.length>0&&<div>{sectionTitle("Dependencies",t.warm)}{deps.map((d,i)=><div key={i} style={{fontSize:11,color:t.dim,marginBottom:4}}>• {d.name||"dependency"} {d.version||""}</div>)}</div>}
-        {risks.length>0&&<div>{sectionTitle("Risks",t.err)}{risks.map((r,i)=><div key={i} style={{fontSize:11,color:t.dim,marginBottom:4}}>• {r}</div>)}</div>}
-      </div>}
-      {planText&&<details style={{borderTop:`1px solid ${t.brd}22`,paddingTop:10}}>
-        <summary style={{fontSize:10,color:t.mut,cursor:"pointer",fontWeight:900,textTransform:"uppercase",letterSpacing:.6}}>Planner notes</summary>
-        <div style={{marginTop:8,color:t.dim,fontSize:12,lineHeight:1.6}}>{md?<MDWrap>{md(planText)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit"}}>{planText}</pre>}</div>
-      </details>}
-    </div>;
-  };
-  const renderFiles=()=>{
-    const rows=[...filesTouched.entries()];
-    return <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:12,alignItems:"start"}}>
-      <div>
-        {sectionTitle("Files changed",t.acc)}
-        {rows.length?<div style={{display:"flex",flexDirection:"column",border:`1px solid ${t.brd}22`,borderRadius:8,overflow:"hidden"}}>
-          {rows.map(([path,phase],i)=><div key={path} style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 86px",gap:8,padding:"8px 10px",borderBottom:i<rows.length-1?`1px solid ${t.brd}16`:"none",fontSize:11}}>
-            <span style={{color:t.text,wordBreak:"break-word",fontWeight:750}}>{path}</span>
-            <span style={{color:t.mut,textAlign:"right"}}>{phase}</span>
-          </div>)}
-        </div>:<div style={{fontSize:12,color:t.mut}}>No file list recorded yet.</div>}
-      </div>
-      <div>
-        {sectionTitle("Artifacts",t.ok)}
-        {artifactEvents.length?artifactEvents.map((a,i)=>{
-          const href=a.artifact_id?`${API}/api/artifacts/${a.artifact_id}/download`:`${API}${a.url||""}`;
-          return <div key={`${a.artifact_id||a.url||a.filename}-${i}`} style={{display:"flex",alignItems:"center",gap:8,border:`1px solid ${t.ok}28`,background:`${t.ok}08`,borderRadius:8,padding:"8px 9px",marginBottom:7,minWidth:0}}>
-            <span style={{fontSize:14}}>📦</span>
-            <a href={href} download={a.filename} style={{color:t.ok,textDecoration:"none",fontSize:11,fontWeight:900,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:0}}>{a.filename||"artifact"}</a>
-            {a.artifact_id&&onOpenArtifact&&<button onClick={()=>onOpenArtifact(a.artifact_id)} style={{marginLeft:"auto",fontSize:10,color:t.acc,background:`${t.acc}10`,border:`1px solid ${t.acc}33`,borderRadius:6,padding:"3px 7px",fontFamily:font,cursor:"pointer",fontWeight:800}}>details</button>}
-          </div>;
-        }):<div style={{fontSize:12,color:t.mut}}>No delivered artifact recorded.</div>}
-      </div>
-    </div>;
-  };
-  const renderLogs=()=>{
-    const selectedRuns=selected.key==="package"?runs:(selected.runs||[]);
-    const grouped={};
-    selectedRuns.forEach(run=>{
-      _compactSteps(_runSteps(run)).forEach((s,i)=>{
-        const group=_stepGroupName(s.action);
-        if(!grouped[group])grouped[group]=[];
-        grouped[group].push({run,step:s,idx:i});
-      });
-    });
-    const groups=Object.entries(grouped);
-    if(!groups.length)return <div style={{fontSize:12,color:t.mut}}>No readable logs recorded for this phase.</div>;
-    return <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      {groups.map(([group,items])=><div key={group}>
-        {sectionTitle(group,group==="Commands"?t.warm:group==="File changes"?t.ok:group==="Verification"?t.acc:t.mut)}
-        <div style={{display:"flex",flexDirection:"column",border:`1px solid ${t.brd}20`,borderRadius:8,overflow:"hidden"}}>
-          {items.slice(0,28).map(({run,step,idx},i)=>{
-            const meta=_stepTimeMeta(step,_runSteps(run)[idx-1],run);
-            const icon=_STEP_ACTION_ICONS[step.action]||"·";
-            return <div key={`${run.id}-${idx}-${i}`} style={{display:"grid",gridTemplateColumns:"24px minmax(90px,.22fr) minmax(0,1fr)",gap:8,padding:"7px 9px",borderBottom:i<items.length-1?`1px solid ${t.brd}12`:"none",fontSize:11,alignItems:"start"}}>
-              <span style={{textAlign:"center"}}>{icon}</span>
-              <span style={{color:_phaseColor(_phaseState([run]),t),fontWeight:900,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{step.action||"step"}</span>
-              <span style={{color:t.dim,wordBreak:"break-word",lineHeight:1.4}}>{(step.detail||"").slice(0,220)}{step.count>1?` (${step.count} updates)`:""}{meta&&<span style={{display:"block",fontSize:9,color:t.mut,marginTop:2}}>{meta}</span>}</span>
-            </div>;
-          })}
-          {items.length>28&&<div style={{padding:"7px 9px",fontSize:10,color:t.mut}}>+{items.length-28} more log rows in Raw.</div>}
-        </div>
-      </div>)}
-    </div>;
-  };
-  const renderRaw=()=> <div style={{display:"flex",flexDirection:"column",gap:10}}>
-    <ToolStatus evts={events.filter(e=>(e.data?.tool||"")!=="processing")} savedEvts={[]} msgContent={msgContent} historical={true} t={t} expandedPill={rawPill} setExpandedPill={setRawPill} onPreview={onPreview} onOpenArtifact={onOpenArtifact} md={md}/>
-    {(selected.key==="package"?runs:(selected.runs||[])).map(run=><details key={run.id} style={{border:`1px solid ${t.brd}24`,borderRadius:8,background:`${t.bgDeep}66`,padding:"7px 9px"}}>
-      <summary style={{fontSize:10,color:t.mut,cursor:"pointer",fontWeight:900}}>{run.role} · {run.status} · {run.id}</summary>
-      <pre style={{margin:"8px 0 0",whiteSpace:"pre-wrap",wordBreak:"break-word",fontSize:10,lineHeight:1.45,color:t.dim,maxHeight:260,overflow:"auto"}}>{JSON.stringify({id:run.id,role:run.role,status:run.status,started_at:run.started_at,ended_at:run.ended_at,result_envelope:run.result_envelope,events_log:run.events_log},null,2)}</pre>
-    </details>)}
-    {(workflows||[]).slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={onOpenArtifact}/>)}
-  </div>;
-  const body={summary:renderSummary,plan:renderPlan,files:renderFiles,logs:renderLogs,raw:renderRaw}[selectedTab]||renderSummary;
-  return <div style={{margin:"0 0 12px",maxWidth:"100%",border:`1px solid ${accent}26`,background:`${t.surface}3f`,borderRadius:8,overflow:"hidden",boxShadow:active?`0 0 18px ${accent}12`:"none"}}>
-    <div style={{padding:"12px 14px",borderBottom:`1px solid ${t.brd}22`,display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:12,alignItems:"start"}}>
-      <div style={{minWidth:0}}>
-        <div style={{display:"flex",alignItems:"center",gap:9,flexWrap:"wrap"}}>
-          <span style={{width:28,height:28,borderRadius:7,display:"inline-flex",alignItems:"center",justifyContent:"center",background:`${accent}13`,border:`1px solid ${accent}36`,color:accent,fontSize:15}}>✦</span>
-          <div style={{fontSize:13,fontWeight:950,color:accent,letterSpacing:.3}}>Daedalus</div>
-          <span style={{fontSize:12,fontWeight:850,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:360}}>{projectName}</span>
-          <span style={pillS(accent)}>{title}</span>
-        </div>
-        <div style={{fontSize:11,color:t.dim,lineHeight:1.45,marginTop:7,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{statusLine}</div>
-        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:9}}>
-          {totalDuration&&<span style={pillS(t.mut)}>total {totalDuration}</span>}
-          {filesTouched.size>0&&<span style={pillS(t.acc)}>{filesTouched.size} file{filesTouched.size===1?"":"s"}</span>}
-          {runs.length>0&&<span style={pillS(t.mut)}>{runs.length} run{runs.length===1?"":"s"}</span>}
-          {loadErr&&<span style={pillS(t.err)}>{loadErr}</span>}
-        </div>
-      </div>
-      {latestArtifact&&<div style={{display:"flex",gap:6,alignItems:"center",justifyContent:"flex-end",flexWrap:"wrap"}}>
-        <a href={artifactHref} download={latestArtifact.filename} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"7px 10px",background:`${t.ok}13`,border:`1px solid ${t.ok}40`,borderRadius:7,color:t.ok,textDecoration:"none",fontSize:11,fontWeight:900,maxWidth:260}}>
-          <span>📦</span><span style={{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{latestArtifact.filename||"Artifact"}</span>
-        </a>
-        {latestArtifact.artifact_id&&onOpenArtifact&&<button onClick={()=>onOpenArtifact(latestArtifact.artifact_id)} title="Open artifact details" style={{padding:"7px 9px",borderRadius:7,border:`1px solid ${t.acc}35`,background:`${t.acc}10`,color:t.acc,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:900}}>details</button>}
-      </div>}
-    </div>
-    <div style={{padding:"10px 12px",borderBottom:`1px solid ${t.brd}18`,display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(145px,1fr))",gap:8}}>
-      {phases.map(p=>{
-        const selectedNow=p.key===selected.key;
-        return <button key={p.key} onClick={()=>phaseClick(p)} style={{textAlign:"left",minWidth:0,border:`1px solid ${selectedNow?p.color:`${t.brd}28`}`,background:selectedNow?`${p.color}10`:`${t.bgDeep}42`,borderRadius:8,padding:"9px 10px",cursor:"pointer",fontFamily:font,boxShadow:selectedNow?`0 0 0 1px ${p.color}22 inset`:"none"}}>
-          <div style={{display:"flex",alignItems:"center",gap:7,minWidth:0}}>
-            <span style={{fontSize:14}}>{p.icon}</span>
-            <span style={{fontSize:11,fontWeight:950,color:selectedNow?p.color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.label}</span>
-            <span style={{marginLeft:"auto",fontSize:8,color:p.color,textTransform:"uppercase",letterSpacing:.45,fontWeight:900}}>{_phaseStatusLabel(p.state)}</span>
-          </div>
-          <div style={{marginTop:5,fontSize:9,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{[p.duration,p.runs?.length?`${p.runs.length} run${p.runs.length===1?"":"s"}`:""].filter(Boolean).join(" · ")||"ready"}</div>
-          <div style={{marginTop:4,fontSize:10,color:t.dim,lineHeight:1.35,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{p.outcome}</div>
-        </button>;
-      })}
-    </div>
-    <div style={{padding:"0 12px",borderBottom:`1px solid ${t.brd}18`,display:"flex",gap:4,overflowX:"auto"}}>
-      {tabs.map(([id,label])=><button key={id} onClick={()=>setSelectedTab(id)} style={{border:"none",borderBottom:selectedTab===id?`2px solid ${selected.color}`:"2px solid transparent",background:"transparent",color:selectedTab===id?selected.color:t.mut,cursor:"pointer",padding:"9px 10px 8px",fontFamily:font,fontSize:10,fontWeight:900,textTransform:"uppercase",letterSpacing:.55,whiteSpace:"nowrap"}}>{label}</button>)}
-    </div>
-    <div style={{padding:"13px 14px",minHeight:120}}>
-      {body()}
-    </div>
-  </div>;
-}
-
-function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,font,md,msgContent="",live=false,onOpenArtifact,onPreview}){
-  const [runs,setRuns]=useState([]);
-  const [loadErr,setLoadErr]=useState("");
-  const [expandedPhase,setExpandedPhase]=useState("");
-  const [rawPill,setRawPill]=useState(null);
-  const runIdsKey=runIds.join("|");
-  useEffect(()=>{
-    let stop=false;
-    const load=async()=>{
-      if(!runIds.length){setRuns([]);return;}
-      try{
-        const rows=await Promise.all(runIds.map(async rid=>{
-          try{
-            const r=await fetch(`${API}/api/runs/${encodeURIComponent(rid)}`);
-            return r.ok?await r.json():null;
-          }catch{return null;}
-        }));
-        if(!stop){setRuns(rows.filter(Boolean));setLoadErr("");}
-      }catch(e){if(!stop)setLoadErr(e.message||"run load failed");}
-    };
-    load();
-    const id=live&&runIds.length?setInterval(load,4000):null;
-    return()=>{stop=true;if(id)clearInterval(id);};
-  },[runIdsKey,live]);
-
-  const events=useMemo(()=>{
-    const seen=new Set(),out=[];
-    for(const e of [...(savedEvents||[]),...(liveEvts||[])]){
-      const key=`${e?.type||""}:${e?.timestamp||""}:${e?.data?.tool||""}:${e?.data?.run_id||e?.run_id||""}:${e?.data?.status||""}`;
-      if(!seen.has(key)){seen.add(key);out.push(e);}
-    }
-    return out;
-  },[savedEvents,liveEvts]);
-
-  const tools=new Set(events.map(e=>e?.data?.tool).filter(Boolean));
-  const artifactEvents=_artifactEventsFromDaedalus(events);
-  const latestArtifact=artifactEvents[artifactEvents.length-1]||null;
-  const wf=Array.isArray(workflows)&&workflows.length?workflows[0]:null;
-  const wfAccepted=(workflows||[]).some(w=>w.state==="accepted"||w.artifact_status==="delivered"||w.artifact_status==="partial_delivered");
-  const delivered=wfAccepted||tools.has("download_project")||tools.has("download_file")||artifactEvents.length>0;
-  const projectName=wf?.project_id
-    || runs.map(r=>r.project_id||_runEnv(r).project_id||_basename(_runEnv(r).project_dir)).find(Boolean)
-    || (latestArtifact?.filename||"").replace(/(\.tar\.gz|\.tgz|\.zip|\.gz)$/i,"")
-    || "Project";
-  const phaseRuns={plan:[],build:[],review:[],fixes:[],acceptance:[],work:[]};
-  runs.forEach(r=>{const k=_phaseKeyForRun(r);(phaseRuns[k]||(phaseRuns[k]=[])).push(r);});
-  const phaseDefs=[
-    ["plan","Plan","📐"],
-    ["build","Build","🏗"],
-    ["review","Review","🔍"],
-    ["fixes","Fixes","🛠"],
-    ["acceptance","Acceptance","✅"],
-    ["package","Package","📦"],
-  ];
-  const phases=phaseDefs.map(([key,label,icon])=>{
-    const rs=phaseRuns[key]||[];
-    const fallback=key==="package"&&delivered?"succeeded":"queued";
-    const state=key==="package"?fallback:_phaseState(rs,fallback);
-    return {
-      key,label,icon,state,runs:rs,
-      color:_phaseColor(state,t),
-      duration:key==="package"?"":_runsDurationLabel(rs),
-      outcome:_phaseOutcome(key,rs,{latestArtifact,delivered}),
-    };
-  });
-  const filesTouched=new Map();
-  runs.forEach(r=>{
-    const env=_runEnv(r);
-    const phase=_phaseKeyForRun(r);
-    for(const f of [...(env.files_written||[]),...(env.files_touched||[])])if(f&&!filesTouched.has(f))filesTouched.set(f,phase);
-  });
-  const planRun=phaseRuns.plan[phaseRuns.plan.length-1]||null;
-  const planEnv=_runEnv(planRun);
-  const planText=_eventPlanDetail(events);
-  const phaseKeys=phases.map(p=>p.key).join("|");
-  useEffect(()=>{
-    if(expandedPhase&&!phases.some(p=>p.key===expandedPhase))setExpandedPhase("");
-  },[phaseKeys,expandedPhase]);
 
   const sectionTitle=(label,color=t.acc)=><div style={{fontSize:9,color,textTransform:"uppercase",letterSpacing:.7,fontWeight:900,marginBottom:8}}>{label}</div>;
   const renderMd=(content,preStyle={})=>md?<MDWrap>{md(content)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit",...preStyle}}>{content}</pre>;
@@ -2380,89 +2119,70 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
     const env=_runEnv(run);
     return env.model||env.architect_model||env.acceptance_model||env.fixer_model||"";
   };
-  const phaseChips=(p)=>{
+  const recentUpdates=p=>{
+    const rows=[];
+    (p.key==="package"?runs:p.runs||[]).forEach(run=>{
+      _compactSteps(_runSteps(run)).forEach(step=>{
+        const detail=_sanitizeStepDetail(step.detail||step.action||"");
+        if(detail&&detail!==rows[rows.length-1])rows.push(detail);
+      });
+    });
+    return rows.slice(-3);
+  };
+  const ticker=(()=>{
+    const src=runningPhase||lastTouchedPhase;
+    if(!src)return"";
+    const rows=recentUpdates(src);
+    return rows[rows.length-1]||"";
+  })();
+  // One compact facts strip per phase — replaces the old chips row + "phase
+  // facts" column + meta line, which all repeated status/duration/runs.
+  const phaseFacts=(p)=>{
     const last=_lastRun(p.runs);
     const env=_runEnv(last);
-    const chips=[];
-    const add=(label,value,color=t.mut)=>{if(value!==undefined&&value!==null&&String(value).trim()!=="")chips.push([label,String(value),color]);};
-    add("status",_phaseStatusLabel(p.state),p.color);
-    add("duration",p.duration);
-    add("runs",p.runs?.length?`${p.runs.length}`:"");
+    const facts=[];
+    const add=(label,value,color)=>{if(value!==undefined&&value!==null&&String(value).trim()!=="")facts.push([label,String(value),color]);};
+    add("",_phaseStatusLabel(p.state),p.color);
+    add("",p.duration);
+    if(p.runs.length>1)add("",`${p.runs.length} runs`);
     add("model",runModel(last));
-    add("dir",env.project_dir);
     if(p.key==="plan"){
       add("files",Array.isArray(env.manifest)?env.manifest.length:"");
       add("criteria",Array.isArray(env.success_criteria)?env.success_criteria.length:"");
     }
+    if(p.key==="build"){
+      const files=new Set();
+      p.runs.forEach(r=>{const e=_runEnv(r);[...(e.files_written||[]),...(e.files_touched||[])].forEach(f=>f&&files.add(f));});
+      if(files.size)add("files",files.size);
+    }
     if(p.key==="review"){
-      add("level",env.verification_level);
+      add("",env.verification_level);
       add("build",env.build_exit!==undefined?`exit ${env.build_exit}`:"");
       add("test",env.test_exit!==undefined?`exit ${env.test_exit}`:"");
       add("lint",env.lint_exit!==undefined?`exit ${env.lint_exit}`:"");
     }
-    if(p.key==="package"&&latestArtifact?.filename)add("artifact",latestArtifact.filename,t.ok);
-    return chips;
+    if(p.key==="fixes"){
+      const files=new Set();
+      p.runs.forEach(r=>{const e=_runEnv(r);[...(e.files_touched||[]),...(e.files_written||[])].forEach(f=>f&&files.add(f));});
+      if(files.size)add("touched",files.size);
+    }
+    if(p.key==="acceptance")add("",env.status);
+    if(p.key==="package"&&latestArtifact?.filename)add("",latestArtifact.filename,t.ok);
+    add("dir",env.project_dir);
+    return facts;
   };
   const phaseNoteText=(p)=>{
     const last=_lastRun(p.runs);
     const env=_runEnv(last);
-    if(p.key==="plan")return planText||"";
     if(p.key==="build"){
       const missing=Array.isArray(env.manifest_missing)&&env.manifest_missing.length?`Missing: ${env.manifest_missing.join(", ")}`:"";
       return [env.build_summary,env.critique,env.error,missing].filter(Boolean).join("\n\n");
-    }
-    if(p.key==="review"){
-      const issues=Array.isArray(env.issues)?env.issues:[];
-      return issues.length?issues.map((issue,i)=>`${i+1}. ${issue.file||issue.path||"Issue"}: ${issue.summary||issue.message||""}`).join("\n"):env.summary||"";
     }
     if(p.key==="fixes"){
       const diffs=Array.isArray(env.diffs)?env.diffs.map(d=>`${d.path||"file"}: ${d.summary||""}`).join("\n"):"";
       return [env.summary,diffs,(env.errors||[]).join("\n")].filter(Boolean).join("\n\n");
     }
-    if(p.key==="acceptance"){
-      const issues=Array.isArray(env.issues)?env.issues:[];
-      return issues.length?[env.summary,issues.map((issue,i)=>`${i+1}. ${issue.file||issue.path||issue.category||"Issue"}: ${issue.summary||issue.message||""}`).join("\n")].filter(Boolean).join("\n\n"):env.summary||"";
-    }
     return "";
-  };
-  const recentUpdates=p=>{
-    const rows=[];
-    (p.key==="package"?runs:p.runs||[]).forEach(run=>{
-      _compactSteps(_runSteps(run)).forEach(step=>{
-        const detail=(step.detail||step.action||"").trim();
-        if(detail)rows.push(detail);
-      });
-    });
-    return rows.slice(-3);
-  };
-  const phaseMetaLine=p=>{
-    const last=_lastRun(p.runs);
-    const env=_runEnv(last);
-    const parts=[];
-    if(p.duration)parts.push(p.duration);
-    if(p.runs?.length)parts.push(`${p.runs.length} run${p.runs.length===1?"":"s"}`);
-    if(p.key==="plan"){
-      if(Array.isArray(env.manifest))parts.push(`${env.manifest.length} file${env.manifest.length===1?"":"s"}`);
-      if(Array.isArray(env.success_criteria))parts.push(`${env.success_criteria.length} criteria`);
-    }
-    if(p.key==="build"){
-      const files=new Set();
-      p.runs.forEach(r=>{const e=_runEnv(r);[...(e.files_written||[]),...(e.files_touched||[])].forEach(f=>f&&files.add(f));});
-      if(files.size)parts.push(`${files.size} file${files.size===1?"":"s"}`);
-    }
-    if(p.key==="review"){
-      if(env.build_exit!==undefined)parts.push(`build ${env.build_exit}`);
-      if(env.test_exit!==undefined)parts.push(`tests ${env.test_exit}`);
-      if(env.lint_exit!==undefined)parts.push(`lint ${env.lint_exit}`);
-    }
-    if(p.key==="fixes"&&p.runs?.length){
-      const files=new Set();
-      p.runs.forEach(r=>{const e=_runEnv(r);[...(e.files_touched||[]),...(e.files_written||[])].forEach(f=>f&&files.add(f));});
-      if(files.size)parts.push(`${files.size} touched`);
-    }
-    if(p.key==="acceptance"&&env.status)parts.push(env.status);
-    if(p.key==="package"&&latestArtifact?.filename)parts.push(latestArtifact.filename);
-    return parts.join(" · ")||"pending";
   };
   const phaseFiles=(key)=>{
     if(key==="package")return [...filesTouched.entries()];
@@ -2513,7 +2233,7 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
   };
   const renderFiles=key=>{
     const rows=phaseFiles(key);
-    if(!rows.length)return <div style={{fontSize:12,color:t.mut}}>No file list recorded for this phase.</div>;
+    if(!rows.length)return null;
     return <div style={{display:"flex",flexDirection:"column",border:`1px solid ${t.brd}22`,borderRadius:8,overflow:"hidden"}}>
       {rows.map(([path,phase],i)=><div key={path} style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 82px",gap:8,padding:"8px 10px",borderBottom:i<rows.length-1?`1px solid ${t.brd}16`:"none",fontSize:11}}>
         <span style={{color:t.text,wordBreak:"break-word",fontWeight:750}}>{path}</span>
@@ -2582,91 +2302,92 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
       <pre style={{margin:"8px 0 0",whiteSpace:"pre-wrap",wordBreak:"break-word",fontSize:10,lineHeight:1.45,color:t.dim,maxHeight:260,overflow:"auto"}}>{JSON.stringify({id:run.id,role:run.role,status:run.status,started_at:run.started_at,ended_at:run.ended_at,result_envelope:run.result_envelope,events_log:run.events_log},null,2)}</pre>
     </details>)}
   </div>;
-  const renderPhaseDetails=p=>{
-    const last=_lastRun(p.runs);
-    const env=_runEnv(last);
-    const chips=phaseChips(p);
+  const renderPanel=p=>{
+    const facts=phaseFacts(p);
     const updates=recentUpdates(p);
     const note=phaseNoteText(p);
-    return <div style={{padding:"12px 14px 14px",borderTop:`1px solid ${p.color}28`,display:"flex",flexDirection:"column",gap:13}}>
-      {chips.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-        {chips.map(([label,value,color],i)=><span key={`${label}-${i}`} title={value} style={{fontSize:9,color:color||t.mut,border:`1px solid ${(color||t.mut)}2e`,background:`${color||t.surface}10`,borderRadius:999,padding:"2px 7px",maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-          <span style={{color:t.dim,fontWeight:850}}>{label}</span> {value}
-        </span>)}
-      </div>}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:12,alignItems:"start"}}>
-        <div>
-          {sectionTitle(`${p.label} outcome`,p.color)}
-          <div style={{fontSize:12,lineHeight:1.58,color:t.text}}>{p.outcome}</div>
-        </div>
-        <div>
-          {sectionTitle("Phase facts",t.mut)}
-          {[
-            ["Runs",p.runs?.length||"—"],
-            ["Directory",env.project_dir||""],
-            ["Project",env.project_id||last?.project_id||""],
-            ["Language",env.language||""],
-            ["Verification",env.verification_level||env.status||""],
-          ].filter(([,v])=>v!==""&&v!==undefined&&v!==null).map(([k,v])=><div key={k} style={{display:"grid",gridTemplateColumns:"82px minmax(0,1fr)",gap:8,fontSize:10,lineHeight:1.45,marginBottom:4}}>
-            <span style={{color:t.mut,fontWeight:850}}>{k}</span>
-            <span style={{color:t.dim,wordBreak:"break-word"}}>{v}</span>
-          </div>)}
-        </div>
+    const outcome=p.runs.length||p.key==="package"?p.outcome:"Not started yet.";
+    const showActions=!!onQuickAction&&!activeNow&&(p.state==="attention"||(!!attentionPhase&&p.key===attentionPhase.key)||wfBlocked);
+    const actionBtn=(label,color,text)=><button onClick={()=>onQuickAction(text)} style={{padding:"7px 12px",borderRadius:7,border:`1px solid ${color}40`,background:`${color}12`,color,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:900}}>{label}</button>;
+    return <div style={{borderTop:`1px solid ${t.brd}20`,padding:"12px 14px 13px",display:"flex",flexDirection:"column",gap:12}}>
+      <div style={{display:"flex",alignItems:"baseline",gap:8,flexWrap:"wrap"}}>
+        <span style={{fontSize:10,fontWeight:950,color:p.color,textTransform:"uppercase",letterSpacing:.6,flexShrink:0}}>{p.label}</span>
+        <span style={{fontSize:12.5,lineHeight:1.55,color:t.text,minWidth:0}}>{outcome}</span>
       </div>
-      {updates.length>0&&<div>
-        {sectionTitle("Recent updates",p.color)}
-        <div style={{display:"flex",flexDirection:"column",gap:5}}>
-          {updates.map((u,i)=><div key={`${p.key}-update-${i}`} style={{fontSize:11,color:t.dim,lineHeight:1.45,borderTop:i?`1px solid ${t.brd}14`:"none",paddingTop:i?5:0}}>{u}</div>)}
-        </div>
-      </div>}
-      {note&&p.key!=="plan"&&<div>
-        {sectionTitle("Agent output",p.color)}
-        <div style={{fontSize:11,color:t.dim,lineHeight:1.55,maxHeight:220,overflow:"auto"}}>{renderMd(note,{color:t.dim})}</div>
+      {facts.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+        {facts.map(([label,value,color],i)=><span key={`${label}-${i}`} title={label?`${label} ${value}`:value} style={{fontSize:9.5,color:color||t.dim,border:`1px solid ${(color||t.brd)}2e`,background:`${t.bgDeep}55`,borderRadius:999,padding:"3px 8px",maxWidth:300,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+          {label&&<span style={{color:t.mut,fontWeight:850}}>{label} </span>}{value}
+        </span>)}
       </div>}
       {p.key==="plan"&&renderPlanDetails()}
       {renderIssues(p.runs||[])}
+      {note&&<div style={{fontSize:11,color:t.dim,lineHeight:1.55,maxHeight:200,overflow:"auto"}}>{renderMd(note,{color:t.dim})}</div>}
+      {(p.key==="build"||p.key==="fixes")&&phaseFiles(p.key).length>0&&<div>{sectionTitle("Files",t.acc)}{renderFiles(p.key)}</div>}
       {p.key==="package"&&<div>{sectionTitle("Artifacts",t.ok)}{renderArtifacts()}</div>}
-      {p.key!=="plan"&&p.key!=="package"&&<div>{sectionTitle("Files",t.acc)}{renderFiles(p.key)}</div>}
       {p.key==="package"&&filesTouched.size>0&&<div>{sectionTitle("Files",t.acc)}{renderFiles(p.key)}</div>}
+      {updates.length>0&&<div>
+        {sectionTitle("Recent activity",t.mut)}
+        <div style={{display:"flex",flexDirection:"column",gap:4}}>
+          {updates.map((u,i)=><div key={`${p.key}-u-${i}`} style={{fontSize:11,color:i===updates.length-1?t.dim:t.mut,lineHeight:1.45}}>{u}</div>)}
+        </div>
+      </div>}
+      {showActions&&<div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        {actionBtn("🛠 Fix remaining issues",t.acc,"Fix the remaining issues.")}
+        {!delivered&&actionBtn("📦 Download as-is",t.ok,"Download the project as-is; the remaining issues are acceptable.")}
+      </div>}
       <details>
-        <summary style={{fontSize:10,color:t.mut,cursor:"pointer",fontWeight:900,textTransform:"uppercase",letterSpacing:.6}}>Logs</summary>
-        <div style={{marginTop:10}}>{renderLogs(p)}</div>
-      </details>
-      <details>
-        <summary style={{fontSize:10,color:t.mut,cursor:"pointer",fontWeight:900,textTransform:"uppercase",letterSpacing:.6}}>Raw details</summary>
-        <div style={{marginTop:10}}>{renderRaw(p)}</div>
+        <summary style={{fontSize:10,color:t.mut,cursor:"pointer",fontWeight:900,textTransform:"uppercase",letterSpacing:.6}}>Developer details</summary>
+        <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:12}}>
+          {renderLogs(p)}
+          {renderRaw(p)}
+        </div>
       </details>
     </div>;
   };
+  const headerMeta=[totalDuration,filesTouched.size?`${filesTouched.size} file${filesTouched.size===1?"":"s"}`:"",runs.length?`${runs.length} run${runs.length===1?"":"s"}`:""].filter(Boolean).join(" · ");
   return <div style={{margin:"0 0 12px",maxWidth:"100%"}}>
     {msgContent&&<div style={{margin:"0 0 12px",color:t.dim,lineHeight:1.68,fontSize:13}}>
       {renderMd(msgContent,{color:t.dim})}
     </div>}
-    <div style={{display:"flex",flexDirection:"column",gap:8}}>
-      {loadErr&&<div style={{fontSize:11,color:t.err,border:`1px solid ${t.err}30`,background:`${t.err}08`,borderRadius:8,padding:"7px 9px"}}>{loadErr}</div>}
-      {phases.length?phases.map(p=>{
-        const expanded=expandedPhase===p.key;
-        const updates=recentUpdates(p);
-        const latestUpdate=updates[updates.length-1]||"";
-        const metaLine=phaseMetaLine(p);
-        const statusLabel=_phaseStatusLabel(p.state);
-        return <div key={p.key} style={{border:`1px solid ${expanded?p.color:`${p.color}34`}`,background:expanded?`${p.color}0d`:`${t.bgDeep}42`,borderRadius:8,overflow:"hidden",boxShadow:p.state==="running"?`0 0 14px ${p.color}14`:"none"}}>
-          <button onClick={()=>setExpandedPhase(cur=>cur===p.key?"":p.key)} style={{width:"100%",border:"none",background:"transparent",padding:"10px 12px",cursor:"pointer",fontFamily:font,color:t.text,textAlign:"left",display:"grid",gridTemplateColumns:"30px minmax(0,1fr) auto",gap:10,alignItems:"start"}}>
-            <span style={{width:28,height:28,borderRadius:7,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:14,color:p.color,background:`${p.color}13`,border:`1px solid ${p.color}38`,boxSizing:"border-box"}}>{p.icon}</span>
-            <span style={{minWidth:0}}>
-              <span style={{display:"flex",gap:8,alignItems:"center",minWidth:0,flexWrap:"wrap"}}>
-                <span style={{fontSize:12,fontWeight:950,color:p.color,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.label}</span>
-                <span style={{fontSize:8,color:p.color,textTransform:"uppercase",letterSpacing:.55,fontWeight:900}}>{statusLabel}</span>
+    {loadErr&&<div style={{fontSize:11,color:t.err,border:`1px solid ${t.err}30`,background:`${t.err}08`,borderRadius:8,padding:"7px 9px",marginBottom:8}}>{loadErr}</div>}
+    <div style={{border:`1px solid ${overall.color}26`,background:`${t.surface}3f`,borderRadius:10,overflow:"hidden",boxShadow:activeNow?`0 0 18px ${overall.color}12`:"none"}}>
+      <div style={{padding:"11px 14px 0",display:"flex",alignItems:"center",gap:9,flexWrap:"wrap"}}>
+        <span style={{width:26,height:26,borderRadius:7,display:"inline-flex",alignItems:"center",justifyContent:"center",background:`${overall.color}13`,border:`1px solid ${overall.color}36`,color:overall.color,fontSize:14,flexShrink:0}}>✦</span>
+        <span style={{fontSize:13,fontWeight:950,color:overall.color,letterSpacing:.3}}>Daedalus</span>
+        <span style={{fontSize:12,fontWeight:800,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:300}}>{projectName}</span>
+        <span style={{fontSize:9,fontWeight:800,color:overall.color,border:`1px solid ${overall.color}33`,background:`${overall.color}0f`,borderRadius:999,padding:"3px 8px",textTransform:"uppercase",letterSpacing:.5}}>{overall.label}</span>
+        <span style={{marginLeft:"auto",fontSize:10,color:t.mut,whiteSpace:"nowrap"}}>{headerMeta}</span>
+        {latestArtifact&&<a href={artifactHref} download={latestArtifact.filename} style={{display:"inline-flex",alignItems:"center",gap:5,padding:"5px 9px",background:`${t.ok}13`,border:`1px solid ${t.ok}40`,borderRadius:7,color:t.ok,textDecoration:"none",fontSize:10.5,fontWeight:900,maxWidth:230}}>
+          <span>📦</span><span style={{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{latestArtifact.filename||"Artifact"}</span>
+        </a>}
+      </div>
+      {activeNow&&ticker&&<div style={{display:"flex",alignItems:"center",gap:7,padding:"8px 14px 0",fontSize:11,color:t.dim,minWidth:0}}>
+        <span style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:"pulse 1.4s infinite",flexShrink:0}}/>
+        <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ticker}</span>
+      </div>}
+      <div style={{display:"flex",alignItems:"flex-start",padding:"13px 14px 12px",overflowX:"auto"}}>
+        {phases.map((p,i)=>{
+          const sel=p.key===selected.key;
+          const done=p.state==="succeeded"||p.state==="complete";
+          const pendingStep=!done&&p.state!=="running"&&p.state!=="attention";
+          const prevDone=i>0&&["succeeded","complete"].includes(phases[i-1].state);
+          return <React.Fragment key={p.key}>
+            {i>0&&<div style={{flex:1,height:2,minWidth:10,borderRadius:2,margin:"10px 5px 0",background:prevDone?`${t.ok}55`:`${t.brd}30`}}/>}
+            <button onClick={()=>setPickedPhase(p.key)} title={`${p.label} — ${_phaseStatusLabel(p.state)}`} style={{background:"transparent",border:"none",cursor:"pointer",fontFamily:font,padding:0,display:"flex",flexDirection:"column",alignItems:"center",gap:5,minWidth:44,flexShrink:0}}>
+              <span style={{width:22,height:22,borderRadius:"50%",display:"inline-flex",alignItems:"center",justifyContent:"center",boxSizing:"border-box",fontSize:11,fontWeight:900,lineHeight:1,
+                color:done?t.bgDeep:p.color,
+                background:done?p.color:pendingStep?"transparent":`${p.color}16`,
+                border:`2px solid ${pendingStep?`${t.mut}44`:p.color}`,
+                boxShadow:sel?`0 0 0 3px ${p.color}26`:"none",
+                animation:p.state==="running"?"pulse 1.5s infinite":"none"}}>
+                {done?"✓":p.state==="attention"?"!":p.state==="running"?"●":""}
               </span>
-              <span style={{display:"block",marginTop:4,fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{metaLine}</span>
-              <span style={{display:"-webkit-box",marginTop:5,fontSize:11,color:t.dim,lineHeight:1.4,overflow:"hidden",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{p.outcome}</span>
-              {latestUpdate&&<span style={{display:"block",marginTop:5,fontSize:10,color:t.mut,lineHeight:1.35,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{latestUpdate}</span>}
-            </span>
-            <span style={{fontSize:10,color:p.color,opacity:.6,paddingTop:2}}>{expanded?"▴":"▾"}</span>
-          </button>
-          {expanded&&renderPhaseDetails(p)}
-        </div>;
-      }):<div style={{fontSize:12,color:t.mut,padding:"6px 2px"}}>Waiting for Daedalus workflow events.</div>}
+              <span style={{fontSize:9,fontWeight:850,letterSpacing:.45,textTransform:"uppercase",color:sel?p.color:pendingStep?`${t.mut}99`:t.dim,whiteSpace:"nowrap"}}>{p.label}</span>
+            </button>
+          </React.Fragment>;
+        })}
+      </div>
+      {renderPanel(selected)}
     </div>
   </div>;
 }

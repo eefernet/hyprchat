@@ -1856,6 +1856,14 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
         if round_num > 0:
             await events.emit(conv_id, "tool_start", {"tool": "processing", "status": "🔄 Processing tool results...", "icon": "activity"})
+            # Round texts concatenate into one message on the frontend; without
+            # a separator they run together mid-sentence ("...planning the
+            # architecture.Now I'll generate..."). Emit a paragraph break
+            # before this round's tokens when prior rounds left visible text.
+            if _turn_text.strip() and not _turn_text.endswith("\n"):
+                _turn_text += "\n\n"
+                _sep_evt = json.dumps({"type": "token", "content": "\n\n"})
+                yield f"data: {_sep_evt}\n\n"
 
         payload = {
             "model": _provider_model_name if _model_provider == "ollama" else req.model,
