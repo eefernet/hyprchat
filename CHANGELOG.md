@@ -1,4 +1,24 @@
 <details open>
+<summary>Alpha v17.4.0 — July 5, 2026</summary>
+
+> Quick Search gets a hybrid brain: a small-LLM query planner now runs in
+> parallel with the instant deterministic search, queries stop getting
+> misclassified ("Taylor Swift" is no longer a coding question), and
+> off-topic results trigger automatic recovery rounds.
+
+## Quick Search
+- New hybrid query planner: every searched turn (balanced/quality modes) asks the workspace model to write standalone search queries — resolving pronouns and follow-ups from the conversation — in parallel with the deterministic first search wave. If the planner lands within its timeout, its queries join a second wave; if it's slow or returns garbage, the deterministic results ship unchanged. Speed mode and `QUICK_SEARCH_PLANNER=deterministic` skip it entirely.
+- Category detection now uses strong/weak signals instead of first-keyword-wins: bare ambiguous words like `swift`, `ruby`, `rust`, `spring`, `game`, `build`, or `level` no longer hijack a query into code or gaming bias on their own. A new sports guard routes real-world sports questions ("who won the celtics game last night") to news sources instead of game wikis.
+- Off-topic recovery now works in the default balanced mode: when results barely overlap the question, Quick Search first retries the raw user message for free, then spends one LLM refinement round — and if results are still off-topic, the model is warned in-context instead of being force-grounded on bad sources.
+- Embedding rerank (nomic-embed-text) is now on by default, semantically re-scoring results against the question and collapsing mirror articles; it degrades gracefully to heuristic ranking on any failure.
+- Smarter query construction: long questions keep their subject instead of being chopped at 12 words, "overview"/"sources" filler variants are gone, follow-up fusion uses a compact topic phrase (and can resolve topics the assistant introduced), and "last night"/"this month"/"right now" now count as freshness cues.
+- Page-text enrichment no longer throws away every fetched page when one slow site exceeds the deadline — completed fetches are kept.
+
+</details>
+
+---
+
+<details>
 <summary>Alpha v17.3.2 — July 3, 2026</summary>
 
 > Deep Research gets a full-page report composer, Settings gets a unified

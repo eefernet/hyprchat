@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch, AsyncMock
 
+import pytest
+
 # Ensure backend/ is importable when pytest runs from repo root or backend/.
 _BACKEND = Path(__file__).resolve().parent.parent
 if str(_BACKEND) not in sys.path:
@@ -22,6 +24,16 @@ import search_agent  # noqa: E402
 import quick_search  # noqa: E402  (we patch helpers on this module)
 import research  # noqa: E402
 import config  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_test_defaults(monkeypatch):
+    """The LLM planner and embed rerank are on by default in production
+    config. Keep legacy orchestration tests deterministic; planner/rerank
+    tests opt back in with patch.object inside the test body."""
+    monkeypatch.setattr(config, "QUICK_SEARCH_PLANNER", "deterministic")
+    monkeypatch.setattr(config, "QUICK_SEARCH_RERANKER", "none")
+    monkeypatch.setattr(config, "QUICK_SEARCH_EMBED_RERANK", False)
 
 
 def _run(coro):
@@ -715,8 +727,8 @@ def test_run_search_agent_search_failure_injects_unavailable_context():
     assert "cannot verify it from fresh sources" in out["context"]
 
 
-def test_run_search_agent_default_path_does_not_call_triage():
-    """Default Quick Search uses deterministic planning instead of LLM triage."""
+def test_run_search_agent_planner_kill_switch_stays_deterministic():
+    """QUICK_SEARCH_PLANNER=deterministic keeps the zero-LLM path intact."""
     http = _FakeHTTP([_ollama_response("garbage that is not json")])
     user_msg = "tell me about UK Reform Party recent gains"
     messages = [{"role": "user", "content": user_msg}]
@@ -728,7 +740,8 @@ def test_run_search_agent_default_path_does_not_call_triage():
         captured_queries.append(query)
         return fake_results
 
-    with patch.object(quick_search, "_cached_search", new=fake_cached_search), \
+    with patch.object(config, "QUICK_SEARCH_PLANNER", "deterministic"), \
+         patch.object(quick_search, "_cached_search", new=fake_cached_search), \
          patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
          patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)):
         out = _run(search_agent.run_search_agent(
@@ -740,3 +753,234 @@ def test_run_search_agent_default_path_does_not_call_triage():
         assert http.calls == []
         assert captured_queries[0] == "UK Reform Party recent gains"
         assert out["rewritten_query"] == user_msg
+
+
+# ── Hybrid LLM planner ──
+def _planner_json(**overrides) -> dict:
+    payload = {
+        "question": "What is the latest on the UK Reform Party?",
+        "queries": ["UK Reform Party polling 2026"],
+        "category": "news",
+        "freshness": "month",
+    }
+    payload.update(overrides)
+    return _ollama_response(json.dumps(payload))
+
+
+def test_run_search_agent_planner_merges_queries_and_question():
+    """Valid planner output adds a second search wave and the standalone question."""
+    http = _FakeHTTP([_planner_json()])
+    messages = [{"role": "user", "content": "hows reform doing over in the uk"}]
+    fake_results = _searxng_results(("Reform UK polling", "https://bbc.co.uk/reform"))
+    captured: list[str] = []
+
+    async def fake_cached_search(http, query, count=10, time_range=None, categories="general", engines=None):
+        captured.append(query)
+        return fake_results
+
+    with patch.object(config, "QUICK_SEARCH_PLANNER", "llm"), \
+         patch.object(quick_search, "_cached_search", new=fake_cached_search), \
+         patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)):
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "planner-model",
+            events=None, conv_id=None, messages=messages,
+        ))
+    assert out["skipped"] is False
+    assert len(http.calls) == 1                       # exactly one planner call
+    assert "UK Reform Party polling 2026" in captured  # second wave searched it
+    assert out["rewritten_query"] == "What is the latest on the UK Reform Party?"
+
+
+def test_run_search_agent_planner_garbage_keeps_deterministic_plan():
+    """Planner returning non-JSON garbage must not change the search at all."""
+    http = _FakeHTTP([_ollama_response("garbage that is not json")])
+    user_msg = "tell me about UK Reform Party recent gains"
+    messages = [{"role": "user", "content": user_msg}]
+    fake_results = _searxng_results(("UK Reform results", "https://bbc.co.uk/x"))
+    captured: list[str] = []
+
+    async def fake_cached_search(http, query, count=10, time_range=None, categories="general", engines=None):
+        captured.append(query)
+        return fake_results
+
+    with patch.object(config, "QUICK_SEARCH_PLANNER", "llm"), \
+         patch.object(quick_search, "_cached_search", new=fake_cached_search), \
+         patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)):
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "planner-model",
+            events=None, conv_id=None, messages=messages,
+        ))
+    assert out["skipped"] is False
+    assert len(http.calls) == 1
+    assert captured[0] == "UK Reform Party recent gains"
+    assert out["rewritten_query"] == user_msg
+
+
+def test_run_search_agent_planner_timeout_falls_back_to_deterministic():
+    """A slow planner is cut off at the timeout; deterministic results ship."""
+    class _SlowHTTP:
+        def __init__(self):
+            self.calls = []
+
+        async def post(self, url, json=None, timeout=None):
+            self.calls.append(url)
+            await asyncio.sleep(5)
+            return _FakeResponse(_planner_json())
+
+    http = _SlowHTTP()
+    user_msg = "tell me about UK Reform Party recent gains"
+    messages = [{"role": "user", "content": user_msg}]
+    fake_results = _searxng_results(("UK Reform results", "https://bbc.co.uk/x"))
+    captured: list[str] = []
+
+    async def fake_cached_search(http, query, count=10, time_range=None, categories="general", engines=None):
+        captured.append(query)
+        return fake_results
+
+    with patch.object(config, "QUICK_SEARCH_PLANNER", "llm"), \
+         patch.object(config, "QUICK_SEARCH_PLANNER_TIMEOUT", 0.05), \
+         patch.object(quick_search, "_cached_search", new=fake_cached_search), \
+         patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)):
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "planner-model",
+            events=None, conv_id=None, messages=messages,
+        ))
+    assert out["skipped"] is False
+    assert captured[0] == "UK Reform Party recent gains"
+    assert out["rewritten_query"] == user_msg
+
+
+def test_run_search_agent_speed_mode_skips_planner():
+    """Speed mode never spends an LLM call even with the planner enabled."""
+    http = _FakeHTTP([_planner_json()])
+    messages = [{"role": "user", "content": "tell me about UK Reform Party recent gains"}]
+    fake_results = _searxng_results(("UK Reform results", "https://bbc.co.uk/x"))
+
+    async def fake_cached_search(http, query, count=10, time_range=None, categories="general", engines=None):
+        return fake_results
+
+    with patch.object(config, "QUICK_SEARCH_PLANNER", "llm"), \
+         patch.object(config, "QUICK_SEARCH_MODE", "speed"), \
+         patch.object(quick_search, "_cached_search", new=fake_cached_search), \
+         patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)):
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "planner-model",
+            events=None, conv_id=None, messages=messages,
+        ))
+    assert out["skipped"] is False
+    assert http.calls == []
+
+
+# ── Category classification (strong/weak signals + sports guard) ──
+def test_classify_ambiguous_language_names_not_code():
+    assert quick_search._classify_query("taylor swift new album release") == "general"
+    assert quick_search._classify_query("how do markets react to rate cuts") == "general"
+
+
+def test_classify_sports_game_is_news_not_video_game():
+    assert quick_search._classify_query("who won the celtics game last night") == "news"
+    assert quick_search._classify_query("nba standings this season") == "news"
+
+
+def test_classify_single_weak_game_word_stays_general():
+    assert quick_search._classify_query("what should I build for my new house") == "general"
+
+
+def test_classify_strong_signals_still_classify():
+    assert quick_search._classify_query("eu4 best build order") == "game"
+    assert quick_search._classify_query("fastapi traceback on startup") == "code"
+    assert quick_search._classify_query("swift package manager dependency") == "code"  # 2 weak hits
+
+
+def test_deterministic_plan_sports_query_not_game():
+    latest = "who won the celtics game last night"
+    plan = search_agent._deterministic_plan(
+        [{"role": "user", "content": latest}], latest, _balanced_mode(),
+    )
+    assert plan.category == "news"
+    assert plan.freshness_mode == "day"  # "last night" resolves to yesterday
+    yesterday = datetime.now().date().toordinal() - 1
+    assert plan.resolved_date == datetime.fromordinal(yesterday).date().isoformat()
+    assert any("celtics" in q.lower() for q in plan.queries)
+
+
+def test_deterministic_plan_game_context_still_wins_over_sports_wording():
+    latest = "how do i win the game as france"
+    plan = search_agent._deterministic_plan(
+        [{"role": "user", "content": latest}], latest, _balanced_mode(),
+        context_hint="The user plays Europa Universalis IV and discusses strategy games.",
+    )
+    assert plan.category == "game"
+
+
+# ── Page enrichment keeps completed fetches on deadline ──
+def test_enrich_with_pages_keeps_completed_on_timeout():
+    results = [
+        {"url": "https://fast.test/a", "content": "thin"},
+        {"url": "https://slow.test/b", "content": "thin"},
+    ]
+
+    async def fake_fetch(http, url):
+        if "slow" in url:
+            await asyncio.sleep(2)
+        return {"url": url, "content": "x" * 500}
+
+    with patch.object(quick_search, "_fetch_clean_page", new=fake_fetch), \
+         patch.object(quick_search, "_url_safe", new=AsyncMock(return_value=True)), \
+         patch.object(quick_search, "_PAGE_FETCH_DEADLINE", 0.2):
+        out = _run(quick_search._enrich_with_pages(None, results, top_n=2))
+    assert "https://fast.test/a" in out
+    assert "https://slow.test/b" not in out
+
+
+# ── Low-relevance surfacing ──
+def test_run_search_agent_low_relevance_warning_in_context():
+    """Off-topic results the pipeline can't fix get flagged to the model."""
+    http = _FakeHTTP([])
+    off_topic = _searxng_results(
+        ("chocolate chip cookie recipes", "https://example.com/cookies"),
+        ("gardening in spring frost", "https://example.com/garden"),
+    )
+    messages = [{"role": "user", "content": "tell me about UK Reform Party 2026 politics"}]
+
+    async def fake_cached_search(http, query, count=10, time_range=None, categories="general", engines=None):
+        return off_topic
+
+    with patch.object(quick_search, "_cached_search", new=fake_cached_search), \
+         patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
+         patch.object(search_agent, "refine_query", new=AsyncMock(return_value="")):
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "test-model",
+            events=None, conv_id=None, messages=messages,
+        ))
+    assert out["skipped"] is False
+    assert "RELEVANCE WARNING" in out["context"]
+
+
+def test_run_search_agent_balanced_mode_refines_on_low_relevance():
+    """Balanced mode (the default) now gets the corrective refine round."""
+    http = _FakeHTTP([])
+    off_topic = _searxng_results(("chocolate chip cookies", "https://example.com/c"))
+    on_topic = _searxng_results(("UK Reform Party polling", "https://bbc.co.uk/reform"))
+    messages = [{"role": "user", "content": "tell me about UK Reform Party 2026 politics"}]
+
+    async def fake_cached_search(http, query, count=10, time_range=None, categories="general", engines=None):
+        return on_topic if query == "UK Reform Party polling surge" else off_topic
+
+    with patch.object(quick_search, "_cached_search", new=fake_cached_search), \
+         patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)), \
+         patch.object(config, "QUICK_SEARCH_MODE", "balanced"), \
+         patch.object(search_agent, "refine_query",
+                      new=AsyncMock(return_value="UK Reform Party polling surge")) as mock_refine:
+        out = _run(search_agent.run_search_agent(
+            http, "http://ollama", "test-model",
+            events=None, conv_id=None, messages=messages,
+        ))
+    assert out["skipped"] is False
+    assert mock_refine.await_count == 1
