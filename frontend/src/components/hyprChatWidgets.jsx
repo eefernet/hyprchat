@@ -134,6 +134,7 @@ const Pill = ({ev,t,expanded,onToggle})=>{
       ["Fallback",detail.prompt_fallback?"yes":"no"],
     ].filter(([,v])=>v!==undefined&&v!==null&&v!=="");
     return <div>
+      {detail.auto_enhanced&&<div style={{display:"inline-flex",alignItems:"center",gap:4,marginBottom:8,fontSize:9,fontWeight:800,color:t.acc2,background:`${t.acc2}12`,border:`1px solid ${t.acc2}30`,borderRadius:6,padding:"2px 8px"}}>✨ prompt auto-enhanced</div>}
       {block("prompt","Prompt sent to ComfyUI",detail.prompt)}
       {block("negative","Negative prompt",detail.negative_prompt)}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:6,marginTop:2}}>

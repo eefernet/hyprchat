@@ -87,6 +87,7 @@ async def get_app_settings():
         "image_chat_prompt_prefix": config.IMAGE_CHAT_PROMPT_PREFIX,
         "image_chat_negative": config.IMAGE_CHAT_NEGATIVE,
         "image_chat_compose_model": config.IMAGE_CHAT_COMPOSE_MODEL,
+        "image_chat_auto_enhance": config.IMAGE_CHAT_AUTO_ENHANCE,
         "model_hardware_profile": hyprfit.clean_hardware_profile(settings.get("model_hardware_profile")),
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
@@ -110,6 +111,7 @@ async def update_app_settings(body: dict = Body(...)):
                "default_num_ctx", "research_num_ctx", "quick_search_mode",
                "image_chat_checkpoint", "image_chat_workflow", "image_chat_resolution", "image_chat_vae",
                "image_chat_prompt_prefix", "image_chat_negative", "image_chat_compose_model",
+               "image_chat_auto_enhance",
                "ollama_scan_ssh_host", "ollama_scan_ssh_port", "ollama_scan_ssh_user",
                "ollama_scan_ssh_auth_mode", "ollama_scan_ssh_key_path", "ollama_scan_ssh_password",
                "model_hardware_profile"}
@@ -336,6 +338,11 @@ async def update_app_settings(body: dict = Body(...)):
         config.IMAGE_CHAT_COMPOSE_MODEL = str(body["image_chat_compose_model"] or "").strip()[:200]
         settings["image_chat_compose_model"] = config.IMAGE_CHAT_COMPOSE_MODEL
         print(f"[Config] Photo prompt model: {config.IMAGE_CHAT_COMPOSE_MODEL or '(conversation chat model)'}")
+    if "image_chat_auto_enhance" in body:
+        # The frontend persists string values; bool("false") is True, so parse.
+        config.IMAGE_CHAT_AUTO_ENHANCE = str(body["image_chat_auto_enhance"]).strip().lower() in ("1", "true", "yes", "on")
+        settings["image_chat_auto_enhance"] = config.IMAGE_CHAT_AUTO_ENHANCE
+        print(f"[Config] Chat image auto-enhance: {'on' if config.IMAGE_CHAT_AUTO_ENHANCE else 'off'}")
     save_settings(settings)
     return {
         **_public_settings_payload(settings),

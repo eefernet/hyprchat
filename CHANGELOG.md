@@ -1,4 +1,35 @@
 <details open>
+<summary>Alpha v17.5.0 — July 5, 2026</summary>
+
+> Image generation levels up: chat images now look good with any prompt
+> (default quality tags + an optional LLM auto-enhancer), Image Studio gets
+> LoRAs, more aspect ratios, seed lock, and app-matched inputs, and sparse
+> API calls stop silently sampling flow/vpred models with the wrong objective.
+
+## Chat Image Quality
+- Chat `generate_image` prompts finally match what the system prompt promised: when no per-model preset or global prefix is configured, the server now applies standard quality tags and a baseline negative prompt automatically. A bare "cute doggo" no longer hits SDXL raw with an empty negative.
+- New **Auto-enhance chat prompts** toggle (Settings → Model & Generation → Chat Image Generation): the prompt model expands every non-persona chat image prompt into a detailed SDXL prompt before rendering (bounded at ~20s, fails open to the raw prompt). The tool pill shows a "✨ prompt auto-enhanced" chip and the final prompt.
+- Persona photos are untouched — persona prompt composition, profiles, and rating gates keep owning that path.
+- Joined negative prompts are deduplicated tag-by-tag, so baseline + preset + enhancer tags never stack duplicates.
+
+## Image Studio
+- **LoRA picker**: apply up to 4 LoRAs with per-LoRA strength — the backend chain machinery existed but was persona-profile-only until now. Reuse restores an image's LoRA stack.
+- **Seed lock + randomize**: a 🎲 button fills a concrete random seed, and a lock keeps the server-chosen seed across runs so you can iterate on one composition.
+- Four more SDXL bucket aspect ratios (1152×896, 896×1152, 1344×768, 768×1344) in both Image Studio and the chat-image resolution setting.
+- Steps and CFG are now sliders with live value readouts, matching the rest of Settings; inputs use the shared app-wide styles instead of local copies.
+- Sampler/scheduler dropdowns are served from the backend allow-lists (adds dpm_2, dpm_2_ancestral, lms, dpmpp_2s_ancestral, ddim_uniform that the UI previously hid).
+
+## Reliability & API
+- `POST /api/images/generate` now falls back to the checkpoint's saved preset for omitted sampler/scheduler/model-type/steps/CFG — sparse API calls no longer silently sample a flow/vpred checkpoint with the wrong objective (solid-color/deep-fried output).
+- Image jobs that finish after a backend restart no longer create duplicate artifact rows, and their prompt/seed/settings are recovered from ComfyUI history instead of coming back empty.
+- Chat images are now clickable — they open the same preview pane as attachments (Image Studio already had its lightbox).
+- The prompt enhancer moved into a shared helper used by both the Studio Enhance button and the chat auto-enhance path; duplicate persona intent regexes were removed with no behavior change.
+
+</details>
+
+---
+
+<details>
 <summary>Alpha v17.4.0 — July 5, 2026</summary>
 
 > Quick Search gets a hybrid brain: a small-LLM query planner now runs in

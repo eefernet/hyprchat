@@ -14,6 +14,7 @@ from datetime import datetime
 import comfyui
 import config
 import database as db
+import image_prompt_enhancer
 import persona_images
 import cancel_registry
 from artifact_files import artifact_file_metadata as _artifact_file_metadata
@@ -1066,6 +1067,19 @@ CODEAGENT_TOOLS = {
             }, "required": ["directory"]},
         },
     },
+    "save_memory": {
+        "type": "function",
+        "function": {
+            "name": "save_memory",
+            "description": "Save a durable memory when the user explicitly asks you to remember something, or clearly states a lasting fact, preference, or standing instruction worth keeping. Saves immediately. Never save secrets, passwords, API keys, or tokens.",
+            "parameters": {"type": "object", "properties": {
+                "content": {"type": "string", "description": "The fact to remember, as one self-contained sentence"},
+                "memory_type": {"type": "string", "description": "semantic (facts/preferences), episodic (dated events/decisions), or procedural (workflows/instructions). Default semantic"},
+                "scope": {"type": "string", "description": "global (all future chats, default) or workspace (only this workspace)"},
+                "importance": {"type": "integer", "description": "1-5, default 4"},
+            }, "required": ["content"]},
+        },
+    },
     "delete_file": {
         "type": "function",
         "function": {
@@ -1485,6 +1499,19 @@ def _join_prompt_parts(*parts: str) -> str:
     return ", ".join(p.strip(" ,") for p in parts if str(p or "").strip(" ,"))
 
 
+def _dedupe_prompt_tags(text: str) -> str:
+    """Drop repeated comma-separated tags (case-insensitive, order kept).
+    Negatives join baseline + preset + enhancer output, which share tags."""
+    seen = set()
+    tags = []
+    for tag in (text or "").split(","):
+        tag = tag.strip()
+        if tag and tag.lower() not in seen:
+            seen.add(tag.lower())
+            tags.append(tag)
+    return ", ".join(tags)
+
+
 def _image_chat_resolution() -> tuple[int, int]:
     try:
         w, h = (int(x) for x in (config.IMAGE_CHAT_RESOLUTION or "1024x1024").split("x"))
@@ -1548,6 +1575,7 @@ def _resolve_chat_image_recipe(args: dict, persona_context: dict | None = None) 
     """Resolve chat generate_image settings without submitting to ComfyUI."""
     args = args or {}
     persona_context = persona_context or {}
+    is_persona = bool(persona_context.get("persona_id"))
     gi_prompt = _clean_text(args.get("prompt"))
     gi_negative_arg = _clean_text(args.get("negative_prompt"))
     default_w, default_h = _image_chat_resolution()
@@ -1632,7 +1660,13 @@ def _resolve_chat_image_recipe(args: dict, persona_context: dict | None = None) 
         if active_profile else ""
     ) or (config.IMAGE_CHAT_VAE or "").strip()
 
-    base_prompt_prefix = (gi_preset.get("prompt_prefix") or config.IMAGE_CHAT_PROMPT_PREFIX or "").strip()
+    # Non-persona baseline: with no preset and no configured global prefix, a
+    # bare prompt would hit SDXL with zero quality tags and an empty negative.
+    # Persona prompts are composed upstream and profiles carry their own tags.
+    base_prompt_prefix = (
+        (gi_preset.get("prompt_prefix") or config.IMAGE_CHAT_PROMPT_PREFIX or "").strip()
+        or ("" if is_persona else image_prompt_enhancer.DEFAULT_QUALITY_PREFIX)
+    )
     profile_prompt_prefix = (
         _profile_text(active_profile, "prompt_prefix", "positive_prefix")
         if active_profile else ""
@@ -1642,11 +1676,12 @@ def _resolve_chat_image_recipe(args: dict, persona_context: dict | None = None) 
         if active_profile else ""
     )
     gi_full_prompt = _join_prompt_parts(base_prompt_prefix, profile_prompt_prefix, gi_prompt, profile_prompt_suffix)
-    gi_negative = _join_prompt_parts(
-        (gi_preset.get("negative_prefix") or config.IMAGE_CHAT_NEGATIVE or "").strip(),
+    gi_negative = _dedupe_prompt_tags(_join_prompt_parts(
+        (gi_preset.get("negative_prefix") or config.IMAGE_CHAT_NEGATIVE or "").strip()
+        or ("" if is_persona else image_prompt_enhancer.DEFAULT_NEGATIVE_PROMPT),
         _profile_text(active_profile, "negative_prefix", "negative_prompt") if active_profile else "",
         gi_negative_arg,
-    )
+    ))
     profile_metadata = _profile_metadata(selection, active=bool(active_profile), fallback_reason=fallback_reason)
     if prompt_payload:
         profile_metadata.update({
@@ -1706,6 +1741,7 @@ def _image_recipe_event_detail(recipe: dict) -> dict:
         "loras_active": bool(recipe.get("loras")),
         "prompt_fallback": bool(profile_meta.get("prompt_fallback")),
         "adult_request": bool(profile_meta.get("adult_request")),
+        "auto_enhanced": bool(recipe.get("auto_enhanced")),
     }
 
 
@@ -2723,6 +2759,77 @@ async def exec_tool(
 
             return "\n".join(parts)
 
+        elif name == "save_memory":
+            content = re.sub(r"\s+", " ", str(args.get("content") or "").strip())
+            if len(content) < 8:
+                return "ERROR: save_memory requires a 'content' sentence describing what to remember."
+            content = content[:800]
+            if re.search(r"(password|api[_ -]?key|secret|private key|token)\s*[:=]", content, re.I):
+                return "ERROR: refusing to save what looks like a secret or credential."
+            mem_type = str(args.get("memory_type") or "semantic").strip().lower()
+            scope = str(args.get("scope") or "global").strip().lower()
+            try:
+                importance = max(1, min(5, int(args.get("importance") or 4)))
+            except Exception:
+                importance = 4
+            await events.emit(conv_id, "tool_start", {
+                "tool": "memory", "icon": "brain", "status": "Saving memory...",
+            })
+            ws = None
+            if scope == "workspace":
+                try:
+                    ws = await db.get_workspace_for_conversation(conv_id)
+                except Exception:
+                    ws = None
+                if not ws or not int(ws.get("memory_enabled") or 0):
+                    ws = None  # no memory-enabled workspace — fall back to global
+            try:
+                if ws:
+                    existing = await db.list_workspace_memories(ws["id"], status="all")
+                else:
+                    existing = await db.list_global_memories(status="all")
+                norm = content.lower()
+                dup = next((m for m in existing
+                            if re.sub(r"\s+", " ", (m.get("content") or "").strip().lower()) == norm), None)
+                where = f"workspace \"{ws.get('name') or ws['id']}\" memory" if ws else "HyprChat memory"
+                if dup:
+                    if (dup.get("status") or "") != "accepted":
+                        if ws:
+                            await db.update_workspace_memory(dup["id"], ws["id"], status="accepted")
+                        else:
+                            await db.update_global_memory(dup["id"], status="accepted")
+                        await events.emit(conv_id, "tool_end", {
+                            "tool": "memory", "icon": "brain", "status": "Existing memory activated",
+                        })
+                        return f"That was already suggested — now saved and active in {where}: \"{content}\""
+                    await events.emit(conv_id, "tool_end", {
+                        "tool": "memory", "icon": "brain", "status": "Already remembered",
+                    })
+                    return f"Already remembered in {where}: \"{content}\""
+                if ws:
+                    mem = await db.create_workspace_memory(
+                        ws["id"], content=content, memory_type=mem_type, status="accepted",
+                        importance=importance, source_conv_id=conv_id,
+                        source_conversation_id=conv_id, confidence=1,
+                        metadata={"suggested_by": "save_memory_tool"},
+                    )
+                else:
+                    mem = await db.create_global_memory(
+                        content=content, memory_type=mem_type, status="accepted",
+                        importance=importance, source_conv_id=conv_id,
+                        source_conversation_id=conv_id, confidence=1,
+                        metadata={"suggested_by": "save_memory_tool"},
+                    )
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "memory", "icon": "brain", "status": f"Saved to {where}",
+                })
+                return f"Saved to {where}: \"{content}\". It will be recalled in future memory-enabled chats."
+            except Exception as e:
+                await events.emit(conv_id, "tool_error", {
+                    "tool": "memory", "icon": "brain", "status": f"Save failed: {e}",
+                })
+                return f"ERROR: could not save memory: {e}"
+
         elif name == "fetch_url":
             url = args.get("url", "").strip()
             # Auto-prepend https:// if no protocol present
@@ -2837,10 +2944,31 @@ async def exec_tool(
             gi_prompt = (args.get("prompt") or "").strip()
             if not gi_prompt:
                 return "ERROR: generate_image requires a prompt describing the image."
+            # Optional LLM pass expanding terse prompts into full SDXL prompts.
+            # Non-persona only: persona prompts are composed by persona_images.
+            # Fail-open — a slow or dead helper model never blocks the render.
+            gi_auto_enhanced = False
+            if config.IMAGE_CHAT_AUTO_ENHANCE and not (persona_context or {}).get("persona_id"):
+                await events.emit(conv_id, "tool_progress", {
+                    "tool": "generate_image", "icon": "image",
+                    "status": "Enhancing prompt",
+                })
+                try:
+                    _enh = await asyncio.wait_for(
+                        image_prompt_enhancer.enhance_prompt(None, gi_prompt, timeout=20),
+                        timeout=25)
+                except Exception:
+                    _enh = None
+                if _enh and _enh[0]:
+                    gi_auto_enhanced = True
+                    args = {**args, "prompt": _enh[0],
+                            "negative_prompt": _join_prompt_parts(
+                                _clean_text(args.get("negative_prompt")), _enh[1])}
             # Settings-driven defaults plus persona-only local profile routing.
             # The profile file lives in ignored data/ and only selects known
             # saved workflows/checkpoints/LoRAs; the model never invents graphs.
             gi_recipe = _resolve_chat_image_recipe(args, persona_context=persona_context)
+            gi_recipe["auto_enhanced"] = gi_auto_enhanced
             gi_detail = _image_recipe_event_detail(gi_recipe)
             gi_detail_json = json.dumps(gi_detail, ensure_ascii=True)
             await events.emit(conv_id, "tool_start", {
@@ -2976,6 +3104,7 @@ async def exec_tool(
                             "vae": "[profile]" if gi_recipe["profile_active"] and gi_vae else gi_vae,
                             "workflow": "[profile]" if gi_recipe["profile_active"] and gi_recipe["workflow_name"] else "",
                             "persona_image_profile": gi_recipe["profile_metadata"],
+                            "auto_enhanced": gi_auto_enhanced,
                             "size_bytes": file_meta["size_bytes"],
                             "sha256": file_meta["sha256"],
                         },

@@ -119,7 +119,13 @@ function ArtifactPreviewBlock({preview,t,font}){
   return <pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:11,color:t.dim,fontFamily:font,lineHeight:1.55}}>{preview.content||preview.message||"No preview available."}</pre>;
 }
 
-function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify,confirmAction}){
+// SDXL bucket presets shared by the aspect-ratio select, Reuse, and workflow prefill
+const IMG_SIZE_PRESETS=["1024x1024","1216x832","832x1216","1152x896","896x1152","1344x768","768x1344"];
+// Fallbacks when /api/images/checkpoints predates the samplers/schedulers payload
+const IMG_FALLBACK_SAMPLERS=["euler","euler_ancestral","dpmpp_2m","dpmpp_2m_sde","dpmpp_3m_sde","dpmpp_sde","heun","ddim","uni_pc","lcm"];
+const IMG_FALLBACK_SCHEDULERS=["normal","karras","sgm_uniform","exponential","simple","beta"];
+
+function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,inputS,fieldLabelS,sliderField}){
   const [prompt,setPrompt]=useState("");
   const [negPrompt,setNegPrompt]=useState("");
   const [size,setSize]=useState("1024x1024");
@@ -128,14 +134,19 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify,confir
   const [steps,setSteps]=useState(25);
   const [cfg,setCfg]=useState(7);
   const [seed,setSeed]=useState("");
+  const [seedLock,setSeedLock]=useState(()=>{try{return localStorage.getItem("hc-img-seed-lock")==="1";}catch{return false;}});
   const [count,setCount]=useState(1);
   const [sampler,setSampler]=useState("euler");
   const [scheduler,setScheduler]=useState("normal");
+  const [samplers,setSamplers]=useState(IMG_FALLBACK_SAMPLERS);
+  const [schedulers,setSchedulers]=useState(IMG_FALLBACK_SCHEDULERS);
   const [modelSampling,setModelSampling]=useState("");
   const [checkpoints,setCheckpoints]=useState([]);
   const [checkpoint,setCheckpoint]=useState("");
   const [vaes,setVaes]=useState([]);
   const [vae,setVae]=useState("");
+  const [loraList,setLoraList]=useState([]);
+  const [selLoras,setSelLoras]=useState([]); // [{name, strength}]
   const [ckptSettings,setCkptSettings]=useState({});
   const [workflows,setWorkflows]=useState([]);
   const [workflow,setWorkflow]=useState("");
@@ -154,6 +165,7 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify,confir
   const wfUploadRef=useRef(null);
   const thumbsRef=useRef(null);
   const toggleAdvanced=()=>setShowAdvanced(p=>{const v=!p;try{localStorage.setItem("hc-img-adv",v?"1":"0");}catch{}return v;});
+  const toggleSeedLock=()=>setSeedLock(p=>{const v=!p;try{localStorage.setItem("hc-img-seed-lock",v?"1":"0");}catch{}return v;});
   const stopPoll=()=>{if(pollRef.current){clearInterval(pollRef.current);pollRef.current=null;}};
   const loadWorkflows=()=>fetch(`${API}/api/images/workflows`).then(r=>r.ok?r.json():{workflows:[]}).then(d=>setWorkflows(d.workflows||[])).catch(()=>{});
   const loadGallery=()=>{
@@ -207,9 +219,12 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify,confir
     setVae(meta.vae&&vaes.includes(meta.vae)?meta.vae:"");
     if(meta.checkpoint&&checkpoints.includes(meta.checkpoint))setCheckpoint(meta.checkpoint);
     if(meta.workflow&&workflows.some(w=>w.name===meta.workflow))setWorkflow(meta.workflow);else setWorkflow("");
+    setSelLoras(Array.isArray(meta.loras)
+      ?meta.loras.filter(l=>l&&l.name&&loraList.includes(l.name)).map(l=>({name:l.name,strength:l.strength_model??l.strength??1}))
+      :[]);
     if(meta.width&&meta.height){
       const preset=`${meta.width}x${meta.height}`;
-      if(["1024x1024","1216x832","832x1216"].includes(preset))setSize(preset);
+      if(IMG_SIZE_PRESETS.includes(preset))setSize(preset);
       else{setSize("custom");setCustomW(meta.width);setCustomH(meta.height);}
     }
     if(meta.seed!=null)setSeed(String(meta.seed));
@@ -312,6 +327,9 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify,confir
     fetch(`${API}/api/images/checkpoints`).then(r=>r.ok?r.json():{checkpoints:[]}).then(d=>{
       setCheckpoints(d.checkpoints||[]);
       setVaes(d.vaes||[]);
+      setLoraList(Array.isArray(d.loras)?d.loras:[]);
+      if(Array.isArray(d.samplers)&&d.samplers.length)setSamplers(d.samplers);
+      if(Array.isArray(d.schedulers)&&d.schedulers.length)setSchedulers(d.schedulers);
       setCkptSettings(d.settings||{});
       setCheckpoint(c=>{
         const initial=c||d.default||"";
@@ -365,7 +383,7 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify,confir
     if(meta.checkpoint&&checkpoints.includes(meta.checkpoint))setCheckpoint(meta.checkpoint);
     if(meta.width&&meta.height){
       const preset=`${meta.width}x${meta.height}`;
-      if(["1024x1024","1216x832","832x1216"].includes(preset))setSize(preset);
+      if(IMG_SIZE_PRESETS.includes(preset))setSize(preset);
       else{setSize("custom");setCustomW(meta.width);setCustomH(meta.height);}
     }
     setModelSampling(""); // built-in sampling nodes (if any) come with the workflow itself
@@ -401,6 +419,7 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify,confir
     setError("");
     const [w,h]=dims();
     const body={prompt:prompt.trim(),negative_prompt:negPrompt.trim(),width:w,height:h,steps:Number(steps)||25,cfg:Number(cfg)||7,count:Number(count)||1,checkpoint,sampler,scheduler,model_sampling:modelSampling,vae,workflow};
+    if(selLoras.length)body.loras=selLoras.map(l=>({name:l.name,strength:Number(l.strength)||1}));
     if(seed!=="")body.seed=parseInt(seed)||0;
     let d;
     try{
@@ -409,6 +428,9 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify,confir
       if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
     }catch(e){setError(String(e.message||e));return;}
     const jid=d.job_id;
+    // Seed lock: hold onto the server-chosen seed so the next runs iterate on
+    // the same composition without copy-pasting from the gallery.
+    if(seedLock&&seed===""&&d.params?.seed!=null)setSeed(String(d.params.seed));
     setJob({id:jid,started:Date.now(),status:"queued",params:d.params});
     pollRef.current=setInterval(async()=>{
       try{
@@ -443,9 +465,10 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify,confir
       if(d.attachment)onUseInChat&&onUseInChat(d.attachment);
     }catch(e){notify&&notify({type:"error",text:"Use in chat failed",detail:String(e.message||e)});}
   };
-  const inputS={width:"100%",background:`${t.bgDeep}E6`,border:`1px solid ${t.brd}55`,color:t.text,padding:"9px 12px",borderRadius:7,fontFamily:font,fontSize:13,outline:"none",boxSizing:"border-box"};
+  // Shared settings design-system styles arrive as props from App (same
+  // pattern as PromptLibraryPanel/AnalyticsPanel) so inputs match app-wide.
   const smallNum={...inputS,width:"100%",padding:"7px 8px",fontSize:12};
-  const labelS={fontSize:10,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.55,display:"flex",flexDirection:"column",gap:5,minWidth:0};
+  const labelS=fieldLabelS;
   const railSectionS={padding:"0 0 14px",borderBottom:`1px solid ${t.brd}24`,display:"flex",flexDirection:"column",gap:10};
   const sectionHead=(label,Icon,extra=null)=><div style={{display:"flex",alignItems:"center",gap:7,minHeight:22}}>
     {Icon&&<span style={{display:"flex",color:t.acc}}><Icon/></span>}
@@ -515,6 +538,19 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify,confir
             </button>
           </div>:<div style={{fontSize:11,color:t.mut}}>No checkpoints reported.</div>}
         </>)}
+        {loraList.length>0&&section("LoRAs",IC.Layers,<>
+          <label style={labelS}>Add LoRA
+            <select value="" onChange={e=>{const n=e.target.value;if(n)setSelLoras(p=>p.some(l=>l.name===n)?p:[...p,{name:n,strength:1}]);}} style={{...inputS,padding:"8px 10px",fontSize:12}}>
+              <option value="">{selLoras.length?"Add another…":"None — pick to apply"}</option>
+              {loraList.filter(n=>!selLoras.some(l=>l.name===n)).map(n=><option key={n} value={n}>{n.replace(/\.(safetensors|pt|ckpt)$/i,"")}</option>)}
+            </select>
+          </label>
+          {selLoras.map(l=><div key={l.name} style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 74px auto",gap:8,alignItems:"center"}}>
+            <span title={l.name} style={{fontSize:11,color:t.dim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.name.replace(/\.(safetensors|pt|ckpt)$/i,"")}</span>
+            <input type="number" min={-2} max={2} step={0.05} value={l.strength} title="LoRA strength" onChange={e=>{const v=e.target.value;setSelLoras(p=>p.map(x=>x.name===l.name?{...x,strength:v}:x));}} style={smallNum}/>
+            <button onClick={()=>setSelLoras(p=>p.filter(x=>x.name!==l.name))} title="Remove LoRA" style={smallBtn(t.err)}>✕</button>
+          </div>)}
+        </>)}
         {section("Canvas",IC.Image,<>
           <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 74px",gap:8,alignItems:"end"}}>
             <label style={labelS}>Aspect ratio
@@ -522,11 +558,15 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify,confir
                 <option value="1024x1024">Square · 1024 x 1024</option>
                 <option value="1216x832">Landscape · 1216 x 832</option>
                 <option value="832x1216">Portrait · 832 x 1216</option>
+                <option value="1152x896">Landscape · 1152 x 896</option>
+                <option value="896x1152">Portrait · 896 x 1152</option>
+                <option value="1344x768">Wide · 1344 x 768</option>
+                <option value="768x1344">Tall · 768 x 1344</option>
                 <option value="custom">Custom</option>
               </select>
             </label>
             <label style={labelS}>Count
-              <select value={count} onChange={e=>setCount(e.target.value)} style={{...inputS,padding:"8px 10px",fontSize:12}}>{[1,2,3,4].map(n=><option key={n} value={n}>{n}</option>)}</select>
+              <select value={count} onChange={e=>setCount(Number(e.target.value)||1)} style={{...inputS,padding:"8px 10px",fontSize:12}}>{[1,2,3,4].map(n=><option key={n} value={n}>{n}</option>)}</select>
             </label>
           </div>
           {size==="custom"&&<div style={grid2}>
@@ -553,20 +593,24 @@ function ImageStudioPanel({t,font,configured,onPreview,onUseInChat,notify,confir
             <IC.Settings/><span style={{fontSize:10,fontWeight:900,letterSpacing:.9,textTransform:"uppercase"}}>Advanced Sampling</span><div style={{flex:1}}/><span style={{display:"flex",transform:showAdvanced?"rotate(0deg)":"rotate(-90deg)",transition:"transform .15s"}}><IC.ChevDown/></span>
           </button>
           {showAdvanced&&<div style={{display:"flex",flexDirection:"column",gap:10}}>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(0,1fr))",gap:8,alignItems:"end"}}>
-              <label style={labelS}>Steps<input type="number" min={1} max={60} value={steps} onChange={e=>setSteps(e.target.value)} style={smallNum}/></label>
-              <label style={labelS}>CFG<input type="number" min={1} max={20} step={0.5} value={cfg} onChange={e=>setCfg(e.target.value)} style={smallNum}/></label>
+            <div style={grid2}>
+              {sliderField({label:"Steps",value:Number(steps)||25,set:v=>setSteps(Math.round(v)),min:1,max:60,step:1,color:t.acc})}
+              {sliderField({label:"CFG",value:Number(cfg)||7,set:setCfg,min:1,max:20,step:0.5,color:t.acc2})}
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto auto",gap:8,alignItems:"end"}}>
               <label style={labelS}>Seed<input type="text" placeholder="random" value={seed} onChange={e=>setSeed(e.target.value.replace(/[^\d]/g,""))} style={smallNum}/></label>
+              <button onClick={()=>setSeed(String(Math.floor(Math.random()*4294967296)))} title="Randomize seed" style={railBtn(t.acc2)}>🎲</button>
+              <button onClick={toggleSeedLock} title={seedLock?"Seed lock on — the next generation's seed is kept for reuse":"Seed lock off — every generation gets a fresh random seed"} style={railBtn(seedLock?t.warm:t.f1,{solid:seedLock})}>{seedLock?"🔒":"🔓"}</button>
             </div>
             <div style={grid2}>
               <label style={labelS}>Sampler
                 <select value={sampler} onChange={e=>setSampler(e.target.value)} style={{...inputS,padding:"7px 8px",fontSize:12}}>
-                  {["euler","euler_ancestral","dpmpp_2m","dpmpp_2m_sde","dpmpp_3m_sde","dpmpp_sde","heun","ddim","uni_pc","lcm"].map(s2=><option key={s2} value={s2}>{s2}</option>)}
+                  {samplers.map(s2=><option key={s2} value={s2}>{s2}</option>)}
                 </select>
               </label>
               <label style={labelS}>Scheduler
                 <select value={scheduler} onChange={e=>setScheduler(e.target.value)} style={{...inputS,padding:"7px 8px",fontSize:12}}>
-                  {["normal","karras","sgm_uniform","exponential","simple","beta"].map(s2=><option key={s2} value={s2}>{s2}</option>)}
+                  {schedulers.map(s2=><option key={s2} value={s2}>{s2}</option>)}
                 </select>
               </label>
             </div>

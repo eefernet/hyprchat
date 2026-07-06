@@ -225,6 +225,7 @@ function HyprChat(){
   const [imgChatPrefix,setImgChatPrefix]=useState("");
   const [imgChatNeg,setImgChatNeg]=useState("");
   const [imgChatComposeModel,setImgChatComposeModel]=useState(()=>lsGet("hc-img-chat-compose",""));
+  const [imgChatAutoEnhance,setImgChatAutoEnhance]=useState(()=>lsGet("hc-img-chat-auto-enhance","")==="true");
   const [imgChatLists,setImgChatLists]=useState(null); // {checkpoints,vaes,settings} lazy-fetched for the dropdowns
   const [mdlPrefix,setMdlPrefix]=useState(""); // per-model prompt prefix being edited for imgChatCkpt
   const [mdlNeg,setMdlNeg]=useState("");
@@ -398,6 +399,7 @@ function HyprChat(){
   useEffect(()=>{persistServerSetting("hc-img-chat-vae","image_chat_vae",imgChatVae);},[imgChatVae]);
   useEffect(()=>{persistServerSetting("hc-img-chat-workflow","image_chat_workflow",imgChatWorkflow);},[imgChatWorkflow]);
   useEffect(()=>{persistServerSetting("hc-img-chat-compose","image_chat_compose_model",imgChatComposeModel);},[imgChatComposeModel]);
+  useEffect(()=>{persistServerSetting("hc-img-chat-auto-enhance","image_chat_auto_enhance",imgChatAutoEnhance,String(imgChatAutoEnhance));},[imgChatAutoEnhance]);
   // Per-model prompt fields track the selected default image model
   useEffect(()=>{
     const s=(imgChatCkpt&&imgChatLists?.settings?.[imgChatCkpt])||{};
@@ -1356,6 +1358,7 @@ function HyprChat(){
       if(d.image_chat_prompt_prefix!=null)setImgChatPrefix(d.image_chat_prompt_prefix);
       if(d.image_chat_negative!=null)setImgChatNeg(d.image_chat_negative);
       if(d.image_chat_compose_model!=null)hydrateServerSetting("image_chat_compose_model",setImgChatComposeModel,d.image_chat_compose_model,imgChatComposeModel);
+      if(d.image_chat_auto_enhance!=null)hydrateServerSetting("image_chat_auto_enhance",setImgChatAutoEnhance,d.image_chat_auto_enhance,imgChatAutoEnhance);
       if(d.model_hardware_profile)setHyprfitProfile(d.model_hardware_profile);
       settingsLoadedRef.current=true;
     }).catch(()=>{settingsLoadedRef.current=true;});
@@ -3697,7 +3700,7 @@ function HyprChat(){
         // to NYT/Wikipedia/etc), hotlink bypass (proxy sends domain-matched Referer), and
         // mixed-content fix. /api/img-proxy URLs and same-origin /api/ URLs pass through.
         const finalSrc = proxiedImageUrl(src);
-        return <img key={k} src={finalSrc} alt={alt||""} referrerPolicy="no-referrer" loading="lazy" style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`}} onError={e=>e.target.style.display="none"}/>;}
+        return <img key={k} src={finalSrc} alt={alt||""} referrerPolicy="no-referrer" loading="lazy" onClick={()=>{const base=decodeURIComponent(src.split("?")[0].split("/").pop()||"");openPreview(base||alt||"image",src);}} title="Click to preview" style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`,cursor:"zoom-in"}} onError={e=>e.target.style.display="none"}/>;}
       if(s.startsWith("`")&&s.endsWith("`")&&s.length>1)
         return <code key={k} style={{background:`${t.surface}CC`,padding:"1px 5px",borderRadius:3,fontFamily:font,fontSize:"0.88em",color:t.warm}}>{s.slice(1,-1)}</code>;
       if(s.charCodeAt(0)===0xE010){
@@ -4095,7 +4098,7 @@ function HyprChat(){
     </div>);
   const sliderField=({label,value,set,min,max,step,display,minLabel,maxLabel,color=t.acc,hint})=>(<div>
     <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>{label}: <span style={{color,fontFamily:"monospace"}}>{display!==undefined?display:value}</span></label>
-    <input type="range" min={min} max={max} step={step} value={value} onChange={e=>set(parseInt(e.target.value))} style={{width:"100%",accentColor:color}}/>
+    <input type="range" min={min} max={max} step={step} value={value} onChange={e=>set(parseFloat(e.target.value))} style={{width:"100%",accentColor:color}}/>
     <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>{minLabel??min}</span><span>{maxLabel??max}</span></div>
     {hint?<div style={{fontSize:9,color:t.mut,marginTop:4,lineHeight:1.5}}>{hint}</div>:null}
   </div>);
@@ -4601,7 +4604,7 @@ function HyprChat(){
             notify={notify}
             onPersonaCreated={mc=>{const norm={...mc,parameters:normalizeProfileParams(mc)};setMcs(p=>[...p,norm]);setProfileTab(getProfileType(norm)==="persona"?"personas":"agents");setPanel("personas");setEditMc(mc.id);}}/>
       :panel==="artifacts"?<ArtifactStudioPanel t={t} font={font} workspaces={workspaces} kbs={kbs} onPreview={openPreview} onOpenConv={id=>loadConversation(id)} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Artifact added to composer",duration:1800});}}} focusId={artifactFocusId} onFocusConsumed={()=>setArtifactFocusId(null)} notify={notify}/>
-      :panel==="images"?<ImageStudioPanel t={t} font={font} configured={!!comfyuiUrl} onPreview={openPreview} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Image added to composer",duration:1800});}}} notify={notify} confirmAction={confirmAction}/>
+      :panel==="images"?<ImageStudioPanel t={t} font={font} configured={!!comfyuiUrl} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Image added to composer",duration:1800});}}} notify={notify} confirmAction={confirmAction} inputS={inputS} fieldLabelS={secFieldLabelS} sliderField={sliderField}/>
       :panel==="memory"?<MemoryProfilePanel t={t} API={API} font={font} notify={notify} onOpenConv={id=>loadConversation(id)} models={models} wsModel={wsModel}/>
       :panel==="kb"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     {panelHeader(<IC.Database/>,"Knowledge Bases",<button onClick={createKb} style={btnS(t.acc)}><IC.Plus/> New KB</button>)}
@@ -6584,8 +6587,8 @@ function HyprChat(){
           {!comfyuiUrl
             ?<div style={{fontSize:11,color:t.mut}}>ComfyUI is not configured — set its URL in Settings → Connections first.</div>
             :(()=>{
-              const sel={background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"8px 10px",borderRadius:7,fontFamily:font,fontSize:12,outline:"none",boxSizing:"border-box"};
-              const inp={...sel,width:"100%"};
+              const sel={...inputS,padding:"8px 10px",fontSize:12};
+              const inp=sel;
               const cks=imgChatLists?.checkpoints||[];
               const vaeList=imgChatLists?.vaes||[];
               const hasPreset=!!(imgChatLists?.settings?.[imgChatCkpt]?.user_override);
@@ -6609,6 +6612,10 @@ function HyprChat(){
                       <option value="1024x1024">Square — 1024 × 1024</option>
                       <option value="1216x832">Landscape — 1216 × 832</option>
                       <option value="832x1216">Portrait — 832 × 1216</option>
+                      <option value="1152x896">Landscape — 1152 × 896</option>
+                      <option value="896x1152">Portrait — 896 × 1152</option>
+                      <option value="1344x768">Wide — 1344 × 768</option>
+                      <option value="768x1344">Tall — 768 × 1344</option>
                     </select>
                       </label>
                       <label style={secFieldLabelS}>VAE
@@ -6645,11 +6652,11 @@ function HyprChat(){
                 </>:<>
                   <div>
                     <div style={{fontSize:10,color:t.mut,marginBottom:5}}>Default prompt (global fallback)</div>
-                    <input value={imgChatPrefix} onChange={e=>setImgChatPrefix(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-prefix","image_chat_prompt_prefix",imgChatPrefix)} placeholder="style/quality tags prepended to every chat image" style={inp}/>
+                    <input value={imgChatPrefix} onChange={e=>setImgChatPrefix(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-prefix","image_chat_prompt_prefix",imgChatPrefix)} placeholder="empty = standard quality tags (masterpiece, best quality, …)" style={inp}/>
                   </div>
                   <div>
                     <div style={{fontSize:10,color:t.mut,marginBottom:5}}>Default negative prompt (global fallback)</div>
-                    <input value={imgChatNeg} onChange={e=>setImgChatNeg(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-neg","image_chat_negative",imgChatNeg)} placeholder="things to avoid in every chat image" style={inp}/>
+                    <input value={imgChatNeg} onChange={e=>setImgChatNeg(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-neg","image_chat_negative",imgChatNeg)} placeholder="empty = standard negatives (lowres, bad anatomy, watermark, …)" style={inp}/>
                   </div>
                 </>}
                     <div style={secHintS}>Text fields save when you click away. Pony-family models get score-tag prompts automatically unless overridden here.</div>
@@ -6661,7 +6668,8 @@ function HyprChat(){
                       <div style={{fontSize:9,color:t.mut}}>persona photos + enhance</div>
                     </div>
                   {modelField({icon:"📷",value:imgChatComposeModel,set:setImgChatComposeModel,inheritTitle:"Same as the conversation's chat model",inheritDesc:"Click to pick a dedicated model"})}
-                  <div style={secHintS}>Empty uses the chat's own model, which is usually best for matching conversation tone and content rating.</div>
+                  {toggleField("Auto-enhance chat prompts",imgChatAutoEnhance,()=>setImgChatAutoEnhance(v=>!v),imgChatAutoEnhance?"the prompt model expands every chat image prompt (adds up to ~20s per image)":"off — raw prompt + default quality tags")}
+                  <div style={secHintS}>Empty uses the chat's own model, which is usually best for matching conversation tone and content rating. Auto-enhance applies to regular chats only — persona photos already compose their own prompts.</div>
                   </section>
               </div>;
             })()}

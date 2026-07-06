@@ -2893,6 +2893,24 @@ async def count_artifacts_with_storage_path(storage_path: str, exclude_id: str =
         await db.close()
 
 
+async def find_artifact_by_storage_path(storage_path: str) -> dict | None:
+    """Newest artifact row referencing this file. Cross-user like
+    count_artifacts_with_storage_path — the post-restart image-job dedupe must
+    fire regardless of which session's poll lands first."""
+    if not storage_path:
+        return None
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT * FROM artifacts WHERE storage_path=? ORDER BY created_at DESC LIMIT 1",
+            (storage_path,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        await db.close()
+
+
 async def scrub_image_traces(filenames: list[str]) -> int:
     """Rewrite chat messages so purged generated images leave no trace.
 

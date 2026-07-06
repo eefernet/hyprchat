@@ -25,16 +25,17 @@ _ADULT_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 
+_MIRROR_SELFIE_RE = re.compile(r"\bmirror\s+(?:selfie|shot|photo|pic|picture)\b", re.I)
+
 _INTENT_PATTERNS = (
     ("another", re.compile(r"\b(?:another|one\s+more|again|new\s+(?:one|photo|pic|picture)|different\s+(?:one|photo|pic|picture))\b", re.I)),
     ("consistency", re.compile(r"\b(?:same\s+face|consistent|identity|reference|ref\s+image|faceid|ipadapter|ip-adapter|keep\s+(?:her|his|their|your)\s+look)\b", re.I)),
-    ("mirror_selfie", re.compile(r"\bmirror\s+(?:selfie|shot|photo|pic|picture)\b", re.I)),
+    ("mirror_selfie", _MIRROR_SELFIE_RE),
     ("selfie", re.compile(r"\b(?:selfie|front\s+camera)\b", re.I)),
     ("full_body", re.compile(r"\b(?:full\s+body|head\s+to\s+toe|standing\s+pose|whole\s+body)\b", re.I)),
     ("outfit", re.compile(r"\b(?:outfit|clothes|clothing|wearing|dressed|wardrobe|costume|uniform|fit\s+check)\b", re.I)),
     ("action", re.compile(r"\b(?:action|doing|running|walking|dancing|fighting|working|cooking|driving|playing|holding|sitting|kneeling|crouching|lying|laying|reclining|arms?\s+up)\b", re.I)),
     ("location", re.compile(r"\b(?:at|in|inside|outside|near|by|on)\s+(?:a\s+|the\s+)?(?:cafe|bar|bed|bedroom|kitchen|street|office|studio|forest|beach|city|room|car|park|school|library|restaurant|club|pool|gym|shop|store)\b", re.I)),
-    ("identity", re.compile(r"\b(?:same\s+face|consistent|identity|reference|ref\s+image|faceid|ipadapter|ip-adapter)\b", re.I)),
     ("pose", re.compile(r"\b(?:pose|posing|posture|standing|sitting|kneeling|crouching|lying|laying|reclining|facing\s+away|turned\s+away|back\s+to\s+(?:the\s+)?camera|from\s+behind|back\s+view|rear\s+view|profile\s+view|arms?\s+up)\b", re.I)),
     ("portrait", re.compile(r"\b(?:portrait|headshot|face\s+shot|close[\s-]?up)\b", re.I)),
     ("realism", re.compile(r"\b(?:realistic|photoreal|photo[\s-]?real|dslr|cinematic|real\s+photo|lifelike)\b", re.I)),
@@ -52,7 +53,6 @@ _INTENT_PROFILE_KEYS = {
     "outfit": ["outfit_photo", "full_body_photo", "pose_photo", "sfw_photo"],
     "action": ["action_photo", "pose_photo", "control_photo", "sfw_photo"],
     "location": ["location_photo", "environment_photo", "portrait_photo", "sfw_photo"],
-    "identity": ["identity_photo", "ipadapter_photo", "reference_photo", "persona_consistency_photo"],
     "pose": ["pose_photo", "control_photo", "controlnet_photo"],
     "portrait": ["portrait_photo", "closeup_photo", "selfie_photo"],
     "realism": ["realism_photo", "photo_realism", "photoreal_photo"],
@@ -102,7 +102,6 @@ _REQUEST_ONLY_STOPWORDS = _TOKEN_STOPWORDS | {
     "setting", "one", "more", "different", "variation", "variant", "selfie",
 }
 
-_MIRROR_SELFIE_RE = re.compile(r"\bmirror\s+(?:selfie|shot|photo|pic|picture)\b", re.I)
 _VISIBLE_PHONE_RE = re.compile(
     r"\b(?:holding\s+(?:a\s+)?(?:smart)?phone|visible\s+(?:smart)?phone|"
     r"(?:smart)?phone\s+in\s+(?:her|his|their|the)\s+hand|phone\s+prop)\b",
