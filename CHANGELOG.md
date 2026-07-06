@@ -1,82 +1,23 @@
 <details open>
-<summary>Alpha v17.5.1 — July 6, 2026</summary>
-
-> Persona photos get smarter: the roleplay model's own scene-aware prompt is
-> finally used (instead of being silently rebuilt), "keep your look" reuses
-> the previous photo's seed for consistent characters, and adult words in a
-> persona's appearance no longer flip innocent requests into adult routing.
-
-## Persona Chat Photos
-- The model's `generate_image` prompt now flows through the structured validation path (leakage scrub, request-fidelity check, framing cleanup) and is used when it validates — persona photos finally reflect the scene the roleplay described instead of a deterministic `appearance + request` rebuild. The deterministic composer remains the fallback, and artifact metadata `prompt_fallback` now actually distinguishes the two.
-- If the model's prompt drops the persona's described look, the appearance is folded back in automatically (character consistency guard).
-- SFW-rated personas (G/PG/PG-13) facing an adult-cue request always use the conservative deterministic rebuild — model-authored wording is never trusted for that combination.
-- **Continuity seed**: "another photo, keep your look / same face" requests reuse the most recent photo's seed (`continuity_seed` in artifact metadata) so the character stays recognizable; "another/different one" keeps a fresh seed. Explicit tool-arg seeds always win.
-- Adult-cue detection is appearance-aware: adult words in the persona's appearance text (echoed into every tool prompt by design) no longer route innocent requests to adult profiles or replace them with a generic safe-for-work prompt — only the user's own words (or genuinely novel prompt cues) count.
-- Profile selection now reads the raw model prompt instead of the composed one (which always started with the appearance).
-- The selfie-rescue only fires on explicit photo-of-you requests again — "make me an image of a sunset" answered in prose no longer force-generates a persona selfie.
-- Cleanup: persona rating normalization is shared with the image pipeline (one source of truth), and the rescue composer receives the normalized rating key directly instead of prefix-matching guidance text.
-
-</details>
-
----
-
-<details>
-<summary>Alpha v17.5.0 — July 5, 2026</summary>
-
-> Image generation levels up: chat images now look good with any prompt
-> (default quality tags + an optional LLM auto-enhancer), Image Studio gets
-> LoRAs, more aspect ratios, seed lock, and app-matched inputs, and sparse
-> API calls stop silently sampling flow/vpred models with the wrong objective.
-
-## Chat Image Quality
-- Chat `generate_image` prompts finally match what the system prompt promised: when no per-model preset or global prefix is configured, the server now applies standard quality tags and a baseline negative prompt automatically. A bare "cute doggo" no longer hits SDXL raw with an empty negative.
-- New **Auto-enhance chat prompts** toggle (Settings → Model & Generation → Chat Image Generation): the prompt model expands every non-persona chat image prompt into a detailed SDXL prompt before rendering (bounded at ~20s, fails open to the raw prompt). The tool pill shows a "✨ prompt auto-enhanced" chip and the final prompt.
-- Persona photos are untouched — persona prompt composition, profiles, and rating gates keep owning that path.
-- Joined negative prompts are deduplicated tag-by-tag, so baseline + preset + enhancer tags never stack duplicates.
-
-## Image Studio
-- **LoRA picker**: apply up to 4 LoRAs with per-LoRA strength — the backend chain machinery existed but was persona-profile-only until now. Reuse restores an image's LoRA stack.
-- **Seed lock + randomize**: a 🎲 button fills a concrete random seed, and a lock keeps the server-chosen seed across runs so you can iterate on one composition.
-- Four more SDXL bucket aspect ratios (1152×896, 896×1152, 1344×768, 768×1344) in both Image Studio and the chat-image resolution setting.
-- Steps and CFG are now sliders with live value readouts, matching the rest of Settings; inputs use the shared app-wide styles instead of local copies.
-- Sampler/scheduler dropdowns are served from the backend allow-lists (adds dpm_2, dpm_2_ancestral, lms, dpmpp_2s_ancestral, ddim_uniform that the UI previously hid).
-
-## Reliability & API
-- `POST /api/images/generate` now falls back to the checkpoint's saved preset for omitted sampler/scheduler/model-type/steps/CFG — sparse API calls no longer silently sample a flow/vpred checkpoint with the wrong objective (solid-color/deep-fried output).
-- Image jobs that finish after a backend restart no longer create duplicate artifact rows, and their prompt/seed/settings are recovered from ComfyUI history instead of coming back empty.
-- Chat images are now clickable — they open the same preview pane as attachments (Image Studio already had its lightbox).
-- The prompt enhancer moved into a shared helper used by both the Studio Enhance button and the chat auto-enhance path; duplicate persona intent regexes were removed with no behavior change.
-
-</details>
-
----
-
-<details>
-<summary>Alpha v17.4.0 — July 5, 2026</summary>
-
-> Quick Search gets a hybrid brain: a small-LLM query planner now runs in
-> parallel with the instant deterministic search, queries stop getting
-> misclassified ("Taylor Swift" is no longer a coding question), and
-> off-topic results trigger automatic recovery rounds.
-
-## Quick Search
-- New hybrid query planner: every searched turn (balanced/quality modes) asks the workspace model to write standalone search queries — resolving pronouns and follow-ups from the conversation — in parallel with the deterministic first search wave. If the planner lands within its timeout, its queries join a second wave; if it's slow or returns garbage, the deterministic results ship unchanged. Speed mode and `QUICK_SEARCH_PLANNER=deterministic` skip it entirely.
-- Category detection now uses strong/weak signals instead of first-keyword-wins: bare ambiguous words like `swift`, `ruby`, `rust`, `spring`, `game`, `build`, or `level` no longer hijack a query into code or gaming bias on their own. A new sports guard routes real-world sports questions ("who won the celtics game last night") to news sources instead of game wikis.
-- Off-topic recovery now works in the default balanced mode: when results barely overlap the question, Quick Search first retries the raw user message for free, then spends one LLM refinement round — and if results are still off-topic, the model is warned in-context instead of being force-grounded on bad sources.
-- Embedding rerank (nomic-embed-text) is now on by default, semantically re-scoring results against the question and collapsing mirror articles; it degrades gracefully to heuristic ranking on any failure.
-- Smarter query construction: long questions keep their subject instead of being chopped at 12 words, "overview"/"sources" filler variants are gone, follow-up fusion uses a compact topic phrase (and can resolve topics the assistant introduced), and "last night"/"this month"/"right now" now count as freshness cues.
-- Page-text enrichment no longer throws away every fetched page when one slow site exceeds the deadline — completed fetches are kept.
-
-</details>
-
----
-
-<details>
 <summary>Alpha v17.3.2 — July 3, 2026</summary>
 
-> Deep Research gets a full-page report composer, Settings gets a unified
-> card-based redesign, animated backgrounds get glow, depth, and parallax,
-> and PDF exports stop cutting content at page breaks.
+> Combined polish release for persona photos, image generation, Quick Search,
+> Deep Research, Settings, animated backgrounds, and export reliability.
+
+## Persona Chat Photos
+- Persona photo prompts now use the model's validated scene-aware wording when safe, with deterministic composition as fallback.
+- "Keep your look" photo requests reuse the prior image seed for character continuity.
+- Adult routing now ignores adult words that only came from the persona appearance, and selfie rescue only fires on explicit photo-of-you requests.
+
+## Image Generation
+- Chat images now get default quality/negative prompts, plus optional LLM auto-enhancement for non-persona prompts.
+- Image Studio adds LoRAs, seed lock/randomize, more SDXL aspect ratios, slider-based steps/CFG, and backend-driven sampler lists.
+- Sparse image API calls fall back to checkpoint presets, restarted jobs avoid duplicate artifacts, and chat images open in preview.
+
+## Quick Search
+- Balanced/quality search now runs a small-LLM query planner alongside deterministic search, with speed mode still deterministic.
+- Category detection is less trigger-happy for ambiguous words, sports questions route better, and weak results trigger raw-query/refinement recovery.
+- Embedding rerank is on by default, follow-up/freshness handling is cleaner, and completed page fetches are kept even when one source times out.
 
 ## Deep Research
 - Starting a new report now opens a dedicated full-page composer — a large topic box up top with report, model, context, and sources settings organized into cards below — instead of cramming the form into the sidebar.
