@@ -12,6 +12,7 @@ export default function PromptLibraryPanel({
   editPrompt,
   setEditPrompt,
   setInp,
+  insertPrompt,
   setPanel,
 }){
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
@@ -55,7 +56,7 @@ export default function PromptLibraryPanel({
                 <div style={{fontSize:10,color:t.f1,marginTop:1,display:"flex",alignItems:"center",gap:4}}>{p.category||"General"}{p.is_system&&<span style={{fontSize:8,padding:"1px 5px",borderRadius:6,background:`${t.warm}18`,color:t.warm,fontWeight:600}}>System Prompt</span>}</div>
               </div>
               <div style={{display:"flex",gap:4,flexShrink:0}}>
-                <button onClick={()=>{setInp(p.content);setPanel("chat");}} style={{...btnS(t.f1),fontSize:9}}>⚡ Use</button>
+                <button onClick={()=>{setPanel("chat");if(insertPrompt)insertPrompt(p);else setInp(p.content);}} style={{...btnS(t.f1),fontSize:9}}>⚡ Use</button>
                 <button onClick={()=>setEditPrompt({id:p.id,title:p.title,content:p.content,category:p.category||"General",is_system:!!p.is_system})} style={btnS(t.mut)}><IC.Pencil/></button>
                 <button onClick={()=>setPrompts(ps=>ps.filter(x=>x.id!==p.id))} style={btnS(t.err)}><IC.Trash/></button>
               </div>

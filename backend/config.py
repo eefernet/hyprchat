@@ -171,6 +171,17 @@ QUICK_SEARCH_TRIAGE_MODEL = os.getenv("QUICK_SEARCH_TRIAGE_MODEL", "")
 # ============================================================
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen3.5:27b")
 WORKSPACE_MODEL = os.getenv("WORKSPACE_MODEL", "qwen3.5:4b")
+# "on" = summarize old turns via the Workspace Model when a chat approaches its
+# context window; "off" (default) = rely on client-side trimming only.
+CONTEXT_COMPACTION = os.getenv("CONTEXT_COMPACTION", "off")
+# Chat-history recall: global kill-switch for indexing/searching past turns.
+# ANDs with the per-conversation memory toggle — turns are only ever indexed
+# from conversations where the user enabled memory.
+HISTORY_RECALL = os.getenv("HISTORY_RECALL", "on")
+# Smart model routing: the "auto" pseudo-model classifies each request locally
+# (Workspace Model) and routes to the configured model per category. Category
+# values may be cloud-prefixed (explicit user config); the classifier never is.
+MODEL_ROUTING = {"enabled": False, "chat": "", "code": "", "reasoning": "", "long_context": ""}
 PLANNING_MODEL = os.getenv("PLANNING_MODEL", "qwen3.5:27b")
 CODER_MODEL = os.getenv("CODER_MODEL", "qwen2.5-coder:14b")
 CRITIC_MODEL = os.getenv("CRITIC_MODEL", "")  # Empty = falls back to PLANNING_MODEL. Independent code reviewer for generate_code output.

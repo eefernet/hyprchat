@@ -1,4 +1,5 @@
 """User/session and local reset routes."""
+import time
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -10,6 +11,49 @@ from .context import route_context
 
 
 router = APIRouter()
+
+# ── Login rate limiting (in-process, fixed window) ──
+# 5 failures per 300s per (user_id, client ip). Cleared on success. The map is
+# capped so a scanner cycling ids/ips can't grow it unbounded. Deliberately
+# NOT applied to validate_user_session (every request validates).
+_LOGIN_WINDOW_SECONDS = 300
+_LOGIN_MAX_FAILURES = 5
+_LOGIN_FAILURES_CAP = 512
+_LOGIN_FAILURES: dict[tuple[str, str], tuple[int, float]] = {}  # key -> (count, window_start)
+
+
+def _login_rate_key(user_id: str, request: Request) -> tuple[str, str]:
+    ip = (request.client.host if request.client else "") or "unknown"
+    return (str(user_id or ""), ip)
+
+
+def _login_rate_retry_after(key: tuple[str, str]) -> int | None:
+    """Seconds until the window resets when limited, else None."""
+    entry = _LOGIN_FAILURES.get(key)
+    if not entry:
+        return None
+    count, start = entry
+    now = time.time()
+    if now - start >= _LOGIN_WINDOW_SECONDS:
+        _LOGIN_FAILURES.pop(key, None)
+        return None
+    if count >= _LOGIN_MAX_FAILURES:
+        return max(1, int(_LOGIN_WINDOW_SECONDS - (now - start)))
+    return None
+
+
+def _login_rate_record_failure(key: tuple[str, str]) -> None:
+    now = time.time()
+    count, start = _LOGIN_FAILURES.get(key, (0, now))
+    if now - start >= _LOGIN_WINDOW_SECONDS:
+        count, start = 0, now
+    _LOGIN_FAILURES[key] = (count + 1, start)
+    if len(_LOGIN_FAILURES) > _LOGIN_FAILURES_CAP:
+        cutoff = now - _LOGIN_WINDOW_SECONDS
+        for stale in [k for k, (_c, s) in _LOGIN_FAILURES.items() if s < cutoff]:
+            _LOGIN_FAILURES.pop(stale, None)
+        while len(_LOGIN_FAILURES) > _LOGIN_FAILURES_CAP:
+            _LOGIN_FAILURES.pop(next(iter(_LOGIN_FAILURES)), None)
 
 
 class UserCreate(BaseModel):
@@ -30,6 +74,21 @@ class UserUpdate(BaseModel):
 
 async def _validated_request_user(request: Request) -> dict:
     return await route_context().validated_request_user(request)
+
+
+async def _require_profile_access(request: Request, target_id: str) -> dict:
+    """The caller must be the target profile itself, or Main (the admin)."""
+    current = await _validated_request_user(request)
+    if current["id"] != target_id and current["id"] != db.DEFAULT_USER_ID:
+        raise HTTPException(403, "You can only manage your own profile")
+    return current
+
+
+async def _require_main_user(request: Request) -> dict:
+    current = await _validated_request_user(request)
+    if current["id"] != db.DEFAULT_USER_ID:
+        raise HTTPException(403, "Only the Main profile can do this")
+    return current
 
 
 def _request_user_id(request: Request) -> str:
@@ -66,10 +125,19 @@ async def create_user_ep(req: UserCreate):
 
 
 @router.post("/api/users/login")
-async def login_user_ep(req: UserLogin):
+async def login_user_ep(req: UserLogin, request: Request):
+    key = _login_rate_key(req.user_id, request)
+    retry_after = _login_rate_retry_after(key)
+    if retry_after is not None:
+        raise HTTPException(
+            429, "Too many failed logins; try again later",
+            headers={"Retry-After": str(retry_after)},
+        )
     user, session_token = await db.login_user(req.user_id, req.password or "")
     if not user:
+        _login_rate_record_failure(key)
         raise HTTPException(401, "Invalid user or password")
+    _LOGIN_FAILURES.pop(key, None)
     return {"user": user, "session_token": session_token}
 
 
@@ -82,7 +150,7 @@ async def logout_user_ep(request: Request):
 
 @router.patch("/api/users/{user_id}")
 async def update_user_ep(user_id: str, req: UserUpdate, request: Request):
-    current = await _validated_request_user(request)
+    current = await _require_profile_access(request, user_id)
     user, _ = await db.update_user(
         user_id,
         name=req.name,
@@ -99,7 +167,7 @@ async def update_user_ep(user_id: str, req: UserUpdate, request: Request):
 
 @router.delete("/api/users/{user_id}")
 async def delete_user_ep(user_id: str, request: Request):
-    await _validated_request_user(request)
+    await _require_profile_access(request, user_id)
     if user_id == db.DEFAULT_USER_ID:
         raise HTTPException(400, "The Main user cannot be deleted")
     ok = await db.delete_user(user_id)
@@ -122,7 +190,7 @@ async def _user_ids(exclude_user_id: str | None = None) -> list[str]:
 
 @router.delete("/api/users")
 async def delete_other_users_ep(request: Request):
-    current = await _validated_request_user(request)
+    current = await _require_main_user(request)
     other_user_ids = await _user_ids(exclude_user_id=current["id"])
     deleted_files = await _delete_artifact_files_for_user_ids(other_user_ids)
     result = await db.delete_users_except(current["id"])
@@ -135,7 +203,7 @@ async def delete_other_users_ep(request: Request):
 
 @router.post("/api/danger-zone/fresh-install")
 async def fresh_install_reset_ep(request: Request):
-    await _validated_request_user(request)
+    await _require_main_user(request)
     user_ids = await _user_ids()
     deleted_files = await _delete_artifact_files_for_user_ids(user_ids)
     try:

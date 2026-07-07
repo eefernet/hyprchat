@@ -3,10 +3,11 @@ export const cloudModelProvider=(m)=>{
   const s=String(m||"");
   if(s.startsWith("openai:"))return"openai";
   if(s.startsWith("anthropic:"))return"anthropic";
+  if(s.startsWith("custom:"))return"custom";
   return"";
 };
 export const isCloudModelName=(m)=>!!cloudModelProvider(m);
-export const cloudModelName=(m)=>String(m||"").replace(/^(openai|anthropic):/,"");
+export const cloudModelName=(m)=>String(m||"").replace(/^(openai|anthropic|custom):/,"");
 export const modelInfo=(modelDetails,m)=>modelDetails?.[m]||{};
 export const modelDetail=(modelDetails,m)=>modelInfo(modelDetails,m).details||{};
 export const modelFamilies=(modelDetails,m)=>{

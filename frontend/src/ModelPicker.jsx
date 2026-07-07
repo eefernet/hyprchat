@@ -42,10 +42,11 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
     setOpen(p=>!p);
     if(willOpen&&onRefresh)onRefresh();
   };
-  const famIcon=(n)=>{const b=(n||"").toLowerCase();if(b.startsWith("openai:")||b==="openai")return"◎";if(b.startsWith("anthropic:")||b==="anthropic")return"✦";if(b.includes("qwen"))return"🌸";if(b.includes("llama"))return"🦙";if(b.includes("mistral")||b.includes("mixtral"))return"💨";if(b.includes("gemma"))return"💎";if(b.includes("phi"))return"φ";if(b.includes("deepseek"))return"🔍";if(b.includes("coder")||b.includes("codestral"))return"💻";if(b.includes("wizard"))return"🧙";if(b.includes("hf.co"))return"🤗";return"🤖";};
+  const famIcon=(n)=>{const b=(n||"").toLowerCase();if(b==="auto")return"🧭";if(b.startsWith("openai:")||b==="openai")return"◎";if(b.startsWith("anthropic:")||b==="anthropic")return"✦";if(b.startsWith("custom:")||b==="custom")return"⌬";if(b.includes("qwen"))return"🌸";if(b.includes("llama"))return"🦙";if(b.includes("mistral")||b.includes("mixtral"))return"💨";if(b.includes("gemma"))return"💎";if(b.includes("phi"))return"φ";if(b.includes("deepseek"))return"🔍";if(b.includes("coder")||b.includes("codestral"))return"💻";if(b.includes("wizard"))return"🧙";if(b.includes("hf.co"))return"🤗";return"🤖";};
   const szCol=(tag)=>{const l=(tag||"").toLowerCase();if(l.match(/70b|65b|72b/))return t.err;if(l.match(/30b|32b|34b/))return t.warm;if(l.match(/13b|14b|27b/))return t.acc;if(l.match(/7b|8b/))return t.ok;if(l.match(/1b|3b|4b/))return t.f1;return t.mut;};
   const modelCaps=(m)=>{const b=(m||"").toLowerCase();const caps=[];
-    if(b.startsWith("openai:")||b.startsWith("anthropic:"))return[{emoji:"☁",color:"#4aa3ff",label:"Cloud"}];
+    if(b==="auto")return[{emoji:"🧭",color:"#5ad0ff",label:"Router"}];
+    if(b.startsWith("openai:")||b.startsWith("anthropic:")||b.startsWith("custom:"))return[{emoji:"☁",color:"#4aa3ff",label:"Cloud"}];
     if(b.match(/embed/))return[{emoji:"🔢",color:"#9b59b6",label:"Embed"}];
     if(isMoeModelName(m,modelDetails))caps.push({emoji:"MoE",color:"#66d9ef",label:"Expert"});
     if(b.match(/llava|vision|[\-:]vl[\-:$]/)||b.match(/vl\b/))caps.push({emoji:"👁",color:"#e67e22",label:"Vision"});
@@ -78,8 +79,10 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
     </div>
     {open&&(()=>{
       const getMaker=(m)=>{
+        if(m==="auto")return"Auto";
         if(m.startsWith("openai:"))return"OpenAI";
         if(m.startsWith("anthropic:"))return"Anthropic";
+        if(m.startsWith("custom:"))return modelDetails?.[m]?.details?.provider_label||"Custom";
         if(m.startsWith("hf.co/")){const parts=m.replace("hf.co/","").split("/");return parts[0]||"HuggingFace";}
         const b=m.toLowerCase();
         if(b.includes("qwen"))return"Alibaba";
@@ -125,7 +128,7 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
                 <div style={{display:"flex",alignItems:"center",gap:4}}>
                   <div style={{fontSize:11,fontWeight:sel?700:500,color:sel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{displayName}</div>
                   {isHF&&<span style={{fontSize:7,padding:"1px 4px",borderRadius:3,background:"#ff660022",color:"#ff6600",fontWeight:700,flexShrink:0,border:"1px solid #ff660033"}}>HF</span>}
-                  {provider&&<span style={{fontSize:7,padding:"1px 4px",borderRadius:3,background:`${provider==="openai"?t.ok:t.pink}22`,color:provider==="openai"?t.ok:t.pink,fontWeight:700,flexShrink:0,border:`1px solid ${provider==="openai"?t.ok:t.pink}33`}}>{provider==="openai"?"OpenAI":"Claude"}</span>}
+                  {provider&&(()=>{const pc=provider==="openai"?t.ok:provider==="anthropic"?t.pink:"#4aa3ff";const pl=provider==="openai"?"OpenAI":provider==="anthropic"?"Claude":(mdi.details?.provider_label||"Custom");return <span style={{fontSize:7,padding:"1px 4px",borderRadius:3,background:`${pc}22`,color:pc,fontWeight:700,flexShrink:0,border:`1px solid ${pc}33`,maxWidth:80,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{pl}</span>;})()}
                 </div>
                 <div style={{display:"flex",gap:3,alignItems:"center",marginTop:1,flexWrap:"wrap"}}>
                   <span style={{fontSize:8,color:sc2,fontWeight:700}}>{mt}</span>

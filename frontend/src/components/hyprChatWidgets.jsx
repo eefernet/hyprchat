@@ -1263,6 +1263,21 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
   const [newMemType,setNewMemType]=React.useState("semantic");
   const [memEdit,setMemEdit]=React.useState(null);
   const [memEditText,setMemEditText]=React.useState("");
+  const [histQ,setHistQ]=React.useState("");
+  const [histResults,setHistResults]=React.useState(null); // null = not searched yet
+  const [histLoading,setHistLoading]=React.useState(false);
+  const searchHistory=async()=>{
+    const q=histQ.trim();
+    if(!q)return;
+    setHistLoading(true);
+    try{
+      const r=await fetch(`${API}/api/history/search?q=${encodeURIComponent(q)}&limit=12`);
+      const d=await r.json();
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      setHistResults(d.results||[]);
+    }catch(e){notify&&notify({type:"error",text:"History search failed",detail:e.message||String(e)});setHistResults([]);}
+    setHistLoading(false);
+  };
   const parseLinks=(text)=>String(text||"").split("\n").map(line=>{
     const parts=line.split("|").map(x=>x.trim()).filter(Boolean);
     if(!parts.length)return null;
@@ -1413,6 +1428,25 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
               <textarea value={newMemText} onChange={e=>setNewMemText(e.target.value)} placeholder="Add an accepted memory manually..." style={{...inputS,minHeight:78,lineHeight:1.5,resize:"vertical"}}/>
             </div>
             <button onClick={createManualMemory} disabled={!newMemText.trim()} style={{...btnS(t.ok),opacity:newMemText.trim()?1:.45,marginTop:8}}>Add Accepted Memory</button>
+          </div>
+          <div style={{background:`${t.surface}F0`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
+            <div style={{fontSize:10,fontWeight:800,color:t.f1,textTransform:"uppercase",letterSpacing:.7,marginBottom:10}}>Search Past Conversations</div>
+            <div style={{display:"flex",gap:8}}>
+              <input value={histQ} onChange={e=>setHistQ(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")searchHistory();}} placeholder="What did we discuss about..." style={inputS}/>
+              <button onClick={searchHistory} disabled={histLoading||!histQ.trim()} style={{...btnS(t.f1),whiteSpace:"nowrap",opacity:histQ.trim()?1:.5}}>{histLoading?"Searching":"Search"}</button>
+            </div>
+            <div style={{fontSize:9,color:t.mut,marginTop:6}}>Semantic recall over memory-enabled chats plus keyword search over all chats.</div>
+            {histResults!==null&&<div style={{display:"flex",flexDirection:"column",gap:6,marginTop:10,maxHeight:300,overflowY:"auto"}}>
+              {histResults.map((h,i)=><div key={i} onClick={()=>h.conversation_id&&onOpenConv&&onOpenConv(h.conversation_id)} style={{padding:"8px 10px",borderRadius:8,background:`${t.bgDeep}AA`,border:`1px solid ${t.brd}33`,cursor:h.conversation_id?"pointer":"default"}}>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+                  <span style={{fontSize:10,fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{h.conv_title||h.conversation_id||"untitled"}</span>
+                  <span style={{fontSize:8,padding:"1px 5px",borderRadius:4,background:h.source==="semantic"?`${t.acc}18`:`${t.mut}18`,color:h.source==="semantic"?t.acc:t.mut,fontWeight:700}}>{h.source}</span>
+                  {h.role&&<span style={{fontSize:8,color:t.mut}}>{h.role}</span>}
+                </div>
+                <div style={{fontSize:10,color:t.dim,lineHeight:1.45,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:3,WebkitBoxOrient:"vertical"}} dangerouslySetInnerHTML={{__html:(h.snippet||"").replace(/</g,"&lt;").replace(/&lt;mark>/g,"<mark>").replace(/&lt;\/mark>/g,"</mark>")}}/>
+              </div>)}
+              {!histResults.length&&<div style={{fontSize:11,color:t.mut,textAlign:"center",padding:10}}>No matches. Semantic recall only covers chats with memory enabled.</div>}
+            </div>}
           </div>
           {suggested.length>0&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
             <div style={{fontSize:10,fontWeight:800,color:t.warm,textTransform:"uppercase",letterSpacing:.7}}>Suggestions ({suggested.length})</div>

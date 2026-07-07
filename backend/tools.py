@@ -1067,6 +1067,17 @@ CODEAGENT_TOOLS = {
             }, "required": ["directory"]},
         },
     },
+    "search_history": {
+        "type": "function",
+        "function": {
+            "name": "search_history",
+            "description": "Search the user's past conversations (memory-enabled chats only) for relevant prior discussions, decisions, or facts. Use when the user references something discussed before ('what did we decide about X', 'as we talked about last week').",
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "What to look for in past conversations"},
+                "include_current": {"type": "boolean", "description": "Also search the current conversation (default false)"},
+            }, "required": ["query"]},
+        },
+    },
     "save_memory": {
         "type": "function",
         "function": {
@@ -2783,6 +2794,36 @@ async def exec_tool(
             else:
                 parts.append("\n*(Could not fetch any page content — use the snippets above.)*\n")
 
+            return "\n".join(parts)
+
+        elif name == "search_history":
+            import rag  # lazy: keeps tools.py import light
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return "ERROR: search_history requires a 'query'."
+            await events.emit(conv_id, "tool_start", {
+                "tool": "history", "icon": "brain", "status": f"Searching past conversations: {query[:60]}",
+            })
+            exclude = "" if args.get("include_current") else (conv_id or "")
+            hits = await rag.query_history(db.current_user_id(), query, top_k=6, exclude_conv_id=exclude)
+            await events.emit(conv_id, "tool_end", {
+                "tool": "history", "icon": "brain", "status": f"Found {len(hits)} past-conversation match(es)",
+            })
+            if not hits:
+                return ("No matching past conversations found. Only memory-enabled chats are indexed — "
+                        "the user may need to enable memory on the relevant conversations.")
+            parts = ["Relevant excerpts from the user's past conversations (most similar first):\n"]
+            total = 0
+            for h in hits:
+                title = h.get("conv_title") or h.get("conversation_id") or "untitled chat"
+                date = (h.get("created_at") or "")[:10]
+                head = f"[{title}{' — ' + date if date else ''}] ({h.get('role','')})"
+                body = (h.get("text") or "").strip()
+                seg = f"{head}\n{body}\n"
+                if total + len(seg) > 3000:
+                    break
+                parts.append(seg)
+                total += len(seg)
             return "\n".join(parts)
 
         elif name == "save_memory":

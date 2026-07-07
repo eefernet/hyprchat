@@ -1,4 +1,35 @@
 <details open>
+<summary>Alpha v17.4.0 — July 6, 2026</summary>
+
+> Nine new features: a generic OpenAI-compatible provider, cloud cost + tokens/sec
+> analytics, continue-truncated responses, message ratings, URL→KB ingestion,
+> slash commands with prompt variables, context auto-compaction, memory-gated
+> chat-history recall, smart model routing, and full backup/restore.
+
+## Cloud Models
+- New **Custom (OpenAI-compatible)** provider: point HyprChat at any `/chat/completions` endpoint (OpenRouter, Groq, Mistral, vLLM, llama.cpp, LiteLLM) with a base URL, optional key, and display name. Models appear as `custom:<model>` with full streaming, thinking, vision, and usage support.
+- Estimated **cloud spend ($)** now shows in Statistics — per-model cost column plus today/30-day/all-time totals, computed from a built-in price table (local models are never costed).
+
+## Chat
+- **Tokens/sec** now displays live in the header and persists in a per-message stats footer (`N tok · X tok/s`), using Ollama's real eval timings.
+- Responses cut off by the output-token limit show a **▶ continue** button that resumes the same message in place — no repetition, same DB row.
+- **👍/👎 ratings** on assistant replies, persisted per message and totaled in Statistics.
+- **Slash commands**: type `/` in the composer to search and insert Prompt Library prompts, with `{{variable}}` placeholders filled via an inline form. The Prompt Library "Use" button and quick-menu picker share the same variable flow.
+- **Auto-compact long chats** (Settings → Model & Generation, off by default): when a conversation nears its context window, older turns are summarized by the Workspace Model into a rolling summary so long chats never lose their beginning. Original messages are untouched.
+- **Smart model routing**: enable in Settings → Model & Generation to get an 🧭 Auto model entry. Each message is classified locally (chat/code/reasoning, plus a deterministic long-context check) and routed to the model you configured per category; the footer shows which model answered.
+
+## Memory
+- **Chat-history recall**, gated by the existing per-conversation memory toggle: turns from memory-enabled chats are indexed into ChromaDB, a `search_history` tool lets the model answer "what did we decide about X?" across conversations, and the Memory panel gains a Search Past Conversations box (semantic + keyword). Edits re-index; deletes clean up.
+
+## Knowledge Bases
+- **Add URL**: paste a web page or PDF URL into a KB card — fetched SSRF-safely, extracted with trafilatura, stored as markdown with source provenance (🌐 link on the file row), and indexed like an upload. Re-adding the same URL updates in place.
+
+## Operations
+- **Backup & Restore** (Settings → Danger Zone): one-click download of a full data backup (consistent SQLite copy with provider keys and connector secrets scrubbed, uploads, knowledge bases, settings; ChromaDB excluded as derived). Restores stage safely and apply on the next service restart, keeping the previous database as a `.pre-restore` copy.
+
+</details>
+
+<details>
 <summary>Alpha v17.3.2 — July 5, 2026</summary>
 
 > Combined polish release for persona photos, image generation, Quick Search,

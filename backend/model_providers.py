@@ -18,7 +18,7 @@ import httpx
 import database as db
 
 
-CLOUD_PROVIDERS = {"openai", "anthropic"}
+CLOUD_PROVIDERS = {"openai", "anthropic", "custom"}
 SUPPORTED_PROVIDERS = {
     "openai": {
         "label": "OpenAI",
@@ -33,7 +33,72 @@ SUPPORTED_PROVIDERS = {
         "messages_url": "https://api.anthropic.com/v1/messages",
         "version": "2023-06-01",
     },
+    # Any OpenAI-compatible /chat/completions endpoint (OpenRouter, Groq,
+    # Mistral, vLLM, llama.cpp server, LiteLLM, ...). base_url is user config;
+    # api_key may legitimately be empty for local servers.
+    "custom": {
+        "label": "Custom (OpenAI-compatible)",
+        "env_key": "",
+    },
 }
+
+
+# ── Cloud model pricing — $ per 1M tokens: (input, output) ──
+# Keys are prefixed model IDs matched by LONGEST prefix, so dated/versioned IDs
+# (anthropic:claude-sonnet-4-20250514) resolve to their family price. Costs are
+# computed at read time from this table — estimates for budgeting, not billing.
+# Unprefixed (Ollama/local) and custom: models never match → no cost.
+MODEL_PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
+    # OpenAI
+    "openai:gpt-5-nano": (0.05, 0.40),
+    "openai:gpt-5-mini": (0.25, 2.00),
+    "openai:gpt-5": (1.25, 10.00),
+    "openai:gpt-4.1-nano": (0.10, 0.40),
+    "openai:gpt-4.1-mini": (0.40, 1.60),
+    "openai:gpt-4.1": (2.00, 8.00),
+    "openai:gpt-4o-mini": (0.15, 0.60),
+    "openai:gpt-4o": (2.50, 10.00),
+    "openai:gpt-4-turbo": (10.00, 30.00),
+    "openai:gpt-4": (30.00, 60.00),
+    "openai:gpt-3.5-turbo": (0.50, 1.50),
+    "openai:o3-pro": (20.00, 80.00),
+    "openai:o3-mini": (1.10, 4.40),
+    "openai:o3": (2.00, 8.00),
+    "openai:o4-mini": (1.10, 4.40),
+    "openai:o1-mini": (1.10, 4.40),
+    "openai:o1": (15.00, 60.00),
+    # Anthropic
+    "anthropic:claude-opus-4-5": (5.00, 25.00),
+    "anthropic:claude-opus-4": (15.00, 75.00),
+    "anthropic:claude-sonnet-4": (3.00, 15.00),
+    "anthropic:claude-haiku-4": (1.00, 5.00),
+    "anthropic:claude-3-7-sonnet": (3.00, 15.00),
+    "anthropic:claude-3-5-sonnet": (3.00, 15.00),
+    "anthropic:claude-3-5-haiku": (0.80, 4.00),
+    "anthropic:claude-3-opus": (15.00, 75.00),
+    "anthropic:claude-3-haiku": (0.25, 1.25),
+}
+
+
+def price_for_model(model_id: str) -> tuple[float, float] | None:
+    m = (model_id or "").lower().strip()
+    if not m:
+        return None
+    best_key = ""
+    best = None
+    for key, prices in MODEL_PRICES_PER_MTOK.items():
+        if m.startswith(key) and len(key) > len(best_key):
+            best_key = key
+            best = prices
+    return best
+
+
+def cost_usd(model_id: str, prompt_tokens: int, completion_tokens: int) -> float | None:
+    """Estimated cost in USD, or None for unpriced (local/custom) models."""
+    prices = price_for_model(model_id)
+    if prices is None:
+        return None
+    return (prompt_tokens or 0) * prices[0] / 1e6 + (completion_tokens or 0) * prices[1] / 1e6
 
 
 class ProviderError(Exception):
@@ -100,6 +165,8 @@ async def provider_statuses() -> list[dict]:
             "has_key": bool(row_key or env_key),
             "key_source": source,
             "key_hint": _mask_key(effective_key),
+            "base_url": (row or {}).get("base_url", "") or "",
+            "custom_label": (row or {}).get("label", "") or "",
             "last_test_status": (row or {}).get("last_test_status", ""),
             "last_test_error": (row or {}).get("last_test_error", ""),
             "last_test_at": (row or {}).get("last_test_at"),
@@ -118,13 +185,50 @@ async def get_api_key(provider: str) -> str:
     return _env_key(provider)
 
 
-async def save_provider(provider: str, api_key: str | None = None, enabled: bool | None = None) -> dict:
+async def get_custom_config() -> dict:
+    """Effective config for the custom OpenAI-compatible provider.
+
+    Returns {} when not configured/enabled. Unlike the named providers, the
+    gate is base_url (not api_key) — local servers often need no key.
+    """
+    row = await db.get_model_provider_credential("custom", include_secret=True)
+    if not row or not row.get("enabled"):
+        return {}
+    base = (row.get("base_url") or "").strip().rstrip("/")
+    if not base:
+        return {}
+    return {
+        "base_url": base,
+        "api_key": row.get("api_key", "") or "",
+        "label": (row.get("label") or "").strip() or "Custom",
+    }
+
+
+def _custom_headers(api_key: str) -> dict:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+async def save_provider(
+    provider: str,
+    api_key: str | None = None,
+    enabled: bool | None = None,
+    base_url: str | None = None,
+    label: str | None = None,
+) -> dict:
     if provider not in CLOUD_PROVIDERS:
         raise ProviderError(f"Unsupported model provider: {provider}", provider=provider)
+    if isinstance(base_url, str) and base_url.strip():
+        if not base_url.strip().lower().startswith(("http://", "https://")):
+            raise ProviderError("Base URL must start with http:// or https://", provider=provider)
     await db.upsert_model_provider_credential(
         provider,
         api_key=(api_key.strip() if isinstance(api_key, str) and api_key.strip() else None),
         enabled=enabled,
+        base_url=(base_url.strip() if isinstance(base_url, str) else None),
+        label=(label.strip() if isinstance(label, str) else None),
     )
     invalidate_model_cache()
     return next(s for s in await provider_statuses() if s["provider"] == provider)
@@ -232,6 +336,38 @@ async def list_anthropic_models(http: httpx.AsyncClient, key: str) -> tuple[list
     return [prefixed_model_id("anthropic", mid) for mid in ids], details
 
 
+async def list_custom_models(http: httpx.AsyncClient, cfg: dict) -> tuple[list[str], dict]:
+    r = await http.get(
+        f"{cfg['base_url']}/models",
+        headers=_custom_headers(cfg.get("api_key", "")),
+        timeout=20,
+    )
+    if r.status_code >= 400:
+        raise ProviderError(_http_error_text(r, "Custom provider model list failed"), provider="custom", status_code=r.status_code)
+    body = r.json()
+    # OpenAI-style servers return {"data":[...]}; a few return a bare list.
+    raw = body.get("data", []) if isinstance(body, dict) else body
+    if not isinstance(raw, list):
+        raw = []
+    ids = sorted({str(m.get("id", "")) for m in raw if isinstance(m, dict) and m.get("id")})
+    details = {}
+    by_id = {m.get("id"): m for m in raw if isinstance(m, dict)}
+    for mid in ids:
+        item = by_id.get(mid, {})
+        pref = prefixed_model_id("custom", mid)
+        details[pref] = {
+            "size": 0,
+            "modified_at": "",
+            "digest": "",
+            "details": {
+                "provider": "custom",
+                "provider_label": cfg.get("label", "Custom"),
+                "owned_by": item.get("owned_by", ""),
+            },
+        }
+    return [prefixed_model_id("custom", mid) for mid in ids], details
+
+
 # /api/models is hit every time the model picker opens; without a short cache
 # each open costs two cloud round-trips.
 _MODEL_LIST_CACHE: dict[str, Any] = {"at": 0.0, "result": None}
@@ -251,14 +387,20 @@ async def list_cloud_models(http: httpx.AsyncClient) -> tuple[list[str], dict, d
     details: dict = {}
     errors: dict = {}
     for provider in SUPPORTED_PROVIDERS:
-        key = await get_api_key(provider)
-        if not key:
-            continue
         try:
-            if provider == "openai":
-                p_models, p_details = await list_openai_models(http, key)
+            if provider == "custom":
+                cfg = await get_custom_config()
+                if not cfg:
+                    continue
+                p_models, p_details = await list_custom_models(http, cfg)
             else:
-                p_models, p_details = await list_anthropic_models(http, key)
+                key = await get_api_key(provider)
+                if not key:
+                    continue
+                if provider == "openai":
+                    p_models, p_details = await list_openai_models(http, key)
+                else:
+                    p_models, p_details = await list_anthropic_models(http, key)
             models.extend(p_models)
             details.update(p_details)
         except Exception as e:
@@ -274,15 +416,24 @@ async def list_cloud_models(http: httpx.AsyncClient) -> tuple[list[str], dict, d
 async def test_provider(http: httpx.AsyncClient, provider: str, api_key: str | None = None) -> dict:
     if provider not in CLOUD_PROVIDERS:
         raise ProviderError(f"Unsupported model provider: {provider}", provider=provider)
-    stored_key = await get_api_key(provider)
-    key = (api_key or "").strip() or stored_key
-    if not key:
-        raise ProviderError(f"{provider_label(provider)} API key is not configured.", provider=provider)
+    if provider == "custom":
+        cfg = await get_custom_config()
+        if not cfg:
+            raise ProviderError("Custom provider base URL is not configured or the provider is disabled.", provider="custom")
+        stored_key = cfg.get("api_key", "")
+        key = (api_key or "").strip() or stored_key
+    else:
+        stored_key = await get_api_key(provider)
+        key = (api_key or "").strip() or stored_key
+        if not key:
+            raise ProviderError(f"{provider_label(provider)} API key is not configured.", provider=provider)
     # Only persist the test result when the tested key is the stored/effective
     # one — testing an unsaved key must not relabel the saved credential.
     persist = key == stored_key
     try:
-        if provider == "openai":
+        if provider == "custom":
+            models, _ = await list_custom_models(http, {**cfg, "api_key": key})
+        elif provider == "openai":
             models, _ = await list_openai_models(http, key)
         else:
             models, _ = await list_anthropic_models(http, key)
@@ -436,6 +587,32 @@ def _anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
     if not out:
         out.append({"role": "user", "content": ""})
     return "\n\n".join(system_parts).strip(), out
+
+
+def _openai_compat_messages(messages: list[dict]) -> list[dict]:
+    """Convert HyprChat messages to classic /chat/completions shape."""
+    out = []
+    for msg in messages:
+        role = msg.get("role") or "user"
+        text = _coerce_text(msg.get("content"))
+        if role == "tool":
+            out.append({"role": "user", "content": f"[Tool result]\n{text}"})
+            continue
+        if role == "developer":
+            role = "system"
+        if role not in {"user", "assistant", "system"}:
+            role = "user"
+        images = msg.get("images") or []
+        if role == "user" and images:
+            parts = []
+            if text:
+                parts.append({"type": "text", "text": text})
+            for image in images:
+                parts.append({"type": "image_url", "image_url": {"url": _data_url(str(image))}})
+            out.append({"role": role, "content": parts})
+        else:
+            out.append({"role": role, "content": text})
+    return out
 
 
 def _max_output_tokens(options: dict | None, default: int = 4096) -> int:
@@ -622,6 +799,10 @@ async def stream_provider_chat(
         async for event in _stream_anthropic(http, model_name, messages, options or {}):
             yield event
         return
+    if provider == "custom":
+        async for event in _stream_openai_compat(http, model_name, messages, options or {}):
+            yield event
+        return
     raise ProviderError(f"Unsupported cloud model provider: {provider}", provider=provider)
 
 
@@ -676,7 +857,9 @@ async def _stream_openai(
                 }
                 if typ == "response.incomplete":
                     reason = (resp_obj.get("incomplete_details") or {}).get("reason") or "max_output_tokens"
-                    yield {"type": "token", "content": f"\n\n[Response truncated by OpenAI: {reason}]"}
+                    # Surfaced as a finish event so the chat loop can offer
+                    # "Continue" instead of injecting a note into the content.
+                    yield {"type": "finish", "reason": "length" if "token" in reason else str(reason)}
             elif typ == "response.failed":
                 err = (obj.get("response") or {}).get("error") or {}
                 msg = err.get("message") if isinstance(err, dict) else str(err)
@@ -742,7 +925,87 @@ async def _stream_anthropic(
             return
 
 
+async def _stream_openai_compat(
+    http: httpx.AsyncClient,
+    model_name: str,
+    messages: list[dict],
+    options: dict,
+) -> AsyncIterator[dict]:
+    cfg = await get_custom_config()
+    if not cfg:
+        raise ProviderError("Custom provider base URL is not configured or the provider is disabled.", provider="custom")
+    payload: dict[str, Any] = {
+        "model": model_name,
+        "messages": _openai_compat_messages(messages),
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    max_tokens = _max_output_tokens(options, default=4096)
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
+    if options.get("temperature") is not None:
+        payload["temperature"] = options["temperature"]
+
+    retried_stream_options = False
+    while True:
+        async with http.stream(
+            "POST",
+            f"{cfg['base_url']}/chat/completions",
+            headers=_custom_headers(cfg.get("api_key", "")),
+            json=payload,
+            timeout=300,
+        ) as resp:
+            if resp.status_code >= 400:
+                body = await resp.aread()
+                text = body.decode("utf-8", errors="replace")
+                # Some servers 400 on stream_options; retry once without it
+                # (usage reporting is lost, streaming still works).
+                if (
+                    not retried_stream_options
+                    and resp.status_code == 400
+                    and "stream_options" in text
+                    and "stream_options" in payload
+                ):
+                    retried_stream_options = True
+                    payload.pop("stream_options", None)
+                    continue
+                raise ProviderError(text[:500] or f"Custom provider HTTP {resp.status_code}", provider="custom", status_code=resp.status_code)
+            prompt_tokens = 0
+            gen_tokens = 0
+            usage_seen = False
+            finish_reason = ""
+            async for obj in _iter_sse_json(resp):
+                if obj.get("error"):
+                    err = obj.get("error") or {}
+                    msg = err.get("message") if isinstance(err, dict) else str(err)
+                    raise ProviderError(msg or "Custom provider stream error", provider="custom")
+                choices = obj.get("choices") or []
+                if choices and isinstance(choices[0], dict):
+                    choice = choices[0]
+                    delta = choice.get("delta") or {}
+                    content = delta.get("content")
+                    if content:
+                        yield {"type": "token", "content": content}
+                    # DeepSeek-style servers stream reasoning separately.
+                    thinking = delta.get("reasoning_content") or delta.get("reasoning")
+                    if isinstance(thinking, str) and thinking:
+                        yield {"type": "thinking", "content": thinking}
+                    if choice.get("finish_reason"):
+                        finish_reason = str(choice["finish_reason"])
+                usage = obj.get("usage")
+                if isinstance(usage, dict) and usage:
+                    prompt_tokens = int(usage.get("prompt_tokens") or 0)
+                    gen_tokens = int(usage.get("completion_tokens") or 0)
+                    usage_seen = True
+            if usage_seen:
+                yield {"type": "usage", "prompt_tokens": prompt_tokens, "gen_tokens": gen_tokens}
+            if finish_reason == "length":
+                yield {"type": "finish", "reason": "length"}
+            return
+
+
 async def _anthropic_stream_events(resp: httpx.Response, input_tokens: int, output_tokens: int) -> AsyncIterator[dict]:
+    stop_reason = ""
     async for obj in _iter_sse_json(resp):
         typ = obj.get("type", "")
         if typ == "message_start":
@@ -758,8 +1021,11 @@ async def _anthropic_stream_events(resp: httpx.Response, input_tokens: int, outp
         elif typ == "message_delta":
             usage = obj.get("usage") or {}
             output_tokens = int(usage.get("output_tokens") or output_tokens or 0)
+            stop_reason = str((obj.get("delta") or {}).get("stop_reason") or stop_reason)
         elif typ == "message_stop":
             yield {"type": "usage", "prompt_tokens": input_tokens, "gen_tokens": output_tokens}
+            if stop_reason == "max_tokens":
+                yield {"type": "finish", "reason": "length"}
         elif typ == "error" or obj.get("error"):
             err = obj.get("error") or {}
             msg = err.get("message") if isinstance(err, dict) else str(err)

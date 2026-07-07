@@ -3,6 +3,7 @@ Database layer — SQLite with aiosqlite for async access.
 Stores conversations, messages, knowledge bases, tools, model configs.
 """
 import aiosqlite
+import asyncio
 import base64
 import contextvars
 import hashlib
@@ -79,6 +80,9 @@ async def get_db() -> aiosqlite.Connection:
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA foreign_keys=ON")
+    # Wait for a writer lock instead of instantly raising "database is locked"
+    # when a background task holds a write transaction.
+    await db.execute("PRAGMA busy_timeout=5000")
     return db
 
 
@@ -465,7 +469,9 @@ async def create_user(name: str, password: str = "") -> dict:
     user_id = f"user-{uuid.uuid4().hex[:12]}"
     clean_name = _clean_user_name(name)
     now = datetime.utcnow().isoformat()
-    password_hash = _hash_password(password) if password else ""
+    # PBKDF2 with a high iteration count blocks the event loop for ~100ms;
+    # run it in a worker thread.
+    password_hash = await asyncio.to_thread(_hash_password, password) if password else ""
     db = await get_db()
     try:
         await db.execute(
@@ -506,7 +512,8 @@ async def login_user(user_id: str, password: str = "") -> tuple[dict | None, str
         if not rows:
             return None, None
         row = dict(rows[0])
-        if row.get("password_hash") and not _verify_password(password or "", row["password_hash"]):
+        if row.get("password_hash") and not await asyncio.to_thread(
+                _verify_password, password or "", row["password_hash"]):
             return None, None
         now = datetime.utcnow().isoformat()
         token = None
@@ -568,6 +575,23 @@ async def logout_user_session(user_id: str, token: str | None = None) -> None:
         await db.close()
 
 
+async def owns_event_channel(channel_id: str, user_id: str | None = None) -> bool:
+    """True when the id names a conversation OR research report owned by the
+    current (scoped) user. Used to gate the /api/events SSE stream."""
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT id FROM conversations WHERE id=? AND user_id=?", (channel_id, uid))
+        if rows:
+            return True
+        rows = await db.execute_fetchall(
+            "SELECT id FROM research_reports WHERE id=? AND user_id=?", (channel_id, uid))
+        return bool(rows)
+    finally:
+        await db.close()
+
+
 async def update_user(user_id: str, *, name: str | None = None,
                       password: str | None = None, clear_password: bool = False) -> tuple[dict | None, str | None]:
     uid = _scope_user(user_id)
@@ -577,7 +601,7 @@ async def update_user(user_id: str, *, name: str | None = None,
     if clear_password:
         fields["password_hash"] = ""
     elif password is not None:
-        fields["password_hash"] = _hash_password(password) if password else ""
+        fields["password_hash"] = await asyncio.to_thread(_hash_password, password) if password else ""
     if not fields:
         return await get_user(uid), None
     fields["updated_at"] = datetime.utcnow().isoformat()
@@ -594,6 +618,69 @@ async def update_user(user_id: str, *, name: str | None = None,
     finally:
         await db.close()
     return await get_user(uid), None
+
+
+# ── User preference KV (server-side home for per-user UI state) ──
+
+async def get_user_prefs(user_id: str | None = None) -> dict:
+    """All prefs for the current user as {key: parsed_value}."""
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT key, value_json FROM user_prefs WHERE user_id=?", (uid,))
+        out = {}
+        for r in rows:
+            try:
+                out[r["key"]] = json.loads(r["value_json"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return out
+    finally:
+        await db.close()
+
+
+async def get_user_pref(key: str, user_id: str | None = None):
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT value_json FROM user_prefs WHERE user_id=? AND key=?", (uid, key))
+        if not rows:
+            return None
+        try:
+            return json.loads(rows[0]["value_json"])
+        except (json.JSONDecodeError, TypeError):
+            return None
+    finally:
+        await db.close()
+
+
+async def set_user_pref(key: str, value, user_id: str | None = None) -> None:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        await db.execute(
+            """INSERT INTO user_prefs(user_id, key, value_json, updated_at)
+               VALUES(?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(user_id, key) DO UPDATE SET
+                 value_json=excluded.value_json, updated_at=excluded.updated_at""",
+            (uid, key, json.dumps(value)))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def delete_user_pref(key: str, user_id: str | None = None) -> bool:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "DELETE FROM user_prefs WHERE user_id=? AND key=?", (uid, key))
+        await db.commit()
+        return (cur.rowcount or 0) > 0
+    finally:
+        await db.close()
 
 
 async def _delete_user_conn(conn: aiosqlite.Connection, uid: str, *, allow_default: bool = False) -> bool:
@@ -633,6 +720,7 @@ async def _delete_user_conn(conn: aiosqlite.Connection, uid: str, *, allow_defau
         "mcp_servers", "openapi_connectors", "connector_tools",
     ):
         await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (uid,))
+    await conn.execute("DELETE FROM user_prefs WHERE user_id=?", (uid,))
     await conn.execute("DELETE FROM user_profile WHERE id=?", (uid,))
     await conn.execute("DELETE FROM user_sessions WHERE user_id=?", (uid,))
     await conn.execute("DELETE FROM users WHERE id=?", (uid,))
@@ -686,7 +774,7 @@ async def delete_all_users_and_data() -> dict:
             "tools", "model_configs", "workspaces", "council_configs", "memories",
             "research_reports", "token_usage", "coding_projects", "artifacts",
             "mcp_servers", "openapi_connectors", "connector_tools",
-            "user_profile", "user_sessions", "users",
+            "user_prefs", "user_profile", "user_sessions", "users",
         ):
             await db.execute(f"DELETE FROM {table}")
         await db.commit()
@@ -739,9 +827,42 @@ async def init_db():
             except Exception as e:
                 if "duplicate column" not in str(e).lower():
                     print(f"[DB MIGRATION] Warning adding artifacts.{col}: {e}")
+        # Custom OpenAI-compatible provider config (base URL + display label)
+        for col, coltype, default in [
+            ("base_url", "TEXT", "''"),
+            ("label", "TEXT", "''"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE model_provider_credentials ADD COLUMN {col} {coltype} DEFAULT {default}")
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    print(f"[DB MIGRATION] Warning adding model_provider_credentials.{col}: {e}")
+        # Thumbs feedback on messages (-1 / 0 / 1)
+        try:
+            await db.execute("ALTER TABLE messages ADD COLUMN rating INTEGER DEFAULT 0")
+        except Exception as e:
+            if "duplicate column" not in str(e).lower():
+                print(f"[DB MIGRATION] Warning adding messages.rating: {e}")
+        # KB files ingested from a URL keep their source for provenance/re-sync
+        try:
+            await db.execute("ALTER TABLE kb_files ADD COLUMN source_url TEXT DEFAULT ''")
+        except Exception as e:
+            if "duplicate column" not in str(e).lower():
+                print(f"[DB MIGRATION] Warning adding kb_files.source_url: {e}")
+        # Context auto-compaction: rolling summary of turns older than the keep-window
+        for col, coltype, default in [
+            ("summary", "TEXT", "''"),
+            ("summary_until_msg_id", "INTEGER", "0"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} {coltype} DEFAULT {default}")
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    print(f"[DB MIGRATION] Warning adding conversations.{col}: {e}")
         await db.executescript("""
             CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at);
             CREATE INDEX IF NOT EXISTS idx_messages_conv_created_id ON messages(conversation_id, created_at, id);
+            CREATE INDEX IF NOT EXISTS idx_kb_files_kb_source_url ON kb_files(kb_id, source_url);
             CREATE INDEX IF NOT EXISTS idx_knowledge_bases_user ON knowledge_bases(user_id, updated_at);
             CREATE INDEX IF NOT EXISTS idx_tools_user ON tools(user_id, updated_at);
             CREATE INDEX IF NOT EXISTS idx_model_configs_user ON model_configs(user_id, updated_at);
@@ -982,6 +1103,11 @@ async def get_conversations(limit: int = 50, offset: int = 0):
     user_id = _scope_user()
     db = await get_db()
     try:
+        # The CAST(...pinned...) sort key defeats index-ordered scans on
+        # purpose-built indexes, but conversation counts per user are small
+        # (hundreds) and idx_conversations_user narrows to the user first, so
+        # the in-memory sort is cheap. Leave as-is rather than adding a
+        # computed/pinned index migration for legacy text-valued pinned rows.
         cursor = await db.execute(
             "SELECT * FROM conversations WHERE user_id=? ORDER BY CAST(COALESCE(pinned,'0') AS INTEGER) DESC, updated_at DESC LIMIT ? OFFSET ?",
             (user_id, limit, offset)
@@ -1030,6 +1156,89 @@ async def get_conversation(id: str):
             parsed_msgs.append(msg)
         conv["messages"] = parsed_msgs
         return conv
+    finally:
+        await db.close()
+
+
+async def get_latest_user_message(conversation_id: str) -> dict | None:
+    """Most recent user-role message for a conversation as {id, content}.
+
+    Cheap single-row lookup for the chat agent's defensive-persist check —
+    hydrating the whole conversation (every message + metadata parse) per
+    turn just to peek at the last user row was the hot-path cost.
+    Returns None when the conversation doesn't exist for this user or has
+    no user messages yet.
+    """
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            """SELECT m.id, m.content FROM messages m
+               JOIN conversations c ON c.id = m.conversation_id
+               WHERE m.conversation_id=? AND c.user_id=? AND m.role='user'
+               ORDER BY m.created_at DESC, m.id DESC LIMIT 1""",
+            (conversation_id, user_id))
+        if not rows:
+            return None
+        return {"id": rows[0]["id"], "content": rows[0]["content"] or ""}
+    finally:
+        await db.close()
+
+
+async def get_conversation_summary(id: str) -> tuple[str, int]:
+    """Rolling compaction summary + the highest message id folded into it."""
+    if not id:
+        return "", 0
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT summary, summary_until_msg_id FROM conversations WHERE id=? AND user_id=?",
+            (id, user_id))
+        if not rows:
+            return "", 0
+        return str(rows[0]["summary"] or ""), int(rows[0]["summary_until_msg_id"] or 0)
+    finally:
+        await db.close()
+
+
+async def set_conversation_summary(id: str, summary: str, until_msg_id: int) -> None:
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE conversations SET summary=?, summary_until_msg_id=? WHERE id=? AND user_id=?",
+            (summary or "", int(until_msg_id or 0), id, user_id))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_conversation_title(id: str) -> str:
+    if not id:
+        return ""
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall("SELECT title FROM conversations WHERE id=? AND user_id=?", (id, user_id))
+        return str(rows[0]["title"] or "") if rows else ""
+    finally:
+        await db.close()
+
+
+async def get_latest_user_message_id(conv_id: str) -> int:
+    """Row id of the newest user message in a conversation (0 if none)."""
+    if not conv_id:
+        return 0
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            """SELECT m.id FROM messages m JOIN conversations c ON c.id = m.conversation_id
+               WHERE m.conversation_id=? AND c.user_id=? AND m.role='user'
+               ORDER BY m.id DESC LIMIT 1""",
+            (conv_id, user_id))
+        return int(rows[0]["id"]) if rows else 0
     finally:
         await db.close()
 
@@ -1167,6 +1376,89 @@ async def update_message(message_id: int, *, content: str = None, metadata: dict
         await db.close()
 
 
+async def delete_messages_from(conversation_id: str, from_id: int) -> list[int] | None:
+    """Delete a message and everything after it in a conversation (regenerate/
+    edit truncation). User-scoped. Returns the deleted message ids, or None
+    when the conversation isn't owned by the current user.
+
+    Resets the compaction summary when the truncation overlaps it — a summary
+    folded over deleted turns would keep resurrecting their content."""
+    user_id = _scope_user()
+    from_id = int(from_id or 0)
+    if not conversation_id or from_id <= 0:
+        return None
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT summary_until_msg_id FROM conversations WHERE id=? AND user_id=?",
+            (conversation_id, user_id))
+        if not rows:
+            return None
+        anchor = await db.execute_fetchall(
+            "SELECT created_at, id FROM messages WHERE id=? AND conversation_id=?",
+            (from_id, conversation_id))
+        if not anchor:
+            return []
+        doomed = await db.execute_fetchall(
+            """SELECT id FROM messages WHERE conversation_id=?
+               AND (created_at > ? OR (created_at = ? AND id >= ?))""",
+            (conversation_id, anchor[0]["created_at"], anchor[0]["created_at"], from_id))
+        ids = [r["id"] for r in doomed]
+        if not ids:
+            return []
+        await db.execute(
+            f"DELETE FROM messages WHERE id IN ({','.join('?' * len(ids))})", ids)
+        summary_until = int(rows[0]["summary_until_msg_id"] or 0)
+        if summary_until >= from_id:
+            await db.execute(
+                "UPDATE conversations SET summary='', summary_until_msg_id=0 WHERE id=? AND user_id=?",
+                (conversation_id, user_id))
+        await db.commit()
+        return ids
+    finally:
+        await db.close()
+
+
+async def set_message_rating(message_id: int, rating: int) -> bool:
+    """Thumbs feedback: -1, 0 (cleared), or 1. Stored as a real column — the
+    metadata PATCH replaces metadata wholesale and would clobber it there."""
+    rating = max(-1, min(1, int(rating)))
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """UPDATE messages SET rating=?
+               WHERE id=? AND conversation_id IN (SELECT id FROM conversations WHERE user_id=?)""",
+            (rating, message_id, user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+    finally:
+        await db.close()
+
+
+async def get_message_rating_counts(days: int = 0) -> dict:
+    """Aggregate thumbs feedback for the current user. days <= 0 = all time."""
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        where = "WHERE c.user_id=? AND m.rating != 0"
+        params: list = [user_id]
+        if (days or 0) > 0:
+            where += " AND m.created_at >= datetime('now', ?)"
+            params.append(f"-{days} days")
+        rows = await db.execute_fetchall(
+            f"""SELECT SUM(m.rating=1) AS up, SUM(m.rating=-1) AS down
+                FROM messages m JOIN conversations c ON c.id = m.conversation_id
+                {where}""",
+            tuple(params),
+        )
+        row = dict(rows[0]) if rows else {}
+        return {"up": int(row.get("up") or 0), "down": int(row.get("down") or 0)}
+    finally:
+        await db.close()
+
+
 async def delete_message(message_id: int) -> bool:
     user_id = _scope_user()
     db = await get_db()
@@ -1239,7 +1531,8 @@ async def get_kb(kb_id: str):
         await db.close()
 
 
-async def add_kb_file(kb_id: str, filename: str, filepath: str, file_size: int, file_type: str) -> int:
+async def add_kb_file(kb_id: str, filename: str, filepath: str, file_size: int, file_type: str,
+                      source_url: str = "") -> int:
     user_id = _scope_user()
     db = await get_db()
     try:
@@ -1247,13 +1540,29 @@ async def add_kb_file(kb_id: str, filename: str, filepath: str, file_size: int, 
         if not rows:
             return 0
         cursor = await db.execute(
-            "INSERT INTO kb_files (kb_id, filename, filepath, file_size, file_type) VALUES (?, ?, ?, ?, ?)",
-            (kb_id, filename, filepath, file_size, file_type)
+            "INSERT INTO kb_files (kb_id, filename, filepath, file_size, file_type, source_url) VALUES (?, ?, ?, ?, ?, ?)",
+            (kb_id, filename, filepath, file_size, file_type, source_url or "")
         )
         file_id = cursor.lastrowid
         await db.execute("UPDATE knowledge_bases SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (kb_id,))
         await db.commit()
         return file_id
+    finally:
+        await db.close()
+
+
+async def get_kb_file_by_source_url(kb_id: str, source_url: str) -> dict | None:
+    """Existing kb_file row for a URL, so re-adding the same URL overwrites
+    in place (rag.index_file removes-first, making reingest idempotent)."""
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            """SELECT f.* FROM kb_files f JOIN knowledge_bases k ON k.id = f.kb_id
+               WHERE f.kb_id=? AND f.source_url=? AND k.user_id=?""",
+            (kb_id, source_url, user_id),
+        )
+        return dict(rows[0]) if rows else None
     finally:
         await db.close()
 
@@ -1723,6 +2032,8 @@ async def upsert_model_provider_credential(
     *,
     api_key: str | None = None,
     enabled: bool | None = None,
+    base_url: str | None = None,
+    label: str | None = None,
     last_test_status: str | None = None,
     last_test_error: str | None = None,
     last_test_at: str | None = None,
@@ -1732,6 +2043,8 @@ async def upsert_model_provider_credential(
     fields = {
         "api_key": existing.get("api_key", "") if existing else "",
         "enabled": existing.get("enabled", True) if existing else True,
+        "base_url": existing.get("base_url", "") if existing else "",
+        "label": existing.get("label", "") if existing else "",
         "last_test_status": existing.get("last_test_status", "") if existing else "",
         "last_test_error": existing.get("last_test_error", "") if existing else "",
         "last_test_at": existing.get("last_test_at") if existing else None,
@@ -1740,6 +2053,10 @@ async def upsert_model_provider_credential(
         fields["api_key"] = api_key
     if enabled is not None:
         fields["enabled"] = bool(enabled)
+    if base_url is not None:
+        fields["base_url"] = base_url.strip()
+    if label is not None:
+        fields["label"] = label.strip()
     if last_test_status is not None:
         fields["last_test_status"] = last_test_status
     if last_test_error is not None:
@@ -1751,11 +2068,13 @@ async def upsert_model_provider_credential(
     try:
         await db.execute(
             """INSERT INTO model_provider_credentials
-               (user_id, provider, api_key, enabled, last_test_status, last_test_error, last_test_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
+               (user_id, provider, api_key, enabled, base_url, label, last_test_status, last_test_error, last_test_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(user_id, provider) DO UPDATE SET
                  api_key=excluded.api_key,
                  enabled=excluded.enabled,
+                 base_url=excluded.base_url,
+                 label=excluded.label,
                  last_test_status=excluded.last_test_status,
                  last_test_error=excluded.last_test_error,
                  last_test_at=excluded.last_test_at,
@@ -1765,6 +2084,8 @@ async def upsert_model_provider_credential(
                 provider,
                 fields["api_key"],
                 1 if fields["enabled"] else 0,
+                fields["base_url"],
+                fields["label"],
                 fields["last_test_status"],
                 fields["last_test_error"],
                 fields["last_test_at"],
@@ -4255,6 +4576,13 @@ async def get_token_usage(days: int = 30, group_by: str = "day"):
                    SUM(total_tokens) as total_tokens, COUNT(*) as request_count
                    FROM token_usage {where}
                    GROUP BY persona_name ORDER BY total_tokens DESC""".format(where=where)
+        elif group_by == "day_model":
+            q = """SELECT date(created_at) as date, model,
+                   SUM(prompt_tokens) as prompt_tokens,
+                   SUM(completion_tokens) as completion_tokens,
+                   SUM(total_tokens) as total_tokens, COUNT(*) as request_count
+                   FROM token_usage {where}
+                   GROUP BY date(created_at), model ORDER BY date ASC""".format(where=where)
         else:
             q = """SELECT date(created_at) as date,
                    SUM(prompt_tokens) as prompt_tokens,

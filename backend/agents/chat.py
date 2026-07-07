@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import time
 import traceback
 from datetime import datetime
 
@@ -953,6 +954,169 @@ async def _blocked_tool_summary(conv_id: str, tool_name: str, tool_result: str) 
     return "\n".join(lines)
 
 
+async def _route_auto_model(req, http):
+    """Resolve the 'auto' pseudo-model to a concrete model id. Never raises.
+
+    Deterministic long-context check first (no LLM call), then a bounded local
+    classifier on the Workspace Model. Category targets may be cloud-prefixed
+    (explicit user config in Settings → Model Routing); the classifier itself
+    is always local via reject_cloud. Never returns 'auto'.
+    """
+    routing = getattr(config, "MODEL_ROUTING", {}) or {}
+    fallback = routing.get("chat") or config.DEFAULT_MODEL
+    if fallback == "auto":
+        fallback = config.DEFAULT_MODEL
+    try:
+        est_tokens = sum(len(m.get("content") or "") for m in (req.messages or [])) // 4
+        if est_tokens > 12000 and routing.get("long_context"):
+            return routing["long_context"], "long_context"
+        last_user = next((m.get("content") or "" for m in reversed(req.messages or [])
+                          if m.get("role") == "user"), "")
+        if not last_user.strip():
+            return fallback, "chat_fallback"
+        classifier = model_providers.reject_cloud(config.WORKSPACE_MODEL or "") or config.DEFAULT_MODEL
+        if classifier == "auto":
+            classifier = config.DEFAULT_MODEL
+        prompt = (
+            "Classify this user request into exactly one category. Reply with ONE word only:\n"
+            "chat (casual conversation, general questions, writing, creative)\n"
+            "code (programming, debugging, scripts, technical implementation)\n"
+            "reasoning (math, logic puzzles, complex multi-step analysis)\n\n"
+            f"REQUEST:\n{last_user[:1500]}"
+        )
+        word = ""
+        try:
+            word = (await asyncio.wait_for(
+                model_providers.complete_chat(
+                    http, classifier, prompt, temperature=0.0, num_ctx=2048,
+                    num_predict=8, timeout=20, ollama_url=config.OLLAMA_URL),
+                timeout=12)).strip().lower()
+        except Exception as e:
+            print(f"[CHAT] auto-router classifier failed (fallback to chat): {e}")
+        for cat in ("code", "reasoning", "chat"):
+            if cat in word and routing.get(cat) and routing[cat] != "auto":
+                return routing[cat], cat
+        return fallback, "chat_fallback"
+    except Exception as e:
+        print(f"[CHAT] auto-router error (fallback to chat): {e}")
+        return fallback, "chat_fallback"
+
+
+async def _index_history_turn_bg(conv_id, assistant_msg_id, user_text, assistant_text):
+    """Index both sides of a completed memory-enabled turn for cross-chat recall.
+
+    Runs via _spawn_bg after `done` (inherits the user-scoping contextvar).
+    Only called when the conversation's memory toggle is on."""
+    try:
+        uid = db.current_user_id()
+        title = await db.get_conversation_title(conv_id)
+        now = datetime.utcnow().isoformat()
+        user_row_id = await db.get_latest_user_message_id(conv_id)
+        if user_row_id and (user_text or "").strip():
+            await rag.index_history_turn(uid, conv_id, user_row_id, "user", user_text, title, now)
+        if assistant_msg_id and (assistant_text or "").strip():
+            await rag.index_history_turn(uid, conv_id, int(assistant_msg_id), "assistant", assistant_text, title, now)
+    except Exception as e:
+        print(f"[CHAT] history indexing failed (non-fatal): {e}")
+
+
+# ── Context auto-compaction ──
+_COMPACT_KEEP_RECENT = 8       # newest user/assistant messages kept verbatim
+_COMPACT_THRESHOLD = 0.75      # of num_ctx (estimated at chars/4)
+_COMPACT_TRANSCRIPT_CAP = 24000  # chars of foldable dialogue per summary pass
+
+
+async def _maybe_compact_context(req, http, messages, model_options, conv_id,
+                                 ephemeral, persona_placeholder_ctx=None):
+    """Replace old history with a rolling summary when the prompt nears num_ctx.
+
+    Runs ONCE per request (before the round loop — never per round). Reads the
+    DB history (which can extend past the client's trim window), folds rows
+    newer than summary_until_msg_id into the persisted summary via the local
+    workspace model, and rebuilds the outgoing list as
+    [leading system blocks] + [summary block] + [last K user/assistant turns].
+    Original message rows are never modified. Fails open: any error/timeout
+    returns `messages` unchanged. The summary_until_msg_id guard means the
+    summary (and thus the Ollama prompt-cache prefix) only changes when the
+    threshold trips on new turns, not on every request.
+    """
+    if ephemeral or getattr(config, "CONTEXT_COMPACTION", "off") != "on" or not conv_id:
+        return messages
+    try:
+        num_ctx = int(model_options.get("num_ctx") or 0)
+        if num_ctx <= 0:
+            return messages
+        est_tokens = sum(len(m.get("content") or "") for m in messages) // 4
+        if est_tokens <= _COMPACT_THRESHOLD * num_ctx:
+            return messages
+        old_summary, until_id = await db.get_conversation_summary(conv_id)
+        conv = await db.get_conversation(conv_id)
+        rows = [r for r in (conv or {}).get("messages", [])
+                if r.get("role") in ("user", "assistant")]
+        foldable = [r for r in rows[:-_COMPACT_KEEP_RECENT]
+                    if int(r.get("id") or 0) > int(until_id or 0)
+                    and (r.get("content") or "").strip()]
+        new_summary = old_summary
+        if foldable:
+            parts, total = [], 0
+            for r in foldable:
+                seg = f"{str(r['role']).upper()}: {(r.get('content') or '').strip()}"
+                room = _COMPACT_TRANSCRIPT_CAP - total
+                if room <= 0:
+                    break
+                parts.append(seg[:room])
+                total += len(seg)
+            transcript = "\n\n".join(parts)
+            model = model_providers.reject_cloud(config.WORKSPACE_MODEL or "") or config.DEFAULT_MODEL
+            prompt = (
+                "You maintain a running summary of an ongoing conversation.\n\n"
+                f"EXISTING SUMMARY:\n{old_summary or '(none)'}\n\n"
+                f"NEW DIALOGUE TO FOLD IN:\n{transcript}\n\n"
+                "Merge everything into ONE updated summary (max 350 words). Preserve "
+                "decisions, facts, names, numbers, code/file references, and open "
+                "questions. Output ONLY the summary text."
+            )
+            try:
+                new_summary = (await asyncio.wait_for(
+                    model_providers.complete_chat(
+                        http, model, prompt, temperature=0.2, num_ctx=8192,
+                        num_predict=700, timeout=60, ollama_url=config.OLLAMA_URL),
+                    timeout=75)).strip()
+            except Exception as e:
+                print(f"[CHAT] compaction summarizer failed (fail-open): {e}")
+                new_summary = ""
+            if not new_summary:
+                return messages
+            max_folded = max(int(r.get("id") or 0) for r in foldable)
+            await db.set_conversation_summary(conv_id, new_summary, max_folded)
+        if not (new_summary or "").strip():
+            return messages
+        lead_sys = []
+        i = 0
+        while i < len(messages) and messages[i].get("role") == "system":
+            lead_sys.append(messages[i])
+            i += 1
+        tail = messages[i:]
+        keep = tail[-_COMPACT_KEEP_RECENT:]
+        # Never open the kept window mid-pair on an assistant reply
+        for j, m in enumerate(keep):
+            if m.get("role") == "user":
+                keep = keep[j:]
+                break
+        if not keep:
+            keep = tail[-_COMPACT_KEEP_RECENT:]
+        summary_text = f"=== EARLIER CONVERSATION (summarized) ===\n{new_summary}"
+        if persona_placeholder_ctx:
+            summary_text = _replace_persona_placeholders(summary_text, **persona_placeholder_ctx)
+        out = lead_sys + [{"role": "system", "content": summary_text}] + keep
+        print(f"[CHAT] Context compacted: {len(messages)}→{len(out)} msgs "
+              f"(est {est_tokens} tok > {int(_COMPACT_THRESHOLD * num_ctx)} budget, num_ctx={num_ctx})")
+        return out
+    except Exception as e:
+        print(f"[CHAT] compaction error (fail-open): {e}")
+        return messages
+
+
 async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_id_map, connector_tool_id_map=None, connector_tool_name_map=None):
     """Async generator that yields SSE events for a streaming chat with tool-calling.
 
@@ -985,21 +1149,39 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         _user_meta = getattr(req, "user_metadata", None)
         _content_to_save = _display if _display is not None else last_user_msg
         try:
-            existing = await db.get_conversation(conv_id)
-            if existing:
-                msgs = existing.get("messages") or []
-                recent_user = next((m for m in reversed(msgs) if m.get("role") == "user"), None)
-                # Match by either the clean display content or the raw model-facing content
-                # so we don't double-save when the previous turn already persisted one.
-                _recent_content = (recent_user.get("content") or "") if recent_user else ""
-                if not recent_user or (_recent_content != _content_to_save and _recent_content != last_user_msg):
-                    await db.add_message(conv_id, "user", _content_to_save, metadata=_user_meta)
+            # Single-row lookup instead of hydrating the whole conversation.
+            # Match by either the clean display content or the raw model-facing
+            # content so we don't double-save when the previous turn already
+            # persisted one. add_message no-ops when the conversation is gone.
+            recent_user = await db.get_latest_user_message(conv_id)
+            _recent_content = (recent_user or {}).get("content") or ""
+            if not recent_user or (_recent_content != _content_to_save and _recent_content != last_user_msg):
+                await db.add_message(conv_id, "user", _content_to_save, metadata=_user_meta)
         except Exception:
             pass
 
     await events.emit(conv_id, "tool_start", {"tool": "processing", "status": "🔮 Connecting to neural oracle...", "icon": "activity"})
 
     print(f"[CHAT] conv={conv_id} model={req.model} tool_ids={req.tool_ids} msgs={len(req.messages)} persona={req.persona_id} ephemeral={ephemeral}")
+
+    # ── Smart routing: resolve the "auto" pseudo-model BEFORE validation ──
+    # Everything downstream (provider split, validation, token accounting,
+    # done payload) sees the concrete model; "auto" never reaches Ollama.
+    _routed_from_auto = ""
+    if req.model == "auto":
+        _routed_model, _route_cat = await _route_auto_model(req, http)
+        print(f"[CHAT] Auto-routed → {_routed_model} ({_route_cat})")
+        yield f"data: {json.dumps({'type': 'model_routed', 'model': _routed_model, 'category': _route_cat})}\n\n"
+        try:
+            await events.emit(conv_id, "tool_start", {
+                "tool": "routing", "icon": "activity",
+                "status": f"🧭 Auto → {_routed_model} ({_route_cat.replace('_', ' ')})",
+            })
+        except Exception:
+            pass
+        req.model = _routed_model
+        _routed_from_auto = _routed_model
+
     _model_provider, _provider_model_name = model_providers.split_model_id(req.model)
     _is_cloud_provider = _model_provider in model_providers.CLOUD_PROVIDERS
 
@@ -1510,6 +1692,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             _msg["images"] = m["images"]
         messages.append(_msg)
 
+    # ── Context auto-compaction (once per request, before the round loop) ──
+    messages = await _maybe_compact_context(
+        req, http, messages, model_options, conv_id, ephemeral, persona_placeholder_ctx)
+
     # ── Build Ollama-native tool definitions ──
     available_tool_names = set()
     ollama_tools = []
@@ -1575,10 +1761,22 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         ollama_tools.append(CODEAGENT_TOOLS["save_memory"])
         available_tool_names.add("save_memory")
 
+    # search_history: recall across past conversations. Memory-gated — offered
+    # only when this conversation's memory toggle is on (same consent surface
+    # as memory injection; only memory-enabled chats are ever indexed).
+    if (not ephemeral and global_memory_enabled
+            and getattr(config, "HISTORY_RECALL", "on") == "on"
+            and "search_history" not in available_tool_names
+            and "search_history" in CODEAGENT_TOOLS):
+        ollama_tools.append(CODEAGENT_TOOLS["search_history"])
+        available_tool_names.add("search_history")
+
     print(f"[CHAT]   Tools: {sorted(available_tool_names)}")
 
     # ── Quick Search: gate → rewrite → search → rank → fetch → inject ──
-    if "quick_search" in requested_tool_ids:
+    # Skipped in continue mode: the turn resumes a truncated answer, and the
+    # injection target would be the OLD user message (re-searching it).
+    if "quick_search" in requested_tool_ids and not getattr(req, "continue_message_id", None):
         try:
             _quick_search_context_hint = "\n\n".join(
                 s for s in [
@@ -1783,7 +1981,28 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     _assistant_msg_id = None
     _stream_started_at = datetime.utcnow().isoformat()
     _stream_has_full_product_build = False
-    if not ephemeral:
+    _continue_mode = bool(getattr(req, "continue_message_id", None)) and not ephemeral
+    _continue_prior = ""
+    if _continue_mode:
+        # Resume a length-truncated assistant message: reuse the existing row
+        # instead of creating a new stub. messages[] ends with the partial.
+        _assistant_msg_id = int(req.continue_message_id)
+        if messages and messages[-1].get("role") == "assistant":
+            _continue_prior = messages[-1].get("content") or ""
+        yield f"data: {json.dumps({'type': 'init', 'message_id': _assistant_msg_id})}\n\n"
+        # Anthropic continues a trailing assistant message natively (prefill).
+        # Ollama/OpenAI-style backends get an explicit in-memory-only user
+        # nudge instead — thinking-model chat templates mangle raw prefill
+        # (qwen3 closes a phantom </think> and restarts the whole answer).
+        # The nudge is never persisted: the last saved user message predates it.
+        if _model_provider != "anthropic" and _continue_prior:
+            messages.append({
+                "role": "user",
+                "content": "Continue your previous message exactly where it stopped, "
+                           "mid-sentence if necessary. Do not repeat any text you already "
+                           "wrote. Do not restart, summarize, or add a preamble.",
+            })
+    elif not ephemeral:
         try:
             _assistant_msg_id = await db.add_message(conv_id, "assistant", "", metadata={
                 "stream_started_at": _stream_started_at,
@@ -1829,14 +2048,18 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     # injected image markdown) in order, so a mid-turn disconnect snapshot
     # matches what the user saw. The happy-path final content still comes from
     # the frontend PATCH on `done`.
-    _turn_text = ""
+    # In continue mode, seed with the already-persisted partial so mid-stream
+    # disconnect/error snapshots never lose the text the user already has.
+    _turn_text = _continue_prior
 
+    _gen_speed = 0.0  # tokens/sec of the most recent generation round
     for round_num in range(MAX_ROUNDS):
         content = ""
         thinking = ""
         tool_calls = []
         gen_tokens = 0
         prompt_tokens = 0
+        _round_done_reason = ""  # "length" = hit num_predict/max_tokens
         _gen_pill_started = False  # First "generating" pill uses tool_start; subsequent ones use tool_progress so the frontend collapses them into one updating pill
         _streamed_content = False
         _has_tools = bool(available_tool_names)
@@ -1900,6 +2123,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 _chunk_buf = ""
                 _repeat_window = ""
                 _live_gen_tokens = 0
+                _t_first_tok = None  # cloud providers report no durations; wall-clock tok/s
                 async for event in model_providers.stream_provider_chat(
                     http,
                     req.model,
@@ -1910,13 +2134,20 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     if etype == "usage":
                         gen_tokens = int(event.get("gen_tokens") or 0)
                         prompt_tokens = int(event.get("prompt_tokens") or 0)
+                        if gen_tokens and _t_first_tok is not None:
+                            _gen_speed = round(gen_tokens / max(time.monotonic() - _t_first_tok, 0.001), 1)
                         if gen_tokens or prompt_tokens:
                             yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': gen_tokens, 'prompt_tokens': prompt_tokens})}\n\n"
+                        continue
+                    if etype == "finish":
+                        _round_done_reason = event.get("reason") or ""
                         continue
                     if etype == "thinking":
                         _thinking_token = event.get("content", "")
                         if not _thinking_token:
                             continue
+                        if _t_first_tok is None:
+                            _t_first_tok = time.monotonic()
                         _thinking_buf += _thinking_token
                         _in_thinking = True
                         _live_gen_tokens += 1
@@ -1931,6 +2162,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     token = event.get("content", "")
                     if not token:
                         continue
+                    if _t_first_tok is None:
+                        _t_first_tok = time.monotonic()
 
                     if "<think>" in token:
                         _in_thinking = True
@@ -2334,6 +2567,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                 _in_thinking = False
                             gen_tokens = chunk.get("eval_count", 0)
                             prompt_tokens = chunk.get("prompt_eval_count", 0)
+                            _round_done_reason = chunk.get("done_reason") or ""
+                            _eval_dur_ns = chunk.get("eval_duration", 0) or 0
+                            if gen_tokens and _eval_dur_ns:
+                                _gen_speed = round(gen_tokens / (_eval_dur_ns / 1e9), 1)
                             if gen_tokens or prompt_tokens:
                                 yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': gen_tokens, 'prompt_tokens': prompt_tokens})}\n\n"
 
@@ -2377,7 +2614,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             # user loses the partial answer they were watching.
             if _assistant_msg_id is not None:
                 try:
-                    _partial = content if content.strip() else ""
+                    _partial = (_turn_text + content) if _turn_text else content
+                    _partial = _partial if _partial.strip() else ""
                     _final = (_partial + f"\n\n_[interrupted: {err_msg[:160]}]_") if _partial \
                         else f"_[no response — {err_msg[:160]}]_"
                     await db.update_message(_assistant_msg_id, content=_final,
@@ -3302,13 +3540,20 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         req, http, events, conv_id,
                         last_user_msg, content, _assistant_msg_id,
                     ))
+                    # Chat-history recall rides the same memory consent switch
+                    if getattr(config, "HISTORY_RECALL", "on") == "on":
+                        _spawn_bg(_index_history_turn_bg(
+                            conv_id, _assistant_msg_id, last_user_msg, content))
                 _spawn_bg(_suggest_workspace_memories(
                     req, http, events, conv_id,
                     workspace_memory_info.get("workspace"),
                     last_user_msg, content, _assistant_msg_id,
                 ))
             await events.emit(conv_id, "complete", {"status": "Complete"})
-            _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id}
+            _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id,
+                             "speed": _gen_speed, "gen_tokens": gen_tokens, "prompt_tokens": prompt_tokens}
+            if _round_done_reason == "length":
+                _done_payload["done_reason"] = "length"
             if _review_round > 0:
                 _done_payload["refinements"] = _review_round
             yield f"data: {json.dumps(_done_payload)}\n\n"
@@ -3331,7 +3576,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     except Exception:
                         pass
                 await events.emit(conv_id, "complete", {"status": "Complete"})
-                _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id}
+                _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id,
+                                 "speed": _gen_speed, "gen_tokens": gen_tokens, "prompt_tokens": prompt_tokens}
                 if _review_round > 0:
                     _done_payload["refinements"] = _review_round
                 yield f"data: {json.dumps(_done_payload)}\n\n"
@@ -3445,7 +3691,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             print(f"[CHAT] fallback persist failed (non-fatal): {_pe}")
 
     await events.emit(conv_id, "complete", {"status": "Complete (max rounds)"})
-    _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id}
+    _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id,
+                     "speed": _gen_speed, "gen_tokens": gen_tokens, "prompt_tokens": prompt_tokens}
     if _review_round > 0:
         _done_payload["refinements"] = _review_round
     yield f"data: {json.dumps(_done_payload)}\n\n"

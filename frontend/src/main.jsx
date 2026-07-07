@@ -42,7 +42,7 @@ import {
   modelContextLength,
   researchModelOptions,
 } from './modelHelpers.js';
-import { createSettingsSync } from './settingsSync.js';
+import { createSettingsSync, createPrefsSync } from './settingsSync.js';
 import ModelPicker from './ModelPicker.jsx';
 import AnalyticsPanel from './panels/AnalyticsPanel.jsx';
 import PromptLibraryPanel from './panels/PromptLibraryPanel.jsx';
@@ -140,6 +140,9 @@ function HyprChat(){
   const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"14");}catch{return 14;}});
   const [chatWidth,setChatWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-w")||"880");}catch{return 880;}});
   const [wsModel,setWsModel]=useState(()=>{try{return localStorage.getItem("hc-ws-model")||"qwen2.5:7b";}catch{return "qwen2.5:7b";}});
+  const [contextCompaction,setContextCompaction]=useState(()=>{try{return localStorage.getItem("hc-context-compaction")==="on";}catch{return false;}});
+  const [modelRouting,setModelRouting]=useState({enabled:false,chat:"",code:"",reasoning:"",long_context:""});
+  const [backupStatus,setBackupStatus]=useState(null);
   const [dailyWelcome,setDailyWelcome]=useState(()=>{try{const c=JSON.parse(localStorage.getItem("hc-daily-welcome")||"{}");if(c.version===WELCOME_VERSION&&c.date===localDayKey()&&c.message)return c.message;}catch{}return fallbackWelcome();});
   const [planningModel,setPlanningModel]=useState(()=>{try{return localStorage.getItem("hc-planning-model")||"";}catch{return "";}});
   const [coderModel,setCoderModel]=useState(()=>{try{return localStorage.getItem("hc-coder-model")||"";}catch{return "";}});
@@ -243,8 +246,11 @@ function HyprChat(){
   const [ollamaScanSshHasPassword,setOllamaScanSshHasPassword]=useState(false);
   const [ollamaScanSshClearPassword,setOllamaScanSshClearPassword]=useState(false);
   const [modelProviders,setModelProviders]=useState({});
-  const [providerKeys,setProviderKeys]=useState({openai:"",anthropic:""});
+  const [providerKeys,setProviderKeys]=useState({openai:"",anthropic:"",custom:""});
   const [providerBusy,setProviderBusy]=useState({});
+  // Custom OpenAI-compatible provider config edits (null = not edited, show saved value)
+  const [customBaseUrl,setCustomBaseUrl]=useState(null);
+  const [customLabel,setCustomLabel]=useState(null);
   const [connectionsSaving,setConnectionsSaving]=useState(false);
   const [connectionsSaveState,setConnectionsSaveState]=useState(null); // saving|saved|failed
   const [ragSettings,setRagSettings]=useState({embed_model:"nomic-embed-text",chunk_size:500,chunk_overlap:50,top_k:6,max_context_chars:6000,research_top_k:4,research_max_chars:3000});
@@ -259,6 +265,9 @@ function HyprChat(){
   const [modelSearch,setModelSearch]=useState("");
   const [prompts,setPrompts]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-prompts")||"[]");}catch{return [];}});
   const [showPromptPicker,setShowPromptPicker]=useState(false);
+  const [slashIdx,setSlashIdx]=useState(0);            // highlighted row in the "/" slash menu
+  const [slashVarFill,setSlashVarFill]=useState(null); // {title, content, vars:[{name,value}]} — {{var}} fill-in card
+  const [slashDismissed,setSlashDismissed]=useState(false); // Esc closes the slash menu until inp stops starting with "/"
   const [showQuickMenu,setShowQuickMenu]=useState(false);
   const [showConnectorPicker,setShowConnectorPicker]=useState(false);
   const [showEffortPicker,setShowEffortPicker]=useState(false);
@@ -349,12 +358,13 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-nav-labels",showNavLabels?"1":"0");}catch{}},[showNavLabels]);
   useEffect(()=>{try{localStorage.setItem("hc-think-mode",thinkMode);}catch{}},[thinkMode]);
   useEffect(()=>{try{localStorage.setItem("hc-effort-level",String(globalEffort));}catch{}},[globalEffort]);
-  useEffect(()=>{try{localStorage.setItem("hc-effort-per-chat",JSON.stringify(effortPerChat));}catch{}},[effortPerChat]);
+  useEffect(()=>{persistPref("effort-per-chat",effortPerChat);},[effortPerChat]);
   useEffect(()=>{try{localStorage.setItem("hc-font-size",fontSize);}catch{}},[fontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-ui-font-size",uiFontSize);}catch{}},[uiFontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
-  useEffect(()=>{try{localStorage.setItem("hc-custom-quotes",JSON.stringify(customQuotes));}catch{}},[customQuotes]);
+  useEffect(()=>{persistPref("custom-quotes",customQuotes);},[customQuotes]);
   useEffect(()=>{persistServerSetting("hc-ws-model","workspace_model",wsModel);},[wsModel]);
+  useEffect(()=>{persistServerSetting("hc-context-compaction","context_compaction",contextCompaction?"on":"off");},[contextCompaction]);
   useEffect(()=>{
     const date=localDayKey();
     const model=wsModel||"";
@@ -413,9 +423,9 @@ function HyprChat(){
       .then(d=>{setImgChatLists(p=>p?{...p,settings:{...p.settings,[imgChatCkpt]:d.settings}}:p);flashSettingsPulse("Saved");})
       .catch(()=>flashSettingsPulse("Failed","error"));
   };
-  useEffect(()=>{try{localStorage.setItem("hc-model-params",JSON.stringify(modelParams));}catch{}if(modelParamsSeenRef.current)flashSettingsPulse("Saved locally","success");else modelParamsSeenRef.current=true;},[modelParams]);
-  useEffect(()=>{try{localStorage.setItem("hc-prompts",JSON.stringify(prompts));}catch{}},[prompts]);
-  useEffect(()=>{try{localStorage.setItem("hc-conv-tags",JSON.stringify(convTags));}catch{}},[convTags]);
+  useEffect(()=>{const echoed=persistPref("model-params",modelParams);if(!echoed){if(modelParamsSeenRef.current)flashSettingsPulse("Saved","success");else modelParamsSeenRef.current=true;}},[modelParams]);
+  useEffect(()=>{persistPref("prompts",prompts);},[prompts]);
+  useEffect(()=>{persistPref("conv-tags",convTags);},[convTags]);
   const [convs,setConvs]=useState([]);
   const [actId,setActId]=useState(null);
   const [inp,setInp]=useState("");
@@ -455,6 +465,7 @@ function HyprChat(){
   const [artifactFocusId,setArtifactFocusId]=useState(null);
   const previousPanelRef=useRef("chat");
   const [settingsTab,setSettingsTab]=useState("connections");
+  useEffect(()=>{if(settingsTab==="danger"){fetch(`${API}/api/backup/status`).then(r=>r.ok?r.json():null).then(d=>{if(d)setBackupStatus(d);}).catch(()=>{});}},[settingsTab]);
   // Lazy-load the checkpoint/VAE dropdown data and refresh saved workflow names
   // when the Model & Generation tab is opened with ComfyUI configured. (Must stay below the
   // panel/settingsTab declarations — hooks read them at render time.)
@@ -467,6 +478,19 @@ function HyprChat(){
   const [currentUser,setCurrentUser]=useState(null);
   const [currentUserId,setCurrentUserId]=useState(()=>hcStoredUserId());
   const [authReady,setAuthReady]=useState(false);
+  // ── Server-backed user prefs (prompts, model params, quotes, tags, effort) ──
+  // Debounced PUTs to /api/prefs/{key}; namespaced localStorage cache per user.
+  const prefsSyncRef=useRef(null);
+  if(!prefsSyncRef.current)prefsSyncRef.current=createPrefsSync({api:API});
+  const prefsReadyRef=useRef(false);   // gate: no PUTs until boot hydration ran
+  const prefsSkipRef=useRef({});       // per-key: next persist call is a hydration echo
+  // Returns true when the call was a hydration echo (callers can skip UI pulses).
+  const persistPref=useCallback((key,value)=>{
+    try{localStorage.setItem(`hc-${key}::${hcStoredUserId()||"default"}`,JSON.stringify(value));}catch{}
+    if(prefsSkipRef.current[key]){delete prefsSkipRef.current[key];return true;}
+    if(prefsReadyRef.current)prefsSyncRef.current.queue(key,value);
+    return false;
+  },[]);
   const [userGateOpen,setUserGateOpen]=useState(false);
   const [loginUserId,setLoginUserId]=useState(()=>hcStoredUserId());
   const [loginPassword,setLoginPassword]=useState("");
@@ -485,6 +509,7 @@ function HyprChat(){
   const [kbs,setKbs]=useState([]);
   const kbSaveTimersRef=useRef(new Map());
   const [uploadProgress,setUploadProgress]=useState({});  // {kbId: {filename, progress, status, error}}
+  const [kbUrlInputs,setKbUrlInputs]=useState({});  // {kbId: url string} — Add URL composer per KB card
   const [tools,setTools]=useState([]);
   const [mcs,setMcs]=useState([]);
   const [health,setHealth]=useState({});
@@ -526,6 +551,21 @@ function HyprChat(){
     if(ttl>0)setTimeout(()=>setToasts(ts=>ts.filter(x=>x.id!==id)),ttl);
     return id;
   },[]);
+  // Persistence writes that must not fail silently (message/conversation saves):
+  // retry once after 1.5s, then surface an error toast with a Retry action.
+  const persistFetch=useCallback(async(url,options,{label="Save"}={})=>{
+    const attempt=()=>fetch(url,options).then(r=>{if(!r.ok)throw new Error(`HTTP ${r.status}`);return r;});
+    try{return await attempt();}
+    catch{
+      await new Promise(res=>setTimeout(res,1500));
+      try{return await attempt();}
+      catch(e2){
+        notify({type:"error",text:`${label} failed`,detail:`${e2.message||e2} — this change is not saved on the server.`,duration:10000,
+          action:{label:"Retry",onClick:()=>{persistFetch(url,options,{label});}}});
+        return null;
+      }
+    }
+  },[notify]);
   const confirmAction=useCallback((opts={})=>new Promise(resolve=>{
     setConfirmPhrase("");
     setConfirmDialog({
@@ -1093,6 +1133,35 @@ function HyprChat(){
     const r=await fetch(`${API}/api/knowledge-bases`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New KB",description:""})}).catch(()=>null);
     if(r){const kb=await r.json();setKbs(p=>[...p,{...kb,files:[]}]);}else{setKbs(p=>[...p,{id:`kb-${Date.now()}`,name:"New KB",description:"",files:[]}]);}
   };
+  const addKbUrl=async(kbId)=>{
+    const url=(kbUrlInputs[kbId]||"").trim();
+    if(!url)return;
+    const pKey=`${kbId}:url:${Date.now()}`;
+    const clearLater=(ms)=>setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),ms);
+    setUploadProgress(p=>({...p,[pKey]:{filename:url.slice(0,60),progress:40,status:"uploading"}}));
+    try{
+      const r=await fetch(`${API}/api/knowledge-bases/${kbId}/urls`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url})});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      setKbUrlInputs(p=>({...p,[kbId]:""}));
+      setUploadProgress(p=>({...p,[pKey]:{filename:d.filename,progress:100,status:"indexing"}}));
+      if(!d.replaced)setKbs(p=>p.map(k=>k.id===kbId?{...k,files:[...(k.files||[]),{id:d.id,filename:d.filename,file_size:d.file_size,source_url:d.source_url}]}:k));
+      for(let i=0;i<60;i++){
+        await new Promise(res=>setTimeout(res,2000));
+        try{
+          const sr=await fetch(`${API}/api/knowledge-bases/${kbId}/files/${encodeURIComponent(d.filename)}/status`);
+          const st=await sr.json();
+          if(st.status==="done"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"done"}}));clearLater(3000);return;}
+          if(st.status==="error"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:st.error||"indexing failed"}}));notify({type:"error",text:"KB indexing failed",detail:st.error||d.filename});clearLater(6000);return;}
+        }catch{}
+      }
+      setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"done"}}));clearLater(3000);
+    }catch(e){
+      setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:e.message}}));
+      notify({type:"error",text:"URL ingest failed",detail:e.message||String(e)});
+      clearLater(6000);
+    }
+  };
   const parseConnectorJson=(txt,fallback,label)=>{
     try{return (txt||"").trim()?JSON.parse(txt):fallback;}catch(e){notify({type:"error",text:`Invalid ${label}`,detail:e.message||String(e)});throw e;}
   };
@@ -1157,7 +1226,62 @@ function HyprChat(){
     setResearchReports([]);setActiveResearchId(null);setActiveResearch(null);setResearchEvents([]);setResearchLiveMarkdown("");setResearchRunning(false);
     setCouncils([]);setActiveCouncilId(null);setCouncilReport(null);setQuickResults([]);setSearchLoading(false);setQuickSearchError(null);
     setCoderWorkflows([]);setCoderProjInfo(null);setAttachments([]);setFtsResults([]);setArtifactFocusId(null);setPanel("chat");setLoadingConv(false);
+    // Server-backed prefs are per-profile: clear them and re-gate persistence
+    // until the next boot hydration fetches the new profile's values.
+    prefsReadyRef.current=false;prefsSkipRef.current={};
+    setPrompts([]);setModelParams({});setCustomQuotes(DEFAULT_LOADING_QUOTES);setConvTags({});setEffortPerChat({});
   };
+
+  // Boot hydration for server-backed prefs. Server value wins; otherwise the
+  // per-user namespaced cache; otherwise the legacy un-namespaced localStorage
+  // key gets a one-time PUT migration. Conversation-keyed maps drop ghost/l-
+  // ids (local-only conversations never reach the server).
+  useEffect(()=>{
+    if(!authReady||!currentUserId)return;
+    let cancelled=false;
+    prefsReadyRef.current=false;
+    (async()=>{
+      const uid=currentUserId;
+      const defs=[
+        {key:"prompts",legacy:"hc-prompts",set:setPrompts,fallback:[]},
+        {key:"model-params",legacy:"hc-model-params",set:setModelParams,fallback:{}},
+        {key:"custom-quotes",legacy:"hc-custom-quotes",set:setCustomQuotes,fallback:DEFAULT_LOADING_QUOTES},
+        {key:"conv-tags",legacy:"hc-conv-tags",set:setConvTags,fallback:{},convMap:true},
+        {key:"effort-per-chat",legacy:"hc-effort-per-chat",set:setEffortPerChat,fallback:{},convMap:true},
+      ];
+      let server={};
+      try{const r=await fetch(`${API}/api/prefs`);if(r.ok)server=(await r.json()).prefs||{};}catch{}
+      if(cancelled)return;
+      for(const d of defs){
+        let val=server[d.key];
+        if(val===undefined){
+          let stored=null;
+          try{stored=JSON.parse(localStorage.getItem(`hc-${d.key}::${uid}`)||"null");}catch{}
+          if(stored===null){try{stored=JSON.parse(localStorage.getItem(d.legacy)||"null");}catch{}}
+          if(stored!==null&&stored!==undefined){val=stored;prefsSyncRef.current.put(d.key,stored);}
+        }
+        if(val===null||val===undefined)val=d.fallback;
+        if(d.convMap&&val&&typeof val==="object"&&!Array.isArray(val)){
+          val=Object.fromEntries(Object.entries(val).filter(([k])=>!k.startsWith("ghost-")&&!k.startsWith("l-")));
+        }
+        if(d.key==="custom-quotes"){
+          const cleaned=Array.isArray(val)?val.filter(x=>x&&x.t&&x.a!=="HyprChat"):[];
+          val=cleaned.length?cleaned:DEFAULT_LOADING_QUOTES;
+        }
+        try{localStorage.setItem(`hc-${d.key}::${uid}`,JSON.stringify(val));}catch{}
+        // Functional set: only mark the hydration echo when the value really
+        // changes — a bailed-out set fires no effect and must not eat the
+        // skip flag meant for the user's next real change.
+        d.set(prev=>{
+          if(JSON.stringify(prev)===JSON.stringify(val))return prev;
+          prefsSkipRef.current[d.key]=true;
+          return val;
+        });
+      }
+      if(!cancelled)prefsReadyRef.current=true;
+    })();
+    return ()=>{cancelled=true;};
+  },[authReady,currentUserId]);
   const refreshUsers=useCallback(async()=>{
     const r=await fetch(`${API}/api/users`);
     if(!r.ok)throw new Error(`HTTP ${r.status}`);
@@ -1332,6 +1456,8 @@ function HyprChat(){
       setOllamaScanSshClearPassword(false);
       if(d.rag)setRagSettings(p=>({...p,...d.rag}));
       if(d.default_num_ctx!=null)hydrateServerSetting("default_num_ctx",setNumCtx,d.default_num_ctx,numCtx);
+      if(d.context_compaction!=null)hydrateServerSetting("context_compaction",v=>setContextCompaction(v==="on"),d.context_compaction,contextCompaction?"on":"off");
+      if(d.model_routing&&typeof d.model_routing==="object")setModelRouting({enabled:!!d.model_routing.enabled,chat:d.model_routing.chat||"",code:d.model_routing.code||"",reasoning:d.model_routing.reasoning||"",long_context:d.model_routing.long_context||""});
       if(d.current_planning_model!=null)hydrateServerSetting("planning_model",setPlanningModel,d.current_planning_model,planningModel);
       if(d.current_coder_model!=null)hydrateServerSetting("coder_model",setCoderModel,d.current_coder_model,coderModel);
       if(d.current_architect_model!=null)hydrateServerSetting("architect_model",setArchitectModel,d.current_architect_model,architectModel);
@@ -1945,7 +2071,7 @@ function HyprChat(){
         // If this conversation is being streamed right now, local state is authoritative for messages —
         // skip the overwrite so the stream's m[m.length-1] assistant update doesn't clobber the user message.
         const skipMessages = streamingCidRef.current === id;
-        setConvs(prev=>prev.map(c=>c.id===id ? {...c, ...(skipMessages ? {} : {messages: full.messages.map(m=>({id:m.id,role:m.role,content:m.content,metadata:parseMeta(m),created_at:m.created_at}))}), model: full.model||c.model, system_prompt: full.system_prompt||c.system_prompt, tool_ids: full.tool_ids||c.tool_ids||[], model_config_id: full.model_config_id||null, use_memories: full.use_memories??c.use_memories??"0", is_council: isCouncil(full.is_council), council_config_id: full.council_config_id||null} : c));
+        setConvs(prev=>prev.map(c=>c.id===id ? {...c, ...(skipMessages ? {} : {messages: full.messages.map(m=>({id:m.id,role:m.role,content:m.content,metadata:parseMeta(m),rating:m.rating||0,created_at:m.created_at}))}), model: full.model||c.model, system_prompt: full.system_prompt||c.system_prompt, tool_ids: full.tool_ids||c.tool_ids||[], model_config_id: full.model_config_id||null, use_memories: full.use_memories??c.use_memories??"0", is_council: isCouncil(full.is_council), council_config_id: full.council_config_id||null} : c));
         // Fetch suggestions for council chats with no messages yet
         if(isCouncil(full.is_council)&&full.council_config_id&&!(full.messages||[]).length){
           fetchCouncilSuggestions(full.council_config_id);
@@ -2078,11 +2204,11 @@ function HyprChat(){
         try{localStorage.setItem("hc-last-model",patch.model);}catch{}
       }
       if(Object.keys(patch).length&&!id.startsWith("l-")&&!id.startsWith("ghost-")){
-        fetch(`${API}/api/conversations/${id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)}).catch(()=>{});
+        persistFetch(`${API}/api/conversations/${id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)},{label:"Conversation update"});
       }
       return updated;
     }));
-  },[]);
+  },[persistFetch]);
   const revealOlderMessages=useCallback((id,totalMessages)=>{
     if(!id)return;
     const el=chatScrollRef.current;
@@ -2554,6 +2680,26 @@ function HyprChat(){
   // Rough token estimate: ~4 chars per token
   const estimateTokens = (msgs) => msgs.reduce((sum,m)=>sum+Math.ceil((m.content||"").length/4),0);
 
+  // ── Prompt library insertion (slash menu, quick-menu picker, panel Use button) ──
+  const PROMPT_VAR_RE=/\{\{\s*([\w][\w .\-]*?)\s*\}\}/g;
+  const focusComposer=()=>setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);
+  const insertPrompt=(p)=>{
+    setShowPromptPicker(false);setShowQuickMenu(false);setSlashIdx(0);
+    const vars=[...new Set([...(p.content||"").matchAll(PROMPT_VAR_RE)].map(m=>m[1]))];
+    if(!vars.length){setInp(p.content||"");focusComposer();}
+    else setSlashVarFill({title:p.title,content:p.content,vars:vars.map(name=>({name,value:""}))});
+  };
+  const applyVarFill=()=>{
+    if(!slashVarFill)return;
+    const out=(slashVarFill.content||"").replace(PROMPT_VAR_RE,(m,name)=>{const v=slashVarFill.vars.find(x=>x.name===name);return v?v.value:m;});
+    setSlashVarFill(null);setInp(out);focusComposer();
+  };
+  const slashMatchesFor=(text)=>{
+    const q=(text||"").slice(1).toLowerCase().trim();
+    return prompts.filter(p=>!q||(p.title||"").toLowerCase().includes(q)||(p.category||"").toLowerCase().includes(q)).slice(0,8);
+  };
+  const slashMenuActive=()=>!act?.is_council&&!streaming&&!slashVarFill&&inp.startsWith("/")&&!inp.includes("\n")&&!slashDismissed&&prompts.length>0;
+
   // Core send logic — used by send, regenerate, and edit
   const sendMessages=async(cid, messagesToSend, appendUser, overrides)=>{
     overrides = overrides || {};
@@ -2646,15 +2792,21 @@ function HyprChat(){
       else if(thinkMode!=="auto")body.think_budget=thinkMode==="off"?0:1;
       const _effort=resolveEffort(cid,overrides);
       if(_effort>0)body.effort_rounds=_effort;
+      // Continue mode: resume a length-truncated assistant message on its
+      // existing row; `full` starts from the partial so tokens append.
+      if(overrides.continueMessageId)body.continue_message_id=overrides.continueMessageId;
       const res=await fetch(`${API}/api/chat/stream`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:ctrl.signal});
       if(!res.ok){const errText=await res.text().catch(()=>res.statusText);throw new Error(`HTTP ${res.status}: ${errText}`);}
       const rdr=res.body.getReader(),dec=new TextDecoder();
-      let full="",buf="",refinementsCount=0;
+      let full=overrides.prefill||"",buf="",refinementsCount=0;
       // Phase 0.6: backend creates the assistant message at stream start and sends
       // its id via an `init` SSE event. We PATCH this row on stream-complete instead
       // of POSTing a duplicate, so disconnect-then-reload still leaves exactly one
       // assistant message per turn.
       let _streamMsgId=null;
+      let _doneStats=null;
+      let _doneTruncated=false;
+      let _routedModel=null;
       while(true){
         const{done,value}=await rdr.read();if(done)break;
         buf+=dec.decode(value,{stream:true});
@@ -2666,11 +2818,13 @@ function HyprChat(){
             else if(d.type==="token"){full+=d.content;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:true};return{...c,messages:m};});}
             else if(d.type==="clear"){full="";uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});}
             else if(d.type==="refinement_start"){full="";refinementsCount=d.round||refinementsCount;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});const _refEv={type:"tool_start",data:{tool:"refinement",status:`Refining answer (${d.round}/${d.total})...`,icon:"sparkles",round:d.round,total:d.total},timestamp:Date.now()/1000};streamSaveEvtsRef.current.push(_refEv);setEvts(p=>[...p.slice(-200),_refEv]);}
-            else if(d.type==="done"){if(d.message_id)_streamMsgId=d.message_id;setTokS(d.speed);if(d.gen_tokens||d.tokens)setSessionTokens(p=>p+((d.gen_tokens||d.tokens)||0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens){setGenTokens(d.gen_tokens);setTokC(d.gen_tokens);}if(d.refinements)refinementsCount=d.refinements;}
+            else if(d.type==="done"){if(d.message_id)_streamMsgId=d.message_id;setTokS(d.speed);if(d.gen_tokens||d.tokens)setSessionTokens(p=>p+((d.gen_tokens||d.tokens)||0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens){setGenTokens(d.gen_tokens);setTokC(d.gen_tokens);_doneStats={gen_tokens:d.gen_tokens,...(d.speed?{speed:d.speed}:{})};}if(d.done_reason==="length")_doneTruncated=true;if(d.refinements)refinementsCount=d.refinements;}
             else if(d.type==="ctx_update"){if(d.gen_tokens)setTokC(d.gen_tokens);if(d.prompt_tokens)setCtxTokens(d.prompt_tokens);}
+            else if(d.type==="model_routed"){_routedModel=d.model;}
             else if(d.type==="error"){const _errBlock=(full?"\n\n":"")+"```\n⚠ "+d.error+"\n```";full=full+_errBlock;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:false};return{...c,messages:m};});}
           }catch{}}
       }
+      if(_routedModel)_doneStats={...(_doneStats||{}),routed_model:_routedModel};
       // Capture relevant events into metadata for persistence (tool status + search results + source links)
       // Prefer the persistent stream-save buffer, which survives chat switches. Fall back to evtsRef for safety.
       const _rawEvts = streamSaveEvtsRef.current.length > 0 ? streamSaveEvtsRef.current : evtsRef.current;
@@ -2689,17 +2843,22 @@ function HyprChat(){
       // Pluck run_ids out of the raw event stream so the Daedalus summary can
       // find every run even when older status events are trimmed.
       const _streamRunIds = _runIdsFromEvents(_rawEvts);
-      const _msgMeta = (_savedEvts.length || refinementsCount > 0 || _streamRunIds.length) ? {
+      let _msgMeta = (_savedEvts.length || refinementsCount > 0 || _streamRunIds.length) ? {
         ...(_savedEvts.length?{saved_events:_savedEvts}:{}),
         ...(refinementsCount>0?{refinements:refinementsCount}:{}),
         ...(_streamRunIds.length?{run_ids:_streamRunIds}:{}),
+        ...(_doneStats?{stats:_doneStats}:{}),
         has_full_product_build: _streamHasFullProductBuild,
         in_progress: false,
-      } : {in_progress: false};
+      } : {...(_doneStats?{stats:_doneStats}:{}), in_progress: false};
+      // Continue mode: keep the original turn's persisted metadata (events,
+      // stats) underneath the new state — the PATCH replaces it wholesale.
+      if(overrides.priorMeta){_msgMeta={...overrides.priorMeta,..._msgMeta};delete _msgMeta.truncated;}
+      if(_doneTruncated)_msgMeta.truncated=true;
       const finalFull=replacePersonaPlaceholdersForConversation(full,cv);
       // Auto-play the reply when the Voice "Auto-play replies" toggle is on
       if(ttsAutoplay&&ttsUrl&&finalFull&&!isGhostSend){setTimeout(()=>{try{speak(finalFull,_streamMsgId!=null?_streamMsgId:`auto-${Date.now()}`);}catch{}},80);}
-      uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:finalFull,isS:false,metadata:_msgMeta};return{...c,messages:m};});
+      uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:finalFull,isS:false,metadata:_msgMeta,...(_streamMsgId?{id:_streamMsgId}:{})};return{...c,messages:m};});
       // Save final assistant message state to DB. PATCH the row the backend already
       // created at stream start (preferred — exactly one row per turn). Fall back to
       // POST for older backends or if init/done didn't include a message_id.
@@ -2707,9 +2866,9 @@ function HyprChat(){
         // Ghost chats are intentionally local-only: no assistant PATCH/POST,
         // no title generation, no workspace memory suggestion source row.
       }else if(_streamMsgId){
-        fetch(`${API}/api/conversations/${cid}/messages/${_streamMsgId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:finalFull,metadata:_msgMeta})}).catch(()=>{});
+        persistFetch(`${API}/api/conversations/${cid}/messages/${_streamMsgId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:finalFull,metadata:_msgMeta})},{label:"Message save"});
       }else{
-        fetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:finalFull,metadata:_msgMeta})}).catch(()=>{});
+        persistFetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:finalFull,metadata:_msgMeta})},{label:"Message save"});
       }
       // Auto-generate title after first exchange
       if(!isGhostSend&&autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const curTitle=cv2?.title||"";if(!curTitle||curTitle==="New Chat"||curTitle===appendUser.slice(0,40))fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
@@ -2788,9 +2947,13 @@ function HyprChat(){
   const regenerate=async(msgIndex, overrides)=>{
     if(streaming)return;
     const cid=actId;if(!cid)return;
+    const cv=convs.find(c=>c.id===cid);
+    // Truncate server-side from the replaced assistant row inclusive BEFORE
+    // re-streaming — otherwise the old rows stay in SQLite and reload shows
+    // both the old and the new reply.
+    await truncateServerMessages(cid,msgIndex,cv?.messages?.[msgIndex]);
     // Remove the assistant message at msgIndex and re-send everything before it
     uConv(cid,c=>{const m=[...(c.messages||[])];m[msgIndex]={role:"assistant",content:"",isS:true,created_at:new Date().toISOString()};return{...c,messages:m.slice(0,msgIndex+1)};});
-    const cv=convs.find(c=>c.id===cid);
     const msgsBeforeRegen=(cv?.messages||[]).slice(0,msgIndex);
     await sendMessages(cid, msgsBeforeRegen, null, overrides);
   };
@@ -2799,11 +2962,21 @@ function HyprChat(){
     if(streaming)return;
     const cid=actId;if(!cid)return;
     setEditingMsg(null);
-    // Replace the user message and remove everything after it, then re-send
-    uConv(cid,c=>{const m=(c.messages||[]).slice(0,msgIndex);const _now=new Date().toISOString();m.push({role:"user",content:newContent,created_at:_now});m.push({role:"assistant",content:"",isS:true,created_at:_now});return{...c,messages:m};});
     const cv=convs.find(c=>c.id===cid);
+    const orig=cv?.messages?.[msgIndex];
+    // Truncate server-side from the edited user row inclusive FIRST — the
+    // stream's defensive persist then saves the edited text exactly once
+    // instead of stacking it under the original.
+    await truncateServerMessages(cid,msgIndex,orig);
+    // Rebuild the user message carrying attachment metadata/_images through;
+    // drop the stale _fullContent — the send mapper reconstructs the image
+    // hint from metadata.images when _fullContent is absent.
+    const rebuilt={role:"user",content:newContent,
+      ...(orig?.metadata?{metadata:orig.metadata}:{}),
+      ...(Array.isArray(orig?._images)&&orig._images.length?{_images:orig._images}:{})};
+    uConv(cid,c=>{const m=(c.messages||[]).slice(0,msgIndex);const _now=new Date().toISOString();m.push({...rebuilt,created_at:_now});m.push({role:"assistant",content:"",isS:true,created_at:_now});return{...c,messages:m};});
     const msgsUpToEdit=(cv?.messages||[]).slice(0,msgIndex);
-    msgsUpToEdit.push({role:"user",content:newContent});
+    msgsUpToEdit.push(rebuilt);
     await sendMessages(cid, msgsUpToEdit, newContent);
   };
 
@@ -2828,6 +3001,63 @@ function HyprChat(){
       if(dbId)await fetch(`${API}/api/conversations/${cid}/messages/${dbId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:newContent})});
       else console.warn("Edited assistant message not persisted: could not resolve DB id");
     }catch(e){console.warn("Could not persist edited assistant message:",e);}
+  };
+
+  // Resolve a message's DB row id — direct when present, else by position
+  // (same convention as forkAt/saveAssistantEdit).
+  const resolveMsgDbId=async(cid,msgIndex,target)=>{
+    if(target?.id)return target.id;
+    if(String(cid).startsWith("ghost-"))return null;
+    try{
+      const full=await(await fetch(`${API}/api/conversations/${cid}`)).json();
+      const cand=(full.messages||[])[msgIndex];
+      if(cand?.role===target?.role)return cand.id;
+    }catch{}
+    return null;
+  };
+
+  // Server-side truncation for regenerate/edit: delete the DB row at msgIndex
+  // and everything after it so reload can't resurrect replaced turns.
+  // Non-fatal on failure — the stream continues; worst case is the old
+  // pre-fix duplicate behavior.
+  const truncateServerMessages=async(cid,msgIndex,target)=>{
+    if(!cid||!target)return;
+    const s=String(cid);
+    if(s.startsWith("ghost-")||s.startsWith("l-"))return;
+    try{
+      const mid=await resolveMsgDbId(cid,msgIndex,target);
+      if(!mid)return;
+      await fetch(`${API}/api/conversations/${cid}/messages?from_id=${mid}`,{method:"DELETE"});
+    }catch(e){console.warn("Server truncate failed (non-fatal):",e);}
+  };
+
+  const continueMessage=async(msgIndex)=>{
+    if(streaming)return;
+    const cid=actId;if(!cid)return;
+    const cv=convs.find(c=>c.id===cid);
+    const msg=cv?.messages?.[msgIndex];
+    if(!msg||msg.role==="user"||!msg.content)return;
+    const mid=await resolveMsgDbId(cid,msgIndex,msg);
+    if(!mid){notify({type:"warning",text:"Can't continue",detail:"Message id not found — reload the conversation and retry."});return;}
+    // Reuse the existing bubble (no new one); history ends with the partial.
+    uConv(cid,c=>{const m=(c.messages||[]).slice(0,msgIndex+1);m[msgIndex]={...m[msgIndex],isS:true};return{...c,messages:m};});
+    const prior=(cv.messages||[]).slice(0,msgIndex+1);
+    await sendMessages(cid,prior,null,{continueMessageId:mid,prefill:msg.content,priorMeta:msg.metadata||null});
+  };
+
+  const rateMessage=async(msgIndex,value)=>{
+    const cid=actId;if(!cid)return;
+    const cv=convs.find(c=>c.id===cid);
+    const msg=cv?.messages?.[msgIndex];
+    if(!msg)return;
+    const mid=await resolveMsgDbId(cid,msgIndex,msg);
+    if(!mid){notify({type:"warning",text:"Can't rate message",detail:"Message id not found — reload the conversation and retry."});return;}
+    const next=(msg.rating===value)?0:value; // clicking the active thumb clears it
+    uConv(cid,c=>{const m=[...(c.messages||[])];m[msgIndex]={...m[msgIndex],rating:next,id:mid};return{...c,messages:m};});
+    try{
+      const r=await fetch(`${API}/api/conversations/${cid}/messages/${mid}/rating`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({rating:next})});
+      if(!r.ok)throw new Error(`HTTP ${r.status}`);
+    }catch(e){notify({type:"error",text:"Rating failed",detail:e.message||String(e)});}
   };
 
   const delMsg=(msgIndex)=>{
@@ -3370,11 +3600,16 @@ function HyprChat(){
       const key=(providerKeys[provider]||"").trim();
       const body={...patch};
       if(key)body.api_key=key;
+      if(provider==="custom"){
+        if(customBaseUrl!==null)body.base_url=customBaseUrl.trim();
+        if(customLabel!==null)body.label=customLabel.trim();
+      }
       const r=await fetch(`${API}/api/model-providers/${provider}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
       const d=await r.json().catch(()=>({}));
       if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
       setModelProviders(p=>({...p,[provider]:d}));
       setProviderKeys(p=>({...p,[provider]:""}));
+      if(provider==="custom"){setCustomBaseUrl(null);setCustomLabel(null);}
       await refreshModels();
       notify({type:"success",text:"Provider saved",detail:d.label||provider,duration:2400});
     }catch(e){notify({type:"error",text:"Provider save failed",detail:e.message||String(e)});}
@@ -3393,7 +3628,7 @@ function HyprChat(){
     setProviderBusy(p=>({...p,[provider]:null}));
   };
   const deleteModelProvider=async(provider)=>{
-    const ok=await confirmAction({title:"Remove provider key",body:`Remove the saved ${provider==="openai"?"OpenAI":"Anthropic"} API key for this HyprChat user?`,confirmLabel:"Remove Key",tone:"danger"});
+    const ok=await confirmAction({title:"Remove provider key",body:`Remove the saved ${provider==="openai"?"OpenAI":provider==="anthropic"?"Anthropic":"custom provider"} ${provider==="custom"?"configuration":"API key"} for this HyprChat user?`,confirmLabel:"Remove",tone:"danger"});
     if(!ok)return;
     setProviderBusy(p=>({...p,[provider]:"deleting"}));
     try{
@@ -4622,13 +4857,19 @@ function HyprChat(){
         </div>
         <div style={{maxHeight:240,overflowY:"auto",marginBottom:10,display:"flex",flexDirection:"column",gap:6}}>
           {(kb.files||[]).map((f,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:`${t.surface}44`,borderRadius:8,border:`1px solid ${t.brd}22`,fontSize:11}}>
-            <span style={{color:t.f1,flexShrink:0}}>{(()=>{const ext=((f.filename||f.name||"").split(".").pop()||"").toLowerCase();if(ext==="pdf")return"📕";if(["doc","docx"].includes(ext))return"📘";if(["xls","xlsx","csv"].includes(ext))return"📊";if(["json","xml","yaml","yml"].includes(ext))return"🗂";if(["py","js","ts","rs","go","java","c","cpp","h","rb","sh"].includes(ext))return"💻";if(["md"].includes(ext))return"📝";if(["txt","text","log"].includes(ext))return"📝";if(["html","htm"].includes(ext))return"🌐";if(["png","jpg","jpeg","gif","svg","webp"].includes(ext))return"🖼";if(["zip","tar","gz","rar","7z"].includes(ext))return"📦";return"📄";})()}</span>
+            <span style={{color:t.f1,flexShrink:0}}>{(()=>{if(f.source_url)return"🌐";const ext=((f.filename||f.name||"").split(".").pop()||"").toLowerCase();if(ext==="pdf")return"📕";if(["doc","docx"].includes(ext))return"📘";if(["xls","xlsx","csv"].includes(ext))return"📊";if(["json","xml","yaml","yml"].includes(ext))return"🗂";if(["py","js","ts","rs","go","java","c","cpp","h","rb","sh"].includes(ext))return"💻";if(["md"].includes(ext))return"📝";if(["txt","text","log"].includes(ext))return"📝";if(["html","htm"].includes(ext))return"🌐";if(["png","jpg","jpeg","gif","svg","webp"].includes(ext))return"🖼";if(["zip","tar","gz","rar","7z"].includes(ext))return"📦";return"📄";})()}</span>
             <span style={{flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:500}}>{f.filename||f.name}</span>
+            {f.source_url&&<a href={f.source_url} target="_blank" rel="noreferrer" title={f.source_url} style={{fontSize:10,color:t.f1,flexShrink:0,textDecoration:"none"}}>↗</a>}
             <span style={{fontSize:9,color:t.mut,flexShrink:0}}>{((f.file_size||f.size||0)/1024).toFixed(1)}KB</span>
             {f.id&&<button onClick={async()=>{const fn=(f.filename||f.name||"").toLowerCase();const ext=fn.split(".").pop();if(ext==="pdf"){setKbPreview({filename:f.filename||f.name,rawUrl:userScopedUrl(`/api/knowledge-bases/${kb.id}/files/${f.id}/raw`),isPdf:true,pdfFullView:false,content:null,loading:true});try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/pdf-text?pages=10`);const d=await r.json();setKbPreview(p=>({...p,content:d.content,total_pages:d.total_pages,previewed_pages:d.previewed_pages,truncated:d.truncated,loading:false}));}catch(e){setKbPreview(p=>({...p,content:"Failed to extract PDF text: "+e.message,loading:false}));}}else if(["png","jpg","jpeg","gif","svg","webp","bmp"].includes(ext)){setKbPreview({filename:f.filename||f.name,rawUrl:userScopedUrl(`/api/knowledge-bases/${kb.id}/files/${f.id}/raw`),isImage:true,loading:false});}else{setKbPreview({filename:f.filename||f.name,content:null,loading:true});try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/preview`);const d=await r.json();setKbPreview({filename:d.filename,content:d.content,truncated:d.truncated,total_lines:d.total_lines,loading:false});}catch(e){setKbPreview({filename:f.filename||f.name,content:"Failed to load preview: "+e.message,loading:false});}}}} style={{background:`${t.acc}15`,border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",padding:"2px 8px",borderRadius:5,fontSize:9,fontWeight:600,flexShrink:0}}>Preview</button>}
             <button onClick={()=>{if(f.id)fetch(`${API}/api/knowledge-bases/files/${f.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:(k.files||[]).filter((_,j)=>j!==i)}:k));}} style={{background:"none",border:"none",color:t.err,cursor:"pointer",padding:"2px 4px",fontSize:10,opacity:.6,flexShrink:0}} title="Delete file">✕</button>
           </div>)}
           {!(kb.files||[]).length&&<span style={{fontSize:11,color:t.mut,fontStyle:"italic",padding:"4px 0"}}>No files uploaded</span>}
+        </div>
+        {/* Add web page by URL */}
+        <div style={{display:"flex",gap:6,marginBottom:8}}>
+          <input value={kbUrlInputs[kb.id]||""} onChange={e=>setKbUrlInputs(p=>({...p,[kb.id]:e.target.value}))} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();addKbUrl(kb.id);}}} placeholder="https://…  add a web page or PDF by URL" style={{flex:1,fontSize:11,padding:"6px 9px",background:t.bgDeep,border:`1px solid ${t.brd}33`,color:t.text,borderRadius:7,fontFamily:font,boxSizing:"border-box"}}/>
+          <button onClick={()=>addKbUrl(kb.id)} disabled={!(kbUrlInputs[kb.id]||"").trim()} style={{...btnS(t.f1),opacity:(kbUrlInputs[kb.id]||"").trim()?1:.5,whiteSpace:"nowrap"}}>🌐 Add URL</button>
         </div>
         {/* Upload progress bars */}
         {Object.keys(uploadProgress).some(k=>k.startsWith(kb.id+":"))&&<div style={{border:`1px solid ${t.brd}22`,borderRadius:8,padding:"8px 10px",marginBottom:8,display:"flex",flexDirection:"column",gap:6}}>
@@ -5525,7 +5766,7 @@ function HyprChat(){
     </div>
   </div>;})()
 
-      :panel==="prompts"?<PromptLibraryPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} prompts={prompts} setPrompts={setPrompts} editPrompt={editPrompt} setEditPrompt={setEditPrompt} setInp={setInp} setPanel={setPanel}/>
+      :panel==="prompts"?<PromptLibraryPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} prompts={prompts} setPrompts={setPrompts} editPrompt={editPrompt} setEditPrompt={setEditPrompt} setInp={setInp} insertPrompt={insertPrompt} setPanel={setPanel}/>
 
       :panel==="models"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     {/* Toolbar */}
@@ -6369,7 +6610,7 @@ function HyprChat(){
 
         {settingSection("Manage Profiles",<div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:10,color:t.dim}}>{users.length} profile{users.length===1?"":"s"}</span><button onClick={refreshUsers} style={{...btnS(t.mut),fontSize:10,padding:"4px 9px"}}><IC.Refresh/> Refresh</button></div>,
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
-              {users.map(u=>{const isCurrent=u.id===currentUserId;const nameDraft=userNameDrafts[u.id]??u.name??"";const pwdDraft=userPasswordDrafts[u.id]||"";return <div key={u.id} style={{background:t.bgDeep,border:`1px solid ${isCurrent?t.acc:t.brd}30`,borderRadius:9,padding:"11px 12px"}}>
+              {users.map(u=>{const isCurrent=u.id===currentUserId;const canManage=isCurrent||currentUserId==="default";const nameDraft=userNameDrafts[u.id]??u.name??"";const pwdDraft=userPasswordDrafts[u.id]||"";return <div key={u.id} style={{background:t.bgDeep,border:`1px solid ${isCurrent?t.acc:t.brd}30`,borderRadius:9,padding:"11px 12px"}}>
                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:10}}>
                   <div style={{display:"flex",alignItems:"center",gap:7,minWidth:0}}>
                     <span style={{fontSize:10,color:isCurrent?t.acc:t.mut,fontWeight:900,textTransform:"uppercase",letterSpacing:.6,flexShrink:0}}>{isCurrent?"Current":"Profile"}</span>
@@ -6377,15 +6618,15 @@ function HyprChat(){
                     {u.password_enabled&&<span style={{fontSize:9,color:t.warm,border:`1px solid ${t.warm}33`,background:`${t.warm}12`,borderRadius:999,padding:"1px 6px",fontWeight:800,flexShrink:0}}>Password</span>}
                     {u.id==="default"&&<span style={{fontSize:9,color:t.mut,border:`1px solid ${t.brd}33`,borderRadius:999,padding:"1px 6px",fontWeight:800,flexShrink:0}}>Main</span>}
                   </div>
-                  {u.id!=="default"&&<button onClick={()=>deleteManagedUser(u)} title="Delete profile" style={{...btnS(t.err),fontSize:10,padding:"6px 8px",height:32,flexShrink:0}}><IC.Trash/></button>}
+                  {u.id!=="default"&&canManage&&<button onClick={()=>deleteManagedUser(u)} title="Delete profile" style={{...btnS(t.err),fontSize:10,padding:"6px 8px",height:32,flexShrink:0}}><IC.Trash/></button>}
                 </div>
-                <div style={{display:"grid",gridTemplateColumns:"minmax(180px,1fr) 74px minmax(180px,1fr) 74px minmax(72px,auto)",gap:8,alignItems:"center"}}>
+                {canManage&&<div style={{display:"grid",gridTemplateColumns:"minmax(180px,1fr) 74px minmax(180px,1fr) 74px minmax(72px,auto)",gap:8,alignItems:"center"}}>
                   <input value={nameDraft} onChange={e=>setUserNameDrafts(p=>({...p,[u.id]:e.target.value}))} placeholder="Display name" style={{...inputS,fontSize:12,padding:"8px 10px"}}/>
                   <button onClick={()=>updateManagedUser(u.id,{name:nameDraft})} disabled={!nameDraft.trim()||nameDraft===u.name} style={{...btnS(t.f1),fontSize:10,padding:"6px 9px",height:36,opacity:nameDraft.trim()&&nameDraft!==u.name?1:.45,justifyContent:"center"}}>Save</button>
                   <input type="password" value={pwdDraft} onChange={e=>setUserPasswordDrafts(p=>({...p,[u.id]:e.target.value}))} placeholder={u.password_enabled?"New password":"Set password"} style={{...inputS,fontSize:12,padding:"8px 10px"}}/>
                   <button onClick={()=>updateManagedUser(u.id,{password:pwdDraft})} disabled={!pwdDraft} style={{...btnS(t.warm),fontSize:10,padding:"6px 9px",height:36,opacity:pwdDraft?1:.45,whiteSpace:"nowrap",justifyContent:"center"}}>Set</button>
                   {u.password_enabled?<button onClick={()=>updateManagedUser(u.id,{clear_password:true})} style={{...btnS(t.mut),fontSize:10,padding:"6px 9px",height:36,whiteSpace:"nowrap",justifyContent:"center"}}>Clear</button>:<span/>}
-                </div>
+                </div>}
               </div>;})}
             </div>
         )}
@@ -6412,18 +6653,24 @@ function HyprChat(){
         ,"Runtime endpoint health at a glance.")}
         {settingSection("Cloud Models",<button onClick={async()=>{await refreshModelProviders();await refreshModels();}} style={{...btnS(t.f1),fontSize:10,padding:"5px 9px"}}><IC.Refresh/> Refresh</button>,
           <div style={{display:"grid",gridTemplateColumns:"1fr",gap:10}}>
-            {[["openai","OpenAI","sk-...","ChatGPT / GPT models"],["anthropic","Anthropic","sk-ant-...","Claude models"]].map(([provider,label,placeholder,hint])=>{
-              const st=modelProviders[provider]||{provider,label,enabled:false,has_key:false,key_source:"none",key_hint:""};
+            {[["openai","OpenAI","sk-...","ChatGPT / GPT models"],["anthropic","Anthropic","sk-ant-...","Claude models"],["custom","Custom","(optional key)","Any OpenAI-compatible endpoint — OpenRouter, Groq, vLLM, llama.cpp..."]].map(([provider,label,placeholder,hint])=>{
+              const st=modelProviders[provider]||{provider,label,enabled:false,has_key:false,key_source:"none",key_hint:"",base_url:"",custom_label:""};
               const busy=providerBusy[provider];
               const enabled=!!st.enabled;
               const key=providerKeys[provider]||"";
-              const statusColor=enabled&&st.has_key?t.ok:st.has_key?t.warm:t.mut;
+              const isCustom=provider==="custom";
+              const configured=isCustom?!!st.base_url:st.has_key;
+              const statusColor=enabled&&configured?t.ok:configured?t.warm:t.mut;
+              const saveReady=isCustom?(!!key||customBaseUrl!==null||customLabel!==null):!!key;
+              const testReady=isCustom?!!st.base_url:(!!key||st.has_key);
               return <div key={provider} style={{...subSecS,display:"grid",gridTemplateColumns:"120px minmax(0,1fr) auto",gap:10,alignItems:"center"}}>
                 <div>
-                  <div style={{display:"flex",alignItems:"center",gap:7,fontSize:12,fontWeight:900,color:t.text}}><span>{provider==="openai"?"◎":"✦"}</span>{label}</div>
+                  <div style={{display:"flex",alignItems:"center",gap:7,fontSize:12,fontWeight:900,color:t.text}}><span>{provider==="openai"?"◎":provider==="anthropic"?"✦":"⌬"}</span>{isCustom&&st.custom_label?st.custom_label:label}</div>
                   <div style={{fontSize:9,color:t.mut,marginTop:3}}>{hint}</div>
                 </div>
                 <div style={{display:"grid",gridTemplateColumns:"minmax(180px,1fr) auto",gap:8,alignItems:"center"}}>
+                  {isCustom&&<input value={customBaseUrl??(st.base_url||"")} onChange={e=>setCustomBaseUrl(e.target.value)} placeholder="Full base URL, e.g. https://openrouter.ai/api/v1" style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px",gridColumn:"1 / -1"}}/>}
+                  {isCustom&&<input value={customLabel??(st.custom_label||"")} onChange={e=>setCustomLabel(e.target.value)} placeholder="Display name (e.g. OpenRouter)" style={{...inputS,fontSize:12,padding:"8px 10px",gridColumn:"1 / -1"}}/>}
                   <input type="password" value={key} onChange={e=>setProviderKeys(p=>({...p,[provider]:e.target.value}))} placeholder={st.key_hint?`Saved ${st.key_hint}`:placeholder} style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
                   <label style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:enabled?t.ok:t.mut,cursor:"pointer",whiteSpace:"nowrap"}}>
                     <input type="checkbox" checked={enabled} onChange={e=>saveModelProvider(provider,{enabled:e.target.checked})} disabled={!!busy}/>
@@ -6431,15 +6678,15 @@ function HyprChat(){
                   </label>
                   <div style={{gridColumn:"1 / -1",display:"flex",gap:8,alignItems:"center",fontSize:9,color:statusColor}}>
                     <span style={{width:7,height:7,borderRadius:"50%",background:statusColor,boxShadow:`0 0 6px ${statusColor}66`}}/>
-                    <span>{st.has_key?(enabled?`Ready (${st.key_source})`:`Key disabled`):"No key saved"}</span>
+                    <span>{configured?(enabled?`Ready${isCustom?"":` (${st.key_source})`}`:isCustom?"Disabled":"Key disabled"):isCustom?"No base URL saved":"No key saved"}</span>
                     {st.last_test_status==="ok"&&<span style={{color:t.ok}}>Test passed</span>}
                     {st.last_test_status==="error"&&<span title={st.last_test_error||""} style={{color:t.err}}>Test failed</span>}
                   </div>
                 </div>
                 <div style={{display:"flex",gap:6,justifyContent:"flex-end",flexWrap:"wrap"}}>
-                  <button onClick={()=>testModelProvider(provider)} disabled={!!busy||(!key&&!st.has_key)} style={{...btnS(t.f1),fontSize:10,padding:"6px 9px",opacity:(busy||(!key&&!st.has_key))?0.5:1}}>{busy==="testing"?"Testing...":"Test"}</button>
-                  <button onClick={()=>saveModelProvider(provider,{enabled})} disabled={!!busy||!key} style={{...btnS(t.ok),fontSize:10,padding:"6px 9px",opacity:(busy||!key)?0.5:1}}>{busy==="saving"?"Saving...":"Save"}</button>
-                  <button onClick={()=>deleteModelProvider(provider)} disabled={!!busy||!st.has_key} style={{...btnS(t.err),fontSize:10,padding:"6px 8px",opacity:(busy||!st.has_key)?0.45:1}}><IC.Trash/></button>
+                  <button onClick={()=>testModelProvider(provider)} disabled={!!busy||!testReady} style={{...btnS(t.f1),fontSize:10,padding:"6px 9px",opacity:(busy||!testReady)?0.5:1}}>{busy==="testing"?"Testing...":"Test"}</button>
+                  <button onClick={()=>saveModelProvider(provider,{enabled})} disabled={!!busy||!saveReady} style={{...btnS(t.ok),fontSize:10,padding:"6px 9px",opacity:(busy||!saveReady)?0.5:1}}>{busy==="saving"?"Saving...":"Save"}</button>
+                  <button onClick={()=>deleteModelProvider(provider)} disabled={!!busy||(!st.has_key&&!configured)} style={{...btnS(t.err),fontSize:10,padding:"6px 8px",opacity:(busy||(!st.has_key&&!configured))?0.45:1}}><IC.Trash/></button>
                 </div>
               </div>;
             })}
@@ -6576,12 +6823,34 @@ function HyprChat(){
           {chipRow(EFFORT_LEVELS.map((lv,v)=>({v,title:lv.desc,label:<><span style={{fontSize:14}}>{lv.emoji}</span>{lv.name}</>})),globalEffort,setGlobalEffort,{color:t.pink})}
           <div style={{fontSize:10,color:t.mut,marginTop:4}}>After the initial answer, the model re-examines and refines it. {EFFORT_LEVELS[globalEffort].name} = {globalEffort===0?"no review":`${globalEffort} review pass${globalEffort>1?"es":""}`}. Each chat can override this.</div>
         </div>
+        <div>
+          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Auto-Compact Long Chats</div>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:contextCompaction?t.ok:t.dim,cursor:"pointer"}}>
+            <input type="checkbox" checked={contextCompaction} onChange={e=>setContextCompaction(e.target.checked)} style={{accentColor:t.ok,cursor:"pointer"}}/>
+            {contextCompaction?"Enabled":"Disabled"}
+          </label>
+          <div style={{fontSize:10,color:t.mut,marginTop:4}}>When a chat nears its context window, older turns are summarized by the Workspace Analysis Model so long conversations keep their beginning. Original messages are never modified.</div>
+        </div>
         </>,"Global model behavior. Individual chats can still override effort and tools.")}
 
         {settingSection("Workspace Analysis Model",null,<div>
           <ModelPicker value={wsModel} onChange={setWsModel} models={models} modelDetails={modelDetails} t={t} font={font}/>
           <div style={{fontSize:10,color:t.mut,marginTop:6}}>Small, fast model for workspace topic auto-detection.</div>
         </div>)}
+
+        {settingSection("Smart Model Routing",
+          <label style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:modelRouting.enabled?t.ok:t.mut,cursor:"pointer",whiteSpace:"nowrap"}}>
+            <input type="checkbox" checked={modelRouting.enabled} onChange={e=>{const next={...modelRouting,enabled:e.target.checked};setModelRouting(next);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({model_routing:next})}).then(()=>refreshModels()).catch(()=>{});}} style={{accentColor:t.ok,cursor:"pointer"}}/>
+            {modelRouting.enabled?"Enabled":"Disabled"}
+          </label>,
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:12,opacity:modelRouting.enabled?1:.55}}>
+            {[["chat","💬 Chat","casual conversation, writing, general questions"],["code","💻 Code","programming, debugging, scripts"],["reasoning","🧠 Reasoning","math, logic, multi-step analysis"],["long_context","📜 Long Context","prompts over ~12K tokens (no classifier call)"]].map(([k,label,hint])=><div key={k}>
+              <div style={{fontSize:11,color:t.dim,fontWeight:700,marginBottom:4}}>{label}</div>
+              <ModelPicker value={modelRouting[k]} onChange={v=>{const next={...modelRouting,[k]:v};setModelRouting(next);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({model_routing:next})}).then(()=>refreshModels()).catch(()=>{});}} models={models.filter(m=>m!=="auto")} modelDetails={modelDetails} t={t} font={font}/>
+              <div style={{fontSize:9,color:t.mut,marginTop:3}}>{hint}</div>
+            </div>)}
+          </div>
+        ,"Adds an 🧭 Auto entry to the model picker. Each message is classified locally by the Workspace Analysis Model and routed to the model you set per category.")}
 
         {settingSection("Chat Image Generation",<span style={{fontSize:9,color:t.acc,background:`${t.acc}12`,border:`1px solid ${t.acc}28`,borderRadius:6,padding:"2px 6px",fontWeight:800}}>ComfyUI</span>,<>
           {!comfyuiUrl
@@ -7015,6 +7284,30 @@ function HyprChat(){
 
 	      {/* TILE: Danger Zone */}
 	      <div style={{display:settingsTab==="danger"?"block":"none",animation:"fadeIn .18s ease"}}>
+	        {settingSection("Backup & Restore",null,
+	        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+	          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+	            <a href={userScopedUrl("/api/backup/export")} download style={{...btnS(t.ok),textDecoration:"none"}}>⬇ Download Backup</a>
+	            <label style={{...btnS(t.warm),cursor:"pointer"}}>⬆ Restore from Backup
+	              <input type="file" accept=".gz,.tar.gz,application/gzip" style={{display:"none"}} onChange={async e=>{
+	                const f=e.target.files?.[0];e.target.value="";if(!f)return;
+	                const ok=await confirmAction({title:"Stage restore",body:`Replace this HyprChat's data with the backup "${f.name}" at the next service restart? The current database is kept as a .pre-restore copy.`,confirmLabel:"Stage Restore",tone:"danger"});
+	                if(!ok)return;
+	                try{
+	                  const fd=new FormData();fd.append("file",f);
+	                  const r=await fetch(`${API}/api/backup/restore`,{method:"POST",body:fd});
+	                  const d=await r.json().catch(()=>({}));
+	                  if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+	                  setBackupStatus(p=>({...(p||{}),restore_pending:true,staged_at:new Date().toISOString()}));
+	                  notify({type:"success",text:"Restore staged",detail:"Restart the HyprChat service to apply, then run Knowledge Bases → Reindex All.",duration:9000});
+	                }catch(err){notify({type:"error",text:"Restore staging failed",detail:err.message||String(err)});}
+	              }}/>
+	            </label>
+	            {backupStatus?.restore_pending&&<button onClick={async()=>{try{const r=await fetch(`${API}/api/backup/restore`,{method:"DELETE"});if(!r.ok)throw new Error(`HTTP ${r.status}`);setBackupStatus(p=>({...(p||{}),restore_pending:false}));notify({type:"info",text:"Staged restore cancelled",duration:3000});}catch(err){notify({type:"error",text:"Cancel failed",detail:err.message||String(err)});}}} style={btnS(t.err)}>✕ Cancel Staged Restore</button>}
+	          </div>
+	          {backupStatus?.restore_pending&&<div style={{fontSize:11,color:t.warm,fontWeight:700}}>⚠ A restore is staged — it will apply on the next service restart.</div>}
+	        </div>
+	        ,"Backup = database (provider API keys and connector secrets scrubbed) + uploads + knowledge bases + settings. RAG vectors are rebuilt after restore via Knowledge Bases → Reindex All.")}
 	        {settingSection("⚠️ Danger Zone",null,
 	        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(210px,1fr))",gap:10}}>
 	          {[
@@ -7023,8 +7316,10 @@ function HyprChat(){
 	            ["📦","Clear All Artifacts","Current user's artifact records and removable files",clearAllArtifacts,false],
 	            ["📊","Clear Statistics","Current user's token usage and analytics rows",clearStatistics,false],
 	            ["🧱","Delete All Models","Every local Ollama model",deleteAllModels,true],
-	            ["👥","Delete Other Users","All profiles except the current one",deleteOtherUsers,true],
-	            ["☢","Delete All / Fresh Install","Everything, including current user and local models",freshInstallReset,true],
+	            ...(currentUserId==="default"?[
+	              ["👥","Delete Other Users","All profiles except the current one",deleteOtherUsers,true],
+	              ["☢","Delete All / Fresh Install","Everything, including current user and local models",freshInstallReset,true],
+	            ]:[]),
 	          ].map(([icon,label,desc,onClick,strong])=><button key={label} onClick={onClick} style={{...btnS(t.err),padding:"10px 12px",minHeight:62,justifyContent:"flex-start",alignItems:"center",gap:10,background:strong?`${t.err}16`:`${t.err}0C`,borderColor:strong?`${t.err}55`:`${t.err}34`,textAlign:"left"}}>
 	            <span style={{fontSize:18,width:24,textAlign:"center",flexShrink:0}}>{icon}</span>
 	            <span style={{display:"flex",flexDirection:"column",gap:2,minWidth:0}}>
@@ -7530,6 +7825,12 @@ function HyprChat(){
                     {!streaming&&<button onClick={()=>delMsg(i)} title="Delete this message" style={msgActionS(t.mut)}>
                       <IC.Trash/> delete
                     </button>}
+                    {!isU&&msg.content&&!streaming&&msg.metadata?.truncated&&i===(act.messages||[]).length-1&&<button onClick={()=>continueMessage(i)} title="Response was cut off by the output-token limit — continue it" style={msgActionS(t.warm)}>▶ continue</button>}
+                    {!isU&&msg.content&&!streaming&&<>
+                      <button onClick={()=>rateMessage(i,1)} title="Good response" style={msgActionS(msg.rating===1?t.ok:t.mut)}>👍</button>
+                      <button onClick={()=>rateMessage(i,-1)} title="Poor response" style={msgActionS(msg.rating===-1?t.err:t.mut)}>👎</button>
+                    </>}
+                    {!isU&&!!msg.metadata?.stats?.gen_tokens&&<span title="Generation stats" style={{fontSize:9,color:t.mut,opacity:.75,marginLeft:4,alignSelf:"center",whiteSpace:"nowrap"}}>{msg.metadata.stats.gen_tokens} tok{msg.metadata.stats.speed?` · ${msg.metadata.stats.speed} tok/s`:""}{msg.metadata.stats.routed_model?` · via ${msg.metadata.stats.routed_model}`:""}</span>}
                   </div>}
                 </div>
               </div></React.Fragment>;
@@ -7639,6 +7940,40 @@ function HyprChat(){
             {composerActive&&<div aria-hidden="true" style={{position:"absolute",inset:0,borderRadius:8,pointerEvents:"none",overflow:"hidden",zIndex:0}}>
               {["top","right","bottom","left"].map(side=><span key={side} className={`composer-trace composer-trace-${side}`} style={{"--trace-color":composerColor}}/>)}
             </div>}
+            {/* Slash command menu — type "/" to insert a prompt-library prompt */}
+            {slashMenuActive()&&(()=>{
+              const matches=slashMatchesFor(inp);
+              const hi=Math.min(slashIdx,Math.max(matches.length-1,0));
+              return <div style={{position:"absolute",bottom:"110%",left:0,right:0,maxWidth:480,zIndex:320,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,padding:8,animation:"fadeIn .14s ease"}}>
+                <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:800,padding:"2px 6px 6px"}}>Prompts — ↑↓ select · Enter insert · Esc dismiss</div>
+                <div style={{maxHeight:230,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
+                  {matches.map((p,ix)=><div key={p.id||ix} onMouseDown={e=>{e.preventDefault();insertPrompt(p);}} onMouseEnter={()=>setSlashIdx(ix)}
+                    style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:ix===hi?`${t.f1}18`:`${t.surface}44`,border:`1px solid ${ix===hi?`${t.f1}44`:`${t.brd}22`}`}}>
+                    <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+                      <span style={{fontSize:11,fontWeight:700,color:ix===hi?t.f1:t.text}}>{p.title}</span>
+                      <span style={{fontSize:9,color:t.f1}}>{p.category||"General"}</span>
+                      {/\{\{\s*[\w][\w .\-]*?\s*\}\}/.test(p.content||"")&&<span style={{fontSize:8,padding:"0 4px",borderRadius:3,background:`${t.warm}18`,color:t.warm,fontWeight:700}}>vars</span>}
+                    </div>
+                    <div style={{fontSize:9,color:t.mut,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{(p.content||"").slice(0,90)}</div>
+                  </div>)}
+                  {!matches.length&&<div style={{textAlign:"center",padding:12,color:t.mut,fontSize:11}}>No matching prompts — Esc to dismiss</div>}
+                </div>
+              </div>;
+            })()}
+            {/* {{variable}} fill-in card for prompt insertion */}
+            {slashVarFill&&<div style={{position:"absolute",bottom:"110%",left:0,right:0,maxWidth:480,zIndex:330,background:t.bgDeep,border:`1px solid ${t.warm}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,padding:12,animation:"fadeIn .14s ease"}}>
+              <div style={{fontSize:11,fontWeight:800,color:t.warm,marginBottom:8}}>Fill in “{slashVarFill.title}”</div>
+              {slashVarFill.vars.map((v,ix)=><label key={v.name} style={{display:"grid",gridTemplateColumns:"110px 1fr",gap:8,alignItems:"center",marginBottom:6}}>
+                <span style={{fontSize:10,color:t.dim,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis"}}>{v.name}</span>
+                <input autoFocus={ix===0} value={v.value} onChange={e=>setSlashVarFill(s=>({...s,vars:s.vars.map((x,j)=>j===ix?{...x,value:e.target.value}:x)}))}
+                  onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();applyVarFill();}if(e.key==="Escape"){e.preventDefault();e.stopPropagation();setSlashVarFill(null);}}}
+                  style={{fontSize:11,padding:"6px 9px",background:t.bg,border:`1px solid ${t.brd}44`,color:t.text,borderRadius:7,fontFamily:font,boxSizing:"border-box"}}/>
+              </label>)}
+              <div style={{display:"flex",gap:6,justifyContent:"flex-end",marginTop:4}}>
+                <button onClick={()=>setSlashVarFill(null)} style={{...btnS(t.mut),fontSize:10}}>Cancel</button>
+                <button onClick={applyVarFill} style={{...btnS(t.warm),fontSize:10,fontWeight:700}}>Insert</button>
+              </div>
+            </div>}
             {!act?.is_council&&<><div ref={quickMenuRef} style={{position:"relative",flexShrink:0}}>
               <button onClick={()=>{setShowQuickMenu(p=>!p);setShowPromptPicker(false);}} title="Quick actions" style={{background:showQuickMenu?`${t.acc}18`:"none",border:showQuickMenu?`1px solid ${t.acc}44`:"none",color:showQuickMenu?t.acc:t.mut,cursor:"pointer",padding:"4px 6px",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,opacity:showQuickMenu?1:.75,borderRadius:7,fontSize:17,lineHeight:1}}><IC.Plus/></button>
               {showQuickMenu&&<div style={{position:"absolute",bottom:"115%",left:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:220,padding:7,display:"flex",flexDirection:"column",gap:4,animation:"fadeIn .16s ease"}}>
@@ -7652,7 +7987,7 @@ function HyprChat(){
               {showPromptPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:310,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8,animation:"fadeIn .16s ease"}}>
                 <input value={promptSearch} onChange={e=>setPromptSearch(e.target.value)} placeholder="Search prompts..." style={{...inputS,marginBottom:6,padding:"5px 8px",fontSize:11}} autoFocus/>
                 <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
-                  {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={(e)=>{e.stopPropagation();setInp(p.content);setShowPromptPicker(false);setShowQuickMenu(false);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
+                  {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={(e)=>{e.stopPropagation();insertPrompt(p);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
                     <div style={{fontSize:11,fontWeight:600,color:t.text}}>{p.title}</div>
                     <div style={{fontSize:9,color:t.f1,marginTop:1}}>{p.category||"General"}</div>
                   </div>)}
@@ -7664,7 +7999,18 @@ function HyprChat(){
               </div>}
             </div>}
             </>}
-            <textarea ref={inpRef} value={inp} onChange={e=>setInp(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
+            <textarea ref={inpRef} value={inp} onChange={e=>{const v=e.target.value;setInp(v);if(!v.startsWith("/"))setSlashDismissed(false);setSlashIdx(0);}} onKeyDown={e=>{
+              if(slashMenuActive()){
+                const matches=slashMatchesFor(inp);
+                if(matches.length){
+                  if(e.key==="ArrowDown"){e.preventDefault();setSlashIdx(i=>(i+1)%matches.length);return;}
+                  if(e.key==="ArrowUp"){e.preventDefault();setSlashIdx(i=>(i-1+matches.length)%matches.length);return;}
+                  if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();insertPrompt(matches[Math.min(slashIdx,matches.length-1)]);return;}
+                  if(e.key==="Tab"){e.preventDefault();insertPrompt(matches[Math.min(slashIdx,matches.length-1)]);return;}
+                }
+                if(e.key==="Escape"){e.preventDefault();e.stopPropagation();setSlashDismissed(true);setSlashIdx(0);return;}
+              }
+              if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
               placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":"What's on your mind?"}`} rows={1}
               disabled={streaming||councilRunning||loadingConv}
               style={{flex:1,background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:14,outline:"none",resize:"none",padding:isEmptyChatSurface?"11px 0":"8px 0",minHeight:isEmptyChatSurface?38:"auto",maxHeight:140,lineHeight:1.6}}

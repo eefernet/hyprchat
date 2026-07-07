@@ -1,6 +1,7 @@
 """Runtime settings, cleanup, RAG stats, changelog, and analytics routes."""
 import os
 import re
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException, Query
@@ -9,6 +10,7 @@ import comfyui
 import config
 import database as db
 import hyprfit
+import model_providers
 import rag
 import voice
 
@@ -60,6 +62,9 @@ async def get_app_settings():
         "current_planning_model": config.PLANNING_MODEL,
         "current_coder_model": config.CODER_MODEL,
         "current_workspace_model": config.WORKSPACE_MODEL,
+        "context_compaction": config.CONTEXT_COMPACTION,
+        "history_recall": config.HISTORY_RECALL,
+        "model_routing": config.MODEL_ROUTING,
         # Coder Bot v2 per-agent overrides — empty string = inherit from umbrella
         "current_architect_model": config.ARCHITECT_MODEL,
         "current_reviewer_model":  config.REVIEWER_MODEL,
@@ -103,7 +108,7 @@ async def update_app_settings(body: dict = Body(...)):
     allowed = {"file_cleanup_days", "ollama_url", "codebox_url", "searxng_url", "n8n_url",
                "comfyui_url", "stt_url", "tts_url", "tts_voice",
                "rag", "planning_model", "coder_model",
-               "workspace_model",
+               "workspace_model", "context_compaction", "history_recall", "model_routing",
                "architect_model", "reviewer_model", "acceptance_model", "builder_model", "fixer_model", "qa_model",
                "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
                "openhands_reasoning_effort", "openhands_disable_thinking",
@@ -216,6 +221,26 @@ async def update_app_settings(body: dict = Body(...)):
     if "workspace_model" in body:
         config.WORKSPACE_MODEL = body["workspace_model"] or ""
         print(f"[Config] Updated Workspace Model to: {config.WORKSPACE_MODEL or '(use chat model)'}")
+    if "context_compaction" in body:
+        config.CONTEXT_COMPACTION = "on" if str(body["context_compaction"]).lower() in {"1", "true", "on", "yes"} else "off"
+        settings["context_compaction"] = config.CONTEXT_COMPACTION
+        print(f"[Config] Updated context compaction: {config.CONTEXT_COMPACTION}")
+    if "history_recall" in body:
+        config.HISTORY_RECALL = "on" if str(body["history_recall"]).lower() in {"1", "true", "on", "yes"} else "off"
+        settings["history_recall"] = config.HISTORY_RECALL
+        print(f"[Config] Updated history recall: {config.HISTORY_RECALL}")
+    if "model_routing" in body and isinstance(body["model_routing"], dict):
+        _mr = body["model_routing"]
+        _clean_mr = {
+            "enabled": bool(_mr.get("enabled")),
+            "chat": str(_mr.get("chat") or ""),
+            "code": str(_mr.get("code") or ""),
+            "reasoning": str(_mr.get("reasoning") or ""),
+            "long_context": str(_mr.get("long_context") or ""),
+        }
+        config.MODEL_ROUTING = _clean_mr
+        settings["model_routing"] = _clean_mr
+        print(f"[Config] Updated model routing: {_clean_mr}")
     # Coder Bot v2 per-agent overrides
     for _key, _attr, _label in (
         ("architect_model", "ARCHITECT_MODEL", "Architect"),
@@ -357,6 +382,7 @@ async def update_app_settings(body: dict = Body(...)):
         "current_planning_model": config.PLANNING_MODEL,
         "current_coder_model": config.CODER_MODEL,
         "current_workspace_model": config.WORKSPACE_MODEL,
+        "context_compaction": config.CONTEXT_COMPACTION,
         "current_architect_model": config.ARCHITECT_MODEL,
         "current_reviewer_model":  config.REVIEWER_MODEL,
         "current_acceptance_model": config.ACCEPTANCE_MODEL,
@@ -484,13 +510,86 @@ async def get_changelog():
 
 
 # ============================================================
+# USER PREFERENCE KV — server-side home for per-user UI state
+# (prompt library, model params, custom quotes, conversation tags,
+# per-chat effort). Values are opaque JSON blobs owned by the frontend.
+# ============================================================
+_PREF_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+_PREF_MAX_BYTES = 256 * 1024
+
+
+def _validate_pref_key(key: str) -> str:
+    if not _PREF_KEY_RE.fullmatch(key or ""):
+        raise HTTPException(400, "Invalid pref key (lowercase alphanumerics, ., _, -; max 64 chars)")
+    return key
+
+
+@router.get("/api/prefs")
+async def get_prefs():
+    return {"prefs": await db.get_user_prefs()}
+
+
+@router.get("/api/prefs/{key}")
+async def get_pref(key: str):
+    value = await db.get_user_pref(_validate_pref_key(key))
+    return {"key": key, "value": value}
+
+
+@router.put("/api/prefs/{key}")
+async def put_pref(key: str, value=Body(...)):
+    _validate_pref_key(key)
+    import json as _json
+    if len(_json.dumps(value)) > _PREF_MAX_BYTES:
+        raise HTTPException(413, f"Pref value exceeds {_PREF_MAX_BYTES // 1024}KB")
+    await db.set_user_pref(key, value)
+    return {"ok": True, "key": key}
+
+
+@router.delete("/api/prefs/{key}")
+async def delete_pref(key: str):
+    deleted = await db.delete_user_pref(_validate_pref_key(key))
+    return {"ok": True, "deleted": deleted}
+
+
+# ============================================================
 # TOKEN USAGE ANALYTICS
 # ============================================================
+def _annotate_cost(rows: list[dict]) -> list[dict]:
+    """Attach cost_usd to rows that have a `model` column (priced models only)."""
+    for r in rows:
+        c = model_providers.cost_usd(r.get("model", ""), r.get("prompt_tokens") or 0, r.get("completion_tokens") or 0)
+        if c is not None:
+            r["cost_usd"] = round(c, 4)
+    return rows
+
+
+def _sum_cost(rows: list[dict]) -> float:
+    return round(sum(r.get("cost_usd") or 0 for r in rows), 4)
+
+
+async def _daily_costs(days: int) -> dict[str, float]:
+    """date → summed cloud cost, from per-day-per-model aggregation."""
+    rows = _annotate_cost(await db.get_token_usage(days, "day_model"))
+    out: dict[str, float] = {}
+    for r in rows:
+        if r.get("cost_usd"):
+            out[r["date"]] = round(out.get(r["date"], 0) + r["cost_usd"], 4)
+    return out
+
+
 @router.get("/api/analytics/tokens")
 async def get_token_analytics(days: int = Query(30), group_by: str = Query("day")):
-    if group_by not in ("day", "model", "persona"):
-        raise HTTPException(400, "group_by must be: day, model, or persona")
-    return await db.get_token_usage(days, group_by)
+    if group_by not in ("day", "model", "persona", "day_model"):
+        raise HTTPException(400, "group_by must be: day, model, persona, or day_model")
+    rows = await db.get_token_usage(days, group_by)
+    if group_by in ("model", "day_model"):
+        _annotate_cost(rows)
+    elif group_by == "day":
+        by_date = await _daily_costs(days)
+        for r in rows:
+            if by_date.get(r.get("date")):
+                r["cost_usd"] = by_date[r["date"]]
+    return rows
 
 
 @router.delete("/api/analytics/tokens")
@@ -499,19 +598,61 @@ async def clear_token_analytics():
     return {"ok": True, "deleted": deleted}
 
 
+_USAGE_SUM_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens", "request_count")
+
+
+def _usage_cutoff_date(days: int) -> str:
+    """Date floor for an N-day window over date-grouped rows. Matches the SQL
+    rolling window at date granularity (the boundary day counts in full)."""
+    return (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def _agg_by_day(rows: list[dict], days: int = 0) -> list[dict]:
+    cutoff = _usage_cutoff_date(days) if days > 0 else ""
+    out: dict[str, dict] = {}
+    for r in rows:
+        d = r.get("date") or ""
+        if cutoff and d < cutoff:
+            continue
+        agg = out.setdefault(d, {"date": d, **{k: 0 for k in _USAGE_SUM_KEYS}})
+        for k in _USAGE_SUM_KEYS:
+            agg[k] += r.get(k) or 0
+    return sorted(out.values(), key=lambda x: x["date"])
+
+
+def _agg_by_model(rows: list[dict], days: int = 0) -> list[dict]:
+    cutoff = _usage_cutoff_date(days) if days > 0 else ""
+    out: dict[str, dict] = {}
+    for r in rows:
+        if cutoff and (r.get("date") or "") < cutoff:
+            continue
+        m = r.get("model")
+        agg = out.setdefault(m, {"model": m, **{k: 0 for k in _USAGE_SUM_KEYS}})
+        for k in _USAGE_SUM_KEYS:
+            agg[k] += r.get(k) or 0
+    return sorted(out.values(), key=lambda x: -(x["total_tokens"] or 0))
+
+
 @router.get("/api/analytics/tokens/summary")
 async def get_token_summary():
-    today = await db.get_token_usage(1, "day")
-    week = await db.get_token_usage(7, "model")
-    month = await db.get_token_usage(30, "day")
-    all_time = await db.get_token_usage(0, "day")
-    by_model_all = await db.get_token_usage(0, "model")
+    # One day×model scan covers every window/grouping below (was 8 queries);
+    # persona grouping and ratings are the only extra fetches.
+    day_model_all = _annotate_cost(await db.get_token_usage(0, "day_model"))
     by_persona_all = await db.get_token_usage(0, "persona")
+    by_model_all = _annotate_cost(_agg_by_model(day_model_all))
+    cutoff_1 = _usage_cutoff_date(1)
+    cutoff_30 = _usage_cutoff_date(30)
     return {
-        "today": today,
-        "by_model_7d": week,
-        "daily_30d": month,
-        "all_time": all_time,
+        "today": _agg_by_day(day_model_all, 1),
+        "by_model_7d": _annotate_cost(_agg_by_model(day_model_all, 7)),
+        "daily_30d": _agg_by_day(day_model_all, 30),
+        "all_time": _agg_by_day(day_model_all),
         "by_model_all": by_model_all,
         "by_persona_all": by_persona_all,
+        "cost": {
+            "today": _sum_cost([r for r in day_model_all if (r.get("date") or "") >= cutoff_1]),
+            "last_30d": _sum_cost([r for r in day_model_all if (r.get("date") or "") >= cutoff_30]),
+            "all_time": _sum_cost(by_model_all),
+        },
+        "ratings": await db.get_message_rating_counts(0),
     }

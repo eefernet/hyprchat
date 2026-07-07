@@ -58,6 +58,7 @@ WATCHED = {
     "backend/artifact_service.py":  ("Artifact Service", REMOTE_BACKEND,            True),
     "backend/research_config.py":   ("Research Config",  REMOTE_BACKEND,            True),
     "backend/model_management.py":  ("Model Management", REMOTE_BACKEND,            True),
+    "backend/backup.py":            ("Backup Service",   REMOTE_BACKEND,            True),
     "backend/db/__init__.py":       ("Database Package", REMOTE_DB,                 True),
     "backend/db/schema.py":         ("Database Schema",  REMOTE_DB,                 True),
     "backend/db/artifacts.py":      ("Artifact DB",      REMOTE_DB,                 True),
@@ -75,6 +76,7 @@ WATCHED = {
     "backend/routes/tools_connectors.py": ("Tools/Connector Routes", REMOTE_ROUTES,  True),
     "backend/routes/model_configs.py": ("Model Config Routes", REMOTE_ROUTES,        True),
     "backend/routes/ollama_models.py": ("Ollama Model Routes", REMOTE_ROUTES,        True),
+    "backend/routes/backup.py":     ("Backup Routes",    REMOTE_ROUTES,             True),
     "backend/tooling/__init__.py":  ("Tooling Package",  REMOTE_TOOLING,            True),
     "backend/tooling/parser.py":    ("Tool Parser",      REMOTE_TOOLING,            True),
     "backend/tooling/codebox_tools.py": ("Codebox Tools", REMOTE_TOOLING,            True),
@@ -803,8 +805,29 @@ def _build_and_deploy_frontend(target):
     return swap_ok, swap_err
 
 
+def _cleanup_staged_tmp(entries):
+    """Best-effort removal of staged .deploy-tmp files, batched per host."""
+    by_host = {}
+    for e in entries:
+        by_host.setdefault(e["target"]["ip"], []).append(e)
+    for host_entries in by_host.values():
+        target = host_entries[0]["target"]
+        for i in range(0, len(host_entries), 40):
+            chunk = host_entries[i:i + 40]
+            rm_cmd = "rm -f " + " ".join(shlex.quote(e["tmp"]) for e in chunk)
+            ssh_cmd(target["ip"], target["user"], target["pass"], rm_cmd, timeout=30)
+
+
 def deploy_changes(changed, cfg):
-    """Deploy changed files and restart service only if needed."""
+    """Deploy changed files and restart service only if needed.
+
+    Backend files deploy in two phases: every file is staged to
+    `<final>.deploy-tmp` first, and only when the whole batch staged cleanly
+    does a per-host batched `mv -f` flip them live. A failed stage aborts the
+    batch (old files stay live, no restart, digests unrecorded so the next
+    scan retries everything). This replaces the old per-file scp-in-place,
+    where a mid-batch failure restarted the service on a half-updated tree.
+    """
     hypr = cfg["hyprchat"]
     sx = cfg.get("searxng") if _server_configured(cfg.get("searxng")) else None
     needs_restart = False
@@ -837,7 +860,11 @@ def deploy_changes(changed, cfg):
     else:
         print(f"  {G}\u2713{RST} Codebox host ready")
 
+    # Phase 1 — stage: copy every backend file to <final>.deploy-tmp. Nothing
+    # in the live tree changes until the whole batch has staged cleanly.
     frontend_built = False
+    staged = []        # entries staged and awaiting activation
+    stage_failed = []  # (label, filepath, err, target)
     for filepath, (label, remote_dir, restart_flag) in changed:
         # Frontend source changes are handled by a single build + dist/ sync,
         # regardless of how many src files changed in this batch.
@@ -863,21 +890,63 @@ def deploy_changes(changed, cfg):
             dir_ok, dir_err = _ensure_remote_dir(target, remote_dir)
             ensured_dirs.add(dir_key)
             if not dir_ok:
-                results.append((label, filepath, False,
-                                f"Could not create remote dir {remote_dir}: {dir_err}",
-                                target))
+                stage_failed.append((label, filepath,
+                                     f"Could not create remote dir {remote_dir}: {dir_err}",
+                                     target))
                 continue
 
+        final = remote_dir.rstrip("/") + "/" + os.path.basename(filepath)
+        tmp = final + ".deploy-tmp"
         digest = file_digest(filepath)
-        ok, err = scp(filepath, target["ip"], remote_dir, target["user"], target["pass"])
-        results.append((label, filepath, ok, err, target))
-        if ok and digest is not None:
-            pushed[filepath] = digest
-        if restart_flag:
-            needs_restart = True
+        ok, err = scp(filepath, target["ip"], tmp, target["user"], target["pass"])
+        if ok:
+            staged.append({
+                "filepath": filepath, "label": label, "target": target,
+                "tmp": tmp, "final": final, "digest": digest,
+                "restart_flag": restart_flag,
+            })
+        else:
+            stage_failed.append((label, filepath, err, target))
 
-        if filepath == "backend/requirements.txt":
-            needs_pip = True
+    if stage_failed:
+        # Abort the whole backend batch: the live tree stays untouched,
+        # staged tmp files are removed, and no digests are recorded so
+        # every file retries on the next scan.
+        for label, filepath, err, target in stage_failed:
+            results.append((label, filepath, False, err, target))
+        for e in staged:
+            results.append((e["label"], e["filepath"], False,
+                            "staged ok but batch aborted — tmp removed, will retry",
+                            e["target"]))
+        _cleanup_staged_tmp(staged)
+    else:
+        # Phase 2 — activate: flip staged files live with batched mv per host.
+        by_host = {}
+        for e in staged:
+            by_host.setdefault(e["target"]["ip"], []).append(e)
+        for host_entries in by_host.values():
+            target = host_entries[0]["target"]
+            for i in range(0, len(host_entries), 40):
+                chunk = host_entries[i:i + 40]
+                mv_cmd = " && ".join(
+                    f"mv -f {shlex.quote(e['tmp'])} {shlex.quote(e['final'])}"
+                    for e in chunk)
+                ok, _out, err = ssh_cmd(target["ip"], target["user"], target["pass"],
+                                        mv_cmd, timeout=60)
+                if ok:
+                    for e in chunk:
+                        results.append((e["label"], e["filepath"], True, "", e["target"]))
+                        if e["digest"] is not None:
+                            pushed[e["filepath"]] = e["digest"]
+                        if e["restart_flag"]:
+                            needs_restart = True
+                        if e["filepath"] == "backend/requirements.txt":
+                            needs_pip = True
+                else:
+                    for e in chunk:
+                        results.append((e["label"], e["filepath"], False,
+                                        f"activation failed: {err}", e["target"]))
+                    _cleanup_staged_tmp(chunk)
 
     # Print results
     print()
@@ -887,6 +956,16 @@ def deploy_changes(changed, cfg):
         print(f"  {icon}  {BLD}{label:18}{RST} {DIM}{filepath}{RST}  → {server_tag}")
         if err:
             print(f"       {R}{err}{RST}")
+
+    if stage_failed:
+        print()
+        print(f"  {bar('═', R)}")
+        print(f"  {BLD}{R}DEPLOY ABORTED{RST} — {len(stage_failed)} file(s) failed to stage.")
+        print(f"  {R}No live files were replaced and no service was restarted.{RST}")
+        print(f"  {R}The full batch will retry on the next scan.{RST}")
+        print(f"  {bar('═', R)}")
+        input(f"\n  {DIM}Press Enter to continue...{RST}")
+        return pushed
 
     if needs_pip:
         print()
@@ -898,8 +977,8 @@ def deploy_changes(changed, cfg):
         else:
             print(f"  {R}\u2717{RST} pip install failed: {err}")
 
-    # Reload systemd if service file changed
-    if any(fp == "backend/hyprchat.service" for fp, *_ in changed):
+    # Reload systemd if service file changed (and actually activated)
+    if "backend/hyprchat.service" in pushed:
         print()
         print(f"  {Y}\u25b6{RST} Reloading systemd daemon...")
         ok, out, err = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
@@ -949,7 +1028,7 @@ def deploy_changes(changed, cfg):
                 print(f"  {R}\u2717{RST} Start fallback failed: {(err_start or out_start or out2)[:300]}")
                 _show_journal(hypr, "hyprchat")
 
-    worker_deployed = any(fp == "backend/openhands_worker.py" for fp, *_ in changed)
+    worker_deployed = "backend/openhands_worker.py" in pushed
     aider_ready, aider_out, _ = _aider_worker_ready(cb)
     if worker_deployed or not aider_ready:
         print()
