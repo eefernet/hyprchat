@@ -108,6 +108,26 @@ const ReactDOM = { ...ReactDOMFull, createRoot, hydrateRoot };
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const CHAT_HISTORY_RENDER_CHUNK = 80;
 
+const normalizePrompts = (value) => {
+  if(!Array.isArray(value))return [];
+  const seen = new Set();
+  return value
+    .filter(p => p && typeof p === "object" && !Array.isArray(p))
+    .map((p, i) => {
+      let id = typeof p.id === "string" && p.id.trim() ? p.id.trim() : `p-imported-${i}`;
+      while(seen.has(id))id = `${id}-${i}`;
+      seen.add(id);
+      return {
+        ...p,
+        id,
+        title: typeof p.title === "string" && p.title.trim() ? p.title : "Untitled Prompt",
+        content: typeof p.content === "string" ? p.content : "",
+        category: typeof p.category === "string" && p.category.trim() ? p.category : "General",
+        is_system: !!p.is_system,
+      };
+    });
+};
+
 // ============================================================
 function HyprChat(){
   const [tm,setTm]=useState(()=>{try{return localStorage.getItem("hc-theme")||"hyprflat";}catch{return "hyprflat";}});
@@ -263,7 +283,7 @@ function HyprChat(){
   const [modelParams,setModelParams]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-model-params")||"{}");}catch{return {};}});
   const [modelParamsOpen,setModelParamsOpen]=useState(null); // model name
   const [modelSearch,setModelSearch]=useState("");
-  const [prompts,setPrompts]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-prompts")||"[]");}catch{return [];}});
+  const [prompts,setPrompts]=useState(()=>{try{return normalizePrompts(JSON.parse(localStorage.getItem("hc-prompts")||"[]"));}catch{return [];}});
   const [showPromptPicker,setShowPromptPicker]=useState(false);
   const [slashIdx,setSlashIdx]=useState(0);            // highlighted row in the "/" slash menu
   const [slashVarFill,setSlashVarFill]=useState(null); // {title, content, vars:[{name,value}]} — {{var}} fill-in card
@@ -281,6 +301,7 @@ function HyprChat(){
   const [promptSearch,setPromptSearch]=useState("");
   const [connectorSearch,setConnectorSearch]=useState("");
   const [editPrompt,setEditPrompt]=useState(null); // {id, title, content, category}
+  const validPrompts=useMemo(()=>normalizePrompts(prompts),[prompts]);
 
   const [convTags,setConvTags]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-conv-tags")||"{}");}catch{return {};}});
   const [activeTagFilter,setActiveTagFilter]=useState(null);
@@ -1254,21 +1275,28 @@ function HyprChat(){
       if(cancelled)return;
       for(const d of defs){
         let val=server[d.key];
+        let shouldPutPref=false;
         if(val===undefined){
           let stored=null;
           try{stored=JSON.parse(localStorage.getItem(`hc-${d.key}::${uid}`)||"null");}catch{}
           if(stored===null){try{stored=JSON.parse(localStorage.getItem(d.legacy)||"null");}catch{}}
-          if(stored!==null&&stored!==undefined){val=stored;prefsSyncRef.current.put(d.key,stored);}
+          if(stored!==null&&stored!==undefined){val=stored;shouldPutPref=true;}
         }
         if(val===null||val===undefined)val=d.fallback;
         if(d.convMap&&val&&typeof val==="object"&&!Array.isArray(val)){
           val=Object.fromEntries(Object.entries(val).filter(([k])=>!k.startsWith("ghost-")&&!k.startsWith("l-")));
+        }
+        if(d.key==="prompts"){
+          const raw=val;
+          val=normalizePrompts(val);
+          if(JSON.stringify(raw)!==JSON.stringify(val))shouldPutPref=true;
         }
         if(d.key==="custom-quotes"){
           const cleaned=Array.isArray(val)?val.filter(x=>x&&x.t&&x.a!=="HyprChat"):[];
           val=cleaned.length?cleaned:DEFAULT_LOADING_QUOTES;
         }
         try{localStorage.setItem(`hc-${d.key}::${uid}`,JSON.stringify(val));}catch{}
+        if(shouldPutPref)prefsSyncRef.current.put(d.key,val);
         // Functional set: only mark the hydration echo when the value really
         // changes — a bailed-out set fires no effect and must not eat the
         // skip flag meant for the user's next real change.
@@ -2696,9 +2724,9 @@ function HyprChat(){
   };
   const slashMatchesFor=(text)=>{
     const q=(text||"").slice(1).toLowerCase().trim();
-    return prompts.filter(p=>!q||(p.title||"").toLowerCase().includes(q)||(p.category||"").toLowerCase().includes(q)).slice(0,8);
+    return validPrompts.filter(p=>!q||(p.title||"").toLowerCase().includes(q)||(p.category||"").toLowerCase().includes(q)).slice(0,8);
   };
-  const slashMenuActive=()=>!act?.is_council&&!streaming&&!slashVarFill&&inp.startsWith("/")&&!inp.includes("\n")&&!slashDismissed&&prompts.length>0;
+  const slashMenuActive=()=>!act?.is_council&&!streaming&&!slashVarFill&&inp.startsWith("/")&&!inp.includes("\n")&&!slashDismissed&&validPrompts.length>0;
 
   // Core send logic — used by send, regenerate, and edit
   const sendMessages=async(cid, messagesToSend, appendUser, overrides)=>{
@@ -4671,7 +4699,7 @@ function HyprChat(){
                 {act.system_prompt?"\u{1F4CB} System Prompt":"\u002B System Prompt"}
               </button>
               {showSysPromptPicker&&<div style={{position:"absolute",top:"calc(100% + 6px)",left:0,zIndex:9999,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:260,maxWidth:340,padding:8,animation:"fadeIn .15s"}}>
-                {(()=>{const sysPrompts=prompts.filter(p=>p.is_system||(p.category&&p.category.toLowerCase()==="system prompt"));return sysPrompts.length?<><div style={{maxHeight:200,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
+                {(()=>{const sysPrompts=validPrompts.filter(p=>p.is_system||(p.category&&p.category.toLowerCase()==="system prompt"));return sysPrompts.length?<><div style={{maxHeight:200,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
                   {sysPrompts.map(p=><div key={p.id} onClick={()=>{uConv(actId,{system_prompt:p.content});if(!isGhostConv(act))fetch(`${API}/api/conversations/${actId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({system_prompt:p.content})});setShowSysPromptPicker(false);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.warm}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
                     <div style={{fontSize:11,fontWeight:600,color:t.text}}>{p.title}</div>
                     <div style={{fontSize:9,color:t.mut,marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.content.slice(0,80)}...</div>
@@ -5766,7 +5794,7 @@ function HyprChat(){
     </div>
   </div>;})()
 
-      :panel==="prompts"?<PromptLibraryPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} prompts={prompts} setPrompts={setPrompts} editPrompt={editPrompt} setEditPrompt={setEditPrompt} setInp={setInp} insertPrompt={insertPrompt} setPanel={setPanel}/>
+      :panel==="prompts"?<PromptLibraryPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} prompts={validPrompts} setPrompts={setPrompts} editPrompt={editPrompt} setEditPrompt={setEditPrompt} setInp={setInp} insertPrompt={insertPrompt} setPanel={setPanel}/>
 
       :panel==="models"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     {/* Toolbar */}
@@ -7978,20 +8006,20 @@ function HyprChat(){
               <button onClick={()=>{setShowQuickMenu(p=>!p);setShowPromptPicker(false);}} title="Quick actions" style={{background:showQuickMenu?`${t.acc}18`:"none",border:showQuickMenu?`1px solid ${t.acc}44`:"none",color:showQuickMenu?t.acc:t.mut,cursor:"pointer",padding:"4px 6px",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,opacity:showQuickMenu?1:.75,borderRadius:7,fontSize:17,lineHeight:1}}><IC.Plus/></button>
               {showQuickMenu&&<div style={{position:"absolute",bottom:"115%",left:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:220,padding:7,display:"flex",flexDirection:"column",gap:4,animation:"fadeIn .16s ease"}}>
                 <button onClick={()=>{fileRef.current?.click();setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:`${t.surface}66`,color:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}><IC.Paperclip/> Attach files</button>
-                {prompts.length>0&&<button onClick={()=>{setShowPromptPicker(true);setPromptSearch("");setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:showPromptPicker?`${t.f1}18`:`${t.surface}66`,color:showPromptPicker?t.f1:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}>⚡ Prompt Library</button>}
+                {validPrompts.length>0&&<button onClick={()=>{setShowPromptPicker(true);setPromptSearch("");setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:showPromptPicker?`${t.f1}18`:`${t.surface}66`,color:showPromptPicker?t.f1:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}>⚡ Prompt Library</button>}
                 {(()=>{const coderMc=mcs.find(m=>isCoderPersonaName(m.name));const isCoderActive=isCoderPersonaName(act?.persona_name)||(!actId&&isCoderPersonaName(pendingPersona?.persona_name));return coderMc?<button onClick={()=>{setShowQuickMenu(false);if(!actId){if(isCoderActive){setPendingPersona(null);setPendingToolIds([]);setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}const persona={model:coderMc.base_model||models[0]||"qwen3.5:27b",system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)};modelChoiceRef.current.pending=persona.model||"";setPendingPersona(persona);setPendingToolIds(persona.tool_ids||[]);setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);return;}if(isCoderActive){uConv(actId,{model_config_id:null,persona_name:null,persona_avatar:null,system_prompt:"",tool_ids:[]});setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:isCoderActive?`${t.ok}18`:`${t.surface}66`,color:isCoderActive?t.ok:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}>&lt;/&gt; {isCoderActive?"Disable Daedalus":"Activate Daedalus"}</button>:null;})()}
               </div>}
             </div>
             <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>{if(e.target.files?.length)handleFileUpload(Array.from(e.target.files));e.target.value="";}}/>
-            {prompts.length>0&&<div ref={promptPickerRef} style={{position:"relative",flexShrink:0}}>
+            {validPrompts.length>0&&<div ref={promptPickerRef} style={{position:"relative",flexShrink:0}}>
               {showPromptPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:310,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8,animation:"fadeIn .16s ease"}}>
                 <input value={promptSearch} onChange={e=>setPromptSearch(e.target.value)} placeholder="Search prompts..." style={{...inputS,marginBottom:6,padding:"5px 8px",fontSize:11}} autoFocus/>
                 <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
-                  {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={(e)=>{e.stopPropagation();insertPrompt(p);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
+                  {validPrompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={(e)=>{e.stopPropagation();insertPrompt(p);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
                     <div style={{fontSize:11,fontWeight:600,color:t.text}}>{p.title}</div>
                     <div style={{fontSize:9,color:t.f1,marginTop:1}}>{p.category||"General"}</div>
                   </div>)}
-                  {prompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())).length===0&&<div style={{textAlign:"center",padding:16,color:t.mut,fontSize:11}}>No matches</div>}
+                  {validPrompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())).length===0&&<div style={{textAlign:"center",padding:16,color:t.mut,fontSize:11}}>No matches</div>}
                 </div>
                 <div style={{borderTop:`1px solid ${t.brd}22`,marginTop:4,paddingTop:4}}>
                   <button onClick={()=>{setShowPromptPicker(false);setShowQuickMenu(false);setPanel("prompts");}} style={{...btnS(t.f1),width:"100%",justifyContent:"center",fontSize:9}}>Manage Prompts →</button>
