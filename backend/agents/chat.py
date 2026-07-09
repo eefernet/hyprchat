@@ -14,6 +14,7 @@ import config
 import database as db
 import model_providers
 import persona_images
+import provider_tools
 import rag
 from tools import (CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls,
                    strip_tool_calls, _v2_name_match)
@@ -2015,11 +2016,18 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         except Exception as _ase:
             print(f"[CHAT] Failed to create assistant message stub: {_ase}")
     _text_fallback_done = False
+    _native_cloud_tools = False
     if _is_cloud_provider and available_tool_names:
-        print(f"[CHAT] Cloud model {req.model} using text tool-call fallback")
-        ollama_tools = []
-        inject_text_tool_prompt(messages, available_tool_names)
-        _text_fallback_done = True
+        if provider_tools.supports_native_tools(_model_provider):
+            # OpenAI/Anthropic get real JSON tool definitions; ollama_tools
+            # stays populated and is passed through stream_provider_chat.
+            _native_cloud_tools = True
+            print(f"[CHAT] Cloud model {req.model} using native tool calling")
+        else:
+            print(f"[CHAT] Cloud model {req.model} using text tool-call fallback")
+            ollama_tools = []
+            inject_text_tool_prompt(messages, available_tool_names)
+            _text_fallback_done = True
     _prev_tool_key = None  # Track previous tool call to detect loops
     _tool_history = []     # Last N tool keys for near-duplicate detection
     _dup_break_count = 0   # How many times we broke out of duplicate loops
@@ -2129,8 +2137,21 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     req.model,
                     messages,
                     options=model_options,
+                    tools=(ollama_tools if _native_cloud_tools else None),
                 ):
                     etype = event.get("type")
+                    if etype == "tool_call":
+                        # Native provider tool call — normalize to the Ollama
+                        # shape the tool loop already executes. The id rides
+                        # along so results can round-trip natively next round.
+                        tool_calls.append({
+                            "id": event.get("id") or f"tc_{round_num}_{len(tool_calls)}",
+                            "function": {
+                                "name": event.get("name") or "",
+                                "arguments": event.get("arguments") or {},
+                            },
+                        })
+                        continue
                     if etype == "usage":
                         gen_tokens = int(event.get("gen_tokens") or 0)
                         prompt_tokens = int(event.get("prompt_tokens") or 0)
@@ -2592,6 +2613,21 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         except _ProviderStreamComplete:
             pass
         except Exception as e:
+            # A cloud model that rejects native tool definitions flips to the
+            # text fallback instead of failing the stream (mirrors Ollama's
+            # "does not support tools" retry above).
+            if (
+                _native_cloud_tools
+                and not _text_fallback_done
+                and isinstance(e, model_providers.ProviderError)
+                and provider_tools.tools_unsupported_error(str(e))
+            ):
+                print(f"[CHAT] Model {req.model} rejected native tools — switching to text-based")
+                _native_cloud_tools = False
+                ollama_tools = []
+                inject_text_tool_prompt(messages, available_tool_names)
+                _text_fallback_done = True
+                continue
             # Log the actual cause — previously this catch silently emitted str(e) to the
             # client, leaving the journal blank when Ollama streams died in unexpected ways.
             print(f"[CHAT]   Round {round_num} exception: {type(e).__name__}: {e!r}")
@@ -3005,7 +3041,9 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                             # (e.g. image prompts) that must stay out of logs
                             print(f"[CHAT] Warning: failed to parse tool args JSON for {tool_name} ({len(tool_args)} chars)")
                         tool_args = {}
-                _parsed_calls.append((tool_name, tool_args))
+                # id present only for native cloud tool calls — rides through to
+                # the role="tool" result so providers can round-trip the pair.
+                _parsed_calls.append((tool_name, tool_args, str(tc.get("id") or "")))
 
             # ── Request-fidelity backstop (adult-rated personas only): the
             # chat model sometimes says one thing in prose but writes a
@@ -3021,7 +3059,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 _rw = re.sub(r"\s+", " ", _rw).strip(" ,.")
                 _rw_tokens = [w for w in re.findall(r"[a-z]{3,}", _rw.lower())
                               if w not in _REQ_STOPWORDS]
-                for _pi, (_tn, _ta) in enumerate(_parsed_calls):
+                for _pi, (_tn, _ta, _tid) in enumerate(_parsed_calls):
                     if _tn != "generate_image" or not isinstance(_ta, dict):
                         continue
                     _p = str(_ta.get("prompt") or "")
@@ -3029,19 +3067,19 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         continue
                     _missing = [w for w in _rw_tokens if w not in _p.lower()]
                     if _missing:
-                        _parsed_calls[_pi] = (_tn, {**_ta, "prompt": f"{_p}, ({_rw}:1.2)"})
+                        _parsed_calls[_pi] = (_tn, {**_ta, "prompt": f"{_p}, ({_rw}:1.2)"}, _tid)
                         print(f"[CHAT]   request-fidelity: appended {len(_missing)} request token(s) to image prompt")
 
             # Check if all calls are parallel-safe (different read targets)
             _all_parallel = (
                 len(_parsed_calls) > 1
-                and all(n in _PARALLEL_SAFE_TOOLS for n, _ in _parsed_calls)
+                and all(n in _PARALLEL_SAFE_TOOLS for n, *_ in _parsed_calls)
             )
             # Also allow parallel write_file if all paths are different
             if not _all_parallel and len(_parsed_calls) > 1:
-                _names = [n for n, _ in _parsed_calls]
+                _names = [n for n, *_ in _parsed_calls]
                 if all(n in (_PARALLEL_SAFE_TOOLS | {"write_file"}) for n in _names):
-                    _write_paths = [a.get("path", "") for n, a in _parsed_calls if n == "write_file"]
+                    _write_paths = [a.get("path", "") for n, a, _ in _parsed_calls if n == "write_file"]
                     if len(_write_paths) == len(set(_write_paths)):
                         _all_parallel = True
 
@@ -3055,11 +3093,14 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
                 _futures = []
                 _metas = []  # (tool_name, tool_args, icon, label, detail)
-                for tool_name, tool_args in batch:
+                for tool_name, tool_args, _tool_call_id in batch:
                     # Block unauthorized tools
                     if tool_name not in available_tool_names:
                         print(f"[CHAT]   Blocked unauthorized tool: {tool_name} (allowed: {sorted(available_tool_names)})")
-                        messages.append({"role": "tool", "content": f"Error: tool '{tool_name}' is not available in this session."})
+                        _blocked_msg = {"role": "tool", "content": f"Error: tool '{tool_name}' is not available in this session."}
+                        if _tool_call_id:
+                            _blocked_msg["tool_call_id"] = _tool_call_id
+                        messages.append(_blocked_msg)
                         continue
 
                     if tool_name in {"plan_project", "generate_code"}:
@@ -3163,7 +3204,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                             if not _f.done(): _f.set_exception(_e)
 
                     _spawn_bg(_run_tool_bg())
-                    _futures.append((_tf, _tool_chars, tool_name, _tool_icon, _tool_label, _tool_detail))
+                    _futures.append((_tf, _tool_chars, tool_name, _tool_icon, _tool_label, _tool_detail, _tool_call_id))
 
                 # Wait for all futures in this batch
                 _base_ctx = sum(len(m.get("content", "")) for m in messages) // 4
@@ -3171,7 +3212,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 _tool_start_time = _loop.time()
                 while _futures and not all(f[0].done() for f in _futures):
                     await asyncio.sleep(2)
-                    for _tf, _tool_chars, _tn, _ti, _tl, _td in _futures:
+                    for _tf, _tool_chars, _tn, _ti, _tl, _td, _tcid in _futures:
                         if not _tf.done():
                             _elapsed = _loop.time() - _tool_start_time
                             if _tn != "generate_code":
@@ -3185,7 +3226,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
 
                 # Collect results in order
-                for _fi, (_tf, _tool_chars, tool_name, _tool_icon, _tool_label, _tool_detail) in enumerate(_futures):
+                for _fi, (_tf, _tool_chars, tool_name, _tool_icon, _tool_label, _tool_detail, _tool_call_id) in enumerate(_futures):
                     try:
                         tool_result = _tf.result()
                     except Exception as te:
@@ -3233,7 +3274,10 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         tail = tool_result[-8000:]
                         tool_result = head + f"\n\n[... {orig_len - 12000} chars omitted ...]\n\n" + tail
 
-                    messages.append({"role": "tool", "content": tool_result})
+                    _result_msg = {"role": "tool", "content": tool_result}
+                    if _tool_call_id:
+                        _result_msg["tool_call_id"] = _tool_call_id
+                    messages.append(_result_msg)
                     _tools_ran_this_turn += 1
                     print(f"[CHAT]   Tool result ({tool_name}): {len(tool_result)} chars")
 

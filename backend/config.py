@@ -178,6 +178,17 @@ CONTEXT_COMPACTION = os.getenv("CONTEXT_COMPACTION", "off")
 # ANDs with the per-conversation memory toggle — turns are only ever indexed
 # from conversations where the user enabled memory.
 HISTORY_RECALL = os.getenv("HISTORY_RECALL", "on")
+# RAG reranker: "llm" reorders the fused hybrid_query candidates with a
+# pointwise Workspace Model scoring pass (backend/reranker.py) before the
+# top_k cut; "none" (default) keeps the plain RRF order. Fails open on any
+# LLM error/timeout.
+RAG_RERANKER = os.getenv("RAG_RERANKER", "none").strip().lower()
+RAG_RERANK_TIMEOUT = float(os.getenv("RAG_RERANK_TIMEOUT", "8"))
+# Scanned-PDF OCR fallback (backend/ocr.py, RapidOCR + pypdfium2). "on" by
+# default but a no-op until the pip deps are installed; page cap bounds the
+# CPU time a huge scan can consume during KB ingestion.
+PDF_OCR = os.getenv("PDF_OCR", "on")
+PDF_OCR_MAX_PAGES = int(os.getenv("PDF_OCR_MAX_PAGES", "50"))
 # Smart model routing: the "auto" pseudo-model classifies each request locally
 # (Workspace Model) and routes to the configured model per category. Category
 # values may be cloud-prefixed (explicit user config); the classifier never is.

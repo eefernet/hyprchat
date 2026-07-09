@@ -2,6 +2,7 @@
 RAG pipeline — ChromaDB + Ollama embeddings.
 Chunks documents, embeds via Ollama, stores in ChromaDB, retrieves relevant chunks.
 """
+import asyncio
 import hashlib
 import os
 import re
@@ -12,6 +13,8 @@ import httpx
 
 import config
 import database as db
+import ocr
+import reranker
 
 # ── ChromaDB persistent client ──
 _chroma_client: Optional[chromadb.ClientAPI] = None
@@ -69,16 +72,25 @@ def parse_file(filepath: str, filename: str) -> str:
 
 
 def _parse_pdf(filepath: str) -> str:
-    """Extract text from PDF using pypdf."""
+    """Extract text from PDF using pypdf; OCR fallback for scanned PDFs."""
     try:
         from pypdf import PdfReader
         reader = PdfReader(filepath)
+        num_pages = len(reader.pages)
         pages = []
         for i, page in enumerate(reader.pages):
             text = page.extract_text() or ""
             if text.strip():
                 pages.append(f"[Page {i+1}]\n{text}")
-        return "\n\n".join(pages)
+        text = "\n\n".join(pages)
+        # Scanned PDFs have no meaningful text layer — OCR them (backend/ocr.py,
+        # no-op when disabled or deps missing). Callers run parse_file in a
+        # worker thread, so the CPU-heavy OCR never blocks the event loop.
+        if ocr.should_ocr(text, num_pages):
+            ocr_text = ocr.ocr_pdf(filepath)
+            if len(ocr_text.strip()) > len(text.strip()):
+                return ocr_text
+        return text
     except ImportError:
         print("[RAG] pypdf not installed — reading PDF as raw text")
         try:
@@ -252,8 +264,9 @@ async def index_file(kb_id: str, filename: str, filepath: str) -> dict:
 
     Returns stats about the indexing operation.
     """
-    # Parse file content
-    text = parse_file(filepath, filename)
+    # Parse file content in a worker thread — PDF parsing (and the scanned-PDF
+    # OCR fallback especially) is CPU-bound and must not block the event loop.
+    text = await asyncio.to_thread(parse_file, filepath, filename)
     if not text.strip():
         return {"filename": filename, "chunks": 0, "error": "empty file"}
 
@@ -499,6 +512,11 @@ async def hybrid_query(kb_ids: list[str], query_text: str, top_k: int = 6,
 
     if prefer_filename_hints:
         ordered = _apply_filename_hints(ordered, prefer_filename_hints)
+
+    # Optional LLM rerank over the fused candidates (config RAG_RERANKER=llm).
+    # Fails open inside rerank() — any error returns the RRF order unchanged.
+    if reranker.enabled() and len(ordered) > top_k:
+        return await reranker.rerank(query_text, ordered, top_k)
 
     return ordered[:top_k]
 

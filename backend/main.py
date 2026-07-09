@@ -339,6 +339,9 @@ async def lifespan(app: FastAPI):
     if "history_recall" in _settings:
         config.HISTORY_RECALL = "on" if str(_settings["history_recall"]).lower() in {"1", "true", "on", "yes"} else "off"
         print(f"[Config] Loaded history recall: {config.HISTORY_RECALL}")
+    if "rag_reranker" in _settings:
+        config.RAG_RERANKER = "llm" if str(_settings["rag_reranker"]).lower() in {"1", "true", "on", "yes", "llm"} else "none"
+        print(f"[Config] Loaded RAG reranker: {config.RAG_RERANKER}")
     if isinstance(_settings.get("model_routing"), dict):
         _mr = _settings["model_routing"]
         config.MODEL_ROUTING = {
@@ -2379,16 +2382,30 @@ async def extract_pdf(file: UploadFile = File(...)):
     if len(content) > config.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
         raise HTTPException(413, f"PDF too large (max {config.MAX_UPLOAD_SIZE_MB}MB)")
     try:
-        from pypdf import PdfReader
-        import io
-        reader = PdfReader(io.BytesIO(content))
-        total_pages = len(reader.pages)
-        extracted = []
-        for i, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
-            if text.strip():
-                extracted.append(f"[Page {i+1}]\n{text}")
-        text = "\n\n".join(extracted) if extracted else "No extractable text found in this PDF."
+        def _extract_upload_pdf():
+            from pypdf import PdfReader
+            import io
+            import ocr
+            reader = PdfReader(io.BytesIO(content))
+            total_pages = len(reader.pages)
+            extracted = []
+            for i, page in enumerate(reader.pages):
+                text = page.extract_text() or ""
+                if text.strip():
+                    extracted.append(f"[Page {i+1}]\n{text}")
+            text = "\n\n".join(extracted)
+            # Scanned PDF (no text layer) → OCR fallback. Needs a real file
+            # path for pypdfium2, so spill the upload to a temp file.
+            if ocr.should_ocr(text, total_pages):
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tf:
+                    tf.write(content)
+                    tf.flush()
+                    ocr_text = ocr.ocr_pdf(tf.name)
+                if len(ocr_text.strip()) > len(text.strip()):
+                    text = ocr_text
+            return (text or "No extractable text found in this PDF."), total_pages
+        text, total_pages = await asyncio.to_thread(_extract_upload_pdf)
         return {"filename": file.filename, "text": text, "total_pages": total_pages}
     except ImportError:
         raise HTTPException(500, "pypdf not installed on server")

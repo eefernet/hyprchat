@@ -64,6 +64,7 @@ async def get_app_settings():
         "current_workspace_model": config.WORKSPACE_MODEL,
         "context_compaction": config.CONTEXT_COMPACTION,
         "history_recall": config.HISTORY_RECALL,
+        "rag_reranker": config.RAG_RERANKER,
         "model_routing": config.MODEL_ROUTING,
         # Coder Bot v2 per-agent overrides — empty string = inherit from umbrella
         "current_architect_model": config.ARCHITECT_MODEL,
@@ -108,7 +109,7 @@ async def update_app_settings(body: dict = Body(...)):
     allowed = {"file_cleanup_days", "ollama_url", "codebox_url", "searxng_url", "n8n_url",
                "comfyui_url", "stt_url", "tts_url", "tts_voice",
                "rag", "planning_model", "coder_model",
-               "workspace_model", "context_compaction", "history_recall", "model_routing",
+               "workspace_model", "context_compaction", "history_recall", "rag_reranker", "model_routing",
                "architect_model", "reviewer_model", "acceptance_model", "builder_model", "fixer_model", "qa_model",
                "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
                "openhands_reasoning_effort", "openhands_disable_thinking",
@@ -229,6 +230,10 @@ async def update_app_settings(body: dict = Body(...)):
         config.HISTORY_RECALL = "on" if str(body["history_recall"]).lower() in {"1", "true", "on", "yes"} else "off"
         settings["history_recall"] = config.HISTORY_RECALL
         print(f"[Config] Updated history recall: {config.HISTORY_RECALL}")
+    if "rag_reranker" in body:
+        config.RAG_RERANKER = "llm" if str(body["rag_reranker"]).lower() in {"1", "true", "on", "yes", "llm"} else "none"
+        settings["rag_reranker"] = config.RAG_RERANKER
+        print(f"[Config] Updated RAG reranker: {config.RAG_RERANKER}")
     if "model_routing" in body and isinstance(body["model_routing"], dict):
         _mr = body["model_routing"]
         _clean_mr = {

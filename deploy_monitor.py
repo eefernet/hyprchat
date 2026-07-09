@@ -84,8 +84,12 @@ WATCHED = {
     "backend/tooling/gate_decisions.py": ("Gate Decisions", REMOTE_TOOLING,           True),
     "backend/connectors.py":        ("Connectors",       REMOTE_BACKEND,            True),
     "backend/model_providers.py":   ("Model Providers",  REMOTE_BACKEND,            True),
+    "backend/provider_tools.py":    ("Provider Tools",   REMOTE_BACKEND,            True),
     "backend/cancel_registry.py":   ("Cancel Registry",  REMOTE_BACKEND,            True),
     "backend/rag.py":               ("RAG Pipeline",     REMOTE_BACKEND,            True),
+    "backend/reranker.py":          ("RAG Reranker",     REMOTE_BACKEND,            True),
+    "backend/ocr.py":               ("PDF OCR",          REMOTE_BACKEND,            True),
+    "backend/canvas_edit.py":       ("Canvas AI Edit",   REMOTE_BACKEND,            True),
     "backend/comfyui.py":           ("ComfyUI Client",   REMOTE_BACKEND,            True),
     "backend/image_prompt_enhancer.py": ("Image Prompt Enhancer", REMOTE_BACKEND,   True),
     "backend/persona_images.py":    ("Persona Images",   REMOTE_BACKEND,            True),
@@ -136,6 +140,13 @@ WATCHED = {
     "frontend/vite.config.js":      ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/package.json":        ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/package-lock.json":   ("Frontend (build)", REMOTE_FRONTEND,           False),
+    # PWA static files (frontend/public/ → copied verbatim into dist/ by Vite)
+    "frontend/public/manifest.json": ("Frontend (build)", REMOTE_FRONTEND,          False),
+    "frontend/public/sw.js":        ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/public/icons/icon-192.png": ("Frontend (build)", REMOTE_FRONTEND,     False),
+    "frontend/public/icons/icon-512.png": ("Frontend (build)", REMOTE_FRONTEND,     False),
+    "frontend/public/icons/icon-512-maskable.png": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/public/icons/apple-touch-icon.png": ("Frontend (build)", REMOTE_FRONTEND, False),
     "CHANGELOG.md":                 ("Changelog",        "/opt/hyprchat/",          False),
     "README.md":                    ("README",           "/opt/hyprchat/",          False),
 }
@@ -164,6 +175,12 @@ FRONTEND_SRC_FILES = {
     "frontend/vite.config.js",
     "frontend/package.json",
     "frontend/package-lock.json",
+    "frontend/public/manifest.json",
+    "frontend/public/sw.js",
+    "frontend/public/icons/icon-192.png",
+    "frontend/public/icons/icon-512.png",
+    "frontend/public/icons/icon-512-maskable.png",
+    "frontend/public/icons/apple-touch-icon.png",
 }
 
 CHECK_INTERVAL = 1

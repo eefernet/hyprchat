@@ -7,3 +7,6 @@ pypdf>=4.0.0
 chromadb>=0.4.0
 trafilatura>=1.10.0
 PyYAML>=6.0
+# Scanned-PDF OCR fallback (backend/ocr.py) — pure pip, CPU-only
+rapidocr-onnxruntime>=1.3.0
+pypdfium2>=4.30.0

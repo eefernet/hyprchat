@@ -161,6 +161,7 @@ function HyprChat(){
   const [chatWidth,setChatWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-w")||"880");}catch{return 880;}});
   const [wsModel,setWsModel]=useState(()=>{try{return localStorage.getItem("hc-ws-model")||"qwen2.5:7b";}catch{return "qwen2.5:7b";}});
   const [contextCompaction,setContextCompaction]=useState(()=>{try{return localStorage.getItem("hc-context-compaction")==="on";}catch{return false;}});
+  const [ragReranker,setRagReranker]=useState(()=>{try{return localStorage.getItem("hc-rag-reranker")==="llm";}catch{return false;}});
   const [modelRouting,setModelRouting]=useState({enabled:false,chat:"",code:"",reasoning:"",long_context:""});
   const [backupStatus,setBackupStatus]=useState(null);
   const [dailyWelcome,setDailyWelcome]=useState(()=>{try{const c=JSON.parse(localStorage.getItem("hc-daily-welcome")||"{}");if(c.version===WELCOME_VERSION&&c.date===localDayKey()&&c.message)return c.message;}catch{}return fallbackWelcome();});
@@ -386,6 +387,7 @@ function HyprChat(){
   useEffect(()=>{persistPref("custom-quotes",customQuotes);},[customQuotes]);
   useEffect(()=>{persistServerSetting("hc-ws-model","workspace_model",wsModel);},[wsModel]);
   useEffect(()=>{persistServerSetting("hc-context-compaction","context_compaction",contextCompaction?"on":"off");},[contextCompaction]);
+  useEffect(()=>{persistServerSetting("hc-rag-reranker","rag_reranker",ragReranker?"llm":"none");},[ragReranker]);
   useEffect(()=>{
     const date=localDayKey();
     const model=wsModel||"";
@@ -1485,6 +1487,7 @@ function HyprChat(){
       if(d.rag)setRagSettings(p=>({...p,...d.rag}));
       if(d.default_num_ctx!=null)hydrateServerSetting("default_num_ctx",setNumCtx,d.default_num_ctx,numCtx);
       if(d.context_compaction!=null)hydrateServerSetting("context_compaction",v=>setContextCompaction(v==="on"),d.context_compaction,contextCompaction?"on":"off");
+      if(d.rag_reranker!=null)hydrateServerSetting("rag_reranker",v=>setRagReranker(v==="llm"),d.rag_reranker,ragReranker?"llm":"none");
       if(d.model_routing&&typeof d.model_routing==="object")setModelRouting({enabled:!!d.model_routing.enabled,chat:d.model_routing.chat||"",code:d.model_routing.code||"",reasoning:d.model_routing.reasoning||"",long_context:d.model_routing.long_context||""});
       if(d.current_planning_model!=null)hydrateServerSetting("planning_model",setPlanningModel,d.current_planning_model,planningModel);
       if(d.current_coder_model!=null)hydrateServerSetting("coder_model",setCoderModel,d.current_coder_model,coderModel);
@@ -6858,6 +6861,14 @@ function HyprChat(){
             {contextCompaction?"Enabled":"Disabled"}
           </label>
           <div style={{fontSize:10,color:t.mut,marginTop:4}}>When a chat nears its context window, older turns are summarized by the Workspace Analysis Model so long conversations keep their beginning. Original messages are never modified.</div>
+        </div>
+        <div>
+          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Smart KB Reranking</div>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:ragReranker?t.ok:t.dim,cursor:"pointer"}}>
+            <input type="checkbox" checked={ragReranker} onChange={e=>setRagReranker(e.target.checked)} style={{accentColor:t.ok,cursor:"pointer"}}/>
+            {ragReranker?"Enabled":"Disabled"}
+          </label>
+          <div style={{fontSize:10,color:t.mut,marginTop:4}}>Knowledge-base retrieval reorders its candidate excerpts with a quick Workspace Analysis Model relevance pass before answering. Sharper citations at the cost of ~1-2s per KB question; falls back to normal ranking on any error.</div>
         </div>
         </>,"Global model behavior. Individual chats can still override effort and tools.")}
 

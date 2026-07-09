@@ -789,14 +789,20 @@ async def stream_provider_chat(
     model_id: str,
     messages: list[dict],
     options: dict | None = None,
+    tools: list | None = None,
 ) -> AsyncIterator[dict]:
+    """`tools` (Ollama-shaped defs) enables NATIVE tool calling for providers
+    that support it (see provider_tools.py); the adapter then yields
+    {"type": "tool_call", "id", "name", "arguments"} events alongside the
+    usual token/thinking/usage/finish events. Custom provider ignores tools
+    (text fallback remains its contract)."""
     provider, model_name = split_model_id(model_id)
     if provider == "openai":
-        async for event in _stream_openai(http, model_name, messages, options or {}):
+        async for event in _stream_openai(http, model_name, messages, options or {}, tools=tools):
             yield event
         return
     if provider == "anthropic":
-        async for event in _stream_anthropic(http, model_name, messages, options or {}):
+        async for event in _stream_anthropic(http, model_name, messages, options or {}, tools=tools):
             yield event
         return
     if provider == "custom":
@@ -811,15 +817,25 @@ async def _stream_openai(
     model_name: str,
     messages: list[dict],
     options: dict,
+    tools: list | None = None,
 ) -> AsyncIterator[dict]:
     key = await get_api_key("openai")
     if not key:
         raise ProviderError("OpenAI API key is not configured.", provider="openai")
-    payload: dict[str, Any] = {
-        "model": model_name,
-        "input": _openai_input(messages),
-        "stream": True,
-    }
+    if tools:
+        import provider_tools  # lazy: only tool-enabled rounds need it
+        payload: dict[str, Any] = {
+            "model": model_name,
+            "input": provider_tools.openai_input_native(messages),
+            "tools": provider_tools.openai_tool_defs(tools),
+            "stream": True,
+        }
+    else:
+        payload = {
+            "model": model_name,
+            "input": _openai_input(messages),
+            "stream": True,
+        }
     # Some current OpenAI models reject sampling controls on the Responses API.
     # HyprChat sends default temperature/top_p for Ollama, so omit them here
     # unless we add explicit per-model capability metadata later.
@@ -843,6 +859,11 @@ async def _stream_openai(
             raise ProviderError(text[:500] or f"OpenAI HTTP {resp.status_code}", provider="openai", status_code=resp.status_code)
         async for obj in _iter_sse_json(resp):
             typ = obj.get("type", "")
+            if tools:
+                tc_event = provider_tools.openai_tool_call_event(obj)
+                if tc_event:
+                    yield tc_event
+                    continue
             if typ == "response.output_text.delta":
                 delta = obj.get("delta", "")
                 if delta:
@@ -875,11 +896,16 @@ async def _stream_anthropic(
     model_name: str,
     messages: list[dict],
     options: dict,
+    tools: list | None = None,
 ) -> AsyncIterator[dict]:
     key = await get_api_key("anthropic")
     if not key:
         raise ProviderError("Anthropic API key is not configured.", provider="anthropic")
-    system, anth_messages = _anthropic_messages(messages)
+    if tools:
+        import provider_tools  # lazy: only tool-enabled rounds need it
+        system, anth_messages = provider_tools.anthropic_messages_native(messages)
+    else:
+        system, anth_messages = _anthropic_messages(messages)
     max_tokens = _max_output_tokens(options, default=4096)
     payload: dict[str, Any] = {
         "model": model_name,
@@ -887,6 +913,8 @@ async def _stream_anthropic(
         "max_tokens": max_tokens,
         "stream": True,
     }
+    if tools:
+        payload["tools"] = provider_tools.anthropic_tool_defs(tools)
     if system:
         payload["system"] = system
     if options.get("temperature") is not None:
@@ -920,7 +948,9 @@ async def _stream_anthropic(
                     payload["max_tokens"] = 4096
                     continue
                 raise ProviderError(text[:500] or f"Anthropic HTTP {resp.status_code}", provider="anthropic", status_code=resp.status_code)
-            async for event in _anthropic_stream_events(resp, input_tokens, output_tokens):
+            async for event in _anthropic_stream_events(
+                resp, input_tokens, output_tokens, parse_tools=bool(tools),
+            ):
                 yield event
             return
 
@@ -1004,10 +1034,24 @@ async def _stream_openai_compat(
             return
 
 
-async def _anthropic_stream_events(resp: httpx.Response, input_tokens: int, output_tokens: int) -> AsyncIterator[dict]:
+async def _anthropic_stream_events(
+    resp: httpx.Response,
+    input_tokens: int,
+    output_tokens: int,
+    parse_tools: bool = False,
+) -> AsyncIterator[dict]:
     stop_reason = ""
+    tool_acc = None
+    if parse_tools:
+        import provider_tools  # lazy: only tool-enabled rounds need it
+        tool_acc = provider_tools.AnthropicToolAccumulator()
     async for obj in _iter_sse_json(resp):
         typ = obj.get("type", "")
+        if tool_acc is not None:
+            tc_event = tool_acc.feed(obj)
+            if tc_event:
+                yield tc_event
+                continue
         if typ == "message_start":
             usage = (obj.get("message") or {}).get("usage") or {}
             input_tokens = int(usage.get("input_tokens") or input_tokens or 0)
