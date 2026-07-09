@@ -18,6 +18,14 @@ CREATE TABLE IF NOT EXISTS user_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
 
+CREATE TABLE IF NOT EXISTS user_prefs (
+    user_id TEXT NOT NULL DEFAULT 'default',
+    key TEXT NOT NULL,
+    value_json TEXT NOT NULL DEFAULT 'null',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, key)
+);
+
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL DEFAULT 'default',
@@ -29,6 +37,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     persona_name TEXT DEFAULT '',
     persona_avatar TEXT DEFAULT '',
     use_memories TEXT DEFAULT '0',
+    summary TEXT DEFAULT '',
+    summary_until_msg_id INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -39,6 +49,7 @@ CREATE TABLE IF NOT EXISTS messages (
     role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system', 'tool')),
     content TEXT NOT NULL DEFAULT '',
     metadata TEXT DEFAULT '{}',
+    rating INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );
@@ -59,6 +70,7 @@ CREATE TABLE IF NOT EXISTS kb_files (
     filepath TEXT NOT NULL,
     file_size INTEGER DEFAULT 0,
     file_type TEXT DEFAULT '',
+    source_url TEXT DEFAULT '',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (kb_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
 );
@@ -147,6 +159,8 @@ CREATE TABLE IF NOT EXISTS model_provider_credentials (
     provider TEXT NOT NULL,
     api_key TEXT DEFAULT '',
     enabled INTEGER DEFAULT 1,
+    base_url TEXT DEFAULT '',
+    label TEXT DEFAULT '',
     last_test_status TEXT DEFAULT '',
     last_test_error TEXT DEFAULT '',
     last_test_at TIMESTAMP,

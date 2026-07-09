@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 
 import { API } from '../session.js';
 import { IC } from './icons.jsx';
+import ArtifactCanvas from './ArtifactCanvas.jsx';
 
 const artifactKindMeta=(kind,t,metadata={})=>{
   const k=String(kind||"file").toLowerCase();
@@ -703,6 +704,7 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
   const [timeline,setTimeline]=useState([]);
   const [tagDraft,setTagDraft]=useState("");
   const [kbId,setKbId]=useState(kbs?.[0]?.id||"");
+  const [canvasOpen,setCanvasOpen]=useState(false);
   const a=artifact||{};
   const btnS=(c,bg)=>({background:bg||`${c}14`,border:`1px solid ${c}35`,color:c,padding:"6px 9px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:10,fontWeight:800,display:"inline-flex",alignItems:"center",gap:5,textDecoration:"none"});
   const gridBtn=(c)=>({...btnS(c),justifyContent:"center",padding:"7px 6px",minWidth:0,whiteSpace:"nowrap"});
@@ -754,6 +756,8 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
       </section>
       <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Actions</div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
+          {["text","markdown","json","html","table"].includes(preview?.preview_type)&&a.exists_status!=="missing"&&
+            <button onClick={()=>setCanvasOpen(true)} style={gridBtn(t.pink)}>✏️ Edit</button>}
           <button onClick={async()=>{const d=await action("use-in-chat");onUseInChat?.(d.attachment);}} style={gridBtn(t.acc)}>Use in chat</button>
           <button onClick={async()=>{const d=await action("send-to-research");notify&&notify({type:"success",text:"Research started",detail:d.report_id||d.id||"",duration:2500});}} style={gridBtn(t.pink)}>Research</button>
           <button onClick={async()=>{const d=await action("fork-to-codebox");notify&&notify({type:"success",text:"Copied to Codebox",detail:d.path,duration:3000});}} style={gridBtn(t.warm)}>Codebox</button>
@@ -814,6 +818,9 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
       </section>
       {onDelete&&<button onClick={()=>onDelete(a.id)} style={{...btnS(t.err),justifyContent:"center"}}>Delete metadata</button>}
     </div>
+    {canvasOpen&&<ArtifactCanvas artifact={a} t={t} font={font} notify={notify}
+      onClose={()=>setCanvasOpen(false)}
+      onRevised={(rev)=>{setCanvasOpen(false);onRefreshList?.();if(rev?.id)onOpenArtifact?.(rev.id);}}/>}
   </div>;
 }
 

@@ -50,6 +50,9 @@ export default function AnalyticsPanel({
                 <div style={{fontSize:10,color:t.mut,marginTop:5,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{detail}</div>
               </div>;
               const rows=analyticsData.grouped||[];
+              const cost=summary.cost||{};
+              const fmtUsd=v=>{const n=Number(v)||0;return n>=1?`$${n.toFixed(2)}`:`$${n.toFixed(3)}`;};
+              const hasCost=(cost.all_time||0)>0;
               return <>
               <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap"}}>
                 {statCard("Total Tokens",all.total.toLocaleString(),`${all.requests.toLocaleString()} recorded requests`,t.acc)}
@@ -61,6 +64,8 @@ export default function AnalyticsPanel({
                 {statCard("Today",today.total.toLocaleString(),`${today.requests.toLocaleString()} requests`,t.acc2||t.acc)}
                 {statCard("Last 30 Days",month.total.toLocaleString(),`${month.requests.toLocaleString()} requests`,t.f1||t.acc)}
                 {statCard("Top Model",topModel?.model||"-",`${(topModel?.total_tokens||0).toLocaleString()} tokens`,t.pink||t.acc)}
+                {hasCost&&statCard("Cloud Spend",fmtUsd(cost.all_time),`today ${fmtUsd(cost.today)} · 30d ${fmtUsd(cost.last_30d)} (estimate)`,t.warm)}
+                {((summary.ratings?.up||0)+(summary.ratings?.down||0))>0&&statCard("Feedback",`👍 ${summary.ratings.up} · 👎 ${summary.ratings.down}`,"thumbs on assistant replies",t.ok)}
               </div>
               {rows.length>0?<div style={{...cardS,padding:20}}>
                 <div style={{fontSize:12,fontWeight:800,marginBottom:12,color:t.mut}}>Tokens by {analyticsGroup==="persona"?"profile":analyticsGroup} {analyticsDays===0?"(all time)":`(${analyticsDays}d)`}</div>
@@ -74,15 +79,16 @@ export default function AnalyticsPanel({
               </div>:<EmptyState t={t} icon={<IC.BarChart/>} title="No statistics recorded yet" hint="Start chatting to record token telemetry and populate this page."/>}
               {allModels.length>0&&<div style={{...cardS,marginTop:16}}>
                 <div style={{fontSize:12,fontWeight:800,marginBottom:8,color:t.mut}}>All-Time Model Breakdown</div>
-                <div style={{display:"grid",gridTemplateColumns:"minmax(180px,2fr) repeat(4,minmax(80px,1fr))",gap:8,padding:"6px 0",borderBottom:`1px solid ${t.brd}33`,fontSize:10,fontWeight:800,color:t.mut}}>
-                  <div>Model</div><div style={{textAlign:"right"}}>Processed</div><div style={{textAlign:"right"}}>Generated</div><div style={{textAlign:"right"}}>Total</div><div style={{textAlign:"right"}}>Requests</div>
+                <div style={{display:"grid",gridTemplateColumns:`minmax(180px,2fr) repeat(${hasCost?5:4},minmax(80px,1fr))`,gap:8,padding:"6px 0",borderBottom:`1px solid ${t.brd}33`,fontSize:10,fontWeight:800,color:t.mut}}>
+                  <div>Model</div><div style={{textAlign:"right"}}>Processed</div><div style={{textAlign:"right"}}>Generated</div><div style={{textAlign:"right"}}>Total</div><div style={{textAlign:"right"}}>Requests</div>{hasCost&&<div style={{textAlign:"right"}}>Cost</div>}
                 </div>
-                {allModels.slice(0,20).map((d,i)=><div key={i} style={{display:"grid",gridTemplateColumns:"minmax(180px,2fr) repeat(4,minmax(80px,1fr))",gap:8,padding:"6px 0",borderBottom:`1px solid ${t.brd}15`,fontSize:10,alignItems:"center"}}>
+                {allModels.slice(0,20).map((d,i)=><div key={i} style={{display:"grid",gridTemplateColumns:`minmax(180px,2fr) repeat(${hasCost?5:4},minmax(80px,1fr))`,gap:8,padding:"6px 0",borderBottom:`1px solid ${t.brd}15`,fontSize:10,alignItems:"center"}}>
                   <div style={{color:t.text,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.model}</div>
                   <div style={{textAlign:"right",color:t.mut}}>{(d.prompt_tokens||0).toLocaleString()}</div>
                   <div style={{textAlign:"right",color:t.mut}}>{(d.completion_tokens||0).toLocaleString()}</div>
                   <div style={{textAlign:"right",color:t.acc,fontWeight:800}}>{(d.total_tokens||0).toLocaleString()}</div>
                   <div style={{textAlign:"right",color:t.mut}}>{d.request_count||0}</div>
+                  {hasCost&&<div style={{textAlign:"right",color:d.cost_usd?t.warm:t.mut,fontWeight:d.cost_usd?800:400}}>{d.cost_usd?fmtUsd(d.cost_usd):"—"}</div>}
                 </div>)}
               </div>}
               {allProfiles.length>0&&<div style={{...cardS,marginTop:16}}>

@@ -232,10 +232,13 @@ WF_EVENT_TRANSITIONS = {
 
 def is_environment_fault(envelope: dict | None) -> bool:
     """Reviewer classified the failure as a sandbox environment fault (missing
-    absolute path outside the project that no project file references).
+    absolute path outside the project that no project file references), or
+    acceptance found the project_dir itself missing/empty (wrong path — a
+    clean-reviewed project cannot legitimately have zero files).
     Nothing in the project can be edited to fix it — such envelopes must never
     route to Aider/Fixer, count toward fix budgets, or force deep_research."""
-    return (envelope or {}).get("deterministic_issue") == "environment_fault"
+    return (envelope or {}).get("deterministic_issue") in (
+        "environment_fault", "empty_project_dir")
 
 
 def environment_fault_notice(envelope: dict | None) -> str:

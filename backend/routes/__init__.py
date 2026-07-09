@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 
 from .context import configure_context
-from . import artifacts, audio, catalog, downloads, health, hf, model_configs, model_providers, ollama_models, settings, tools_connectors, users
+from . import artifacts, audio, backup, catalog, downloads, health, hf, model_configs, model_providers, ollama_models, settings, tools_connectors, users
 
 
 def register_extracted_routes(
@@ -53,3 +53,4 @@ def register_extracted_routes(
     app.include_router(downloads.router)
     app.include_router(catalog.router)
     app.include_router(artifacts.router)
+    app.include_router(backup.router)

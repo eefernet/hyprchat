@@ -87,6 +87,14 @@ class ArtifactReviseRequest(BaseModel):
     workspace_ids: Optional[list[str]] = None
 
 
+class ArtifactAiEditRequest(BaseModel):
+    content: str
+    selection_start: int = 0
+    selection_end: int = 0
+    instruction: str
+    model: str = ""
+
+
 class ArtifactBundleRequest(BaseModel):
     artifact_ids: list[str]
     title: Optional[str] = None
@@ -627,6 +635,33 @@ async def revise_artifact_ep(artifact_id: str, req: ArtifactReviseRequest):
         {"related_artifact_id": artifact["id"], "parent_artifact_id": parent_id},
     )
     return new_artifact
+
+
+@router.post("/api/artifacts/{artifact_id}/ai-edit")
+async def ai_edit_artifact_ep(artifact_id: str, req: ArtifactAiEditRequest):
+    """Canvas editor AI selection edit — returns replacement text for the
+    selected range of the CURRENT editor document (which may have unsaved
+    changes, so the doc travels in the request). Nothing is written to disk;
+    the frontend applies the diff and saves via /revise."""
+    import canvas_edit
+    artifact = await db.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "Artifact not found")
+    try:
+        replacement = await canvas_edit.ai_edit_selection(
+            route_context().http,
+            req.content,
+            req.selection_start,
+            req.selection_end,
+            req.instruction,
+            model=req.model,
+            filename=artifact.get("filename") or "",
+        )
+    except canvas_edit.CanvasEditError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"AI edit failed: {e}")
+    return {"replacement": replacement}
 
 
 @router.post("/api/artifacts/bundle")

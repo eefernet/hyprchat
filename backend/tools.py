@@ -234,6 +234,18 @@ def _project_id_from_project_dir(project_dir: str) -> str:
     return _project_id_from_dir(project_dir) or project_dir.rsplit("/", 1)[-1]
 
 
+def _project_dir_from_build(project_id: str, files: list | None) -> str:
+    """Project root for a worker build result: /root/projects/<project_id>,
+    falling back to the /root/projects/<name> prefix of the created files."""
+    if project_id:
+        return f"/root/projects/{project_id}"
+    for f in files or []:
+        parts = str(f).split("/")
+        if len(parts) >= 5 and parts[1] == "root" and parts[2] == "projects":
+            return "/".join(parts[:4])
+    return ""
+
+
 async def _aider_worker_healthy(http, *, force: bool = False) -> bool:
     """Cheap preflight for routing decisions; run_aider_fix still checks again."""
     if not getattr(config, "AIDER_ENABLED", True):
@@ -1065,6 +1077,17 @@ CODEAGENT_TOOLS = {
             "parameters": {"type": "object", "properties": {
                 "directory": {"type": "string", "description": "Directory to package, e.g. /root/myproject"},
             }, "required": ["directory"]},
+        },
+    },
+    "search_history": {
+        "type": "function",
+        "function": {
+            "name": "search_history",
+            "description": "Search the user's past conversations (memory-enabled chats only) for relevant prior discussions, decisions, or facts. Use when the user references something discussed before ('what did we decide about X', 'as we talked about last week').",
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "What to look for in past conversations"},
+                "include_current": {"type": "boolean", "description": "Also search the current conversation (default false)"},
+            }, "required": ["query"]},
         },
     },
     "save_memory": {
@@ -2785,6 +2808,36 @@ async def exec_tool(
 
             return "\n".join(parts)
 
+        elif name == "search_history":
+            import rag  # lazy: keeps tools.py import light
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return "ERROR: search_history requires a 'query'."
+            await events.emit(conv_id, "tool_start", {
+                "tool": "history", "icon": "brain", "status": f"Searching past conversations: {query[:60]}",
+            })
+            exclude = "" if args.get("include_current") else (conv_id or "")
+            hits = await rag.query_history(db.current_user_id(), query, top_k=6, exclude_conv_id=exclude)
+            await events.emit(conv_id, "tool_end", {
+                "tool": "history", "icon": "brain", "status": f"Found {len(hits)} past-conversation match(es)",
+            })
+            if not hits:
+                return ("No matching past conversations found. Only memory-enabled chats are indexed — "
+                        "the user may need to enable memory on the relevant conversations.")
+            parts = ["Relevant excerpts from the user's past conversations (most similar first):\n"]
+            total = 0
+            for h in hits:
+                title = h.get("conv_title") or h.get("conversation_id") or "untitled chat"
+                date = (h.get("created_at") or "")[:10]
+                head = f"[{title}{' — ' + date if date else ''}] ({h.get('role','')})"
+                body = (h.get("text") or "").strip()
+                seg = f"{head}\n{body}\n"
+                if total + len(seg) > 3000:
+                    break
+                parts.append(seg)
+                total += len(seg)
+            return "\n".join(parts)
+
         elif name == "save_memory":
             content = re.sub(r"\s+", " ", str(args.get("content") or "").strip())
             if len(content) < 8:
@@ -4297,8 +4350,23 @@ async def exec_tool(
                     reviewer_run_id = reviewer_run.get("id", "")
 
             review_env = (reviewer_run or {}).get("result_envelope") or {}
+            _dir_override_note = ""
+            _reviewer_dir = (review_env.get("project_dir") or "").strip()
             if not project_dir:
-                project_dir = (review_env.get("project_dir") or "").strip()
+                project_dir = _reviewer_dir
+            elif _reviewer_dir and project_dir.rstrip("/") != _reviewer_dir.rstrip("/"):
+                # Acceptance must inspect the same directory the clean reviewer
+                # verified. Models occasionally pass the PLANNED project name as
+                # a path (e.g. the Architect's project_id) — the reviewer's
+                # envelope is authoritative for what actually exists on disk.
+                print(f"[run_acceptance_review] overriding model-supplied "
+                      f"project_dir={project_dir!r} with reviewer's {_reviewer_dir!r}")
+                _dir_override_note = (
+                    f"NOTE: project_dir corrected to '{_reviewer_dir}' (the directory the "
+                    f"clean reviewer verified); '{project_dir}' is not the project root — "
+                    f"use '{_reviewer_dir}' for all further tool calls.\n\n"
+                )
+                project_dir = _reviewer_dir
             if not project_id:
                 project_id = (review_env.get("project_id") or "").strip()
 
@@ -4327,9 +4395,19 @@ async def exec_tool(
             if _ast not in ("cancelled", ""):
                 await _apply_workflow_event(
                     conv_id,
-                    "ACCEPT_OK" if _ast == "accepted" else "ACCEPT_ISSUES",
+                    ("ACCEPT_OK" if _ast == "accepted"
+                     else "REVIEW_ENV_FAULT" if _is_environment_fault(envelope)
+                     else "ACCEPT_ISSUES"),
                     run_id=envelope.get("run_id", ""),
                     project_id=project_id,
+                )
+            if _is_environment_fault(envelope):
+                # Wrong/missing project_dir or unreachable sandbox — there is
+                # nothing in the project to fix; never route this to Aider/Fixer.
+                return (
+                    f"{_dir_override_note}"
+                    + _environment_fault_notice(envelope)
+                    + f"\n\nacceptance_run_id: {envelope.get('run_id', '')}"
                 )
 
             a_status = envelope.get("status", "?")
@@ -4338,13 +4416,14 @@ async def exec_tool(
             acceptance_run_id = envelope.get("run_id", "")
             if a_status == "accepted":
                 return (
+                    f"{_dir_override_note}"
                     f"ACCEPTANCE ACCEPTED. {summary}\n"
                     f"acceptance_run_id: {acceptance_run_id}\n"
                     "Project is ready — package and deliver with download_project."
                 )
 
             lines = [
-                f"ACCEPTANCE FOUND {len(issues)} ISSUE(S). {summary}",
+                f"{_dir_override_note}ACCEPTANCE FOUND {len(issues)} ISSUE(S). {summary}",
                 f"acceptance_run_id: {acceptance_run_id}",
                 "",
             ]
@@ -6046,8 +6125,11 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                     print(f"[CODEGEN:OH] Agent {status}, retrying with simplified task (+5 rounds)...")
                     oh_payload["_retried"] = True
                     oh_payload["max_rounds"] = max_rounds + 5
+                    # Original task FIRST: the worker derives fresh-build dir
+                    # names from the leading task words, and a retry preamble
+                    # here once named a project "simple-request-focus".
                     oh_payload["task"] = (
-                        f"SIMPLE REQUEST — focus on writing code, not verifying:\n{task}"
+                        f"{task}\n\nRETRY NOTE — focus on writing code, not verifying."
                     )
                     await events.emit(conv_id, "tool_progress", {
                         "tool": "generate_code", "icon": "wand",
@@ -6115,28 +6197,63 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                     if result and result.get("status") == "ok":
                         files = result.get("files_created", [])
                         if files:
-                            # Re-run the success path (simplified — just return the result)
+                            # Re-run the success path (simplified) — but keep the
+                            # DURABLE side effects identical to the normal path:
+                            # envelope project_dir, coding_projects row (feeds the
+                            # ACTIVE PROJECT prompt injection), and git checkpoint.
+                            # Skipping these once left a whole conversation with no
+                            # record of the real on-disk project dir.
                             duration = result.get("duration_seconds", 0)
                             _project_id = result.get("project_id", "")
+                            # Worker ok-results always carry project_id; derive
+                            # from the created file paths as a fallback.
+                            _retry_project_dir = _project_dir_from_build(_project_id, files)
                             file_list = "\n".join(f"  - {f}" for f in files)
                             await events.emit(conv_id, "tool_end", {
                                 "tool": "generate_code", "icon": "wand",
                                 "status": f"🤖 OpenHands (retry): {len(files)} file(s) built ({duration}s)",
                                 "run_id": _run_id,
                             })
+                            try:
+                                proj_name = task[:60].strip().replace("\n", " ")
+                                await db.upsert_coding_project(
+                                    project_id=_project_id or f"proj-{uuid.uuid4().hex[:12]}",
+                                    name=proj_name, conversation_id=conv_id,
+                                    description=task[:500], language=language,
+                                    file_manifest=files, openhands_project_id=_project_id,
+                                )
+                            except Exception as proj_e:
+                                print(f"[CODEGEN] Failed to save project metadata (retry): {proj_e}")
                             await _finalize_run("succeeded", {
                                 "files_written": files,
                                 "build_summary": "Retry succeeded after initial failure",
                                 "project_id": _project_id,
+                                "project_dir": _retry_project_dir,
                                 "duration_s": duration,
                                 "model": coder_model,
                                 "language": language,
                                 "retried": True,
                             })
+                            _ckpt = await _git_checkpoint(
+                                http, _retry_project_dir,
+                                f"builder succeeded (retry): {task[:60]} ({_run_id})",
+                            )
+                            if _ckpt:
+                                print(f"[git-checkpoint] {_ckpt}")
+                            _retry_project_dir = _retry_project_dir or "/root/projects/<project>"
                             return (
                                 f"PROJECT COMPLETE (retry succeeded). OpenHands agent built the project "
                                 f"(model: {coder_model}, {duration}s, project_id: {_project_id}).\n\n"
-                                f"**Files created ({len(files)}):**\n{file_list}\n"
+                                f"**Files created ({len(files)}):**\n{file_list}\n\n"
+                                f"The project root is `{_retry_project_dir}` — pass this exact path to "
+                                f"run_review/run_acceptance_review/download_project; do NOT use the "
+                                f"planned project name as a path.\n\n"
+                                f"## DELIVERY (REQUIRED — no auto-download)\n"
+                                f"NO tarball has been packaged yet. When (and only when) the project is verified complete:\n"
+                                f"1. Call run_review(project_dir='{_retry_project_dir}') and fix any issues found.\n"
+                                f"2. After a clean review, call run_acceptance_review.\n"
+                                f"3. Call download_project(directory='{_retry_project_dir}') to package the FINAL sandbox state.\n"
+                                f"4. THEN respond to the user with what was built, the download link from step 3, and how to run it locally.\n"
                             )
                     # Retry also failed — fall through to error response below
                     print(f"[CODEGEN:OH] Retry also failed")

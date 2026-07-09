@@ -348,3 +348,79 @@ def test_acceptance_clean_synonym_normalizes_to_accepted():
 
     assert envelope["status"] == "accepted"
     assert envelope["issues"] == []
+
+
+class _EmptyDirHTTP(_FakeHTTP):
+    """Codebox fake for a project_dir that does not exist: file listing is
+    empty and the `test -d` probe exits 1."""
+
+    def __init__(self, probe_exit=1, probe_transport_fail=False):
+        super().__init__({"message": {"content": _accepted_json()}})
+        self.probe_exit = probe_exit
+        self.probe_transport_fail = probe_transport_fail
+
+    async def post(self, url, json=None, timeout=None):
+        self.posts.append({"url": url, "json": json, "timeout": timeout})
+        command = (json or {}).get("command", "")
+        if command.startswith("test -d"):
+            if self.probe_transport_fail:
+                raise RuntimeError("codebox unreachable")
+            return _FakeResponse({"exit_code": self.probe_exit, "stdout": "", "stderr": ""})
+        # Every listing/read returns nothing — the directory has no files.
+        return _FakeResponse({"exit_code": 1, "stdout": "", "stderr": ""})
+
+
+def _run_acceptance_against_missing_dir(http):
+    events = _FakeEvents()
+    clean_review = {
+        "status": "clean",
+        "summary": "Build, tests, and lint pass.",
+        "project_dir": "/root/projects/real-project",
+        "language": "python",
+    }
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(acceptance.db, "create_run", new=AsyncMock(return_value=None)))
+        stack.enter_context(patch.object(acceptance.db, "update_run", new=AsyncMock(return_value=None)))
+        stack.enter_context(patch.object(acceptance.db, "get_run", new=AsyncMock(return_value={
+            "result_envelope": clean_review,
+        })))
+        stack.enter_context(patch.object(acceptance.config, "CODEBOX_URL", "http://codebox"))
+        envelope = _run(acceptance.run_acceptance_review(
+            http, events, "conv-1",
+            project_dir="/root/projects/hallucinated-name",
+            reviewer_run_id="run-review",
+        ))
+    return envelope, events
+
+
+def test_acceptance_empty_project_dir_yields_non_actionable_envelope():
+    """Zero files at the given project_dir after a CLEAN review means the path
+    is wrong/gone — the envelope must be an env-fault-style error with no
+    issues, never an actionable 'all files missing' verdict the gate would
+    route to Aider/Fixer (the neon-brick-breaker deadlock)."""
+    envelope, events = _run_acceptance_against_missing_dir(_EmptyDirHTTP(probe_exit=1))
+
+    assert envelope["status"] == "error"
+    assert envelope["deterministic_issue"] == "empty_project_dir"
+    assert envelope["issues"] == []
+    assert "missing" in envelope["summary"]
+    assert "/root/projects/hallucinated-name" in envelope["summary"]
+
+
+def test_acceptance_empty_but_existing_dir_is_still_env_fault():
+    envelope, _events = _run_acceptance_against_missing_dir(_EmptyDirHTTP(probe_exit=0))
+
+    assert envelope["status"] == "error"
+    assert envelope["deterministic_issue"] == "empty_project_dir"
+    assert "empty" in envelope["summary"]
+
+
+def test_acceptance_codebox_transport_failure_is_environment_fault():
+    """If the sandbox itself is unreachable the envelope must say so (an
+    environment fault), not blame the project path."""
+    envelope, _events = _run_acceptance_against_missing_dir(
+        _EmptyDirHTTP(probe_transport_fail=True))
+
+    assert envelope["status"] == "error"
+    assert envelope["deterministic_issue"] == "environment_fault"
+    assert "unreachable" in envelope["summary"]

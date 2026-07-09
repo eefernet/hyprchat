@@ -2,6 +2,7 @@
 RAG pipeline — ChromaDB + Ollama embeddings.
 Chunks documents, embeds via Ollama, stores in ChromaDB, retrieves relevant chunks.
 """
+import asyncio
 import hashlib
 import os
 import re
@@ -12,6 +13,8 @@ import httpx
 
 import config
 import database as db
+import ocr
+import reranker
 
 # ── ChromaDB persistent client ──
 _chroma_client: Optional[chromadb.ClientAPI] = None
@@ -69,16 +72,25 @@ def parse_file(filepath: str, filename: str) -> str:
 
 
 def _parse_pdf(filepath: str) -> str:
-    """Extract text from PDF using pypdf."""
+    """Extract text from PDF using pypdf; OCR fallback for scanned PDFs."""
     try:
         from pypdf import PdfReader
         reader = PdfReader(filepath)
+        num_pages = len(reader.pages)
         pages = []
         for i, page in enumerate(reader.pages):
             text = page.extract_text() or ""
             if text.strip():
                 pages.append(f"[Page {i+1}]\n{text}")
-        return "\n\n".join(pages)
+        text = "\n\n".join(pages)
+        # Scanned PDFs have no meaningful text layer — OCR them (backend/ocr.py,
+        # no-op when disabled or deps missing). Callers run parse_file in a
+        # worker thread, so the CPU-heavy OCR never blocks the event loop.
+        if ocr.should_ocr(text, num_pages):
+            ocr_text = ocr.ocr_pdf(filepath)
+            if len(ocr_text.strip()) > len(text.strip()):
+                return ocr_text
+        return text
     except ImportError:
         print("[RAG] pypdf not installed — reading PDF as raw text")
         try:
@@ -252,8 +264,9 @@ async def index_file(kb_id: str, filename: str, filepath: str) -> dict:
 
     Returns stats about the indexing operation.
     """
-    # Parse file content
-    text = parse_file(filepath, filename)
+    # Parse file content in a worker thread — PDF parsing (and the scanned-PDF
+    # OCR fallback especially) is CPU-bound and must not block the event loop.
+    text = await asyncio.to_thread(parse_file, filepath, filename)
     if not text.strip():
         return {"filename": filename, "chunks": 0, "error": "empty file"}
 
@@ -499,6 +512,11 @@ async def hybrid_query(kb_ids: list[str], query_text: str, top_k: int = 6,
 
     if prefer_filename_hints:
         ordered = _apply_filename_hints(ordered, prefer_filename_hints)
+
+    # Optional LLM rerank over the fused candidates (config RAG_RERANKER=llm).
+    # Fails open inside rerank() — any error returns the RRF order unchanged.
+    if reranker.enabled() and len(ordered) > top_k:
+        return await reranker.rerank(query_text, ordered, top_k)
 
     return ordered[:top_k]
 
@@ -873,4 +891,141 @@ async def query_code_memory(query_text: str, top_k: int = 4, language: str = "")
         return matches
     except Exception as e:
         print(f"[RAG] Code memory query failed: {e}")
+        return []
+
+
+# ============================================================
+# CHAT HISTORY RECALL — memory-gated conversation indexing
+# ============================================================
+# Only turns from conversations with the memory toggle ON are ever indexed
+# (the gate lives at the chat.py call site, inside `if global_memory_enabled`).
+_HISTORY_COLLECTION = "chat_history"
+_HISTORY_MIN_CHARS = 80
+_HISTORY_MAX_CHUNKS_PER_MSG = 10
+
+
+def _get_history_collection():
+    client = get_chroma()
+    return client.get_or_create_collection(
+        name=_HISTORY_COLLECTION,
+        metadata={"hnsw:space": "cosine"},
+    )
+
+
+async def index_history_turn(user_id: str, conv_id: str, message_id: int, role: str,
+                             text: str, conv_title: str = "", created_at: str = "") -> dict:
+    """Index one chat message for cross-conversation recall.
+
+    Delete-first by message_id so re-indexing an edited message never leaves
+    stale chunks behind."""
+    text = (text or "").strip()
+    if not user_id or not conv_id or not message_id or len(text) < _HISTORY_MIN_CHARS:
+        return {"indexed": False, "reason": "too short or missing ids"}
+    try:
+        collection = _get_history_collection()
+        try:
+            collection.delete(where={"message_id": int(message_id)})
+        except Exception:
+            pass
+        chunks = chunk_text(text, f"chat:{conv_id}")[:_HISTORY_MAX_CHUNKS_PER_MSG]
+        texts = [c["text"] for c in chunks]
+        if not texts:
+            return {"indexed": False, "reason": "no chunks"}
+        embeddings = await embed_texts(texts)
+        valid = [(c, t, e) for c, t, e in zip(chunks, texts, embeddings) if e is not None]
+        if not valid:
+            return {"indexed": False, "reason": "embedding failed"}
+        ids, docs, metas, embeds = [], [], [], []
+        for c, t, e in valid:
+            ids.append(hashlib.md5(f"hist:{conv_id}:{message_id}:{c['chunk_index']}".encode()).hexdigest())
+            docs.append(t)
+            metas.append({
+                "user_id": user_id,
+                "conversation_id": conv_id,
+                "message_id": int(message_id),
+                "role": role or "",
+                "conv_title": (conv_title or "")[:120],
+                "created_at": (created_at or "")[:32],
+            })
+            embeds.append(e)
+        collection.upsert(ids=ids, documents=docs, metadatas=metas, embeddings=embeds)
+        return {"indexed": True, "chunks": len(ids)}
+    except Exception as e:
+        print(f"[RAG] History index failed for msg {message_id}: {e}")
+        return {"indexed": False, "reason": str(e)}
+
+
+async def remove_history_message(message_id: int) -> None:
+    try:
+        _get_history_collection().delete(where={"message_id": int(message_id)})
+    except Exception as e:
+        print(f"[RAG] History delete (msg {message_id}) failed: {e}")
+
+
+async def remove_history_messages(message_ids: list[int]) -> None:
+    """Batch-delete history chunks for a set of message ids (conversation
+    truncation on regenerate/edit)."""
+    ids = [int(m) for m in (message_ids or []) if m]
+    if not ids:
+        return
+    try:
+        _get_history_collection().delete(where={"message_id": {"$in": ids}})
+    except Exception as e:
+        print(f"[RAG] History batch delete ({len(ids)} msgs) failed: {e}")
+
+
+async def remove_history_conversation(conv_id: str) -> None:
+    try:
+        _get_history_collection().delete(where={"conversation_id": conv_id})
+    except Exception as e:
+        print(f"[RAG] History delete (conv {conv_id}) failed: {e}")
+
+
+async def query_history(user_id: str, query_text: str, top_k: int = 6,
+                        exclude_conv_id: str = "") -> list[dict]:
+    """Search the current user's indexed chat history (cross-conversation)."""
+    if not (query_text or "").strip() or not user_id:
+        return []
+    query_embedding = await embed_single(query_text)
+    if query_embedding is None:
+        return []
+    try:
+        collection = _get_history_collection()
+        count = collection.count()
+        if count == 0:
+            return []
+        clauses = [{"user_id": user_id}]
+        if exclude_conv_id:
+            clauses.append({"conversation_id": {"$ne": exclude_conv_id}})
+        where = clauses[0] if len(clauses) == 1 else {"$and": clauses}
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(max(top_k * 2, top_k), count),  # headroom for per-message dedup
+            where=where,
+        )
+        if not results or not results.get("documents"):
+            return []
+        matches = []
+        seen_msg = set()
+        for i, doc in enumerate(results["documents"][0]):
+            meta = results["metadatas"][0][i] if results.get("metadatas") else {}
+            dist = results["distances"][0][i] if results.get("distances") else 0
+            key = meta.get("message_id")
+            if key in seen_msg:
+                continue
+            seen_msg.add(key)
+            matches.append({
+                "text": doc,
+                "score": 1 - dist,
+                "conversation_id": meta.get("conversation_id", ""),
+                "message_id": meta.get("message_id"),
+                "role": meta.get("role", ""),
+                "conv_title": meta.get("conv_title", ""),
+                "created_at": meta.get("created_at", ""),
+            })
+            if len(matches) >= top_k:
+                break
+        return matches
+    except Exception as e:
+        print(f"[RAG] History query failed: {e}")
         return []

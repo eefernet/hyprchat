@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+import backup as backup_svc
 import config
 import database as db
 from council import stream_council_chat
@@ -172,7 +173,7 @@ async def _cleanup_loop():
     """Background task: run cleanup every 6 hours."""
     while True:
         await asyncio.sleep(6 * 3600)
-        _run_cleanup_sync()
+        await asyncio.to_thread(_run_cleanup_sync)
 
 
 events = EventBus()
@@ -189,10 +190,20 @@ _cleanup_task_ref = None
 _BG_TASKS: set = set()
 
 
+def _bg_task_done(t):
+    _BG_TASKS.discard(t)
+    # Surface failures instead of swallowing them — a crashed background task
+    # (RAG delete, reindex, cleanup) previously vanished without a trace.
+    if not t.cancelled():
+        exc = t.exception()
+        if exc is not None:
+            print(f"[BG] background task {t.get_name()} failed: {exc!r}")
+
+
 def _track_bg(coro):
     t = asyncio.create_task(coro)
     _BG_TASKS.add(t)
-    t.add_done_callback(_BG_TASKS.discard)
+    t.add_done_callback(_bg_task_done)
     return t
 
 
@@ -262,6 +273,12 @@ def _format_reindex_error(kb_name: str, error: Exception) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _cleanup_task_ref, _health_task_ref
+    # Staged backup restore must land BEFORE init_db so an older-schema backup
+    # is migrated by the normal idempotent migrations right after.
+    try:
+        backup_svc.apply_pending_restore()
+    except Exception as _bre:
+        print(f"[Backup] apply_pending_restore crashed (continuing): {_bre}")
     await db.init_db()
     try:
         _reaped = await db.reap_stale_runs()
@@ -316,6 +333,25 @@ async def lifespan(app: FastAPI):
     if "workspace_model" in _settings:
         config.WORKSPACE_MODEL = _settings["workspace_model"] or ""
         print(f"[Config] Loaded Workspace Model from settings: {config.WORKSPACE_MODEL or '(use chat model)'}")
+    if "context_compaction" in _settings:
+        config.CONTEXT_COMPACTION = "on" if str(_settings["context_compaction"]).lower() in {"1", "true", "on", "yes"} else "off"
+        print(f"[Config] Loaded context compaction: {config.CONTEXT_COMPACTION}")
+    if "history_recall" in _settings:
+        config.HISTORY_RECALL = "on" if str(_settings["history_recall"]).lower() in {"1", "true", "on", "yes"} else "off"
+        print(f"[Config] Loaded history recall: {config.HISTORY_RECALL}")
+    if "rag_reranker" in _settings:
+        config.RAG_RERANKER = "llm" if str(_settings["rag_reranker"]).lower() in {"1", "true", "on", "yes", "llm"} else "none"
+        print(f"[Config] Loaded RAG reranker: {config.RAG_RERANKER}")
+    if isinstance(_settings.get("model_routing"), dict):
+        _mr = _settings["model_routing"]
+        config.MODEL_ROUTING = {
+            "enabled": bool(_mr.get("enabled")),
+            "chat": str(_mr.get("chat") or ""),
+            "code": str(_mr.get("code") or ""),
+            "reasoning": str(_mr.get("reasoning") or ""),
+            "long_context": str(_mr.get("long_context") or ""),
+        }
+        print(f"[Config] Loaded model routing: enabled={config.MODEL_ROUTING['enabled']}")
     # Coder Bot v2 per-agent overrides — each empty by default; only seen here
     # when the user has explicitly pinned a model for that agent.
     for _key, _attr in (
@@ -417,8 +453,9 @@ async def lifespan(app: FastAPI):
     if "image_chat_auto_enhance" in _settings:
         # Stored as a real bool, but tolerate a hand-edited "false" string.
         config.IMAGE_CHAT_AUTO_ENHANCE = str(_settings["image_chat_auto_enhance"]).strip().lower() in ("1", "true", "yes", "on")
-    # Run cleanup once on startup to clear any stale files
-    _run_cleanup_sync()
+    # Run cleanup once on startup to clear any stale files — in a worker
+    # thread so a big outputs dir doesn't stall the first requests.
+    _track_bg(asyncio.to_thread(_run_cleanup_sync))
     # Start background cleanup loop
     _cleanup_task_ref = asyncio.create_task(_cleanup_loop())
     # Start health check loop (every 5 min)
@@ -479,6 +516,7 @@ _USER_SCOPED_PREFIXES = (
     "/api/analytics",
     "/api/danger-zone",
     "/api/events",
+    "/api/prefs",
 )
 
 
@@ -594,6 +632,11 @@ class ChatRequest(BaseModel):
     # Ghost/private mode. When true, this stream must not persist messages,
     # workspace memories, token usage, or RAG/research memory for the turn.
     ephemeral: bool = False
+    # Continue a length-truncated assistant message: id of the existing
+    # assistant row to resume. messages[] must end with that partial assistant
+    # message; no new stub row is created and the frontend PATCHes the
+    # concatenated result back onto the same row.
+    continue_message_id: Optional[int] = None
 
 class ExecuteRequest(BaseModel):
     conversation_id: Optional[str] = None
@@ -740,6 +783,15 @@ async def list_models():
     model_details.update(cloud_details)
     if not models and ollama_error:
         raise HTTPException(502, f"Failed to reach Ollama: {ollama_error}")
+    # "auto" pseudo-model — must be a first-class list entry or the frontend's
+    # unknown-model fallback silently rewrites it before send.
+    _routing = getattr(config, "MODEL_ROUTING", {}) or {}
+    if _routing.get("enabled") and any(_routing.get(k) for k in ("chat", "code", "reasoning", "long_context")):
+        models.insert(0, "auto")
+        model_details["auto"] = {
+            "size": 0, "modified_at": "", "digest": "",
+            "details": {"provider": "auto", "provider_label": "Auto Router"},
+        }
     return {
         "models": models,
         "model_details": model_details,
@@ -866,6 +918,117 @@ async def chat_stream(req: ChatRequest):
 # ============================================================
 # CODER BOT — upload an existing project archive
 # ============================================================
+class _UploadTooLarge(Exception):
+    """Decompressed archive exceeded the extraction budget."""
+    def __init__(self, budget_mb: int):
+        super().__init__(f"decompressed size exceeds {budget_mb}MB")
+        self.budget_mb = budget_mb
+
+
+def _extract_and_stage_project(content: bytes, lower: str, is_zip: bool,
+                               staging_root: str) -> tuple[list[str], dict[str, int]]:
+    """Extract an uploaded project archive into staging_root (sync — run via
+    asyncio.to_thread), enforcing a decompressed-size budget so a zip bomb
+    can't fill the disk: the archive itself is capped at MAX_UPLOAD_SIZE_MB,
+    but its extracted content was previously unbounded. Bytes are counted as
+    actually written, so the declared (spoofable) sizes don't matter.
+
+    Returns (manifest, ext_counts) after collapsing a single top-level folder.
+    Raises _UploadTooLarge past budget; caller handles cleanup + HTTP codes.
+    """
+    import io as _io
+    import tarfile
+    import zipfile
+
+    staging_abs = os.path.abspath(staging_root)
+    budget = 4 * config.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    written = 0
+
+    def _safe_target(member_name: str) -> Optional[str]:
+        if not member_name or member_name.startswith("/") or "\x00" in member_name:
+            return None
+        parts = [p for p in member_name.replace("\\", "/").split("/") if p not in ("", ".")]
+        if any(p == ".." for p in parts):
+            return None
+        target = os.path.abspath(os.path.join(staging_abs, *parts))
+        if target != staging_abs and not target.startswith(staging_abs + os.sep):
+            return None
+        return target
+
+    def _copy_budgeted(src, target: str):
+        nonlocal written
+        with open(target, "wb") as dst:
+            while True:
+                buf = src.read(1024 * 1024)
+                if not buf:
+                    break
+                written += len(buf)
+                if written > budget:
+                    raise _UploadTooLarge(budget // (1024 * 1024))
+                dst.write(buf)
+
+    if is_zip:
+        with zipfile.ZipFile(_io.BytesIO(content)) as zf:
+            for info in zf.infolist():
+                target = _safe_target(info.filename)
+                if not target:
+                    continue
+                if info.is_dir():
+                    os.makedirs(target, exist_ok=True)
+                else:
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    with zf.open(info) as src:
+                        _copy_budgeted(src, target)
+    else:
+        if lower.endswith((".tar.gz", ".tgz")):
+            mode = "r:gz"
+        elif lower.endswith((".tar.bz2", ".tbz2")):
+            mode = "r:bz2"
+        else:
+            mode = "r:"
+        with tarfile.open(fileobj=_io.BytesIO(content), mode=mode) as tf:
+            for m in tf.getmembers():
+                if m.islnk() or m.issym() or m.isdev():
+                    continue
+                target = _safe_target(m.name)
+                if not target:
+                    continue
+                if m.isdir():
+                    os.makedirs(target, exist_ok=True)
+                elif m.isfile():
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    ef = tf.extractfile(m)
+                    if ef is None:
+                        continue
+                    _copy_budgeted(ef, target)
+
+    # Collapse a single top-level folder (typical of GitHub tarballs)
+    try:
+        entries = [e for e in os.listdir(staging_root) if not e.startswith("__MACOSX")]
+        if len(entries) == 1:
+            only = os.path.join(staging_root, entries[0])
+            if os.path.isdir(only):
+                for name in os.listdir(only):
+                    shutil.move(os.path.join(only, name), os.path.join(staging_root, name))
+                shutil.rmtree(only, ignore_errors=True)
+    except Exception as e:
+        print(f"[CoderUpload] top-level collapse failed (non-fatal): {e}")
+
+    # Walk the cleaned tree for manifest + language detection
+    manifest: list[str] = []
+    ext_counts: dict[str, int] = {}
+    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv",
+                 "dist", "build", ".next", ".cache", ".idea", ".vscode", "target"}
+    for root, dirs, files in os.walk(staging_root):
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        for fname in files:
+            rel = os.path.relpath(os.path.join(root, fname), staging_root)
+            manifest.append(rel)
+            ext = os.path.splitext(fname)[1].lower()
+            ext_counts[ext] = ext_counts.get(ext, 0) + 1
+    return manifest, ext_counts
+
+
 @app.post("/api/coder/upload-project")
 async def upload_coder_project(
     file: UploadFile = File(...),
@@ -877,7 +1040,6 @@ async def upload_coder_project(
     injection then makes Coder Bot aware of the uploaded code automatically."""
     import io as _io
     import tarfile
-    import zipfile
 
     if not conv_id:
         raise HTTPException(400, "conv_id required")
@@ -904,88 +1066,20 @@ async def upload_coder_project(
     project_id = f"proj-{uuid.uuid4().hex[:12]}"
     project_name = base[:60]
 
-    # Extract locally to a staging dir with path sanitization
+    # Extract locally to a staging dir — in a worker thread (decompression is
+    # CPU/disk-bound and previously froze the event loop for the whole upload)
+    # with traversal sanitization and a decompressed-size budget.
     staging_root = os.path.join(config.UPLOAD_DIR, "coder_projects", project_id)
     os.makedirs(staging_root, exist_ok=True)
-    staging_abs = os.path.abspath(staging_root)
-
-    def _safe_target(member_name: str) -> Optional[str]:
-        if not member_name or member_name.startswith("/") or "\x00" in member_name:
-            return None
-        parts = [p for p in member_name.replace("\\", "/").split("/") if p not in ("", ".")]
-        if any(p == ".." for p in parts):
-            return None
-        target = os.path.abspath(os.path.join(staging_abs, *parts))
-        if target != staging_abs and not target.startswith(staging_abs + os.sep):
-            return None
-        return target
-
     try:
-        if is_zip:
-            with zipfile.ZipFile(_io.BytesIO(content)) as zf:
-                for info in zf.infolist():
-                    target = _safe_target(info.filename)
-                    if not target:
-                        continue
-                    if info.is_dir():
-                        os.makedirs(target, exist_ok=True)
-                    else:
-                        os.makedirs(os.path.dirname(target), exist_ok=True)
-                        with zf.open(info) as src, open(target, "wb") as dst:
-                            shutil.copyfileobj(src, dst)
-        else:
-            if lower.endswith((".tar.gz", ".tgz")):
-                mode = "r:gz"
-            elif lower.endswith((".tar.bz2", ".tbz2")):
-                mode = "r:bz2"
-            else:
-                mode = "r:"
-            with tarfile.open(fileobj=_io.BytesIO(content), mode=mode) as tf:
-                for m in tf.getmembers():
-                    if m.islnk() or m.issym() or m.isdev():
-                        continue
-                    target = _safe_target(m.name)
-                    if not target:
-                        continue
-                    if m.isdir():
-                        os.makedirs(target, exist_ok=True)
-                    elif m.isfile():
-                        os.makedirs(os.path.dirname(target), exist_ok=True)
-                        ef = tf.extractfile(m)
-                        if ef is None:
-                            continue
-                        with open(target, "wb") as dst:
-                            shutil.copyfileobj(ef, dst)
-    except HTTPException:
-        raise
+        manifest, ext_counts = await asyncio.to_thread(
+            _extract_and_stage_project, content, lower, is_zip, staging_root)
+    except _UploadTooLarge as e:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        raise HTTPException(413, f"Archive decompresses beyond the {e.budget_mb}MB extraction budget")
     except Exception as e:
         shutil.rmtree(staging_root, ignore_errors=True)
         raise HTTPException(400, f"Failed to extract archive: {e}")
-
-    # Collapse a single top-level folder (typical of GitHub tarballs)
-    try:
-        entries = [e for e in os.listdir(staging_root) if not e.startswith("__MACOSX")]
-        if len(entries) == 1:
-            only = os.path.join(staging_root, entries[0])
-            if os.path.isdir(only):
-                for name in os.listdir(only):
-                    shutil.move(os.path.join(only, name), os.path.join(staging_root, name))
-                shutil.rmtree(only, ignore_errors=True)
-    except Exception as e:
-        print(f"[CoderUpload] top-level collapse failed (non-fatal): {e}")
-
-    # Walk the cleaned tree for manifest + language detection
-    manifest: list[str] = []
-    ext_counts: dict[str, int] = {}
-    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv",
-                 "dist", "build", ".next", ".cache", ".idea", ".vscode", "target"}
-    for root, dirs, files in os.walk(staging_root):
-        dirs[:] = [d for d in dirs if d not in skip_dirs]
-        for fname in files:
-            rel = os.path.relpath(os.path.join(root, fname), staging_root)
-            manifest.append(rel)
-            ext = os.path.splitext(fname)[1].lower()
-            ext_counts[ext] = ext_counts.get(ext, 0) + 1
 
     if not manifest:
         shutil.rmtree(staging_root, ignore_errors=True)
@@ -1013,11 +1107,14 @@ async def upload_coder_project(
         print(f"[CoderUpload] contract detection failed (non-fatal): {e}")
         project_contract = {"language": language, "build_system": "unknown"}
 
-    # Re-tar the sanitized tree (gzip) for transport to the sandbox
-    tar_buf = _io.BytesIO()
-    with tarfile.open(fileobj=tar_buf, mode="w:gz") as out_tf:
-        out_tf.add(staging_root, arcname=".")
-    tar_bytes = tar_buf.getvalue()
+    # Re-tar the sanitized tree (gzip) for transport to the sandbox — also
+    # off-loop; gzipping a large tree blocks just like extracting one.
+    def _retar() -> bytes:
+        tar_buf = _io.BytesIO()
+        with tarfile.open(fileobj=tar_buf, mode="w:gz") as out_tf:
+            out_tf.add(staging_root, arcname=".")
+        return tar_buf.getvalue()
+    tar_bytes = await asyncio.to_thread(_retar)
 
     # Upload to codebox via the dedicated /upload-chunk endpoint. Sends raw
     # tarball bytes in chunks via multipart — bypasses both pitfalls of
@@ -1464,6 +1561,12 @@ async def n8n_execute(req: N8nRequest):
 @app.get("/api/events/{conversation_id}")
 async def event_stream(conversation_id: str):
     """SSE endpoint — clients connect to receive real-time status events."""
+    # Ghost/local ids never exist server-side; anything else must be a
+    # conversation or research report owned by the requesting user, or a
+    # foreign user could tap another profile's live event stream by id.
+    if not conversation_id.startswith(("ghost-", "l-")):
+        if not await db.owns_event_channel(conversation_id):
+            raise HTTPException(404, "Unknown event channel")
     queue = await events.subscribe(conversation_id)
 
     async def generate():
@@ -1777,6 +1880,8 @@ async def update_conversation(conv_id: str, req: ConversationUpdate):
 @app.delete("/api/conversations/{conv_id}")
 async def delete_conversation(conv_id: str):
     await db.delete_conversation(conv_id)
+    # Drop any history-recall chunks indexed from this conversation
+    _track_bg(rag.remove_history_conversation(conv_id))
     return {"status": "deleted"}
 
 
@@ -1849,7 +1954,54 @@ async def update_message(conv_id: str, msg_id: int, body: dict = Body(...)):
     if content is None and meta is None:
         raise HTTPException(400, "content or metadata required")
     await db.update_message(msg_id, content=content, metadata=meta)
+    # Manual assistant edits arrive content-only (the stream-finalize PATCH
+    # always carries metadata). Re-index the edited text for history recall
+    # when this conversation is memory-enabled; delete-first keeps it clean.
+    if content is not None and meta is None and getattr(config, "HISTORY_RECALL", "on") == "on":
+        async def _reindex_edited():
+            try:
+                if await db.get_conversation_use_memories(conv_id):
+                    uid = db.current_user_id()
+                    title = await db.get_conversation_title(conv_id)
+                    await rag.index_history_turn(uid, conv_id, msg_id, "assistant", content, title,
+                                                 datetime.now().isoformat())
+                else:
+                    await rag.remove_history_message(msg_id)
+            except Exception as e:
+                print(f"[HISTORY] edit reindex failed (non-fatal): {e}")
+        _track_bg(_reindex_edited())
     return {"status": "updated"}
+
+
+@app.patch("/api/conversations/{conv_id}/messages/{msg_id}/rating")
+async def rate_message(conv_id: str, msg_id: int, body: dict = Body(...)):
+    """Thumbs feedback on a message. Deliberately a separate route: the content
+    PATCH above replaces metadata wholesale and would clobber a metadata-based
+    rating on every stream-complete."""
+    try:
+        rating = int(body.get("rating", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "rating must be -1, 0, or 1")
+    if rating not in (-1, 0, 1):
+        raise HTTPException(400, "rating must be -1, 0, or 1")
+    ok = await db.set_message_rating(msg_id, rating)
+    if not ok:
+        raise HTTPException(404, "message not found")
+    return {"status": "rated", "rating": rating}
+
+
+@app.delete("/api/conversations/{conv_id}/messages")
+async def truncate_messages(conv_id: str, from_id: int = Query(...)):
+    """Delete a message and everything after it (regenerate/edit truncation).
+
+    Without this, regenerate/edit only rewrote frontend state; the replaced
+    rows stayed in SQLite and resurfaced as duplicates on reload."""
+    deleted = await db.delete_messages_from(conv_id, from_id)
+    if deleted is None:
+        raise HTTPException(404, "conversation not found")
+    if deleted:
+        _track_bg(rag.remove_history_messages(deleted))
+    return {"status": "truncated", "deleted": len(deleted), "message_ids": deleted}
 
 
 @app.delete("/api/conversations/{conv_id}/messages/{msg_id}")
@@ -1857,7 +2009,52 @@ async def delete_message(conv_id: str, msg_id: int):
     ok = await db.delete_message(msg_id)
     if not ok:
         raise HTTPException(404, "message not found")
+    _track_bg(rag.remove_history_message(msg_id))
     return {"status": "deleted"}
+
+
+@app.get("/api/history/search")
+async def search_chat_history(q: str, limit: int = 12):
+    """Cross-conversation recall search: semantic leg over the memory-gated
+    chat_history collection + keyword leg over the existing messages FTS
+    (sanitized — raw sentences break FTS5 MATCH), interleaved and deduped."""
+    q = (q or "").strip()
+    if not q:
+        raise HTTPException(400, "q required")
+    uid = db.current_user_id()
+    vec = []
+    if getattr(config, "HISTORY_RECALL", "on") == "on":
+        try:
+            vec = await rag.query_history(uid, q, top_k=limit)
+        except Exception as e:
+            print(f"[HISTORY] semantic search failed: {e}")
+    try:
+        kw = await db.search_messages(db._fts_match_expr(q), limit)
+    except Exception:
+        kw = []
+    out, seen = [], set()
+    for v in vec:
+        mid = v.get("message_id")
+        if mid in seen:
+            continue
+        seen.add(mid)
+        out.append({"source": "semantic", "message_id": mid,
+                    "conversation_id": v.get("conversation_id"),
+                    "conv_title": v.get("conv_title") or "",
+                    "role": v.get("role") or "",
+                    "snippet": (v.get("text") or "")[:300],
+                    "score": round(float(v.get("score") or 0), 3)})
+    for k in kw:
+        mid = k.get("id")
+        if mid in seen:
+            continue
+        seen.add(mid)
+        out.append({"source": "keyword", "message_id": mid,
+                    "conversation_id": k.get("conversation_id"),
+                    "conv_title": k.get("conv_title") or "",
+                    "role": k.get("role") or "",
+                    "snippet": (k.get("snippet") or k.get("content") or "")[:300]})
+    return {"query": q, "results": out[:limit]}
 
 
 # ============================================================
@@ -1900,6 +2097,19 @@ async def delete_kb(kb_id: str):
 
 # Track background indexing status per file
 _indexing_status: dict[str, dict] = {}  # key: "kb_id:filename" → status dict
+_INDEXING_STATUS_TTL = 3600  # seconds
+
+
+def _set_indexing_status(status_key: str, value: dict) -> None:
+    """Write a status entry and TTL-evict stale ones on the way — uploads
+    nobody polls (the read path only evicts terminal statuses it serves)
+    previously accumulated in the map forever."""
+    now = time.time()
+    value["_ts"] = now
+    _indexing_status[status_key] = value
+    for k in [k for k, v in _indexing_status.items()
+              if now - (v.get("_ts") or 0) > _INDEXING_STATUS_TTL]:
+        _indexing_status.pop(k, None)
 
 
 @app.post("/api/knowledge-bases/{kb_id}/files")
@@ -1930,19 +2140,141 @@ async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
 
     # Start background RAG indexing so the upload response returns immediately
     status_key = f"{kb_id}:{safe_name}"
-    _indexing_status[status_key] = {"status": "indexing", "filename": safe_name}
+    _set_indexing_status(status_key, {"status": "indexing", "filename": safe_name})
 
     async def _bg_index():
         try:
             result = await rag.index_file(kb_id, safe_name, filepath)
-            _indexing_status[status_key] = {"status": "done", "filename": safe_name, **result}
+            _set_indexing_status(status_key, {"status": "done", "filename": safe_name, **result})
         except Exception as e:
             print(f"[RAG] Indexing failed for {safe_name}: {e}")
-            _indexing_status[status_key] = {"status": "error", "filename": safe_name, "error": str(e)}
+            _set_indexing_status(status_key, {"status": "error", "filename": safe_name, "error": str(e)})
 
     _track_bg(_bg_index())
 
     return {"id": file_id, "filename": safe_name, "file_size": len(content), "indexing": True}
+
+
+_URL_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _kb_url_slug(text: str, fallback: str = "page") -> str:
+    slug = _URL_SLUG_RE.sub("-", (text or "").lower()).strip("-")[:80]
+    return slug or fallback
+
+
+@app.post("/api/knowledge-bases/{kb_id}/urls")
+async def ingest_kb_url(kb_id: str, body: dict = Body(...)):
+    """Fetch a web page (or PDF) into a knowledge base as an indexed document.
+
+    Fetches go through research.fetch_bytes_safely — SSRF-checked on every
+    redirect hop, size-capped. HTML is extracted with trafilatura (full-length;
+    quick_search's page fetcher caps at ~6K chars and is NOT reused here) with
+    a regex-strip fallback. Re-adding the same URL overwrites the same file.
+    """
+    owned = await db.get_kb(kb_id)
+    if not owned:
+        raise HTTPException(404, "KB not found")
+    url = str((body or {}).get("url") or "").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        raise HTTPException(400, "url must start with http:// or https://")
+
+    try:
+        status_code, headers, final_url, raw = await fetch_bytes_safely(
+            http, url,
+            timeout=25,
+            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) HyprChat-KB/1.0"},
+            max_bytes=5 * 1024 * 1024,
+        )
+    except ValueError as e:
+        raise HTTPException(400, f"Fetch blocked: {e}")
+    except Exception as e:
+        raise HTTPException(502, f"Fetch failed: {e}")
+    if status_code >= 400:
+        raise HTTPException(502, f"URL returned HTTP {status_code}")
+
+    ctype = (headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    is_pdf = ctype == "application/pdf" or raw[:5] == b"%PDF-"
+
+    kb_dir = os.path.join(config.KB_DIR, kb_id)
+    os.makedirs(kb_dir, exist_ok=True)
+
+    from urllib.parse import urlparse
+    parsed = urlparse(final_url or url)
+
+    title = ""
+    if is_pdf:
+        content_bytes = raw
+        ext = ".pdf"
+        file_type = "application/pdf"
+    else:
+        if ctype and not ctype.startswith("text/") and "html" not in ctype and "xml" not in ctype:
+            raise HTTPException(400, f"Unsupported content type: {ctype or 'unknown'}")
+        m = re.search(rb"charset=([^;\s\"']+)", raw[:2048], re.I)
+        try:
+            html = raw.decode((m.group(1).decode("ascii", "ignore") if m else "utf-8") or "utf-8", errors="replace")
+        except Exception:
+            html = raw.decode("utf-8", errors="replace")
+        tm = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+        title = re.sub(r"\s+", " ", tm.group(1)).strip()[:200] if tm else ""
+        text = ""
+        if qs_module._HAS_TRAFILATURA:
+            try:
+                import trafilatura
+                text = trafilatura.extract(html, include_comments=False, include_tables=True) or ""
+            except Exception as e:
+                print(f"[KB URL] trafilatura failed for {final_url}: {e}")
+        if not text.strip():
+            text = qs_module._regex_strip_html(html)
+        if not text.strip():
+            raise HTTPException(400, "No extractable text found at that URL")
+        md = f"# {title or parsed.netloc}\n\nSource: {final_url or url}\nFetched: {datetime.now().isoformat(timespec='seconds')}\n\n{text.strip()}\n"
+        content_bytes = md.encode("utf-8")
+        ext = ".md"
+        file_type = "text/markdown"
+
+    # Re-adding the same URL overwrites the same file (index_file removes first)
+    existing = await db.get_kb_file_by_source_url(kb_id, final_url or url)
+    if existing:
+        safe_name = existing["filename"]
+    else:
+        base = _kb_url_slug(title) if title else _kb_url_slug(f"{parsed.netloc}{parsed.path}", "page")
+        safe_name = f"{base}{ext}"
+        taken = {f.get("filename") for f in (owned.get("files") or [])}
+        n = 2
+        while safe_name in taken:
+            safe_name = f"{base}-{n}{ext}"
+            n += 1
+    filepath = os.path.join(kb_dir, safe_name)
+    if not os.path.abspath(filepath).startswith(os.path.abspath(kb_dir)):
+        raise HTTPException(400, "Invalid filename")
+
+    def _write_page():
+        with open(filepath, "wb") as f:
+            f.write(content_bytes)
+    await asyncio.to_thread(_write_page)
+
+    if existing:
+        file_id = existing["id"]
+    else:
+        file_id = await db.add_kb_file(kb_id, safe_name, filepath, len(content_bytes), file_type,
+                                       source_url=final_url or url)
+
+    status_key = f"{kb_id}:{safe_name}"
+    _set_indexing_status(status_key, {"status": "indexing", "filename": safe_name})
+
+    async def _bg_index():
+        try:
+            result = await rag.index_file(kb_id, safe_name, filepath)
+            _set_indexing_status(status_key, {"status": "done", "filename": safe_name, **result})
+        except Exception as e:
+            print(f"[RAG] Indexing failed for {safe_name}: {e}")
+            _set_indexing_status(status_key, {"status": "error", "filename": safe_name, "error": str(e)})
+
+    _track_bg(_bg_index())
+
+    return {"id": file_id, "filename": safe_name, "file_size": len(content_bytes),
+            "indexing": True, "source_url": final_url or url, "replaced": bool(existing)}
 
 
 @app.get("/api/knowledge-bases/{kb_id}/files/{filename}/status")
@@ -1957,7 +2289,7 @@ async def get_file_index_status(kb_id: str, filename: str):
         # Evict terminal statuses on read so the dict doesn't grow unbounded
         if status.get("status") in ("done", "error"):
             _indexing_status.pop(status_key, None)
-        return status
+        return {k: v for k, v in status.items() if k != "_ts"}
     return {"status": "unknown", "filename": filename}
 
 
@@ -2050,16 +2382,30 @@ async def extract_pdf(file: UploadFile = File(...)):
     if len(content) > config.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
         raise HTTPException(413, f"PDF too large (max {config.MAX_UPLOAD_SIZE_MB}MB)")
     try:
-        from pypdf import PdfReader
-        import io
-        reader = PdfReader(io.BytesIO(content))
-        total_pages = len(reader.pages)
-        extracted = []
-        for i, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
-            if text.strip():
-                extracted.append(f"[Page {i+1}]\n{text}")
-        text = "\n\n".join(extracted) if extracted else "No extractable text found in this PDF."
+        def _extract_upload_pdf():
+            from pypdf import PdfReader
+            import io
+            import ocr
+            reader = PdfReader(io.BytesIO(content))
+            total_pages = len(reader.pages)
+            extracted = []
+            for i, page in enumerate(reader.pages):
+                text = page.extract_text() or ""
+                if text.strip():
+                    extracted.append(f"[Page {i+1}]\n{text}")
+            text = "\n\n".join(extracted)
+            # Scanned PDF (no text layer) → OCR fallback. Needs a real file
+            # path for pypdfium2, so spill the upload to a temp file.
+            if ocr.should_ocr(text, total_pages):
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tf:
+                    tf.write(content)
+                    tf.flush()
+                    ocr_text = ocr.ocr_pdf(tf.name)
+                if len(ocr_text.strip()) > len(text.strip()):
+                    text = ocr_text
+            return (text or "No extractable text found in this PDF."), total_pages
+        text, total_pages = await asyncio.to_thread(_extract_upload_pdf)
         return {"filename": file.filename, "text": text, "total_pages": total_pages}
     except ImportError:
         raise HTTPException(500, "pypdf not installed on server")
@@ -3868,7 +4214,9 @@ async def quick_search(req: QuickSearchRequest):
 async def search_conversations(req: ConversationSearchRequest):
     if not req.query.strip():
         return []
-    return await db.search_messages(req.query.strip(), req.limit)
+    # Sanitize through the quoted-terms builder: raw sentences with ?/quotes
+    # are FTS5 MATCH syntax errors and made search silently return nothing.
+    return await db.search_messages(db._fts_match_expr(req.query.strip()), req.limit)
 
 
 # ============================================================

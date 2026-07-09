@@ -526,6 +526,50 @@ async def run_acceptance_review(http, events, conv_id: str, *,
 
         await _step("manifest", project_dir)
         files = await _list_files(http, project_dir, run_id)
+        if not files:
+            # A clean reviewer pass just verified this project, so an empty
+            # file listing means the DIRECTORY is wrong or gone — not that the
+            # project has zero source files. Emitting an actionable "all files
+            # missing" issues envelope here once sent the workflow gate into a
+            # fix-loop against a directory that never existed. Mark it like an
+            # environment fault so the gate never routes it to Aider/Fixer.
+            probe = await _run_command(
+                http, f"test -d {shlex.quote(project_dir)}", timeout=10, run_id=run_id)
+            if probe.get("exit_code", -1) == -1:
+                marker = "environment_fault"
+                summary = (
+                    f"Acceptance could not inspect '{project_dir}' — the Codebox "
+                    f"sandbox is unreachable ({(probe.get('stderr') or '')[:120]}). "
+                    "This is an infrastructure problem, not a project code issue."
+                )
+            else:
+                marker = "empty_project_dir"
+                state = "missing" if probe.get("exit_code") else "empty"
+                summary = (
+                    f"Acceptance found no files at '{project_dir}' (directory is "
+                    f"{state}). This is a wrong-path/environment problem, not a "
+                    "project code issue. Re-check the project root (the clean "
+                    "reviewer envelope's project_dir is authoritative) and run "
+                    "acceptance again with that path."
+                )
+            envelope = {
+                "status": "error",
+                "summary": summary,
+                "issues": [],
+                "deterministic_issue": marker,
+                "project_dir": project_dir,
+                "project_id": project_id,
+                "reviewer_run_id": reviewer_run_id,
+                "run_id": run_id,
+            }
+            if run_id:
+                await db.update_run(run_id, status="failed", result_envelope=envelope, ended=True)
+            await events.emit(conv_id, "tool_end", {
+                "tool": "run_acceptance_review", "icon": "clipboard-check",
+                "status": f"⚠ Acceptance aborted — no files at {project_dir}",
+                "run_id": run_id,
+            })
+            return envelope
         artifacts = await _scan_artifacts(http, project_dir, run_id)
         picked = _pick_context_files(files)
 

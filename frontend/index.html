@@ -2,9 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>HyprChat</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%230B1D24'/><rect x='28' y='24' width='18' height='52' rx='3' fill='%2358BFEF'/><rect x='54' y='24' width='18' height='52' rx='3' fill='%23D7A72F'/></svg>">
+<!-- PWA: manifest + icons live in frontend/public/ (copied to dist/ by Vite) -->
+<link rel="manifest" href="./manifest.json">
+<meta name="theme-color" content="#282C34">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="HyprChat">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; width: 100%; overflow: hidden; }
@@ -478,5 +486,15 @@
 
 <div id="root"></div>
 <script type="module" src="/src/main.jsx"></script>
+<script>
+// PWA service worker — registration requires a secure context (HTTPS or
+// localhost); on plain http this silently no-ops. sw.js is network-first
+// and never intercepts /api/*.
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("sw.js").catch(function () {});
+  });
+}
+</script>
 </body>
 </html>
