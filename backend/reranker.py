@@ -25,11 +25,15 @@ import config
 import model_providers
 
 # How many fused candidates are offered to the scorer. hybrid_query fetches
-# ~3x top_k per leg, so 16 covers the realistic fused pool without blowing up
-# the prompt (16 x 600 chars ≈ 2.4K tokens).
-RERANK_CANDIDATES = 16
+# ~3x top_k per leg; 12 balances coverage against what a 4B scorer can
+# reliably enumerate (16 made it drop entries) and keeps the prompt short.
+RERANK_CANDIDATES = 12
 _EXCERPT_CHARS = 600
 
+# Index-KEYED output on purpose: small models miscount long plain arrays
+# (observed live: 10 scores for 16 excerpts — twice), which misaligns
+# positions and forces a fail-open. Keyed entries stay aligned even when the
+# model skips or truncates some.
 _PROMPT = """You are a search relevance judge. Score how relevant each excerpt is to the query on a 0-10 scale (10 = directly answers it, 0 = unrelated).
 
 Query: {query}
@@ -37,8 +41,8 @@ Query: {query}
 Excerpts:
 {excerpts}
 
-Respond with ONLY this JSON, one score per excerpt in order:
-{{"scores": [s1, s2, ...]}}"""
+Respond with ONLY a JSON object mapping each excerpt number to its score, covering all {n} excerpts, no explanation, no other keys:
+{{"1": s1, "2": s2, ..., "{n}": s{n}}}"""
 
 
 def enabled() -> bool:
@@ -52,8 +56,20 @@ def _scoring_model() -> str:
     )
 
 
+def _clamp(v) -> float:
+    return max(0.0, min(10.0, float(v)))
+
+
 def _parse_scores(raw: str, n: int) -> list[float] | None:
-    """Accepts {"scores":[...]} or a bare JSON array; None = fail open."""
+    """Parse scorer output into exactly n scores; None = fail open.
+
+    Accepts (in order of preference):
+      - index-keyed object {"1": s1, ...} — partial results stay position-
+        aligned; missing indices get a neutral 5.0
+      - {"scores": [...]} or a bare array — clipped when over-long, rejected
+        when short (positions would misalign)
+      - regex-recovered "idx": score pairs from truncated/dirty output
+    """
     if not (raw or "").strip():
         return None
     obj = None
@@ -65,15 +81,41 @@ def _parse_scores(raw: str, n: int) -> list[float] | None:
             try:
                 obj = json.loads(m.group(0))
             except Exception:
+                obj = None
+        if obj is None:
+            # Truncated/dirty keyed output — salvage the "idx": score pairs.
+            pairs = re.findall(r'"(\d+)"\s*:\s*(-?\d+(?:\.\d+)?)', raw)
+            if pairs:
+                obj = {k: v for k, v in pairs}
+            else:
                 return None
+    if isinstance(obj, dict) and isinstance(obj.get("scores"), (list, dict)):
+        obj = obj["scores"]
     if isinstance(obj, dict):
-        obj = obj.get("scores")
-    if not isinstance(obj, list) or len(obj) != n:
+        scores = [5.0] * n  # neutral default keeps unscored items mid-pack
+        seen = 0
+        for k, v in obj.items():
+            try:
+                i = int(str(k).strip())
+                s = _clamp(v)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= i <= n:
+                scores[i - 1] = s
+                seen += 1
+        return scores if seen >= max(2, n // 2) else None
+    if not isinstance(obj, list):
+        return None
+    # More scores than excerpts: trust the leading n (models occasionally
+    # append extras). Fewer is unrecoverable — positions would misalign.
+    if len(obj) > n:
+        obj = obj[:n]
+    if len(obj) != n:
         return None
     scores = []
     for s in obj:
         try:
-            scores.append(max(0.0, min(10.0, float(s))))
+            scores.append(_clamp(s))
         except (TypeError, ValueError):
             return None
     return scores
@@ -97,7 +139,8 @@ async def rerank(query_text: str, chunks: list[dict], top_k: int) -> list[dict]:
         flat = re.sub(r"\s+", " ", str(c.get("text") or ""))[:_EXCERPT_CHARS]
         excerpt_lines.append(f"[{i + 1}] {flat}")
     excerpts = "\n".join(excerpt_lines)
-    prompt = _PROMPT.format(query=query_text.strip()[:500], excerpts=excerpts)
+    prompt = _PROMPT.format(query=query_text.strip()[:500], excerpts=excerpts,
+                            n=len(candidates))
     timeout_s = max(2.0, float(getattr(config, "RAG_RERANK_TIMEOUT", 8) or 8))
 
     try:

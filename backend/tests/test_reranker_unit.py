@@ -47,8 +47,44 @@ def test_parse_scores_clamped():
 def test_parse_scores_rejects_bad():
     assert reranker._parse_scores("", 2) is None
     assert reranker._parse_scores("no numbers here", 2) is None
-    assert reranker._parse_scores('{"scores": [1]}', 2) is None       # wrong length
+    assert reranker._parse_scores('{"scores": [1]}', 2) is None       # too few — misaligned
     assert reranker._parse_scores('{"scores": [1, "x"]}', 2) is None  # non-numeric
+
+
+def test_parse_scores_clips_extras():
+    # Models occasionally append extra scores — trust the leading n
+    assert reranker._parse_scores('{"scores": [1, 2, 3, 4]}', 2) == [1.0, 2.0]
+
+
+def test_parse_scores_truncated_json_with_explanation():
+    # Real-world failure: model added an "explanation" key and got cut off by
+    # num_predict — the array-regex fallback must still recover the scores.
+    raw = '{"scores": [3, 6, 4, 8], "explanation": "[1] Introduces '
+    assert reranker._parse_scores(raw, 4) == [3.0, 6.0, 4.0, 8.0]
+
+
+def test_parse_scores_index_keyed():
+    # Preferred format: keyed by excerpt number, order-independent
+    assert reranker._parse_scores('{"2": 9, "1": 3, "3": 5}', 3) == [3.0, 9.0, 5.0]
+
+
+def test_parse_scores_index_keyed_partial():
+    # Real-world failure #2: small models drop entries when enumerating many
+    # excerpts. Keyed output keeps present entries aligned; missing → neutral 5.
+    out = reranker._parse_scores('{"1": 8, "2": 2, "3": 7}', 5)
+    assert out == [8.0, 2.0, 7.0, 5.0, 5.0]
+    # But too few scored entries = no signal — fail open
+    assert reranker._parse_scores('{"1": 8}', 12) is None
+
+
+def test_parse_scores_keyed_pairs_salvaged_from_truncation():
+    raw = '{"1": 3, "2": 7, "3": 9, "4": 2, "explanation": "the fir'
+    assert reranker._parse_scores(raw, 4) == [3.0, 7.0, 9.0, 2.0]
+
+
+def test_parse_scores_keyed_ignores_out_of_range():
+    out = reranker._parse_scores('{"1": 4, "2": 6, "0": 9, "99": 9}', 2)
+    assert out == [4.0, 6.0]
 
 
 # ── rerank() behavior ────────────────────────────────────────────────────────
