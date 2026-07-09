@@ -1,35 +1,16 @@
 <details open>
-<summary>Alpha v17.5.0 — July 9, 2026</summary>
+<summary>Alpha v17.4.0 — July 9, 2026</summary>
 
-> Native cloud tool calling, an Artifact Canvas editor with AI edits, smart KB
-> reranking, scanned-PDF OCR, PWA install support, and HTTPS via Tailscale Serve.
-
-## Cloud Models
-- **Native tool calling for OpenAI and Claude models.** Tools-enabled chats now send real JSON tool definitions (OpenAI Responses function calling / Anthropic tool_use) instead of the text-parsing fallback — dramatically more reliable multi-step tool use with cloud models. Models that reject tools automatically fall back to the old text format mid-stream; the Custom provider keeps the text fallback.
-
-## Artifacts
-- **Canvas editor**: text, markdown, code, JSON, and HTML artifacts get a full-screen ✏️ Edit view (CodeMirror, syntax-highlighted, lazy-loaded). Select any text and describe a change — **AI Edit** proposes a rewrite with a before/after diff you can apply or reject. Saving always creates a new revision; originals are never overwritten.
-
-## Knowledge Bases
-- **Smart KB Reranking** (Settings → Model & Generation, off by default): retrieval candidates are re-scored for relevance by the Workspace Analysis Model in a single quick pass before answering — sharper citations for ~1-2s per KB question. Any error falls back to normal ranking.
-- **Scanned-PDF OCR**: PDFs with no text layer (scans, faxes, photographed docs) are now OCR'd automatically during KB upload and chat PDF extraction (RapidOCR, CPU-only, up to 50 pages). Requires `pip install rapidocr-onnxruntime pypdfium2` on the server; silently skipped otherwise.
-
-## Mobile & Access
-- **PWA install support**: HyprChat now ships a web app manifest, icons, and a network-first service worker — installable to the home screen / dock when served over HTTPS. The service worker never touches API traffic; it only keeps the app shell loadable.
-- **HTTPS via Tailscale Serve**: `tailscale serve` on the HyprChat LXC proxies `https://hyprchat.<tailnet>.ts.net` to the backend with an automatic valid certificate — this unlocks the microphone without browser flags and PWA installation. One-time tailnet enablement required in the Tailscale admin console.
-
-</details>
-
-<details>
-<summary>Alpha v17.4.0 — July 6, 2026</summary>
-
-> Nine new features: a generic OpenAI-compatible provider, cloud cost + tokens/sec
-> analytics, continue-truncated responses, message ratings, URL→KB ingestion,
-> slash commands with prompt variables, context auto-compaction, memory-gated
-> chat-history recall, smart model routing, and full backup/restore.
+> Fifteen new features: a generic OpenAI-compatible provider, native cloud tool
+> calling, cloud cost + tokens/sec analytics, continue-truncated responses,
+> message ratings, an Artifact Canvas editor with AI edits, URL→KB ingestion,
+> smart KB reranking, scanned-PDF OCR, slash commands with prompt variables,
+> context auto-compaction, memory-gated chat-history recall, smart model
+> routing, full backup/restore, and PWA install + HTTPS via Tailscale Serve.
 
 ## Cloud Models
 - New **Custom (OpenAI-compatible)** provider: point HyprChat at any `/chat/completions` endpoint (OpenRouter, Groq, Mistral, vLLM, llama.cpp, LiteLLM) with a base URL, optional key, and display name. Models appear as `custom:<model>` with full streaming, thinking, vision, and usage support.
+- **Native tool calling for OpenAI and Claude models.** Tools-enabled chats now send real JSON tool definitions (OpenAI Responses function calling / Anthropic tool_use) instead of the text-parsing fallback — dramatically more reliable multi-step tool use with cloud models. Models that reject tools automatically fall back to the old text format mid-stream; the Custom provider keeps the text fallback.
 - Estimated **cloud spend ($)** now shows in Statistics — per-model cost column plus today/30-day/all-time totals, computed from a built-in price table (local models are never costed).
 
 ## Chat
@@ -43,11 +24,20 @@
 ## Memory
 - **Chat-history recall**, gated by the existing per-conversation memory toggle: turns from memory-enabled chats are indexed into ChromaDB, a `search_history` tool lets the model answer "what did we decide about X?" across conversations, and the Memory panel gains a Search Past Conversations box (semantic + keyword). Edits re-index; deletes clean up.
 
+## Artifacts
+- **Canvas editor**: text, markdown, code, JSON, and HTML artifacts get a full-screen ✏️ Edit view (CodeMirror, syntax-highlighted, lazy-loaded). Select any text and describe a change — **AI Edit** proposes a rewrite with a before/after diff you can apply or reject. Saving always creates a new revision; originals are never overwritten.
+
 ## Knowledge Bases
 - **Add URL**: paste a web page or PDF URL into a KB card — fetched SSRF-safely, extracted with trafilatura, stored as markdown with source provenance (🌐 link on the file row), and indexed like an upload. Re-adding the same URL updates in place.
+- **Smart KB Reranking** (Settings → Model & Generation, off by default): retrieval candidates are re-scored for relevance by the Workspace Analysis Model in a single quick pass before answering — sharper citations for ~1-2s per KB question. Any error falls back to normal ranking.
+- **Scanned-PDF OCR**: PDFs with no text layer (scans, faxes, photographed docs) are now OCR'd automatically during KB upload and chat PDF extraction (RapidOCR, CPU-only, up to 50 pages). Requires `pip install rapidocr-onnxruntime pypdfium2` on the server; silently skipped otherwise.
 
 ## Operations
 - **Backup & Restore** (Settings → Danger Zone): one-click download of a full data backup (consistent SQLite copy with provider keys and connector secrets scrubbed, uploads, knowledge bases, settings; ChromaDB excluded as derived). Restores stage safely and apply on the next service restart, keeping the previous database as a `.pre-restore` copy.
+
+## Mobile & Access
+- **PWA install support**: HyprChat now ships a web app manifest, icons, and a network-first service worker — installable to the home screen / dock when served over HTTPS. The service worker never touches API traffic; it only keeps the app shell loadable.
+- **HTTPS via Tailscale Serve**: `tailscale serve` on the HyprChat LXC proxies `https://hyprchat.<tailnet>.ts.net` to the backend with an automatic valid certificate — this unlocks the microphone without browser flags and PWA installation. One-time tailnet enablement required in the Tailscale admin console.
 
 </details>
 
