@@ -6725,8 +6725,8 @@ function HyprChat(){
             {[
               ["Ollama",ollamaUrl,setOllamaUrl,"http://192.168.1.110:11434","Model inference and model manager"],
               ["Codebox",codeboxUrl,setCodeboxUrl,"http://192.168.1.201:8585","Tool execution and project upload bridge"],
-              ["N8N",n8nUrl,setN8nUrl,"http://192.168.1.114:5678","External workflow automation"],
-              ["SearXNG",searxngUrl,setSearxngUrl,"http://192.168.1.141:8888","Search and research backend"],
+              ["N8N",n8nUrl,setN8nUrl,"http://192.168.1.47:5678","External workflow automation"],
+              ["SearXNG",searxngUrl,setSearxngUrl,"http://192.168.1.56:8888","Search and research backend"],
               ["ComfyUI",comfyuiUrl,setComfyuiUrl,"http://192.168.1.115:8188","Stable Diffusion image generation (optional)"],
               ["Voice STT",sttUrl,setSttUrl,"http://192.168.1.115:8001","Speech-to-text — Speaches/Whisper (optional)"],
               ["Voice TTS",ttsUrl,setTtsUrl,"http://192.168.1.115:8880","Text-to-speech — Kokoro (optional)"],
