@@ -14,7 +14,6 @@ import config
 CODEBOX_TOOL_NAMES = {
     "execute_code",
     "run_shell",
-    "install_package",
     "write_file",
     "read_file",
     "list_files",
@@ -161,13 +160,9 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
             parts.append("\n---\nCode ran successfully with no output. Add print() statements if you need to verify results.")
         return "\n".join(parts)
 
-    if name == "run_shell" or name == "install_package":
-        command = args.get("command", args.get("package", ""))
+    if name == "run_shell":
+        command = args.get("command", "")
         shell_timeout = config.EXECUTION_TIMEOUT
-        if name == "install_package":
-            pkg = command
-            command = f"pip3 install {pkg} 2>&1; echo \"EXIT:$?\""
-            shell_timeout = max(shell_timeout, 120)
         cmd_stripped = command.strip()
         if any(cmd_stripped.startswith(p) for p in ("pip ", "pip3 ", "python ", "python3 ")):
             venv_ok = await _ensure_venv(http)
@@ -179,10 +174,24 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
             json={"command": command, "timeout": shell_timeout},
             timeout=shell_timeout + 10,
         )
+        if r.status_code != 200:
+            # e.g. codebox deny-list 400 ({"detail": "Blocked dangerous command
+            # pattern"}) — the command never ran; never report exit 0.
+            try:
+                _detail = str(r.json().get("detail", ""))[:200]
+            except Exception:
+                _detail = ""
+            _detail = _detail or f"HTTP {r.status_code}"
+            await events.emit(conv_id, "tool_end", {
+                "tool": name, "icon": "terminal",
+                "status": f"FAILED (rejected): {command[:50]}",
+                "detail": json.dumps({"command": command, "error": _detail}),
+            })
+            return f"ERROR: Codebox rejected the command ({_detail}). The command did not run."
         result = r.json()
         stdout = _strip_ansi(result.get("stdout", "")).strip()
         stderr = _strip_ansi(result.get("stderr", "")).strip()
-        exit_code = result.get("exit_code", result.get("returncode", 0))
+        exit_code = result.get("exit_code", result.get("returncode", 1))
         success = exit_code == 0
         status_icon = "OK" if success else "FAILED"
         await events.emit(conv_id, "tool_end", {
@@ -241,9 +250,15 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
         if not path or path in ("/", "/root", "/etc", "/usr", "/bin", "/tmp"):
             return f"ERROR: Refusing to delete protected path: {path}"
         await events.emit(conv_id, "tool_start", {"tool": "delete_file", "icon": "terminal", "status": f"Deleting: {path}"})
-        r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": f"rm -rf {shlex.quote(path)}", "timeout": 10}, timeout=15)
-        result = r.json()
-        exit_code = result.get("exit_code", 0)
+        # `--` breaks the codebox deny-list's "rm -rf /" substring match, which
+        # otherwise 400-blocks EVERY absolute-path delete (see the
+        # language_adapters.py note on the same filter).
+        r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": f"rm -rf -- {shlex.quote(path)}", "timeout": 10}, timeout=15)
+        try:
+            result = r.json()
+        except Exception:
+            result = {}
+        exit_code = result.get("exit_code", result.get("returncode", 1)) if r.status_code == 200 else 1
         ok = exit_code == 0
         await events.emit(conv_id, "tool_end", {"tool": "delete_file", "icon": "terminal", "status": f"{'Deleted' if ok else 'Failed'}: {path}"})
         return f"Deleted: {path}" if ok else f"ERROR: Delete failed (exit {exit_code}): {result.get('stderr', '')[:200]}"

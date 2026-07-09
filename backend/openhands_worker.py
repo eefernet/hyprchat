@@ -1250,9 +1250,12 @@ async def run_aider_stream(req: AiderRunRequest):
             # Client disconnected mid-run (Stop, orchestrator crash/kill):
             # nobody is consuming, so cancel — the blocking runner's poll
             # loop sees the event and kills the aider process group.
-            if not finished and not cancel_event.is_set():
-                print(f"[Aider-Worker] stream consumer vanished for {req.run_id} — cancelling run")
-                cancel_event.set()
+            if not finished:
+                with _ACTIVE_AIDER_RUNS_LOCK:
+                    entry = _ACTIVE_AIDER_RUNS.get(req.run_id)
+                if entry and not entry["cancel"].is_set():
+                    print(f"[Aider-Worker] stream consumer vanished for {req.run_id} — cancelling run")
+                    entry["cancel"].set()
 
     return StreamingResponse(
         generate(),

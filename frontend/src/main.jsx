@@ -683,6 +683,7 @@ function HyprChat(){
   const [councilKbStatus,setCouncilKbStatus]=useState(""); // KB retrieval status line
   // Ref to track active council stream — survives conversation switches
   const councilStreamRef=useRef(null); // {cid, running, responses, hostContent, votes, voting, round}
+  const councilAbortRef=useRef(null); // AbortController for the active council stream (Stop button)
   const [expandedRounds,setExpandedRounds]=useState({}); // {"turnIdx-roundNum": true/false}
   const [councilSuggestions,setCouncilSuggestions]=useState([]); // suggested prompts for council
   const [councilSugLoading,setCouncilSugLoading]=useState(false);
@@ -1547,7 +1548,11 @@ function HyprChat(){
     const connect=()=>{
       if(closed)return;
       const es=new EventSource(userScopedUrl(`/api/events/${actId}`));
-      es.onmessage=e=>{try{const ev=JSON.parse(e.data);if(ev.type!=="heartbeat"&&ev.type!=="keepalive"){setEvts(p=>[...p.slice(-200),ev]);streamSaveEvtsRef.current.push(ev);
+      es.onmessage=e=>{try{const ev=JSON.parse(e.data);if(ev.type!=="heartbeat"&&ev.type!=="keepalive"){setEvts(p=>[...p.slice(-200),ev]);
+        // Only buffer events for the conversation that is actually streaming —
+        // switching to another chat with an in-flight background run otherwise
+        // persists THAT chat's events into this stream's message metadata.
+        if(streamingCidRef.current===actId)streamSaveEvtsRef.current.push(ev);
         // Route search_agent results into the QUICK SEARCH carousel — same data
         // the chat model saw, instead of the old parallel /api/quick-search call.
         if(ev.type==="search_results"&&ev.data?.source==="quick_search"){
@@ -2628,10 +2633,13 @@ function HyprChat(){
     // Initialize stream ref for cross-navigation persistence
     const sRef={cid,running:true,responses:{},hostContent:"",votes:[],voting:false,round:null};
     councilStreamRef.current=sRef;
+    const abortCtl=new AbortController();
+    councilAbortRef.current=abortCtl;
     const msgs=(cv.messages||[]).map(m=>({role:m.role,content:m.content}));
     msgs.push({role:"user",content:userMsg});
     try{
-      const res=await fetch(`${API}/api/council/chat/stream`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({conversation_id:cid,council_id:cv.council_config_id,messages:msgs,quick_search:quickSearch})});
+      const res=await fetch(`${API}/api/council/chat/stream`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({conversation_id:cid,council_id:cv.council_config_id,messages:msgs,quick_search:quickSearch}),signal:abortCtl.signal});
+      if(!res.ok)throw new Error(`HTTP ${res.status}`);
       const rdr=res.body.getReader(),dec=new TextDecoder();let buf="";
       while(true){
         const{done,value}=await rdr.read();if(done)break;
@@ -2693,9 +2701,10 @@ function HyprChat(){
           }catch{}
         }
       }
-    }catch(e){console.error("Council stream error",e);notify({type:"error",text:"Council stream failed",detail:e.message||String(e)});}
+    }catch(e){if(e.name!=="AbortError"){console.error("Council stream error",e);notify({type:"error",text:"Council stream failed",detail:e.message||String(e)});}}
     sRef.running=false;
     if(councilStreamRef.current===sRef)councilStreamRef.current=null;
+    if(councilAbortRef.current===abortCtl)councilAbortRef.current=null;
     setCouncilRunning(false);
   };
 
@@ -2888,7 +2897,7 @@ function HyprChat(){
       if(_doneTruncated)_msgMeta.truncated=true;
       const finalFull=replacePersonaPlaceholdersForConversation(full,cv);
       // Auto-play the reply when the Voice "Auto-play replies" toggle is on
-      if(ttsAutoplay&&ttsUrl&&finalFull&&!isGhostSend){setTimeout(()=>{try{speak(finalFull,_streamMsgId!=null?_streamMsgId:`auto-${Date.now()}`);}catch{}},80);}
+      if(ttsAutoplay&&ttsUrl&&finalFull&&!isGhostSend){setTimeout(()=>{try{speak(finalFull,_streamMsgId!=null?String(_streamMsgId):`auto-${Date.now()}`);}catch{}},80);}
       uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:finalFull,isS:false,metadata:_msgMeta,...(_streamMsgId?{id:_streamMsgId}:{})};return{...c,messages:m};});
       // Save final assistant message state to DB. PATCH the row the backend already
       // created at stream start (preferred — exactly one row per turn). Fall back to
@@ -7818,7 +7827,7 @@ function HyprChat(){
                     {!isU&&msg.content&&<button onClick={()=>cp(renderedContent,mid)} style={msgActionS(copied===mid?t.ok:t.mut)}>
                       {copied===mid?<><IC.Check/> copied</>:<><IC.Copy/> copy</>}
                     </button>}
-                    {!isU&&msg.content&&ttsUrl&&(()=>{const generating=ttsLoadingMid===mid,playing=speakingMid===mid;return <button onClick={()=>speak(renderedContent,mid)} title={(playing||generating)?"Stop playback":"Read aloud"} style={msgActionS(playing?t.acc:generating?t.warm:t.mut)}>
+                    {!isU&&msg.content&&ttsUrl&&(()=>{const smid=msg.id!=null?String(msg.id):mid;const generating=ttsLoadingMid===smid,playing=speakingMid===smid;return <button onClick={()=>speak(renderedContent,smid)} title={(playing||generating)?"Stop playback":"Read aloud"} style={msgActionS(playing?t.acc:generating?t.warm:t.mut)}>
                       {generating?<><span style={{width:10,height:10,border:`2px solid ${t.warm}44`,borderTopColor:t.warm,borderRadius:"50%",display:"inline-block",animation:"spin 1s linear infinite"}}/> {ttsPhase||"generating"}</>:playing?<><IC.Stop/> playing</>:<><IC.Volume/> speak</>}
                     </button>;})()}
                     {!isU&&msg.content&&!streaming&&<div style={{position:"relative",display:"inline-flex"}}>
@@ -8087,7 +8096,7 @@ function HyprChat(){
             {sttUrl&&!streaming&&!councilRunning&&<button onClick={toggleRecording} disabled={transcribing} title={recording?"Stop recording":transcribing?"Transcribing…":"Voice input (speech-to-text)"} style={{background:recording?`${t.err}22`:"none",border:recording?`1px solid ${t.err}66`:"1px solid transparent",color:recording?t.err:transcribing?t.warm:t.mut,cursor:transcribing?"default":"pointer",padding:"6px 8px",borderRadius:8,display:"flex",alignItems:"center",flexShrink:0,animation:recording?"pGlow 1.5s ease-in-out infinite":"none"}}>
               {transcribing?<span style={{width:13,height:13,border:`2px solid ${t.warm}44`,borderTopColor:t.warm,borderRadius:"50%",display:"inline-block",animation:"spin 1s linear infinite"}}/>:<IC.Mic/>}
             </button>}
-            {councilRunning?<button onClick={()=>setCouncilRunning(false)} style={{background:t.pink,border:"none",color:"#fff",padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            {councilRunning?<button onClick={()=>{councilAbortRef.current?.abort();if(councilStreamRef.current){councilStreamRef.current.running=false;councilStreamRef.current=null;}setCouncilRunning(false);}} style={{background:t.pink,border:"none",color:"#fff",padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
             :streaming?<button onClick={stop} style={{background:t.err,border:"none",color:"#fff",padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
             :<button onClick={send} disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?"#fff":t.mut,padding:"10px 14px",borderRadius:8,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all .2s",boxShadow:"none",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
           </div>

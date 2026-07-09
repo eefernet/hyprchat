@@ -593,12 +593,20 @@ async def run_acceptance_review(http, events, conv_id: str, *,
 
         def _sections(title_map: dict[str, str], cap: int = 18000,
                       per_file_cap: int = 5000) -> str:
+            # A single file larger than the ctx-derived cap must be truncated
+            # to fit, not dropped — dropping it blanked the whole section
+            # ("(none)") and hid every file after it.
             parts = []
             used = 0
             for p, content in title_map.items():
-                block = f"### {p}\n```\n{content[:per_file_cap]}\n```"
-                if used + len(block) > cap:
-                    break
+                wrapper = len(p) + 12  # "### {p}\n```\n" + "\n```"
+                remaining = cap - used - wrapper
+                if remaining <= 0:
+                    continue
+                snippet = content[:min(per_file_cap, remaining)]
+                if not snippet:
+                    continue
+                block = f"### {p}\n```\n{snippet}\n```"
                 parts.append(block)
                 used += len(block)
             return "\n\n".join(parts) if parts else "(none)"

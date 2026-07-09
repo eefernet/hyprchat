@@ -29,7 +29,6 @@ from tooling.gate_decisions import (
     GateContext,
     build_gate_context,
     compute_fix_battle,
-    compute_fix_battle_ctx,
     evaluate_gate,
     issue_scoped_files,
     normalize_issue_path,
@@ -219,6 +218,17 @@ def _auto_dispatch_task(name: str, args: dict, pending_role: str,
 _CAP_RELEASE_DIAGNOSTIC_TOOLS = {"read_file", "list_files"}
 _AIDER_HEALTH_CACHE = {"url": "", "ts": 0.0, "healthy": False}
 _AIDER_HEALTH_TTL_SECONDS = 30.0
+
+# Fire-and-forget background tasks need a strong reference or the event loop
+# may GC-cancel them mid-run (same pattern as main._track_bg / chat._spawn_bg).
+_BG_TASKS: set = set()
+
+
+def _spawn_bg(coro) -> "asyncio.Task":
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
 
 
 def _fix_cap_releases_tool(name: str) -> bool:
@@ -2147,8 +2157,12 @@ async def exec_tool(
             # happened. State 2 of the gate (PENDING_FIX) covers the
             # legitimate "reviewer just ran with issues → call run_fixer"
             # case; this guard handles every other case.
+            # run_fixer ONLY: run_aider_fix legitimately runs task-only with
+            # no issue envelope (uploaded-project bootstrap, change requests
+            # against a clean-reviewed project) — blocking it here deadlocks
+            # against the bootstrap gate's "call run_aider_fix next" mandate.
             try:
-                if await _check_v2():
+                if name == "run_fixer" and await _check_v2():
                     _runs_pf = (_gate_ctx.runs_window(20) if _gate_ctx is not None
                                 else await db.get_runs_by_conversation(conv_id, limit=20))
                     _latest_meaningful = None
@@ -2157,8 +2171,8 @@ async def exec_tool(
                     for _r in _runs_pf:
                         _role_pf = _r.get("role", "")
                         _st_pf = (_r.get("status") or "").lower()
-                        if (_role_pf in {"reviewer", "acceptance"} or _role_pf.startswith("builder")
-                                or _role_pf == "fixer") and _st_pf in _MEANINGFUL_STATUSES:
+                        if (_role_pf in {"reviewer", "acceptance", "fixer", "aider.fix"}
+                                or _role_pf.startswith("builder")) and _st_pf in _MEANINGFUL_STATUSES:
                             _latest_meaningful = _r
                             break
 
@@ -2615,22 +2629,32 @@ async def exec_tool(
                             _rid,
                         )
                     elif _exhausted_after_research_gate:
-                        _gate_msg = (
-                            "state", "fix-needed-exhausted",
-                            f"BLOCKED — {_pending_role} ({_rid}) still has issues after "
-                            f"deep_research and the full automated repair budget "
-                            f"({_streak_gate} attempt(s) without verified progress; "
-                            f"{_fixer_attempts_gate} total, Aider + Fixer combined).\n\n"
-                            f"Your VERY NEXT output MUST be plain text to the user: summarize the "
-                            f"remaining issue, say the automated repair budget is exhausted, and "
-                            f"ask whether to ship as-is or authorize manual intervention.\n\n"
-                            f"Do NOT call {name}, read_file, list_files, write_file, run_shell, "
-                            f"run_review, run_acceptance_review, run_fixer, run_aider_fix, "
-                            f"download_project, or download_file unless the latest user message "
-                            f"explicitly asks to ship/download anyway.",
-                            f"⛔ Blocked — automated repair budget exhausted for {_pending_role}",
-                            _rid,
-                        )
+                        if _fix_cap_releases_tool(name):
+                            # Cap-aware diagnostic release (see comment above):
+                            # budget exhausted → allow read-only inspection so
+                            # the model can explain the remaining issue.
+                            # Delivery/write tools stay gated below.
+                            print(f"[v2-gate] cap-release: allowing read-only "
+                                  f"{name} after exhausted repair budget", flush=True)
+                        else:
+                            _gate_msg = (
+                                "state", "fix-needed-exhausted",
+                                f"BLOCKED — {_pending_role} ({_rid}) still has issues after "
+                                f"deep_research and the full automated repair budget "
+                                f"({_streak_gate} attempt(s) without verified progress; "
+                                f"{_fixer_attempts_gate} total, Aider + Fixer combined).\n\n"
+                                f"Your VERY NEXT output MUST be plain text to the user: summarize the "
+                                f"remaining issue, say the automated repair budget is exhausted, and "
+                                f"ask whether to ship as-is or authorize manual intervention. "
+                                f"You MAY use read_file/list_files to inspect the project while "
+                                f"composing that summary.\n\n"
+                                f"Do NOT call {name}, write_file, run_shell, "
+                                f"run_review, run_acceptance_review, run_fixer, run_aider_fix, "
+                                f"download_project, or download_file unless the latest user message "
+                                f"explicitly asks to ship/download anyway.",
+                                f"⛔ Blocked — automated repair budget exhausted for {_pending_role}",
+                                _rid,
+                            )
                     elif _aider_ctx_gate:
                         _project_dir = _aider_ctx_gate.get("project_dir") or _pending_env.get("project_dir") or ""
                         # Manual work tools in fix-needed state get AUTO-DISPATCHED
@@ -6002,7 +6026,7 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                             if _current_file and _current_lines:
                                 _code_files[_current_file] = "\n".join(_current_lines)
                             if _code_files:
-                                asyncio.create_task(_rag.index_generated_code(
+                                _spawn_bg(_rag.index_generated_code(
                                     task=task, language=language, file_contents=_code_files,
                                     conv_id=conv_id, project_id=_project_id,
                                 ))

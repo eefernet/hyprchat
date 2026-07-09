@@ -703,6 +703,9 @@ async def _delete_user_conn(conn: aiosqlite.Connection, uid: str, *, allow_defau
     await conn.execute("DELETE FROM artifact_tags WHERE artifact_id IN (SELECT id FROM artifacts WHERE user_id=?)", (uid,))
     await conn.execute("DELETE FROM artifact_workspaces WHERE artifact_id IN (SELECT id FROM artifacts WHERE user_id=?)", (uid,))
     await conn.execute("DELETE FROM artifact_events WHERE user_id=?", (uid,))
+    # kb_chunks_fts is a standalone FTS5 table (no FK/trigger cleanup) — clear
+    # it here or the deleted user's full KB text stays queryable in the DB.
+    await conn.execute("DELETE FROM kb_chunks_fts WHERE kb_id IN (SELECT id FROM knowledge_bases WHERE user_id=?)", (uid,))
     for table in (
         "messages",
         "runs",
@@ -767,6 +770,7 @@ async def delete_all_users_and_data() -> dict:
             "conversation_files", "workspace_conversations", "workspace_research_reports",
             "research_sources", "research_events", "run_events", "workspace_memory_blocks",
             "artifact_tags", "artifact_workspaces", "artifact_events", "council_members",
+            "kb_chunks_fts",
         ):
             await db.execute(f"DELETE FROM {table}")
         for table in (
@@ -1318,6 +1322,9 @@ async def delete_conversation(id: str):
         await db.execute("DELETE FROM messages WHERE conversation_id = ?", (id,))
         await db.execute("DELETE FROM conversation_files WHERE conversation_id = ?", (id,))
         await db.execute("DELETE FROM workspace_conversations WHERE conversation_id = ?", (id,))
+        # run_events has no FK on run_id — clear it before the conversation
+        # delete cascades the runs rows, or the events are orphaned forever.
+        await db.execute("DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE conversation_id=?)", (id,))
         await db.execute("DELETE FROM conversations WHERE id = ?", (id,))
         await db.commit()
     finally:
@@ -4859,6 +4866,7 @@ async def delete_research_report(report_id: str) -> None:
             return
         await db.execute("DELETE FROM workspace_research_reports WHERE report_id=?", (report_id,))
         await db.execute("DELETE FROM research_sources WHERE report_id=?", (report_id,))
+        await db.execute("DELETE FROM research_events WHERE report_id=?", (report_id,))
         await db.execute("DELETE FROM research_reports WHERE id=? AND user_id=?", (report_id, user_id))
         await db.commit()
     finally:

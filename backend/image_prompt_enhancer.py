@@ -87,7 +87,7 @@ def _json_fields(parsed) -> tuple[str, str] | None:
 def _extract_json_fields(raw: str) -> tuple[str, str] | None:
     try:
         fields = _json_fields(json.loads(raw))
-        if fields:
+        if fields and fields[0]:
             return fields
     except (json.JSONDecodeError, TypeError):
         pass
@@ -98,7 +98,9 @@ def _extract_json_fields(raw: str) -> tuple[str, str] | None:
         except (json.JSONDecodeError, TypeError):
             continue
         fields = _json_fields(parsed)
-        if fields:
+        # A dict with no usable positive prompt (e.g. a stray {} or schema
+        # echo in prose) must not short-circuit the labeled/salvage parsers.
+        if fields and fields[0]:
             return fields
     return None
 

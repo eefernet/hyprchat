@@ -12,9 +12,6 @@ from fastapi.responses import StreamingResponse
 import config
 
 
-HF_MODELS_DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), "..", "hf_models")
-
-
 def parse_ollama_progress(line: str, final_name: str = "") -> tuple[str | None, str | None]:
     """Parse a single Ollama streaming JSON line into a normalized SSE event.
 

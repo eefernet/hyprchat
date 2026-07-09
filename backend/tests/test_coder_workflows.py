@@ -54,7 +54,12 @@ def test_python_adapter_catches_cli_package_contract():
     assert "./.venv/bin/python3 -m pip install -e ." in contract["build_cmd"]
     assert contract["test_cmd"].endswith("./.venv/bin/python3 -m pytest -q")
     assert contract["test_cmd"].startswith(language_adapters.PY_VENV_GUARD)
-    assert contract["aider_test_cmd"] == contract["test_cmd"]
+    # Aider runs its test cmd standalone (possibly before any build created
+    # ./.venv), so it must self-bootstrap pytest into the guarded venv.
+    assert contract["aider_test_cmd"].startswith(language_adapters.PY_VENV_GUARD)
+    assert "pip install -q pytest" in contract["aider_test_cmd"]
+    assert contract["aider_test_cmd"].endswith("./.venv/bin/python3 -m pytest -q")
+    assert contract["aider_lint_cmd"].startswith(language_adapters.PY_VENV_GUARD)
     assert "./.venv/bin/python3 -m taskforge --help" in contract["smoke_cmds"]
     assert contract["safe_lint"] is True
     assert "__main__.py" in " ".join(contract["package_rules"])

@@ -925,6 +925,12 @@ function ResearchLiveStatus({t,font,events=[],metrics={},sources=[],researchRunn
 // Inline tool status: shows latest pill, expands to show all
 const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifact,historical,md,savedEvts,msgContent})=>{
   const [showAll,setShowAll]=useState(false);
+  // Hoisted from SourceLinkCards: that component type is recreated every
+  // render (inline definition), so React remounts it constantly — local
+  // state there resets on every parent re-render, and its conditional
+  // useState after an early return only avoided crashing because of the
+  // remount. Keep its state here.
+  const [slExpanded,setSlExpanded]=useState(false);
   if(!evts.length) return null;
 
   // Stable string key for expandedPill — avoids collapse when new events arrive
@@ -1150,7 +1156,6 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
   const SourceLinkCards = ()=>{
     const allLinks=sourceLinkEvts.flatMap(e=>(e.data?.links||[]));
     if(!allLinks.length)return null;
-    const [slExpanded,setSlExpanded]=useState(false);
     const shown=slExpanded?allLinks:allLinks.slice(0,8);
     return <div style={{marginTop:10}}>
       <div style={{fontSize:9,color:t.warm,textTransform:"uppercase",letterSpacing:.5,marginBottom:6,display:"flex",alignItems:"center",gap:4}}>

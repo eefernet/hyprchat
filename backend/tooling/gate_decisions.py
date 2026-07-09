@@ -27,7 +27,6 @@ from tooling.workflow_gate import (
 
 Run = dict[str, Any]
 AsyncBoolResolver = Callable[[Any], Awaitable[bool]]
-AsyncContextResolver = Callable[..., Awaitable[dict | None]]
 AsyncStringResolver = Callable[[], Awaitable[str]]
 
 FIX_ROLES = {"fixer", "aider.fix"}
@@ -49,10 +48,6 @@ async def _default_false(_since: Any = None) -> bool:
     return False
 
 
-async def _default_none(*_args: Any, **_kwargs: Any) -> dict | None:
-    return None
-
-
 async def _default_text() -> str:
     return ""
 
@@ -68,7 +63,6 @@ class GateContext:
     latest_workflow: dict | None = None
     conv_row: dict | None = None
     snapshot_partial: bool = False
-    aider_context_resolver: AsyncContextResolver = _default_none
     research_since: AsyncBoolResolver = _default_false
     ship_anyway: Callable[[], Awaitable[bool]] = _default_false
     latest_user_task_text: AsyncStringResolver = _default_text
@@ -153,7 +147,6 @@ async def build_gate_context(
     conv_id: str,
     is_v2_resolver: Callable[..., Awaitable[bool]],
     *,
-    aider_context_resolver: AsyncContextResolver = _default_none,
     research_since: AsyncBoolResolver = _default_false,
     ship_anyway: Callable[[], Awaitable[bool]] = _default_false,
     latest_user_task_text: AsyncStringResolver = _default_text,
@@ -207,7 +200,6 @@ async def build_gate_context(
         latest_workflow=latest_workflow,
         conv_row=conv_row,
         snapshot_partial=snapshot_partial,
-        aider_context_resolver=aider_context_resolver,
         research_since=research_since,
         ship_anyway=ship_anyway,
         latest_user_task_text=latest_user_task_text,
@@ -385,17 +377,6 @@ def compute_fix_battle(runs: list[Run], latest_user_ts) -> FixBattleState:
         else:
             state.no_progress_streak += 1
             state.streak_editors.append(fix_run.get("role") or "")
-    return state
-
-
-async def compute_fix_battle_ctx(ctx: GateContext) -> FixBattleState:
-    """Async wrapper adding the turn-scoped research flag to the battle."""
-    state = compute_fix_battle(ctx.runs, ctx.latest_user_ts)
-    try:
-        state.research_done = await ctx.research_since(ctx.latest_user_ts)
-    except Exception as exc:
-        print(f"[v2-gate] research flag lookup failed (non-fatal): {exc}")
-        state.research_done = False
     return state
 
 

@@ -224,7 +224,10 @@
     materialOcean:{bg:"#0f111a",bgDeep:"#090b10",surface:"#1a1c25",brd:"#2a2d3a",text:"#a6accd",dim:"#8b91b8",mut:"#4b526d",acc:"#82aaff",acc2:"#89ddff",warm:"#ffcb6b",pink:"#c792ea",f1:"#89ddff"},
     ayuDark:{bg:"#0b0e14",bgDeep:"#070910",surface:"#0d1017",brd:"#1a1f2e",text:"#cccac2",dim:"#b3b1ad",mut:"#626a73",acc:"#39bae6",acc2:"#59c2ff",warm:"#ffb454",pink:"#d2a6ff",f1:"#95e6cb"}
   };
-  var validEffects={dots:1,rain:1,flow:1,aurora:1,stars:1,circuit:1,scanlines:1,off:1};
+  // Keep in sync with BACKGROUND_EFFECTS in src/theme.js and the canvasEffects
+  // list in startLoadingBg below — a missing id silently downgrades the
+  // loader background to "dots" even though the effect is implemented.
+  var validEffects={dots:1,rain:1,flow:1,aurora:1,stars:1,circuit:1,neural:1,sacred:1,signal:1,quantum:1,veins:1,solar:1,terminalGhost:1,orbital:1,lattice:1,synapse:1,sonar:1,magnetic:1,candle:1,microwave:1,blueprint:1,scanlines:1,off:1};
   var savedTheme="hyprflat", savedEffect="dots";
   try{savedTheme=localStorage.getItem("hc-theme")||savedTheme;}catch{}
   try{savedEffect=localStorage.getItem("hc-bg-effect")||(localStorage.getItem("hc-scanline")==="1"?"scanlines":"dots");}catch{}
@@ -474,7 +477,13 @@
     {t:'"There are only two ways to live your life. One is as though nothing is a miracle. The other is as though everything is a miracle."',a:'Albert Einstein'},
   ];
   var custom=[];
-  try{custom=JSON.parse(localStorage.getItem('hc-custom-quotes')||'[]');}catch{}
+  // Quotes live in the user-namespaced cache since the server-prefs migration;
+  // the un-namespaced key is only a legacy fallback for pre-migration installs.
+  try{
+    var quid=localStorage.getItem('hc-current-user')||'default';
+    var qraw=localStorage.getItem('hc-custom-quotes::'+quid)||localStorage.getItem('hc-custom-quotes')||'[]';
+    custom=JSON.parse(qraw);
+  }catch{}
   var all=defaults.concat(custom.filter(function(q){return q&&q.t;}));
   var q=all[Math.floor(Math.random()*all.length)];
   var txt=q.t;

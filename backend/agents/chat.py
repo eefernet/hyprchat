@@ -3093,6 +3093,11 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
                 _futures = []
                 _metas = []  # (tool_name, tool_args, icon, label, detail)
+                # If every call in this batch is blocked as unauthorized, the
+                # results loop never runs — the post-loop checks below must see
+                # an empty result, not an unbound name (NameError killed the
+                # whole SSE stream).
+                tool_result = ""
                 for tool_name, tool_args, _tool_call_id in batch:
                     # Block unauthorized tools
                     if tool_name not in available_tool_names:

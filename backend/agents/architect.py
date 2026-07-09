@@ -593,7 +593,9 @@ def _render_file_tree(manifest: list[dict], project_id: str = "project") -> str:
     # original manifest entry attached so we can render purpose/LOC in comments.
     root: dict = {}
     for entry in manifest:
-        path = (entry.get("path") or "").strip().lstrip("./")
+        # removeprefix, not lstrip: lstrip("./") eats ALL leading dots and
+        # mangles dotfiles (".gitignore" → "gitignore" in the plan tree).
+        path = (entry.get("path") or "").strip().removeprefix("./")
         if not path:
             continue
         parts = path.split("/")

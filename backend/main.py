@@ -1237,11 +1237,11 @@ async def upload_coder_project(
                 workflow_id = ""
                 workflow_status = "failed"
 
-    # Phase 4.2 — fire the Project Indexer in the background. It walks the
-    # uploaded tree, detects build system, and seeds ChromaDB code_memory so
-    # that subsequent ask_project / generate_code calls have semantic
-    # retrieval over the uploaded code. Non-blocking: even if it fails, the
-    # upload itself succeeds.
+    # Phase 4.2 — run the Project Indexer inline (the response deliberately
+    # includes its status). It walks the uploaded tree, detects build system,
+    # and seeds ChromaDB code_memory so that subsequent ask_project /
+    # generate_code calls have semantic retrieval over the uploaded code.
+    # Failure is non-fatal: even if it fails, the upload itself succeeds.
     indexer_run_id = ""
     indexer_status = "not_started"
     try:

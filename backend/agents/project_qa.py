@@ -532,10 +532,14 @@ async def run_project_qa(http, events, conv_id: str, *,
             import rag as _rag
             project_id = project_dir.rstrip("/").rsplit("/", 1)[-1]
             semantic = await _rag.query_code_memory(question, top_k=8, language=language)
+            # file_list entries come from `find .` ("./"-prefixed) while
+            # greenfield code-memory filenames are unprefixed — normalize
+            # both sides or the filter drops every semantic hit.
+            _norm_file_list = {(f or "").removeprefix("./") for f in file_list}
             semantic = [
                 s for s in semantic
                 if (not s.get("project_id") or s.get("project_id") == project_id)
-                and s.get("filename") in file_list
+                and (s.get("filename") or "").removeprefix("./") in _norm_file_list
             ][:4]
             if semantic:
                 await _step("semantic", f"{len(semantic)} code-memory hit(s)")
@@ -616,8 +620,10 @@ async def run_project_qa(http, events, conv_id: str, *,
                 ollama_url=config.OLLAMA_URL,
             )
             answer = await cancel_registry.await_cancellable(coro, run_id)
-            if not answer:
-                answer = "(LLM call returned no output)"
+            # No placeholder on empty output: a truthy placeholder made the
+            # envelope status "ok", so the run succeeded and the chat QA
+            # short-circuit streamed the literal placeholder to the user as
+            # the whole answer. Empty answer → status "error" below.
         except cancel_registry.RunCancelled:
             cancelled_env = {
                 "status": "cancelled",

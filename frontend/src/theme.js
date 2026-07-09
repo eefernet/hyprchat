@@ -67,7 +67,6 @@ export const WELCOME_FALLBACKS = [
   "Translate fog into working code",
 ];
 export const WELCOME_VERSION="fun-2";
-export const HC_UI_BUILD="research-live-2026-06-04b";
 export const localDayKey=()=>{
   const d=new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
@@ -77,10 +76,3 @@ export const fallbackWelcome=()=>{
   const idx=Number(key.slice(-4))%WELCOME_FALLBACKS.length;
   return WELCOME_FALLBACKS[idx];
 };
-
-export const hexToRgb=(hex)=>{
-  const s=String(hex||"").replace("#","");
-  const m=s.match(/^([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
-  return m?{r:parseInt(m[1],16),g:parseInt(m[2],16),b:parseInt(m[3],16)}:{r:17,g:20,b:24};
-};
-
