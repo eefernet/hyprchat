@@ -7688,7 +7688,17 @@ function HyprChat(){
               const isLastAssistant=!isU&&i===lastAssistantMsgIdx;
               const liveEventsForMsg=isLastAssistant?evts:[];
               const messageWorkflows=isLastAssistant&&Array.isArray(coderWorkflows)?coderWorkflows.slice(0,3):[];
-              const daedalusRunIds=!isU?_daedalusRunIdsForMessage(meta,isLastAssistant,evts):[];
+              // For the message that is ACTIVELY streaming, derive run ids from
+              // the UNCAPPED stream buffer (same source the finalize PATCH
+              // uses): the live `evts` state keeps only the last 200 events, so
+              // on long Daedalus turns the early plan/build run ids scroll out
+              // and the stepper's earlier checkmarks regress until the turn
+              // finishes. Gate on msg.isS — the ref deliberately survives chat
+              // switches, so a non-streaming message must never read it.
+              // Reading the ref at render time is safe — evts updates already
+              // trigger these renders (same pattern as the finalize _rawEvts).
+              const runIdEvts=!isU&&msg.isS&&streamSaveEvtsRef.current.length?streamSaveEvtsRef.current:evts;
+              const daedalusRunIds=!isU?_daedalusRunIdsForMessage(meta,isLastAssistant,runIdEvts):[];
               const isDaedalusFullBuild=!isU&&_isDaedalusFullBuildOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
               const isDaedalusOutput=!isU&&_isDaedalusOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
               const liveQuickSearchPayload=isLastAssistant?_quickSearchPayloadFromEvents(evts,quickResults):null;

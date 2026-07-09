@@ -3014,3 +3014,272 @@ def test_isolated_commands_pass_codebox_denylist():
                 assert bad not in cmd.lower(), (
                     f"{language}: denylisted {bad!r} in isolated cmd: {cmd[:140]}"
                 )
+
+
+def test_project_dir_from_build_prefers_project_id_then_file_prefix():
+    import tools
+
+    assert tools._project_dir_from_build("neon-game", []) == "/root/projects/neon-game"
+    assert tools._project_dir_from_build(
+        "", ["/root/projects/simple-request-focus/main.py"],
+    ) == "/root/projects/simple-request-focus"
+    assert tools._project_dir_from_build("", ["/tmp/scratch.py"]) == ""
+    assert tools._project_dir_from_build("", None) == ""
+
+
+def test_is_environment_fault_covers_empty_project_dir():
+    from tooling import workflow_gate
+
+    assert workflow_gate.is_environment_fault({"deterministic_issue": "empty_project_dir"})
+    assert workflow_gate.is_environment_fault({"deterministic_issue": "environment_fault"})
+    assert not workflow_gate.is_environment_fault({"deterministic_issue": ""})
+    assert not workflow_gate.is_environment_fault({"status": "error"})
+    assert not workflow_gate.is_environment_fault(None)
+
+
+def test_acceptance_dispatch_overrides_mismatched_project_dir(monkeypatch):
+    """Acceptance must inspect the directory the CLEAN reviewer verified. A
+    model-supplied path that disagrees (e.g. the Architect's planned project
+    name) is overridden — passing it through once ran acceptance against a
+    nonexistent directory and deadlocked the workflow gate."""
+    import tools
+    import agents.acceptance as acceptance_mod
+
+    class Events:
+        def __init__(self):
+            self.items = []
+
+        async def emit(self, conv_id, event_type, data):
+            self.items.append((conv_id, event_type, data))
+
+    reviewer_run = {
+        "id": "run-review", "role": "reviewer", "status": "succeeded",
+        "result_envelope": {
+            "status": "clean",
+            "project_dir": "/root/projects/real-dir",
+            "project_id": "",
+        },
+    }
+
+    seen = {}
+
+    async def fake_acceptance(http, events, conv_id, *, project_dir="",
+                              reviewer_run_id="", project_id="",
+                              conv_model="", prior_acceptance_context=""):
+        seen["project_dir"] = project_dir
+        return {"status": "accepted", "summary": "ok", "issues": [],
+                "run_id": "run-acc"}
+
+    async def get_run(run_id):
+        return reviewer_run if run_id == "run-review" else None
+
+    async def get_runs_by_conversation(_conv_id, limit=50):
+        return [reviewer_run]
+
+    async def get_conversation(conv_id):
+        return {"id": conv_id, "messages": []}
+
+    async def get_latest_coder_workflow(_conv_id, project_id=None):
+        return None
+
+    async def is_v2(_conv_id, conv_row=None):
+        return False
+
+    async def no_wf_event(*_a, **_k):
+        return ""
+
+    monkeypatch.setattr(tools.db, "get_run", get_run)
+    monkeypatch.setattr(tools.db, "get_runs_by_conversation", get_runs_by_conversation)
+    monkeypatch.setattr(tools.db, "get_conversation", get_conversation)
+    monkeypatch.setattr(tools.db, "get_latest_coder_workflow", get_latest_coder_workflow)
+    monkeypatch.setattr(tools, "_is_v2_persona", is_v2)
+    monkeypatch.setattr(tools, "_apply_workflow_event", no_wf_event)
+    monkeypatch.setattr(acceptance_mod, "run_acceptance_review", fake_acceptance)
+
+    result = _run(tools.exec_tool(
+        http=object(),
+        events=Events(),
+        name="run_acceptance_review",
+        args={"project_dir": "/root/projects/hallucinated",
+              "reviewer_run_id": "run-review"},
+        conv_id="conv-x",
+    ))
+
+    assert seen["project_dir"] == "/root/projects/real-dir"
+    assert "corrected to '/root/projects/real-dir'" in result
+    assert "ACCEPTANCE ACCEPTED" in result
+
+
+def test_acceptance_dispatch_env_fault_envelope_skips_fix_routing(monkeypatch):
+    """An empty_project_dir acceptance envelope must return the environment
+    fault notice (no FIX PROCEDURE / no aider dispatch) and emit
+    REVIEW_ENV_FAULT instead of ACCEPT_ISSUES."""
+    import tools
+    import agents.acceptance as acceptance_mod
+
+    class Events:
+        def __init__(self):
+            self.items = []
+
+        async def emit(self, conv_id, event_type, data):
+            self.items.append((conv_id, event_type, data))
+
+    reviewer_run = {
+        "id": "run-review", "role": "reviewer", "status": "succeeded",
+        "result_envelope": {
+            "status": "clean",
+            "project_dir": "/root/projects/real-dir",
+            "project_id": "",
+        },
+    }
+
+    async def fake_acceptance(http, events, conv_id, *, project_dir="",
+                              reviewer_run_id="", project_id="",
+                              conv_model="", prior_acceptance_context=""):
+        return {
+            "status": "error",
+            "summary": f"Acceptance found no files at '{project_dir}'.",
+            "issues": [],
+            "deterministic_issue": "empty_project_dir",
+            "run_id": "run-acc",
+        }
+
+    async def get_run(run_id):
+        return reviewer_run if run_id == "run-review" else None
+
+    async def get_runs_by_conversation(_conv_id, limit=50):
+        return [reviewer_run]
+
+    async def get_conversation(conv_id):
+        return {"id": conv_id, "messages": []}
+
+    async def get_latest_coder_workflow(_conv_id, project_id=None):
+        return None
+
+    async def is_v2(_conv_id, conv_row=None):
+        return False
+
+    wf_events = []
+
+    async def record_wf_event(_conv_id, event, **_k):
+        wf_events.append(event)
+        return ""
+
+    monkeypatch.setattr(tools.db, "get_run", get_run)
+    monkeypatch.setattr(tools.db, "get_runs_by_conversation", get_runs_by_conversation)
+    monkeypatch.setattr(tools.db, "get_conversation", get_conversation)
+    monkeypatch.setattr(tools.db, "get_latest_coder_workflow", get_latest_coder_workflow)
+    monkeypatch.setattr(tools, "_is_v2_persona", is_v2)
+    monkeypatch.setattr(tools, "_apply_workflow_event", record_wf_event)
+    monkeypatch.setattr(acceptance_mod, "run_acceptance_review", fake_acceptance)
+
+    result = _run(tools.exec_tool(
+        http=object(),
+        events=Events(),
+        name="run_acceptance_review",
+        args={"reviewer_run_id": "run-review"},
+        conv_id="conv-x",
+    ))
+
+    assert wf_events == ["REVIEW_ENV_FAULT"]
+    assert "ENVIRONMENT FAULT" in result
+    assert "run_aider_fix" in result  # the notice says do NOT call it
+    assert "ACCEPTANCE FOUND" not in result
+
+
+def test_python_flat_script_gets_bounded_entrypoint_smoke():
+    """A requirements.txt + main.py project previously had smoke_cmds=[] —
+    py_compile shipped a game whose constructors didn't match their call
+    sites. The contract must now actually RUN the entrypoint, bounded."""
+    manifest = ["requirements.txt", "main.py", "game_objects.py", "constants.py"]
+
+    contract = language_adapters.detect_contract(manifest, "python")
+
+    assert len(contract["smoke_cmds"]) == 1
+    smoke = contract["smoke_cmds"][0]
+    assert "timeout 10 ./.venv/bin/python3 main.py" in smoke
+    assert "SDL_VIDEODRIVER=dummy" in smoke
+    assert '"$rc" = 124' in smoke          # long-running loop == started-ok
+    assert "EOFError" in smoke             # interactive CLI exemption
+    # Isolated verification also runs the entrypoint in the clean env, after
+    # the library-only pygame preflight.
+    iso_runtime = contract["isolated_verification"]["runtime_smoke_cmds"]
+    assert len(iso_runtime) == 2
+    assert "{tmp}/venv/bin/python main.py" in iso_runtime[1]
+
+
+def test_python_package_smoke_unchanged_by_entrypoint_smoke():
+    """Packages with __main__.py keep the --help smoke; the entrypoint run
+    only fills the previously-empty flat-script gap."""
+    manifest = ["pyproject.toml", "taskforge/__init__.py", "taskforge/__main__.py",
+                "main.py"]
+
+    contract = language_adapters.detect_contract(manifest, "python")
+
+    assert contract["smoke_cmds"] == ["./.venv/bin/python3 -m taskforge --help"]
+
+
+def test_python_no_entrypoint_no_new_smoke():
+    manifest = ["requirements.txt", "helpers.py", "config.py"]
+
+    contract = language_adapters.detect_contract(manifest, "python")
+
+    assert contract["smoke_cmds"] == []
+
+
+def test_go_adapter_runs_main_bounded():
+    contract = language_adapters.detect_contract(["go.mod", "main.go"], "go")
+    assert len(contract["smoke_cmds"]) == 1
+    assert "timeout 15 go run . " in contract["smoke_cmds"][0]
+
+    cmd_layout = language_adapters.detect_contract(
+        ["go.mod", "cmd/tool/main.go"], "go")
+    assert "timeout 15 go run ./cmd/tool " in cmd_layout["smoke_cmds"][0]
+
+    no_entry = language_adapters.detect_contract(["go.mod", "pkg/lib.go"], "go")
+    assert no_entry["smoke_cmds"] == []
+
+
+def test_plain_node_script_gets_bounded_entrypoint_smoke():
+    contract = language_adapters.detect_contract(["main.js", "util.js"], "javascript")
+    assert len(contract["smoke_cmds"]) == 1
+    assert "timeout 10 node main.js " in contract["smoke_cmds"][0]
+
+    # package.json projects keep the existing NODE_RUNTIME_SMOKE_CMD path.
+    pkg = language_adapters.detect_contract(["package.json", "index.js"], "javascript")
+    assert pkg["smoke_cmds"] == [language_adapters.NODE_RUNTIME_SMOKE_CMD]
+
+
+def test_java_run_smoke_is_self_gated():
+    gradle = language_adapters.detect_contract(
+        ["build.gradle", "src/main/java/App.java"], "java")
+    assert len(gradle["smoke_cmds"]) == 1
+    assert gradle["smoke_cmds"][0].startswith("if grep -q application build.gradle")
+    assert "gradlew run" in gradle["smoke_cmds"][0]
+
+    maven = language_adapters.detect_contract(
+        ["pom.xml", "src/main/java/App.java"], "java")
+    assert maven["smoke_cmds"][0].startswith("if grep -q exec-maven-plugin pom.xml")
+    assert "mvn -q exec:java" in maven["smoke_cmds"][0]
+
+    plain = language_adapters.detect_contract(["src/App.java"], "java")
+    assert plain["smoke_cmds"] == []
+
+
+def test_csharp_run_smoke_targets_app_project_not_tests():
+    contract = language_adapters.detect_contract(
+        ["App/App.csproj", "App/Program.cs", "App.Tests/App.Tests.csproj"], "csharp")
+    assert len(contract["smoke_cmds"]) == 1
+    assert 'dotnet run --project "App/App.csproj"' in contract["smoke_cmds"][0]
+
+
+def test_cmake_run_smoke_finds_built_binary_self_gated():
+    contract = language_adapters.detect_contract(
+        ["CMakeLists.txt", "src/main.cpp"], "cpp")
+    assert len(contract["smoke_cmds"]) == 1
+    smoke = contract["smoke_cmds"][0]
+    assert smoke.startswith("bin=$(find build ")
+    assert "no built binary found" in smoke
+
+    plain = language_adapters.detect_contract(["src/main.cpp"], "cpp")
+    assert plain["smoke_cmds"] == []

@@ -2072,7 +2072,15 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
             return r.ok?await r.json():null;
           }catch{return null;}
         }));
-        if(!stop){setRuns(rows.filter(Boolean));setLoadErr("");}
+        if(!stop){
+          // Merge with what we already fetched: a transient failed fetch must
+          // not remove a run (it makes finished phase checkmarks flicker off).
+          setRuns(prev=>{
+            const prevById=new Map(prev.map(r=>[r.id,r]));
+            return runIds.map((rid,idx)=>rows[idx]||prevById.get(rid)).filter(Boolean);
+          });
+          setLoadErr("");
+        }
       }catch(e){if(!stop)setLoadErr(e.message||"run load failed");}
     };
     load();

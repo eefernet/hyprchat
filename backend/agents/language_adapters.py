@@ -124,6 +124,42 @@ def _bounded_rust_runtime_smoke(run_cmd: str) -> str:
     )
 
 
+def _bounded_entrypoint_smoke(run_cmd: str, timeout_s: int, label: str) -> str:
+    """Bounded 'actually run the program' smoke shared by the adapters.
+
+    Exit contract: 0 = ran and exited cleanly; timeout (124) = still running
+    when the window closed, which for games/servers/loops means it started
+    fine. Programs that genuinely need a user (stdin CLIs, X11 GUIs) are
+    exempted by output signature so a headless sandbox doesn't flag them.
+    Anything else is a startup crash the compile-level phases can't see —
+    e.g. a cross-file constructor mismatch that shipped as ACCEPTED once.
+    SDL dummy drivers let pygame/SDL programs run without a display.
+    """
+    return (
+        "out=$(mktemp); "
+        "export SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy; "
+        f"timeout {timeout_s} {run_cmd} </dev/null >\"$out\" 2>&1; rc=$?; "
+        "tail -n 25 \"$out\"; "
+        f"if [ \"$rc\" = 124 ]; then echo '({label} stayed up {timeout_s}s; started-ok)'; "
+        "rm -f \"$out\"; exit 0; fi; "
+        "if [ \"$rc\" = 0 ]; then rm -f \"$out\"; exit 0; fi; "
+        "if grep -qE 'EOFError|cannot open display|not connect to display|no display name' \"$out\"; then "
+        f"echo '({label} needs an interactive/display environment; treating as started-ok)'; "
+        "rm -f \"$out\"; exit 0; fi; "
+        "rm -f \"$out\"; exit $rc"
+    )
+
+
+# Top-level script names that count as a runnable entrypoint for flat
+# (non-packaged) projects, in priority order.
+PY_ENTRYPOINT_FILES = ("main.py", "app.py", "game.py", "run.py")
+NODE_ENTRYPOINT_FILES = ("index.js", "main.js", "app.js", "server.js")
+
+
+def _first_top_level(manifest: list[str], candidates: tuple[str, ...]) -> str:
+    return next((c for c in candidates if _top_level_has(manifest, c)), "")
+
+
 def _rust_runtime_smoke_cmd(manifest: list[str]) -> str:
     if _has(manifest, "src/main.rs"):
         return _bounded_rust_runtime_smoke("cargo run -- --help")
@@ -298,6 +334,13 @@ def python_adapter(manifest: list[str]) -> LanguageAdapter:
             smoke_cmds.append(f"{CODEBOX_PYTHON} -m {pkg} --help")
     if has_pyproject and packages and not smoke_cmds:
         smoke_cmds.append(f"{CODEBOX_PYTHON} -c \"import {packages[0]}; print({packages[0]}.__name__)\"")
+    entry_script = _first_top_level(manifest, PY_ENTRYPOINT_FILES)
+    if entry_script and not smoke_cmds:
+        # Flat script projects (main.py + requirements.txt) previously got NO
+        # smoke at all — py_compile happily shipped a game whose constructors
+        # didn't match their call sites. Actually run the entrypoint, bounded.
+        smoke_cmds.append(_bounded_entrypoint_smoke(
+            f"{CODEBOX_PYTHON} {entry_script}", 10, f"python {entry_script}"))
 
     isolated_applicable = has_pyproject or has_requirements
     isolated_setup = ""
@@ -334,6 +377,13 @@ def python_adapter(manifest: list[str]) -> LanguageAdapter:
             "pygame.font.Font(None, 24); pygame.quit(); print('pygame smoke ok')\"; "
             "else echo '(pygame smoke skipped)'; fi"
         )]
+        if entry_script:
+            # The check above only proves the pygame LIBRARY works — it never
+            # executes the project. Run the real entrypoint in the clean env.
+            isolated_runtime.append(
+                "cd {tmp}/work && " + _bounded_entrypoint_smoke(
+                    "{tmp}/venv/bin/python " + entry_script, 10,
+                    f"python {entry_script}"))
 
     return LanguageAdapter(
         language="python",
@@ -391,12 +441,16 @@ def node_adapter(manifest: list[str], language: str) -> LanguageAdapter:
         ] if has_pkg else []),
         reason="fresh Node dependency install from package manifest",
     )
+    plain_node_entry = "" if has_pkg else _first_top_level(manifest, NODE_ENTRYPOINT_FILES)
     return LanguageAdapter(
         language="typescript" if is_ts else "javascript",
         build_system="package.json" if has_pkg else "plain-node",
         build_cmd=build_cmd or plain_node_check,
         test_cmd=test_cmd,
-        smoke_cmds=[NODE_RUNTIME_SMOKE_CMD] if has_pkg else [],
+        smoke_cmds=([NODE_RUNTIME_SMOKE_CMD] if has_pkg
+                    else [_bounded_entrypoint_smoke(
+                        f"node {plain_node_entry}", 10, f"node {plain_node_entry}")]
+                    if plain_node_entry else []),
         package_rules=["Do not package node_modules, dist, build, .next, or cache directories."],
         source_extensions=[".ts", ".tsx", ".js", ".jsx"] if is_ts else [".js", ".jsx"],
         ignored_dirs=COMMON_IGNORES,
@@ -473,12 +527,23 @@ def rust_adapter(manifest: list[str]) -> LanguageAdapter:
 
 def go_adapter(manifest: list[str]) -> LanguageAdapter:
     has_mod = _top_level_has(manifest, "go.mod")
+    go_run_target = ""
+    if has_mod:
+        if _top_level_has(manifest, "main.go"):
+            go_run_target = "."
+        else:
+            cmd_mains = sorted(
+                p for p in manifest
+                if p.startswith("cmd/") and p.endswith("/main.go"))
+            if cmd_mains:
+                go_run_target = "./" + os.path.dirname(cmd_mains[0])
     return LanguageAdapter(
         language="go",
         build_system="go.mod" if has_mod else "plain-go",
         build_cmd="go build ./..." if has_mod else "",
         test_cmd="go test ./..." if has_mod else "",
-        smoke_cmds=[],
+        smoke_cmds=([_bounded_entrypoint_smoke(
+            f"go run {go_run_target}", 15, "go run")] if go_run_target else []),
         package_rules=["Do not package bin/, dist/, or coverage outputs."],
         source_extensions=[".go"],
         ignored_dirs=COMMON_IGNORES,
@@ -500,6 +565,7 @@ def go_adapter(manifest: list[str]) -> LanguageAdapter:
 def java_adapter(manifest: list[str]) -> LanguageAdapter:
     has_maven = _top_level_has(manifest, "pom.xml")
     has_gradle = _top_level_has(manifest, "build.gradle") or _top_level_has(manifest, "build.gradle.kts")
+    java_smoke = ""
     if has_maven:
         build_cmd = "mvn -q -DskipTests compile"
         test_cmd = "mvn -q test"
@@ -508,6 +574,12 @@ def java_adapter(manifest: list[str]) -> LanguageAdapter:
             "cd {tmp}/work && mvn -q -Dmaven.repo.local={tmp}/m2 -DskipTests compile",
             "cd {tmp}/work && mvn -q -Dmaven.repo.local={tmp}/m2 test",
         ]
+        # Self-gated: only runnable when the project wired the exec plugin.
+        java_smoke = (
+            "if grep -q exec-maven-plugin pom.xml 2>/dev/null; then "
+            + _bounded_entrypoint_smoke("mvn -q exec:java", 30, "mvn exec:java")
+            + "; else echo '(java run smoke skipped: no exec-maven-plugin)'; fi"
+        )
     elif has_gradle:
         build_cmd = "./gradlew build -q -x test || gradle build -q -x test"
         test_cmd = "./gradlew test -q || gradle test -q"
@@ -516,6 +588,13 @@ def java_adapter(manifest: list[str]) -> LanguageAdapter:
             "cd {tmp}/work && export GRADLE_USER_HOME={tmp}/gradle && (./gradlew build -q -x test || gradle build -q -x test)",
             "cd {tmp}/work && export GRADLE_USER_HOME={tmp}/gradle && (./gradlew test -q || gradle test -q)",
         ]
+        # Self-gated: `run` exists only with the application plugin.
+        java_smoke = (
+            "if grep -q application build.gradle build.gradle.kts 2>/dev/null; then "
+            + _bounded_entrypoint_smoke(
+                "sh -c './gradlew run -q || gradle run -q'", 30, "gradle run")
+            + "; else echo '(java run smoke skipped: no application plugin)'; fi"
+        )
     else:
         build_cmd = "rm -rf out && mkdir -p out && find . -name '*.java' -not -path '*/out/*' -not -path '*/build/*' -not -path '*/target/*' | xargs -r javac -d out"
         test_cmd = ""
@@ -526,7 +605,7 @@ def java_adapter(manifest: list[str]) -> LanguageAdapter:
         build_system=build_system,
         build_cmd=build_cmd,
         test_cmd=test_cmd,
-        smoke_cmds=[],
+        smoke_cmds=[java_smoke] if java_smoke else [],
         package_rules=["Do not package target/, build/, out/, or .gradle/."],
         source_extensions=[".java", ".kt"],
         ignored_dirs=COMMON_IGNORES + [".gradle", "out"],
@@ -563,12 +642,32 @@ def c_cpp_adapter(manifest: list[str], language: str) -> LanguageAdapter:
         build_cmd = "gcc -Wall -fsyntax-only $(find . -name '*.c')"
         test_cmd = ""
         build_system = "plain-c"
+    c_smoke = ""
+    if has_cmake:
+        # Run the first executable the cmake build produced (self-gated).
+        c_smoke = (
+            "bin=$(find build -maxdepth 3 -type f -perm -u+x "
+            "! -name '*.so*' ! -name '*.a' ! -name '*.cmake' 2>/dev/null | head -1); "
+            "if [ -n \"$bin\" ]; then "
+            + _bounded_entrypoint_smoke("\"$bin\"", 10, "built binary")
+            + "; else echo '(run smoke skipped: no built binary found)'; fi"
+        )
+    elif has_make:
+        # Only artifacts newer than the Makefile count as build outputs.
+        c_smoke = (
+            "bin=$(find . -maxdepth 2 -type f -perm -u+x -newer Makefile "
+            "! -name '*.sh' ! -name '*.py' ! -name '*.so*' ! -name 'configure' "
+            "! -path './.git/*' 2>/dev/null | head -1); "
+            "if [ -n \"$bin\" ]; then "
+            + _bounded_entrypoint_smoke("\"$bin\"", 10, "built binary")
+            + "; else echo '(run smoke skipped: no built binary found)'; fi"
+        )
     return LanguageAdapter(
         language="cpp" if is_cpp else "c",
         build_system=build_system,
         build_cmd=build_cmd,
         test_cmd=test_cmd,
-        smoke_cmds=[],
+        smoke_cmds=[c_smoke] if c_smoke else [],
         package_rules=["Do not package build/, dist/, out/, coverage, or compiler outputs."],
         source_extensions=[".cpp", ".cc", ".cxx", ".hpp", ".h"] if is_cpp else [".c", ".h"],
         ignored_dirs=COMMON_IGNORES + ["out"],
@@ -602,12 +701,20 @@ def csharp_adapter(manifest: list[str]) -> LanguageAdapter:
     )
     build_cmd = f"{_DOTNET_ENV} && dotnet build -nologo -v q"
     test_cmd = f"{_DOTNET_ENV} && dotnet test -nologo -v q" if has_tests else ""
+    app_csproj = next(
+        (p for p in manifest if p.endswith(".csproj") and "test" not in p.lower()),
+        "")
+    cs_smoke = ""
+    if app_csproj:
+        cs_smoke = _bounded_entrypoint_smoke(
+            f"sh -c '{_DOTNET_ENV} && dotnet run --project \"{app_csproj}\"'",
+            30, "dotnet run")
     return LanguageAdapter(
         language="csharp",
         build_system="dotnet",
         build_cmd=build_cmd,
         test_cmd=test_cmd,
-        smoke_cmds=[],
+        smoke_cmds=[cs_smoke] if cs_smoke else [],
         package_rules=["Do not package bin/, obj/, or NuGet cache directories."],
         source_extensions=[".cs", ".csproj", ".sln"],
         ignored_dirs=COMMON_IGNORES + ["bin", "obj"],
