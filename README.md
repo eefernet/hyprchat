@@ -184,7 +184,7 @@ KB answers use **hybrid retrieval** (ChromaDB vectors + SQLite FTS5 keywords, fu
 - **Scanned-PDF OCR** — PDFs with no text layer (scans, faxes, photographed docs) are OCR'd automatically during KB upload and chat PDF extraction (RapidOCR, CPU-only, up to 50 pages).
 
 <p align="center">
-  <img src="docs/images/knowledge%20base.png" alt="HyprChat knowledge base manager" width="440">
+  <img src="docs/images/knowledgeBase.png" alt="HyprChat knowledge base manager" width="440">
   <img src="docs/images/workspaceExample.png" alt="HyprChat workspace example" width="440">
 </p>
 
