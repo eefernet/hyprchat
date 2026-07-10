@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 
 import { API } from '../session.js';
+import useIsMobile from '../useIsMobile.js';
 import { IC } from './icons.jsx';
 import ArtifactCanvas from './ArtifactCanvas.jsx';
 
@@ -127,6 +128,7 @@ const IMG_FALLBACK_SAMPLERS=["euler","euler_ancestral","dpmpp_2m","dpmpp_2m_sde"
 const IMG_FALLBACK_SCHEDULERS=["normal","karras","sgm_uniform","exponential","simple","beta"];
 
 function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,inputS,fieldLabelS,sliderField}){
+  const isMobile=useIsMobile();
   const [prompt,setPrompt]=useState("");
   const [negPrompt,setNegPrompt]=useState("");
   const [size,setSize]=useState("1024x1024");
@@ -506,9 +508,9 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
       {gallery.length>0&&<span style={{fontSize:10,color:t.mut,marginRight:6}}>{gallery.length} image{gallery.length===1?"":"s"}</span>}
       {gallery.length>0&&<button onClick={purgeAll} title="Delete every trace of generated images everywhere: Image Studio + chat images, files, records, chat-message references, ComfyUI history/copies, and server logs." style={{fontSize:10,padding:"6px 11px",borderRadius:6,background:`${t.err}10`,border:`1px solid ${t.err}30`,color:t.err,cursor:"pointer",fontFamily:font,fontWeight:600}}>Delete all</button>}
     </div>
-    <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+    <div style={{flex:1,display:"flex",overflow:"hidden",...(isMobile?{flexDirection:"column"}:{})}}>
       {/* LEFT RAIL — prompt + all generation inputs */}
-      <div style={{width:"clamp(330px,30vw,420px)",flexShrink:0,borderRight:`1px solid ${t.brd}28`,overflowY:"auto",padding:16,display:"flex",flexDirection:"column",gap:12}}>
+      <div style={{width:isMobile?"100%":"clamp(330px,30vw,420px)",flexShrink:0,borderRight:isMobile?"none":`1px solid ${t.brd}28`,overflowY:"auto",padding:16,display:"flex",flexDirection:"column",gap:12,...(isMobile?{maxHeight:"46%",borderBottom:`1px solid ${t.brd}28`}:{})}}>
         {section("Prompt",IC.Pencil,<>
           <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&(e.metaKey||e.ctrlKey)){e.preventDefault();generate();}}} placeholder="Subject, style, lighting, mood" rows={5} style={{...inputS,resize:"vertical",lineHeight:1.55,fontSize:13.5,padding:"11px 13px"}}/>
           <textarea value={negPrompt} onChange={e=>setNegPrompt(e.target.value)} placeholder="Negative prompt" rows={1} style={{...inputS,resize:"vertical",fontSize:12,minHeight:38}}/>
@@ -700,6 +702,7 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
 }
 
 function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onDelete,onUseInChat,notify,onRefreshList,onOpenArtifact}){
+  const isMobile=useIsMobile();
   const [preview,setPreview]=useState(null);
   const [timeline,setTimeline]=useState([]);
   const [tagDraft,setTagDraft]=useState("");
@@ -740,7 +743,7 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
   const addTag=async()=>{const tag=tagDraft.trim();if(!tag)return;await patch({tags:[...(a.tags||[]),tag]});setTagDraft("");};
   const duplicateRows=a.duplicates||[];
   const timelineRows=timeline||[];
-  return <div style={{width:"clamp(320px,42vw,430px)",maxWidth:"100vw",borderLeft:`1px solid ${t.brd}28`,background:t.bgDeep,display:"flex",flexDirection:"column",overflow:"hidden",flexShrink:0}}>
+  return <div style={{width:isMobile?"auto":"clamp(320px,42vw,430px)",maxWidth:"100vw",borderLeft:isMobile?"none":`1px solid ${t.brd}28`,background:t.bgDeep,display:"flex",flexDirection:"column",overflow:"hidden",flexShrink:0,...(isMobile?{position:"absolute",inset:0,zIndex:40}:{})}}>
     <div style={{padding:"12px 14px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:8}}>
       <span style={{color:km.color,display:"flex"}}>{DetailIcon?<DetailIcon/>:null}</span>
       <div style={{minWidth:0,flex:1}}><div style={{fontSize:13,fontWeight:900,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.title||a.filename}</div><div style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.filename}</div></div>
@@ -968,7 +971,7 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
     }catch(e){notify&&notify({type:"error",text:"Bundle failed",detail:e.message||String(e)});}
   };
   const toggleSelected=(id,on)=>setSelected(p=>{const n=new Set(p);if(on)n.add(id);else n.delete(id);return n;});
-  return <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+  return <div style={{flex:1,display:"flex",overflow:"hidden",position:"relative"}}>
   <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
       <div style={{display:"flex",alignItems:"center",gap:8,minWidth:160}}><IC.Layers/><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Artifacts</span></div>

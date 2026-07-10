@@ -44,6 +44,7 @@ import {
 } from './modelHelpers.js';
 import { createSettingsSync, createPrefsSync } from './settingsSync.js';
 import ModelPicker from './ModelPicker.jsx';
+import useIsMobile, { isMobileNow, useKeyboardViewportHeight } from './useIsMobile.js';
 import AnalyticsPanel from './panels/AnalyticsPanel.jsx';
 import PromptLibraryPanel from './panels/PromptLibraryPanel.jsx';
 import BackgroundCanvas from './components/BackgroundCanvas.jsx';
@@ -453,7 +454,9 @@ function HyprChat(){
   const [actId,setActId]=useState(null);
   const [inp,setInp]=useState("");
   const [streaming,setStreaming]=useState(false);
-  const [sidebar,setSidebar]=useState(true);
+  const isMobile=useIsMobile();
+  const keyboardVvh=useKeyboardViewportHeight(isMobile);
+  const [sidebar,setSidebar]=useState(()=>!isMobileNow());
   const [models,setModels]=useState([]);
   const [modelDetails,setModelDetails]=useState({});
   const [modelInfoCache,setModelInfoCache]=useState({});
@@ -1575,6 +1578,8 @@ function HyprChat(){
     return()=>{closed=true;if(retryTimer)clearTimeout(retryTimer);sseR.current?.close();};
   },[actId]);
   useEffect(()=>{if(actId)refreshCoderWorkflows(actId);},[actId,refreshCoderWorkflows]);
+  // Mobile: close the nav drawer after picking a conversation or switching panels.
+  useEffect(()=>{if(isMobile)setSidebar(false);},[isMobile,actId,panel]);
   useEffect(()=>{
     if(!searchLoading)return;
     const id=setTimeout(()=>{setSearchLoading(false);setQuickSearchError("No results returned before the timeout.");},25000);
@@ -4497,7 +4502,7 @@ function HyprChat(){
   // RENDER
   // ============================================================
   const _uiScale=uiFontSize/14;
-  return <div style={{height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:t.bg,color:t.text,overflow:"hidden",position:"relative"}}>
+  return <div style={{height:keyboardVvh?`${(keyboardVvh/_uiScale).toFixed(1)}px`:`${(100/_uiScale).toFixed(3)}${isMobile?"dvh":"vh"}`,width:`${(100/_uiScale).toFixed(3)}${isMobile?"dvw":"vw"}`,zoom:_uiScale,display:"flex",fontFamily:font,background:t.bg,color:t.text,overflow:"hidden",position:"relative"}}>
     {bgEffect==="dots"&&<div style={{position:"absolute",inset:0,opacity:.42,zIndex:0,pointerEvents:"none",backgroundImage:`radial-gradient(circle,${t.acc}18 1px,transparent 1.4px)`,backgroundSize:"24px 24px"}}/>}
     <BackgroundCanvas effect={bgEffect} t={t}/>
     {bgEffect==="scanlines"&&<div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${t.acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:.4}}/>}
@@ -4533,7 +4538,7 @@ function HyprChat(){
     </div>}
 
     {/* NAV RAIL */}
-    <div style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...glass,borderRight:`1px solid ${t.brd}55`,zIndex:11,padding:"12px 0",gap:4}}>
+    <div style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...glass,borderRight:`1px solid ${t.brd}55`,zIndex:11,padding:"12px 0",gap:4,...(isMobile?{position:"absolute",left:0,top:0,bottom:0,zIndex:60,transform:sidebar?"translateX(0)":"translateX(-100%)",transition:"transform .25s ease",paddingTop:"calc(12px + env(safe-area-inset-top))"}:{})}}>
       <div style={{flex:1,minHeight:0,width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflowY:"auto",overflowX:"hidden",scrollbarWidth:"none",paddingBottom:4}}>
         <button className={`nav-panel-button${sidebarSearchActive?" is-active":""}`} onClick={()=>{if(showMessageSearch&&sidebar)closeSidebarSearch();else openSidebarSearch("titles");}} title="Search conversations" style={navBtnS(!!sidebarSearchActive)}>
           <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Search/></span>
@@ -4565,7 +4570,9 @@ function HyprChat(){
     </div>
 
     {/* CONVERSATION LIST */}
-    <div style={{width:sidebar?304:0,minWidth:sidebar?304:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",display:"flex",flexDirection:"column",borderRight:`1px solid ${t.brd}55`,overflow:"hidden",background:`${t.bgDeep}F2`,backdropFilter:"none",position:"relative",zIndex:10}}>
+    <div style={{...(isMobile
+      ?{position:"absolute",left:68,top:0,bottom:0,width:"min(292px, calc(100% - 76px))",minWidth:0,transform:sidebar?"translateX(0)":"translateX(calc(-100% - 68px))",transition:"transform .25s ease",zIndex:60}
+      :{width:sidebar?304:0,minWidth:sidebar?304:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",position:"relative",zIndex:10}),display:"flex",flexDirection:"column",borderRight:`1px solid ${t.brd}55`,overflow:"hidden",background:`${t.bgDeep}F2`,backdropFilter:"none"}}>
       <div style={{padding:"12px 10px 6px",flexShrink:0}}>
         <div style={{fontSize:13,fontWeight:800,letterSpacing:1.8,textTransform:"uppercase",color:t.acc,marginBottom:6,paddingLeft:2}}>HyprChat <span style={{fontSize:8,fontWeight:700,letterSpacing:1,color:t.warm,opacity:.95,padding:"1px 5px",background:`${t.warm}14`,border:`1px solid ${t.warm}40`,borderRadius:4}}>ALPHA</span></div>
         <button onClick={()=>{openSettings();setSettingsTab("users");}} style={{width:"100%",display:"flex",alignItems:"center",gap:7,background:`${t.surface}44`,border:`1px solid ${t.brd}22`,color:t.dim,borderRadius:8,padding:"6px 8px",fontFamily:font,fontSize:11,cursor:"pointer",marginBottom:8,textAlign:"left"}}>
@@ -4673,10 +4680,14 @@ function HyprChat(){
       </div>
     </div>
 
+    {/* Mobile drawer backdrop */}
+    {isMobile&&sidebar&&<div onClick={()=>setSidebar(false)} style={{position:"absolute",inset:0,zIndex:55,background:"rgba(0,0,0,.45)"}}/>}
+
     {/* MAIN */}
     <div style={{flex:1,display:"flex",flexDirection:"column",zIndex:5,minWidth:0,position:"relative"}}>
-      <div style={{padding:"10px 18px",...glass,borderBottom:`1px solid ${t.brd}55`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0,position:"relative",zIndex:100}}>
-        <div style={{display:"flex",alignItems:"center",gap:6}}>
+      <div style={{padding:isMobile?"8px 10px":"10px 18px",...glass,borderBottom:`1px solid ${t.brd}55`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0,position:"relative",zIndex:100,...(isMobile?{flexWrap:"wrap",rowGap:6,paddingTop:"calc(8px + env(safe-area-inset-top))"}:{})}}>
+        <div style={{display:"flex",alignItems:"center",gap:6,...(isMobile?{flexWrap:"wrap",minWidth:0}:{})}}>
+          {isMobile&&<button onClick={()=>setSidebar(p=>!p)} title={sidebar?"Hide menu":"Show menu"} style={{display:"flex",alignItems:"center",justifyContent:"center",width:34,height:30,flexShrink:0,background:"transparent",border:`1px solid ${t.brd}44`,borderRadius:8,color:t.dim,cursor:"pointer",fontFamily:font}}><IC.Sidebar/></button>}
           {panel==="chat"&&!act&&<>
             <ModelPicker value={pendingChatModel||models[0]||""} onChange={setPendingChatModel} models={models} modelDetails={modelDetails} t={t} font={font} compact={true} onRefresh={refreshModels}/>
             {pendingPersona&&(()=>{const pendingProfile=getProfileForConversation(pendingPersona);const type=pendingProfile?getProfileType(pendingProfile):(isCoderPersonaName(pendingPersona.persona_name)||(pendingPersona.tool_ids||[]).length?"agent":"persona");const c=type==="persona"?t.pink:t.acc;const label=type==="persona"?"Persona":"Agent";const avatar=pendingPersona.persona_avatar||profileAvatar(pendingProfile);return <><div style={{display:"flex",alignItems:"center",gap:5,padding:"3px 10px",background:`${c}15`,border:`1px solid ${c}28`,borderRadius:20}}>
@@ -4726,7 +4737,7 @@ function HyprChat(){
           </>}
         </div>
         {/* Token counter + export — persistent */}
-        <div style={{display:"flex",alignItems:"center",gap:8}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,...(isMobile?{flexWrap:"wrap",minWidth:0}:{})}}>
           {/* Activity Center */}
           {downloads.length>0&&(()=>{
             const active=downloads.filter(d=>!_activityIsTerminal(d.status));
@@ -4833,7 +4844,7 @@ function HyprChat(){
             </div>
           </>}
           <input ref={importRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>{if(e.target.files?.[0])importChatJSON(e.target.files[0]);e.target.value="";}}/>
-          <button onClick={()=>importRef.current?.click()} title="Import chat from JSON" style={{background:"none",border:`1px solid ${t.brd}33`,color:t.mut,cursor:"pointer",padding:"4px 8px",borderRadius:8,fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:2}}><IC.Download/> import</button>
+          {!isMobile&&<button onClick={()=>importRef.current?.click()} title="Import chat from JSON" style={{background:"none",border:`1px solid ${t.brd}33`,color:t.mut,cursor:"pointer",padding:"4px 8px",borderRadius:8,fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:2}}><IC.Download/> import</button>}
           {panel==="chat"&&act&&(()=>{
             // Context meter: prompt + generated tokens against the active num_ctx.
             const promptToks=ctxTokens||0;
@@ -4865,7 +4876,7 @@ function HyprChat(){
 
       {/* Panels + Preview wrapper. Keyed on the active panel so a panel switch remounts
           this column and replays the entry fade; key is stable while chatting. */}
-      <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+      <div style={{flex:1,display:"flex",overflow:"hidden",position:"relative"}}>
       <div key={wsPanel&&activeWs?"ws":panel} style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",minWidth:0,animation:"fadeIn .18s ease"}}>
       {/* Panels */}
       {wsPanel&&activeWs
@@ -5214,7 +5225,7 @@ function HyprChat(){
   </div>
 
       :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return `Audit complete${d.coverage_score!==undefined?` - coverage ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return d.summary?`Report complete - ${d.summary}`:"Report complete";if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=[...(report?.outline?.sections||[])].map(s=>s.heading||s).filter(Boolean);const cardS={background:`${t.surface}80`,border:`1px solid ${t.brd}33`,borderRadius:10,padding:14,display:"flex",flexDirection:"column",gap:9};const cardHeadS={fontSize:11,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.6};return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}>
+    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,...(isMobile?{flexWrap:"wrap",rowGap:6}:{})}}>
       <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}><IC.Search/><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Deep Research</span>{researchRunning&&<span style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.acc}14`,border:`1px solid ${t.acc}33`,color:t.acc}}>live</span>}<div style={{display:"flex",gap:3,marginLeft:8,padding:3,border:`1px solid ${t.brd}28`,borderRadius:8,background:`${t.bgDeep}88`}}>{[["new","New"],["reports",researchReports.length?`Reports ${researchReports.length}`:"Reports"]].map(([id,label])=><button key={id} onClick={()=>setResearchView(id)} style={{fontSize:10,padding:"5px 9px",borderRadius:6,border:"none",background:researchView===id?`${t.acc}22`:"transparent",color:researchView===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontWeight:researchView===id?800:600,transition:"background .15s ease,color .15s ease"}}>{label}</button>)}</div></div>
       {researchView==="reports"&&<div style={{display:"flex",gap:6,alignItems:"center"}}>
         {activeResearchId&&researchRunning&&<button onClick={()=>cancelResearchReport(activeResearchId)} style={btnS(t.err)}><IC.Stop/> Stop</button>}
@@ -5316,8 +5327,8 @@ function HyprChat(){
         </div>
       </div>
     </div>
-    :<div style={{flex:1,display:"grid",gridTemplateColumns:"290px minmax(0,1fr) 320px",overflow:"hidden",minHeight:0}}>
-      <div style={{borderRight:`1px solid ${t.brd}24`,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:12}}>
+    :<div style={{flex:1,display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"290px minmax(0,1fr) 320px",overflow:isMobile?"auto":"hidden",minHeight:0}}>
+      {!(isMobile&&activeResearchId)&&<div style={{borderRight:`1px solid ${t.brd}24`,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:12}}>
         <div style={{display:"flex",alignItems:"center",gap:6}}>
           <input value={researchReportFilter} onChange={e=>setResearchReportFilter(e.target.value)} placeholder="Filter reports" style={{...inputS,fontSize:11,padding:"7px 9px"}}/>
           <button onClick={()=>refreshResearchReports()} style={btnS(t.mut)}><IC.Refresh/></button>
@@ -5337,8 +5348,9 @@ function HyprChat(){
           </div>;})}
           {!filteredReports.length&&<EmptyState t={t} font={font} compact icon={<IC.Search/>} title="No research reports yet" hint="Run a deep research report and it will be saved here." action={<button onClick={()=>setResearchView("new")} style={{...btnS(t.acc),fontSize:10}}><IC.Plus/> New Report</button>}/>}
         </div>
-      </div>
-      <div style={{overflowY:"auto",padding:"18px 26px",minWidth:0}}>
+      </div>}
+      {(!isMobile||activeResearchId)&&<div style={{overflowY:"auto",padding:isMobile?"16px 12px":"18px 26px",minWidth:0}}>
+        {isMobile&&<button onClick={()=>{setActiveResearchId(null);setActiveResearch(null);}} style={{...btnS(t.mut),marginBottom:12}}>← All reports</button>}
         {report?<div style={{maxWidth:960,margin:"0 auto"}}>
           <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:14,marginBottom:14,paddingBottom:12,borderBottom:`1px solid ${t.brd}22`}}>
             <div style={{minWidth:0}}>
@@ -5348,7 +5360,7 @@ function HyprChat(){
                 {metrics.coverage_score!==undefined&&<span title="Evidence coverage score" style={{fontSize:10,color:t.acc}}>coverage {metrics.coverage_score}/100</span>}
                 {activeResearchId&&workspaces.length>0&&<select value="" title="Add report to workspace" onChange={e=>{const wsId=e.target.value;if(wsId)addResearchReportToWorkspace(activeResearchId,wsId);}} style={{fontSize:9,padding:"2px 5px",borderRadius:6,border:`1px solid ${t.brd}33`,background:t.bgDeep,color:t.mut,fontFamily:font}}><option value="">Add to workspace</option>{workspaces.map(ws=><option key={ws.id} value={ws.id}>{ws.name}</option>)}</select>}
               </div>
-              <h1 style={{fontSize:24,lineHeight:1.15,margin:"0 0 6px",color:t.text,letterSpacing:0}}>{report.title||report.query}</h1>
+              <h1 style={{fontSize:isMobile?20:24,lineHeight:1.15,margin:"0 0 6px",color:t.text,letterSpacing:0}}>{report.title||report.query}</h1>
               <div style={{fontSize:12,color:t.mut,lineHeight:1.45}}>{report.query}</div>
             </div>
           </div>
@@ -5359,8 +5371,8 @@ function HyprChat(){
             <MDWrap>{md(body)}</MDWrap>
           </div>:<ResearchLiveStatus t={t} font={font} events={researchEvents} metrics={metrics} sources={sources} researchRunning={researchRunning} elapsedLabel={elapsedLabel} eventLabel={eventLabel}/>}
         </div>:<div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:t.mut,fontSize:12}}>Select a report or start a new research run.</div>}
-      </div>
-      <div style={{borderLeft:`1px solid ${t.brd}24`,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:12}}>
+      </div>}
+      {(!isMobile||activeResearchId)&&<div style={{borderLeft:isMobile?"none":`1px solid ${t.brd}24`,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:12,...(isMobile?{borderTop:`1px solid ${t.brd}24`}:{})}}>
         <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8}}>
           {[["Sources",fmtTarget(sources.length||metrics.source_count||0,metrics.target_sources),t.acc],["Pages",fmtTarget(metrics.pages_read||0,metrics.target_pages),t.f1],["Searches",fmtTarget(metrics.searches||0,metrics.target_queries),t.warm],["Elapsed",elapsedLabel,t.mut]].map(([l,v,c])=><div key={l} style={{padding:10,borderRadius:8,border:`1px solid ${c}2e`,background:`${c}0d`}}>
             <div style={{fontSize:18,fontWeight:900,color:c,lineHeight:1}}>{v}</div><div style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.7,marginTop:5}}>{l}</div>
@@ -5414,7 +5426,7 @@ function HyprChat(){
             </div>;})}
           </div>
         </div>
-      </div>
+      </div>}
     </div>}
   </div>;})()
 
@@ -5831,10 +5843,10 @@ function HyprChat(){
     </div>
 
     {/* ── OLLAMA TAB ── */}
-    {modelsTab==="ollama"&&<div style={{flex:1,display:"flex",overflow:"hidden",background:`${t.bg}22`}}>
+    {modelsTab==="ollama"&&<div style={{flex:1,display:"flex",overflow:"hidden",background:`${t.bg}22`,...(isMobile?{flexDirection:"column"}:{})}}>
 
       {/* Left: model list */}
-      <div style={{width:"clamp(360px,30vw,460px)",minWidth:340,borderRight:`1px solid ${t.brd}20`,display:"flex",flexDirection:"column",overflow:"hidden",background:`${t.bgDeep}66`}}>
+      <div style={{width:isMobile?"100%":"clamp(360px,30vw,460px)",minWidth:isMobile?0:340,borderRight:isMobile?"none":`1px solid ${t.brd}20`,display:"flex",flexDirection:"column",overflow:"hidden",background:`${t.bgDeep}66`,...(isMobile?{maxHeight:"45%",borderBottom:`1px solid ${t.brd}20`,flexShrink:0}:{})}}>
         {/* Search bar */}
         <div style={{padding:"12px 12px 10px",flexShrink:0,borderBottom:`1px solid ${t.brd}16`}}>
           <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8}}>
@@ -6129,10 +6141,10 @@ function HyprChat(){
     </div>}
 
     {/* ── HUGGINGFACE TAB ── */}
-    {modelsTab==="hf"&&<div style={{flex:1,display:"flex",overflow:"hidden",background:`${t.bg}22`}}>
+    {modelsTab==="hf"&&<div style={{flex:1,display:"flex",overflow:"hidden",background:`${t.bg}22`,...(isMobile?{flexDirection:"column"}:{})}}>
 
       {/* Left: search + installed Hugging Face models */}
-      <div style={{width:"clamp(360px,30vw,460px)",minWidth:340,borderRight:`1px solid ${t.brd}20`,display:"flex",flexDirection:"column",overflow:"hidden",background:`${t.bgDeep}66`}}>
+      <div style={{width:isMobile?"100%":"clamp(360px,30vw,460px)",minWidth:isMobile?0:340,borderRight:isMobile?"none":`1px solid ${t.brd}20`,display:"flex",flexDirection:"column",overflow:"hidden",background:`${t.bgDeep}66`,...(isMobile?{maxHeight:"45%",borderBottom:`1px solid ${t.brd}20`,flexShrink:0}:{})}}>
         <div style={{padding:"12px 12px 10px",borderBottom:`1px solid ${t.brd}18`,flexShrink:0}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
             <div>
@@ -6372,9 +6384,9 @@ function HyprChat(){
             </div>;
           })()}
           {/* Body: files left, readme right */}
-          <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+          <div style={{flex:1,display:"flex",overflow:"hidden",...(isMobile?{flexDirection:"column"}:{})}}>
             {/* Files + download */}
-            <div style={{width:"clamp(280px,24vw,320px)",minWidth:280,borderRight:`1px solid ${t.brd}18`,overflowY:"auto",padding:"16px 14px",background:`${t.bgDeep}33`}}>
+            <div style={{width:isMobile?"100%":"clamp(280px,24vw,320px)",minWidth:isMobile?0:280,borderRight:isMobile?"none":`1px solid ${t.brd}18`,overflowY:"auto",padding:"16px 14px",background:`${t.bgDeep}33`,...(isMobile?{maxHeight:"45%",borderBottom:`1px solid ${t.brd}18`,flexShrink:0}:{})}}>
               <div style={{...mmKickerS,marginBottom:10}}>GGUF Files</div>
               {!hfModelInfo?<div style={{color:t.mut,fontSize:11,fontStyle:"italic"}}>Loading...</div>:
               hfModelInfo.gguf_files.length===0?<div style={{color:t.mut,fontSize:11,fontStyle:"italic"}}>No GGUF files.</div>:
@@ -6415,8 +6427,8 @@ function HyprChat(){
     </div>}
 
     {/* ── HYPRFIT TAB ── */}
-    {modelsTab==="hyprfit"&&<div style={{flex:1,display:"flex",overflow:"hidden",background:`${t.bg}22`}}>
-      <div style={{width:"clamp(340px,28vw,440px)",minWidth:320,borderRight:`1px solid ${t.brd}20`,background:`${t.bgDeep}66`,overflowY:"auto",padding:"18px 18px 28px",boxSizing:"border-box"}}>
+    {modelsTab==="hyprfit"&&<div style={{flex:1,display:"flex",overflow:"hidden",background:`${t.bg}22`,...(isMobile?{flexDirection:"column"}:{})}}>
+      <div style={{width:isMobile?"100%":"clamp(340px,28vw,440px)",minWidth:isMobile?0:320,borderRight:isMobile?"none":`1px solid ${t.brd}20`,background:`${t.bgDeep}66`,overflowY:"auto",padding:"18px 18px 28px",boxSizing:"border-box",...(isMobile?{maxHeight:"45%",borderBottom:`1px solid ${t.brd}20`,flexShrink:0}:{})}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:14}}>
           <div>
             <div style={mmKickerS}>HyprFit</div>
@@ -6592,33 +6604,33 @@ function HyprChat(){
       :panel==="analytics"?<AnalyticsPanel t={t} btnS={btnS} cardS={cardS} analyticsDays={analyticsDays} setAnalyticsDays={setAnalyticsDays} analyticsGroup={analyticsGroup} setAnalyticsGroup={setAnalyticsGroup} loadAnalytics={loadAnalytics} analyticsData={analyticsData}/>
 
       :panel==="settings"?ReactDOM.createPortal(<div style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)",fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)closeSettings();}}>
-    <div style={{width:"min(1100px,95vw)",maxHeight:"85vh",height:"85vh",display:"grid",gridTemplateColumns:"260px minmax(0,1fr)",background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,boxShadow:"0 8px 48px #0008",overflow:"hidden",animation:"fadeIn .25s"}}>
-      <div style={{borderRight:`1px solid ${t.brd}44`,background:`${t.surface}50`,padding:18,display:"flex",flexDirection:"column",gap:8,overflow:"hidden"}}>
-        <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:10}}>
+    <div style={{width:isMobile?"100%":"min(1100px,95vw)",maxHeight:isMobile?"100%":"85vh",height:isMobile?"100%":"85vh",display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"260px minmax(0,1fr)",background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,boxShadow:"0 8px 48px #0008",overflow:"hidden",animation:"fadeIn .25s",...(isMobile?{gridTemplateRows:"auto minmax(0,1fr)",borderRadius:0,border:"none"}:{})}}>
+      <div style={{borderRight:isMobile?"none":`1px solid ${t.brd}44`,background:`${t.surface}50`,padding:isMobile?"calc(8px + env(safe-area-inset-top)) 12px 8px":18,display:"flex",flexDirection:isMobile?"row":"column",gap:8,overflow:"hidden",...(isMobile?{borderBottom:`1px solid ${t.brd}44`,alignItems:"center"}:{})}}>
+        <div style={{display:isMobile?"none":"flex",alignItems:"center",gap:9,marginBottom:10}}>
           <span style={{color:t.acc,display:"flex"}}><IC.Settings/></span>
           <div>
             <div style={{fontSize:15,fontWeight:800,color:t.text,letterSpacing:.4}}>Settings</div>
           </div>
         </div>
-        <div style={{flex:1,minHeight:0,overflowY:"auto",display:"flex",flexDirection:"column",gap:8,paddingRight:2}}>
-          {settingsTabs.filter(([id])=>id!=="changelog").map(([id,icon,label,hint])=>{const active=settingsTab===id;return <button key={id} onClick={()=>{setSettingsTab(id);if(id!=="connections")setShowHealthMonitor(false);}} style={{width:"100%",display:"flex",alignItems:"center",gap:10,textAlign:"left",padding:"10px 11px",borderRadius:10,border:`1px solid ${active?t.acc:t.brd}33`,background:active?`${t.acc}18`:`${t.bgDeep}88`,color:active?t.acc:t.dim,cursor:"pointer",fontFamily:font,boxShadow:"none",transition:"background .15s ease,border-color .15s ease,color .15s ease"}}>
+        <div style={{flex:1,minHeight:0,overflowY:isMobile?"hidden":"auto",display:"flex",flexDirection:isMobile?"row":"column",gap:8,paddingRight:2,...(isMobile?{overflowX:"auto"}:{})}}>
+          {settingsTabs.filter(([id])=>id!=="changelog").map(([id,icon,label,hint])=>{const active=settingsTab===id;return <button key={id} onClick={()=>{setSettingsTab(id);if(id!=="connections")setShowHealthMonitor(false);}} style={{width:isMobile?"auto":"100%",display:"flex",alignItems:"center",gap:10,textAlign:"left",padding:"10px 11px",borderRadius:10,border:`1px solid ${active?t.acc:t.brd}33`,background:active?`${t.acc}18`:`${t.bgDeep}88`,color:active?t.acc:t.dim,cursor:"pointer",fontFamily:font,boxShadow:"none",transition:"background .15s ease,border-color .15s ease,color .15s ease",...(isMobile?{flexShrink:0}:{})}}>
             <span style={{fontSize:16,width:20,textAlign:"center",flexShrink:0}}>{icon}</span>
             <span style={{minWidth:0,flex:1}}>
               <span style={{display:"block",fontSize:12,fontWeight:800,color:active?t.acc:t.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{label}</span>
-              <span style={{display:"block",fontSize:9,color:t.mut,marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{hint}</span>
+              <span style={{display:isMobile?"none":"block",fontSize:9,color:t.mut,marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{hint}</span>
             </span>
           </button>;})}
         </div>
-        {(()=>{const active=settingsTab==="changelog";return <button onClick={async()=>{setSettingsTab("changelog");setShowHealthMonitor(false);if(!changelogContent){try{const r=await fetch(`${API}/api/changelog`);const d=await r.json();setChangelogContent(d.content||"");}catch{setChangelogContent("# Changelog\n\nFailed to load.");}}}} style={{width:"100%",display:"flex",alignItems:"center",gap:10,textAlign:"left",padding:"10px 11px",borderRadius:10,border:`1px solid ${active?t.acc:t.brd}33`,background:active?`${t.acc}18`:`${t.bgDeep}88`,color:active?t.acc:t.dim,cursor:"pointer",fontFamily:font,boxShadow:"none",marginTop:8}}>
+        {(()=>{const active=settingsTab==="changelog";return <button onClick={async()=>{setSettingsTab("changelog");setShowHealthMonitor(false);if(!changelogContent){try{const r=await fetch(`${API}/api/changelog`);const d=await r.json();setChangelogContent(d.content||"");}catch{setChangelogContent("# Changelog\n\nFailed to load.");}}}} style={{width:isMobile?"auto":"100%",display:"flex",alignItems:"center",gap:10,textAlign:"left",padding:"10px 11px",borderRadius:10,border:`1px solid ${active?t.acc:t.brd}33`,background:active?`${t.acc}18`:`${t.bgDeep}88`,color:active?t.acc:t.dim,cursor:"pointer",fontFamily:font,boxShadow:"none",marginTop:isMobile?0:8,...(isMobile?{flexShrink:0}:{})}}>
           <span style={{fontSize:16,width:20,textAlign:"center",flexShrink:0}}>📋</span>
           <span style={{minWidth:0,flex:1}}>
             <span style={{display:"block",fontSize:12,fontWeight:800,color:active?t.acc:t.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>Changelog</span>
-            <span style={{display:"block",fontSize:9,color:t.mut,marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>Release notes and updates</span>
+            <span style={{display:isMobile?"none":"block",fontSize:9,color:t.mut,marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>Release notes and updates</span>
           </span>
         </button>;})()}
       </div>
-      <div style={{display:"flex",overflow:"hidden",minWidth:0}}>
-    <div style={{flex:showHealthMonitor?"0 0 52%":"1 1 auto",overflowY:"auto",padding:"22px 30px",transition:"flex .3s ease",minWidth:0}}>
+      <div style={{display:"flex",overflow:"hidden",minWidth:0,...(isMobile?{flexDirection:"column"}:{})}}>
+    <div style={{flex:showHealthMonitor?"0 0 52%":"1 1 auto",overflowY:"auto",padding:isMobile?"16px 14px":"22px 30px",transition:"flex .3s ease",minWidth:0}}>
     <div style={{maxWidth:980}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
         <h3 style={{fontSize:16,fontWeight:700,color:t.acc,letterSpacing:1,textTransform:"uppercase",margin:0}}>{activeSettingsTitle}</h3>
@@ -6703,7 +6715,7 @@ function HyprChat(){
               const statusColor=enabled&&configured?t.ok:configured?t.warm:t.mut;
               const saveReady=isCustom?(!!key||customBaseUrl!==null||customLabel!==null):!!key;
               const testReady=isCustom?!!st.base_url:(!!key||st.has_key);
-              return <div key={provider} style={{...subSecS,display:"grid",gridTemplateColumns:"120px minmax(0,1fr) auto",gap:10,alignItems:"center"}}>
+              return <div key={provider} style={{...subSecS,display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"120px minmax(0,1fr) auto",gap:10,alignItems:"center"}}>
                 <div>
                   <div style={{display:"flex",alignItems:"center",gap:7,fontSize:12,fontWeight:900,color:t.text}}><span>{provider==="openai"?"◎":provider==="anthropic"?"✦":"⌬"}</span>{isCustom&&st.custom_label?st.custom_label:label}</div>
                   <div style={{fontSize:9,color:t.mut,marginTop:3}}>{hint}</div>
@@ -7393,7 +7405,7 @@ function HyprChat(){
   </div>
 
     {/* ── HEALTH MONITOR PANEL (slides in from right) ── */}
-    {showHealthMonitor&&<div style={{flex:"0 0 50%",overflowY:"auto",padding:"20px 24px",borderLeft:`1px solid ${t.brd}22`,background:`${t.bg}`,animation:"fadeIn .3s ease"}}>
+    {showHealthMonitor&&<div style={{flex:isMobile?"0 0 48%":"0 0 50%",overflowY:"auto",padding:isMobile?"16px 14px":"20px 24px",borderLeft:isMobile?"none":`1px solid ${t.brd}22`,background:`${t.bg}`,animation:"fadeIn .3s ease",...(isMobile?{borderTop:`1px solid ${t.brd}22`}:{})}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
         <h3 style={{fontSize:16,fontWeight:700,color:t.acc,letterSpacing:1,textTransform:"uppercase",margin:0}}>Service Monitor</h3>
         <button onClick={()=>setShowHealthMonitor(false)} style={{background:"none",border:`1px solid ${t.brd}33`,borderRadius:7,color:t.dim,cursor:"pointer",padding:"4px 10px",fontSize:12}}>✕ Close</button>
@@ -7934,7 +7946,7 @@ function HyprChat(){
           </div>
         </div>
         {/* INPUT */}
-        <div style={{padding:"6px 18px 16px",flexShrink:0}}>
+        <div style={{padding:isMobile?(keyboardVvh?"6px 12px 10px":"6px 12px calc(10px + env(safe-area-inset-bottom))"):"6px 18px 16px",flexShrink:0}}>
           {currentRun&&(()=>{
             const phaseLabel={searching:"searching",thinking:"thinking",tool:"tool running",streaming:"streaming",voting:"council voting",council:"council",stopped:"stopped",failed:"failed",complete:"complete"}[currentRun.phase]||currentRun.phase||"running";
             const pct=currentRun.pct!=null?Math.max(0,Math.min(100,Number(currentRun.pct)||0)):null;
@@ -8071,7 +8083,7 @@ function HyprChat(){
               if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
               placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":"What's on your mind?"}`} rows={1}
               disabled={streaming||councilRunning||loadingConv}
-              style={{flex:1,background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:14,outline:"none",resize:"none",padding:isEmptyChatSurface?"11px 0":"8px 0",minHeight:isEmptyChatSurface?38:"auto",maxHeight:140,lineHeight:1.6}}
+              style={{flex:1,background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:isMobile?16:14,outline:"none",resize:"none",padding:isEmptyChatSurface?"11px 0":"8px 0",minHeight:isEmptyChatSurface?38:"auto",maxHeight:140,lineHeight:1.6}}
               onFocus={()=>setComposerFocused(true)} onBlur={()=>setComposerFocused(false)}
               onInput={e=>{e.target.style.height="auto";e.target.style.height=Math.min(e.target.scrollHeight,120)+"px";}}
               onPaste={e=>{const files=Array.from(e.clipboardData?.files||[]);if(files.length){e.preventDefault();handleFileUpload(files);}}}/>
@@ -8105,9 +8117,9 @@ function HyprChat(){
       </>}
       </div>{/* end inner panel column */}
       {/* Preview panel — outside panel ternary so it renders alongside any panel */}
-      {previewFile&&<div style={{width:previewWidth,flexShrink:0,borderLeft:`1px solid ${t.brd}33`,background:t.bgDeep,display:"flex",flexDirection:"column",position:"relative",overflow:"hidden",transition:"width .15s"}}>
+      {previewFile&&<div style={{width:isMobile?"auto":previewWidth,flexShrink:0,borderLeft:isMobile?"none":`1px solid ${t.brd}33`,background:t.bgDeep,display:"flex",flexDirection:"column",position:"relative",overflow:"hidden",transition:"width .15s",...(isMobile?{position:"absolute",inset:0,zIndex:30}:{})}}>
             {/* Drag handle */}
-            <div onMouseDown={startPreviewDrag} style={{position:"absolute",left:0,top:0,bottom:0,width:5,cursor:"col-resize",zIndex:10,background:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}44`} onMouseLeave={e=>e.currentTarget.style.background="transparent"}/>
+            {!isMobile&&<div onMouseDown={startPreviewDrag} style={{position:"absolute",left:0,top:0,bottom:0,width:5,cursor:"col-resize",zIndex:10,background:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}44`} onMouseLeave={e=>e.currentTarget.style.background="transparent"}/>}
             {/* Header */}
             <div style={{padding:"9px 12px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:7,flexShrink:0,background:`${t.surface}88`}}>
               <span style={{fontSize:11,fontWeight:700,color:t.text,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{previewFile.isExternal?(()=>{try{return new URL(previewFile.url).hostname.replace("www.","");}catch{return previewFile.filename;}})():previewFile.filename}</span>
@@ -8283,6 +8295,10 @@ function HyprChat(){
       .conv-row:hover .conv-act{opacity:1;}
       .conv-act:hover{background:${t.sfBri}33 !important;}
       .conv-del:hover{color:${t.err} !important;}
+      @media (hover:none){
+        .conv-act{opacity:1;}
+        .conv-row .conv-actions::before{opacity:.94;}
+      }
       *{scrollbar-width:auto;scrollbar-color:${t.sfBri} transparent}
       *::-webkit-scrollbar{width:7px;height:10px}*::-webkit-scrollbar-track{background:transparent;border-radius:5px}
       *::-webkit-scrollbar-thumb{background:${t.sfBri};border-radius:5px}*::-webkit-scrollbar-thumb:hover{background:${t.acc}88}

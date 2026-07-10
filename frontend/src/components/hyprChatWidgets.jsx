@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { API, proxiedImageUrl } from '../session.js';
+import useIsMobile from '../useIsMobile.js';
 import {
   _eventsHaveDaedalus,
   _eventsHaveDaedalusFullBuild,
@@ -1255,6 +1256,7 @@ const Tip=({k,t})=>{const [show,setShow]=React.useState(false);const txt=TIPS[k]
 // WORKSPACE DETAIL COMPONENT
 // ============================================================
 function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
+  const isMobile=useIsMobile();
   const inputS={width:"100%",background:`${t.bgDeep}E6`,border:`1px solid ${t.brd}55`,color:t.text,padding:"9px 12px",borderRadius:7,fontFamily:font,fontSize:13,outline:"none",boxSizing:"border-box"};
   const btnS=(c,bg)=>({background:bg||`${c}18`,border:`1px solid ${c}4D`,color:c,padding:"6px 12px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:11,display:"flex",alignItems:"center",gap:5,boxShadow:"none"});
   const emptyDraft={display_name:"",legal_name:"",birthday:"",age:"",bio:"",interestsText:"",linksText:"",notes:""};
@@ -1406,7 +1408,7 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
       <div style={{display:"flex",gap:8}}><button onClick={scanMemory} disabled={scanning} style={btnS(t.warm)}>{scanning?"Scanning":"Scan Recent"}</button><button onClick={refresh} disabled={loading} style={btnS(t.acc)}>{loading?"Loading":"Refresh"}</button></div>
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
-      <div style={{display:"grid",gridTemplateColumns:"minmax(280px,0.62fr) minmax(280px,1fr)",gap:14,alignItems:"start"}}>
+      <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"minmax(280px,0.62fr) minmax(280px,1fr)",gap:14,alignItems:"start"}}>
         <div style={{background:`${t.surface}F0`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
           <div style={{fontSize:10,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.7,marginBottom:12}}>User Profile</div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
@@ -1428,7 +1430,7 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
           <div style={{background:`${t.surface}F0`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
             <div style={{fontSize:10,fontWeight:800,color:t.pink,textTransform:"uppercase",letterSpacing:.7,marginBottom:10}}>Add Memory</div>
-            <div style={{display:"grid",gridTemplateColumns:"160px 1fr",gap:8,alignItems:"start"}}>
+            <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"160px 1fr",gap:8,alignItems:"start"}}>
               <select value={newMemType} onChange={e=>setNewMemType(e.target.value)} style={inputS}><option value="semantic">Semantic</option><option value="episodic">Episodic</option><option value="procedural">Procedural</option></select>
               <textarea value={newMemText} onChange={e=>setNewMemText(e.target.value)} placeholder="Add an accepted memory manually..." style={{...inputS,minHeight:78,lineHeight:1.5,resize:"vertical"}}/>
             </div>
@@ -1472,6 +1474,7 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
 }
 
 function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onOpenReport,onRemoveReport,onPreview,models,wsModel,onPersonaCreated,notify}){
+  const isMobile=useIsMobile();
   const [tab,setTab]=React.useState("convs");
   const [editMode,setEditMode]=React.useState(false);
   const [wsName,setWsName]=React.useState("");
@@ -1730,7 +1733,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
           <button onClick={scanMemory} disabled={memScanning} style={btnS(t.warm)}>{memScanning?"Scanning":"Scan Recent"}</button>
           <button onClick={refreshMemory} disabled={memLoading} style={btnS(t.acc)}>{memLoading?"Loading":"Refresh"}</button>
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(260px,.55fr)",gap:12,alignItems:"start"}}>
+        <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"minmax(0,1fr) minmax(260px,.55fr)",gap:12,alignItems:"start"}}>
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
             <div style={{fontSize:10,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.7}}>Workspace Instructions</div>
             <textarea value={wsInstructions} onChange={e=>setWsInstructions(e.target.value)} placeholder="Stable project instructions, constraints, tone, or goals..." style={{...inputS,minHeight:92,lineHeight:1.5,resize:"vertical"}}/>

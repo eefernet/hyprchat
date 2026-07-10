@@ -30,13 +30,20 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
       if(dropRef.current&&dropRef.current.contains(e.target))return;
       setOpen(false);
     };
+    const close=()=>setOpen(false);
     document.addEventListener("mousedown",handler);
-    return()=>document.removeEventListener("mousedown",handler);
+    window.addEventListener("resize",close);
+    return()=>{document.removeEventListener("mousedown",handler);window.removeEventListener("resize",close);};
   },[open]);
   const openDropdown=()=>{
     if(triggerRef.current){
       const r=triggerRef.current.getBoundingClientRect();
-      setDropPos({top:r.bottom+4,left:r.left,width:Math.max(r.width,240)});
+      // Clamp against the dropdown's max possible width (it grows past minWidth
+      // up to maxWidth from content), so the right edge stays on screen.
+      const maxW=Math.min(380,window.innerWidth-16);
+      const width=Math.min(Math.max(r.width,240),maxW);
+      const left=Math.max(8,Math.min(r.left,window.innerWidth-maxW-8));
+      setDropPos({top:r.bottom+4,left,width});
     }
     const willOpen=!open;
     setOpen(p=>!p);
@@ -108,7 +115,7 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
         if(a==="Other")return 1;if(b==="Other")return-1;
         return a.localeCompare(b);
       });
-      return createPortal(<div ref={dropRef} style={{position:"fixed",top:dropPos.top,left:dropPos.left,minWidth:dropPos.width,maxWidth:380,background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:10,boxShadow:`0 8px 32px #00000077`,zIndex:99999,maxHeight:360,overflowY:"auto",padding:"4px",fontFamily:font}}>
+      return createPortal(<div ref={dropRef} style={{position:"fixed",top:dropPos.top,left:dropPos.left,minWidth:dropPos.width,maxWidth:"min(380px, calc(100vw - 16px))",background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:10,boxShadow:`0 8px 32px #00000077`,zIndex:99999,maxHeight:360,overflowY:"auto",padding:"4px",fontFamily:font}}>
         {sortedMakers.map(maker=><div key={maker}>
           <div style={{padding:"5px 10px 3px",fontSize:8,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.8,borderTop:maker===sortedMakers[0]?"none":`1px solid ${t.brd}22`,marginTop:maker===sortedMakers[0]?0:4,paddingTop:maker===sortedMakers[0]?5:7}}>{maker}</div>
           {grouped[maker].map(m=>{
