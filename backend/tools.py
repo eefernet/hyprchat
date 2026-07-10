@@ -1196,6 +1196,7 @@ CODEAGENT_TOOLS = {
                 "to": {"type": "string", "description": "Recipient email address"},
                 "subject": {"type": "string", "description": "Subject line"},
                 "body": {"type": "string", "description": "Plain-text body"},
+                "account": {"type": "string", "description": "Which account to send from when the user has several: match by label, address, or username (default: the first account)"},
             }, "required": ["to", "subject", "body"]},
         },
     },
@@ -1225,6 +1226,16 @@ CODEAGENT_TOOLS = {
         "function": {
             "name": "mark_email_read",
             "description": "Mark an email as read.",
+            "parameters": {"type": "object", "properties": {
+                "message_id": {"type": "string", "description": "Email id from list_emails"},
+            }, "required": ["message_id"]},
+        },
+    },
+    "delete_email": {
+        "type": "function",
+        "function": {
+            "name": "delete_email",
+            "description": "Delete an email (moves it to the server's Trash folder). Use ONLY when the user explicitly asks to delete — prefer archive_email otherwise. If autonomous deletion is disabled for the account, this refuses and asks you to confirm with the user — expected behavior, not an error.",
             "parameters": {"type": "object", "properties": {
                 "message_id": {"type": "string", "description": "Email id from list_emails"},
             }, "required": ["message_id"]},
@@ -3119,8 +3130,9 @@ async def exec_tool(
                     await db.update_scheduled_task(task_id, {"enabled": False})
                     return f"Paused task \"{task['title']}\"."
                 if action == "resume":
-                    tz = task.get("timezone") or "UTC"
-                    nxt = _scheduler.compute_next_run(task["schedule_kind"], task["schedule_json"], tz)
+                    nxt = await _scheduler.recompute_next_run(
+                        task["schedule_kind"], task["schedule_json"],
+                        task.get("timezone") or "")
                     await db.update_scheduled_task(task_id, {"enabled": True, "next_run": nxt})
                     return f"Resumed task \"{task['title']}\" (next run {nxt} UTC)."
                 if action == "delete":
@@ -3147,8 +3159,8 @@ async def exec_tool(
                     if changed_schedule:
                         fields["schedule_kind"] = kind
                         fields["schedule_json"] = schedule_json
-                        fields["next_run"] = _scheduler.compute_next_run(
-                            kind, schedule_json, task.get("timezone") or "UTC")
+                        fields["next_run"] = await _scheduler.recompute_next_run(
+                            kind, schedule_json, task.get("timezone") or "")
                     if not fields:
                         return "Nothing to update — pass title, prompt, or schedule fields."
                     updated = await db.update_scheduled_task(task_id, fields)
@@ -3284,7 +3296,7 @@ async def exec_tool(
                 return f"ERROR: manage_calendar failed: {e}"
 
         elif name in ("list_emails", "read_email", "send_email", "reply_to_email",
-                      "archive_email", "mark_email_read"):
+                      "archive_email", "mark_email_read", "delete_email"):
             import email_client as _email_client
             try:
                 accounts = await db.list_email_accounts()
@@ -3316,6 +3328,20 @@ async def exec_tool(
                     body = str(args.get("body") or "").strip()
                     if not to or "@" not in to or not subject or not body:
                         return "ERROR: send_email requires a valid 'to' address, 'subject', and 'body'."
+                    # Multi-account: honor an explicit account hint (label /
+                    # address / username substring) instead of always sending
+                    # from the oldest account.
+                    wanted = str(args.get("account") or "").strip().lower()
+                    if wanted:
+                        matches = [a for a in accounts if wanted in " ".join(
+                            (a.get("label") or "", a.get("from_address") or "",
+                             a.get("username") or "")).lower()]
+                        if not matches:
+                            known = ", ".join(a.get("label") or a.get("username") or a["id"]
+                                              for a in accounts)
+                            return (f"ERROR: no email account matches '{wanted}'. "
+                                    f"Configured accounts: {known}.")
+                        account_id = matches[0]["id"]
                     account = await db.get_email_account(account_id, with_password=True)
                     # SERVER-SIDE autonomy gate: prompt rules alone don't count.
                     if not account.get("allow_autonomous_send"):
@@ -3363,19 +3389,37 @@ async def exec_tool(
                     subject = msg["subject"] or ""
                     if not subject.lower().startswith("re:"):
                         subject = f"Re: {subject}"
-                    await _email_client.send_mail(account, to=to, subject=subject, body=body)
+                    await _email_client.send_mail(
+                        account, to=to, subject=subject, body=body,
+                        in_reply_to=msg.get("message_id") or "")
                     await db.update_email_message(message_id, {"draft_reply": ""})
                     return f"Reply sent to {to}."
 
                 if name == "archive_email":
-                    await _email_client.set_flags(account, msg["uid"], archive=True)
+                    moved = await _email_client.set_flags(account, msg["uid"], archive=True)
                     await db.update_email_message(message_id, {"archived": True, "unread": False})
-                    return f"Archived \"{msg['subject']}\"."
+                    if moved:
+                        return f"Archived \"{msg['subject']}\"."
+                    return (f"Archived \"{msg['subject']}\" in HyprChat, but the mail "
+                            f"server has no Archive folder — on the server it was only "
+                            f"marked read and stays in the inbox.")
 
                 if name == "mark_email_read":
                     await _email_client.set_flags(account, msg["uid"], seen=True)
                     await db.update_email_message(message_id, {"unread": False})
                     return f"Marked \"{msg['subject']}\" as read."
+
+                if name == "delete_email":
+                    # SERVER-SIDE autonomy gate (like allow_autonomous_send):
+                    # prompt rules alone must not authorize destroying mail.
+                    if not account.get("allow_autonomous_delete"):
+                        return (f"Autonomous deletion is disabled for this account, so "
+                                f"\"{msg['subject']}\" was NOT deleted. Ask the user to "
+                                f"delete it from the Email panel, or to enable autonomous "
+                                f"delete in Email settings. Consider archive_email instead.")
+                    await _email_client.delete_message(account, msg["uid"])
+                    await db.delete_email_message(message_id)
+                    return f"Deleted \"{msg['subject']}\" (moved to the server's Trash folder)."
             except Exception as e:
                 return f"ERROR: {name} failed: {e}"
 

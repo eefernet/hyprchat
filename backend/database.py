@@ -13,7 +13,7 @@ import json
 import secrets
 import uuid
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from config import DATABASE_PATH
 from db.artifacts import (
     ARTIFACT_KIND_SET as _ARTIFACT_KIND_SET,
@@ -853,6 +853,17 @@ async def init_db():
         except Exception as e:
             if "duplicate column" not in str(e).lower():
                 print(f"[DB MIGRATION] Warning adding kb_files.source_url: {e}")
+        # Jarvis email: server-side autonomous-delete gate + RFC 822 Message-ID
+        # (reply threading)
+        for table, col, coltype, default in [
+            ("email_accounts", "allow_autonomous_delete", "INTEGER", "0"),
+            ("email_messages", "message_id", "TEXT", "''"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype} DEFAULT {default}")
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    print(f"[DB MIGRATION] Warning adding {table}.{col}: {e}")
         # Context auto-compaction: rolling summary of turns older than the keep-window
         for col, coltype, default in [
             ("summary", "TEXT", "''"),
@@ -5633,6 +5644,29 @@ async def delete_notification(notification_id: int, user_id: str | None = None) 
         await db.close()
 
 
+async def prune_jarvis_history(*, notification_days: int = 30,
+                               runs_per_task: int = 50) -> dict:
+    """Retention sweep for the two unbounded Jarvis tables. Cross-user raw SQL
+    by design — called from the scheduler tick (daily cadence), like the
+    reapers. Seen notifications older than the window go; each task keeps only
+    its newest N runs."""
+    db = await get_db()
+    try:
+        cutoff = (datetime.utcnow() - timedelta(days=notification_days)).isoformat()
+        notif_cur = await db.execute(
+            "DELETE FROM notifications WHERE seen=1 AND created_at < ?", (cutoff,))
+        runs_cur = await db.execute(
+            """DELETE FROM task_runs WHERE id NOT IN (
+                 SELECT id FROM task_runs AS tr
+                 WHERE tr.task_id = task_runs.task_id
+                 ORDER BY tr.started_at DESC LIMIT ?)""",
+            (runs_per_task,))
+        await db.commit()
+        return {"notifications": notif_cur.rowcount, "task_runs": runs_cur.rowcount}
+    finally:
+        await db.close()
+
+
 async def get_assistant_profile(user_id: str | None = None) -> dict | None:
     uid = _scope_user(user_id)
     db = await get_db()
@@ -6058,11 +6092,15 @@ async def caldav_accounts_for_sync() -> list[dict]:
 # JARVIS SUITE — email accounts + cached message headers
 # ============================================================
 
+_EMAIL_ACCOUNT_BOOL_KEYS = ("imap_ssl", "smtp_ssl", "enabled",
+                            "allow_autonomous_send", "allow_autonomous_delete")
+
+
 def _public_email_account(row) -> dict:
     a = dict(row)
     a["password_set"] = bool(a.get("password"))
     a.pop("password", None)
-    for key in ("imap_ssl", "smtp_ssl", "enabled", "allow_autonomous_send"):
+    for key in _EMAIL_ACCOUNT_BOOL_KEYS:
         a[key] = bool(a.get(key))
     return a
 
@@ -6102,7 +6140,7 @@ async def get_email_account(account_id: str, *, with_password: bool = False,
             return None
         if with_password:
             a = dict(rows[0])
-            for key in ("imap_ssl", "smtp_ssl", "enabled", "allow_autonomous_send"):
+            for key in _EMAIL_ACCOUNT_BOOL_KEYS:
                 a[key] = bool(a.get(key))
             return a
         return _public_email_account(rows[0])
@@ -6126,14 +6164,15 @@ async def update_email_account(account_id: str, fields: dict,
     uid = _scope_user(user_id)
     allowed = {"label", "imap_host", "imap_port", "imap_ssl", "smtp_host", "smtp_port",
                "smtp_ssl", "username", "password", "from_address", "enabled",
-               "allow_autonomous_send", "last_uidvalidity", "last_seen_uid",
+               "allow_autonomous_send", "allow_autonomous_delete",
+               "last_uidvalidity", "last_seen_uid",
                "last_checked_at", "last_error"}
     sets, vals = [], []
     for key, value in fields.items():
         if key not in allowed:
             continue
         sets.append(f"{key}=?")
-        if key in ("imap_ssl", "smtp_ssl", "enabled", "allow_autonomous_send"):
+        if key in _EMAIL_ACCOUNT_BOOL_KEYS:
             vals.append(1 if value else 0)
         else:
             vals.append(value)
@@ -6177,7 +6216,7 @@ async def email_accounts_for_poll() -> list[dict]:
         out = []
         for r in rows:
             a = dict(r)
-            for key in ("imap_ssl", "smtp_ssl", "enabled", "allow_autonomous_send"):
+            for key in _EMAIL_ACCOUNT_BOOL_KEYS:
                 a[key] = bool(a.get(key))
             out.append(a)
         return out
@@ -6195,21 +6234,24 @@ def _row_to_email(row) -> dict:
 async def upsert_email_message(message_id: str, *, account_id: str, uid: int,
                                folder: str, subject: str, from_addr: str,
                                to_addrs: str, date_at: str | None, snippet: str,
-                               unread: bool, user_id: str | None = None) -> None:
+                               unread: bool, rfc_message_id: str = "",
+                               user_id: str | None = None) -> None:
     owner = _scope_user(user_id)
     db = await get_db()
     try:
         await db.execute(
             """INSERT INTO email_messages(id, account_id, user_id, uid, folder, subject,
-               from_addr, to_addrs, date_at, snippet, unread, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+               from_addr, to_addrs, date_at, snippet, unread, message_id, created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(account_id, folder, uid) DO UPDATE SET
                  subject=excluded.subject, from_addr=excluded.from_addr,
                  to_addrs=excluded.to_addrs, date_at=excluded.date_at,
-                 snippet=excluded.snippet, unread=excluded.unread""",
+                 snippet=excluded.snippet, unread=excluded.unread,
+                 message_id=excluded.message_id""",
             (message_id, account_id, owner, uid, folder, subject[:500],
              from_addr[:300], to_addrs[:1000], date_at, snippet[:2000],
-             1 if unread else 0, datetime.utcnow().isoformat()))
+             1 if unread else 0, (rfc_message_id or "")[:500],
+             datetime.utcnow().isoformat()))
         await db.commit()
     finally:
         await db.close()
@@ -6275,6 +6317,35 @@ async def update_email_message(message_id: str, fields: dict,
     finally:
         await db.close()
     return await get_email_message(message_id, user_id=uid)
+
+
+async def delete_email_message(message_id: str, user_id: str | None = None) -> bool:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "DELETE FROM email_messages WHERE id=? AND user_id=?", (message_id, uid))
+        await db.commit()
+        return cur.rowcount > 0
+    finally:
+        await db.close()
+
+
+async def delete_email_messages_for_account(account_id: str,
+                                            user_id: str | None = None) -> int:
+    """Purge every cached row for one account. Used when UIDVALIDITY changes:
+    the server reassigned every UID, so old rows point at DIFFERENT messages
+    and acting on them (read/delete) would hit the wrong email."""
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "DELETE FROM email_messages WHERE account_id=? AND user_id=?",
+            (account_id, uid))
+        await db.commit()
+        return cur.rowcount
+    finally:
+        await db.close()
 
 
 async def untriaged_email_messages(account_id: str, limit: int = 25,

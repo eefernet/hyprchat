@@ -16,41 +16,14 @@ from zoneinfo import ZoneInfo
 import database as db
 import notifications
 from agents import assistant as assistant_mod
-
-
-def _tz(tz_name: str) -> ZoneInfo:
-    try:
-        return ZoneInfo(tz_name or "UTC")
-    except Exception:
-        return ZoneInfo("UTC")
+# Shared conversions (timeutil owns the single implementation); local_to_utc /
+# utc_to_local stay importable from pim for existing callers.
+from timeutil import local_to_utc, utc_to_local, safe_zone as _tz
 
 
 async def user_timezone(user_id: str | None = None) -> str:
     profile = await db.get_assistant_profile(user_id=user_id)
     return (profile or {}).get("timezone") or "UTC"
-
-
-def local_to_utc(value: str, tz_name: str) -> str | None:
-    """'YYYY-MM-DDTHH:MM' local wall clock → naive-UTC ISO. None on garbage."""
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    try:
-        local = datetime.fromisoformat(raw).replace(tzinfo=_tz(tz_name))
-        return local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None).isoformat()
-    except ValueError:
-        return None
-
-
-def utc_to_local(value: str, tz_name: str) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    try:
-        utc = datetime.fromisoformat(raw).replace(tzinfo=ZoneInfo("UTC"))
-        return utc.astimezone(_tz(tz_name)).replace(tzinfo=None).isoformat(timespec="minutes")
-    except ValueError:
-        return raw
 
 
 # ------------------------------------------------------------------
@@ -95,9 +68,14 @@ async def update_event(event_id: str, fields: dict, user_id: str | None = None) 
     """Route/tool-facing update: local times in, marks the row dirty for CalDAV."""
     tz = await user_timezone(user_id)
     mapped: dict = {}
-    for key in ("title", "description", "location", "all_day", "remind_minutes"):
+    for key in ("title", "description", "location", "all_day"):
         if key in fields and fields[key] is not None:
             mapped[key] = fields[key]
+    # remind_minutes present-with-None means CLEAR the reminder (the route
+    # sends an exclude_unset dump, so the key only appears when explicitly
+    # sent — otherwise a set reminder could never be removed).
+    if "remind_minutes" in fields:
+        mapped["remind_minutes"] = fields["remind_minutes"]
     if fields.get("start_local"):
         start = local_to_utc(fields["start_local"], tz)
         if start:
@@ -106,6 +84,10 @@ async def update_event(event_id: str, fields: dict, user_id: str | None = None) 
         end = local_to_utc(fields["end_local"], tz)
         if end:
             mapped["end_at"] = end
+    # Re-arm the reminder whenever the event moves or the reminder changes —
+    # without this a rescheduled event keeps reminded=1 and never fires again.
+    if "start_at" in mapped or "remind_minutes" in mapped:
+        mapped["reminded"] = False
     if mapped:
         existing = await db.get_calendar_event(event_id, user_id=user_id)
         if existing and existing.get("sync_state") in ("synced", "dirty"):

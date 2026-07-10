@@ -701,7 +701,7 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
   </div>;
 }
 
-function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onDelete,onUseInChat,notify,onRefreshList,onOpenArtifact}){
+function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onDelete,onUseInChat,notify,confirmAction,onRefreshList,onOpenArtifact}){
   const isMobile=useIsMobile();
   const [preview,setPreview]=useState(null);
   const [timeline,setTimeline]=useState([]);
@@ -821,13 +821,13 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
       </section>
       {onDelete&&<button onClick={()=>onDelete(a.id)} style={{...btnS(t.err),justifyContent:"center"}}>Delete metadata</button>}
     </div>
-    {canvasOpen&&<ArtifactCanvas artifact={a} t={t} font={font} notify={notify}
+    {canvasOpen&&<ArtifactCanvas artifact={a} t={t} font={font} notify={notify} confirmAction={confirmAction}
       onClose={()=>setCanvasOpen(false)}
       onRevised={(rev)=>{setCanvasOpen(false);onRefreshList?.();if(rev?.id)onOpenArtifact?.(rev.id);}}/>}
   </div>;
 }
 
-const ArtifactCard=({artifact,t,font,workspaces,onPreview,onOpenConv,onPatch,onDelete,onDetails,onSelect,selected,compact})=>{
+const ArtifactCard=({artifact,t,font,workspaces,onPreview,onOpenConv,onPatch,onDelete,onDetails,onSelect,selected,compact,confirmAction})=>{
   const a=artifact||{};
   const meta=a.metadata||{};
   const km=artifactKindMeta(a.kind,t,meta);
@@ -835,9 +835,10 @@ const ArtifactCard=({artifact,t,font,workspaces,onPreview,onOpenConv,onPatch,onD
   const title=a.title||a.filename||"Artifact";
   const created=a.created_at?new Date(a.created_at).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"";
   const rename=async()=>{
-    const next=window.prompt("Artifact name",title);
-    if(next===null)return;
-    const clean=String(next||"").trim();
+    const next=confirmAction?await confirmAction({title:"Rename artifact",promptText:title,inputLabel:"Artifact name",confirmLabel:"Rename",tone:"info"})
+      :window.prompt("Artifact name",title);
+    if(!next)return;
+    const clean=String(next).trim();
     if(clean&&clean!==title)await onPatch?.(a.id,{title:clean});
   };
   const assign=async(e)=>{
@@ -893,7 +894,7 @@ const ArtifactCard=({artifact,t,font,workspaces,onPreview,onOpenConv,onPatch,onD
   </div>;
 };
 
-function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseInChat,focusId,onFocusConsumed,notify}){
+function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseInChat,focusId,onFocusConsumed,notify,confirmAction}){
   const [items,setItems]=useState([]);
   const [view,setView]=useState("all");
   const [q,setQ]=useState("");
@@ -990,11 +991,11 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
         <div style={{fontSize:11,lineHeight:1.55,maxWidth:420}}>Files the assistant delivers with download_file or download_project are collected here.</div>
       </div>}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:12}}>
-        {items.map(a=><ArtifactCard key={a.id} artifact={a} t={t} font={font} workspaces={workspaces} onPreview={onPreview} onOpenConv={onOpenConv} onPatch={patchArtifact} onDelete={deleteArtifact} onDetails={openDetail} onSelect={toggleSelected} selected={selected.has(a.id)}/>)}
+        {items.map(a=><ArtifactCard key={a.id} artifact={a} t={t} font={font} workspaces={workspaces} onPreview={onPreview} onOpenConv={onOpenConv} onPatch={patchArtifact} onDelete={deleteArtifact} onDetails={openDetail} onSelect={toggleSelected} selected={selected.has(a.id)} confirmAction={confirmAction}/>)}
       </div>
     </div>
   </div>
-  {detail&&<ArtifactDetailPanel artifact={detail} t={t} font={font} workspaces={workspaces} kbs={kbs} onClose={()=>setDetail(null)} onPatch={patchArtifact} onDelete={deleteArtifact} onUseInChat={onUseInChat} notify={notify} onRefreshList={load} onOpenArtifact={openDetail}/>}
+  {detail&&<ArtifactDetailPanel artifact={detail} t={t} font={font} workspaces={workspaces} kbs={kbs} onClose={()=>setDetail(null)} onPatch={patchArtifact} onDelete={deleteArtifact} onUseInChat={onUseInChat} notify={notify} confirmAction={confirmAction} onRefreshList={load} onOpenArtifact={openDetail}/>}
   </div>;
 }
 

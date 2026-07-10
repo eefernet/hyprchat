@@ -41,6 +41,7 @@ class EmailAccountUpdate(BaseModel):
     from_address: Optional[str] = None
     enabled: Optional[bool] = None
     allow_autonomous_send: Optional[bool] = None
+    allow_autonomous_delete: Optional[bool] = None
 
 
 class SendRequest(BaseModel):
@@ -152,10 +153,29 @@ async def archive_message(message_id: str):
     account = await _account_or_404(msg["account_id"], with_password=True)
     try:
         import email_client
-        await email_client.set_flags(account, msg["uid"], archive=True)
+        moved = await email_client.set_flags(account, msg["uid"], archive=True)
     except Exception as e:
         raise HTTPException(502, f"IMAP archive failed: {e}")
-    return await db.update_email_message(message_id, {"archived": True, "unread": False})
+    updated = await db.update_email_message(message_id, {"archived": True, "unread": False})
+    # Honest server-side status: without an Archive folder the message was
+    # only marked read on the server and stays in its inbox.
+    updated["archived_on_server"] = bool(moved)
+    return updated
+
+
+@router.post("/api/email/messages/{message_id}/delete")
+async def delete_message(message_id: str):
+    msg = await db.get_email_message(message_id)
+    if not msg:
+        raise HTTPException(404, "Message not found")
+    account = await _account_or_404(msg["account_id"], with_password=True)
+    try:
+        import email_client
+        await email_client.delete_message(account, msg["uid"])
+    except Exception as e:
+        raise HTTPException(502, f"IMAP delete failed: {e}")
+    await db.delete_email_message(message_id)
+    return {"status": "deleted", "id": message_id}
 
 
 @router.post("/api/email/messages/{message_id}/read")
@@ -209,7 +229,8 @@ async def send_reply(message_id: str, req: ReplyRequest):
     if not subject.lower().startswith("re:"):
         subject = f"Re: {subject}"
     try:
-        await email_client.send_mail(account, to=to, subject=subject, body=body)
+        await email_client.send_mail(account, to=to, subject=subject, body=body,
+                                     in_reply_to=msg.get("message_id") or "")
     except Exception as e:
         raise HTTPException(502, f"SMTP send failed: {e}")
     await db.update_email_message(message_id, {"draft_reply": "", "unread": False})

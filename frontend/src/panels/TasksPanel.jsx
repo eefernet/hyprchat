@@ -1,14 +1,17 @@
 import React,{useState,useEffect,useCallback} from 'react';
 
 import { API } from '../session.js';
+import { apiJson } from '../api.js';
+import { fmtUtcMinute } from '../datetime.js';
 import { IC } from '../components/icons.jsx';
+import PanelHeader from '../components/PanelHeader.jsx';
 import { EmptyState } from '../components/hyprChatWidgets.jsx';
 
 const KIND_FIELDS={once:["run_at"],daily:["time"],weekly:["time","weekday"],monthly:["time","day"],cron:["cron"]};
 const WEEKDAYS=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
-const EMPTY_FORM={title:"",prompt:"",task_type:"llm",schedule_kind:"daily",time:"08:30",weekday:0,day:1,cron:"",run_at:"",notify:true};
+const EMPTY_FORM={title:"",prompt:"",task_type:"llm",schedule_kind:"daily",time:"08:30",weekday:0,day:1,cron:"",run_at:"",notify:true,delivery:{}};
 
-export default function TasksPanel({t,btnS,cardS,inputS,tab,setTab,onUnseenChange}){
+export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab,onUnseenChange}){
   const [tasks,setTasks]=useState([]);
   const [notifs,setNotifs]=useState([]);
   const [unseen,setUnseen]=useState(0);
@@ -21,17 +24,18 @@ export default function TasksPanel({t,btnS,cardS,inputS,tab,setTab,onUnseenChang
   const [ntfy,setNtfy]=useState({url:"",topic:"",token:"",allow_private:false,token_set:false});
 
   const loadTasks=useCallback(async()=>{
-    try{const r=await fetch(`${API}/api/tasks`);setTasks(await r.json());}catch(e){setErr(String(e));}
+    try{setTasks(await apiJson("/api/tasks"));}catch(e){setErr(String(e.message||e));}
   },[]);
   const loadNotifs=useCallback(async()=>{
     try{
-      const r=await fetch(`${API}/api/notifications?limit=100`);const d=await r.json();
+      const d=await apiJson("/api/notifications?limit=100");
       setNotifs(d.notifications||[]);setUnseen(d.unseen_count||0);
       onUnseenChange&&onUnseenChange(d.unseen_count||0);
-    }catch(e){setErr(String(e));}
+    }catch(e){setErr(String(e.message||e));}
   },[onUnseenChange]);
   const loadNtfy=useCallback(async()=>{
-    try{const r=await fetch(`${API}/api/notifications/channels`);const d=await r.json();setNtfy(n=>({...n,...(d.ntfy||{}),token:""}));}catch{}
+    try{const d=await apiJson("/api/notifications/channels");setNtfy(n=>({...n,...(d.ntfy||{}),token:""}));}
+    catch(e){setErr(String(e.message||e));}
   },[]);
   useEffect(()=>{loadTasks();loadNotifs();loadNtfy();},[loadTasks,loadNotifs,loadNtfy]);
 
@@ -41,9 +45,11 @@ export default function TasksPanel({t,btnS,cardS,inputS,tab,setTab,onUnseenChang
     const schedule_json={};
     for(const f of (KIND_FIELDS[form.schedule_kind]||[]))
       if(form[f]!==""&&form[f]!=null)schedule_json[f]=(f==="weekday"||f==="day")?Number(form[f]):form[f];
+    // Preserve delivery options the form doesn't surface (ntfy/email flags) —
+    // spreading form.delivery first keeps them across edits.
     const body={title:form.title,prompt:form.prompt,task_type:form.task_type,
       schedule_kind:form.schedule_kind,schedule_json,
-      delivery_json:{conversation:!!form.conversation_id,notify:!!form.notify},
+      delivery_json:{...(form.delivery||{}),conversation:!!form.conversation_id,notify:!!form.notify},
       conversation_id:form.conversation_id||""};
     try{
       const r=await fetch(`${API}/api/tasks${form.id?`/${form.id}`:""}`,{
@@ -54,15 +60,18 @@ export default function TasksPanel({t,btnS,cardS,inputS,tab,setTab,onUnseenChang
   };
   const taskAction=async(id,action)=>{
     try{
-      if(action==="delete"){if(!confirm("Delete this task?"))return;await fetch(`${API}/api/tasks/${id}`,{method:"DELETE"});}
+      if(action==="delete"){if(!await confirmAction({title:"Delete task",body:"Delete this scheduled task and its run history?",confirmLabel:"Delete",tone:"danger"}))return;await fetch(`${API}/api/tasks/${id}`,{method:"DELETE"});}
       else await fetch(`${API}/api/tasks/${id}/${action}`,{method:"POST"});
       loadTasks();
     }catch(e){setErr(String(e));}
   };
+  const refreshRuns=useCallback(async id=>{
+    try{setRuns(await apiJson(`/api/tasks/${id}/runs`));}catch{}
+  },[]);
   const showRuns=async id=>{
     if(runsFor===id){setRunsFor(null);return;}
     setRunsFor(id);setRuns([]);
-    try{const r=await fetch(`${API}/api/tasks/${id}/runs`);setRuns(await r.json());}catch{}
+    refreshRuns(id);
   };
   const parseNl=async()=>{
     if(!nlText.trim())return;
@@ -90,24 +99,21 @@ export default function TasksPanel({t,btnS,cardS,inputS,tab,setTab,onUnseenChang
   };
 
   const kindLabel=k=>({once:"once",daily:"daily",weekly:"weekly",monthly:"monthly",cron:"cron",event:"on event",webhook:"webhook"})[k]||k;
-  const fmtTs=s=>s?String(s).replace("T"," ").slice(0,16)+" UTC":"";
+  const fmtTs=fmtUtcMinute;
   const statusColor=s=>s==="succeeded"?t.ok:s==="failed"?t.err:s==="running"?t.warm:t.mut;
 
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",alignItems:"center",gap:8,flexShrink:0,flexWrap:"wrap"}}>
-      <span style={{display:"flex",color:t.acc}}><IC.Clock/></span>
-      <div style={{marginRight:12}}>
-        <div style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Scheduled Tasks</div>
-        <div style={{fontSize:10,color:t.mut,marginTop:2}}>Recurring agent work, reminders, and the notification queue.</div>
-      </div>
-      <button onClick={()=>setTab("tasks")} style={{...btnS(tab==="tasks"?t.acc:t.mut),padding:"5px 12px"}}>Tasks</button>
-      <button onClick={()=>setTab("notifications")} style={{...btnS(tab==="notifications"?t.acc:t.mut),padding:"5px 12px"}}>
-        Notifications{unseen>0?` (${unseen})`:""}
-      </button>
-      <div style={{flex:1}}/>
+    <PanelHeader t={t} icon={<IC.Clock/>} title="Scheduled Tasks"
+      subtitle="Recurring agent work, reminders, and the notification queue."
+      nav={<>
+        <button onClick={()=>setTab("tasks")} style={{...btnS(tab==="tasks"?t.acc:t.mut),padding:"5px 12px"}}>Tasks</button>
+        <button onClick={()=>setTab("notifications")} style={{...btnS(tab==="notifications"?t.acc:t.mut),padding:"5px 12px"}}>
+          Notifications{unseen>0?` (${unseen})`:""}
+        </button>
+      </>}>
       <button onClick={()=>{loadTasks();loadNotifs();}} style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
       {tab==="tasks"&&<button onClick={()=>setForm({...EMPTY_FORM})} style={btnS(t.warm)}><IC.Plus/> New Task</button>}
-    </div>
+    </PanelHeader>
     <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
       <div style={{maxWidth:900}}>
         {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}
@@ -138,6 +144,9 @@ export default function TasksPanel({t,btnS,cardS,inputS,tab,setTab,onUnseenChang
               {(KIND_FIELDS[form.schedule_kind]||[]).includes("day")&&<input type="number" min={1} max={31} value={form.day} onChange={e=>setForm(f=>({...f,day:e.target.value}))} style={{...inputS,width:70}}/>}
               {(KIND_FIELDS[form.schedule_kind]||[]).includes("cron")&&<input value={form.cron} onChange={e=>setForm(f=>({...f,cron:e.target.value}))} placeholder="*/30 * * * *" style={{...inputS,width:160}}/>}
               {(KIND_FIELDS[form.schedule_kind]||[]).includes("run_at")&&<input type="datetime-local" value={form.run_at} onChange={e=>setForm(f=>({...f,run_at:e.target.value}))} style={{...inputS,width:"auto"}}/>}
+              <label style={{fontSize:10,color:t.mut,display:"flex",gap:5,alignItems:"center"}}>
+                <input type="checkbox" checked={!!form.notify} onChange={e=>setForm(f=>({...f,notify:e.target.checked}))}/> notify when done
+              </label>
             </div>
             <div style={{display:"flex",gap:8}}>
               <button onClick={saveTask} style={btnS(t.ok)}>{form.id?"Save":"Create"}</button>
@@ -159,7 +168,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,tab,setTab,onUnseenChang
               </div>
               <button onClick={()=>taskAction(task.id,"run")} title="Run now" style={{...btnS(t.ok),padding:"4px 9px",fontSize:10}}>▶ Run</button>
               <button onClick={()=>taskAction(task.id,task.enabled?"pause":"resume")} style={{...btnS(task.enabled?t.warm:t.ok),padding:"4px 9px",fontSize:10}}>{task.enabled?"Pause":"Resume"}</button>
-              <button onClick={()=>{const sj=task.schedule_json||{};setForm({...EMPTY_FORM,id:task.id,title:task.title,prompt:task.prompt,task_type:task.task_type,schedule_kind:task.schedule_kind,time:sj.time||"08:30",weekday:sj.weekday??0,day:sj.day??1,cron:sj.cron||"",run_at:sj.run_at||"",conversation_id:task.conversation_id});}} style={{...btnS(t.acc),padding:"4px 9px",fontSize:10}}><IC.Pencil/></button>
+              <button onClick={()=>{const sj=task.schedule_json||{};const dj=task.delivery_json||{};setForm({...EMPTY_FORM,id:task.id,title:task.title,prompt:task.prompt,task_type:task.task_type,schedule_kind:task.schedule_kind,time:sj.time||"08:30",weekday:sj.weekday??0,day:sj.day??1,cron:sj.cron||"",run_at:sj.run_at||"",conversation_id:task.conversation_id,notify:dj.notify!==false,delivery:dj});}} style={{...btnS(t.acc),padding:"4px 9px",fontSize:10}}><IC.Pencil/></button>
               <button onClick={()=>showRuns(task.id)} style={{...btnS(t.mut),padding:"4px 9px",fontSize:10}}>History</button>
               <button onClick={()=>taskAction(task.id,"delete")} style={{...btnS(t.err),padding:"4px 9px",fontSize:10}}><IC.Trash/></button>
             </div>
@@ -173,7 +182,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,tab,setTab,onUnseenChang
                 <span style={{color:statusColor(r.status),fontWeight:700,minWidth:70}}>{r.status}</span>
                 <span style={{color:t.mut}}>{fmtTs(r.started_at)}</span>
                 <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.error||r.result_text||""}</span>
-                {r.status==="running"&&<button onClick={async()=>{await fetch(`${API}/api/tasks/runs/${r.id}/cancel`,{method:"POST"});showRuns(task.id);setRunsFor(task.id);}} style={{...btnS(t.err),padding:"2px 6px",fontSize:9}}>Stop</button>}
+                {r.status==="running"&&<button onClick={async()=>{await fetch(`${API}/api/tasks/runs/${r.id}/cancel`,{method:"POST"});refreshRuns(task.id);loadTasks();}} style={{...btnS(t.err),padding:"2px 6px",fontSize:9}}>Stop</button>}
               </div>)}
             </div>}
           </div>)}

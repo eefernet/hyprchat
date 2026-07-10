@@ -600,7 +600,9 @@ function HyprChat(){
     }
   },[notify]);
   const confirmAction=useCallback((opts={})=>new Promise(resolve=>{
-    setConfirmPhrase("");
+    // promptText (string) switches the dialog to free-text input mode:
+    // resolves the entered string on confirm, null on cancel.
+    setConfirmPhrase(opts.promptText!==undefined?String(opts.promptText):"");
     setConfirmDialog({
       title:opts.title||"Confirm action",
       body:opts.body||"",
@@ -608,7 +610,8 @@ function HyprChat(){
       cancelLabel:opts.cancelLabel||"Cancel",
       tone:opts.tone||"warning",
       requiredText:opts.requiredText||"",
-      inputLabel:opts.inputLabel||"Type to confirm",
+      prompt:opts.promptText!==undefined,
+      inputLabel:opts.inputLabel||(opts.promptText!==undefined?"":"Type to confirm"),
       resolve
     });
   }),[]);
@@ -2501,7 +2504,8 @@ function HyprChat(){
         const items=(d.notifications||[]);
         const maxId=items.reduce((a,n)=>Math.max(a,n.id||0),0);
         if(notifMaxIdRef.current>0&&maxId>notifMaxIdRef.current
-           &&typeof Notification!=="undefined"&&Notification.permission==="granted"){
+           &&typeof Notification!=="undefined"&&Notification.permission==="granted"
+           &&!document.hasFocus()){
           for(const n of items.filter(n=>n.id>notifMaxIdRef.current).slice(0,3)){
             try{new Notification(n.title||"HyprChat",{body:(n.body||"").slice(0,180),tag:`hc-notif-${n.id}`});}catch{}
           }
@@ -4931,9 +4935,9 @@ function HyprChat(){
             onOpenReport={id=>{setWsPanel(false);setPanel("research");setResearchView("reports");loadResearchReport(id);}}
             onRemoveReport={removeResearchReportFromWorkspace}
             onPreview={openPreview} models={models} wsModel={wsModel}
-            notify={notify}
+            notify={notify} confirmAction={confirmAction}
             onPersonaCreated={mc=>{const norm={...mc,parameters:normalizeProfileParams(mc)};setMcs(p=>[...p,norm]);setProfileTab(getProfileType(norm)==="persona"?"personas":"agents");setPanel("personas");setEditMc(mc.id);}}/>
-      :panel==="artifacts"?<ArtifactStudioPanel t={t} font={font} workspaces={workspaces} kbs={kbs} onPreview={openPreview} onOpenConv={id=>loadConversation(id)} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Artifact added to composer",duration:1800});}}} focusId={artifactFocusId} onFocusConsumed={()=>setArtifactFocusId(null)} notify={notify}/>
+      :panel==="artifacts"?<ArtifactStudioPanel t={t} font={font} workspaces={workspaces} kbs={kbs} onPreview={openPreview} onOpenConv={id=>loadConversation(id)} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Artifact added to composer",duration:1800});}}} focusId={artifactFocusId} onFocusConsumed={()=>setArtifactFocusId(null)} notify={notify} confirmAction={confirmAction}/>
       :panel==="images"?<ImageStudioPanel t={t} font={font} configured={!!comfyuiUrl} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Image added to composer",duration:1800});}}} notify={notify} confirmAction={confirmAction} inputS={inputS} fieldLabelS={secFieldLabelS} sliderField={sliderField}/>
       :panel==="memory"?<MemoryProfilePanel t={t} API={API} font={font} notify={notify} onOpenConv={id=>loadConversation(id)} models={models} wsModel={wsModel}/>
       :panel==="kb"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
@@ -6647,15 +6651,15 @@ function HyprChat(){
 
       :panel==="analytics"?<AnalyticsPanel t={t} btnS={btnS} cardS={cardS} analyticsDays={analyticsDays} setAnalyticsDays={setAnalyticsDays} analyticsGroup={analyticsGroup} setAnalyticsGroup={setAnalyticsGroup} loadAnalytics={loadAnalytics} analyticsData={analyticsData}/>
 
-      :(panel==="tasks"||panel==="notifications")?<TasksPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} tab={panel==="notifications"?"notifications":"tasks"} setTab={tb=>setPanel(tb==="notifications"?"notifications":"tasks")} onUnseenChange={setNotifUnseen}/>
+      :(panel==="tasks"||panel==="notifications")?<TasksPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} tab={panel==="notifications"?"notifications":"tasks"} setTab={tb=>setPanel(tb==="notifications"?"notifications":"tasks")} onUnseenChange={setNotifUnseen}/>
 
-      :panel==="email"?<EmailPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS}/>
+      :panel==="email"?<EmailPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/>
 
-      :panel==="notes"?<NotesPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS}/>
+      :panel==="notes"?<NotesPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction}/>
 
-      :panel==="calendar"?<CalendarPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS}/>
+      :panel==="calendar"?<CalendarPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/>
 
-      :panel==="assistant"?<AssistantPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} models={models} openAssistantChat={async cid=>{if(!cid)return;try{const r=await fetch(`${API}/api/conversations`);const cs=await r.json();const isCouncil=v=>v==="1"||v===1||v===true;setConvs(cs.map(c=>({...c,messages:[],is_council:isCouncil(c.is_council),council_config_id:c.council_config_id||null})));}catch{}setActId(cid);loadConversation(cid);setPanel("chat");}}/>
+      :panel==="assistant"?<AssistantPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} models={models} openAssistantChat={async cid=>{if(!cid)return;try{const r=await fetch(`${API}/api/conversations`);const cs=await r.json();const isCouncil=v=>v==="1"||v===1||v===true;setConvs(cs.map(c=>({...c,messages:[],is_council:isCouncil(c.is_council),council_config_id:c.council_config_id||null})));}catch{}setActId(cid);loadConversation(cid);setPanel("chat");}}/>
 
       :panel==="settings"?ReactDOM.createPortal(<div style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)",fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)closeSettings();}}>
     <div style={{width:isMobile?"100%":"min(1100px,95vw)",maxHeight:isMobile?"100%":"85vh",height:isMobile?"100%":"85vh",display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"260px minmax(0,1fr)",background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,boxShadow:"0 8px 48px #0008",overflow:"hidden",animation:"fadeIn .25s",...(isMobile?{gridTemplateRows:"auto minmax(0,1fr)",borderRadius:0,border:"none"}:{})}}>
@@ -8260,16 +8264,16 @@ function HyprChat(){
       </div>
     </div>}
 
-    {confirmDialog&&ReactDOM.createPortal((()=>{const c={danger:t.err,warning:t.warm,success:t.ok,info:t.acc}[confirmDialog.tone]||t.acc;const requiredText=confirmDialog.requiredText||"";const phraseOk=!requiredText||confirmPhrase===requiredText;const close=v=>{const dlg=confirmDialog;setConfirmDialog(null);setConfirmPhrase("");dlg.resolve&&dlg.resolve(v);};return <div style={{position:"fixed",inset:0,zIndex:500,background:"rgba(0,0,0,.66)",display:"flex",alignItems:"center",justifyContent:"center",padding:18,fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)close(false);}}>
+    {confirmDialog&&ReactDOM.createPortal((()=>{const c={danger:t.err,warning:t.warm,success:t.ok,info:t.acc}[confirmDialog.tone]||t.acc;const requiredText=confirmDialog.requiredText||"";const isPrompt=!!confirmDialog.prompt;const phraseOk=isPrompt?!!confirmPhrase.trim():(!requiredText||confirmPhrase===requiredText);const close=v=>{const dlg=confirmDialog;const phrase=confirmPhrase;setConfirmDialog(null);setConfirmPhrase("");dlg.resolve&&dlg.resolve(dlg.prompt?(v?phrase.trim():null):v);};return <div style={{position:"fixed",inset:0,zIndex:12000,background:"rgba(0,0,0,.66)",display:"flex",alignItems:"center",justifyContent:"center",padding:18,fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)close(false);}}>
       <div style={{width:"min(420px,94vw)",background:t.bgDeep,border:`1px solid ${c}44`,borderRadius:14,boxShadow:"0 18px 70px rgba(0,0,0,.55)",padding:18,animation:"fadeIn .16s"}}>
         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
-          <div style={{width:28,height:28,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${c}16`,border:`1px solid ${c}35`,color:c,fontWeight:800}}>!</div>
+          <div style={{width:28,height:28,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${c}16`,border:`1px solid ${c}35`,color:c,fontWeight:800}}>{isPrompt?"✎":"!"}</div>
           <div style={{fontSize:14,fontWeight:800,color:t.text,letterSpacing:.3}}>{confirmDialog.title}</div>
         </div>
-        <div style={{fontSize:12,color:t.dim,lineHeight:1.6,marginBottom:18}}>{confirmDialog.body}</div>
-        {requiredText&&<div style={{margin:"-4px 0 18px",display:"grid",gap:7}}>
-          <div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:800}}>{confirmDialog.inputLabel}</div>
-          <input value={confirmPhrase} onChange={e=>setConfirmPhrase(e.target.value)} placeholder={requiredText} autoFocus style={{...inputS,borderColor:phraseOk?`${c}66`:`${c}33`,background:`${c}08`,fontSize:12}}/>
+        {confirmDialog.body&&<div style={{fontSize:12,color:t.dim,lineHeight:1.6,marginBottom:18}}>{confirmDialog.body}</div>}
+        {(requiredText||isPrompt)&&<div style={{margin:"-4px 0 18px",display:"grid",gap:7}}>
+          {confirmDialog.inputLabel&&<div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:800}}>{confirmDialog.inputLabel}</div>}
+          <input value={confirmPhrase} onChange={e=>setConfirmPhrase(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&phraseOk)close(true);}} placeholder={requiredText} autoFocus style={{...inputS,borderColor:phraseOk?`${c}66`:`${c}33`,background:`${c}08`,fontSize:12}}/>
         </div>}
         <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
           <button onClick={()=>close(false)} style={{...btnS(t.mut),fontSize:12,padding:"7px 12px"}}>{confirmDialog.cancelLabel}</button>

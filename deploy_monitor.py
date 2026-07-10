@@ -97,6 +97,7 @@ WATCHED = {
     "backend/ocr.py":               ("PDF OCR",          REMOTE_BACKEND,            True),
     "backend/canvas_edit.py":       ("Canvas AI Edit",   REMOTE_BACKEND,            True),
     "backend/scheduler.py":         ("Task Scheduler",   REMOTE_BACKEND,            True),
+    "backend/timeutil.py":          ("Time Utils",       REMOTE_BACKEND,            True),
     "backend/notifications.py":     ("Notifications",    REMOTE_BACKEND,            True),
     "backend/pim.py":               ("PIM (Notes/Calendar)", REMOTE_BACKEND,        True),
     "backend/caldav_sync.py":       ("CalDAV Sync",      REMOTE_BACKEND,            True),

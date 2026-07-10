@@ -1,9 +1,11 @@
 import React,{useState,useEffect,useCallback} from 'react';
 
 import { API } from '../session.js';
+import { fmtUtcMinute } from '../datetime.js';
 import { IC } from '../components/icons.jsx';
+import PanelHeader from '../components/PanelHeader.jsx';
 
-export default function AssistantPanel({t,btnS,cardS,inputS,models,openAssistantChat}){
+export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models,openAssistantChat}){
   const [data,setData]=useState(null);
   const [timezones,setTimezones]=useState([]);
   const [busy,setBusy]=useState(false);
@@ -51,15 +53,10 @@ export default function AssistantPanel({t,btnS,cardS,inputS,models,openAssistant
   const checkIns=data.check_ins||[];
 
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
-      <span style={{display:"flex",color:t.warm}}><IC.Bot/></span>
-      <div>
-        <div style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.warm}}>Personal Assistant</div>
-        <div style={{fontSize:10,color:t.mut,marginTop:2}}>Your proactive agent: pinned chat, daily check-ins, and scheduled work.</div>
-      </div>
-      <div style={{flex:1}}/>
+    <PanelHeader t={t} color={t.warm} icon={<IC.Bot/>} title="Personal Assistant"
+      subtitle="Your proactive agent: pinned chat, daily check-ins, and scheduled work.">
       <button onClick={()=>openAssistantChat&&openAssistantChat(data.profile?.conversation_id)} style={btnS(t.warm)}><IC.Chat/> Open Assistant Chat</button>
-    </div>
+    </PanelHeader>
     <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
       <div style={{maxWidth:820}}>
         {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}
@@ -125,9 +122,9 @@ export default function AssistantPanel({t,btnS,cardS,inputS,models,openAssistant
             <input defaultValue={ci.title} onBlur={e=>{if(e.target.value!==ci.title)patch({check_ins:[{id:ci.id,name:e.target.value}]});}} style={{...inputS,flex:1,minWidth:140}}/>
             <input type="time" defaultValue={(ci.schedule_json||{}).time||"08:30"} onBlur={e=>patch({check_ins:[{id:ci.id,time:e.target.value}]})} style={{...inputS,width:"auto"}}/>
             <button onClick={()=>patch({check_ins:[{id:ci.id,enabled:!ci.enabled}]})} style={{...btnS(ci.enabled?t.ok:t.mut),padding:"5px 10px",fontSize:10}}>{ci.enabled?"On":"Off"}</button>
-            <button onClick={()=>{if(confirm("Delete this check-in?"))patch({check_ins:[{id:ci.id,delete:true}]});}} style={{...btnS(t.err),padding:"5px 8px",fontSize:10}}><IC.Trash/></button>
+            <button onClick={async()=>{if(await confirmAction({title:"Delete check-in",body:"Delete this check-in?",confirmLabel:"Delete",tone:"danger"}))patch({check_ins:[{id:ci.id,delete:true}]});}} style={{...btnS(t.err),padding:"5px 8px",fontSize:10}}><IC.Trash/></button>
             <div style={{width:"100%",fontSize:9,color:t.mut}}>
-              {ci.next_run?`next ${String(ci.next_run).replace("T"," ").slice(0,16)} UTC`:""}
+              {ci.next_run?`next ${fmtUtcMinute(ci.next_run)}`:""}
               {ci.last_status?` · last ${ci.last_status}`:""}
             </div>
           </div>)}

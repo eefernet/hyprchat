@@ -1,14 +1,17 @@
 import React,{useState,useEffect,useCallback} from 'react';
 
 import { API } from '../session.js';
+import { apiJson } from '../api.js';
+import { fmtUtcMinute } from '../datetime.js';
 import { IC } from '../components/icons.jsx';
+import PanelHeader from '../components/PanelHeader.jsx';
 
 const EMPTY_EVENT={title:"",start_local:"",end_local:"",location:"",description:"",remind_minutes:""};
 const EMPTY_ACCOUNT={label:"",url:"",username:"",password:"",calendar_url:""};
 const pad=n=>String(n).padStart(2,"0");
 const dkey=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
 
-export default function CalendarPanel({t,btnS,cardS,inputS}){
+export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}){
   const [events,setEvents]=useState([]);
   const [month,setMonth]=useState(()=>{const d=new Date();return new Date(d.getFullYear(),d.getMonth(),1);});
   const [form,setForm]=useState(null);
@@ -16,27 +19,34 @@ export default function CalendarPanel({t,btnS,cardS,inputS}){
   const [acctForm,setAcctForm]=useState(null);
   const [showAccounts,setShowAccounts]=useState(false);
   const [syncing,setSyncing]=useState(false);
+  const [tz,setTz]=useState("");   // assistant-profile timezone (events are bucketed in it)
   const [err,setErr]=useState("");
 
   const load=useCallback(async()=>{
     const start=new Date(month);start.setDate(start.getDate()-7);
     const end=new Date(month.getFullYear(),month.getMonth()+1,7);
     try{
-      const r=await fetch(`${API}/api/calendar/events?start_local=${dkey(start)}T00:00&end_local=${dkey(end)}T23:59`);
-      setEvents(await r.json());
-    }catch(e){setErr(String(e));}
+      setEvents(await apiJson(`/api/calendar/events?start_local=${dkey(start)}T00:00&end_local=${dkey(end)}T23:59`));
+    }catch(e){setErr(String(e.message||e));}
   },[month]);
   const loadAccounts=useCallback(async()=>{
-    try{const r=await fetch(`${API}/api/calendar/caldav`);setAccounts(await r.json());}catch{}
+    try{setAccounts(await apiJson("/api/calendar/caldav"));}catch(e){setErr(String(e.message||e));}
   },[]);
   useEffect(()=>{load();loadAccounts();},[load,loadAccounts]);
+  useEffect(()=>{apiJson("/api/assistant").then(d=>setTz(d?.profile?.timezone||"")).catch(()=>{});},[]);
+  // "Today" in the ASSISTANT timezone — events arrive bucketed by assistant-tz
+  // start_local, so a browser in another tz would highlight the wrong day.
+  const tzToday=()=>{try{return new Intl.DateTimeFormat("en-CA",{timeZone:tz||undefined}).format(new Date());}catch{return dkey(new Date());}};
 
   const save=async()=>{
     if(!form?.title?.trim()||!form?.start_local)return setErr("Title and start time are required");
     setErr("");
+    // Cleared reminder on an existing event → explicit null (the backend
+    // treats present-with-null as "clear"; omitting the key means "unchanged").
     const body={title:form.title,start_local:form.start_local,end_local:form.end_local||"",
       location:form.location,description:form.description,
-      ...(form.remind_minutes!==""?{remind_minutes:Number(form.remind_minutes)}:{})};
+      ...(form.remind_minutes!==""?{remind_minutes:Number(form.remind_minutes)}
+         :form.id?{remind_minutes:null}:{})};
     try{
       const r=await fetch(`${API}/api/calendar/events${form.id?`/${form.id}`:""}`,{
         method:form.id?"PATCH":"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
@@ -45,7 +55,7 @@ export default function CalendarPanel({t,btnS,cardS,inputS}){
     }catch(e){setErr(String(e.message||e));}
   };
   const remove=async id=>{
-    if(!confirm("Delete this event?"))return;
+    if(!await confirmAction({title:"Delete event",body:"Delete this event?",confirmLabel:"Delete",tone:"danger"}))return;
     await fetch(`${API}/api/calendar/events/${id}`,{method:"DELETE"});load();
   };
   const saveAccount=async()=>{
@@ -59,7 +69,7 @@ export default function CalendarPanel({t,btnS,cardS,inputS}){
     setErr("");
     const r=await fetch(`${API}/api/calendar/caldav/${id}/test`,{method:"POST"});
     const d=await r.json().catch(()=>({}));
-    if(r.ok)alert("Connected. Calendars:\n"+(d.calendars||[]).map(c=>`${c.name}: ${c.url}`).join("\n"));
+    if(r.ok)notify({type:"success",text:"Connected",detail:`Calendars: ${(d.calendars||[]).map(c=>c.name).join(", ")||"none found"}`});
     else setErr(d.detail||"Connection failed");
   };
   const syncNow=async()=>{
@@ -77,7 +87,7 @@ export default function CalendarPanel({t,btnS,cardS,inputS}){
   for(const e of events){const k=(e.start_local||"").slice(0,10);(byDay[k]=byDay[k]||[]).push(e);}
   const firstDow=(month.getDay()+6)%7; // Monday-first
   const daysInMonth=new Date(month.getFullYear(),month.getMonth()+1,0).getDate();
-  const todayKey=dkey(new Date());
+  const todayKey=tzToday();
   const cells=[];
   for(let i=0;i<firstDow;i++)cells.push(null);
   for(let d=1;d<=daysInMonth;d++)cells.push(new Date(month.getFullYear(),month.getMonth(),d));
@@ -85,20 +95,17 @@ export default function CalendarPanel({t,btnS,cardS,inputS}){
   const monthLabel=month.toLocaleDateString(undefined,{month:"long",year:"numeric"});
 
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",alignItems:"center",gap:8,flexShrink:0,flexWrap:"wrap"}}>
-      <span style={{display:"flex",color:t.f1||t.acc}}><IC.Clock/></span>
-      <div style={{marginRight:12}}>
-        <div style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.f1||t.acc}}>Calendar</div>
-        <div style={{fontSize:10,color:t.mut,marginTop:2}}>Times shown in your assistant timezone. CalDAV keeps your phone in sync.</div>
-      </div>
-      <button onClick={()=>setMonth(m=>new Date(m.getFullYear(),m.getMonth()-1,1))} style={{...btnS(t.mut),padding:"5px 10px"}}>◀</button>
-      <div style={{fontSize:12,fontWeight:800,color:t.text,minWidth:130,textAlign:"center"}}>{monthLabel}</div>
-      <button onClick={()=>setMonth(m=>new Date(m.getFullYear(),m.getMonth()+1,1))} style={{...btnS(t.mut),padding:"5px 10px"}}>▶</button>
-      <div style={{flex:1}}/>
+    <PanelHeader t={t} color={t.f1||t.acc} icon={<IC.Clock/>} title="Calendar"
+      subtitle="Times shown in your assistant timezone. CalDAV keeps your phone in sync."
+      nav={<>
+        <button onClick={()=>setMonth(m=>new Date(m.getFullYear(),m.getMonth()-1,1))} style={{...btnS(t.mut),padding:"5px 10px"}}>◀</button>
+        <div style={{fontSize:12,fontWeight:800,color:t.text,minWidth:130,textAlign:"center"}}>{monthLabel}</div>
+        <button onClick={()=>setMonth(m=>new Date(m.getFullYear(),m.getMonth()+1,1))} style={{...btnS(t.mut),padding:"5px 10px"}}>▶</button>
+      </>}>
       {accounts.length>0&&<button onClick={syncNow} disabled={syncing} style={btnS(t.acc)}>{syncing?"Syncing...":"⟳ Sync"}</button>}
       <button onClick={()=>setShowAccounts(s=>!s)} style={btnS(showAccounts?t.acc:t.mut)}>CalDAV</button>
-      <button onClick={()=>{const now=new Date();setForm({...EMPTY_EVENT,start_local:`${dkey(now)}T09:00`});}} style={btnS(t.warm)}><IC.Plus/> Event</button>
-    </div>
+      <button onClick={()=>setForm({...EMPTY_EVENT,start_local:`${tzToday()}T09:00`})} style={btnS(t.warm)}><IC.Plus/> Event</button>
+    </PanelHeader>
     <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
       <div style={{maxWidth:980}}>
         {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}
@@ -113,11 +120,11 @@ export default function CalendarPanel({t,btnS,cardS,inputS}){
             <span style={{fontWeight:700,color:t.text}}>{a.label||a.url}</span>
             <span style={{color:t.mut,fontSize:9}}>{a.username}</span>
             {a.last_error?<span style={{color:t.err,fontSize:9}} title={a.last_error}>sync error</span>
-              :a.last_sync_at?<span style={{color:t.ok,fontSize:9}}>synced {String(a.last_sync_at).replace("T"," ").slice(0,16)}</span>:null}
+              :a.last_sync_at?<span style={{color:t.ok,fontSize:9}}>synced {fmtUtcMinute(a.last_sync_at)}</span>:null}
             <div style={{flex:1}}/>
             <button onClick={()=>testAccount(a.id)} style={{...btnS(t.acc),padding:"3px 8px",fontSize:9}}>Test</button>
             <button onClick={()=>setAcctForm({id:a.id,label:a.label,url:a.url,username:a.username,password:"",calendar_url:a.calendar_url||""})} style={{...btnS(t.mut),padding:"3px 8px",fontSize:9}}><IC.Pencil/></button>
-            <button onClick={async()=>{if(confirm("Remove this CalDAV account? (events stay, become local-only)")){await fetch(`${API}/api/calendar/caldav/${a.id}`,{method:"DELETE"});loadAccounts();}}} style={{...btnS(t.err),padding:"3px 8px",fontSize:9}}><IC.Trash/></button>
+            <button onClick={async()=>{if(await confirmAction({title:"Remove CalDAV account",body:"Remove this CalDAV account? Synced events stay and become local-only.",confirmLabel:"Remove",tone:"danger"})){await fetch(`${API}/api/calendar/caldav/${a.id}`,{method:"DELETE"});loadAccounts();}}} style={{...btnS(t.err),padding:"3px 8px",fontSize:9}}><IC.Trash/></button>
           </div>)}
           {acctForm&&<div style={{marginTop:10,borderTop:`1px solid ${t.brd}33`,paddingTop:10}}>
             <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>

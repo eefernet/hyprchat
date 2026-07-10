@@ -1,12 +1,15 @@
 import React,{useState,useEffect,useCallback} from 'react';
 
 import { API } from '../session.js';
+import { apiJson } from '../api.js';
+import { fmtLocalMinute } from '../datetime.js';
 import { IC } from '../components/icons.jsx';
+import PanelHeader from '../components/PanelHeader.jsx';
 import { EmptyState } from '../components/hyprChatWidgets.jsx';
 
 const EMPTY={kind:"todo",title:"",content:"",due_local:"",remind_local:""};
 
-export default function NotesPanel({t,btnS,cardS,inputS}){
+export default function NotesPanel({t,btnS,cardS,inputS,confirmAction}){
   const [notes,setNotes]=useState([]);
   const [tab,setTab]=useState("todo");
   const [form,setForm]=useState(null);
@@ -14,7 +17,7 @@ export default function NotesPanel({t,btnS,cardS,inputS}){
   const [err,setErr]=useState("");
 
   const load=useCallback(async()=>{
-    try{const r=await fetch(`${API}/api/notes`);setNotes(await r.json());}catch(e){setErr(String(e));}
+    try{setNotes(await apiJson("/api/notes"));}catch(e){setErr(String(e.message||e));}
   },[]);
   useEffect(()=>{load();},[load]);
 
@@ -35,29 +38,26 @@ export default function NotesPanel({t,btnS,cardS,inputS}){
     load();
   };
   const remove=async id=>{
-    if(!confirm("Delete this item?"))return;
+    if(!await confirmAction({title:"Delete item",body:"Delete this item?",confirmLabel:"Delete",tone:"danger"}))return;
     await fetch(`${API}/api/notes/${id}`,{method:"DELETE"});load();
   };
 
   const shown=notes.filter(n=>n.kind===tab&&(showDone||!n.done));
-  const fmtLocal=s=>s?String(s).replace("T"," "):"";
+  const fmtLocal=fmtLocalMinute;
 
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",alignItems:"center",gap:8,flexShrink:0,flexWrap:"wrap"}}>
-      <span style={{display:"flex",color:t.ok}}><IC.Pencil/></span>
-      <div style={{marginRight:12}}>
-        <div style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.ok}}>Notes & Todos</div>
-        <div style={{fontSize:10,color:t.mut,marginTop:2}}>Reminders fire as notifications; the assistant reads these in check-ins.</div>
-      </div>
-      <button onClick={()=>setTab("todo")} style={{...btnS(tab==="todo"?t.ok:t.mut),padding:"5px 12px"}}>Todos</button>
-      <button onClick={()=>setTab("note")} style={{...btnS(tab==="note"?t.ok:t.mut),padding:"5px 12px"}}>Notes</button>
-      <label style={{fontSize:10,color:t.mut,display:"flex",gap:5,alignItems:"center",marginLeft:6}}>
-        <input type="checkbox" checked={showDone} onChange={e=>setShowDone(e.target.checked)}/> show done
-      </label>
-      <div style={{flex:1}}/>
+    <PanelHeader t={t} color={t.ok} icon={<IC.Pencil/>} title="Notes & Todos"
+      subtitle="Reminders fire as notifications; the assistant reads these in check-ins."
+      nav={<>
+        <button onClick={()=>setTab("todo")} style={{...btnS(tab==="todo"?t.ok:t.mut),padding:"5px 12px"}}>Todos</button>
+        <button onClick={()=>setTab("note")} style={{...btnS(tab==="note"?t.ok:t.mut),padding:"5px 12px"}}>Notes</button>
+        <label style={{fontSize:10,color:t.mut,display:"flex",gap:5,alignItems:"center",marginLeft:6}}>
+          <input type="checkbox" checked={showDone} onChange={e=>setShowDone(e.target.checked)}/> show done
+        </label>
+      </>}>
       <button onClick={load} style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
       <button onClick={()=>setForm({...EMPTY,kind:tab})} style={btnS(t.warm)}><IC.Plus/> New</button>
-    </div>
+    </PanelHeader>
     <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
       <div style={{maxWidth:760}}>
         {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}

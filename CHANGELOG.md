@@ -1,4 +1,76 @@
 <details open>
+<summary>Alpha v17.4.1 — July 10, 2026</summary>
+
+> Jarvis-suite hardening pass: a deep audit of the scheduler, assistant,
+> notes/calendar/CalDAV, email, and notifications found ~35 bugs and holes;
+> the critical and high ones are all fixed here, plus shared-helper refactors
+> and the suite's first offline unit tests (27 new tests).
+
+## Reliability
+- **IMAP connections now have a 30s socket timeout** and every scheduler-tick
+  subsystem (reminders, CalDAV, email poll) runs under a 300s bound — a hung
+  mail server can no longer silently stop ALL scheduled tasks, reminders, and
+  syncs for every user.
+- **Timed-out or shutdown scheduled runs now cancel their model generation**
+  (`await_cancellable` propagates external cancellation into the work task)
+  instead of leaving it burning GPU and writing a stale reply later.
+- Startup docstring + guard: `claim_due_tasks` has no lease — the scheduler
+  documents the single-Uvicorn-worker invariant loudly.
+- Daily **retention sweep**: seen notifications older than 30 days and all but
+  the newest 50 runs per task are pruned (both tables previously grew forever).
+
+## Email safety
+- **Delete can never silently expunge.** Trash/Archive folders resolve via
+  RFC 6154 special-use flags first (works with localized folder names); if no
+  Trash folder exists the delete is refused with a clear error instead of
+  permanently expunging. Archive honestly reports when the server had no
+  Archive folder (message only marked read).
+- **New per-account "Allow the assistant to DELETE email" toggle** — a
+  server-side gate like the existing send gate. Off (default) = the chat tool
+  refuses and asks you; the Email panel's own Delete button always works.
+- **UIDVALIDITY change purges the cached inbox** before refetching — stale
+  cached UIDs could previously read or delete the WRONG message.
+- **Replies now thread properly**: the RFC 822 Message-ID is captured on poll
+  and sent as In-Reply-To/References on both panel and tool replies.
+- `send_email` accepts an `account` hint (label/address match) instead of
+  always sending from the oldest account; subjects are CRLF-stripped.
+- Poller checkpoint advances before `email_received` events fire (no duplicate
+  event storms after a crash), and event fires are capped at 20 per poll.
+- Triage prompt fences email content as untrusted data.
+
+## Scheduler & webhooks
+- Webhook payloads are fenced and pinned as untrusted data before reaching the
+  agent prompt, and `/api/hooks/{token}` is rate-limited (30/min per token).
+- `/api/tasks/parse` anchors "now" to your assistant timezone, not the server
+  clock — "tomorrow at 9" drafts correctly across timezones.
+- Editing a task no longer wipes its delivery options, the editor gains a
+  "notify when done" toggle, and Stop on a running run refreshes the history
+  row immediately.
+
+## Calendar & notes
+- **Rescheduled events remind again** (reminders re-arm when the start time or
+  reminder changes) and reminders can now be CLEARED from the panel.
+- CalDAV **all-day and floating-time events** convert through your assistant
+  timezone — they previously shifted by your UTC offset (wrong day for
+  non-UTC users), both on pull and push.
+- The calendar grid's "today" highlight and default event date follow the
+  assistant timezone; the notes editor's Todo/Note switch actually saves.
+
+## Under the hood
+- New `backend/timeutil.py` — the single implementation of the naive-UTC ↔
+  local wall-clock conversions that scheduler/pim/caldav_sync each duplicated;
+  one shared `scheduler.recompute_next_run` for routes and tools.
+- New frontend helpers: `api.js` (`apiJson` — GET loaders now surface backend
+  errors instead of crashing the render), `datetime.js` (UTC vs local
+  formatters), and a shared `PanelHeader` component across all five panels.
+- New offline unit tests: `test_scheduler_unit.py` (DST rollover, monthly
+  day-31 clamp, timezone fallbacks), `test_email_unit.py` (folder resolution,
+  delete refusal, UIDVALIDITY purge, checkpoint ordering, event cap), and
+  `test_cancel_registry.py` (external-cancellation regression).
+
+</details>
+
+<details>
 <summary>Alpha v17.4.0 — July 9, 2026</summary>
 
 > Fifteen new features: a generic OpenAI-compatible provider, native cloud tool

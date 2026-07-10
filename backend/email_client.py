@@ -16,12 +16,41 @@ from email.message import EmailMessage
 from email.utils import formataddr, parseaddr
 
 
+IMAP_TIMEOUT_SECONDS = 30
+
+# Special-folder fallbacks when the server doesn't advertise RFC 6154
+# special-use flags. Lowercase names.
+_TRASH_NAMES = ("trash", "[gmail]/trash", "deleted items", "deleted messages",
+                "deleted")
+_ARCHIVE_NAMES = ("archive", "[gmail]/all mail")
+
+
 def _imap_mailbox(account: dict):
     from imap_tools import MailBox, MailBoxUnencrypted
     cls = MailBox if account.get("imap_ssl", True) else MailBoxUnencrypted
-    box = cls(account["imap_host"], port=int(account.get("imap_port") or 993))
+    # The socket timeout guards the whole scheduler: the poller rides the tick
+    # loop, so a blackholed IMAP host must fail fast instead of hanging a
+    # to_thread worker (and the tick) forever.
+    box = cls(account["imap_host"], port=int(account.get("imap_port") or 993),
+              timeout=IMAP_TIMEOUT_SECONDS)
     box.login(account["username"], account["password"], initial_folder="INBOX")
     return box
+
+
+def _find_special_folder(box, use_flag: str, names: tuple[str, ...]) -> str | None:
+    """Resolve a special folder by RFC 6154 special-use flag first (survives
+    localized folder names), then by the common-name fallback list."""
+    try:
+        folders = list(box.folder.list())
+    except Exception:
+        return None
+    for folder in folders:
+        if use_flag in (folder.flags or ()):
+            return folder.name
+    for folder in folders:
+        if folder.name.lower() in names:
+            return folder.name
+    return None
 
 
 def _html_to_text(html: str) -> str:
@@ -56,8 +85,11 @@ def _fetch_new_blocking(account: dict, last_seen_uid: int) -> dict:
             if uid <= last_seen_uid:
                 continue  # servers ignore open-ended UID ranges when empty
             max_uid = max(max_uid, uid)
+            headers = {k.lower(): v for k, v in (msg.headers or {}).items()}
+            rfc_message_id = str((headers.get("message-id") or ("",))[0]).strip()
             out.append({
                 "uid": uid,
+                "message_id": rfc_message_id,
                 "subject": msg.subject or "(no subject)",
                 "from": msg.from_ or "",
                 "to": ", ".join(msg.to or ()),
@@ -80,23 +112,37 @@ def _fetch_body_blocking(account: dict, uid: int) -> dict:
 
 
 def _flag_blocking(account: dict, uid: int, seen: bool | None = None,
-                   archive: bool = False) -> None:
-    from imap_tools import AND, MailMessageFlags
+                   archive: bool = False) -> bool:
+    # flag/move/delete take UID strings, not AND() criteria — only fetch()
+    # takes criteria. A criteria object here raises "uid ... is not string".
+    # Returns True when an archive request did a REAL folder move (callers
+    # report the mark-read fallback honestly instead of claiming a move).
+    from imap_tools import MailMessageFlags
+    moved = False
     with _imap_mailbox(account) as box:
         if seen is not None:
-            box.flag(AND(uid=str(uid)), MailMessageFlags.SEEN, seen)
+            box.flag(str(uid), MailMessageFlags.SEEN, seen)
         if archive:
             # Prefer a real Archive folder; fall back to marking read.
-            target = None
-            for folder in box.folder.list():
-                name = folder.name
-                if name.lower() in ("archive", "[gmail]/all mail"):
-                    target = name
-                    break
+            target = _find_special_folder(box, "\\Archive", _ARCHIVE_NAMES)
             if target:
-                box.move(AND(uid=str(uid)), target)
+                box.move(str(uid), target)
+                moved = True
             else:
-                box.flag(AND(uid=str(uid)), MailMessageFlags.SEEN, True)
+                box.flag(str(uid), MailMessageFlags.SEEN, True)
+    return moved
+
+
+def _delete_blocking(account: dict, uid: int) -> None:
+    with _imap_mailbox(account) as box:
+        target = _find_special_folder(box, "\\Trash", _TRASH_NAMES)
+        if not target:
+            # Never fall through to \Deleted+EXPUNGE — that is permanent,
+            # unrecoverable deletion nobody asked for.
+            raise RuntimeError(
+                "no Trash folder found on the IMAP server — refusing to "
+                "permanently delete; archive the message instead")
+        box.move(str(uid), target)
 
 
 def _test_blocking(account: dict) -> dict:
@@ -114,8 +160,13 @@ async def fetch_body(account: dict, uid: int) -> dict:
 
 
 async def set_flags(account: dict, uid: int, *, seen: bool | None = None,
-                    archive: bool = False) -> None:
-    await asyncio.to_thread(_flag_blocking, account, uid, seen, archive)
+                    archive: bool = False) -> bool:
+    """Returns True when an archive request really moved the message."""
+    return await asyncio.to_thread(_flag_blocking, account, uid, seen, archive)
+
+
+async def delete_message(account: dict, uid: int) -> None:
+    await asyncio.to_thread(_delete_blocking, account, uid)
 
 
 async def test_account(account: dict) -> dict:
@@ -132,7 +183,8 @@ async def send_mail(account: dict, *, to: str, subject: str, body: str,
     label = account.get("label") or ""
     message["From"] = formataddr((label, from_addr)) if label else from_addr
     message["To"] = to
-    message["Subject"] = subject[:300]
+    # Model/user-supplied subject: strip CR/LF so it can never smuggle headers.
+    message["Subject"] = re.sub(r"[\r\n]+", " ", subject or "").strip()[:300]
     if in_reply_to:
         message["In-Reply-To"] = in_reply_to
         message["References"] = in_reply_to

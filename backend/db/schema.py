@@ -617,7 +617,8 @@ CREATE INDEX IF NOT EXISTS idx_caldav_accounts_user ON caldav_accounts(user_id);
 
 -- Jarvis suite: email accounts (IMAP/SMTP). Passwords are scrubbed from staged
 -- backups; API responses only ever expose password_set. allow_autonomous_send
--- is the SERVER-SIDE hard gate for the send tools (off = draft only).
+-- and allow_autonomous_delete are the SERVER-SIDE hard gates for the send and
+-- delete tools (send off = draft only; delete off = refuse and ask the user).
 CREATE TABLE IF NOT EXISTS email_accounts (
     id                   TEXT PRIMARY KEY,
     user_id              TEXT NOT NULL DEFAULT 'default',
@@ -633,6 +634,7 @@ CREATE TABLE IF NOT EXISTS email_accounts (
     from_address         TEXT DEFAULT '',
     enabled              INTEGER DEFAULT 1,
     allow_autonomous_send INTEGER DEFAULT 0,
+    allow_autonomous_delete INTEGER DEFAULT 0,
     last_uidvalidity     TEXT DEFAULT '',
     last_seen_uid        INTEGER DEFAULT 0,
     last_checked_at      TIMESTAMP,
@@ -655,6 +657,7 @@ CREATE TABLE IF NOT EXISTS email_messages (
     to_addrs           TEXT DEFAULT '',
     date_at            TIMESTAMP,
     snippet            TEXT DEFAULT '',
+    message_id         TEXT DEFAULT '',
     unread             INTEGER DEFAULT 1,
     archived           INTEGER DEFAULT 0,
     urgency            TEXT DEFAULT '',

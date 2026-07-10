@@ -67,12 +67,7 @@ def _validate_task_fields(task_type: str, schedule_kind: str) -> None:
 
 async def _computed_next_run(schedule_kind: str, schedule_json: dict,
                              timezone: str) -> str | None:
-    if schedule_kind in ("event", "webhook"):
-        return None
-    if not timezone:
-        profile = await db.get_assistant_profile()
-        timezone = (profile or {}).get("timezone") or "UTC"
-    return scheduler.compute_next_run(schedule_kind, schedule_json or {}, timezone)
+    return await scheduler.recompute_next_run(schedule_kind, schedule_json, timezone)
 
 
 @router.post("/api/tasks")
@@ -206,7 +201,16 @@ async def parse_task(req: TaskParseRequest):
              or model_providers.reject_cloud(config.DEFAULT_MODEL))
     if not model:
         raise HTTPException(503, "No local model available for task parsing")
-    prompt = _PARSE_PROMPT.format(now=datetime.now().isoformat(timespec="minutes"), text=text[:2000])
+    # Anchor "now" to the USER's assistant-profile timezone, not the server
+    # clock — "tomorrow at 9" must draft in the user's wall clock.
+    import pim
+    from zoneinfo import ZoneInfo
+    try:
+        tz = ZoneInfo(await pim.user_timezone() or "UTC")
+    except Exception:
+        tz = ZoneInfo("UTC")
+    now_local = datetime.now(tz).replace(tzinfo=None)
+    prompt = _PARSE_PROMPT.format(now=now_local.isoformat(timespec="minutes"), text=text[:2000])
     raw = await model_providers.complete_chat(
         ctx.http, model, prompt, num_ctx=4096, num_predict=512, format_json=True,
         timeout=60, ollama_url=config.OLLAMA_URL)
@@ -227,11 +231,42 @@ async def parse_task(req: TaskParseRequest):
     return draft
 
 
+# In-process fixed-window rate limit for the unauthenticated webhook route
+# (same pattern as the login limiter in routes/users.py): a leaked URL must
+# not let a caller queue unbounded task runs / task_runs rows.
+_HOOK_WINDOW_SECONDS = 60
+_HOOK_MAX_HITS = 30
+_HOOK_HITS_CAP = 512
+_HOOK_HITS: dict[str, tuple[int, float]] = {}  # token -> (count, window_start)
+
+
+def _hook_rate_limited(token: str) -> int | None:
+    """Seconds until the window resets when limited, else None (and records
+    the hit)."""
+    import time
+    now = time.time()
+    count, start = _HOOK_HITS.get(token, (0, now))
+    if now - start >= _HOOK_WINDOW_SECONDS:
+        count, start = 0, now
+    if count >= _HOOK_MAX_HITS:
+        return max(1, int(_HOOK_WINDOW_SECONDS - (now - start)))
+    _HOOK_HITS[token] = (count + 1, start)
+    if len(_HOOK_HITS) > _HOOK_HITS_CAP:
+        cutoff = now - _HOOK_WINDOW_SECONDS
+        for stale in [k for k, (_c, s) in _HOOK_HITS.items() if s < cutoff]:
+            _HOOK_HITS.pop(stale, None)
+    return None
+
+
 @router.post("/api/hooks/{token}")
 async def webhook_trigger(token: str, request: Request):
     """Unauthenticated inbound trigger — the token IS the credential. The
     middleware scoped this request to the default user, so the handler sets
     the task owner's contextvar explicitly before firing."""
+    retry_after = _hook_rate_limited(token)
+    if retry_after is not None:
+        raise HTTPException(429, "Too many webhook calls; try again later",
+                            headers={"Retry-After": str(retry_after)})
     task = await db.get_task_by_webhook_token(token)
     if not task or not secrets.compare_digest(task.get("webhook_token") or "", token):
         raise HTTPException(404, "Unknown hook")

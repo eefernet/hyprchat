@@ -23,6 +23,7 @@ class NoteCreate(BaseModel):
 
 
 class NoteUpdate(BaseModel):
+    kind: Optional[str] = None          # note | todo
     title: Optional[str] = None
     content: Optional[str] = None
     done: Optional[bool] = None
@@ -61,6 +62,8 @@ async def update_note(note_id: str, req: NoteUpdate):
         value = getattr(req, key)
         if value is not None:
             fields[key] = value
+    if req.kind in ("note", "todo"):
+        fields["kind"] = req.kind
     if req.due_local is not None:
         fields["due_at"] = pim.local_to_utc(req.due_local, tz)
     if req.remind_local is not None:

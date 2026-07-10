@@ -29,20 +29,33 @@ SYNC_INTERVAL_MIN = 10
 _sync_lock = asyncio.Lock()
 
 
-def _to_utc_naive(value) -> str | None:
-    """icalendar DTSTART/DTEND value (date | naive dt | aware dt) → naive-UTC ISO."""
+from timeutil import safe_zone as _safe_zone
+
+
+def _to_utc_naive(value, tz: ZoneInfo) -> str | None:
+    """icalendar DTSTART/DTEND value (date | naive dt | aware dt) → naive-UTC ISO.
+
+    Everything downstream (calendar panel, reminders, gatherers) treats the
+    stored value as UTC, so floating times and all-day dates must be
+    interpreted in the account owner's timezone here — storing them raw shifts
+    every all-day event by the user's UTC offset on display."""
     if value is None:
         return None
     if isinstance(value, datetime):
         if value.tzinfo is not None:
             return value.astimezone(ZoneInfo("UTC")).replace(tzinfo=None).isoformat()
-        return value.isoformat()  # floating time — keep as-is
+        # Floating time — wall clock in the owner's tz.
+        return (value.replace(tzinfo=tz).astimezone(ZoneInfo("UTC"))
+                .replace(tzinfo=None).isoformat())
     if isinstance(value, date):
-        return datetime(value.year, value.month, value.day).isoformat()
+        # All-day — local midnight in the owner's tz.
+        local_midnight = datetime(value.year, value.month, value.day, tzinfo=tz)
+        return (local_midnight.astimezone(ZoneInfo("UTC"))
+                .replace(tzinfo=None).isoformat())
     return None
 
 
-def _event_fields_from_vevent(vevent) -> dict | None:
+def _event_fields_from_vevent(vevent, tz: ZoneInfo) -> dict | None:
     uid = str(vevent.get("UID") or "").strip()
     if not uid:
         return None
@@ -57,14 +70,14 @@ def _event_fields_from_vevent(vevent) -> dict | None:
         "title": str(vevent.get("SUMMARY") or "(untitled)")[:300],
         "description": str(vevent.get("DESCRIPTION") or "")[:5000],
         "location": str(vevent.get("LOCATION") or "")[:300],
-        "start_at": _to_utc_naive(start_val),
-        "end_at": _to_utc_naive(end_val),
+        "start_at": _to_utc_naive(start_val, tz),
+        "end_at": _to_utc_naive(end_val, tz),
         "all_day": all_day,
         "rrule": rrule.to_ical().decode("utf-8", "replace") if rrule is not None else "",
     }
 
 
-def _build_ics(event: dict) -> str:
+def _build_ics(event: dict, tz: ZoneInfo) -> str:
     from icalendar import Calendar, Event as IcsEvent
     cal = Calendar()
     cal.add("prodid", "-//HyprChat//Jarvis//EN")
@@ -78,9 +91,13 @@ def _build_ics(event: dict) -> str:
         ics.add("location", event["location"])
     start = datetime.fromisoformat(event["start_at"]).replace(tzinfo=ZoneInfo("UTC"))
     if event.get("all_day"):
-        ics.add("dtstart", start.date())
-        end = datetime.fromisoformat(event["end_at"]) if event.get("end_at") else start + timedelta(days=1)
-        ics.add("dtend", end.date())
+        # Stored start is local-midnight-converted-to-UTC; convert back to the
+        # owner's tz before taking the date, or east-of-UTC users push the
+        # previous day.
+        ics.add("dtstart", start.astimezone(tz).date())
+        end = (datetime.fromisoformat(event["end_at"]).replace(tzinfo=ZoneInfo("UTC"))
+               if event.get("end_at") else start + timedelta(days=1))
+        ics.add("dtend", end.astimezone(tz).date())
     else:
         ics.add("dtstart", start)
         end_raw = event.get("end_at")
@@ -91,7 +108,7 @@ def _build_ics(event: dict) -> str:
     return cal.to_ical().decode("utf-8")
 
 
-def _remote_snapshot_blocking(account: dict) -> list[dict]:
+def _remote_snapshot_blocking(account: dict, tz: ZoneInfo) -> list[dict]:
     """Fetch all remote VEVENTs. Each entry: fields dict + content hash (etag
     stand-in — real etags aren't uniformly exposed across servers)."""
     import caldav
@@ -109,7 +126,7 @@ def _remote_snapshot_blocking(account: dict) -> list[dict]:
         try:
             raw = remote.data if isinstance(remote.data, str) else str(remote.data)
             for comp in remote.icalendar_instance.walk("VEVENT"):
-                fields = _event_fields_from_vevent(comp)
+                fields = _event_fields_from_vevent(comp, tz)
                 if fields and fields["start_at"]:
                     fields["hash"] = hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:32]
                     out.append(fields)
@@ -162,6 +179,8 @@ async def sync_account(account: dict) -> dict:
     contextvar. `account` must include the password."""
     user_id = account["user_id"]
     pulled = pushed = deleted = conflicts = 0
+    import pim  # call-time import (module load order)
+    tz = _safe_zone(await pim.user_timezone(user_id))
 
     # 1) Tombstones → delete remote, then hard-delete local.
     all_local = await db.list_calendar_events(include_deleted=True, user_id=user_id)
@@ -173,7 +192,7 @@ async def sync_account(account: dict) -> dict:
         deleted += 1
 
     # 2) Pull remote.
-    remote_events = await asyncio.to_thread(_remote_snapshot_blocking, account)
+    remote_events = await asyncio.to_thread(_remote_snapshot_blocking, account, tz)
     remote_by_uid = {r["uid"]: r for r in remote_events}
     local_by_uid = {e["caldav_uid"]: e for e in mine
                     if e.get("caldav_uid") and e.get("sync_state") != "deleted"}
@@ -220,7 +239,7 @@ async def sync_account(account: dict) -> dict:
             continue
         uid = event.get("caldav_uid") or f"hyprchat-{event['id']}@jarvis"
         payload = {**event, "caldav_uid": uid}
-        await asyncio.to_thread(_push_blocking, account, _build_ics(payload))
+        await asyncio.to_thread(_push_blocking, account, _build_ics(payload, tz))
         await db.update_calendar_event(event["id"], {
             "caldav_uid": uid, "caldav_account_id": account["id"],
             "sync_state": "synced"}, user_id=user_id)

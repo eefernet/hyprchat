@@ -86,7 +86,9 @@ async def create_event(req: EventCreate):
 async def update_event(event_id: str, req: EventUpdate):
     if not await db.get_calendar_event(event_id):
         raise HTTPException(404, "Event not found")
-    event = await pim.update_event(event_id, req.model_dump())
+    # exclude_unset so pim can tell "not sent" from an explicit null
+    # (remind_minutes: null clears the reminder).
+    event = await pim.update_event(event_id, req.model_dump(exclude_unset=True))
     return _localized(event, await pim.user_timezone())
 
 

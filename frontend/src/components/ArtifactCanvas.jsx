@@ -8,7 +8,7 @@ import { API } from '../session.js';
 // apply/reject; Save creates a revision through the existing /revise
 // endpoint (never overwrites the original file). CodeMirror itself is
 // lazy-loaded via canvasEditorSetup.js so it stays out of the main bundle.
-export default function ArtifactCanvas({artifact,t,font,onClose,notify,onRevised}){
+export default function ArtifactCanvas({artifact,t,font,onClose,notify,confirmAction,onRevised}){
   const a=artifact||{};
   const hostRef=useRef(null);
   const edRef=useRef(null);           // {view,getDoc,getSelection,replaceRange,destroy}
@@ -105,8 +105,12 @@ export default function ArtifactCanvas({artifact,t,font,onClose,notify,onRevised
     }
   };
 
-  const close=()=>{
-    if(dirty&&!window.confirm("Discard unsaved changes?"))return;
+  const close=async()=>{
+    if(dirty){
+      const ok=confirmAction?await confirmAction({title:"Discard changes",body:"You have unsaved changes. Discard them?",confirmLabel:"Discard",tone:"warning"})
+        :window.confirm("Discard unsaved changes?");
+      if(!ok)return;
+    }
     onClose?.();
   };
 
