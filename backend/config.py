@@ -168,6 +168,18 @@ QUICK_SEARCH_PLANNER_TIMEOUT = float(os.getenv("QUICK_SEARCH_PLANNER_TIMEOUT", "
 QUICK_SEARCH_TRIAGE_MODEL = os.getenv("QUICK_SEARCH_TRIAGE_MODEL", "")
 
 # ============================================================
+# JARVIS SCHEDULER
+# ============================================================
+# Tick interval for the in-process scheduled-task loop (seconds).
+SCHEDULER_TICK_SECONDS = int(os.getenv("SCHEDULER_TICK_SECONDS", "30"))
+# Hard wall-clock cap per scheduled run — a wedged model must not hold the
+# serial execution slot forever.
+SCHEDULED_RUN_TIMEOUT = int(os.getenv("SCHEDULED_RUN_TIMEOUT", "900"))
+# Defer conversation-posting tasks by this many minutes while the user is
+# actively using HyprChat (foreground gate).
+SCHEDULER_FOREGROUND_DEFER_MIN = int(os.getenv("SCHEDULER_FOREGROUND_DEFER_MIN", "15"))
+
+# ============================================================
 # DEFAULTS
 # ============================================================
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen3.5:27b")

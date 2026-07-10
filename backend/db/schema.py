@@ -493,4 +493,191 @@ CREATE TABLE IF NOT EXISTS coder_workflows (
 CREATE INDEX IF NOT EXISTS idx_coder_workflows_conv ON coder_workflows(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_coder_workflows_project ON coder_workflows(project_id);
 CREATE INDEX IF NOT EXISTS idx_coder_workflows_state ON coder_workflows(state);
+
+-- Jarvis suite: scheduled agent tasks. next_run is naive UTC ISO; schedule_json
+-- carries the kind-specific fields ({time,weekday,day,cron,run_at}). Event- and
+-- webhook-triggered tasks have next_run NULL and fire via counters/tokens.
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    id                 TEXT PRIMARY KEY,
+    user_id            TEXT NOT NULL DEFAULT 'default',
+    title              TEXT NOT NULL DEFAULT '',
+    prompt             TEXT NOT NULL DEFAULT '',
+    task_type          TEXT NOT NULL DEFAULT 'llm',
+    schedule_kind      TEXT NOT NULL DEFAULT 'once',
+    schedule_json      TEXT DEFAULT '{}',
+    timezone           TEXT DEFAULT '',
+    next_run           TIMESTAMP,
+    last_run           TIMESTAMP,
+    last_status        TEXT DEFAULT '',
+    enabled            INTEGER DEFAULT 1,
+    model              TEXT DEFAULT '',
+    tool_ids           TEXT DEFAULT '[]',
+    delivery_json      TEXT DEFAULT '{}',
+    conversation_id    TEXT DEFAULT '',
+    event_trigger_json TEXT DEFAULT '{}',
+    webhook_token      TEXT DEFAULT '',
+    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due  ON scheduled_tasks(enabled, next_run);
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_user ON scheduled_tasks(user_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS task_runs (
+    id          TEXT PRIMARY KEY,
+    task_id     TEXT NOT NULL,
+    user_id     TEXT NOT NULL DEFAULT 'default',
+    status      TEXT NOT NULL DEFAULT 'running',
+    trigger     TEXT DEFAULT 'schedule',
+    started_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    finished_at TIMESTAMP,
+    result_text TEXT DEFAULT '',
+    error       TEXT DEFAULT '',
+    FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_task_runs_task ON task_runs(task_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_task_runs_user ON task_runs(user_id, started_at);
+
+-- Jarvis suite: in-app notification queue polled by the frontend bell.
+CREATE TABLE IF NOT EXISTS notifications (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         TEXT NOT NULL DEFAULT 'default',
+    title           TEXT NOT NULL DEFAULT '',
+    body            TEXT DEFAULT '',
+    kind            TEXT DEFAULT 'task',
+    source_task_id  TEXT DEFAULT '',
+    conversation_id TEXT DEFAULT '',
+    seen            INTEGER DEFAULT 0,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_seen ON notifications(user_id, seen, id);
+
+-- Jarvis suite: notes + todos. Times are naive UTC; tz conversion happens at
+-- the tool/panel edges using the assistant-profile timezone.
+CREATE TABLE IF NOT EXISTS notes (
+    id         TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL DEFAULT 'default',
+    kind       TEXT NOT NULL DEFAULT 'note',
+    title      TEXT NOT NULL DEFAULT '',
+    content    TEXT DEFAULT '',
+    done       INTEGER DEFAULT 0,
+    due_at     TIMESTAMP,
+    remind_at  TIMESTAMP,
+    reminded   INTEGER DEFAULT 0,
+    tags       TEXT DEFAULT '[]',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_notes_user   ON notes(user_id, done, updated_at);
+CREATE INDEX IF NOT EXISTS idx_notes_remind ON notes(reminded, remind_at);
+
+-- Jarvis suite: calendar events. caldav_* fields track two-way sync state:
+-- sync_state local|synced|dirty|deleted (deleted = tombstone awaiting remote
+-- delete; hidden from lists).
+CREATE TABLE IF NOT EXISTS calendar_events (
+    id                TEXT PRIMARY KEY,
+    user_id           TEXT NOT NULL DEFAULT 'default',
+    title             TEXT NOT NULL DEFAULT '',
+    description       TEXT DEFAULT '',
+    location          TEXT DEFAULT '',
+    start_at          TIMESTAMP,
+    end_at            TIMESTAMP,
+    all_day           INTEGER DEFAULT 0,
+    remind_minutes    INTEGER,
+    reminded          INTEGER DEFAULT 0,
+    rrule             TEXT DEFAULT '',
+    caldav_account_id TEXT DEFAULT '',
+    caldav_uid        TEXT DEFAULT '',
+    caldav_etag       TEXT DEFAULT '',
+    sync_state        TEXT DEFAULT 'local',
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_user   ON calendar_events(user_id, start_at);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_remind ON calendar_events(reminded, start_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_calendar_events_caldav ON calendar_events(user_id, caldav_account_id, caldav_uid)
+    WHERE caldav_uid != '';
+
+-- Jarvis suite: CalDAV account credentials (password scrubbed from staged
+-- backups like model_provider_credentials; never in settings.json).
+CREATE TABLE IF NOT EXISTS caldav_accounts (
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL DEFAULT 'default',
+    label        TEXT DEFAULT '',
+    url          TEXT NOT NULL DEFAULT '',
+    username     TEXT DEFAULT '',
+    password     TEXT DEFAULT '',
+    calendar_url TEXT DEFAULT '',
+    enabled      INTEGER DEFAULT 1,
+    last_sync_at TIMESTAMP,
+    last_error   TEXT DEFAULT '',
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_caldav_accounts_user ON caldav_accounts(user_id);
+
+-- Jarvis suite: email accounts (IMAP/SMTP). Passwords are scrubbed from staged
+-- backups; API responses only ever expose password_set. allow_autonomous_send
+-- is the SERVER-SIDE hard gate for the send tools (off = draft only).
+CREATE TABLE IF NOT EXISTS email_accounts (
+    id                   TEXT PRIMARY KEY,
+    user_id              TEXT NOT NULL DEFAULT 'default',
+    label                TEXT DEFAULT '',
+    imap_host            TEXT DEFAULT '',
+    imap_port            INTEGER DEFAULT 993,
+    imap_ssl             INTEGER DEFAULT 1,
+    smtp_host            TEXT DEFAULT '',
+    smtp_port            INTEGER DEFAULT 587,
+    smtp_ssl             INTEGER DEFAULT 1,
+    username             TEXT DEFAULT '',
+    password             TEXT DEFAULT '',
+    from_address         TEXT DEFAULT '',
+    enabled              INTEGER DEFAULT 1,
+    allow_autonomous_send INTEGER DEFAULT 0,
+    last_uidvalidity     TEXT DEFAULT '',
+    last_seen_uid        INTEGER DEFAULT 0,
+    last_checked_at      TIMESTAMP,
+    last_error           TEXT DEFAULT '',
+    created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_email_accounts_user ON email_accounts(user_id);
+
+-- Jarvis suite: cached email headers/snippets (bodies fetched live from IMAP,
+-- never stored). urgency/summary/draft_reply come from background triage.
+CREATE TABLE IF NOT EXISTS email_messages (
+    id                 TEXT PRIMARY KEY,
+    account_id         TEXT NOT NULL,
+    user_id            TEXT NOT NULL DEFAULT 'default',
+    uid                INTEGER NOT NULL,
+    folder             TEXT DEFAULT 'INBOX',
+    subject            TEXT DEFAULT '',
+    from_addr          TEXT DEFAULT '',
+    to_addrs           TEXT DEFAULT '',
+    date_at            TIMESTAMP,
+    snippet            TEXT DEFAULT '',
+    unread             INTEGER DEFAULT 1,
+    archived           INTEGER DEFAULT 0,
+    urgency            TEXT DEFAULT '',
+    summary            TEXT DEFAULT '',
+    draft_reply        TEXT DEFAULT '',
+    extracted_event_id TEXT DEFAULT '',
+    notified           INTEGER DEFAULT 0,
+    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES email_accounts(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_email_messages_uid ON email_messages(account_id, folder, uid);
+CREATE INDEX IF NOT EXISTS idx_email_messages_user ON email_messages(user_id, date_at);
+
+-- Jarvis suite: per-user personal assistant profile. The persona itself is a
+-- model_configs row; this table pins the conversation and holds runtime knobs.
+CREATE TABLE IF NOT EXISTS assistant_profiles (
+    user_id               TEXT PRIMARY KEY,
+    model_config_id       TEXT DEFAULT '',
+    conversation_id       TEXT DEFAULT '',
+    timezone              TEXT DEFAULT 'UTC',
+    enabled_gatherers     TEXT DEFAULT '[]',
+    allow_autonomous_email INTEGER DEFAULT 0,
+    created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """

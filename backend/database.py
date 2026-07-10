@@ -5333,3 +5333,959 @@ async def get_latest_coder_workflow(conversation_id: str,
         return _row_to_coder_workflow(rows[0])
     finally:
         await db.close()
+
+# ============================================================
+# JARVIS SUITE — scheduled tasks, task runs, notifications,
+# assistant profiles
+# ============================================================
+
+TASK_TYPES = ("llm", "research", "action", "check_in", "system")
+SCHEDULE_KINDS = ("once", "daily", "weekly", "monthly", "cron", "event", "webhook")
+_TASK_UPDATE_FIELDS = {
+    "title", "prompt", "task_type", "schedule_kind", "schedule_json",
+    "timezone", "next_run", "last_run", "last_status", "enabled",
+    "model", "tool_ids", "delivery_json", "conversation_id",
+    "event_trigger_json", "webhook_token",
+}
+_TASK_JSON_FIELDS = {"schedule_json", "tool_ids", "delivery_json", "event_trigger_json"}
+
+
+def _row_to_scheduled_task(row) -> dict:
+    t = dict(row)
+    for field, fallback in (("schedule_json", {}), ("tool_ids", []),
+                            ("delivery_json", {}), ("event_trigger_json", {})):
+        try:
+            t[field] = json.loads(t.get(field) or json.dumps(fallback))
+        except (json.JSONDecodeError, TypeError):
+            t[field] = fallback
+    t["enabled"] = bool(t.get("enabled"))
+    return t
+
+
+async def create_scheduled_task(task_id: str, *, title: str, prompt: str = "",
+                                task_type: str = "llm", schedule_kind: str = "once",
+                                schedule_json: dict | None = None, timezone: str = "",
+                                next_run: str | None = None, model: str = "",
+                                tool_ids: list | None = None,
+                                delivery_json: dict | None = None,
+                                conversation_id: str = "",
+                                event_trigger_json: dict | None = None,
+                                webhook_token: str = "",
+                                enabled: bool = True,
+                                user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    now = datetime.utcnow().isoformat()
+    db = await get_db()
+    try:
+        await db.execute(
+            """INSERT INTO scheduled_tasks(id, user_id, title, prompt, task_type,
+               schedule_kind, schedule_json, timezone, next_run, enabled, model,
+               tool_ids, delivery_json, conversation_id, event_trigger_json,
+               webhook_token, created_at, updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (task_id, uid, title, prompt, task_type, schedule_kind,
+             json.dumps(schedule_json or {}), timezone or "", next_run,
+             1 if enabled else 0, model or "", json.dumps(tool_ids or []),
+             json.dumps(delivery_json or {}), conversation_id or "",
+             json.dumps(event_trigger_json or {}), webhook_token or "", now, now),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+    return await get_scheduled_task(task_id, user_id=uid)
+
+
+async def get_scheduled_task(task_id: str, user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM scheduled_tasks WHERE id=? AND user_id=?", (task_id, uid))
+        return _row_to_scheduled_task(rows[0]) if rows else None
+    finally:
+        await db.close()
+
+
+async def list_scheduled_tasks(user_id: str | None = None, limit: int = 200) -> list[dict]:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM scheduled_tasks WHERE user_id=? ORDER BY updated_at DESC LIMIT ?",
+            (uid, limit))
+        return [_row_to_scheduled_task(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def update_scheduled_task(task_id: str, fields: dict,
+                                user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    sets, vals = [], []
+    for key, value in fields.items():
+        if key not in _TASK_UPDATE_FIELDS:
+            continue
+        sets.append(f"{key}=?")
+        if key in _TASK_JSON_FIELDS:
+            vals.append(json.dumps(value if value is not None else ({} if key != "tool_ids" else [])))
+        elif key == "enabled":
+            vals.append(1 if value else 0)
+        else:
+            vals.append(value)
+    if not sets:
+        return await get_scheduled_task(task_id, user_id=uid)
+    sets.append("updated_at=?")
+    vals.append(datetime.utcnow().isoformat())
+    vals.extend([task_id, uid])
+    db = await get_db()
+    try:
+        await db.execute(
+            f"UPDATE scheduled_tasks SET {', '.join(sets)} WHERE id=? AND user_id=?",
+            tuple(vals))
+        await db.commit()
+    finally:
+        await db.close()
+    return await get_scheduled_task(task_id, user_id=uid)
+
+
+async def delete_scheduled_task(task_id: str, user_id: str | None = None) -> bool:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "DELETE FROM scheduled_tasks WHERE id=? AND user_id=?", (task_id, uid))
+        await db.commit()
+        return cursor.rowcount > 0
+    finally:
+        await db.close()
+
+
+async def claim_due_tasks(now_iso: str, limit: int = 20) -> list[dict]:
+    """Due, enabled, time-scheduled tasks across ALL users (the scheduler loop
+    sets the per-task user contextvar before running each one). Cross-user raw
+    SQL by design, like reap_stale_runs."""
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM scheduled_tasks WHERE enabled=1 AND next_run IS NOT NULL "
+            "AND next_run <= ? AND schedule_kind NOT IN ('event','webhook') "
+            "ORDER BY next_run ASC LIMIT ?",
+            (now_iso, limit))
+        return [_row_to_scheduled_task(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def get_task_by_webhook_token(token: str) -> dict | None:
+    """Cross-user lookup for the unauthenticated /api/hooks/{token} route.
+    The token itself is the credential; the caller must set the owner's
+    user contextvar before doing anything scoped."""
+    if not token:
+        return None
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM scheduled_tasks WHERE webhook_token=? AND enabled=1 LIMIT 1",
+            (token,))
+        return _row_to_scheduled_task(rows[0]) if rows else None
+    finally:
+        await db.close()
+
+
+async def add_task_run(run_id: str, task_id: str, *, trigger: str = "schedule",
+                       user_id: str | None = None) -> None:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        await db.execute(
+            """INSERT INTO task_runs(id, task_id, user_id, status, trigger, started_at)
+               VALUES(?,?,?,?,?,?)""",
+            (run_id, task_id, uid, "running", trigger, datetime.utcnow().isoformat()))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def finish_task_run(run_id: str, status: str, *, result_text: str = "",
+                          error: str = "", user_id: str | None = None) -> None:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        await db.execute(
+            """UPDATE task_runs SET status=?, result_text=?, error=?, finished_at=?
+               WHERE id=? AND user_id=?""",
+            (status, result_text[:20000], error[:4000],
+             datetime.utcnow().isoformat(), run_id, uid))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def list_task_runs(task_id: str, limit: int = 20,
+                         user_id: str | None = None) -> list[dict]:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM task_runs WHERE task_id=? AND user_id=? "
+            "ORDER BY started_at DESC LIMIT ?",
+            (task_id, uid, limit))
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def get_task_run(run_id: str, user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM task_runs WHERE id=? AND user_id=?", (run_id, uid))
+        return dict(rows[0]) if rows else None
+    finally:
+        await db.close()
+
+
+async def reap_stale_task_runs() -> int:
+    """Mark task_runs left 'running' by a previous process as failed and clear
+    stuck last_status. Cross-user raw SQL, called once at startup beside
+    reap_stale_runs()."""
+    db = await get_db()
+    try:
+        now = datetime.utcnow().isoformat()
+        cursor = await db.execute(
+            "UPDATE task_runs SET status='failed', error='Orphaned by backend restart', "
+            "finished_at=? WHERE status='running'", (now,))
+        await db.execute(
+            "UPDATE scheduled_tasks SET last_status='failed' WHERE last_status='running'")
+        await db.commit()
+        return cursor.rowcount
+    finally:
+        await db.close()
+
+
+async def add_notification(title: str, body: str = "", *, kind: str = "task",
+                           source_task_id: str = "", conversation_id: str = "",
+                           user_id: str | None = None) -> int:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            """INSERT INTO notifications(user_id, title, body, kind, source_task_id,
+               conversation_id, created_at) VALUES(?,?,?,?,?,?,?)""",
+            (uid, title[:300], body[:2000], kind, source_task_id or "",
+             conversation_id or "", datetime.utcnow().isoformat()))
+        await db.commit()
+        return cursor.lastrowid or 0
+    finally:
+        await db.close()
+
+
+async def list_notifications(since_id: int = 0, limit: int = 50,
+                             unseen_only: bool = False,
+                             user_id: str | None = None) -> list[dict]:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        query = "SELECT * FROM notifications WHERE user_id=? AND id>?"
+        if unseen_only:
+            query += " AND seen=0"
+        query += " ORDER BY id DESC LIMIT ?"
+        rows = await db.execute_fetchall(query, (uid, since_id, limit))
+        out = []
+        for r in rows:
+            n = dict(r)
+            n["seen"] = bool(n.get("seen"))
+            out.append(n)
+        return out
+    finally:
+        await db.close()
+
+
+async def mark_notifications_seen(ids: list[int] | None = None,
+                                  user_id: str | None = None) -> int:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        if ids:
+            placeholders = ",".join("?" * len(ids))
+            cursor = await db.execute(
+                f"UPDATE notifications SET seen=1 WHERE user_id=? AND id IN ({placeholders})",
+                (uid, *ids))
+        else:
+            cursor = await db.execute(
+                "UPDATE notifications SET seen=1 WHERE user_id=? AND seen=0", (uid,))
+        await db.commit()
+        return cursor.rowcount
+    finally:
+        await db.close()
+
+
+async def delete_notification(notification_id: int, user_id: str | None = None) -> bool:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "DELETE FROM notifications WHERE id=? AND user_id=?", (notification_id, uid))
+        await db.commit()
+        return cursor.rowcount > 0
+    finally:
+        await db.close()
+
+
+async def get_assistant_profile(user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM assistant_profiles WHERE user_id=?", (uid,))
+        if not rows:
+            return None
+        p = dict(rows[0])
+        try:
+            p["enabled_gatherers"] = json.loads(p.get("enabled_gatherers") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            p["enabled_gatherers"] = []
+        p["allow_autonomous_email"] = bool(p.get("allow_autonomous_email"))
+        return p
+    finally:
+        await db.close()
+
+
+async def upsert_assistant_profile(*, model_config_id: str | None = None,
+                                   conversation_id: str | None = None,
+                                   timezone: str | None = None,
+                                   enabled_gatherers: list | None = None,
+                                   allow_autonomous_email: bool | None = None,
+                                   user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    now = datetime.utcnow().isoformat()
+    db = await get_db()
+    try:
+        await db.execute(
+            """INSERT INTO assistant_profiles(user_id, created_at, updated_at)
+               VALUES(?,?,?) ON CONFLICT(user_id) DO NOTHING""", (uid, now, now))
+        sets, vals = ["updated_at=?"], [now]
+        if model_config_id is not None:
+            sets.append("model_config_id=?"); vals.append(model_config_id)
+        if conversation_id is not None:
+            sets.append("conversation_id=?"); vals.append(conversation_id)
+        if timezone is not None:
+            sets.append("timezone=?"); vals.append(timezone)
+        if enabled_gatherers is not None:
+            sets.append("enabled_gatherers=?"); vals.append(json.dumps(enabled_gatherers))
+        if allow_autonomous_email is not None:
+            sets.append("allow_autonomous_email=?"); vals.append(1 if allow_autonomous_email else 0)
+        vals.append(uid)
+        await db.execute(
+            f"UPDATE assistant_profiles SET {', '.join(sets)} WHERE user_id=?",
+            tuple(vals))
+        await db.commit()
+    finally:
+        await db.close()
+    return await get_assistant_profile(user_id=uid)
+
+
+async def user_last_seen_at(user_id: str | None = None) -> str | None:
+    """Most recent session activity for the user (scheduler foreground gate).
+    None when the user has no sessions (e.g. passwordless installs) — callers
+    must treat that as 'not active'."""
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT MAX(last_seen_at) AS seen FROM user_sessions WHERE user_id=?", (uid,))
+        return rows[0]["seen"] if rows else None
+    finally:
+        await db.close()
+
+
+# ============================================================
+# JARVIS SUITE — notes/todos, calendar events, CalDAV accounts
+# ============================================================
+
+_NOTE_FIELDS = {"kind", "title", "content", "done", "due_at", "remind_at", "reminded", "tags"}
+_EVENT_FIELDS = {"title", "description", "location", "start_at", "end_at", "all_day",
+                 "remind_minutes", "reminded", "rrule", "caldav_account_id",
+                 "caldav_uid", "caldav_etag", "sync_state"}
+
+
+def _row_to_note(row) -> dict:
+    n = dict(row)
+    try:
+        n["tags"] = json.loads(n.get("tags") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        n["tags"] = []
+    n["done"] = bool(n.get("done"))
+    n["reminded"] = bool(n.get("reminded"))
+    return n
+
+
+async def create_note(note_id: str, *, kind: str = "note", title: str = "",
+                      content: str = "", due_at: str | None = None,
+                      remind_at: str | None = None, tags: list | None = None,
+                      user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    now = datetime.utcnow().isoformat()
+    db = await get_db()
+    try:
+        await db.execute(
+            """INSERT INTO notes(id, user_id, kind, title, content, due_at, remind_at,
+               tags, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (note_id, uid, kind, title[:300], content[:20000], due_at, remind_at,
+             json.dumps(tags or []), now, now))
+        await db.commit()
+    finally:
+        await db.close()
+    return await get_note(note_id, user_id=uid)
+
+
+async def get_note(note_id: str, user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM notes WHERE id=? AND user_id=?", (note_id, uid))
+        return _row_to_note(rows[0]) if rows else None
+    finally:
+        await db.close()
+
+
+async def list_notes(kind: str = "", include_done: bool = True, limit: int = 200,
+                     user_id: str | None = None) -> list[dict]:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        query = "SELECT * FROM notes WHERE user_id=?"
+        params: list = [uid]
+        if kind:
+            query += " AND kind=?"
+            params.append(kind)
+        if not include_done:
+            query += " AND done=0"
+        query += " ORDER BY done ASC, COALESCE(due_at,'9999') ASC, updated_at DESC LIMIT ?"
+        params.append(limit)
+        rows = await db.execute_fetchall(query, tuple(params))
+        return [_row_to_note(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def update_note(note_id: str, fields: dict, user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    sets, vals = [], []
+    for key, value in fields.items():
+        if key not in _NOTE_FIELDS:
+            continue
+        sets.append(f"{key}=?")
+        if key == "tags":
+            vals.append(json.dumps(value or []))
+        elif key in ("done", "reminded"):
+            vals.append(1 if value else 0)
+        else:
+            vals.append(value)
+    if not sets:
+        return await get_note(note_id, user_id=uid)
+    sets.append("updated_at=?")
+    vals.append(datetime.utcnow().isoformat())
+    vals.extend([note_id, uid])
+    db = await get_db()
+    try:
+        await db.execute(f"UPDATE notes SET {', '.join(sets)} WHERE id=? AND user_id=?", tuple(vals))
+        await db.commit()
+    finally:
+        await db.close()
+    return await get_note(note_id, user_id=uid)
+
+
+async def delete_note(note_id: str, user_id: str | None = None) -> bool:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        cursor = await db.execute("DELETE FROM notes WHERE id=? AND user_id=?", (note_id, uid))
+        await db.commit()
+        return cursor.rowcount > 0
+    finally:
+        await db.close()
+
+
+def _row_to_event(row) -> dict:
+    e = dict(row)
+    e["all_day"] = bool(e.get("all_day"))
+    e["reminded"] = bool(e.get("reminded"))
+    return e
+
+
+async def create_calendar_event(event_id: str, *, title: str, start_at: str,
+                                end_at: str | None = None, description: str = "",
+                                location: str = "", all_day: bool = False,
+                                remind_minutes: int | None = None, rrule: str = "",
+                                caldav_account_id: str = "", caldav_uid: str = "",
+                                caldav_etag: str = "", sync_state: str = "local",
+                                user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    now = datetime.utcnow().isoformat()
+    db = await get_db()
+    try:
+        await db.execute(
+            """INSERT INTO calendar_events(id, user_id, title, description, location,
+               start_at, end_at, all_day, remind_minutes, rrule, caldav_account_id,
+               caldav_uid, caldav_etag, sync_state, created_at, updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (event_id, uid, title[:300], description[:5000], location[:300],
+             start_at, end_at, 1 if all_day else 0, remind_minutes, rrule or "",
+             caldav_account_id or "", caldav_uid or "", caldav_etag or "",
+             sync_state or "local", now, now))
+        await db.commit()
+    finally:
+        await db.close()
+    return await get_calendar_event(event_id, user_id=uid)
+
+
+async def get_calendar_event(event_id: str, user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM calendar_events WHERE id=? AND user_id=?", (event_id, uid))
+        return _row_to_event(rows[0]) if rows else None
+    finally:
+        await db.close()
+
+
+async def list_calendar_events(start: str = "", end: str = "", limit: int = 500,
+                               include_deleted: bool = False,
+                               user_id: str | None = None) -> list[dict]:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        query = "SELECT * FROM calendar_events WHERE user_id=?"
+        params: list = [uid]
+        if not include_deleted:
+            query += " AND sync_state != 'deleted'"
+        if start:
+            query += " AND (end_at >= ? OR (end_at IS NULL AND start_at >= ?))"
+            params.extend([start, start])
+        if end:
+            query += " AND start_at <= ?"
+            params.append(end)
+        query += " ORDER BY start_at ASC LIMIT ?"
+        params.append(limit)
+        rows = await db.execute_fetchall(query, tuple(params))
+        return [_row_to_event(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def update_calendar_event(event_id: str, fields: dict,
+                                user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    sets, vals = [], []
+    for key, value in fields.items():
+        if key not in _EVENT_FIELDS:
+            continue
+        sets.append(f"{key}=?")
+        if key in ("all_day", "reminded"):
+            vals.append(1 if value else 0)
+        else:
+            vals.append(value)
+    if not sets:
+        return await get_calendar_event(event_id, user_id=uid)
+    sets.append("updated_at=?")
+    vals.append(datetime.utcnow().isoformat())
+    vals.extend([event_id, uid])
+    db = await get_db()
+    try:
+        await db.execute(
+            f"UPDATE calendar_events SET {', '.join(sets)} WHERE id=? AND user_id=?",
+            tuple(vals))
+        await db.commit()
+    finally:
+        await db.close()
+    return await get_calendar_event(event_id, user_id=uid)
+
+
+async def delete_calendar_event(event_id: str, user_id: str | None = None) -> bool:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "DELETE FROM calendar_events WHERE id=? AND user_id=?", (event_id, uid))
+        await db.commit()
+        return cursor.rowcount > 0
+    finally:
+        await db.close()
+
+
+async def due_reminders(now_iso: str) -> dict:
+    """Cross-user scan for due, un-reminded notes and calendar events (the
+    scheduler tick calls this and sets each row's user contextvar to notify).
+    Events come due at start_at - remind_minutes."""
+    db = await get_db()
+    try:
+        note_rows = await db.execute_fetchall(
+            "SELECT * FROM notes WHERE reminded=0 AND remind_at IS NOT NULL "
+            "AND remind_at <= ? AND done=0 LIMIT 50", (now_iso,))
+        event_rows = await db.execute_fetchall(
+            "SELECT * FROM calendar_events WHERE reminded=0 AND remind_minutes IS NOT NULL "
+            "AND sync_state != 'deleted' AND start_at IS NOT NULL "
+            "AND datetime(start_at, '-' || remind_minutes || ' minutes') <= datetime(?) "
+            "AND datetime(start_at, '+1 day') >= datetime(?) LIMIT 50",
+            (now_iso, now_iso))
+        return {"notes": [_row_to_note(r) for r in note_rows],
+                "events": [_row_to_event(r) for r in event_rows]}
+    finally:
+        await db.close()
+
+
+def _public_caldav_account(row) -> dict:
+    a = dict(row)
+    a["password_set"] = bool(a.get("password"))
+    a.pop("password", None)
+    a["enabled"] = bool(a.get("enabled"))
+    return a
+
+
+async def create_caldav_account(account_id: str, *, label: str, url: str,
+                                username: str, password: str,
+                                calendar_url: str = "",
+                                user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    now = datetime.utcnow().isoformat()
+    db = await get_db()
+    try:
+        await db.execute(
+            """INSERT INTO caldav_accounts(id, user_id, label, url, username, password,
+               calendar_url, enabled, created_at, updated_at) VALUES(?,?,?,?,?,?,?,1,?,?)""",
+            (account_id, uid, label[:100], url[:500], username[:200], password,
+             calendar_url[:500], now, now))
+        await db.commit()
+    finally:
+        await db.close()
+    return await get_caldav_account(account_id, user_id=uid)
+
+
+async def get_caldav_account(account_id: str, *, with_password: bool = False,
+                             user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM caldav_accounts WHERE id=? AND user_id=?", (account_id, uid))
+        if not rows:
+            return None
+        if with_password:
+            a = dict(rows[0])
+            a["enabled"] = bool(a.get("enabled"))
+            return a
+        return _public_caldav_account(rows[0])
+    finally:
+        await db.close()
+
+
+async def list_caldav_accounts(user_id: str | None = None) -> list[dict]:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM caldav_accounts WHERE user_id=? ORDER BY created_at ASC", (uid,))
+        return [_public_caldav_account(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def update_caldav_account(account_id: str, fields: dict,
+                                user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    allowed = {"label", "url", "username", "password", "calendar_url", "enabled",
+               "last_sync_at", "last_error"}
+    sets, vals = [], []
+    for key, value in fields.items():
+        if key not in allowed:
+            continue
+        sets.append(f"{key}=?")
+        vals.append((1 if value else 0) if key == "enabled" else value)
+    if not sets:
+        return await get_caldav_account(account_id, user_id=uid)
+    sets.append("updated_at=?")
+    vals.append(datetime.utcnow().isoformat())
+    vals.extend([account_id, uid])
+    db = await get_db()
+    try:
+        await db.execute(
+            f"UPDATE caldav_accounts SET {', '.join(sets)} WHERE id=? AND user_id=?",
+            tuple(vals))
+        await db.commit()
+    finally:
+        await db.close()
+    return await get_caldav_account(account_id, user_id=uid)
+
+
+async def delete_caldav_account(account_id: str, user_id: str | None = None) -> bool:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "DELETE FROM caldav_accounts WHERE id=? AND user_id=?", (account_id, uid))
+        # Detach (don't delete) events that came from this account.
+        await db.execute(
+            "UPDATE calendar_events SET caldav_account_id='', caldav_uid='', caldav_etag='', "
+            "sync_state='local' WHERE caldav_account_id=? AND user_id=?", (account_id, uid))
+        await db.commit()
+        return cursor.rowcount > 0
+    finally:
+        await db.close()
+
+
+async def caldav_accounts_for_sync() -> list[dict]:
+    """Cross-user: enabled accounts WITH passwords, for the background sync
+    loop (which sets each account's user contextvar before touching events)."""
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM caldav_accounts WHERE enabled=1")
+        out = []
+        for r in rows:
+            a = dict(r)
+            a["enabled"] = True
+            out.append(a)
+        return out
+    finally:
+        await db.close()
+
+
+# ============================================================
+# JARVIS SUITE — email accounts + cached message headers
+# ============================================================
+
+def _public_email_account(row) -> dict:
+    a = dict(row)
+    a["password_set"] = bool(a.get("password"))
+    a.pop("password", None)
+    for key in ("imap_ssl", "smtp_ssl", "enabled", "allow_autonomous_send"):
+        a[key] = bool(a.get(key))
+    return a
+
+
+async def create_email_account(account_id: str, *, label: str, imap_host: str,
+                               imap_port: int, imap_ssl: bool, smtp_host: str,
+                               smtp_port: int, smtp_ssl: bool, username: str,
+                               password: str, from_address: str,
+                               user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    now = datetime.utcnow().isoformat()
+    db = await get_db()
+    try:
+        await db.execute(
+            """INSERT INTO email_accounts(id, user_id, label, imap_host, imap_port,
+               imap_ssl, smtp_host, smtp_port, smtp_ssl, username, password,
+               from_address, enabled, created_at, updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
+            (account_id, uid, label[:100], imap_host[:300], int(imap_port),
+             1 if imap_ssl else 0, smtp_host[:300], int(smtp_port),
+             1 if smtp_ssl else 0, username[:300], password, from_address[:300],
+             now, now))
+        await db.commit()
+    finally:
+        await db.close()
+    return await get_email_account(account_id, user_id=uid)
+
+
+async def get_email_account(account_id: str, *, with_password: bool = False,
+                            user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM email_accounts WHERE id=? AND user_id=?", (account_id, uid))
+        if not rows:
+            return None
+        if with_password:
+            a = dict(rows[0])
+            for key in ("imap_ssl", "smtp_ssl", "enabled", "allow_autonomous_send"):
+                a[key] = bool(a.get(key))
+            return a
+        return _public_email_account(rows[0])
+    finally:
+        await db.close()
+
+
+async def list_email_accounts(user_id: str | None = None) -> list[dict]:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM email_accounts WHERE user_id=? ORDER BY created_at ASC", (uid,))
+        return [_public_email_account(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def update_email_account(account_id: str, fields: dict,
+                               user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    allowed = {"label", "imap_host", "imap_port", "imap_ssl", "smtp_host", "smtp_port",
+               "smtp_ssl", "username", "password", "from_address", "enabled",
+               "allow_autonomous_send", "last_uidvalidity", "last_seen_uid",
+               "last_checked_at", "last_error"}
+    sets, vals = [], []
+    for key, value in fields.items():
+        if key not in allowed:
+            continue
+        sets.append(f"{key}=?")
+        if key in ("imap_ssl", "smtp_ssl", "enabled", "allow_autonomous_send"):
+            vals.append(1 if value else 0)
+        else:
+            vals.append(value)
+    if not sets:
+        return await get_email_account(account_id, user_id=uid)
+    sets.append("updated_at=?")
+    vals.append(datetime.utcnow().isoformat())
+    vals.extend([account_id, uid])
+    db = await get_db()
+    try:
+        await db.execute(
+            f"UPDATE email_accounts SET {', '.join(sets)} WHERE id=? AND user_id=?",
+            tuple(vals))
+        await db.commit()
+    finally:
+        await db.close()
+    return await get_email_account(account_id, user_id=uid)
+
+
+async def delete_email_account(account_id: str, user_id: str | None = None) -> bool:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "DELETE FROM email_accounts WHERE id=? AND user_id=?", (account_id, uid))
+        await db.execute(
+            "DELETE FROM email_messages WHERE account_id=? AND user_id=?", (account_id, uid))
+        await db.commit()
+        return cursor.rowcount > 0
+    finally:
+        await db.close()
+
+
+async def email_accounts_for_poll() -> list[dict]:
+    """Cross-user: enabled accounts WITH passwords for the background poller
+    (which sets each account's user contextvar)."""
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM email_accounts WHERE enabled=1 AND imap_host != ''")
+        out = []
+        for r in rows:
+            a = dict(r)
+            for key in ("imap_ssl", "smtp_ssl", "enabled", "allow_autonomous_send"):
+                a[key] = bool(a.get(key))
+            out.append(a)
+        return out
+    finally:
+        await db.close()
+
+
+def _row_to_email(row) -> dict:
+    m = dict(row)
+    for key in ("unread", "archived", "notified"):
+        m[key] = bool(m.get(key))
+    return m
+
+
+async def upsert_email_message(message_id: str, *, account_id: str, uid: int,
+                               folder: str, subject: str, from_addr: str,
+                               to_addrs: str, date_at: str | None, snippet: str,
+                               unread: bool, user_id: str | None = None) -> None:
+    owner = _scope_user(user_id)
+    db = await get_db()
+    try:
+        await db.execute(
+            """INSERT INTO email_messages(id, account_id, user_id, uid, folder, subject,
+               from_addr, to_addrs, date_at, snippet, unread, created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(account_id, folder, uid) DO UPDATE SET
+                 subject=excluded.subject, from_addr=excluded.from_addr,
+                 to_addrs=excluded.to_addrs, date_at=excluded.date_at,
+                 snippet=excluded.snippet, unread=excluded.unread""",
+            (message_id, account_id, owner, uid, folder, subject[:500],
+             from_addr[:300], to_addrs[:1000], date_at, snippet[:2000],
+             1 if unread else 0, datetime.utcnow().isoformat()))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def list_email_messages(account_id: str = "", limit: int = 50,
+                              unread_only: bool = False, include_archived: bool = False,
+                              user_id: str | None = None) -> list[dict]:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        query = "SELECT * FROM email_messages WHERE user_id=?"
+        params: list = [uid]
+        if account_id:
+            query += " AND account_id=?"
+            params.append(account_id)
+        if unread_only:
+            query += " AND unread=1"
+        if not include_archived:
+            query += " AND archived=0"
+        query += " ORDER BY COALESCE(date_at, created_at) DESC LIMIT ?"
+        params.append(limit)
+        rows = await db.execute_fetchall(query, tuple(params))
+        return [_row_to_email(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def get_email_message(message_id: str, user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM email_messages WHERE id=? AND user_id=?", (message_id, uid))
+        return _row_to_email(rows[0]) if rows else None
+    finally:
+        await db.close()
+
+
+async def update_email_message(message_id: str, fields: dict,
+                               user_id: str | None = None) -> dict | None:
+    uid = _scope_user(user_id)
+    allowed = {"unread", "archived", "urgency", "summary", "draft_reply",
+               "extracted_event_id", "notified"}
+    sets, vals = [], []
+    for key, value in fields.items():
+        if key not in allowed:
+            continue
+        sets.append(f"{key}=?")
+        if key in ("unread", "archived", "notified"):
+            vals.append(1 if value else 0)
+        else:
+            vals.append(value)
+    if not sets:
+        return await get_email_message(message_id, user_id=uid)
+    vals.extend([message_id, uid])
+    db = await get_db()
+    try:
+        await db.execute(
+            f"UPDATE email_messages SET {', '.join(sets)} WHERE id=? AND user_id=?",
+            tuple(vals))
+        await db.commit()
+    finally:
+        await db.close()
+    return await get_email_message(message_id, user_id=uid)
+
+
+async def untriaged_email_messages(account_id: str, limit: int = 25,
+                                   user_id: str | None = None) -> list[dict]:
+    uid = _scope_user(user_id)
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM email_messages WHERE account_id=? AND user_id=? AND urgency='' "
+            "AND archived=0 ORDER BY COALESCE(date_at, created_at) DESC LIMIT ?",
+            (account_id, uid, limit))
+        return [_row_to_email(r) for r in rows]
+    finally:
+        await db.close()

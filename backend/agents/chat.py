@@ -1442,6 +1442,20 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
     messages = []
     effective_system = persona_system_prompt if persona_system_prompt is not None else req.system_prompt
+    # Current date/time in the user's timezone — without it the model guesses
+    # the year for calendar events, reminders, and scheduled tasks.
+    try:
+        from zoneinfo import ZoneInfo as _ZoneInfo
+        _profile = await db.get_assistant_profile()
+        _tz_name = (_profile or {}).get("timezone") or "UTC"
+        _now_local = datetime.now(_ZoneInfo(_tz_name))
+        # Date-only granularity on purpose: minutes in the system prompt would
+        # invalidate Ollama's prompt-cache prefix on every message.
+        effective_system += (
+            f"\n\nToday's date: {_now_local.strftime('%A, %Y-%m-%d')} (timezone {_tz_name})."
+        )
+    except Exception:
+        pass
     if kb_context:
         _cite_note = (
             "Excerpts are numbered [1]..[n]. When you use information from an "
@@ -1761,6 +1775,13 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     if not ephemeral and "save_memory" not in available_tool_names and "save_memory" in CODEAGENT_TOOLS:
         ollama_tools.append(CODEAGENT_TOOLS["save_memory"])
         available_tool_names.add("save_memory")
+
+    # Jarvis tools: available in any persisted chat so "every morning...",
+    # "note this down", and "dentist Tuesday 3pm" work without enabling a suite.
+    for _jt in ("manage_tasks", "manage_notes", "manage_calendar"):
+        if not ephemeral and _jt not in available_tool_names and _jt in CODEAGENT_TOOLS:
+            ollama_tools.append(CODEAGENT_TOOLS[_jt])
+            available_tool_names.add(_jt)
 
     # search_history: recall across past conversations. Memory-gated — offered
     # only when this conversation's memory toggle is on (same consent surface

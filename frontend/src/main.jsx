@@ -47,6 +47,11 @@ import ModelPicker from './ModelPicker.jsx';
 import useIsMobile, { isMobileNow, useKeyboardViewportHeight } from './useIsMobile.js';
 import AnalyticsPanel from './panels/AnalyticsPanel.jsx';
 import PromptLibraryPanel from './panels/PromptLibraryPanel.jsx';
+import TasksPanel from './panels/TasksPanel.jsx';
+import AssistantPanel from './panels/AssistantPanel.jsx';
+import NotesPanel from './panels/NotesPanel.jsx';
+import CalendarPanel from './panels/CalendarPanel.jsx';
+import EmailPanel from './panels/EmailPanel.jsx';
 import BackgroundCanvas from './components/BackgroundCanvas.jsx';
 import { IC, TIC } from './components/icons.jsx';
 import {
@@ -457,6 +462,8 @@ function HyprChat(){
   const isMobile=useIsMobile();
   const keyboardVvh=useKeyboardViewportHeight(isMobile);
   const [sidebar,setSidebar]=useState(()=>!isMobileNow());
+  const [notifUnseen,setNotifUnseen]=useState(0);
+  const notifMaxIdRef=React.useRef(0);
   const [models,setModels]=useState([]);
   const [modelDetails,setModelDetails]=useState({});
   const [modelInfoCache,setModelInfoCache]=useState({});
@@ -2482,6 +2489,33 @@ function HyprChat(){
   },[analyticsDays,analyticsGroup,notify]);
   useEffect(()=>{if(panel==="analytics")loadAnalytics();},[panel,loadAnalytics]);
 
+  // ── Jarvis notification bell: poll unseen count (45s + window focus) ──
+  useEffect(()=>{
+    let stopped=false;
+    const poll=async()=>{
+      try{
+        const r=await fetch(`${API}/api/notifications?limit=5&unseen_only=true`);
+        if(!r.ok||stopped)return;
+        const d=await r.json();
+        setNotifUnseen(d.unseen_count||0);
+        const items=(d.notifications||[]);
+        const maxId=items.reduce((a,n)=>Math.max(a,n.id||0),0);
+        if(notifMaxIdRef.current>0&&maxId>notifMaxIdRef.current
+           &&typeof Notification!=="undefined"&&Notification.permission==="granted"){
+          for(const n of items.filter(n=>n.id>notifMaxIdRef.current).slice(0,3)){
+            try{new Notification(n.title||"HyprChat",{body:(n.body||"").slice(0,180),tag:`hc-notif-${n.id}`});}catch{}
+          }
+        }
+        if(maxId>notifMaxIdRef.current)notifMaxIdRef.current=maxId;
+      }catch{}
+    };
+    poll();
+    const iv=setInterval(poll,45000);
+    const onFocus=()=>poll();
+    window.addEventListener("focus",onFocus);
+    return ()=>{stopped=true;clearInterval(iv);window.removeEventListener("focus",onFocus);};
+  },[]);
+
   const clearDeletedModelRefs=(deletedModels=[],newModels=models)=>{
     const deletedSet=new Set((deletedModels||[]).filter(Boolean));
     if(!deletedSet.size)return;
@@ -4310,6 +4344,11 @@ function HyprChat(){
   });
   const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>setPanel(p)} title={lab} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{active&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}</button>;};
   const moreNavItems=[
+    ["assistant",<IC.Bot/>,"Assistant",t.warm],
+    ["tasks",<IC.Clock/>,"Tasks",t.acc],
+    ["calendar",<IC.Clock/>,"Calendar",t.f1],
+    ["notes",<IC.Pencil/>,"Notes",t.ok],
+    ["email",<IC.Send/>,"Email",t.acc],
     ["artifacts",<IC.Layers/>,"Artifacts",t.acc],
     ["memory",<IC.Brain/>,"Memory",t.f4],
     ["prompts",<IC.Zap/>,"Prompt Library",t.warm],
@@ -4555,10 +4594,15 @@ function HyprChat(){
           {showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>More</div>}
           {moreNavActive&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}
         </button>
-        <div aria-hidden={!showNavMore} style={{width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflow:"hidden",maxHeight:showNavMore?392:0,opacity:showNavMore?1:0,transform:showNavMore?"translateY(0)":"translateY(-6px)",transition:"max-height .22s ease, opacity .16s ease, transform .18s ease",pointerEvents:showNavMore?"auto":"none",flexShrink:0}}>
+        <div aria-hidden={!showNavMore} style={{width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflow:"hidden",maxHeight:showNavMore?700:0,opacity:showNavMore?1:0,transform:showNavMore?"translateY(0)":"translateY(-6px)",transition:"max-height .22s ease, opacity .16s ease, transform .18s ease",pointerEvents:showNavMore?"auto":"none",flexShrink:0}}>
           {moreNavItems.map(([p,ico,lab])=><React.Fragment key={p}>{nb(p,ico,lab)}</React.Fragment>)}
         </div>
       </div>
+      <button className={`nav-panel-button${panel==="notifications"?" is-active":""}`} onClick={()=>{setPanel("notifications");if(typeof Notification!=="undefined"&&Notification.permission==="default"){try{Notification.requestPermission();}catch{}}}} title="Notifications" style={{...navBtnS(panel==="notifications"),position:"relative"}}>
+        <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Bell/></span>
+        {showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>Alerts</div>}
+        {notifUnseen>0&&<div style={{position:"absolute",top:4,right:6,minWidth:14,height:14,padding:"0 3px",borderRadius:8,background:t.err,color:"#fff",fontSize:8,fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center",boxShadow:`0 0 6px ${t.err}88`}}>{notifUnseen>99?"99+":notifUnseen}</div>}
+      </button>
       <button className={`nav-panel-button${panel==="settings"?" is-active":""}`} onClick={openSettings} title="Settings" style={navBtnS(panel==="settings")}>
         <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Settings/></span>
         {showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>Settings</div>}
@@ -6602,6 +6646,16 @@ function HyprChat(){
   </div>
 
       :panel==="analytics"?<AnalyticsPanel t={t} btnS={btnS} cardS={cardS} analyticsDays={analyticsDays} setAnalyticsDays={setAnalyticsDays} analyticsGroup={analyticsGroup} setAnalyticsGroup={setAnalyticsGroup} loadAnalytics={loadAnalytics} analyticsData={analyticsData}/>
+
+      :(panel==="tasks"||panel==="notifications")?<TasksPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} tab={panel==="notifications"?"notifications":"tasks"} setTab={tb=>setPanel(tb==="notifications"?"notifications":"tasks")} onUnseenChange={setNotifUnseen}/>
+
+      :panel==="email"?<EmailPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS}/>
+
+      :panel==="notes"?<NotesPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS}/>
+
+      :panel==="calendar"?<CalendarPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS}/>
+
+      :panel==="assistant"?<AssistantPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} models={models} openAssistantChat={async cid=>{if(!cid)return;try{const r=await fetch(`${API}/api/conversations`);const cs=await r.json();const isCouncil=v=>v==="1"||v===1||v===true;setConvs(cs.map(c=>({...c,messages:[],is_council:isCouncil(c.is_council),council_config_id:c.council_config_id||null})));}catch{}setActId(cid);loadConversation(cid);setPanel("chat");}}/>
 
       :panel==="settings"?ReactDOM.createPortal(<div style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)",fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)closeSettings();}}>
     <div style={{width:isMobile?"100%":"min(1100px,95vw)",maxHeight:isMobile?"100%":"85vh",height:isMobile?"100%":"85vh",display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"260px minmax(0,1fr)",background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,boxShadow:"0 8px 48px #0008",overflow:"hidden",animation:"fadeIn .25s",...(isMobile?{gridTemplateRows:"auto minmax(0,1fr)",borderRadius:0,border:"none"}:{})}}>

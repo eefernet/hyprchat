@@ -30,6 +30,7 @@ from pydantic import BaseModel
 import backup as backup_svc
 import config
 import database as db
+import scheduler as scheduler_svc
 from council import stream_council_chat
 from events import EventBus
 import quick_search as qs_module
@@ -183,6 +184,7 @@ events = EventBus()
 # APP SETUP
 # ============================================================
 _cleanup_task_ref = None
+_scheduler_task_ref = None
 
 # Strong refs for fire-and-forget background jobs (indexing, research runners).
 # Without this, the event loop only weakly references a bare create_task() result,
@@ -286,6 +288,12 @@ async def lifespan(app: FastAPI):
             print(f"[Startup] Reaped stale runs: {_reaped}")
     except Exception as _re:
         print(f"[Startup] Stale-run reaper failed (non-fatal): {_re}")
+    try:
+        _task_reaped = await db.reap_stale_task_runs()
+        if _task_reaped:
+            print(f"[Startup] Reaped {_task_reaped} stale scheduled-task runs")
+    except Exception as _re:
+        print(f"[Startup] Task-run reaper failed (non-fatal): {_re}")
     try:
         _ensure_runtime_storage_dirs()
     except Exception as exc:
@@ -460,6 +468,13 @@ async def lifespan(app: FastAPI):
     _cleanup_task_ref = asyncio.create_task(_cleanup_loop())
     # Start health check loop (every 5 min)
     _health_task_ref = asyncio.create_task(health_check_loop())
+    # Start the Jarvis scheduled-task loop
+    global _scheduler_task_ref
+    _scheduler_task_ref = scheduler_svc.start(
+        http, events,
+        create_research_report=lambda payload: _create_and_start_research_report(
+            ResearchReportCreate(**payload)),
+    )
     # Load RAG settings from persistent config — clamped like the PATCH path,
     # so a legacy settings.json with junk values (e.g. chunk_size -5) can't
     # poison the runtime chunker after a restart.
@@ -476,7 +491,7 @@ async def lifespan(app: FastAPI):
     # (no-op once populated; non-blocking)
     _track_bg(rag.backfill_fts())
     yield
-    for task in [_cleanup_task_ref, _health_task_ref]:
+    for task in [_cleanup_task_ref, _health_task_ref, _scheduler_task_ref]:
         if task:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -517,6 +532,12 @@ _USER_SCOPED_PREFIXES = (
     "/api/danger-zone",
     "/api/events",
     "/api/prefs",
+    "/api/tasks",
+    "/api/notifications",
+    "/api/assistant",
+    "/api/notes",
+    "/api/calendar",
+    "/api/email",
 )
 
 

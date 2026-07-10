@@ -1113,6 +1113,123 @@ CODEAGENT_TOOLS = {
             }, "required": ["content"]},
         },
     },
+    "manage_tasks": {
+        "type": "function",
+        "function": {
+            "name": "manage_tasks",
+            "description": "Create, list, update, pause, resume, delete, or run the user's scheduled tasks. When the user asks for anything recurring ('every morning', 'each Friday', 'remind me daily'), create a scheduled task instead of doing it once. Results are delivered to this conversation plus a notification.",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "description": "create, list, get, update, pause, resume, delete, or run_now"},
+                "task_id": {"type": "string", "description": "Task id (required for get/update/pause/resume/delete/run_now)"},
+                "title": {"type": "string", "description": "Short task title"},
+                "prompt": {"type": "string", "description": "What the task should do each run, phrased as an instruction"},
+                "schedule_kind": {"type": "string", "description": "once, daily, weekly, monthly, or cron"},
+                "time": {"type": "string", "description": "Local time HH:MM for daily/weekly/monthly"},
+                "weekday": {"type": "integer", "description": "0-6 (0=Monday) for weekly"},
+                "day": {"type": "integer", "description": "1-31 for monthly"},
+                "cron": {"type": "string", "description": "Cron expression for schedule_kind=cron"},
+                "run_at": {"type": "string", "description": "Local datetime YYYY-MM-DDTHH:MM for once"},
+            }, "required": ["action"]},
+        },
+    },
+    "manage_notes": {
+        "type": "function",
+        "function": {
+            "name": "manage_notes",
+            "description": "Create, list, complete, update, or delete the user's notes and todos. Use for 'note this down', 'add to my todo list', 'what's on my list', 'mark X done'. Todos support due dates and reminder times.",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "description": "create, list, update, complete, or delete"},
+                "note_id": {"type": "string", "description": "Note id (for update/complete/delete)"},
+                "kind": {"type": "string", "description": "note or todo (default note; list filters by kind when given)"},
+                "title": {"type": "string", "description": "Short title"},
+                "content": {"type": "string", "description": "Body text (optional)"},
+                "due": {"type": "string", "description": "Due datetime YYYY-MM-DDTHH:MM in the user's local time (todos)"},
+                "remind": {"type": "string", "description": "Reminder datetime YYYY-MM-DDTHH:MM local — fires a notification"},
+            }, "required": ["action"]},
+        },
+    },
+    "manage_calendar": {
+        "type": "function",
+        "function": {
+            "name": "manage_calendar",
+            "description": "Create, list, update, or delete calendar events. Use when the user mentions appointments, meetings, or anything with a date/time ('dentist Tuesday 3pm'). Events sync to the user's phone via CalDAV when configured.",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "description": "create, list, update, or delete"},
+                "event_id": {"type": "string", "description": "Event id (for update/delete)"},
+                "title": {"type": "string", "description": "Event title"},
+                "start": {"type": "string", "description": "Start YYYY-MM-DDTHH:MM in the user's local time"},
+                "end": {"type": "string", "description": "End YYYY-MM-DDTHH:MM local (default: start + 1h)"},
+                "location": {"type": "string", "description": "Location (optional)"},
+                "description": {"type": "string", "description": "Details (optional)"},
+                "remind_minutes": {"type": "integer", "description": "Minutes before start to notify (optional)"},
+                "days": {"type": "integer", "description": "For list: how many days ahead (default 7)"},
+            }, "required": ["action"]},
+        },
+    },
+    "list_emails": {
+        "type": "function",
+        "function": {
+            "name": "list_emails",
+            "description": "List the user's recent emails (cached inbox). Shows sender, subject, urgency, and a snippet. Use before read_email or reply_to_email.",
+            "parameters": {"type": "object", "properties": {
+                "unread_only": {"type": "boolean", "description": "Only unread (default false)"},
+                "limit": {"type": "integer", "description": "Max results (default 20)"},
+            }},
+        },
+    },
+    "read_email": {
+        "type": "function",
+        "function": {
+            "name": "read_email",
+            "description": "Fetch the full body of one email live from the mail server.",
+            "parameters": {"type": "object", "properties": {
+                "message_id": {"type": "string", "description": "Email id from list_emails"},
+            }, "required": ["message_id"]},
+        },
+    },
+    "send_email": {
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "description": "Send a new email from the user's account. If autonomous sending is disabled for the account, this saves a DRAFT for the user to review instead — that is expected behavior, not an error.",
+            "parameters": {"type": "object", "properties": {
+                "to": {"type": "string", "description": "Recipient email address"},
+                "subject": {"type": "string", "description": "Subject line"},
+                "body": {"type": "string", "description": "Plain-text body"},
+            }, "required": ["to", "subject", "body"]},
+        },
+    },
+    "reply_to_email": {
+        "type": "function",
+        "function": {
+            "name": "reply_to_email",
+            "description": "Reply to an email from list_emails. If autonomous sending is disabled for the account, the reply is saved as a DRAFT for the user to review — expected behavior, not an error.",
+            "parameters": {"type": "object", "properties": {
+                "message_id": {"type": "string", "description": "Email id from list_emails"},
+                "body": {"type": "string", "description": "Plain-text reply body"},
+            }, "required": ["message_id", "body"]},
+        },
+    },
+    "archive_email": {
+        "type": "function",
+        "function": {
+            "name": "archive_email",
+            "description": "Archive an email (moves it out of the inbox).",
+            "parameters": {"type": "object", "properties": {
+                "message_id": {"type": "string", "description": "Email id from list_emails"},
+            }, "required": ["message_id"]},
+        },
+    },
+    "mark_email_read": {
+        "type": "function",
+        "function": {
+            "name": "mark_email_read",
+            "description": "Mark an email as read.",
+            "parameters": {"type": "object", "properties": {
+                "message_id": {"type": "string", "description": "Email id from list_emails"},
+            }, "required": ["message_id"]},
+        },
+    },
     "delete_file": {
         "type": "function",
         "function": {
@@ -2932,6 +3049,335 @@ async def exec_tool(
                     "tool": "memory", "icon": "brain", "status": f"Save failed: {e}",
                 })
                 return f"ERROR: could not save memory: {e}"
+
+        elif name == "manage_tasks":
+            # Lazy import: scheduler → agents.assistant → agents.chat → tools
+            # would cycle at module import time.
+            import scheduler as _scheduler
+            action = str(args.get("action") or "").strip().lower()
+            task_id = str(args.get("task_id") or "").strip()
+
+            def _fmt_task(t: dict) -> str:
+                state = "enabled" if t["enabled"] else "paused"
+                nxt = f", next run {t['next_run']} UTC" if t.get("next_run") else ""
+                last = f", last: {t['last_status']}" if t.get("last_status") else ""
+                return f"- {t['id']}: \"{t['title']}\" [{t['schedule_kind']}, {state}{nxt}{last}]"
+
+            try:
+                if action == "list":
+                    tasks = await db.list_scheduled_tasks()
+                    if not tasks:
+                        return "No scheduled tasks yet."
+                    return "Scheduled tasks:\n" + "\n".join(_fmt_task(t) for t in tasks[:30])
+
+                if action == "create":
+                    title = str(args.get("title") or "").strip()[:200]
+                    prompt = str(args.get("prompt") or "").strip()
+                    kind = str(args.get("schedule_kind") or "once").strip().lower()
+                    if not title or not prompt:
+                        return "ERROR: manage_tasks create requires 'title' and 'prompt'."
+                    if kind not in ("once", "daily", "weekly", "monthly", "cron"):
+                        return "ERROR: schedule_kind must be once, daily, weekly, monthly, or cron."
+                    schedule_json: dict = {}
+                    if args.get("time"):
+                        schedule_json["time"] = str(args["time"]).strip()
+                    if args.get("weekday") is not None:
+                        schedule_json["weekday"] = int(args["weekday"])
+                    if args.get("day") is not None:
+                        schedule_json["day"] = int(args["day"])
+                    if args.get("cron"):
+                        schedule_json["cron"] = str(args["cron"]).strip()
+                    if args.get("run_at"):
+                        schedule_json["run_at"] = str(args["run_at"]).strip()
+                    profile = await db.get_assistant_profile()
+                    tz = (profile or {}).get("timezone") or "UTC"
+                    next_run = _scheduler.compute_next_run(kind, schedule_json, tz)
+                    if not next_run:
+                        return "ERROR: that schedule doesn't produce a run time — give a concrete time (e.g. time='08:30' for daily, run_at='2026-07-10T08:30' for once)."
+                    task = await db.create_scheduled_task(
+                        f"task-{uuid.uuid4().hex[:10]}", title=title, prompt=prompt,
+                        task_type="llm", schedule_kind=kind, schedule_json=schedule_json,
+                        timezone=tz, next_run=next_run, conversation_id=conv_id or "",
+                        delivery_json={"conversation": bool(conv_id), "notify": True},
+                    )
+                    return (f"Created scheduled task {task['id']} (\"{title}\", {kind}, "
+                            f"next run {task['next_run']} UTC, timezone {tz}). Results will be "
+                            f"posted in this conversation.")
+
+                if not task_id:
+                    return f"ERROR: manage_tasks {action or '?'} requires 'task_id'."
+                task = await db.get_scheduled_task(task_id)
+                if not task:
+                    return f"ERROR: no task with id {task_id}."
+
+                if action == "get":
+                    runs = await db.list_task_runs(task_id, limit=3)
+                    run_lines = "\n".join(
+                        f"  run {r['id']}: {r['status']} at {r['started_at']}" for r in runs)
+                    return _fmt_task(task) + (f"\nRecent runs:\n{run_lines}" if run_lines else "")
+                if action == "pause":
+                    await db.update_scheduled_task(task_id, {"enabled": False})
+                    return f"Paused task \"{task['title']}\"."
+                if action == "resume":
+                    tz = task.get("timezone") or "UTC"
+                    nxt = _scheduler.compute_next_run(task["schedule_kind"], task["schedule_json"], tz)
+                    await db.update_scheduled_task(task_id, {"enabled": True, "next_run": nxt})
+                    return f"Resumed task \"{task['title']}\" (next run {nxt} UTC)."
+                if action == "delete":
+                    await db.delete_scheduled_task(task_id)
+                    return f"Deleted task \"{task['title']}\"."
+                if action == "run_now":
+                    run_id = await _scheduler.run_task_now(task_id)
+                    return f"Started task \"{task['title']}\" now (run {run_id})."
+                if action == "update":
+                    fields: dict = {}
+                    if args.get("title"):
+                        fields["title"] = str(args["title"]).strip()[:200]
+                    if args.get("prompt"):
+                        fields["prompt"] = str(args["prompt"]).strip()
+                    schedule_json = dict(task.get("schedule_json") or {})
+                    changed_schedule = False
+                    for key in ("time", "weekday", "day", "cron", "run_at"):
+                        if args.get(key) is not None and args.get(key) != "":
+                            schedule_json[key] = args[key]
+                            changed_schedule = True
+                    kind = str(args.get("schedule_kind") or task["schedule_kind"]).strip().lower()
+                    if kind != task["schedule_kind"]:
+                        changed_schedule = True
+                    if changed_schedule:
+                        fields["schedule_kind"] = kind
+                        fields["schedule_json"] = schedule_json
+                        fields["next_run"] = _scheduler.compute_next_run(
+                            kind, schedule_json, task.get("timezone") or "UTC")
+                    if not fields:
+                        return "Nothing to update — pass title, prompt, or schedule fields."
+                    updated = await db.update_scheduled_task(task_id, fields)
+                    return f"Updated task:\n{_fmt_task(updated)}"
+
+                return "ERROR: action must be create, list, get, update, pause, resume, delete, or run_now."
+            except Exception as e:
+                return f"ERROR: manage_tasks failed: {e}"
+
+        elif name == "manage_notes":
+            import pim as _pim
+            action = str(args.get("action") or "").strip().lower()
+            try:
+                if action == "list":
+                    kind = str(args.get("kind") or "").strip().lower()
+                    notes = await db.list_notes(kind=kind if kind in ("note", "todo") else "",
+                                                include_done=False)
+                    if not notes:
+                        return "No open notes or todos."
+                    tz = await _pim.user_timezone()
+                    lines = []
+                    for n in notes[:30]:
+                        due = f" (due {_pim.utc_to_local(n['due_at'], tz)})" if n.get("due_at") else ""
+                        body = f" — {(n.get('content') or '')[:60]}" if n.get("content") else ""
+                        lines.append(f"- [{n['kind']}] {n['id']}: {n['title']}{due}{body}")
+                    return "Notes and todos:\n" + "\n".join(lines)
+                if action == "create":
+                    title = str(args.get("title") or "").strip()
+                    if not title:
+                        return "ERROR: manage_notes create requires 'title'."
+                    note = await _pim.create_note(
+                        kind=str(args.get("kind") or "note").strip().lower(),
+                        title=title, content=str(args.get("content") or ""),
+                        due_local=str(args.get("due") or ""),
+                        remind_local=str(args.get("remind") or ""))
+                    extra = " with a reminder" if args.get("remind") else ""
+                    return f"Saved {note['kind']} {note['id']}: \"{title}\"{extra}."
+                note_id = str(args.get("note_id") or "").strip()
+                if not note_id:
+                    return f"ERROR: manage_notes {action or '?'} requires 'note_id'."
+                note = await db.get_note(note_id)
+                if not note:
+                    return f"ERROR: no note with id {note_id}."
+                if action == "complete":
+                    await db.update_note(note_id, {"done": True})
+                    return f"Marked \"{note['title']}\" done."
+                if action == "delete":
+                    await db.delete_note(note_id)
+                    return f"Deleted \"{note['title']}\"."
+                if action == "update":
+                    tz = await _pim.user_timezone()
+                    fields: dict = {}
+                    if args.get("title"):
+                        fields["title"] = str(args["title"]).strip()[:300]
+                    if args.get("content") is not None and args.get("content") != "":
+                        fields["content"] = str(args["content"])
+                    if args.get("due"):
+                        fields["due_at"] = _pim.local_to_utc(str(args["due"]), tz)
+                    if args.get("remind"):
+                        fields["remind_at"] = _pim.local_to_utc(str(args["remind"]), tz)
+                        fields["reminded"] = False
+                    if not fields:
+                        return "Nothing to update — pass title, content, due, or remind."
+                    updated = await db.update_note(note_id, fields)
+                    return f"Updated \"{updated['title']}\"."
+                return "ERROR: action must be create, list, update, complete, or delete."
+            except Exception as e:
+                return f"ERROR: manage_notes failed: {e}"
+
+        elif name == "manage_calendar":
+            import pim as _pim
+            action = str(args.get("action") or "").strip().lower()
+            try:
+                tz = await _pim.user_timezone()
+                if action == "list":
+                    days = max(1, min(90, int(args.get("days") or 7)))
+                    from datetime import datetime as _dt, timedelta as _td
+                    start = _dt.utcnow().isoformat()
+                    end = (_dt.utcnow() + _td(days=days)).isoformat()
+                    events = await db.list_calendar_events(start=start, end=end)
+                    if not events:
+                        return f"No events in the next {days} days."
+                    lines = []
+                    for e in events[:30]:
+                        when = _pim.utc_to_local(e.get("start_at") or "", tz)
+                        loc = f" @ {e['location']}" if e.get("location") else ""
+                        lines.append(f"- {e['id']}: {when} {e['title']}{loc}")
+                    return f"Events (next {days} days, local time):\n" + "\n".join(lines)
+                if action == "create":
+                    title = str(args.get("title") or "").strip()
+                    start = str(args.get("start") or "").strip()
+                    if not title or not start:
+                        return "ERROR: manage_calendar create requires 'title' and 'start' (YYYY-MM-DDTHH:MM local)."
+                    try:
+                        remind = int(args["remind_minutes"]) if args.get("remind_minutes") is not None else None
+                    except (TypeError, ValueError):
+                        remind = None
+                    event = await _pim.create_event(
+                        title=title, start_local=start,
+                        end_local=str(args.get("end") or ""),
+                        description=str(args.get("description") or ""),
+                        location=str(args.get("location") or ""),
+                        remind_minutes=remind)
+                    return (f"Added event {event['id']}: \"{title}\" at "
+                            f"{_pim.utc_to_local(event['start_at'], tz)} (local). "
+                            f"It will sync to CalDAV if configured.")
+                event_id = str(args.get("event_id") or "").strip()
+                if not event_id:
+                    return f"ERROR: manage_calendar {action or '?'} requires 'event_id'."
+                event = await db.get_calendar_event(event_id)
+                if not event:
+                    return f"ERROR: no event with id {event_id}."
+                if action == "delete":
+                    await _pim.delete_event(event_id)
+                    return f"Deleted event \"{event['title']}\"."
+                if action == "update":
+                    fields = {"title": args.get("title") or None,
+                              "description": args.get("description"),
+                              "location": args.get("location"),
+                              "start_local": args.get("start") or "",
+                              "end_local": args.get("end") or ""}
+                    if args.get("remind_minutes") is not None:
+                        try:
+                            fields["remind_minutes"] = int(args["remind_minutes"])
+                        except (TypeError, ValueError):
+                            pass
+                    updated = await _pim.update_event(event_id, fields)
+                    return f"Updated event \"{updated['title']}\" ({_pim.utc_to_local(updated['start_at'], tz)} local)."
+                return "ERROR: action must be create, list, update, or delete."
+            except ValueError as e:
+                return f"ERROR: {e}"
+            except Exception as e:
+                return f"ERROR: manage_calendar failed: {e}"
+
+        elif name in ("list_emails", "read_email", "send_email", "reply_to_email",
+                      "archive_email", "mark_email_read"):
+            import email_client as _email_client
+            try:
+                accounts = await db.list_email_accounts()
+                if not accounts:
+                    return "No email account is configured. The user can add one in the Email panel."
+                account_id = accounts[0]["id"]
+
+                if name == "list_emails":
+                    limit = max(1, min(50, int(args.get("limit") or 20)))
+                    msgs = await db.list_email_messages(
+                        limit=limit, unread_only=bool(args.get("unread_only")))
+                    if not msgs:
+                        return "No emails in the cached inbox yet (the poller checks every ~5 minutes)."
+                    lines = []
+                    for m in msgs:
+                        flags = []
+                        if m["unread"]:
+                            flags.append("unread")
+                        if m.get("urgency") and m["urgency"] != "normal":
+                            flags.append(m["urgency"])
+                        tag = f" [{'/'.join(flags)}]" if flags else ""
+                        lines.append(f"- {m['id']}{tag} {m['from_addr']}: {m['subject']}"
+                                     f" — {(m.get('summary') or m.get('snippet') or '')[:100]}")
+                    return "Inbox:\n" + "\n".join(lines)
+
+                if name == "send_email":
+                    to = _email_client.clean_address(str(args.get("to") or ""))
+                    subject = str(args.get("subject") or "").strip()
+                    body = str(args.get("body") or "").strip()
+                    if not to or "@" not in to or not subject or not body:
+                        return "ERROR: send_email requires a valid 'to' address, 'subject', and 'body'."
+                    account = await db.get_email_account(account_id, with_password=True)
+                    # SERVER-SIDE autonomy gate: prompt rules alone don't count.
+                    if not account.get("allow_autonomous_send"):
+                        note = await db.create_note(
+                            f"note-{uuid.uuid4().hex[:10]}", kind="note",
+                            title=f"Email draft to {to}: {subject}"[:290],
+                            content=body, tags=["email-draft"])
+                        return (f"Autonomous sending is disabled for this account, so the email was "
+                                f"saved as a draft note ({note['id']}) instead. The user can review "
+                                f"and send it from the Email panel, or enable autonomous send in "
+                                f"Email settings.")
+                    await _email_client.send_mail(account, to=to, subject=subject, body=body)
+                    return f"Email sent to {to}: \"{subject}\"."
+
+                message_id = str(args.get("message_id") or "").strip()
+                if not message_id:
+                    return f"ERROR: {name} requires 'message_id' (use list_emails first)."
+                msg = await db.get_email_message(message_id)
+                if not msg:
+                    return f"ERROR: no email with id {message_id}."
+                account = await db.get_email_account(msg["account_id"], with_password=True)
+                if not account:
+                    return "ERROR: the email account for this message no longer exists."
+
+                if name == "read_email":
+                    body = await _email_client.fetch_body(account, msg["uid"])
+                    await db.update_email_message(message_id, {"unread": False})
+                    try:
+                        await _email_client.set_flags(account, msg["uid"], seen=True)
+                    except Exception:
+                        pass
+                    return (f"From: {body['from']}\nTo: {body['to']}\nDate: {body['date']}\n"
+                            f"Subject: {body['subject']}\n\n{body['body'][:12000]}")
+
+                if name == "reply_to_email":
+                    body = str(args.get("body") or "").strip()
+                    if not body:
+                        return "ERROR: reply_to_email requires 'body'."
+                    if not account.get("allow_autonomous_send"):
+                        await db.update_email_message(message_id, {"draft_reply": body})
+                        return (f"Autonomous sending is disabled, so the reply to "
+                                f"\"{msg['subject']}\" was saved as a draft. The user can review "
+                                f"and send it from the Email panel.")
+                    to = _email_client.clean_address(msg["from_addr"])
+                    subject = msg["subject"] or ""
+                    if not subject.lower().startswith("re:"):
+                        subject = f"Re: {subject}"
+                    await _email_client.send_mail(account, to=to, subject=subject, body=body)
+                    await db.update_email_message(message_id, {"draft_reply": ""})
+                    return f"Reply sent to {to}."
+
+                if name == "archive_email":
+                    await _email_client.set_flags(account, msg["uid"], archive=True)
+                    await db.update_email_message(message_id, {"archived": True, "unread": False})
+                    return f"Archived \"{msg['subject']}\"."
+
+                if name == "mark_email_read":
+                    await _email_client.set_flags(account, msg["uid"], seen=True)
+                    await db.update_email_message(message_id, {"unread": False})
+                    return f"Marked \"{msg['subject']}\" as read."
+            except Exception as e:
+                return f"ERROR: {name} failed: {e}"
 
         elif name == "fetch_url":
             url = args.get("url", "").strip()
