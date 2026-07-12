@@ -9,6 +9,7 @@ them, never include them in error strings shown to the model.
 from __future__ import annotations
 
 import asyncio
+import base64
 import html as html_mod
 import re
 from datetime import datetime
@@ -100,14 +101,43 @@ def _fetch_new_blocking(account: dict, last_seen_uid: int) -> dict:
         return {"uidvalidity": uidvalidity, "max_uid": max_uid, "messages": out}
 
 
+# Raw HTML cap (newsletters routinely run 100-300 KB) and total decoded bytes
+# of inline cid: images embedded as data URIs in the response.
+_HTML_BODY_CAP = 400_000
+_INLINE_IMAGE_BUDGET = 3 * 1024 * 1024
+
+
+def _inline_images(msg) -> list[dict]:
+    """Image attachments referenced by Content-ID (multipart/related inline
+    images — signatures, embedded screenshots) as base64, budget-capped."""
+    out, spent = [], 0
+    for att in (msg.attachments or ()):
+        cid = (att.content_id or "").strip().strip("<>")
+        ctype = (att.content_type or "").lower()
+        payload = att.payload or b""
+        if not cid or not ctype.startswith("image/") or not payload:
+            continue
+        if spent + len(payload) > _INLINE_IMAGE_BUDGET:
+            continue
+        spent += len(payload)
+        out.append({"cid": cid, "content_type": ctype,
+                    "b64": base64.b64encode(payload).decode("ascii")})
+    return out
+
+
 def _fetch_body_blocking(account: dict, uid: int) -> dict:
     from imap_tools import AND
     with _imap_mailbox(account) as box:
         for msg in box.fetch(AND(uid=str(uid)), mark_seen=False):
             body = (msg.text or "").strip() or _html_to_text(msg.html or "")
+            # `html` is RAW — sanitization happens at the delivery edge
+            # (routes/email.py via email_render); the read_email chat tool
+            # keeps using the plain-text `body`.
             return {"subject": msg.subject or "", "from": msg.from_ or "",
                     "to": ", ".join(msg.to or ()), "date": str(msg.date or ""),
-                    "body": body[:50000]}
+                    "body": body[:50000],
+                    "html": (msg.html or "")[:_HTML_BODY_CAP],
+                    "inline_images": _inline_images(msg)}
     raise RuntimeError(f"message uid {uid} not found on the server")
 
 

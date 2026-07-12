@@ -103,6 +103,7 @@ WATCHED = {
     "backend/caldav_sync.py":       ("CalDAV Sync",      REMOTE_BACKEND,            True),
     "backend/email_client.py":      ("Email Client",     REMOTE_BACKEND,            True),
     "backend/email_triage.py":      ("Email Triage",     REMOTE_BACKEND,            True),
+    "backend/email_render.py":      ("Email HTML Render", REMOTE_BACKEND,           True),
     "backend/weather.py":           ("Weather",          REMOTE_BACKEND,            True),
     "backend/quiet_hours.py":       ("Quiet Hours",      REMOTE_BACKEND,            True),
     "backend/comfyui.py":           ("ComfyUI Client",   REMOTE_BACKEND,            True),

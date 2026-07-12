@@ -46,6 +46,11 @@
   mail with a local model: urgency tags, one-line summaries, tentative
   calendar events extracted from invitations, and urgent-mail notifications.
   Bodies are never stored — only headers and snippets.
+- **HTML emails render properly** — the reader shows the real formatted
+  message (newsletters, receipts) in a locked sandboxed frame: scripts and
+  event handlers are stripped server-side, no same-origin or script access,
+  links open in a new tab, and inline attached images are embedded. A "view
+  plain text" toggle keeps the old text view.
 - **Safe by default** — chat tools can list, read, reply, archive, and
   delete, but sending and deleting are per-account server-side toggles that
   default OFF (the assistant drafts or asks instead). Deletes only ever move

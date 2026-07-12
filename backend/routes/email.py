@@ -141,6 +141,16 @@ async def read_body(message_id: str):
         body = await email_client.fetch_body(account, msg["uid"])
     except Exception as e:
         raise HTTPException(502, f"IMAP fetch failed: {e}")
+    # Sanitize at the delivery edge: raw IMAP HTML → cid images embedded →
+    # script/on*/javascript: stripped. The panel renders `html` in a locked
+    # sandboxed iframe (second defense layer); `body` stays the plain text.
+    import email_render
+    inline_images = body.pop("inline_images", None)
+    try:
+        body["html"] = email_render.prepare_email_html(body.get("html"), inline_images)
+    except Exception as e:
+        print(f"[EMAIL] html sanitize failed (falling back to text): {e}")
+        body["html"] = ""
     await db.update_email_message(message_id, {"unread": False})
     return body
 

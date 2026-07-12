@@ -238,3 +238,77 @@ def test_event_fires_are_capped_per_poll(monkeypatch):
     _run(email_triage.poll_due_accounts(None))
     events = [c for c in calls if c[0] == "event"]
     assert len(events) == email_triage.EVENT_FIRE_CAP_PER_POLL
+
+
+# ── fetch_body: raw HTML part + inline cid images (HTML email reader) ────
+
+class _Att:
+    def __init__(self, cid, ctype, payload):
+        self.content_id = cid
+        self.content_type = ctype
+        self.payload = payload
+
+
+def _body_msg(**over):
+    class FakeMsg:
+        uid = "7"
+        subject = "s"
+        from_ = "a@b.c"
+        to = ("d@e.f",)
+        date = None
+        text = "plain part"
+        html = "<html><body><p>hi</p></body></html>"
+        attachments = ()
+    m = FakeMsg()
+    for k, v in over.items():
+        setattr(m, k, v)
+    return m
+
+
+def _body_box(msg):
+    class BodyBox(FakeBox):
+        def fetch(self, _criteria, **_kw):
+            return [msg]
+    return BodyBox()
+
+
+def test_fetch_body_returns_raw_html_and_text(monkeypatch):
+    monkeypatch.setattr(email_client, "_imap_mailbox",
+                        lambda _a: _body_box(_body_msg()))
+    out = email_client._fetch_body_blocking(ACCOUNT, 7)
+    assert out["body"] == "plain part"
+    assert out["html"] == "<html><body><p>hi</p></body></html>"  # RAW — edge sanitizes
+    assert out["inline_images"] == []
+
+
+def test_fetch_body_extracts_inline_cid_images(monkeypatch):
+    atts = (_Att("<logo@x>", "image/png", b"PNGDATA"),
+            _Att("", "image/png", b"nocid"),          # no cid → skipped
+            _Att("<doc@x>", "application/pdf", b"%PDF"))  # not an image → skipped
+    monkeypatch.setattr(email_client, "_imap_mailbox",
+                        lambda _a: _body_box(_body_msg(attachments=atts)))
+    out = email_client._fetch_body_blocking(ACCOUNT, 7)
+    assert len(out["inline_images"]) == 1
+    img = out["inline_images"][0]
+    assert img["cid"] == "logo@x"          # <> stripped
+    assert img["content_type"] == "image/png"
+    import base64 as _b64
+    assert _b64.b64decode(img["b64"]) == b"PNGDATA"
+
+
+def test_fetch_body_inline_image_budget(monkeypatch):
+    big = _Att("<big@x>", "image/jpeg", b"x" * (email_client._INLINE_IMAGE_BUDGET + 1))
+    small = _Att("<small@x>", "image/png", b"ok")
+    monkeypatch.setattr(email_client, "_imap_mailbox",
+                        lambda _a: _body_box(_body_msg(attachments=(big, small))))
+    out = email_client._fetch_body_blocking(ACCOUNT, 7)
+    # Oversized image skipped, the small one still fits.
+    assert [i["cid"] for i in out["inline_images"]] == ["small@x"]
+
+
+def test_fetch_body_html_cap(monkeypatch):
+    huge = "<p>" + "a" * (email_client._HTML_BODY_CAP + 100)
+    monkeypatch.setattr(email_client, "_imap_mailbox",
+                        lambda _a: _body_box(_body_msg(html=huge)))
+    out = email_client._fetch_body_blocking(ACCOUNT, 7)
+    assert len(out["html"]) == email_client._HTML_BODY_CAP

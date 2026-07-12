@@ -172,9 +172,26 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
       <button onClick={()=>setReader(null)} style={{...btnS(t.mut),padding:"4px 9px",fontSize:10}}><IC.X/></button>
     </div>
     {reader.msg.summary&&<div style={{fontSize:11,color:t.acc,marginBottom:8}}>AI summary: {reader.msg.summary}</div>}
-    <div style={{fontSize:12,color:t.dim,whiteSpace:"pre-wrap",maxHeight:isMobile?320:"46vh",overflowY:"auto",background:`${t.bgDeep}66`,border:`1px solid ${t.brd}22`,borderRadius:8,padding:12}}>
-      {reader.loading?"Loading body from server...":(reader.body?.body||"")}
-    </div>
+    {(()=>{
+      const textBodyS={fontSize:12,color:t.dim,whiteSpace:"pre-wrap",maxHeight:isMobile?320:"46vh",overflowY:"auto",background:`${t.bgDeep}66`,border:`1px solid ${t.brd}22`,borderRadius:8,padding:12};
+      if(reader.loading)return <div style={textBodyS}>Loading body from server...</div>;
+      const hasHtml=!!(reader.body?.html||"").trim();
+      const showHtml=hasHtml&&reader.view!=="text";
+      return <>
+        {showHtml
+          // Sandboxed WITHOUT allow-scripts/allow-same-origin/allow-forms —
+          // email HTML is untrusted (backend sanitizes as layer one).
+          // allow-popups(+escape) only so <base target="_blank"> links open.
+          ?<iframe sandbox="allow-popups allow-popups-to-escape-sandbox" srcDoc={reader.body.html} title="email"
+            style={{width:"100%",height:isMobile?360:"52vh",border:`1px solid ${t.brd}22`,borderRadius:8,background:"#fff",display:"block"}}/>
+          :<div style={textBodyS}>{reader.body?.body||""}</div>}
+        {hasHtml&&(reader.body?.body||"").trim()&&
+          <button onClick={()=>setReader(p=>p&&({...p,view:showHtml?"text":"html"}))}
+            style={{background:"none",border:"none",color:t.mut,fontSize:9,cursor:"pointer",padding:"4px 0 0",fontFamily:"inherit"}}>
+            {showHtml?"view plain text":"view HTML"}
+          </button>}
+      </>;
+    })()}
     <div style={{marginTop:10}}>
       <div style={{fontSize:10,color:t.mut,marginBottom:4}}>Reply{reader.msg.draft_reply?" (AI draft loaded — edit before sending)":""}</div>
       <textarea value={reader.reply} onChange={e=>setReader(p=>({...p,reply:e.target.value}))} rows={4} style={{...inputS,resize:"vertical",marginBottom:8}}/>
