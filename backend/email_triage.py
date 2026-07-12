@@ -54,8 +54,14 @@ async def triage_new_messages(http, account: dict) -> int:
     for i, msg in enumerate(pending, 1):
         blocks.append(f"{i}. From: {msg['from_addr']}\n   Subject: {msg['subject']}\n"
                       f"   Snippet: {(msg['snippet'] or '')[:300]}")
-    prompt = _TRIAGE_PROMPT.format(today=datetime.utcnow().strftime("%Y-%m-%d"),
-                                   emails="\n".join(blocks))
+    # Anchor "today" in the OWNER's timezone: the extracted event start is
+    # interpreted as local wall clock by pim.create_event, so a UTC date here
+    # put "tomorrow 3pm" on the wrong day for anyone west of UTC in the evening.
+    import pim
+    from timeutil import safe_zone
+    tz_name = await pim.user_timezone(user_id)
+    today_local = datetime.now(safe_zone(tz_name)).strftime("%Y-%m-%d")
+    prompt = _TRIAGE_PROMPT.format(today=today_local, emails="\n".join(blocks))
     raw = await model_providers.complete_chat(
         http, model, prompt, num_ctx=8192, num_predict=2048, format_json=True,
         timeout=120, ollama_url=config.OLLAMA_URL)
@@ -99,13 +105,22 @@ async def triage_new_messages(http, account: dict) -> int:
         await db.update_email_message(msg["id"], fields, user_id=user_id)
         triaged += 1
 
-        # Urgent + unread + not yet notified → one notification.
+        # Urgent + unread + not yet notified → one notification (urgent=True
+        # pierces quiet hours when the profile's urgent_override is on) plus
+        # an urgent_email_received event for "when an urgent email arrives →
+        # ..." automations — fired here, post-triage, so event tasks don't
+        # have to re-judge urgency themselves.
         if urgency == "urgent" and msg["unread"] and not msg["notified"]:
             await notifications.notify(
                 f"Urgent email: {msg['subject']}",
                 f"From {msg['from_addr']}\n{fields['summary'] or (msg['snippet'] or '')[:200]}",
-                kind="email", ntfy=True, user_id=user_id)
+                kind="email", ntfy=True, urgent=True, user_id=user_id)
             await db.update_email_message(msg["id"], {"notified": True}, user_id=user_id)
+            try:
+                import scheduler
+                await scheduler.fire_event("urgent_email_received", user_id=user_id)
+            except Exception as e:
+                print(f"[EMAIL TRIAGE] fire_event(urgent_email_received) failed: {e}")
     return triaged
 
 

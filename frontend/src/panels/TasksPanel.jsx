@@ -2,14 +2,14 @@ import React,{useState,useEffect,useCallback} from 'react';
 
 import { API } from '../session.js';
 import { apiJson } from '../api.js';
-import { fmtUtcMinute } from '../datetime.js';
+import { fmtUtcToLocal } from '../datetime.js';
 import { IC } from '../components/icons.jsx';
 import PanelHeader from '../components/PanelHeader.jsx';
 import { EmptyState } from '../components/hyprChatWidgets.jsx';
 
-const KIND_FIELDS={once:["run_at"],daily:["time"],weekly:["time","weekday"],monthly:["time","day"],cron:["cron"]};
+const KIND_FIELDS={once:["run_at"],daily:["time"],weekly:["time","weekday"],monthly:["time","day"],cron:["cron"],event:[]};
 const WEEKDAYS=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
-const EMPTY_FORM={title:"",prompt:"",task_type:"llm",schedule_kind:"daily",time:"08:30",weekday:0,day:1,cron:"",run_at:"",notify:true,delivery:{}};
+const EMPTY_FORM={title:"",prompt:"",task_type:"llm",schedule_kind:"daily",time:"08:30",weekday:0,day:1,cron:"",run_at:"",event:"",every:1,notify:true,delivery:{}};
 
 export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab,onUnseenChange}){
   const [tasks,setTasks]=useState([]);
@@ -22,6 +22,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
   const [runs,setRuns]=useState([]);
   const [err,setErr]=useState("");
   const [ntfy,setNtfy]=useState({url:"",topic:"",token:"",allow_private:false,token_set:false});
+  const [eventNames,setEventNames]=useState([]);
 
   const loadTasks=useCallback(async()=>{
     try{setTasks(await apiJson("/api/tasks"));}catch(e){setErr(String(e.message||e));}
@@ -37,7 +38,9 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
     try{const d=await apiJson("/api/notifications/channels");setNtfy(n=>({...n,...(d.ntfy||{}),token:""}));}
     catch(e){setErr(String(e.message||e));}
   },[]);
-  useEffect(()=>{loadTasks();loadNotifs();loadNtfy();},[loadTasks,loadNotifs,loadNtfy]);
+  useEffect(()=>{loadTasks();loadNotifs();loadNtfy();
+    apiJson("/api/tasks/events").then(d=>setEventNames(d.events||[])).catch(()=>{});
+  },[loadTasks,loadNotifs,loadNtfy]);
 
   const saveTask=async()=>{
     if(!form)return;
@@ -47,10 +50,18 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
       if(form[f]!==""&&form[f]!=null)schedule_json[f]=(f==="weekday"||f==="day")?Number(form[f]):form[f];
     // Preserve delivery options the form doesn't surface (ntfy/email flags) —
     // spreading form.delivery first keeps them across edits.
-    const body={title:form.title,prompt:form.prompt,task_type:form.task_type,
+    const body={title:form.title,prompt:form.prompt,
       schedule_kind:form.schedule_kind,schedule_json,
       delivery_json:{...(form.delivery||{}),conversation:!!form.conversation_id,notify:!!form.notify},
       conversation_id:form.conversation_id||""};
+    // Never rewrite the type of assistant-managed tasks (check_in): the select
+    // below only offers llm/research, so including it would silently convert a
+    // check-in into a plain agent task and strip its gatherer brief.
+    if(form.task_type==="llm"||form.task_type==="research")body.task_type=form.task_type;
+    if(form.schedule_kind==="event"){
+      if(!form.event){setErr("Pick an event for the trigger.");return;}
+      body.event_trigger_json={event:form.event,every:Math.max(1,Number(form.every)||1)};
+    }
     try{
       const r=await fetch(`${API}/api/tasks${form.id?`/${form.id}`:""}`,{
         method:form.id?"PATCH":"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
@@ -99,7 +110,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
   };
 
   const kindLabel=k=>({once:"once",daily:"daily",weekly:"weekly",monthly:"monthly",cron:"cron",event:"on event",webhook:"webhook"})[k]||k;
-  const fmtTs=fmtUtcMinute;
+  const fmtTs=fmtUtcToLocal;
   const statusColor=s=>s==="succeeded"?t.ok:s==="failed"?t.err:s==="running"?t.warm:t.mut;
 
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
@@ -130,10 +141,14 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
             <input value={form.title} onChange={e=>setForm(f=>({...f,title:e.target.value}))} placeholder="Title" style={{...inputS,marginBottom:8}}/>
             <textarea value={form.prompt} onChange={e=>setForm(f=>({...f,prompt:e.target.value}))} placeholder="What should the agent do each run?" rows={3} style={{...inputS,marginBottom:8,resize:"vertical"}}/>
             <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8,alignItems:"center"}}>
-              <select value={form.task_type} onChange={e=>setForm(f=>({...f,task_type:e.target.value}))} style={{...inputS,width:"auto"}}>
-                <option value="llm">Agent task</option>
-                <option value="research">Deep research</option>
-              </select>
+              {form.task_type==="llm"||form.task_type==="research"
+                ?<select value={form.task_type} onChange={e=>setForm(f=>({...f,task_type:e.target.value}))} style={{...inputS,width:"auto"}}>
+                  <option value="llm">Agent task</option>
+                  <option value="research">Deep research</option>
+                </select>
+                :<span style={{fontSize:10,color:t.warm,border:`1px solid ${t.warm}44`,borderRadius:8,padding:"5px 10px"}}>
+                  {form.task_type==="check_in"?"check-in — managed in the Assistant panel":form.task_type}
+                </span>}
               <select value={form.schedule_kind} onChange={e=>setForm(f=>({...f,schedule_kind:e.target.value}))} style={{...inputS,width:"auto"}}>
                 {Object.keys(KIND_FIELDS).map(k=><option key={k} value={k}>{k}</option>)}
               </select>
@@ -144,6 +159,15 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
               {(KIND_FIELDS[form.schedule_kind]||[]).includes("day")&&<input type="number" min={1} max={31} value={form.day} onChange={e=>setForm(f=>({...f,day:e.target.value}))} style={{...inputS,width:70}}/>}
               {(KIND_FIELDS[form.schedule_kind]||[]).includes("cron")&&<input value={form.cron} onChange={e=>setForm(f=>({...f,cron:e.target.value}))} placeholder="*/30 * * * *" style={{...inputS,width:160}}/>}
               {(KIND_FIELDS[form.schedule_kind]||[]).includes("run_at")&&<input type="datetime-local" value={form.run_at} onChange={e=>setForm(f=>({...f,run_at:e.target.value}))} style={{...inputS,width:"auto"}}/>}
+              {form.schedule_kind==="event"&&<>
+                <select value={form.event} onChange={e=>setForm(f=>({...f,event:e.target.value}))} style={{...inputS,width:"auto"}}>
+                  <option value="">when…</option>
+                  {eventNames.map(ev=><option key={ev} value={ev}>{ev.replace(/_/g," ")}</option>)}
+                </select>
+                <label style={{fontSize:10,color:t.mut,display:"flex",gap:5,alignItems:"center"}}>
+                  every <input type="number" min={1} value={form.every} onChange={e=>setForm(f=>({...f,every:e.target.value}))} style={{...inputS,width:56}}/> occurrence(s)
+                </label>
+              </>}
               <label style={{fontSize:10,color:t.mut,display:"flex",gap:5,alignItems:"center"}}>
                 <input type="checkbox" checked={!!form.notify} onChange={e=>setForm(f=>({...f,notify:e.target.checked}))}/> notify when done
               </label>
@@ -168,7 +192,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
               </div>
               <button onClick={()=>taskAction(task.id,"run")} title="Run now" style={{...btnS(t.ok),padding:"4px 9px",fontSize:10}}>▶ Run</button>
               <button onClick={()=>taskAction(task.id,task.enabled?"pause":"resume")} style={{...btnS(task.enabled?t.warm:t.ok),padding:"4px 9px",fontSize:10}}>{task.enabled?"Pause":"Resume"}</button>
-              <button onClick={()=>{const sj=task.schedule_json||{};const dj=task.delivery_json||{};setForm({...EMPTY_FORM,id:task.id,title:task.title,prompt:task.prompt,task_type:task.task_type,schedule_kind:task.schedule_kind,time:sj.time||"08:30",weekday:sj.weekday??0,day:sj.day??1,cron:sj.cron||"",run_at:sj.run_at||"",conversation_id:task.conversation_id,notify:dj.notify!==false,delivery:dj});}} style={{...btnS(t.acc),padding:"4px 9px",fontSize:10}}><IC.Pencil/></button>
+              <button onClick={()=>{const sj=task.schedule_json||{};const dj=task.delivery_json||{};const ej=task.event_trigger_json||{};setForm({...EMPTY_FORM,id:task.id,title:task.title,prompt:task.prompt,task_type:task.task_type,schedule_kind:task.schedule_kind,time:sj.time||"08:30",weekday:sj.weekday??0,day:sj.day??1,cron:sj.cron||"",run_at:sj.run_at||"",event:ej.event||"",every:ej.every||1,conversation_id:task.conversation_id,notify:dj.notify!==false,delivery:dj});}} style={{...btnS(t.acc),padding:"4px 9px",fontSize:10}}><IC.Pencil/></button>
               <button onClick={()=>showRuns(task.id)} style={{...btnS(t.mut),padding:"4px 9px",fontSize:10}}>History</button>
               <button onClick={()=>taskAction(task.id,"delete")} style={{...btnS(t.err),padding:"4px 9px",fontSize:10}}><IC.Trash/></button>
             </div>

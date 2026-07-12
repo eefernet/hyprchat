@@ -8,6 +8,7 @@ import {
   isMoeModelName,
   modelContextLength,
 } from './modelHelpers.js';
+import { IC } from './components/icons.jsx';
 
 const RefreshIcon = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -82,7 +83,7 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
         </div>}
       </div>
       {onRefresh&&<span onClick={e=>{e.stopPropagation();onRefresh();}} style={{fontSize:12,color:t.mut,flexShrink:0,cursor:"pointer",opacity:.5,display:"flex",alignItems:"center",padding:"0 2px"}} title="Refresh models"><RefreshIcon/></span>}
-      <span style={{fontSize:9,color:t.mut,flexShrink:0,transition:"transform .2s",transform:open?"rotate(180deg)":"none"}}>▾</span>
+      <span style={{color:t.mut,flexShrink:0,transition:"transform .2s",transform:open?"rotate(180deg)":"none",display:"flex",alignItems:"center"}}><IC.ChevDown/></span>
     </div>
     {open&&(()=>{
       const getMaker=(m)=>{

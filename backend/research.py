@@ -2897,6 +2897,13 @@ Write in Markdown. Requirements:
         await _emit_report_event(events, report_id, "research_done", {
             "status": "complete", "summary": summary, "metrics": metrics,
         })
+        # Event-triggered tasks: research_completed was declared in
+        # scheduler.EVENT_NAMES but never fired anywhere until now.
+        try:
+            import scheduler
+            await scheduler.fire_event("research_completed", user_id=db.current_user_id())
+        except Exception as _fe:
+            print(f"[RESEARCH] fire_event(research_completed) failed: {_fe}")
         return {
             "id": report_id, "status": "complete", "report": report, "sources": sources,
             "findings": findings, "metrics": metrics,

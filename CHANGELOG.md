@@ -1,72 +1,107 @@
 <details open>
-<summary>Alpha v17.4.1 — July 10, 2026</summary>
+<summary>Alpha v18.0 — July 12, 2026</summary>
 
-> Jarvis-suite hardening pass: a deep audit of the scheduler, assistant,
-> notes/calendar/CalDAV, email, and notifications found ~35 bugs and holes;
-> the critical and high ones are all fixed here, plus shared-helper refactors
-> and the suite's first offline unit tests (27 new tests).
+> HyprChat becomes a personal assistant: scheduled agent tasks, a proactive
+> Assistant with check-in briefs, an assistant dashboard, weather-aware
+> briefings, event automations ("when X happens → do Y"), quiet hours,
+> notifications, notes & todos, a calendar with CalDAV sync, and full email
+> integration — plus a phone-friendly mobile layout, a customizable nav rail,
+> and refreshed panels throughout.
+
+## Assistant & Automation
+- **Personal Assistant** — every user gets an assistant persona with a pinned
+  conversation and scheduled **check-in briefs** that pull your open tasks,
+  notifications, calendar, notes, and email into one prioritized update.
+- **Scheduled tasks** — run any prompt once, daily, weekly, monthly, or on a
+  cron schedule, or trigger from events and webhooks. Tasks run through the
+  normal chat agent (tools included) and deliver to a conversation and/or a
+  notification. Create them in the Tasks panel with natural-language drafting,
+  or just ask in chat ("remind me every morning at 8 to stretch").
+- **Notifications** — in-app bell with unseen badge and browser toasts, plus
+  optional ntfy push and self-email fanout.
+- **Assistant dashboard** — the Assistant panel shows the latest brief inline
+  (with a read-aloud button), per-check-in Run Now, cadence beyond daily
+  (weekly / monthly / cron), editable focus prompts, and last-run status.
+- **Weather-aware briefings** — set a location and briefs open with current
+  conditions + a today/tomorrow forecast (Open-Meteo, keyless). A new
+  `get_weather` chat tool rides the CodeAgent suite.
+- **Event automations** — "when an urgent email arrives → draft a reply and
+  notify me": event-triggered tasks are creatable from the Tasks panel and by
+  the assistant itself (`manage_tasks`), with a post-triage
+  `urgent_email_received` event alongside email/research/artifact events.
+- **Quiet hours** — pause ntfy/email pushes during a nightly window (assistant
+  timezone, overnight spans handled); urgent email can pierce it, and the
+  in-app bell always lands.
+- **Autonomous email master switch** — one assistant-wide server-side gate
+  ANDed with each account's own allow-send toggle; off means replies are saved
+  as drafts.
+
+## Calendar, Notes & Email
+- **Calendar** panel with month/week/day views, event reminders, and two-way
+  **CalDAV sync** (Nextcloud, iCloud, etc.) — remote wins on conflict, and
+  all-day/floating times are handled in your timezone.
+- **Notes & todos** with reminders. Notes, events, and tasks are all
+  manageable from chat via new tools.
+- **Email** — connect IMAP/SMTP accounts. A background poller triages new
+  mail with a local model: urgency tags, one-line summaries, tentative
+  calendar events extracted from invitations, and urgent-mail notifications.
+  Bodies are never stored — only headers and snippets.
+- **Safe by default** — chat tools can list, read, reply, archive, and
+  delete, but sending and deleting are per-account server-side toggles that
+  default OFF (the assistant drafts or asks instead). Deletes only ever move
+  to Trash (refused if the server has none), replies thread properly, and a
+  mailbox reset purges the local cache so stale IDs can't touch the wrong
+  message.
+
+## Mobile
+- Full phone layout: the nav rail and sidebar become slide-in drawers behind
+  a hamburger button, Settings / Research / Model Manager / Artifacts reflow
+  to single columns, and iOS input-zoom and keyboard-viewport quirks are
+  handled.
+
+## UI
+- **Customizable nav rail** — Settings → Appearance → Navigation Bar: drag
+  (or use the arrow buttons) to reorder panels and choose what sits on the
+  bar, behind the ··· More menu, or hidden entirely. Syncs to your profile
+  across devices. Every panel also has its own unique icon now.
+- Desktop email gets a two-pane list + reader; Analytics gains token bars, a
+  cost line, and a model-share doughnut; panels load with skeleton shimmer;
+  consecutive chat messages group under one avatar with a hover toolbar and
+  timestamps; Canvas AI edits show a side-by-side diff before applying.
+- **Sleeker empty-chat hero** — gradient wordmark, floating logo with a slow
+  orbital accent ring, and a staggered fade-in cascade (honors reduced
+  motion). The hero now greets you by name with a time-of-day line ("Good
+  evening, Ethan"), and the daily AI tagline got a personality transplant:
+  it knows your name and the prompt now aims for unhinged-but-charming
+  instead of tame. Cached per user + time of day; always a local model.
 
 ## Reliability
-- **IMAP connections now have a 30s socket timeout** and every scheduler-tick
-  subsystem (reminders, CalDAV, email poll) runs under a 300s bound — a hung
-  mail server can no longer silently stop ALL scheduled tasks, reminders, and
-  syncs for every user.
-- **Timed-out or shutdown scheduled runs now cancel their model generation**
-  (`await_cancellable` propagates external cancellation into the work task)
-  instead of leaving it burning GPU and writing a stale reply later.
-- Startup docstring + guard: `claim_due_tasks` has no lease — the scheduler
-  documents the single-Uvicorn-worker invariant loudly.
-- Daily **retention sweep**: seen notifications older than 30 days and all but
-  the newest 50 runs per task are pruned (both tables previously grew forever).
-
-## Email safety
-- **Delete can never silently expunge.** Trash/Archive folders resolve via
-  RFC 6154 special-use flags first (works with localized folder names); if no
-  Trash folder exists the delete is refused with a clear error instead of
-  permanently expunging. Archive honestly reports when the server had no
-  Archive folder (message only marked read).
-- **New per-account "Allow the assistant to DELETE email" toggle** — a
-  server-side gate like the existing send gate. Off (default) = the chat tool
-  refuses and asks you; the Email panel's own Delete button always works.
-- **UIDVALIDITY change purges the cached inbox** before refetching — stale
-  cached UIDs could previously read or delete the WRONG message.
-- **Replies now thread properly**: the RFC 822 Message-ID is captured on poll
-  and sent as In-Reply-To/References on both panel and tool replies.
-- `send_email` accepts an `account` hint (label/address match) instead of
-  always sending from the oldest account; subjects are CRLF-stripped.
-- Poller checkpoint advances before `email_received` events fire (no duplicate
-  event storms after a crash), and event fires are capped at 20 per poll.
-- Triage prompt fences email content as untrusted data.
-
-## Scheduler & webhooks
-- Webhook payloads are fenced and pinned as untrusted data before reaching the
-  agent prompt, and `/api/hooks/{token}` is rate-limited (30/min per token).
-- `/api/tasks/parse` anchors "now" to your assistant timezone, not the server
-  clock — "tomorrow at 9" drafts correctly across timezones.
-- Editing a task no longer wipes its delivery options, the editor gains a
-  "notify when done" toggle, and Stop on a running run refreshes the history
-  row immediately.
-
-## Calendar & notes
-- **Rescheduled events remind again** (reminders re-arm when the start time or
-  reminder changes) and reminders can now be CLEARED from the panel.
-- CalDAV **all-day and floating-time events** convert through your assistant
-  timezone — they previously shifted by your UTC offset (wrong day for
-  non-UTC users), both on pull and push.
-- The calendar grid's "today" highlight and default event date follow the
-  assistant timezone; the notes editor's Todo/Note switch actually saves.
-
-## Under the hood
-- New `backend/timeutil.py` — the single implementation of the naive-UTC ↔
-  local wall-clock conversions that scheduler/pim/caldav_sync each duplicated;
-  one shared `scheduler.recompute_next_run` for routes and tools.
-- New frontend helpers: `api.js` (`apiJson` — GET loaders now surface backend
-  errors instead of crashing the render), `datetime.js` (UTC vs local
-  formatters), and a shared `PanelHeader` component across all five panels.
-- New offline unit tests: `test_scheduler_unit.py` (DST rollover, monthly
-  day-31 clamp, timezone fallbacks), `test_email_unit.py` (folder resolution,
-  delete refusal, UIDVALIDITY purge, checkpoint ordering, event cap), and
-  `test_cancel_registry.py` (external-cancellation regression).
+- The whole suite shipped through a ~35-finding audit: IMAP socket timeouts
+  and bounded scheduler subsystems (a hung mail server can't stall scheduled
+  tasks), cancelled or timed-out runs stop their model generation, rescheduled
+  events remind again, webhook payloads are fenced and rate-limited, and old
+  notifications/task runs are pruned daily.
+- A follow-up assistant investigation fixed 17 more bugs, the big ones being:
+  **check-ins actually have tools now** (tool resolution falls through task →
+  conversation → persona, so the CodeAgent suite — email, research, fetch,
+  weather — reaches every scheduled run; they previously ran with an empty
+  tool list), and **deleting the pinned Assistant chat no longer bricks
+  check-ins** (deletion clears stale references, re-seeding repoints every
+  check-in, and dispatch re-resolves the live conversation at run time).
+- Also from that pass: failed briefs no longer report "succeeded" (stream
+  errors fail the run with the real error), the notification contains the
+  actual brief instead of a debug string (and check-in notifications no
+  longer echo back into the next brief), the panel's model picker works (an
+  explicitly chosen cloud model is honored with a spend warning; inherited
+  fallbacks stay local-only), briefs are stamped in your profile timezone,
+  email→calendar extraction anchors "tomorrow" to your local day, next-run
+  times display in browser-local time, check-ins can't be silently retyped in
+  the Tasks panel, gatherers all register at startup, due-date-only todos
+  fire reminders, saving the profile no longer wipes persona tools, and the
+  dead `research_completed` / `artifact_created` events actually fire.
+- 63 new offline unit tests cover the scheduler, email, cancellation,
+  headless tool/model resolution, failure honesty, timezone stamping,
+  self-healing re-seed, quiet-hours window math, and weather formatting.
 
 </details>
 

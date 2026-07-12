@@ -43,6 +43,8 @@ import {
   researchModelOptions,
 } from './modelHelpers.js';
 import { createSettingsSync, createPrefsSync } from './settingsSync.js';
+import { NAV_ITEMS, NAV_ITEM_MAP, DEFAULT_NAV_LAYOUT, resolveNavLayout } from './navItems.js';
+import NavLayoutEditor from './components/NavLayoutEditor.jsx';
 import ModelPicker from './ModelPicker.jsx';
 import useIsMobile, { isMobileNow, useKeyboardViewportHeight } from './useIsMobile.js';
 import AnalyticsPanel from './panels/AnalyticsPanel.jsx';
@@ -53,7 +55,9 @@ import NotesPanel from './panels/NotesPanel.jsx';
 import CalendarPanel from './panels/CalendarPanel.jsx';
 import EmailPanel from './panels/EmailPanel.jsx';
 import BackgroundCanvas from './components/BackgroundCanvas.jsx';
+import ChatHero, { daypartOf, greetableName } from './components/ChatHero.jsx';
 import { IC, TIC } from './components/icons.jsx';
+import { SkeletonList } from './components/Skeleton.jsx';
 import {
   ChartBlock,
   CodeBlock,
@@ -113,6 +117,8 @@ const ReactDOM = { ...ReactDOMFull, createRoot, hydrateRoot };
 // ───────────────────────── original component body ─────────────────────────
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const CHAT_HISTORY_RENDER_CHUNK = 80;
+// Service-status "degraded" amber — deliberately theme-independent (t.warm equals t.err in some themes, which would make degraded indistinguishable from down).
+const STATUS_DEGRADED = "#f0a030";
 
 const normalizePrompts = (value) => {
   if(!Array.isArray(value))return [];
@@ -147,6 +153,8 @@ function HyprChat(){
   const [bgEffect,setBgEffect]=useState(()=>{try{const saved=localStorage.getItem("hc-bg-effect");if(saved&&BACKGROUND_EFFECTS.some(e=>e.id===saved))return saved;return localStorage.getItem("hc-scanline")==="1"?"scanlines":"dots";}catch{return "dots";}});
   const [showNavLabels,setShowNavLabels]=useState(()=>{try{return localStorage.getItem("hc-nav-labels")!=="0";}catch{return true;}});
   const [showNavMore,setShowNavMore]=useState(false);
+  // Per-user nav rail layout {v,bar,more,hidden} — server pref "nav-layout"; localStorage seed avoids a default-layout flash before boot hydration.
+  const [navLayout,setNavLayout]=useState(()=>{try{return resolveNavLayout(JSON.parse(localStorage.getItem(`hc-nav-layout::${hcStoredUserId()||"default"}`)||"null"));}catch{return resolveNavLayout(null);}});
   const [thinkMode,setThinkMode]=useState(()=>{try{return localStorage.getItem("hc-think-mode")||"auto";}catch{return "auto";}});
   // Effort Level — global default (0=Blurt, 1=Ponder, 2=Forge, 3=Galaxy Brain)
   const [globalEffort,setGlobalEffort]=useState(()=>{try{return parseInt(localStorage.getItem("hc-effort-level")||"0")||0;}catch{return 0;}});
@@ -170,7 +178,8 @@ function HyprChat(){
   const [ragReranker,setRagReranker]=useState(()=>{try{return localStorage.getItem("hc-rag-reranker")==="llm";}catch{return false;}});
   const [modelRouting,setModelRouting]=useState({enabled:false,chat:"",code:"",reasoning:"",long_context:""});
   const [backupStatus,setBackupStatus]=useState(null);
-  const [dailyWelcome,setDailyWelcome]=useState(()=>{try{const c=JSON.parse(localStorage.getItem("hc-daily-welcome")||"{}");if(c.version===WELCOME_VERSION&&c.date===localDayKey()&&c.message)return c.message;}catch{}return fallbackWelcome();});
+  const [dailyWelcome,setDailyWelcome]=useState(()=>{try{const c=JSON.parse(localStorage.getItem("hc-daily-welcome")||"{}");if(c.version===WELCOME_VERSION&&c.date===localDayKey()&&c.uid===(hcStoredUserId()||"")&&c.daypart===daypartOf(new Date().getHours())&&c.message)return c.message;}catch{}return fallbackWelcome();});
+  const [dpTick,setDpTick]=useState(0);
   const [planningModel,setPlanningModel]=useState(()=>{try{return localStorage.getItem("hc-planning-model")||"";}catch{return "";}});
   const [coderModel,setCoderModel]=useState(()=>{try{return localStorage.getItem("hc-coder-model")||"";}catch{return "";}});
   // Coder Bot v2 — per-agent model overrides. Empty = inherit from umbrella (Planning/Coder) or chat model.
@@ -394,25 +403,6 @@ function HyprChat(){
   useEffect(()=>{persistServerSetting("hc-ws-model","workspace_model",wsModel);},[wsModel]);
   useEffect(()=>{persistServerSetting("hc-context-compaction","context_compaction",contextCompaction?"on":"off");},[contextCompaction]);
   useEffect(()=>{persistServerSetting("hc-rag-reranker","rag_reranker",ragReranker?"llm":"none");},[ragReranker]);
-  useEffect(()=>{
-    const date=localDayKey();
-    const model=wsModel||"";
-    try{
-      const cached=JSON.parse(localStorage.getItem("hc-daily-welcome")||"{}");
-      if(cached.version===WELCOME_VERSION&&cached.date===date&&cached.model===model&&cached.message){setDailyWelcome(cached.message);return;}
-    }catch{}
-    let cancelled=false;
-    fetch(`${API}/api/daily-message`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model})})
-      .then(r=>r.ok?r.json():null)
-      .then(d=>{
-        const msg=(d?.message||"").trim();
-        if(cancelled||!msg)return;
-        setDailyWelcome(msg);
-        try{localStorage.setItem("hc-daily-welcome",JSON.stringify({version:WELCOME_VERSION,date,model,message:msg}));}catch{}
-      })
-      .catch(()=>{});
-    return ()=>{cancelled=true;};
-  },[wsModel]);
   useEffect(()=>{persistServerSetting("hc-planning-model","planning_model",planningModel);},[planningModel]);
   useEffect(()=>{persistServerSetting("hc-coder-model","coder_model",coderModel);},[coderModel]);
   // Coder Bot v2 per-agent overrides — sync each to localStorage + guarded PATCH /api/settings.
@@ -455,6 +445,7 @@ function HyprChat(){
   useEffect(()=>{const echoed=persistPref("model-params",modelParams);if(!echoed){if(modelParamsSeenRef.current)flashSettingsPulse("Saved","success");else modelParamsSeenRef.current=true;}},[modelParams]);
   useEffect(()=>{persistPref("prompts",prompts);},[prompts]);
   useEffect(()=>{persistPref("conv-tags",convTags);},[convTags]);
+  useEffect(()=>{persistPref("nav-layout",navLayout);},[navLayout]);
   const [convs,setConvs]=useState([]);
   const [actId,setActId]=useState(null);
   const [inp,setInp]=useState("");
@@ -511,6 +502,39 @@ function HyprChat(){
   const [currentUser,setCurrentUser]=useState(null);
   const [currentUserId,setCurrentUserId]=useState(()=>hcStoredUserId());
   const [authReady,setAuthReady]=useState(false);
+  // Daily welcome tagline — lives below the currentUser/currentUserId
+  // declarations because its deps close over them (TDZ during render otherwise).
+  useEffect(()=>{
+    const date=localDayKey();
+    const model=wsModel||"";
+    const uid=currentUserId||"";
+    const daypart=daypartOf(new Date().getHours());
+    // Re-fire at the next daypart boundary so an evening session doesn't keep the morning line.
+    const now=new Date();
+    const nextH=[5,12,17,22].find(h=>h>now.getHours());
+    const boundary=new Date(now);
+    if(nextH!==undefined)boundary.setHours(nextH,0,5,0);
+    else{boundary.setDate(boundary.getDate()+1);boundary.setHours(5,0,5,0);}
+    const bt=setTimeout(()=>setDpTick(v=>v+1),Math.max(30000,boundary-now));
+    try{
+      const cached=JSON.parse(localStorage.getItem("hc-daily-welcome")||"{}");
+      if(cached.version===WELCOME_VERSION&&cached.date===date&&cached.model===model&&cached.uid===uid&&cached.daypart===daypart&&cached.message){setDailyWelcome(cached.message);return()=>clearTimeout(bt);}
+    }catch{}
+    // Personalized interim fallback while the fetch runs (backend also resolves
+    // the name from the X-HyprChat-User header when user_name is empty).
+    setDailyWelcome(fallbackWelcome(greetableName(currentUser)));
+    let cancelled=false;
+    fetch(`${API}/api/daily-message`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model,user_name:greetableName(currentUser),daypart})})
+      .then(r=>r.ok?r.json():null)
+      .then(d=>{
+        const msg=(d?.message||"").trim();
+        if(cancelled||!msg)return;
+        setDailyWelcome(msg);
+        try{localStorage.setItem("hc-daily-welcome",JSON.stringify({version:WELCOME_VERSION,date,model,uid,daypart,message:msg}));}catch{}
+      })
+      .catch(()=>{});
+    return ()=>{cancelled=true;clearTimeout(bt);};
+  },[wsModel,currentUserId,dpTick]);
   // ── Server-backed user prefs (prompts, model params, quotes, tags, effort) ──
   // Debounced PUTs to /api/prefs/{key}; namespaced localStorage cache per user.
   const prefsSyncRef=useRef(null);
@@ -1285,6 +1309,7 @@ function HyprChat(){
         {key:"custom-quotes",legacy:"hc-custom-quotes",set:setCustomQuotes,fallback:DEFAULT_LOADING_QUOTES},
         {key:"conv-tags",legacy:"hc-conv-tags",set:setConvTags,fallback:{},convMap:true},
         {key:"effort-per-chat",legacy:"hc-effort-per-chat",set:setEffortPerChat,fallback:{},convMap:true},
+        {key:"nav-layout",legacy:"hc-nav-layout",set:setNavLayout,fallback:DEFAULT_NAV_LAYOUT},
       ];
       let server={};
       try{const r=await fetch(`${API}/api/prefs`);if(r.ok)server=(await r.json()).prefs||{};}catch{}
@@ -1310,6 +1335,12 @@ function HyprChat(){
         if(d.key==="custom-quotes"){
           const cleaned=Array.isArray(val)?val.filter(x=>x&&x.t&&x.a!=="HyprChat"):[];
           val=cleaned.length?cleaned:DEFAULT_LOADING_QUOTES;
+        }
+        if(d.key==="nav-layout"){
+          // Forward-compat merge: unknown ids dropped, new registry items appended to their default zone; push the normalized layout back up.
+          const raw=val;
+          val=resolveNavLayout(val);
+          if(JSON.stringify(raw)!==JSON.stringify(val))shouldPutPref=true;
         }
         try{localStorage.setItem(`hc-${d.key}::${uid}`,JSON.stringify(val));}catch{}
         if(shouldPutPref)prefsSyncRef.current.put(d.key,val);
@@ -3945,6 +3976,7 @@ function HyprChat(){
     setHfDownloading(false);
   };
   const fmtSize=(bytes)=>{if(!bytes)return"—";if(bytes>1e9)return`${(bytes/1e9).toFixed(1)} GB`;if(bytes>1e6)return`${(bytes/1e6).toFixed(0)} MB`;return`${(bytes/1e3).toFixed(0)} KB`;};
+  // capTags colors are intentionally fixed (not theme tokens): they mirror ModelPicker.modelCaps as cross-theme capability identity badges.
   const capTags=(n)=>{const b=(n||"").toLowerCase();const caps=[];if(b.match(/embed/))caps.push({label:"Embed",emoji:"🔢",color:"#9b59b6"});if(b.match(/llava|vision|[\-:]vl$|[\-:]vl[\-:]/))caps.push({label:"Vision",emoji:"👁",color:"#e67e22"});if(b.match(/coder|codestral|starcoder|deepseek-coder/))caps.push({label:"Code",emoji:"💻",color:"#2ecc71"});if(!b.match(/embed/)&&b.match(/qwen|llama3|llama-3|mistral|mixtral|command|hermes|deepseek|phi3|phi-3|wizardlm|gemma|llama3\./))caps.push({label:"Tools",emoji:"🔧",color:"#3498db"});if(b.match(/mixtral|moe|dbrx|switch|jamba|arctic/))caps.push({label:"MoE",emoji:"🔀",color:"#f39c12"});if(b.match(/qwen3(?!\.5)|deepseek-r1|r1-|thinking|reflection|reason/i)&&!b.match(/qwen3\.5/))caps.push({label:"Thinking",emoji:"💭",color:"#a78bfa"});if(b.match(/abliterated|uncensored|unfiltered|dolphin/))caps.push({label:"Uncensored",emoji:"🔓",color:"#ef4444"});if(b.match(/instruct|chat|it(?:$|[\-:])/))caps.push({label:"Instruct",emoji:"📝",color:"#64748b"});return caps;};
   const quantLabel=(filename)=>{if(!filename)return null;const m=filename.match(/[_\-\.](Q[0-9]_[A-Z_]+|[FQIB][0-9]+(?:_[A-Z0-9]+)?|fp16|bf16|f32|f16|int[48])/i);return m?m[1].toUpperCase():null;};
   const quantColor=(q)=>{if(!q)return"#888";const l=q.toLowerCase();if(l.match(/^(f32|fp32)$/))return"#ef4444";if(l.match(/^(f16|fp16|bf16)$/))return"#f97316";if(l.match(/^q8/))return"#eab308";if(l.match(/^q6/))return"#84cc16";if(l.match(/^q5/))return"#22c55e";if(l.match(/^q4/))return"#06b6d4";if(l.match(/^q3|^q2|^iq/))return"#8b5cf6";return"#94a3b8";};
@@ -4244,7 +4276,7 @@ function HyprChat(){
             NOTE:{color:rt.acc,icon:"i",label:"Note"},
             TIP:{color:rt.ok,icon:"tip",label:"Tip"},
             IMPORTANT:{color:rt.warm,icon:"*",label:"Important"},
-            WARNING:{color:"#f0a030",icon:"⚠",label:"Warning"},
+            WARNING:{color:STATUS_DEGRADED,icon:"⚠",label:"Warning"},
             CAUTION:{color:rt.err,icon:"!",label:"Caution"}
           }[ctype];
           return <div key={j} style={{borderLeft:`3px solid ${cfg.color}`,background:`${cfg.color}12`,padding:"8px 12px 10px",borderRadius:"0 6px 6px 0",margin:"8px 0"}}>
@@ -4337,7 +4369,7 @@ function HyprChat(){
   };
 
   const glass={background:`${t.surface}F2`,backdropFilter:"none",border:`1px solid ${t.brd}55`,boxShadow:"none"};
-  const _navShort={Chat:"Chat",Artifacts:"Artifacts",Memory:"Memory","Knowledge Bases":"KB",Tools:"Tools",Agents:"Agents","Prompt Library":"Prompts","Deep Research":"Research","Council of AI":"Council","Image Studio":"Image Gen","Model Manager":"Models",Analytics:"Stats",Settings:"Settings",More:"More"};
+  const _navShort={...Object.fromEntries(NAV_ITEMS.map(i=>[i.label,i.short])),Settings:"Settings",More:"More",Search:"Search"};
   const openSettings=()=>{setShowNavMore(false);if(panel!=="settings")previousPanelRef.current=panel;setPanel("settings");};
   const closeSettings=()=>{setShowHealthMonitor(false);setPanel(previousPanelRef.current||"chat");};
   const navBtnS=(active=false,extra={})=>({
@@ -4347,22 +4379,8 @@ function HyprChat(){
     ...extra
   });
   const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>setPanel(p)} title={lab} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{active&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}</button>;};
-  const moreNavItems=[
-    ["assistant",<IC.Bot/>,"Assistant",t.warm],
-    ["tasks",<IC.Clock/>,"Tasks",t.acc],
-    ["calendar",<IC.Clock/>,"Calendar",t.f1],
-    ["notes",<IC.Pencil/>,"Notes",t.ok],
-    ["email",<IC.Send/>,"Email",t.acc],
-    ["artifacts",<IC.Layers/>,"Artifacts",t.acc],
-    ["memory",<IC.Brain/>,"Memory",t.f4],
-    ["prompts",<IC.Zap/>,"Prompt Library",t.warm],
-    ["kb",<IC.Database/>,"Knowledge Bases",t.ok],
-    ["tools",<IC.Tool/>,"Tools",t.warm],
-    ["models",<IC.Layers/>,"Model Manager",t.f1],
-    ["analytics",<IC.BarChart/>,"Analytics",t.mut],
-  ];
-  const moreNavActive=moreNavItems.some(([p])=>panel===p);
-  const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?"#f0a030":t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${n}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
+  const moreNavActive=navLayout.more.some(id=>panel===id);
+  const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${n}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
     if(isGhostConv(c))return false;
     const matchSearch=(c.title||"").toLowerCase().includes(sq.toLowerCase());
@@ -4588,19 +4606,17 @@ function HyprChat(){
           {showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>Search</div>}
           {sidebarSearchActive&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}
         </button>
-        {nb("chat",<IC.Chat/>,"Chat")}
-        {nb("research",<IC.Research/>,"Deep Research")}
-        {nb("council",<IC.Council/>,"Council of AI")}
-        {nb("personas",<IC.Cube/>,"Agents")}
-        {nb("images",<IC.Image/>,"Image Studio")}
+        {navLayout.bar.map(id=>{const it=NAV_ITEM_MAP[id];return it?<React.Fragment key={id}>{nb(id,<it.icon/>,it.label)}</React.Fragment>:null;})}
+        {navLayout.more.length>0&&<>
         <button className={`nav-panel-button${(showNavMore||moreNavActive)?" is-active":""}`} onClick={()=>setShowNavMore(p=>!p)} title="More" aria-expanded={showNavMore} style={navBtnS(showNavMore||moreNavActive)}>
           <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.More/></span>
           {showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>More</div>}
           {moreNavActive&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}
         </button>
-        <div aria-hidden={!showNavMore} style={{width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflow:"hidden",maxHeight:showNavMore?700:0,opacity:showNavMore?1:0,transform:showNavMore?"translateY(0)":"translateY(-6px)",transition:"max-height .22s ease, opacity .16s ease, transform .18s ease",pointerEvents:showNavMore?"auto":"none",flexShrink:0}}>
-          {moreNavItems.map(([p,ico,lab])=><React.Fragment key={p}>{nb(p,ico,lab)}</React.Fragment>)}
+        <div aria-hidden={!showNavMore} style={{width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflow:"hidden",maxHeight:showNavMore?navLayout.more.length*(showNavLabels?52:50)+8:0,opacity:showNavMore?1:0,transform:showNavMore?"translateY(0)":"translateY(-6px)",transition:"max-height .22s ease, opacity .16s ease, transform .18s ease",pointerEvents:showNavMore?"auto":"none",flexShrink:0}}>
+          {navLayout.more.map(id=>{const it=NAV_ITEM_MAP[id];return it?<React.Fragment key={id}>{nb(id,<it.icon/>,it.label)}</React.Fragment>:null;})}
         </div>
+        </>}
       </div>
       <button className={`nav-panel-button${panel==="notifications"?" is-active":""}`} onClick={()=>{setPanel("notifications");if(typeof Notification!=="undefined"&&Notification.permission==="default"){try{Notification.requestPermission();}catch{}}}} title="Notifications" style={{...navBtnS(panel==="notifications"),position:"relative"}}>
         <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Bell/></span>
@@ -6659,7 +6675,7 @@ function HyprChat(){
 
       :panel==="calendar"?<CalendarPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/>
 
-      :panel==="assistant"?<AssistantPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} models={models} openAssistantChat={async cid=>{if(!cid)return;try{const r=await fetch(`${API}/api/conversations`);const cs=await r.json();const isCouncil=v=>v==="1"||v===1||v===true;setConvs(cs.map(c=>({...c,messages:[],is_council:isCouncil(c.is_council),council_config_id:c.council_config_id||null})));}catch{}setActId(cid);loadConversation(cid);setPanel("chat");}}/>
+      :panel==="assistant"?<AssistantPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} models={models} openAssistantChat={async cid=>{let live=cid;try{const ar=await fetch(`${API}/api/assistant`);const ad=await ar.json();live=ad?.profile?.conversation_id||cid;}catch{}if(!live)return;try{const r=await fetch(`${API}/api/conversations`);const cs=await r.json();const isCouncil=v=>v==="1"||v===1||v===true;setConvs(cs.map(c=>({...c,messages:[],is_council:isCouncil(c.is_council),council_config_id:c.council_config_id||null})));}catch{}setActId(live);loadConversation(live);setPanel("chat");}}/>
 
       :panel==="settings"?ReactDOM.createPortal(<div style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)",fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)closeSettings();}}>
     <div style={{width:isMobile?"100%":"min(1100px,95vw)",maxHeight:isMobile?"100%":"85vh",height:isMobile?"100%":"85vh",display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"260px minmax(0,1fr)",background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,boxShadow:"0 8px 48px #0008",overflow:"hidden",animation:"fadeIn .25s",...(isMobile?{gridTemplateRows:"auto minmax(0,1fr)",borderRadius:0,border:"none"}:{})}}>
@@ -6753,11 +6769,11 @@ function HyprChat(){
               <span style={{fontSize:13}}>{showHealthMonitor?"◂":"▸"}</span> Monitor
             </button>,
           <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-            {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?"#f0a030":s?.status?t.err:t.mut;const label={ollama:"Ollama",codebox:"Codebox",n8n:"N8N",searxng:"SearXNG",comfyui:"ComfyUI",stt:"Voice STT",tts:"Voice TTS"}[n];return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:7,border:`1px solid ${rl?`#f0a030`:t.brd}24`,fontSize:12}}>
+            {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:s?.status?t.err:t.mut;const label={ollama:"Ollama",codebox:"Codebox",n8n:"N8N",searxng:"SearXNG",comfyui:"ComfyUI",stt:"Voice STT",tts:"Voice TTS"}[n];return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:7,border:`1px solid ${rl?STATUS_DEGRADED:t.brd}24`,fontSize:12}}>
               <div style={{width:8,height:8,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}66`}}/>
               <span style={{fontWeight:700,color:t.dim}}>{label}</span>
               {s?.response_ms!=null&&<span style={{fontSize:10,color:t.mut}}>{s.response_ms}ms</span>}
-              {rl&&<span style={{padding:"1px 6px",borderRadius:4,background:"#f0a03020",border:"1px solid #f0a03044",fontSize:9,fontWeight:800,color:"#f0a030"}}>Limited</span>}
+              {rl&&<span style={{padding:"1px 6px",borderRadius:4,background:`${STATUS_DEGRADED}20`,border:`1px solid ${STATUS_DEGRADED}44`,fontSize:9,fontWeight:800,color:STATUS_DEGRADED}}>Limited</span>}
             </div>;})}
           </div>
         ,"Runtime endpoint health at a glance.")}
@@ -7223,6 +7239,10 @@ function HyprChat(){
           </div>)}
           </div>
         )}
+        {settingSection("Navigation Bar",null,
+          <NavLayoutEditor t={t} layout={navLayout} isMobile={isMobile}
+            onChange={next=>{setNavLayout(next);flashSettingsPulse("Saved","success");}}/>,
+          "Choose which panels sit on the rail, live behind the ··· More menu, or stay hidden. Drag to rearrange, or use the arrow buttons. Syncs to your profile across devices.")}
       </div>
 
       {/* TILE: RAG Pipeline */}
@@ -7471,7 +7491,7 @@ function HyprChat(){
       {!healthHistory?<div style={{color:t.mut,fontSize:12}}>Loading uptime data...</div>
       :Object.keys(healthHistory.services||{}).length===0?<div style={{color:t.mut,fontSize:12}}>No health data yet. Checks run every 5 minutes — data will appear shortly.</div>
       :Object.entries(healthHistory.services).map(([svc,data])=>{
-        const statusColor=data.current_status==="ok"?t.ok:data.current_status==="degraded"?"#f0a030":t.err;
+        const statusColor=data.current_status==="ok"?t.ok:data.current_status==="degraded"?STATUS_DEGRADED:t.err;
         const statusLabel=data.current_status==="ok"?"Operational":data.current_status==="degraded"?"Degraded":"Down";
         const days=data.days||[];
         // Pad to 90 days with gray (no data) bars
@@ -7488,15 +7508,15 @@ function HyprChat(){
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
             <div style={{display:"flex",alignItems:"center",gap:8}}>
               <span style={{fontSize:14,fontWeight:700,color:t.text,textTransform:"capitalize"}}>{svc}</span>
-              {isRL&&<span style={{padding:"3px 10px",borderRadius:6,background:"#f0a03018",border:"1px solid #f0a03044",fontSize:11,fontWeight:600,color:"#f0a030"}}>Still Operational, limited engine usage</span>}
+              {isRL&&<span style={{padding:"3px 10px",borderRadius:6,background:`${STATUS_DEGRADED}18`,border:`1px solid ${STATUS_DEGRADED}44`,fontSize:11,fontWeight:600,color:STATUS_DEGRADED}}>Still Operational, limited engine usage</span>}
             </div>
-            <div style={{fontSize:12,fontWeight:600,color:isRL?"#f0a030":statusColor}}>{isRL?"Rate Limited":statusLabel}</div>
+            <div style={{fontSize:12,fontWeight:600,color:isRL?STATUS_DEGRADED:statusColor}}>{isRL?"Rate Limited":statusLabel}</div>
           </div>
           {/* Uptime bar chart */}
           <div style={{display:"flex",gap:1,height:34,alignItems:"flex-end",marginBottom:6}}>
             {padded.map((d,i)=>{
               const hasData=d.total_checks>0;
-              const barColor=!hasData?`${t.brd}33`:d.error_pct>50?t.err:d.error_pct>0?"#e05050":d.degraded_pct>30?"#f0a030":d.degraded_pct>0?"#b8d040":t.ok;
+              const barColor=!hasData?`${t.brd}33`:d.error_pct>50?t.err:d.error_pct>0?"#e05050":d.degraded_pct>30?STATUS_DEGRADED:d.degraded_pct>0?"#b8d040":t.ok;
               const title=hasData?`${d.day}\n${d.ok_pct}% ok, ${d.degraded_pct}% degraded, ${d.error_pct}% down\n${d.total_checks} checks, avg ${d.avg_ms}ms`:`${d.day}\nNo data`;
               return <div key={i} title={title} style={{flex:1,height:hasData?34:20,background:barColor,borderRadius:2,cursor:"pointer",opacity:hasData?1:.3,transition:"opacity .15s"}}
                 onMouseEnter={e=>e.target.style.opacity="0.7"} onMouseLeave={e=>e.target.style.opacity=hasData?"1":"0.3"}/>;
@@ -7513,7 +7533,7 @@ function HyprChat(){
 
       {/* Legend */}
       <div style={{display:"flex",gap:12,padding:"8px 0",fontSize:11,color:t.dim}}>
-        {[[t.ok,"Operational"],["#f0a030","Degraded"],[t.err,"Down"],[`${t.brd}33`,"No data"]].map(([c,l])=><div key={l} style={{display:"flex",alignItems:"center",gap:5}}>
+        {[[t.ok,"Operational"],[STATUS_DEGRADED,"Degraded"],[t.err,"Down"],[`${t.brd}33`,"No data"]].map(([c,l])=><div key={l} style={{display:"flex",alignItems:"center",gap:5}}>
           <div style={{width:12,height:12,borderRadius:2,background:c}}/>{l}
         </div>)}
       </div>
@@ -7543,20 +7563,8 @@ function HyprChat(){
           {/* Messages */}
           <div ref={chatScrollRef} onScroll={e=>{const el=e.target;setShowScrollTop(el.scrollTop>400);setShowScrollBottom(el.scrollHeight-el.scrollTop-el.clientHeight>400);}} style={{flex:1,overflowY:"auto",padding:"20px 0 18px"}}>
           {!act||!(act.messages||[]).length&&!councilRunning?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",gap:10,opacity:(loadingConv||act?.is_council)?0.68:1,paddingBottom:isEmptyChatSurface?250:0,pointerEvents:"none",transition:"padding-bottom .35s ease"}}>
-            {loadingConv?<><div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div><div style={{fontSize:12,color:t.mut,letterSpacing:1}}>Loading conversation...</div></>
-            :act?.is_council?<><div style={{fontSize:36,animation:"float 4s ease-in-out infinite"}}>⚖️</div><div style={{fontSize:12,color:t.mut,letterSpacing:1}}>{loadingConv?"Loading council history...":"Ask the council"}</div></>
-            :<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:16,animation:"fadeIn .35s both",transform:isEmptyChatSurface?"translateY(-34px)":"none"}}>
-              <div style={{width:68,height:68,borderRadius:18,background:t.bgDeep,border:`1px solid ${t.brd}77`,position:"relative",overflow:"hidden",boxShadow:`0 0 26px ${t.acc}14`,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                <div style={{position:"absolute",inset:6,borderRadius:13,border:`1px solid ${t.brd}33`,background:`${t.surface}55`}}/>
-                <div style={{position:"absolute",left:23,top:18,width:10,height:32,borderRadius:2,background:t.acc,opacity:.95}}/>
-                <div style={{position:"absolute",right:23,bottom:18,width:10,height:32,borderRadius:2,background:t.warm,opacity:.9}}/>
-              </div>
-              <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
-                <div style={{fontSize:32,fontWeight:800,color:t.acc,letterSpacing:.7,lineHeight:1}}>HyprChat</div>
-                <div style={{width:120,height:1,background:`linear-gradient(90deg,transparent,${t.acc}88,transparent)`}}/>
-                <div style={{fontSize:13,color:t.dim,letterSpacing:1.8,textAlign:"center",maxWidth:520,lineHeight:1.7,textTransform:"none"}}>{dailyWelcome}</div>
-              </div>
-            </div>}
+            {loadingConv?<SkeletonList t={t} rows={3} avatar style={{width:"min(760px,90%)"}}/>
+            :<ChatHero t={t} font={font} user={currentUser} tagline={dailyWelcome} isCouncil={!!act?.is_council} lifted={isEmptyChatSurface}/>}
           </div>:act?.is_council?(()=>{
             const councilCfg=councils.find(c=>c.id===act.council_config_id);
             const getMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
@@ -7767,6 +7775,9 @@ function HyprChat(){
                 </button>
               </div>}
               {visibleRows.map(({msg,index:i},visibleIdx)=>{const isU=msg.role==="user";const mid=`m${i}`;const isEditing=editingMsg?.index===i;
+              // Consecutive same-role messages group: repeated avatar+name collapse, tighter spacing.
+              const grouped=visibleRows[visibleIdx-1]?.msg.role===msg.role;
+              const nextGrouped=visibleRows[visibleIdx+1]?.msg.role===msg.role;
               const activeProfile=!isU?getProfileForConversation(act):null;
               const personaAvatar=!isU&&(act?.persona_avatar||profileAvatar(activeProfile));
               const personaName=!isU&&act?.persona_name;
@@ -7794,23 +7805,25 @@ function HyprChat(){
               const liveQuickSearchPayload=isLastAssistant?_quickSearchPayloadFromEvents(evts,quickResults):null;
               const renderOpts=citeOptsFor(msg,liveQuickSearchPayload);
               const quickSearchPayload=renderOpts?.quickSearch;
+              const refinedN=(!isU&&!msg.isS)?(meta.refinements||0):0;
               return <React.Fragment key={msg.id?`${msg.id}-${i}`:i}>
-              <div style={{marginBottom:compactMode?7:18,display:"flex",gap:9,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(visibleIdx*.04,.2)}s both`}}>
-                <div style={{width:isU?28:40,height:isU?28:40,borderRadius:isU?7:10,display:"flex",alignItems:"center",justifyContent:"center",background:isU?t.bgDeep:`${personaColor}10`,border:`1px solid ${isU?t.f4:personaColor}38`,color:isU?t.f4:personaColor,flexShrink:0,marginTop:isU?3:1,overflow:"hidden",boxShadow:"none"}}>
+              <div className="msg-row" style={{marginBottom:nextGrouped?(compactMode?4:7):(compactMode?7:18),display:"flex",gap:9,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(visibleIdx*.04,.2)}s both`}}>
+                {grouped?<div style={{width:isU?28:40,flexShrink:0}}/>
+                :<div style={{width:isU?28:40,height:isU?28:40,borderRadius:isU?7:10,display:"flex",alignItems:"center",justifyContent:"center",background:isU?t.bgDeep:`${personaColor}10`,border:`1px solid ${isU?t.f4:personaColor}38`,color:isU?t.f4:personaColor,flexShrink:0,marginTop:isU?3:1,overflow:"hidden",boxShadow:"none"}}>
                   {isU?<IC.User/>:personaAvatar?<img src={avatarSrc(personaAvatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
-                </div>
+                </div>}
                 <div style={{flex:1,minWidth:0,maxWidth:isU?"min(760px,92%)":"100%"}}>
-                  <div style={{fontSize:11,marginBottom:5,fontWeight:600,letterSpacing:.4,display:"flex",alignItems:"center",gap:6}}>
+                  {(!grouped||refinedN>0)&&<div style={{fontSize:11,marginBottom:5,fontWeight:600,letterSpacing:.4,display:"flex",alignItems:"center",gap:6}}>
                     {isU?<span style={{color:t.mut}}>you</span>:personaName
                       ?<span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"1px 7px",background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:10,color:t.pink}}>
                         {personaAvatar&&<img src={avatarSrc(personaAvatar)} style={{width:14,height:14,borderRadius:4,objectFit:"cover"}} alt=""/>}
                         {personaName}
                       </span>
                       :<span style={{color:t.mut}}>{act.model||"assistant"}</span>}
-                    {msg.created_at&&<span style={{fontSize:9,color:t.mut,opacity:.4,marginLeft:2}}>{new Date(msg.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
-                    {!isU&&!msg.isS&&(()=>{const meta=typeof msg.metadata==="string"?(()=>{try{return JSON.parse(msg.metadata);}catch{return{};}})():(msg.metadata||{});const n=meta.refinements||0;if(n<=0)return null;const lvl=EFFORT_LEVELS[n]||EFFORT_LEVELS[EFFORT_LEVELS.length-1];return <span title={`Refined ${n}× via ${lvl.name}`} style={{fontSize:9,padding:"1px 6px",borderRadius:8,background:`${t.pink}15`,border:`1px solid ${t.pink}30`,color:t.pink,display:"inline-flex",alignItems:"center",gap:3,fontWeight:600}}>✨ Refined {n}×</span>;})()}
-                  </div>
-                  <div style={{background:isU?`${t.surface}DE`:"transparent",padding:isU?"9px 13px":"0",borderRadius:isU?8:0,border:isU?`1px solid ${t.brd}34`:"none",lineHeight:1.68,fontSize:fontSize,color:isU?t.text:t.dim}}>
+                    {msg.created_at&&<span style={{fontSize:10,color:t.mut,opacity:.75,marginLeft:2,fontWeight:500}}>{new Date(msg.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
+                    {refinedN>0&&(()=>{const lvl=EFFORT_LEVELS[refinedN]||EFFORT_LEVELS[EFFORT_LEVELS.length-1];return <span title={`Refined ${refinedN}× via ${lvl.name}`} style={{fontSize:9,padding:"1px 6px",borderRadius:8,background:`${t.pink}15`,border:`1px solid ${t.pink}30`,color:t.pink,display:"inline-flex",alignItems:"center",gap:3,fontWeight:600}}>✨ Refined {refinedN}×</span>;})()}
+                  </div>}
+                  <div style={{background:isU?`${t.surface}DE`:isDaedalusOutput?"transparent":`${t.surface}3D`,padding:isU?"9px 13px":isDaedalusOutput?"0":"10px 14px",borderRadius:isU?8:isDaedalusOutput?0:10,border:isU?`1px solid ${t.brd}34`:isDaedalusOutput?"none":`1px solid ${t.brd}1C`,lineHeight:1.68,fontSize:fontSize,color:isU?t.text:t.dim}}>
                     {isEditing?<div style={{display:"flex",flexDirection:"column",gap:6}}>
                       <textarea defaultValue={msg.content} ref={el=>{if(el&&!el._set){el._set=true;el.style.height=Math.min(el.scrollHeight,isU?200:420)+"px";}}} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.acc}44`,color:t.text,padding:"8px 10px",borderRadius:6,fontFamily:font,fontSize:12,outline:"none",resize:"vertical",lineHeight:1.5,boxSizing:"border-box"}}
                         onChange={e=>setEditingMsg(p=>({...p,content:e.target.value}))}/>
@@ -7893,7 +7906,7 @@ function HyprChat(){
                     </Collapsible>;
                   })()}
                   {!isU&&!isDaedalusOutput&&quickSearchPayload&&<QuickSearchSourcesPanel payload={quickSearchPayload} t={t} font={font}/>}
-                  {!msg.isS&&!isEditing&&<div style={msgToolbarS}>
+                  {!msg.isS&&!isEditing&&<div className="msg-toolbar" style={msgToolbarS}>
                     {!isU&&msg.content&&<button onClick={()=>cp(renderedContent,mid)} style={msgActionS(copied===mid?t.ok:t.mut)}>
                       {copied===mid?<><IC.Check/> copied</>:<><IC.Copy/> copy</>}
                     </button>}
@@ -7955,8 +7968,8 @@ function HyprChat(){
                     </button>}
                     {!isU&&msg.content&&!streaming&&msg.metadata?.truncated&&i===(act.messages||[]).length-1&&<button onClick={()=>continueMessage(i)} title="Response was cut off by the output-token limit — continue it" style={msgActionS(t.warm)}>▶ continue</button>}
                     {!isU&&msg.content&&!streaming&&<>
-                      <button onClick={()=>rateMessage(i,1)} title="Good response" style={msgActionS(msg.rating===1?t.ok:t.mut)}>👍</button>
-                      <button onClick={()=>rateMessage(i,-1)} title="Poor response" style={msgActionS(msg.rating===-1?t.err:t.mut)}>👎</button>
+                      <button onClick={()=>rateMessage(i,1)} title="Good response" style={msgActionS(msg.rating===1?t.ok:t.mut)}><IC.ThumbUp/></button>
+                      <button onClick={()=>rateMessage(i,-1)} title="Poor response" style={msgActionS(msg.rating===-1?t.err:t.mut)}><IC.ThumbDown/></button>
                     </>}
                     {!isU&&!!msg.metadata?.stats?.gen_tokens&&<span title="Generation stats" style={{fontSize:9,color:t.mut,opacity:.75,marginLeft:4,alignSelf:"center",whiteSpace:"nowrap"}}>{msg.metadata.stats.gen_tokens} tok{msg.metadata.stats.speed?` · ${msg.metadata.stats.speed} tok/s`:""}{msg.metadata.stats.routed_model?` · via ${msg.metadata.stats.routed_model}`:""}</span>}
                   </div>}
@@ -8166,9 +8179,9 @@ function HyprChat(){
             {sttUrl&&!streaming&&!councilRunning&&<button onClick={toggleRecording} disabled={transcribing} title={recording?"Stop recording":transcribing?"Transcribing…":"Voice input (speech-to-text)"} style={{background:recording?`${t.err}22`:"none",border:recording?`1px solid ${t.err}66`:"1px solid transparent",color:recording?t.err:transcribing?t.warm:t.mut,cursor:transcribing?"default":"pointer",padding:"6px 8px",borderRadius:8,display:"flex",alignItems:"center",flexShrink:0,animation:recording?"pGlow 1.5s ease-in-out infinite":"none"}}>
               {transcribing?<span style={{width:13,height:13,border:`2px solid ${t.warm}44`,borderTopColor:t.warm,borderRadius:"50%",display:"inline-block",animation:"spin 1s linear infinite"}}/>:<IC.Mic/>}
             </button>}
-            {councilRunning?<button onClick={()=>{councilAbortRef.current?.abort();if(councilStreamRef.current){councilStreamRef.current.running=false;councilStreamRef.current=null;}setCouncilRunning(false);}} style={{background:t.pink,border:"none",color:"#fff",padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :streaming?<button onClick={stop} style={{background:t.err,border:"none",color:"#fff",padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :<button onClick={send} disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?"#fff":t.mut,padding:"10px 14px",borderRadius:8,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all .2s",boxShadow:"none",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
+            {councilRunning?<button onClick={()=>{councilAbortRef.current?.abort();if(councilStreamRef.current){councilStreamRef.current.running=false;councilStreamRef.current=null;}setCouncilRunning(false);}} style={{background:t.pink,border:"none",color:t.bg,padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            :streaming?<button onClick={stop} style={{background:t.err,border:"none",color:t.bg,padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            :<button onClick={send} disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?t.bg:t.mut,padding:"10px 14px",borderRadius:8,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all .2s",boxShadow:"none",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
           </div>
         </div>
         </div>
@@ -8353,9 +8366,12 @@ function HyprChat(){
       .conv-row:hover .conv-act{opacity:1;}
       .conv-act:hover{background:${t.sfBri}33 !important;}
       .conv-del:hover{color:${t.err} !important;}
+      .msg-toolbar{opacity:0;transition:opacity .15s ease;}
+      .msg-row:hover .msg-toolbar,.msg-row:focus-within .msg-toolbar{opacity:1;}
       @media (hover:none){
         .conv-act{opacity:1;}
         .conv-row .conv-actions::before{opacity:.94;}
+        .msg-toolbar{opacity:1;}
       }
       *{scrollbar-width:auto;scrollbar-color:${t.sfBri} transparent}
       *::-webkit-scrollbar{width:7px;height:10px}*::-webkit-scrollbar-track{background:transparent;border-radius:5px}

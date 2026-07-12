@@ -192,6 +192,16 @@ _SHIP_ANYWAY_DIRECT_RE = re.compile(
 )
 _DELIVERY_SHIP_TOOLS = {"download_project", "download_file"}
 
+
+async def _fire_artifact_created_event() -> None:
+    """artifact_created event for event-triggered scheduled tasks. Call-time
+    scheduler import (tools → scheduler is the safe direction); never raises."""
+    try:
+        import scheduler
+        await scheduler.fire_event("artifact_created", user_id=db.current_user_id())
+    except Exception as e:
+        print(f"[FileTrack] fire_event(artifact_created) failed: {e}")
+
 # Manual work tools that get AUTO-DISPATCHED to the repair path (Aider first,
 # Fixer fallback) when a reviewer/acceptance issue is pending. Local chat
 # models flail on these instead of calling run_aider_fix; converting the call
@@ -1117,18 +1127,20 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "manage_tasks",
-            "description": "Create, list, update, pause, resume, delete, or run the user's scheduled tasks. When the user asks for anything recurring ('every morning', 'each Friday', 'remind me daily'), create a scheduled task instead of doing it once. Results are delivered to this conversation plus a notification.",
+            "description": "Create, list, update, pause, resume, delete, or run the user's scheduled tasks. When the user asks for anything recurring ('every morning', 'each Friday', 'remind me daily'), create a scheduled task instead of doing it once. schedule_kind=event runs the task when something happens ('when an urgent email arrives, draft a reply'). Results are delivered to this conversation plus a notification.",
             "parameters": {"type": "object", "properties": {
                 "action": {"type": "string", "description": "create, list, get, update, pause, resume, delete, or run_now"},
                 "task_id": {"type": "string", "description": "Task id (required for get/update/pause/resume/delete/run_now)"},
                 "title": {"type": "string", "description": "Short task title"},
                 "prompt": {"type": "string", "description": "What the task should do each run, phrased as an instruction"},
-                "schedule_kind": {"type": "string", "description": "once, daily, weekly, monthly, or cron"},
+                "schedule_kind": {"type": "string", "description": "once, daily, weekly, monthly, cron, or event"},
                 "time": {"type": "string", "description": "Local time HH:MM for daily/weekly/monthly"},
                 "weekday": {"type": "integer", "description": "0-6 (0=Monday) for weekly"},
                 "day": {"type": "integer", "description": "1-31 for monthly"},
                 "cron": {"type": "string", "description": "Cron expression for schedule_kind=cron"},
                 "run_at": {"type": "string", "description": "Local datetime YYYY-MM-DDTHH:MM for once"},
+                "event": {"type": "string", "description": "For schedule_kind=event: email_received, urgent_email_received, research_completed, or artifact_created"},
+                "every": {"type": "integer", "description": "For schedule_kind=event: fire on every Nth occurrence (default 1)"},
             }, "required": ["action"]},
         },
     },
@@ -1164,6 +1176,16 @@ CODEAGENT_TOOLS = {
                 "remind_minutes": {"type": "integer", "description": "Minutes before start to notify (optional)"},
                 "days": {"type": "integer", "description": "For list: how many days ahead (default 7)"},
             }, "required": ["action"]},
+        },
+    },
+    "get_weather": {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Current conditions plus a today/tomorrow forecast for a location (Open-Meteo, no key). Defaults to the user's saved assistant location when no location is given.",
+            "parameters": {"type": "object", "properties": {
+                "location": {"type": "string", "description": "City or place name, e.g. 'Austin, TX' (optional — defaults to the assistant profile location)"},
+            }},
         },
     },
     "list_emails": {
@@ -3087,30 +3109,50 @@ async def exec_tool(
                     kind = str(args.get("schedule_kind") or "once").strip().lower()
                     if not title or not prompt:
                         return "ERROR: manage_tasks create requires 'title' and 'prompt'."
-                    if kind not in ("once", "daily", "weekly", "monthly", "cron"):
-                        return "ERROR: schedule_kind must be once, daily, weekly, monthly, or cron."
-                    schedule_json: dict = {}
-                    if args.get("time"):
-                        schedule_json["time"] = str(args["time"]).strip()
-                    if args.get("weekday") is not None:
-                        schedule_json["weekday"] = int(args["weekday"])
-                    if args.get("day") is not None:
-                        schedule_json["day"] = int(args["day"])
-                    if args.get("cron"):
-                        schedule_json["cron"] = str(args["cron"]).strip()
-                    if args.get("run_at"):
-                        schedule_json["run_at"] = str(args["run_at"]).strip()
+                    if kind not in ("once", "daily", "weekly", "monthly", "cron", "event"):
+                        return "ERROR: schedule_kind must be once, daily, weekly, monthly, cron, or event."
                     profile = await db.get_assistant_profile()
                     tz = (profile or {}).get("timezone") or "UTC"
-                    next_run = _scheduler.compute_next_run(kind, schedule_json, tz)
-                    if not next_run:
-                        return "ERROR: that schedule doesn't produce a run time — give a concrete time (e.g. time='08:30' for daily, run_at='2026-07-10T08:30' for once)."
+                    event_trigger_json: dict = {}
+                    if kind == "event":
+                        event_name = str(args.get("event") or "").strip().lower()
+                        if event_name not in _scheduler.EVENT_NAMES:
+                            return (f"ERROR: event must be one of "
+                                    f"{', '.join(_scheduler.EVENT_NAMES)}.")
+                        event_trigger_json = {
+                            "event": event_name,
+                            "every": max(1, int(args.get("every") or 1)),
+                        }
+                        next_run = None
+                    else:
+                        schedule_json: dict = {}
+                        if args.get("time"):
+                            schedule_json["time"] = str(args["time"]).strip()
+                        if args.get("weekday") is not None:
+                            schedule_json["weekday"] = int(args["weekday"])
+                        if args.get("day") is not None:
+                            schedule_json["day"] = int(args["day"])
+                        if args.get("cron"):
+                            schedule_json["cron"] = str(args["cron"]).strip()
+                        if args.get("run_at"):
+                            schedule_json["run_at"] = str(args["run_at"]).strip()
+                        next_run = _scheduler.compute_next_run(kind, schedule_json, tz)
+                        if not next_run:
+                            return "ERROR: that schedule doesn't produce a run time — give a concrete time (e.g. time='08:30' for daily, run_at='2026-07-10T08:30' for once)."
                     task = await db.create_scheduled_task(
                         f"task-{uuid.uuid4().hex[:10]}", title=title, prompt=prompt,
-                        task_type="llm", schedule_kind=kind, schedule_json=schedule_json,
+                        task_type="llm", schedule_kind=kind,
+                        schedule_json=schedule_json if kind != "event" else {},
+                        event_trigger_json=event_trigger_json,
                         timezone=tz, next_run=next_run, conversation_id=conv_id or "",
                         delivery_json={"conversation": bool(conv_id), "notify": True},
                     )
+                    if kind == "event":
+                        return (f"Created event-triggered task {task['id']} (\"{title}\", fires on "
+                                f"{event_trigger_json['event']}"
+                                + (f" every {event_trigger_json['every']} occurrences"
+                                   if event_trigger_json['every'] > 1 else "")
+                                + "). Results will be posted in this conversation.")
                     return (f"Created scheduled task {task['id']} (\"{title}\", {kind}, "
                             f"next run {task['next_run']} UTC, timezone {tz}). Results will be "
                             f"posted in this conversation.")
@@ -3169,6 +3211,20 @@ async def exec_tool(
                 return "ERROR: action must be create, list, get, update, pause, resume, delete, or run_now."
             except Exception as e:
                 return f"ERROR: manage_tasks failed: {e}"
+
+        elif name == "get_weather":
+            import weather as _weather
+            location = str(args.get("location") or "").strip()
+            if not location:
+                _profile = await db.get_assistant_profile()
+                location = ((_profile or {}).get("location") or "").strip()
+            if not location:
+                return ("ERROR: no location given and no assistant location saved — "
+                        "pass location, or set one in the Assistant panel.")
+            try:
+                return await _weather.get_weather_text(location)
+            except Exception as e:
+                return f"ERROR: weather lookup failed: {e}"
 
         elif name == "manage_notes":
             import pim as _pim
@@ -3344,12 +3400,19 @@ async def exec_tool(
                         account_id = matches[0]["id"]
                     account = await db.get_email_account(account_id, with_password=True)
                     # SERVER-SIDE autonomy gate: prompt rules alone don't count.
-                    if not account.get("allow_autonomous_send"):
+                    # Per-account flag ANDed with the assistant-profile master
+                    # switch (no profile row = master on, so email works
+                    # without ever opening the Assistant panel).
+                    _profile = await db.get_assistant_profile()
+                    _master_ok = _profile is None or _profile.get("allow_autonomous_email")
+                    if not account.get("allow_autonomous_send") or not _master_ok:
                         note = await db.create_note(
                             f"note-{uuid.uuid4().hex[:10]}", kind="note",
                             title=f"Email draft to {to}: {subject}"[:290],
                             content=body, tags=["email-draft"])
-                        return (f"Autonomous sending is disabled for this account, so the email was "
+                        why = ("for this account" if not account.get("allow_autonomous_send")
+                               else "by the assistant profile's master switch (Assistant panel)")
+                        return (f"Autonomous sending is disabled {why}, so the email was "
                                 f"saved as a draft note ({note['id']}) instead. The user can review "
                                 f"and send it from the Email panel, or enable autonomous send in "
                                 f"Email settings.")
@@ -3380,7 +3443,9 @@ async def exec_tool(
                     body = str(args.get("body") or "").strip()
                     if not body:
                         return "ERROR: reply_to_email requires 'body'."
-                    if not account.get("allow_autonomous_send"):
+                    _profile = await db.get_assistant_profile()
+                    _master_ok = _profile is None or _profile.get("allow_autonomous_email")
+                    if not account.get("allow_autonomous_send") or not _master_ok:
                         await db.update_email_message(message_id, {"draft_reply": body})
                         return (f"Autonomous sending is disabled, so the reply to "
                                 f"\"{msg['subject']}\" was saved as a draft. The user can review "
@@ -3517,6 +3582,8 @@ async def exec_tool(
                     )
                 except Exception as e:
                     print(f"[FileTrack] {e}")
+                if artifact:
+                    await _fire_artifact_created_event()
                 await events.emit(conv_id, "file_ready", {
                     "filename": filename, "url": download_url,
                     "is_image": _ext in _IMAGE_EXTS,
@@ -3704,6 +3771,8 @@ async def exec_tool(
                     )
                 except Exception as e:
                     print(f"[FileTrack] {e}")
+                if artifact:
+                    await _fire_artifact_created_event()
                 await events.emit(conv_id, "file_ready", {
                     "filename": filename, "url": download_url,
                     "is_image": True,
@@ -4069,6 +4138,8 @@ async def exec_tool(
                     )
                 except Exception as e:
                     print(f"[FileTrack] {e}")
+                if artifact:
+                    await _fire_artifact_created_event()
                 await events.emit(conv_id, "file_ready", {
                     "filename": tarname,
                     "url": download_url,

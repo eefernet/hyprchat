@@ -5,6 +5,8 @@ import { API } from '../session.js';
 import useIsMobile from '../useIsMobile.js';
 import { IC } from './icons.jsx';
 import ArtifactCanvas from './ArtifactCanvas.jsx';
+import EmptyState from './EmptyState.jsx';
+import { Skeleton, SkeletonGrid } from './Skeleton.jsx';
 
 const artifactKindMeta=(kind,t,metadata={})=>{
   const k=String(kind||"file").toLowerCase();
@@ -653,10 +655,12 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
       {/* RIGHT VIEWER — newest/selected image large, carousel of the rest below */}
       <div style={{flex:1,minWidth:0,display:"flex",flexDirection:"column",padding:16,gap:10,overflow:"hidden"}}>
         {gallery.length===0
-          ?<div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,color:t.mut}}>
-            <span style={{fontSize:40,opacity:.4}}>🖼️</span>
-            <div style={{fontSize:12}}>{galleryLoading?"Loading gallery…":"No generations yet — describe an image on the left and hit Generate."}</div>
-          </div>
+          ?(galleryLoading
+            ?<Skeleton t={t} h="100%" r={12} style={{flex:1,minHeight:0}}/>
+            :<div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,color:t.mut}}>
+              <span style={{fontSize:40,opacity:.4}}>🖼️</span>
+              <div style={{fontSize:12}}>No generations yet — describe an image on the left and hit Generate.</div>
+            </div>)
           :<>
             <div onClick={()=>cur&&cur.exists_status!=="missing"&&setLightbox(true)} title="Click to open the full-screen viewer" style={{flex:1,minHeight:0,position:"relative",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.bgDeep}99`,border:`1px solid ${t.brd}30`,borderRadius:12,overflow:"hidden",cursor:cur&&cur.exists_status!=="missing"?"zoom-in":"default"}}>
               {cur&&(cur.exists_status==="missing"
@@ -984,12 +988,8 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
       <button onClick={load} style={{background:`${t.surface}66`,border:`1px solid ${t.brd}35`,color:t.mut,cursor:"pointer",padding:"7px 10px",borderRadius:7,fontFamily:font,fontSize:10,fontWeight:800}}>Refresh</button>
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
-      {loading&&<div style={{fontSize:12,color:t.mut,padding:18}}>Loading artifacts...</div>}
-      {!loading&&!items.length&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8,textAlign:"center",padding:"36px 20px",border:`1px dashed ${t.brd}44`,borderRadius:10,background:`${t.surface}30`,color:t.mut,fontFamily:font}}>
-        <div style={{fontSize:30,lineHeight:1,opacity:.9,animation:"float 4s ease-in-out infinite",display:"flex",justifyContent:"center"}}><IC.Layers/></div>
-        <div style={{fontSize:13,fontWeight:800,color:t.dim}}>No artifacts yet</div>
-        <div style={{fontSize:11,lineHeight:1.55,maxWidth:420}}>Files the assistant delivers with download_file or download_project are collected here.</div>
-      </div>}
+      {loading&&<SkeletonGrid t={t} cards={6} minW={250} cardH={120}/>}
+      {!loading&&!items.length&&<EmptyState t={t} font={font} icon={<IC.Layers/>} title="No artifacts yet" hint="Files the assistant delivers with download_file or download_project are collected here."/>}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:12}}>
         {items.map(a=><ArtifactCard key={a.id} artifact={a} t={t} font={font} workspaces={workspaces} onPreview={onPreview} onOpenConv={onOpenConv} onPatch={patchArtifact} onDelete={deleteArtifact} onDetails={openDetail} onSelect={toggleSelected} selected={selected.has(a.id)} confirmAction={confirmAction}/>)}
       </div>

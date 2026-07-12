@@ -2,6 +2,11 @@ import React from 'react';
 
 import { IC } from '../components/icons.jsx';
 import { EmptyState } from '../components/hyprChatWidgets.jsx';
+import { SkeletonCard } from '../components/Skeleton.jsx';
+import PanelHeader from '../components/PanelHeader.jsx';
+import PanelChart from '../components/PanelChart.jsx';
+
+const CHART_FONT="'JetBrains Mono',monospace";
 
 export default function AnalyticsPanel({
   t,
@@ -15,13 +20,8 @@ export default function AnalyticsPanel({
   analyticsData,
 }){
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-        <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
-          <span style={{display:"flex",color:t.acc}}><IC.BarChart/></span>
-          <div>
-            <div style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Statistics</div>
-            <div style={{fontSize:10,color:t.mut,marginTop:2}}>Overall HyprChat usage from recorded chat token telemetry.</div>
-          </div>
-        </div>
+        <PanelHeader t={t} icon={<IC.BarChart/>} title="Statistics"
+          subtitle="Overall HyprChat usage from recorded chat token telemetry."/>
         <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
           <div style={{maxWidth:980}}>
             <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap",alignItems:"center"}}>
@@ -67,16 +67,50 @@ export default function AnalyticsPanel({
                 {hasCost&&statCard("Cloud Spend",fmtUsd(cost.all_time),`today ${fmtUsd(cost.today)} · 30d ${fmtUsd(cost.last_30d)} (estimate)`,t.warm)}
                 {((summary.ratings?.up||0)+(summary.ratings?.down||0))>0&&statCard("Feedback",`👍 ${summary.ratings.up} · 👎 ${summary.ratings.down}`,"thumbs on assistant replies",t.ok)}
               </div>
-              {rows.length>0?<div style={{...cardS,padding:20}}>
-                <div style={{fontSize:12,fontWeight:800,marginBottom:12,color:t.mut}}>Tokens by {analyticsGroup==="persona"?"profile":analyticsGroup} {analyticsDays===0?"(all time)":`(${analyticsDays}d)`}</div>
-                <div style={{display:"flex",alignItems:"flex-end",gap:2,height:210,padding:"0 4px",overflowX:"auto",overflowY:"hidden"}}>
-                  {(()=>{const maxVal=Math.max(...rows.map(d=>d.total_tokens||0),1);return rows.map((d,i)=>{const h=Math.max(((d.total_tokens||0)/maxVal)*180,2);const label=d.date?d.date.slice(5):d.model||d.persona_name||"(none)";return <div key={i} style={{flex:"1 0 26px",display:"flex",flexDirection:"column",alignItems:"center",gap:4,minWidth:26}}>
-                    <div style={{fontSize:8,color:t.mut,textAlign:"center",lineHeight:1}}>{(d.total_tokens||0).toLocaleString()}</div>
-                    <div title={`${label}: ${(d.total_tokens||0).toLocaleString()} tokens, ${d.request_count||0} reqs`} style={{width:"80%",maxWidth:40,height:h,background:`linear-gradient(180deg,${t.acc},${t.acc}66)`,borderRadius:"4px 4px 0 0",transition:"height .3s",cursor:"pointer",minWidth:6}}/>
-                    <div style={{fontSize:7,color:t.mut,textAlign:"center",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:56,transform:"rotate(-30deg)",transformOrigin:"top center"}}>{label}</div>
-                  </div>;});})()}
+              {rows.length>0?(()=>{
+                const isDay=analyticsGroup==="day";
+                const labels=rows.map(d=>d.date?d.date.slice(5):d.model||d.persona_name||"(none)");
+                const spanLabel=analyticsDays===0?"(all time)":`(${analyticsDays}d)`;
+                const costRows=isDay?rows.filter(d=>(d.cost_usd||0)>0):[];
+                const topModels=allModels.slice(0,5);
+                const otherTokens=allModels.slice(5).reduce((a,d)=>a+(d.total_tokens||0),0);
+                // Fixed slot order — keeps t.acc and t.f1 out of adjacency (measured CVD floor pair); "Other" is always t.mut.
+                const sliceColors=[t.acc,t.ok,t.warm,t.pink,t.f4];
+                return <>
+                <div style={{...cardS,padding:20}}>
+                  <div style={{fontSize:12,fontWeight:800,marginBottom:12,color:t.mut}}>Tokens by {analyticsGroup==="persona"?"profile":analyticsGroup} {spanLabel}</div>
+                  <PanelChart t={t} font={CHART_FONT} type="bar" height={260}
+                    data={{labels,datasets:isDay?[
+                      {label:"Prompt",data:rows.map(d=>d.prompt_tokens||0),backgroundColor:`${t.warm}CC`,borderColor:t.bgDeep,borderWidth:1,borderRadius:4},
+                      {label:"Completion",data:rows.map(d=>d.completion_tokens||0),backgroundColor:`${t.ok}CC`,borderColor:t.bgDeep,borderWidth:1,borderRadius:4},
+                    ]:[
+                      {label:"Tokens",data:rows.map(d=>d.total_tokens||0),backgroundColor:`${t.acc}CC`,borderColor:t.bgDeep,borderWidth:1,borderRadius:4},
+                    ]}}
+                    options={{
+                      plugins:{legend:isDay?{labels:{color:t.dim,font:{family:CHART_FONT,size:11},boxWidth:12,boxHeight:12}}:{display:false},tooltip:{mode:"index",intersect:false,bodyFont:{family:CHART_FONT},titleFont:{family:CHART_FONT},backgroundColor:`${t.surface}EE`,borderColor:t.brd,borderWidth:1,titleColor:t.text,bodyColor:t.dim}},
+                      scales:{x:{stacked:isDay},y:{stacked:isDay}},
+                    }}/>
                 </div>
-              </div>:<EmptyState t={t} icon={<IC.BarChart/>} title="No statistics recorded yet" hint="Start chatting to record token telemetry and populate this page."/>}
+                <div style={{display:"flex",gap:16,marginTop:16,flexWrap:"wrap"}}>
+                  {topModels.length>1&&<div style={{...cardS,padding:20,flex:"1 1 300px",minWidth:280,marginBottom:0}}>
+                    <div style={{fontSize:12,fontWeight:800,marginBottom:12,color:t.mut}}>Model share (all time)</div>
+                    <PanelChart t={t} font={CHART_FONT} type="doughnut" height={230}
+                      data={{labels:[...topModels.map(d=>d.model),...(otherTokens>0?["Other"]:[])],
+                        datasets:[{data:[...topModels.map(d=>d.total_tokens||0),...(otherTokens>0?[otherTokens]:[])],
+                          backgroundColor:[...topModels.map((_,i)=>`${sliceColors[i]}CC`),...(otherTokens>0?[`${t.mut}99`]:[])],
+                          borderColor:t.bgDeep,borderWidth:2}]}}
+                      options={{cutout:"62%"}}/>
+                  </div>}
+                  {costRows.length>0&&<div style={{...cardS,padding:20,flex:"2 1 380px",minWidth:300,marginBottom:0}}>
+                    <div style={{fontSize:12,fontWeight:800,marginBottom:12,color:t.mut}}>Cloud spend {spanLabel}</div>
+                    <PanelChart t={t} font={CHART_FONT} type="line" height={230}
+                      data={{labels:costRows.map(d=>(d.date||"").slice(5)),
+                        datasets:[{label:"Cost (USD)",data:costRows.map(d=>d.cost_usd||0),borderColor:t.f1,backgroundColor:`${t.f1}14`,borderWidth:2,pointRadius:0,pointHoverRadius:4,tension:.25,fill:true}]}}
+                      options={{plugins:{legend:{display:false}},scales:{y:{ticks:{color:t.mut,font:{family:CHART_FONT,size:10},callback:v=>`$${Number(v).toFixed(2)}`}}}}}/>
+                  </div>}
+                </div>
+                </>;
+              })():<EmptyState t={t} icon={<IC.BarChart/>} title="No statistics recorded yet" hint="Start chatting to record token telemetry and populate this page."/>}
               {allModels.length>0&&<div style={{...cardS,marginTop:16}}>
                 <div style={{fontSize:12,fontWeight:800,marginBottom:8,color:t.mut}}>All-Time Model Breakdown</div>
                 <div style={{display:"grid",gridTemplateColumns:`minmax(180px,2fr) repeat(${hasCost?5:4},minmax(80px,1fr))`,gap:8,padding:"6px 0",borderBottom:`1px solid ${t.brd}33`,fontSize:10,fontWeight:800,color:t.mut}}>
@@ -100,7 +134,15 @@ export default function AnalyticsPanel({
                 </div>
               </div>}
             </>;
-            })():<div style={{textAlign:"center",padding:40,color:t.mut}}>Loading statistics...</div>}
+            })():<>
+              <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap"}}>
+                {Array.from({length:4},(_,i)=><SkeletonCard key={i} t={t} h={90} lines={1} style={{flex:"1 1 170px",minWidth:160}}/>)}
+              </div>
+              <div style={{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap"}}>
+                {Array.from({length:4},(_,i)=><SkeletonCard key={i} t={t} h={90} lines={1} style={{flex:"1 1 170px",minWidth:160}}/>)}
+              </div>
+              <SkeletonCard t={t} h={240} lines={4}/>
+            </>}
           </div>
         </div>
       </div>;

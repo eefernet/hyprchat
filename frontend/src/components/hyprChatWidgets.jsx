@@ -10,6 +10,7 @@ import {
   _isDaedalusOutput,
 } from '../daedalusTimeline.js';
 import { ArtifactCard } from './artifactComponents.jsx';
+import EmptyState from './EmptyState.jsx';
 import { IC } from './icons.jsx';
 import { Collapsible } from './markdownBlocks.jsx';
 
@@ -1225,17 +1226,8 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
 
 const Chip=({l,c,bg,onX})=><span style={{display:"inline-flex",alignItems:"center",gap:4,background:bg,color:c,padding:"3px 8px",borderRadius:20,fontSize:10,fontWeight:600}}>{l}{onX&&<span onClick={onX} style={{cursor:"pointer",opacity:.7}}>&times;</span>}</span>;
 
-// Shared designed empty state — icon + title + hint + optional action button.
-function EmptyState({t,font,icon,title,hint,action,compact}){
-  return <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8,textAlign:"center",
-    padding:compact?"18px 14px":"36px 20px",border:`1px dashed ${t.brd}44`,borderRadius:10,
-    background:`${t.surface}30`,color:t.mut,fontFamily:font}}>
-    <div style={{fontSize:compact?22:30,lineHeight:1,opacity:.9,animation:"float 4s ease-in-out infinite",display:"flex",justifyContent:"center"}}>{icon}</div>
-    <div style={{fontSize:compact?11:13,fontWeight:800,color:t.dim}}>{title}</div>
-    {hint&&<div style={{fontSize:compact?10:11,lineHeight:1.55,maxWidth:420}}>{hint}</div>}
-    {action||null}
-  </div>;
-}
+// Shared designed empty state — now lives in its own module (components/EmptyState.jsx)
+// so artifactComponents.jsx can import it without a cycle; re-exported below.
 
 const TIPS={
   chunk_size:"Characters per text chunk when indexing KB files. Smaller = more precise retrieval, larger = more context per chunk. Default: 500",
@@ -1687,7 +1679,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
     {addPanel&&<div style={{padding:12,borderBottom:`1px solid ${t.brd}22`,background:`${t.warm}07`,animation:"fadeIn .2s",flexShrink:0}}>
       <input value={addSearch} onChange={e=>setAddSearch(e.target.value)} placeholder="Search conversations..." style={{...inputS,marginBottom:8}}/>
       <div style={{maxHeight:180,overflowY:"auto",display:"flex",flexDirection:"column",gap:3}}>
-        {filteredAvail.length===0&&<div style={{fontSize:11,color:t.mut,padding:8,textAlign:"center"}}>All conversations are already in this workspace.</div>}
+        {filteredAvail.length===0&&<EmptyState t={t} font={font} compact icon={<IC.Chat/>} title="All conversations are already in this workspace"/>}
         {filteredAvail.map(c=><div key={c.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:`${t.surface}44`,borderRadius:8,cursor:"pointer",border:`1px solid ${t.brd}22`}} onClick={()=>addConv(c.id)}>
           <span style={{fontSize:12,flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.title||"New Chat"}</span>
           <span style={{fontSize:10,color:t.mut}}>{c.model||""}</span>
@@ -1697,7 +1689,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
     </div>}
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       {tab==="convs"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-        {!(ws.conversations||[]).length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No conversations yet.<br/>Click "+ Add Chats" to add some.</div>}
+        {!(ws.conversations||[]).length&&<EmptyState t={t} font={font} icon={<IC.Chat/>} title="No conversations yet" hint={'Click "+ Add Chats" to add some.'}/>}
         {(ws.conversations||[]).map(c=><div key={c.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}66`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
           <span style={{fontSize:18}}>💬</span>
           <div style={{flex:1,minWidth:0}}>
@@ -1770,7 +1762,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
         </details>}
       </div>;})()}
       {tab==="reports"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-        {!(ws.reports||[]).length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No reports yet.<br/>Add reports from Deep Research.</div>}
+        {!(ws.reports||[]).length&&<EmptyState t={t} font={font} icon={<IC.Research/>} title="No reports yet" hint="Add reports from Deep Research."/>}
         {(ws.reports||[]).map(r=>{const sm={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]}[String(r.status||"queued").toLowerCase()]||[t.warm,"Queued"];return <div key={r.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}66`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
           <span style={{fontSize:18}}>📊</span>
           <div style={{flex:1,minWidth:0}}>
@@ -1782,7 +1774,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
         </div>;})}
       </div>}
       {tab==="files"&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:10}}>
-        {!(ws.files||[]).length&&<div style={{width:"100%",textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No artifacts yet.<br/>Artifacts are tracked automatically when the AI downloads them in workspace chats.</div>}
+        {!(ws.files||[]).length&&<div style={{gridColumn:"1/-1"}}><EmptyState t={t} font={font} icon={<IC.Layers/>} title="No artifacts yet" hint="Artifacts are tracked automatically when the AI downloads them in workspace chats."/></div>}
         {(ws.files||[]).map(f=><ArtifactCard key={f.id||`${f.filename}-${f.created_at}`} artifact={f} t={t} font={font} workspaces={workspaces} onPreview={onPreview} onOpenConv={onOpenConv} onPatch={patchArtifact} onDelete={deleteArtifact} confirmAction={confirmAction} compact/>)}
       </div>}
     </div>

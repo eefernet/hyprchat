@@ -39,7 +39,8 @@ _run_semaphore = asyncio.Semaphore(1)
 _bg_runs: set[asyncio.Task] = set()
 
 TERMINAL_RUN_STATUSES = ("succeeded", "failed", "cancelled")
-EVENT_NAMES = ("email_received", "research_completed", "artifact_created")
+EVENT_NAMES = ("email_received", "urgent_email_received",
+               "research_completed", "artifact_created")
 
 
 # ------------------------------------------------------------------
@@ -367,22 +368,36 @@ async def _dispatch(task: dict, run_id: str, *, extra_context: str = "") -> str:
         return f"research report {report.get('id', '')} queued"
 
     if task_type == "check_in":
+        # Self-heal: the pinned conversation may have been deleted since the
+        # check-in was created. ensure_assistant re-seeds and returns the live
+        # id; persist it back so the task row stops pointing at a dead conv.
+        profile = await assistant_mod.ensure_assistant(task.get("user_id"))
+        live_conv = profile.get("conversation_id") or ""
+        if live_conv and live_conv != (task.get("conversation_id") or ""):
+            await db.update_scheduled_task(
+                task["id"], {"conversation_id": live_conv},
+                user_id=task.get("user_id"))
+            task = {**task, "conversation_id": live_conv}
         prompt = await assistant_mod.build_checkin_prompt(task, prompt)
 
     delivery = task.get("delivery_json") or {}
     conv_id = task.get("conversation_id") or ""
     if delivery.get("conversation", True) and conv_id:
-        await assistant_mod.run_headless_chat(
+        text = await assistant_mod.run_headless_chat(
             conversation_id=conv_id,
             prompt=prompt,
             model=task.get("model") or "",
-            tool_ids=task.get("tool_ids") or [],
+            # [] means "unset" — let the headless path fall through to the
+            # conversation's, then the persona's tool list.
+            tool_ids=task.get("tool_ids") or None,
             run_id=run_id,
             task_id=task["id"],
             http=_http,
             events=_events,
         )
-        return f"delivered to conversation {conv_id}"
+        # The brief itself is the result — notifications/ntfy show it instead
+        # of the old "delivered to conversation ..." debug marker.
+        return (text or "").strip()[:2000] or f"delivered to conversation {conv_id}"
 
     # No conversation delivery: single bounded completion, local-only fallback.
     import model_providers
@@ -400,10 +415,17 @@ async def _deliver_result(task: dict, status: str, result_text: str, error: str)
     delivery = task.get("delivery_json") or {}
     if not delivery.get("notify", True):
         return
-    title = f"Task {'done' if status == 'succeeded' else status}: {task.get('title') or task['id']}"
+    is_checkin = (task.get("task_type") or "") == "check_in"
+    if is_checkin and status == "succeeded":
+        # The brief IS the notification — no "Task done:" boilerplate, and
+        # kind="checkin" keeps it out of the next brief's notifications dump.
+        title = task.get("title") or "Check-in"
+    else:
+        title = f"Task {'done' if status == 'succeeded' else status}: {task.get('title') or task['id']}"
     body = error if status != "succeeded" else (result_text or "")[:500]
     await notifications.notify(
-        title, body, kind="task", source_task_id=task["id"],
+        title, body, kind="checkin" if is_checkin else "task",
+        source_task_id=task["id"],
         conversation_id=task.get("conversation_id") or "",
         ntfy=bool(delivery.get("ntfy")),
         email=bool(delivery.get("email")),

@@ -1,6 +1,8 @@
 import React from 'react';
 
 import { IC } from '../components/icons.jsx';
+import PanelHeader from '../components/PanelHeader.jsx';
+import EmptyState from '../components/EmptyState.jsx';
 
 export default function PromptLibraryPanel({
   t,
@@ -24,22 +26,19 @@ export default function PromptLibraryPanel({
     is_system:!!p.is_system,
   });
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
-      <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{display:"flex",color:t.f1}}><IC.Zap/></span><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.f1}}>Prompt Library</span></div>
+    <PanelHeader t={t} color={t.f1} icon={<IC.Zap/>} title="Prompt Library"
+      subtitle="Reusable prompts — insert into any chat or trigger with / in the composer.">
       <button onClick={()=>{const id=`p-${Date.now()}`;setPrompts(p=>[{id,title:"New Prompt",content:"",category:"General",is_system:false},...(Array.isArray(p)?p.filter(x=>x&&typeof x==="object"):[])]);}} style={btnS(t.f1)}><IC.Plus/> New Prompt</button>
-    </div>
+    </PanelHeader>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
-      {!safePrompts.length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>
-        <div style={{fontSize:28,marginBottom:8}}>⚡</div>
-        <div style={{fontWeight:600,marginBottom:4}}>No saved prompts yet</div>
-        <div>Save reusable prompts here and insert them into any chat with one click.</div>
-        <button onClick={()=>{setPrompts([
+      {!safePrompts.length&&<EmptyState t={t} icon={<IC.Zap/>} title="No saved prompts yet"
+        hint="Save reusable prompts here and insert them into any chat with one click."
+        action={<button onClick={()=>{setPrompts([
           {id:`p-${Date.now()}-1`,title:"Explain Simply",content:"Explain this as if I'm 12 years old, using simple language and analogies.",category:"Learning"},
           {id:`p-${Date.now()}-2`,title:"Code Review",content:"Review this code for bugs, performance issues, security vulnerabilities, and suggest improvements.",category:"Coding"},
           {id:`p-${Date.now()}-3`,title:"Summarize",content:"Summarize the key points from the above in bullet points.",category:"Writing"},
           {id:`p-${Date.now()}-4`,title:"Pros & Cons",content:"List the pros and cons of this in a balanced way.",category:"Analysis"},
-        ]);}} style={{...btnS(t.f1),marginTop:12,justifyContent:"center"}}>Load Starter Prompts</button>
-      </div>}
+        ]);}} style={{...btnS(t.f1),marginTop:4,justifyContent:"center"}}>Load Starter Prompts</button>}/>}
       {safePrompts.map(raw=>{
         const p=cleanPrompt(raw);
         const isEditing=editPrompt?.id===p.id;

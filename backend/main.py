@@ -468,6 +468,17 @@ async def lifespan(app: FastAPI):
     _cleanup_task_ref = asyncio.create_task(_cleanup_loop())
     # Start health check loop (every 5 min)
     _health_task_ref = asyncio.create_task(health_check_loop())
+    # Register every check-in gatherer BEFORE the scheduler starts. pim
+    # (calendar/notes) and email_triage (email) register at import, but were
+    # only imported lazily inside the tick — a check-in due on the first tick
+    # after a restart silently ran without the email block, and
+    # GET /api/assistant listed an incomplete gatherer set until then.
+    try:
+        import pim  # noqa: F401
+        import email_triage  # noqa: F401
+        import weather  # noqa: F401
+    except Exception as _ge:
+        print(f"[Startup] gatherer imports failed (check-ins degrade): {_ge}")
     # Start the Jarvis scheduled-task loop
     global _scheduler_task_ref
     _scheduler_task_ref = scheduler_svc.start(
@@ -4264,30 +4275,59 @@ async def get_conversation_forks(conv_id: str):
 # AUTO-TITLE GENERATION
 # ============================================================
 @app.post("/api/daily-message")
-async def generate_daily_message(body: dict = Body(default={})):
-    model = body.get("model") or config.WORKSPACE_MODEL or config.DEFAULT_MODEL
-    fallback = "Give the machine a worthy puzzle."
+async def generate_daily_message(request: Request, body: dict = Body(default={})):
+    # Background helper call — never route to a paid cloud API (reject_cloud).
+    model = (
+        model_providers.reject_cloud(body.get("model") or "")
+        or model_providers.reject_cloud(config.WORKSPACE_MODEL or "")
+        or config.DEFAULT_MODEL
+    )
+    name = str(body.get("user_name") or "").strip()
+    if not name:
+        try:
+            user = await db.get_user_private(_request_user_id(request))
+            name = str((user or {}).get("name") or "").strip()
+        except Exception:
+            name = ""
+    name = re.sub(r"[\r\n]+", " ", name).strip()[:40]
+    if name.lower() in ("main", "default", "user"):
+        name = ""  # generic seed profile names — greet namelessly
+    daypart = str(body.get("daypart") or "").strip().lower()
+    if daypart not in ("morning", "afternoon", "evening", "night"):
+        h = datetime.now().hour
+        daypart = "morning" if 5 <= h < 12 else "afternoon" if 12 <= h < 17 else "evening" if 17 <= h < 22 else "night"
+    fallback = (
+        f"Feed me a problem, {name}. I've been chewing drywall." if name
+        else "The GPUs are warm and morally flexible."
+    )
     try:
         resp = await http.post(f"{config.OLLAMA_URL}/api/chat", json={
             "model": model,
             "messages": [
                 {"role": "system", "content": (
-                    "Write one short welcome tagline for HyprChat's empty new-chat screen. "
-                    "Tone: clever, playful, curious, a little mischievous, but still useful. "
-                    "Prefer concrete verbs and odd-but-smart imagery over generic productivity slogans. "
-                    "3-9 words. No quotes, no emoji, no markdown, no brand name, no period unless needed."
+                    "You write the single greeting line for HyprChat's empty new-chat screen. "
+                    "Voice: unhinged but brilliant — a chaotic-genius AI that has been alone in the "
+                    "server rack too long and is thrilled the user showed up. Weird imagery, deadpan "
+                    "menace, feral enthusiasm, and the occasional gentle roast of the user by name are "
+                    "all fair game. ONE line, 4-14 words. If a name is given you may address them by it "
+                    "(first name only). Banned: corporate cheer, the words unleash/empower/journey/"
+                    "possibilities, generic productivity slogans, being boring. No quotes, no emoji, "
+                    "no markdown, no brand name. Roast lightly; never actually cruel."
                 )},
-                {"role": "user", "content": f"Today is {time.strftime('%A, %B %d, %Y')}. Generate one fresh, memorable line."}
+                {"role": "user", "content": (
+                    f"User's name: {name or 'unknown'}. It is {daypart} on {time.strftime('%A, %B %d, %Y')}. "
+                    "Write one fresh line greeting them into a new chat. Do not be tame."
+                )}
             ],
             "stream": False,
             "think": False,
-            "options": {"num_ctx": 1024, "temperature": 1.05}
+            "options": {"num_ctx": 1024, "temperature": 1.15}
         }, timeout=20)
         msg = resp.json().get("message", {}).get("content", "").strip()
         msg = re.sub(r"^[\"'`“”]+|[\"'`“”]+$", "", msg)
         msg = re.sub(r"\s+", " ", msg.splitlines()[0] if msg else "").strip()
-        msg = re.sub(r"^(tagline|line)\s*:\s*", "", msg, flags=re.I).strip()
-        if not msg or len(msg) > 90:
+        msg = re.sub(r"^(tagline|line|greeting)\s*:\s*", "", msg, flags=re.I).strip()
+        if not msg or len(msg) > 110:
             msg = fallback
         return {"message": msg, "model": model}
     except Exception as e:

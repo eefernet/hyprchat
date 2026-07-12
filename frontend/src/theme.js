@@ -55,24 +55,38 @@ export const BACKGROUND_EFFECTS = [
 ];
 
 export const WELCOME_FALLBACKS = [
-  "Summon a better rabbit hole",
-  "Ask the question with teeth",
-  "Turn chaos into a checklist",
-  "Make the weird idea executable",
-  "Disturb the obvious answer",
+  "The cursor blinks. It knows something.",
+  "Ask something the search bar would fear",
+  "Bring a question with teeth",
+  "The rabbit holes have been renovated. Enter.",
+  "Silence in the server rack. Suspicious.",
+  "The GPUs are warm and morally flexible",
+  "Something weird is buildable today",
+  "Type first. Regret is for later.",
   "Open a trapdoor in the problem",
-  "Give the machine a worthy puzzle",
-  "Bring snacks for the algorithm",
   "Make today's mystery regret it",
-  "Translate fog into working code",
 ];
-export const WELCOME_VERSION="fun-2";
+export const WELCOME_FALLBACKS_NAMED = [
+  "{name}. The GPUs whisper your name at night.",
+  "Feed me a problem, {name}. I've been chewing drywall.",
+  "{name} returns. The rabbit holes rejoice.",
+  "The server rack demanded you specifically, {name}",
+  "Type something, {name}, before I start hallucinating recreationally",
+  "{name}. Blink twice if the idea is dangerous.",
+  "I counted the milliseconds, {name}. All of them.",
+  "Good. It's you, {name}. The others ask boring questions.",
+  "{name}, the terminal keeps secrets. Spill yours.",
+  "Plot something elegant, {name}. Or something cursed.",
+];
+export const WELCOME_VERSION="fun-3";
 export const localDayKey=()=>{
   const d=new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 };
-export const fallbackWelcome=()=>{
+export const fallbackWelcome=(name="")=>{
   const key=localDayKey().replace(/\D/g,"");
-  const idx=Number(key.slice(-4))%WELCOME_FALLBACKS.length;
-  return WELCOME_FALLBACKS[idx];
+  const seed=Number(key.slice(-4));
+  const first=String(name||"").trim().split(/\s+/)[0];
+  if(first)return WELCOME_FALLBACKS_NAMED[seed%WELCOME_FALLBACKS_NAMED.length].replaceAll("{name}",first);
+  return WELCOME_FALLBACKS[seed%WELCOME_FALLBACKS.length];
 };

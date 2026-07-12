@@ -864,6 +864,32 @@ async def init_db():
             except Exception as e:
                 if "duplicate column" not in str(e).lower():
                     print(f"[DB MIGRATION] Warning adding {table}.{col}: {e}")
+        # Assistant profile: location (weather gatherer) + quiet hours JSON
+        for col, coltype, default in [
+            ("location", "TEXT", "''"),
+            ("quiet_hours", "TEXT", "'{}'"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE assistant_profiles ADD COLUMN {col} {coltype} DEFAULT {default}")
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    print(f"[DB MIGRATION] Warning adding assistant_profiles.{col}: {e}")
+        # ONE-TIME backfills, tracked via PRAGMA user_version (a plain
+        # idempotent UPDATE would re-flip values users later changed).
+        # v1: allow_autonomous_email became a master AND-gate over the
+        # per-account allow_autonomous_send — turn it on for users who already
+        # had an autonomous account so nothing silently stops sending.
+        try:
+            rows = await db.execute_fetchall("PRAGMA user_version")
+            _uver = rows[0][0] if rows else 0
+            if _uver < 1:
+                await db.execute(
+                    "UPDATE assistant_profiles SET allow_autonomous_email=1 "
+                    "WHERE user_id IN (SELECT DISTINCT user_id FROM email_accounts "
+                    "WHERE allow_autonomous_send=1)")
+                await db.execute("PRAGMA user_version=1")
+        except Exception as e:
+            print(f"[DB MIGRATION] Warning backfilling allow_autonomous_email: {e}")
         # Context auto-compaction: rolling summary of turns older than the keep-window
         for col, coltype, default in [
             ("summary", "TEXT", "''"),
@@ -1336,6 +1362,11 @@ async def delete_conversation(id: str):
         # run_events has no FK on run_id — clear it before the conversation
         # delete cascades the runs rows, or the events are orphaned forever.
         await db.execute("DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE conversation_id=?)", (id,))
+        # Assistant refs: clear the pinned-conversation pointer and any
+        # check-in/scheduled tasks targeting this conversation so they stop
+        # firing into a dead id (ensure_assistant re-seeds + repoints later).
+        await db.execute("UPDATE assistant_profiles SET conversation_id='' WHERE conversation_id=? AND user_id=?", (id, user_id))
+        await db.execute("UPDATE scheduled_tasks SET conversation_id='' WHERE conversation_id=? AND user_id=?", (id, user_id))
         await db.execute("DELETE FROM conversations WHERE id = ?", (id,))
         await db.commit()
     finally:
@@ -5680,6 +5711,12 @@ async def get_assistant_profile(user_id: str | None = None) -> dict | None:
             p["enabled_gatherers"] = json.loads(p.get("enabled_gatherers") or "[]")
         except (json.JSONDecodeError, TypeError):
             p["enabled_gatherers"] = []
+        try:
+            p["quiet_hours"] = json.loads(p.get("quiet_hours") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            p["quiet_hours"] = {}
+        if not isinstance(p["quiet_hours"], dict):
+            p["quiet_hours"] = {}
         p["allow_autonomous_email"] = bool(p.get("allow_autonomous_email"))
         return p
     finally:
@@ -5691,6 +5728,8 @@ async def upsert_assistant_profile(*, model_config_id: str | None = None,
                                    timezone: str | None = None,
                                    enabled_gatherers: list | None = None,
                                    allow_autonomous_email: bool | None = None,
+                                   location: str | None = None,
+                                   quiet_hours: dict | None = None,
                                    user_id: str | None = None) -> dict | None:
     uid = _scope_user(user_id)
     now = datetime.utcnow().isoformat()
@@ -5710,6 +5749,10 @@ async def upsert_assistant_profile(*, model_config_id: str | None = None,
             sets.append("enabled_gatherers=?"); vals.append(json.dumps(enabled_gatherers))
         if allow_autonomous_email is not None:
             sets.append("allow_autonomous_email=?"); vals.append(1 if allow_autonomous_email else 0)
+        if location is not None:
+            sets.append("location=?"); vals.append(location.strip()[:200])
+        if quiet_hours is not None:
+            sets.append("quiet_hours=?"); vals.append(json.dumps(quiet_hours))
         vals.append(uid)
         await db.execute(
             f"UPDATE assistant_profiles SET {', '.join(sets)} WHERE user_id=?",
@@ -5957,9 +6000,13 @@ async def due_reminders(now_iso: str) -> dict:
     Events come due at start_at - remind_minutes."""
     db = await get_db()
     try:
+        # A todo with only a due date still deserves a reminder at that time —
+        # remind_at wins when both are set.
         note_rows = await db.execute_fetchall(
-            "SELECT * FROM notes WHERE reminded=0 AND remind_at IS NOT NULL "
-            "AND remind_at <= ? AND done=0 LIMIT 50", (now_iso,))
+            "SELECT * FROM notes WHERE reminded=0 AND done=0 AND ("
+            "(remind_at IS NOT NULL AND remind_at <= ?) OR "
+            "(remind_at IS NULL AND due_at IS NOT NULL AND due_at <= ?)"
+            ") LIMIT 50", (now_iso, now_iso))
         event_rows = await db.execute_fetchall(
             "SELECT * FROM calendar_events WHERE reminded=0 AND remind_minutes IS NOT NULL "
             "AND sync_state != 'deleted' AND start_at IS NOT NULL "

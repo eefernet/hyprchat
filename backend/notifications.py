@@ -25,10 +25,23 @@ def configure(http) -> None:
 async def notify(title: str, body: str = "", *, kind: str = "task",
                  source_task_id: str = "", conversation_id: str = "",
                  ntfy: bool = False, email: bool = False,
+                 urgent: bool = False,
                  user_id: str | None = None) -> int:
     notification_id = await db.add_notification(
         title, body, kind=kind, source_task_id=source_task_id,
         conversation_id=conversation_id, user_id=user_id)
+    # Quiet hours suppress only the push fanout — the in-app row above always
+    # lands. `urgent=True` (e.g. urgent email triage) can pierce the window
+    # when the profile's urgent_override is on. Fails open: a profile lookup
+    # error must never eat a push.
+    if ntfy or email:
+        try:
+            import quiet_hours
+            profile = await db.get_assistant_profile(user_id=user_id)
+            if quiet_hours.suppress_push(profile, urgent=urgent):
+                ntfy = email = False
+        except Exception as e:
+            print(f"[NOTIFY] quiet-hours check failed (pushing anyway): {e}")
     if ntfy:
         try:
             await _send_ntfy(title, body, user_id=user_id)

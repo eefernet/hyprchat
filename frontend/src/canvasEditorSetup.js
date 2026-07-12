@@ -6,7 +6,8 @@
 
 import { basicSetup } from 'codemirror';
 import { EditorView, keymap } from '@codemirror/view';
-import { Compartment } from '@codemirror/state';
+import { Compartment, EditorState } from '@codemirror/state';
+import { MergeView } from '@codemirror/merge';
 import { indentWithTab } from '@codemirror/commands';
 import { javascript } from '@codemirror/lang-javascript';
 import { python } from '@codemirror/lang-python';
@@ -79,4 +80,38 @@ export function createEditor({parent,doc,filename,t,onDocChanged}){
     },
     destroy:()=>view.destroy(),
   };
+}
+
+// Read-only side-by-side diff (AI-edit preview in the Artifact Canvas).
+// Word-level change highlighting and collapsed unchanged regions come from
+// @codemirror/merge; both panes are non-editable.
+export function createDiffView({parent,original,modified,t}){
+  const dark=isDarkBg(t.bg);
+  const chrome=EditorView.theme({
+    "&":{backgroundColor:"transparent",color:t.text,fontSize:"11px"},
+    ".cm-scroller":{fontFamily:"inherit",lineHeight:1.55,overflow:"auto"},
+    ".cm-gutters":{backgroundColor:"transparent",color:t.mut,border:"none"},
+    "&.cm-focused":{outline:"none"},
+    ".cm-changedLine":{backgroundColor:`${t.ok}14`},
+    ".cm-changedText":{backgroundColor:`${t.ok}33`},
+    ".cm-deletedChunk":{backgroundColor:`${t.err}14`},
+    ".cm-deletedText":{backgroundColor:`${t.err}33`},
+    ".cm-collapsedLines":{color:t.mut,backgroundColor:dark?"rgba(255,255,255,.04)":"rgba(0,0,0,.05)"},
+  },{dark});
+  const side=[
+    ...(dark?[oneDark]:[]),
+    chrome,
+    EditorView.lineWrapping,
+    EditorView.editable.of(false),
+    EditorState.readOnly.of(true),
+  ];
+  const mv=new MergeView({
+    a:{doc:original??"",extensions:side},
+    b:{doc:modified??"",extensions:side},
+    parent,
+    highlightChanges:true,
+    gutter:true,
+    collapseUnchanged:{margin:3,minSize:4},
+  });
+  return {destroy:()=>mv.destroy()};
 }
