@@ -1714,6 +1714,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     # ── Build Ollama-native tool definitions ──
     available_tool_names = set()
     ollama_tools = []
+    _extra_text_tool_defs = []  # custom/connector defs re-surfaced in the text-fallback prompt
     requested_tool_ids = list(req.tool_ids or [])
     connector_tool_id_map = connector_tool_id_map or {}
     connector_tool_name_map = connector_tool_name_map or {}
@@ -1730,18 +1731,22 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         elif tid in custom_tool_id_map:
             ct = custom_tool_id_map[tid]
             tool_params = parse_tool_params(ct.get("code", ""), ct["name"])
-            ollama_tools.append({
+            _custom_def = {
                 "type": "function",
                 "function": {
                     "name": ct["name"],
                     "description": ct.get("description", f"Custom tool: {ct['name']}"),
                     "parameters": tool_params,
                 }
-            })
+            }
+            ollama_tools.append(_custom_def)
+            _extra_text_tool_defs.append(_custom_def)
             available_tool_names.add(ct["name"])
         elif tid in connector_tool_id_map:
             ct = connector_tool_id_map[tid]
-            ollama_tools.append(tool_def_from_connector_tool(ct))
+            _conn_def = tool_def_from_connector_tool(ct)
+            ollama_tools.append(_conn_def)
+            _extra_text_tool_defs.append(_conn_def)
             available_tool_names.add(ct["tool_name"])
         else:
             for tname, tdef in CODEAGENT_TOOLS.items():
@@ -2047,7 +2052,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         else:
             print(f"[CHAT] Cloud model {req.model} using text tool-call fallback")
             ollama_tools = []
-            inject_text_tool_prompt(messages, available_tool_names)
+            inject_text_tool_prompt(messages, available_tool_names, extra_tools=_extra_text_tool_defs)
             _text_fallback_done = True
     _prev_tool_key = None  # Track previous tool call to detect loops
     _tool_history = []     # Last N tool keys for near-duplicate detection
@@ -2292,7 +2297,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         # Model doesn't support native tools — switch to text-based
                         print(f"[CHAT] Model {req.model} rejected native tools — switching to text-based")
                         ollama_tools = []
-                        inject_text_tool_prompt(messages, available_tool_names)
+                        inject_text_tool_prompt(messages, available_tool_names, extra_tools=_extra_text_tool_defs)
                         _text_fallback_done = True
                         continue
                     elif any(s in error_body.lower() for s in ("requires more system memory", "out of memory", "llama runner process has terminated", "failed to allocate")) and _oom_retries < 3:
@@ -2646,7 +2651,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 print(f"[CHAT] Model {req.model} rejected native tools — switching to text-based")
                 _native_cloud_tools = False
                 ollama_tools = []
-                inject_text_tool_prompt(messages, available_tool_names)
+                inject_text_tool_prompt(messages, available_tool_names, extra_tools=_extra_text_tool_defs)
                 _text_fallback_done = True
                 continue
             # Log the actual cause — previously this catch silently emitted str(e) to the
@@ -3670,7 +3675,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             if gen_tokens == 0 and ollama_tools:
                 print(f"[CHAT]   Zero tokens with native tools — switching to text-based")
                 ollama_tools = []
-                inject_text_tool_prompt(messages, available_tool_names)
+                inject_text_tool_prompt(messages, available_tool_names, extra_tools=_extra_text_tool_defs)
                 continue
 
             # Nudge the model to respond

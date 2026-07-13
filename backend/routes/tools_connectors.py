@@ -7,14 +7,19 @@ from typing import Any, Optional
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
-import config
 import connectors
 import database as db
+import events
 
 from .context import route_context
 
 
 router = APIRouter()
+
+
+def _reserved_tool_names() -> frozenset:
+    from tools import CODEAGENT_TOOLS  # call-time import: tools.py is heavy and imports routes' siblings
+    return frozenset(CODEAGENT_TOOLS) | {"codeagent", "quick_search"}
 
 
 class ToolCreate(BaseModel):
@@ -104,17 +109,13 @@ async def create_tool(req: ToolCreate):
     safe_name = os.path.basename(req.filename or "tool.py")
     if not safe_name or safe_name != (req.filename or ""):
         raise HTTPException(400, "Invalid filename")
-    filepath = os.path.abspath(os.path.join(config.TOOLS_DIR, safe_name))
-    tools_root = os.path.abspath(config.TOOLS_DIR)
-    if filepath != tools_root and not filepath.startswith(tools_root + os.sep):
-        raise HTTPException(400, "Invalid filename")
+    try:
+        name = events.validate_custom_tool(req.name, req.code, _reserved_tool_names())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
-    await db.create_tool(tool_id, req.name, req.description, safe_name, req.code)
-    os.makedirs(config.TOOLS_DIR, exist_ok=True)
-    with open(filepath, "w") as f:
-        f.write(req.code)
-
-    return {"id": tool_id, **req.model_dump(exclude={"filename"}), "filename": safe_name}
+    await db.create_tool(tool_id, name, req.description, safe_name, req.code)
+    return {"id": tool_id, "name": name, "description": req.description, "code": req.code, "filename": safe_name}
 
 
 @router.post("/api/tools/upload")
@@ -123,27 +124,46 @@ async def upload_tool(file: UploadFile = File(...)):
     safe_name = os.path.basename(file.filename or "tool.py")
     if not safe_name.endswith(".py"):
         raise HTTPException(400, "Only .py files accepted")
-    filepath = os.path.join(config.TOOLS_DIR, safe_name)
-    if not os.path.abspath(filepath).startswith(os.path.abspath(config.TOOLS_DIR)):
-        raise HTTPException(400, "Invalid filename")
 
     content = await file.read()
-    code = content.decode("utf-8")
-    name = safe_name.replace(".py", "")
+    try:
+        code = content.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "File must be UTF-8 encoded Python source")
+    try:
+        name = events.validate_custom_tool(safe_name[:-3], code, _reserved_tool_names())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     tool_id = f"tool-{uuid.uuid4().hex[:12]}"
 
-    with open(filepath, "w") as f:
-        f.write(code)
-
     await db.create_tool(tool_id, name, f"Uploaded: {safe_name}", safe_name, code)
-    return {"id": tool_id, "name": name, "filename": safe_name, "code": code}
+    return {"id": tool_id, "name": name, "description": f"Uploaded: {safe_name}", "filename": safe_name, "code": code}
+
+
+async def _apply_tool_update(tool_id: str, req: ToolUpdate) -> dict:
+    kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not kwargs:
+        return {"status": "updated"}
+    if "name" in kwargs or "code" in kwargs:
+        existing = next((t for t in await db.get_tools() if t.get("id") == tool_id), None)
+        if not existing:
+            raise HTTPException(404, "Tool not found")
+        effective_name = kwargs.get("name", existing.get("name") or "")
+        effective_code = kwargs.get("code", existing.get("code") or "")
+        try:
+            kwargs["name"] = events.validate_custom_tool(effective_name, effective_code, _reserved_tool_names())
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    await db.update_tool(tool_id, **kwargs)
+    resp = {"status": "updated"}
+    if "name" in kwargs:
+        resp["name"] = kwargs["name"]
+    return resp
 
 
 @router.patch("/api/tools/{tool_id}")
 async def update_tool(tool_id: str, req: ToolUpdate):
-    kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
-    await db.update_tool(tool_id, **kwargs)
-    return {"status": "updated"}
+    return await _apply_tool_update(tool_id, req)
 
 
 @router.delete("/api/tools/{tool_id}")
@@ -154,10 +174,7 @@ async def delete_tool(tool_id: str):
 
 @router.put("/api/tools/{tool_id}")
 async def update_tool_put(tool_id: str, req: ToolUpdate):
-    kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
-    if kwargs:
-        await db.update_tool(tool_id, **kwargs)
-    return {"status": "updated"}
+    return await _apply_tool_update(tool_id, req)
 
 
 @router.get("/api/connector-tools")

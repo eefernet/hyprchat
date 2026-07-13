@@ -1121,7 +1121,14 @@ function HyprChat(){
   };
 
   // Save helpers — persist to backend
-  const saveTool=(tl)=>{fetch(`${API}/api/tools/${tl.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:tl.name,description:tl.description,code:tl.code})}).catch(()=>{});};
+  const saveTool=async(tl)=>{
+    try{
+      const r=await fetch(`${API}/api/tools/${tl.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:tl.name,description:tl.description,code:tl.code})});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok){notify({type:"error",text:"Tool save failed",detail:d.detail||`HTTP ${r.status}`});return;}
+      if(d.name&&d.name!==tl.name) setTools(p=>p.map(x=>x.id===tl.id?{...x,name:d.name}:x));
+    }catch{}
+  };
   const saveProfile=async(mc)=>{
     const parameters=normalizeProfileParams(mc);
     setMcs(p=>p.map(x=>x.id===mc.id?{...x,parameters}:x));
@@ -1245,7 +1252,7 @@ function HyprChat(){
       const r=await fetch(`${API}/api/${path}/discover`,{method:"POST"});
       const d=await r.json().catch(()=>({}));
       if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
-      notify({type:"success",text:"Connector discovered",detail:`${d.tool_count||0} tools available`});
+      notify({type:d.warning?"warning":"success",text:"Connector discovered",detail:d.warning?`${d.tool_count||0} tools — ${d.warning}`:`${d.tool_count||0} tools available`});
       await refreshConnectors();
     }catch(e){notify({type:"error",text:"Connector discovery failed",detail:e.message||String(e)});}
     finally{setConnectorBusy("");}
@@ -1255,7 +1262,7 @@ function HyprChat(){
   const allTools = (() => {
     const seen = new Set();
     const merged = [];
-    // builtinTools already includes custom tools from /api/builtin-tools
+    // builtinTools = the built-in suites from /api/builtin-tools; custom tools merge in from /api/tools below
     for (const tl of builtinTools) { if (!seen.has(tl.id)) { seen.add(tl.id); merged.push(tl); } }
     for (const tl of connectorTools) { if (!seen.has(tl.id)) { seen.add(tl.id); merged.push({id:tl.id,name:tl.name||tl.display_name,description:tl.description||tl.external_name,icon:"plug",connector:true}); } }
     // Only add from tools DB if not already present
@@ -5072,13 +5079,17 @@ function HyprChat(){
         </button>
         <label style={btnS(t.warm)}><IC.Upload/> Upload .py<input type="file" accept=".py" multiple style={{display:"none"}} onChange={async e=>{
           for(const f of e.target.files){const fd=new FormData();fd.append("file",f);
-            try{const r=await fetch(`${API}/api/tools/upload`,{method:"POST",body:fd});const d=await r.json();setTools(p=>[...p,d]);}
+            try{const r=await fetch(`${API}/api/tools/upload`,{method:"POST",body:fd});const d=await r.json().catch(()=>({}));
+              if(!r.ok){notify({type:"error",text:`Upload failed: ${f.name}`,detail:d.detail||`HTTP ${r.status}`});continue;}
+              setTools(p=>[...p,d]);}
             catch{const rd=new FileReader();rd.onload=ev=>{setTools(p=>[...p,{id:`t-${Date.now()}`,name:f.name.replace(".py",""),description:`Uploaded: ${f.name}`,filename:f.name,code:ev.target.result}]);};rd.readAsText(f);}
           }e.target.value="";
         }}/></label>
         <button onClick={async()=>{
-          const tl={name:"new_tool",description:"",filename:"new_tool.py",code:"# New tool\ndef run(input: str) -> str:\n    return input"};
-          try{const r=await fetch(`${API}/api/tools`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(tl)});const d=await r.json();setTools(p=>[...p,d]);setEditTool(d.id);}
+          const tl={name:"new_tool",description:"",filename:"new_tool.py",code:"def new_tool(input: str) -> str:\n    \"\"\"Describe what this tool does.\"\"\"\n    return input"};
+          try{const r=await fetch(`${API}/api/tools`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(tl)});const d=await r.json().catch(()=>({}));
+            if(!r.ok){notify({type:"error",text:"Tool create failed",detail:d.detail||`HTTP ${r.status}`});return;}
+            setTools(p=>[...p,d]);setEditTool(d.id);}
           catch{const id=`t-${Date.now()}`;setTools(p=>[...p,{id,...tl}]);setEditTool(id);}
         }} style={btnS(t.acc)}><IC.Plus/> New</button>
       </>,{color:t.warm})}
@@ -5111,7 +5122,9 @@ function HyprChat(){
         <button disabled={!pasteCode.trim()||!pasteToolName.trim()} onClick={async()=>{
           const tl={name:pasteToolName.trim(),description:pasteToolDesc.trim(),filename:`${pasteToolName.trim()}.py`,code:pasteCode.trim()};
           try{const r=await fetch(`${API}/api/tools`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(tl)});
-            const d=await r.json();setTools(p=>[...p,d]);}
+            const d=await r.json().catch(()=>({}));
+            if(!r.ok){notify({type:"error",text:"Tool register failed",detail:d.detail||`HTTP ${r.status}`});return;}
+            setTools(p=>[...p,d]);}
           catch{const id=`t-${Date.now()}`;setTools(p=>[...p,{id,...tl}]);}
           setPasteMode(false);setPasteCode("");setPasteToolName("");setPasteToolDesc("");
         }} style={{...btnS(t.warm),opacity:(!pasteCode.trim()||!pasteToolName.trim())?0.4:1}}>

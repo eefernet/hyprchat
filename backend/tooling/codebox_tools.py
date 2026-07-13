@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import base64
 import json
 import re
 import shlex
+import sys
 import time
 
 import config
@@ -57,6 +59,87 @@ async def _ensure_venv(http):
     except Exception as e:
         print(f"[SANDBOX] venv setup error: {e}")
     return False
+
+
+# Common import-name → pip-package mismatches for custom-tool auto-install.
+_IMPORT_TO_PIP = {
+    "bs4": "beautifulsoup4",
+    "PIL": "pillow",
+    "yaml": "PyYAML",
+    "cv2": "opencv-python-headless",
+    "dateutil": "python-dateutil",
+    "sklearn": "scikit-learn",
+    "dotenv": "python-dotenv",
+}
+
+
+def tool_import_names(code: str) -> set[str]:
+    """Root module names imported anywhere in the code, minus the stdlib."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return set()
+    roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                roots.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and not node.level:
+                roots.add(node.module.split(".")[0])
+    return {r for r in roots if r and r not in sys.stdlib_module_names}
+
+
+def pip_name_for_import(module_root: str) -> str:
+    return _IMPORT_TO_PIP.get(module_root, module_root)
+
+
+def build_custom_tool_code(tool_code: str, func_name: str, args: dict) -> str:
+    """Assemble the runnable script for a custom tool.
+
+    Args travel as b64-encoded JSON and are splatted as **kwargs, so quoting,
+    newlines, and non-identifier keys can't break the generated script.
+    """
+    args_b64 = base64.b64encode(json.dumps(args or {}).encode("utf-8")).decode("ascii")
+    return (
+        f"{tool_code}\n\n"
+        "import base64 as _hc_b64, json as _hc_json\n"
+        f"_hc_args = _hc_json.loads(_hc_b64.b64decode('{args_b64}').decode('utf-8'))\n"
+        f"_hc_result = {func_name}(**_hc_args)\n"
+        "print(_hc_result if _hc_result is not None else '')\n"
+    )
+
+
+async def run_custom_tool_code(http, run_code: str, timeout: int = 30) -> dict:
+    """Run assembled custom-tool code through the shared sandbox venv."""
+    await _ensure_venv(http)
+    b64 = base64.b64encode(run_code.encode()).decode()
+    cmd = (
+        f"cd /root && printf '%s' {shlex.quote(b64)} | base64 -d > /tmp/_hc_custom_tool.py && "
+        f"/root/venv/bin/python3 /tmp/_hc_custom_tool.py"
+    )
+    r = await http.post(
+        f"{config.CODEBOX_URL}/command",
+        json={"command": cmd, "timeout": timeout},
+        timeout=timeout + 10,
+    )
+    return r.json()
+
+
+async def pip_install_in_venv(http, package: str, timeout: int = 120) -> bool:
+    """Best-effort pip install into the shared sandbox venv."""
+    await _ensure_venv(http)
+    try:
+        r = await http.post(
+            f"{config.CODEBOX_URL}/command",
+            json={"command": f"/root/venv/bin/pip3 install -q {shlex.quote(package)} && echo PIP_OK",
+                  "timeout": timeout},
+            timeout=timeout + 10,
+        )
+        return "PIP_OK" in (r.json().get("stdout") or "")
+    except Exception as e:
+        print(f"[SANDBOX] pip install {package} failed: {e}")
+        return False
 
 
 async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str) -> str:

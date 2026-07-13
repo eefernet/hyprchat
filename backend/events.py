@@ -3,6 +3,7 @@ SSE EventBus — broadcast status events to connected clients.
 Also contains tool prompt helpers used by the chat agent.
 """
 import asyncio
+import ast
 import re
 import time
 
@@ -35,8 +36,12 @@ class EventBus:
             await q.put(event)
 
 
-def inject_text_tool_prompt(messages: list, available_tool_names: set):
-    """Inject instructions for text-based tool calling when native protocol isn't supported."""
+def inject_text_tool_prompt(messages: list, available_tool_names: set, extra_tools: list | None = None):
+    """Inject instructions for text-based tool calling when native protocol isn't supported.
+
+    extra_tools: optional list of Ollama-shaped tool defs (custom/connector tools) whose
+    name+description+parameters are rendered so fallback models can call them correctly.
+    """
     tool_names = ", ".join(sorted(available_tool_names))
 
     has_research = bool(available_tool_names & {"research", "deep_research", "conspiracy_research", "fetch_url"})
@@ -116,16 +121,69 @@ def inject_text_tool_prompt(messages: list, available_tool_names: set):
 
     rules += "- If a tool call fails, read the error, fix the root cause, and retry with a DIFFERENT approach.\n"
 
+    extra_section = ""
+    if extra_tools:
+        lines = []
+        for td in extra_tools[:40]:
+            fn = (td or {}).get("function") or {}
+            t_name = fn.get("name") or ""
+            if not t_name:
+                continue
+            params = fn.get("parameters") or {}
+            props = params.get("properties") or {}
+            req = set(params.get("required") or [])
+            arg_bits = []
+            for p_name, p_schema in props.items():
+                p_type = (p_schema or {}).get("type", "string")
+                arg_bits.append(f"{p_name}{'' if p_name in req else '?'}: {p_type}")
+            desc = (fn.get("description") or "").strip().replace("\n", " ")[:140]
+            lines.append(f"- {t_name}({', '.join(arg_bits)})" + (f" — {desc}" if desc else ""))
+        if lines:
+            extra_section = (
+                "## CUSTOM & CONNECTOR TOOLS\n"
+                "Call these with the same <tool_call> JSON format (arguments marked ? are optional):\n"
+                + "\n".join(lines) + "\n\n"
+            )
+
     text_tool_prompt = (
         "\n\n## TOOL CALLING FORMAT\n"
         "To use tools, output ONLY a <tool_call> tag with JSON. One tool call per response.\n\n"
         "Available tools: " + tool_names + "\n\n"
-        "## EXAMPLES\n" + examples + rules
+        + extra_section
+        + "## EXAMPLES\n" + examples + rules
     )
     if messages and messages[0]["role"] == "system":
         messages[0]["content"] += text_tool_prompt
     else:
         messages.insert(0, {"role": "system", "content": text_tool_prompt.strip()})
+
+
+def validate_custom_tool(name: str, code: str, reserved: frozenset = frozenset()) -> str:
+    """Validate custom-tool code and resolve the tool name.
+
+    Returns the resolved tool name (auto-aligned to the code's function name when the
+    provided name doesn't match any top-level def). Raises ValueError with a
+    user-facing message on invalid code or a reserved (built-in) name.
+    """
+    name = (name or "").strip()
+    if not code or not code.strip():
+        raise ValueError("Tool code is empty")
+    try:
+        compile(code, "<tool>", "exec")
+    except SyntaxError as e:
+        raise ValueError(f"Python syntax error on line {e.lineno}: {e.msg}")
+    tree = ast.parse(code)
+    func_names = [n.name for n in tree.body if isinstance(n, ast.FunctionDef)]
+    if not func_names:
+        if any(isinstance(n, ast.AsyncFunctionDef) for n in tree.body):
+            raise ValueError("Custom tools must define a synchronous function — async def is not supported")
+        raise ValueError("Code must define a top-level function, e.g. def my_tool(query: str) -> str")
+    resolved = name if name in func_names else func_names[0]
+    if resolved in reserved:
+        raise ValueError(
+            f"'{resolved}' is a built-in tool name and would be shadowed — rename the function"
+        )
+    return resolved
 
 
 def parse_tool_params(code: str, func_name: str) -> dict:

@@ -21,7 +21,15 @@ from artifact_files import artifact_file_metadata as _artifact_file_metadata
 from artifact_files import extract_indexable_text
 from connectors import execute_connector_tool
 from research import fetch_bytes_safely, run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
-from tooling.codebox_tools import CODEBOX_TOOL_NAMES, run_codebox_tool
+from tooling.codebox_tools import (
+    CODEBOX_TOOL_NAMES,
+    build_custom_tool_code,
+    pip_install_in_venv,
+    pip_name_for_import,
+    run_codebox_tool,
+    run_custom_tool_code,
+    tool_import_names,
+)
 from tooling.gate_decisions import (
     FIX_ATTEMPT_HARD_CEILING,
     NO_PROGRESS_LAST_SHOT,
@@ -6893,25 +6901,39 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
         elif name in custom_tool_map:
             ct = custom_tool_map[name]
             await events.emit(conv_id, "tool_start", {"tool": name, "icon": "code", "status": f"Running {name}..."})
-            if args:
-                arg_parts = ", ".join(f"{k}={repr(v)}" for k, v in args.items())
-            else:
-                arg_parts = ""
-            run_code = f"{ct['code']}\n\n_result = {name}({arg_parts})\nprint(_result if _result is not None else '')"
+            run_code = build_custom_tool_code(ct.get("code") or "", name, args)
             try:
-                r = await http.post(
-                    f"{config.CODEBOX_URL}/execute",
-                    json={"code": run_code, "language": "python"},
-                    timeout=30,
-                )
-                result = r.json()
-                stdout = result.get("stdout", "").strip()
-                stderr = result.get("stderr", "").strip()
+                result = await run_custom_tool_code(http, run_code)
+                stdout = (result.get("stdout") or "").strip()
+                stderr = (result.get("stderr") or "").strip()
+
+                # Auto-install only modules the tool's own code imports, then retry once.
+                mod_match = re.search(r"ModuleNotFoundError: No module named '([\w.]+)'", stderr)
+                if mod_match:
+                    mod_root = mod_match.group(1).split(".")[0]
+                    if mod_root in tool_import_names(ct.get("code") or ""):
+                        pkg = pip_name_for_import(mod_root)
+                        await events.emit(conv_id, "tool_start", {
+                            "tool": name, "icon": "code",
+                            "status": f"Installing {pkg} for {name}...",
+                        })
+                        if await pip_install_in_venv(http, pkg):
+                            result = await run_custom_tool_code(http, run_code)
+                            stdout = (result.get("stdout") or "").strip()
+                            stderr = (result.get("stderr") or "").strip()
+                        else:
+                            stderr += f"\n(Automatic install of '{pkg}' into the sandbox venv failed.)"
+
                 success = result.get("exit_code", -1) == 0 or result.get("success", False)
                 await events.emit(conv_id, "tool_end", {
                     "tool": name, "icon": "code",
                     "status": f"{'OK' if success else 'FAILED'} {name}",
                 })
+                if not success and f"NameError: name '{name}' is not defined" in stderr:
+                    return (
+                        f"Custom tool '{name}' failed: the code does not define a function named '{name}'. "
+                        f"The tool name must match the function name — edit the tool in the Tools panel.\n\n{stderr[-500:]}"
+                    )
                 return stdout or stderr or "No output"
             except Exception as exec_e:
                 await events.emit(conv_id, "tool_error", {"tool": name, "icon": "code", "status": f"Error: {str(exec_e)}"})
