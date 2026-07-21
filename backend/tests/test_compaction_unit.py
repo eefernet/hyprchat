@@ -127,6 +127,27 @@ def test_fail_open_on_empty_summarizer_output(monkeypatch):
     assert state["saved"] is None  # never persists an empty summary
 
 
+def test_transcript_cap_does_not_advance_fold_point_past_unsummarized(monkeypatch):
+    """Rows dropped by _COMPACT_TRANSCRIPT_CAP must NOT advance
+    summary_until_msg_id — they'd be permanently lost from both the summary
+    and the context otherwise. The marker stops at the last row folded."""
+    cap = chat_mod._COMPACT_TRANSCRIPT_CAP
+    # 12 old rows, each ~cap/3 chars: only the first ~3 fit in one transcript.
+    big = _dialogue(12, chars=cap // 3)
+    recent = _dialogue(9)
+    rows = [{"id": i + 1, **m} for i, m in enumerate(big + recent)]
+    state = _wire(monkeypatch, rows=rows)
+    msgs = [{"role": "system", "content": "persona"}] + big + recent
+    out = _run(chat_mod._maybe_compact_context(None, None, msgs, {"num_ctx": 1024}, "c1", False))
+    assert out is not msgs
+    assert state["saved"] is not None
+    _, _, until = state["saved"]
+    # Not all 12 foldable rows fit under the cap, so the marker must stay
+    # strictly below the last foldable row id (12) — the tail folds next pass.
+    assert until < 12
+    assert until >= 1
+
+
 def test_fail_open_on_db_error(monkeypatch):
     state = _wire(monkeypatch)
 

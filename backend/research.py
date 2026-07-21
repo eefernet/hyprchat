@@ -16,6 +16,7 @@ from datetime import datetime
 import httpx
 
 import config
+import leak_sources
 from research_config import (
     REPORT_TEMPLATE_MAP,
     REPORT_TEMPLATES,
@@ -101,6 +102,17 @@ _RESEARCH_PAGE_MAX_BYTES = 2 * 1024 * 1024     # body cap for research page read
 _RESEARCH_PAGE_MAX_CLEAN_CHARS = 400_000       # decoded-text cap before regex cleaning
 _SEARCH_BATCH_DELAY_DEEP = 2.0          # seconds between batches in deep research
 _SEARCH_BATCH_DELAY_CONSPIRACY = 2.5    # seconds between batches in conspiracy research
+
+# Conspiracy dossier budget by depth (3–5). Scales page fetches, dossier section
+# caps, and the direct-archive wave deadline so `depth` actually does something.
+_CONSPIRACY_LIMITS = {
+    3: {"fetch1": 10, "fetch2": 12, "primary": 10, "findings": 40, "index": 30, "leak_deadline": 18.0},
+    4: {"fetch1": 14, "fetch2": 16, "primary": 14, "findings": 60, "index": 40, "leak_deadline": 25.0},
+    5: {"fetch1": 18, "fetch2": 20, "primary": 18, "findings": 80, "index": 50, "leak_deadline": 30.0},
+}
+# Source classes that get their own dossier section; the catch-all "Web &
+# Community" section excludes anything already routed to one of these.
+_KIND_SECTIONS_SEEN = {"leak", "gov", "court", "foia", "archive"}
 
 
 async def _batched_searches(queries, search_fn, *, delay,
@@ -1992,6 +2004,7 @@ def _make_report_search_queries(
         "market": ["market size competitors", "industry analysis", "pricing business model", "customer adoption", "funding", "analyst report", "customer reviews", "growth trend", "competitive landscape"],
         "technical": ["architecture", "implementation details", "benchmarks", "failure modes best practices", "dependency graph", "source code architecture", "build tooling", "runtime performance", "debugging", "production examples"],
         "timeline": ["timeline chronology", "documents evidence", "key actors", "controversy investigation", "original source", "archive", "public record", "interview", "event sequence"],
+        "investigative": ["leaked documents", "FOIA declassified", "court filing unsealed", "whistleblower testimony", "primary source archive", "government records released", "financial ties funders", "cover up suppressed"],
         "digest": ["best sources", "overview", "primary source", "expert analysis", "official docs", "high signal references", "source comparison", "must read", "FAQ"],
         "analyst": ["expert analysis", "latest developments", "data statistics", "criticism risks", "strategic implications", "operational constraints", "adoption", "roadmap", "lessons learned"],
     }.get(report_type, [])
@@ -2421,6 +2434,68 @@ Use the current date above as authoritative; do not infer "current real-world kn
                 "url": direct_url, "title": src["title"], "source_index": src["index"],
                 "chars": len(page.get("content", "")), "direct": True,
             })
+
+        # Investigative template: fold the shared leak/FOIA/gov/court source layer
+        # into the report's direct sources so they're tiered and cited alongside
+        # web results. Gated on the template's data field (not report_type) so any
+        # future template can opt in. Fails open — a dead adapter contributes nothing.
+        if template.get("source_profile") == "investigative":
+            try:
+                leak_items = await leak_sources.gather_leak_sources(
+                    http, query, depth=depth, searxng_url=searxng_url, deadline=25.0,
+                )
+            except Exception:
+                leak_items = []
+            existing_direct_urls = {s.get("url") for s in direct_sources if s.get("url")}
+            leak_fetch_budget = 6 if depth >= 4 else 4
+            for item in leak_items:
+                await check_cancel()
+                item_url = _normalize_url(item.get("url") or "")
+                if not item_url or item_url in existing_direct_urls:
+                    continue
+                existing_direct_urls.add(item_url)
+                tier = _source_tier(item_url)
+                src = {
+                    "index": len(input_sources) + len(direct_sources) + 1,
+                    "title": item.get("title") or item_url,
+                    "url": item_url,
+                    "snippet": _one_line(item.get("content", ""), 320),
+                    "type": "leak_source",
+                    "tier": tier,
+                    "tier_label": _source_tier_label(tier),
+                    "query": f"{item.get('source', 'archive')} direct search",
+                    "metadata": {"source_class": item.get("kind"), "source_name": item.get("source")},
+                }
+                src = _apply_source_quality(src)
+                direct_sources.append(src)
+                await _emit_report_event(events, report_id, "research_source_found", src)
+            # Read the top-N highest-tier direct-archive hits into evidence.
+            leak_read_urls = [s["url"] for s in direct_sources
+                              if s.get("type") == "leak_source"]
+            leak_read_urls = leak_read_urls[:leak_fetch_budget]
+            if leak_read_urls:
+                leak_pages = await asyncio.gather(
+                    *[_fetch_page(http, u) for u in leak_read_urls], return_exceptions=True,
+                )
+                _by_url = {s["url"]: s for s in direct_sources}
+                for u, page in zip(leak_read_urls, leak_pages):
+                    await check_cancel()
+                    if not isinstance(page, dict) or not page.get("content"):
+                        continue
+                    s = _by_url.get(u)
+                    if not s:
+                        continue
+                    direct_pages.append({
+                        "url": u,
+                        "title": s["title"],
+                        "content": page.get("content", ""),
+                        "source_index": s["index"],
+                        "source_type": "leak_source",
+                    })
+                    await _emit_report_event(events, report_id, "research_source_read", {
+                        "url": u, "title": s["title"], "source_index": s["index"],
+                        "chars": len(page.get("content", "")), "direct": True,
+                    })
 
         # Phase 3: search.
         await phase("search", "Searching the web", "Initial source discovery and query expansion", 20)
@@ -3250,6 +3325,10 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
     fetched = set()
     stats = {"searches": 0, "pages_read": 0}
 
+    # Depth budget — depth (3–5) finally scales real limits instead of being ignored.
+    _cdepth = max(3, min(5, int(depth or 4)))
+    _clim = _CONSPIRACY_LIMITS[_cdepth]
+
     async def _csearch(q, categories="general,news"):
         if q in searched:
             return []
@@ -3257,7 +3336,27 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
         stats["searches"] += 1
         return await _search_searxng(http, searxng_url, q, 12, categories=categories)
 
+    # Launch the direct leak/FOIA/gov/court adapters CONCURRENTLY with SearXNG wave 1.
+    _leak_task = asyncio.create_task(
+        leak_sources.gather_leak_sources(
+            http, topic, depth=_cdepth, searxng_url=searxng_url,
+            deadline=_clim["leak_deadline"],
+        )
+    )
     await _batched_searches(base_queries, _csearch, delay=_SEARCH_BATCH_DELAY_CONSPIRACY, sink=all_findings)
+
+    # Fold in the direct-source hits (each carries its source-class `kind`).
+    try:
+        _leak_hits = await _leak_task
+    except Exception:
+        _leak_hits = []
+    if _leak_hits:
+        all_findings.extend(_leak_hits)
+        _leak_classes = sorted({h.get("source", "") for h in _leak_hits if h.get("source")})
+        await events.emit(conv_id, "tool_start", {
+            "tool": "conspiracy_research", "icon": "search",
+            "status": f"🗄️ Direct archives: {len(_leak_hits)} hits from {', '.join(_leak_classes[:6])}",
+        })
 
     if not all_findings:
         await events.emit(conv_id, "tool_end", {
@@ -3268,7 +3367,7 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
 
     _candidate_urls = [f["url"] for f in all_findings if f.get("url") and f["url"] not in fetched]
     _candidate_urls.sort(key=_source_tier)
-    fetch_urls = _candidate_urls[:14]
+    fetch_urls = _candidate_urls[:_clim["fetch1"]]
     fetch_tasks = [_fetch_page(http, u) for u in fetch_urls]
     fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
     for u, r in zip(fetch_urls, fetch_results):
@@ -3317,7 +3416,7 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
 
     _candidate_urls2 = [f["url"] for f in all_findings if f.get("url") and f["url"] not in fetched]
     _candidate_urls2.sort(key=_source_tier)
-    fetch2 = _candidate_urls2[:16]
+    fetch2 = _candidate_urls2[:_clim["fetch2"]]
     ft2 = [_fetch_page(http, u) for u in fetch2]
     fr2 = await asyncio.gather(*ft2, return_exceptions=True)
     for u, r in zip(fetch2, fr2):
@@ -3602,21 +3701,51 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
     if full_pages:
         full_pages.sort(key=lambda p: _source_tier(p['url']))
         parts.append("\n## 📄 PRIMARY SOURCE CONTENT\n")
-        for p in full_pages[:14]:
+        for p in full_pages[:_clim["primary"]]:
             url_label = p['url']
             content_snippet = p['content'][:3000]
             parts.append(f"### Source: {url_label}\n{content_snippet}\n")
 
-    parts.append("\n## 🔍 SEARCH FINDINGS\n")
+    # ── Findings grouped by source class so the model can cite by tier ──
+    # kind-tagged direct-archive hits are laid out first (leaked > gov > court >
+    # foia/archive), matching the persona's source hierarchy; a single global
+    # [n] counter and `seen` set span every section so a URL appears once and the
+    # SOURCE INDEX stays aligned with inline citations.
     seen = set()
-    for f in all_findings:
-        url = f.get("url", "")
-        if url in seen or not url:
-            continue
-        seen.add(url)
-        parts.append(f"**[{len(seen)}]** [{f.get('title','(no title)')}]({url})\n> {f.get('content','')[:300]}\n")
-        if len(seen) >= 60:
-            break
+    _counter = {"n": 0}
+    _findings_cap = _clim["findings"]
+
+    def _emit_section(header, kinds):
+        if _counter["n"] >= _findings_cap:
+            return
+        rows = []
+        for f in all_findings:
+            url = f.get("url", "")
+            if not url or url in seen:
+                continue
+            fk = f.get("kind")
+            if kinds is None:
+                # catch-all: anything without a recognized source class
+                if fk in _KIND_SECTIONS_SEEN:
+                    continue
+            elif fk not in kinds:
+                continue
+            seen.add(url)
+            _counter["n"] += 1
+            src_label = f.get("source")
+            tag = f" _({src_label})_" if src_label else ""
+            rows.append(f"**[{_counter['n']}]** [{f.get('title','(no title)')}]({url}){tag}\n> {f.get('content','')[:300]}\n")
+            if _counter["n"] >= _findings_cap:
+                break
+        if rows:
+            parts.append(header)
+            parts.extend(rows)
+
+    _emit_section("\n## 📄 Leaked Documents\n", {"leak"})
+    _emit_section("\n## 🏛️ Government Records\n", {"gov"})
+    _emit_section("\n## ⚖️ Court Filings\n", {"court"})
+    _emit_section("\n## 🗄️ FOIA Archives\n", {"foia", "archive"})
+    _emit_section("\n## 🌐 Web & Community Findings\n", None)
 
     srcs = []
     seen2 = set()
@@ -3624,8 +3753,10 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
         u = f.get("url", "")
         if u and u not in seen2:
             seen2.add(u)
-            srcs.append(f"[{len(srcs)+1}] {f.get('title','?')} — {u}")
-        if len(srcs) >= 40:
+            src_label = f.get("source")
+            tag = f" [{src_label}]" if src_label else ""
+            srcs.append(f"[{len(srcs)+1}] {f.get('title','?')}{tag} — {u}")
+        if len(srcs) >= _clim["index"]:
             break
     if srcs:
         parts.append("\n## 📚 SOURCE INDEX\n")

@@ -113,3 +113,72 @@ def test_recompute_explicit_tz_wins(monkeypatch):
     out = _run(scheduler.recompute_next_run(
         "once", {"run_at": "2026-07-10T09:00"}, "UTC"))
     assert out == "2026-07-10T09:00:00"
+
+
+# ── _handle_due_task parking (recurring task with uncomputable next_run) ──
+
+def test_recurring_task_with_failed_next_run_notifies_owner(monkeypatch):
+    """A recurring task whose next_run can't be computed is parked with a
+    notification instead of silently dying (next_run=None is never
+    re-selected by claim_due_tasks)."""
+    state = {"updates": [], "notified": None, "spawned": False}
+
+    async def fake_update(task_id, fields):
+        state["updates"].append((task_id, fields))
+
+    async def fake_notify(title, body="", **kw):
+        state["notified"] = (title, body, kw)
+
+    async def fake_tz(task):
+        return "UTC"
+
+    async def fake_active(user_id, seconds=180):
+        return False
+
+    monkeypatch.setattr(scheduler.db, "update_scheduled_task", fake_update)
+    monkeypatch.setattr(scheduler.notifications, "notify", fake_notify)
+    monkeypatch.setattr(scheduler, "resolve_task_timezone", fake_tz)
+    monkeypatch.setattr(scheduler, "_user_active_recently", fake_active)
+    monkeypatch.setattr(scheduler, "_spawn_run",
+                        lambda task, **kw: state.__setitem__("spawned", True))
+
+    task = {"id": "task-1", "title": "Broken cron", "user_id": "u1",
+            "schedule_kind": "cron", "schedule_json": {"cron": "not a cron"},
+            "delivery_json": {}}
+    _run(scheduler._handle_due_task(task))
+
+    assert state["updates"] == [("task-1", {"next_run": None})]
+    assert state["notified"] is not None
+    assert "Broken cron" in state["notified"][1]
+    assert state["spawned"] is True  # the current due run still executes
+
+
+def test_once_task_never_park_notifies(monkeypatch):
+    """`once` tasks legitimately end with next_run=None — no notification."""
+    state = {"notified": False, "spawned": False}
+
+    async def fake_update(task_id, fields):
+        pass
+
+    async def fake_notify(*a, **kw):
+        state["notified"] = True
+
+    async def fake_tz(task):
+        return "UTC"
+
+    async def fake_active(user_id, seconds=180):
+        return False
+
+    monkeypatch.setattr(scheduler.db, "update_scheduled_task", fake_update)
+    monkeypatch.setattr(scheduler.notifications, "notify", fake_notify)
+    monkeypatch.setattr(scheduler, "resolve_task_timezone", fake_tz)
+    monkeypatch.setattr(scheduler, "_user_active_recently", fake_active)
+    monkeypatch.setattr(scheduler, "_spawn_run",
+                        lambda task, **kw: state.__setitem__("spawned", True))
+
+    task = {"id": "task-2", "title": "One shot", "user_id": "u1",
+            "schedule_kind": "once", "schedule_json": {"run_at": "2020-01-01T00:00"},
+            "delivery_json": {}}
+    _run(scheduler._handle_due_task(task))
+    assert state["notified"] is False
+    assert state["spawned"] is True

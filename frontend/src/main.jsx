@@ -2993,7 +2993,13 @@ function HyprChat(){
       }
       // Auto-generate title after first exchange
       if(!isGhostSend&&autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const curTitle=cv2?.title||"";if(!curTitle||curTitle==="New Chat"||curTitle===appendUser.slice(0,40))fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
-    }catch(e){if(e.name!=="AbortError"){setCurrentRunNotice({type:"failed",label:"Failed",detail:e.message||"Stream failed",at:Date.now()});uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:`\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false};return{...c,messages:m};});}}
+    }catch(e){if(e.name!=="AbortError"){setCurrentRunNotice({type:"failed",label:"Failed",detail:e.message||"Stream failed",at:Date.now()});uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:`\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false};return{...c,messages:m};});}
+      else{
+        // Stop: finalize the partial reply so it doesn't stay stuck in
+        // streaming state (blinking cursor, hidden action toolbar). The
+        // backend persists the partial content itself on disconnect.
+        uConv(cid,c=>{const m=[...(c.messages||[])];const last=m[m.length-1];if(last&&(last.role==="assistant"||last.isS))m[m.length-1]={...last,role:"assistant",isS:false,metadata:{...(last.metadata||{}),in_progress:false}};return{...c,messages:m};});
+      }}
     setStreaming(false);setAttachments([]);streamingCidRef.current=null;
   };
 
@@ -3334,12 +3340,17 @@ function HyprChat(){
   const startPreviewDrag=(e)=>{
     e.preventDefault();
     const startX=e.clientX,startW=previewWidth;
+    // Track the live width locally — `previewWidth` in onUp is the stale
+    // value from the render the drag started in, so persisting it snapped
+    // the panel back to the pre-drag width on reload.
+    let lastW=startW;
     const onMove=(ev)=>{
       const nw=Math.max(260,Math.min(900,startW+(startX-ev.clientX)));
+      lastW=nw;
       setPreviewWidth(nw);
     };
     const onUp=()=>{
-      localStorage.setItem("hc-preview-w",String(previewWidth));
+      localStorage.setItem("hc-preview-w",String(lastW));
       window.removeEventListener("mousemove",onMove);
       window.removeEventListener("mouseup",onUp);
     };
@@ -5331,7 +5342,7 @@ function HyprChat(){
           <div style={cardS}>
             <span style={cardHeadS}>Report</span>
             <select value={researchDraft.report_type} onChange={e=>{const nt=researchTemplates.find(x=>x.id===e.target.value);setResearchDraft(p=>({...p,report_type:e.target.value,depth:nt?.default_depth||p.depth||3}));}} style={{...inputS,fontSize:12}}>
-              {(researchTemplates.length?researchTemplates:[tmpl]).map(rt=>{const ico={analyst:"📊",academic:"🎓",decision:"⚖️",market:"📈",technical:"🛠️",timeline:"🗓️",digest:"🗂️"}[rt.id]||"🔬";return <option key={rt.id} value={rt.id}>{ico} {rt.label}</option>;})}
+              {(researchTemplates.length?researchTemplates:[tmpl]).map(rt=>{const ico={analyst:"📊",academic:"🎓",decision:"⚖️",market:"📈",technical:"🛠️",timeline:"🗓️",digest:"🗂️",investigative:"🕵️"}[rt.id]||"🔬";return <option key={rt.id} value={rt.id}>{ico} {rt.label}</option>;})}
             </select>
             <select value={researchDraft.depth||3} onChange={e=>setResearchDraft(p=>({...p,depth:parseInt(e.target.value)||3}))} title="Research depth" style={{...inputS,fontSize:11,padding:"8px 7px"}}>
               <option value={1}>⚡ Quick</option>

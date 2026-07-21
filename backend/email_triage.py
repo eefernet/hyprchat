@@ -135,13 +135,14 @@ EVENT_FIRE_CAP_PER_POLL = 20
 _poll_running = False
 
 
-async def poll_due_accounts(http) -> None:
+async def poll_due_accounts(http) -> bool:
     """Poll each enabled account at most every POLL_INTERVAL_MIN minutes:
     fetch new UIDs, upsert headers, fire email_received events, triage,
-    notify on urgent. Failures land on the account row, never raise."""
+    notify on urgent. Failures land on the account row, never raise.
+    Returns False when another poll is already running (no work done)."""
     global _poll_running
     if _poll_running:
-        return
+        return False
     _poll_running = True
     try:
         import email_client
@@ -155,7 +156,9 @@ async def poll_due_accounts(http) -> None:
                     from datetime import timedelta
                     if now - datetime.fromisoformat(str(last)) < timedelta(minutes=POLL_INTERVAL_MIN):
                         continue
-                except ValueError:
+                except (ValueError, TypeError):
+                    # TypeError: aware timestamp vs naive utcnow — treat as due
+                    # rather than aborting the whole cross-user poll loop.
                     pass
             token = db.set_current_user_id(account["user_id"])
             try:
@@ -203,6 +206,7 @@ async def poll_due_accounts(http) -> None:
                 db.reset_current_user_id(token)
     finally:
         _poll_running = False
+    return True
 
 
 # ------------------------------------------------------------------

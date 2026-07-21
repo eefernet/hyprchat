@@ -54,6 +54,14 @@ REPORT_TEMPLATES = [
         "default_depth": 2,
         "sections": ["Overview", "Highest-Value Sources", "Source Summaries", "Patterns", "Gaps", "Follow-up Queries"],
     },
+    {
+        "id": "investigative",
+        "label": "Investigative Dossier",
+        "description": "Leak-hunt across WikiLeaks, FOIA vaults, court dockets, and government archives — sourced, tiered, and cross-checked.",
+        "default_depth": 5,
+        "sections": ["Briefing", "Leaked Documents", "Government Records", "Court Filings", "FOIA Archives", "Named Actors and Connections", "Contradictions and Open Questions", "Source Index"],
+        "source_profile": "investigative",
+    },
 ]
 REPORT_TEMPLATE_MAP = {t["id"]: t for t in REPORT_TEMPLATES}
 

@@ -115,7 +115,10 @@ def _inline_images(msg) -> list[dict]:
         cid = (att.content_id or "").strip().strip("<>")
         ctype = (att.content_type or "").lower()
         payload = att.payload or b""
-        if not cid or not ctype.startswith("image/") or not payload:
+        # Strict whitelist — this value is interpolated into a data: URI
+        # attribute by email_render, so a crafted Content-Type must not be
+        # able to smuggle quotes/attributes past layer one.
+        if not cid or not re.fullmatch(r"image/[a-z0-9.+-]+", ctype) or not payload:
             continue
         if spent + len(payload) > _INLINE_IMAGE_BUDGET:
             continue

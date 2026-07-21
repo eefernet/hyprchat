@@ -311,7 +311,9 @@ async def index_file(kb_id: str, filename: str, filepath: str) -> dict:
     # Chroma hard-caps a single upsert at ~5461 records.
     collection = _get_collection(kb_id)
     for s in range(0, len(v_ids), CHROMA_UPSERT_BATCH):
-        collection.upsert(
+        # Threaded — a big upsert batch is a long synchronous write.
+        await asyncio.to_thread(
+            collection.upsert,
             ids=list(v_ids[s:s + CHROMA_UPSERT_BATCH]),
             documents=list(v_texts[s:s + CHROMA_UPSERT_BATCH]),
             metadatas=list(v_metas[s:s + CHROMA_UPSERT_BATCH]),
@@ -337,9 +339,9 @@ async def remove_file(kb_id: str, filename: str):
     try:
         collection = _get_collection(kb_id)
         # Query for all chunks with this filename
-        results = collection.get(where={"filename": filename})
+        results = await asyncio.to_thread(collection.get, where={"filename": filename})
         if results["ids"]:
-            collection.delete(ids=results["ids"])
+            await asyncio.to_thread(collection.delete, ids=results["ids"])
             print(f"[RAG] Removed {len(results['ids'])} chunks for {filename} from {kb_id}")
     except Exception as e:
         print(f"[RAG] Error removing {filename} from {kb_id}: {e}")
@@ -353,7 +355,7 @@ async def delete_kb_index(kb_id: str):
     """Delete the entire ChromaDB collection for a KB."""
     try:
         client = get_chroma()
-        client.delete_collection(_collection_name(kb_id))
+        await asyncio.to_thread(client.delete_collection, _collection_name(kb_id))
         print(f"[RAG] Deleted collection for {kb_id}")
     except Exception as e:
         print(f"[RAG] Error deleting collection {kb_id}: {e}")
@@ -393,7 +395,9 @@ async def query(kb_ids: list[str], query_text: str, top_k: int = 6,
     # When biasing by filename hints, over-fetch so we have headroom to re-rank.
     fetch_k = top_k * 3 if prefer_filename_hints else top_k
 
-    all_results = _vector_query(kb_ids, query_embedding, fetch_k)
+    # Chroma is synchronous — thread it so KB queries don't stall the single
+    # event loop (SSE token streams hitch during large collection scans).
+    all_results = await asyncio.to_thread(_vector_query, kb_ids, query_embedding, fetch_k)
     all_results.sort(key=lambda x: x["score"], reverse=True)
 
     if prefer_filename_hints:
@@ -465,7 +469,7 @@ async def hybrid_query(kb_ids: list[str], query_text: str, top_k: int = 6,
     vector_results: list[dict] = []
     query_embedding = await embed_single(query_text)
     if query_embedding is not None:
-        vector_results = _vector_query(kb_ids, query_embedding, fetch_k)
+        vector_results = await asyncio.to_thread(_vector_query, kb_ids, query_embedding, fetch_k)
         vector_results.sort(key=lambda x: x["score"], reverse=True)
     else:
         print("[RAG] Query embedding failed — keyword-only retrieval")
@@ -540,7 +544,7 @@ async def backfill_fts():
             if await db.kb_fts_count(kb_id) > 0:
                 continue
             collection = _get_collection(kb_id)
-            total = collection.count()
+            total = await asyncio.to_thread(collection.count)
             if total == 0:
                 continue
             offset = 0
@@ -550,7 +554,8 @@ async def backfill_fts():
             # stays correct (one file's chunks can span pages — accumulate first).
             by_file: dict[str, list[dict]] = {}
             while offset < total:
-                got = collection.get(include=["documents", "metadatas"], limit=page, offset=offset)
+                got = await asyncio.to_thread(
+                    collection.get, include=["documents", "metadatas"], limit=page, offset=offset)
                 ids = got.get("ids") or []
                 if not ids:
                     break

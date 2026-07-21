@@ -88,7 +88,10 @@ async def update_event(event_id: str, req: EventUpdate):
         raise HTTPException(404, "Event not found")
     # exclude_unset so pim can tell "not sent" from an explicit null
     # (remind_minutes: null clears the reminder).
-    event = await pim.update_event(event_id, req.model_dump(exclude_unset=True))
+    try:
+        event = await pim.update_event(event_id, req.model_dump(exclude_unset=True))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return _localized(event, await pim.user_timezone())
 
 
@@ -158,7 +161,7 @@ async def sync_now():
     results = {}
     for account in accounts:
         try:
-            results[account["id"]] = await caldav_sync.sync_account(account)
+            results[account["id"]] = await caldav_sync.sync_account_locked(account)
             await db.update_caldav_account(account["id"], {
                 "last_sync_at": datetime.utcnow().isoformat(), "last_error": ""})
         except Exception as e:

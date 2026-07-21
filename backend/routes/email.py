@@ -118,8 +118,11 @@ async def poll_now():
     for account in accounts:
         await db.update_email_account(account["id"], {"last_checked_at": None})
     import email_triage
-    await email_triage.poll_due_accounts(route_context().http)
-    return {"status": "ok", "accounts": [a["id"] for a in await db.list_email_accounts()]}
+    ran = await email_triage.poll_due_accounts(route_context().http)
+    # ran=False → a background poll was already in flight and this call was a
+    # no-op; the UI can tell the user instead of implying a fresh poll ran.
+    return {"status": "ok", "ran": bool(ran),
+            "accounts": [a["id"] for a in await db.list_email_accounts()]}
 
 
 @router.get("/api/email/messages")

@@ -78,12 +78,14 @@ async def update_event(event_id: str, fields: dict, user_id: str | None = None) 
         mapped["remind_minutes"] = fields["remind_minutes"]
     if fields.get("start_local"):
         start = local_to_utc(fields["start_local"], tz)
-        if start:
-            mapped["start_at"] = start
+        if not start:
+            raise ValueError(f"Invalid start_local {fields['start_local']!r} — use YYYY-MM-DDTHH:MM")
+        mapped["start_at"] = start
     if fields.get("end_local"):
         end = local_to_utc(fields["end_local"], tz)
-        if end:
-            mapped["end_at"] = end
+        if not end:
+            raise ValueError(f"Invalid end_local {fields['end_local']!r} — use YYYY-MM-DDTHH:MM")
+        mapped["end_at"] = end
     # Re-arm the reminder whenever the event moves or the reminder changes —
     # without this a rescheduled event keeps reminded=1 and never fires again.
     if "start_at" in mapped or "remind_minutes" in mapped:

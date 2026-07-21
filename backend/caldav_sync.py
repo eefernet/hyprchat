@@ -108,6 +108,26 @@ def _build_ics(event: dict, tz: ZoneInfo) -> str:
     return cal.to_ical().decode("utf-8")
 
 
+def _content_hash(fields: dict) -> str:
+    """Change-detection hash over the fields we actually store (etag stand-in —
+    real etags aren't uniformly exposed across servers). Deliberately NOT a
+    hash of the raw resource: servers rewrite volatile fields (DTSTAMP,
+    SEQUENCE) on normalization, which made every such rewrite look like a real
+    change and could clobber a dirty local edit with a false conflict.
+    Normalizes both sides: all_day bool-vs-0/1, and the same caps
+    _event_fields_from_vevent applies."""
+    basis = "\x1f".join((
+        str(fields.get("title") or "")[:300],
+        str(fields.get("description") or "")[:5000],
+        str(fields.get("location") or "")[:300],
+        str(fields.get("start_at") or ""),
+        str(fields.get("end_at") or ""),
+        str(int(bool(fields.get("all_day")))),
+        str(fields.get("rrule") or ""),
+    ))
+    return hashlib.sha256(basis.encode("utf-8", "replace")).hexdigest()[:32]
+
+
 def _remote_snapshot_blocking(account: dict, tz: ZoneInfo) -> list[dict]:
     """Fetch all remote VEVENTs. Each entry: fields dict + content hash (etag
     stand-in — real etags aren't uniformly exposed across servers)."""
@@ -124,11 +144,10 @@ def _remote_snapshot_blocking(account: dict, tz: ZoneInfo) -> list[dict]:
     out = []
     for remote in calendar.events():
         try:
-            raw = remote.data if isinstance(remote.data, str) else str(remote.data)
             for comp in remote.icalendar_instance.walk("VEVENT"):
                 fields = _event_fields_from_vevent(comp, tz)
                 if fields and fields["start_at"]:
-                    fields["hash"] = hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:32]
+                    fields["hash"] = _content_hash(fields)
                     out.append(fields)
                 break  # first VEVENT per resource; recurrence expansion is out of scope
         except Exception as e:
@@ -240,12 +259,23 @@ async def sync_account(account: dict) -> dict:
         uid = event.get("caldav_uid") or f"hyprchat-{event['id']}@jarvis"
         payload = {**event, "caldav_uid": uid}
         await asyncio.to_thread(_push_blocking, account, _build_ics(payload, tz))
+        # Record the pushed content's hash as the etag so the next pull sees
+        # the row as up-to-date instead of re-pulling what we just pushed.
         await db.update_calendar_event(event["id"], {
             "caldav_uid": uid, "caldav_account_id": account["id"],
+            "caldav_etag": _content_hash(payload),
             "sync_state": "synced"}, user_id=user_id)
         pushed += 1
 
     return {"pulled": pulled, "pushed": pushed, "deleted": deleted, "conflicts": conflicts}
+
+
+async def sync_account_locked(account: dict) -> dict:
+    """Route-facing on-demand sync. Serializes with the background tick's
+    sync_due_accounts — without the lock a manual "Sync now" racing the tick
+    could double-create local rows for the same remote UID."""
+    async with _sync_lock:
+        return await sync_account(account)
 
 
 async def sync_due_accounts() -> None:
@@ -266,7 +296,9 @@ async def sync_due_accounts() -> None:
                 try:
                     if now - datetime.fromisoformat(str(last)) < timedelta(minutes=SYNC_INTERVAL_MIN):
                         continue
-                except ValueError:
+                except (ValueError, TypeError):
+                    # TypeError: aware timestamp vs naive utcnow — treat as due
+                    # rather than aborting the whole cross-user sync loop.
                     pass
             token = db.set_current_user_id(account["user_id"])
             try:

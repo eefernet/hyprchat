@@ -1060,14 +1060,19 @@ async def _maybe_compact_context(req, http, messages, model_options, conv_id,
                     and (r.get("content") or "").strip()]
         new_summary = old_summary
         if foldable:
-            parts, total = [], 0
+            # Only rows that actually make it into the transcript may advance
+            # summary_until_msg_id — rows dropped by the cap fold next pass.
+            parts, total, folded_ids = [], 0, []
             for r in foldable:
                 seg = f"{str(r['role']).upper()}: {(r.get('content') or '').strip()}"
                 room = _COMPACT_TRANSCRIPT_CAP - total
                 if room <= 0:
                     break
+                if len(seg) > room and parts:
+                    break
                 parts.append(seg[:room])
                 total += len(seg)
+                folded_ids.append(int(r.get("id") or 0))
             transcript = "\n\n".join(parts)
             model = model_providers.reject_cloud(config.WORKSPACE_MODEL or "") or config.DEFAULT_MODEL
             prompt = (
@@ -1089,7 +1094,7 @@ async def _maybe_compact_context(req, http, messages, model_options, conv_id,
                 new_summary = ""
             if not new_summary:
                 return messages
-            max_folded = max(int(r.get("id") or 0) for r in foldable)
+            max_folded = max(folded_ids)
             await db.set_conversation_summary(conv_id, new_summary, max_folded)
         if not (new_summary or "").strip():
             return messages
@@ -1901,7 +1906,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             "\n\n## RESEARCH PROTOCOL (MANDATORY)\n"
             f"The user has explicitly enabled **{_names}** for this turn. That means "
             "they want a multi-source web-researched answer, not your own analysis. "
-            f"Your FIRST response MUST be a call to {_names}.\n"
+            f"When the user opens a new topic, your FIRST response MUST be a call to {_names}.\n"
             "\n"
             "**This applies even when context is attached.** Attached PDFs, pasted "
             "text, or knowledge-base excerpts describe the USER (their data, their "
@@ -1918,8 +1923,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             "Cite sources from the tool result.\n"
             "- Do NOT write a written answer before calling the tool. Do NOT say "
             "\"based on the attached document...\" as your first move.\n"
-            "- Only skip the tool for greetings, clarification questions, or trivial "
-            "definitional questions where external research adds nothing.\n"
+            "- Only skip the tool for greetings, clarification questions, trivial "
+            "definitional questions where external research adds nothing, or "
+            "**follow-up questions you can answer from research already performed "
+            "earlier in this conversation** (e.g. expanding on a source or finding "
+            "you already pulled — re-run only when the follow-up needs new "
+            "information).\n"
         )
         if messages and messages[0]["role"] == "system":
             messages[0]["content"] += _research_sys
@@ -3121,6 +3130,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 print(f"[CHAT]   Running {len(_parsed_calls)} tools in parallel")
 
             _direct_codegen_note_sent = False
+            _round_tool_names = set()
             for batch_start in range(0, len(_parsed_calls), max(1, len(_parsed_calls) if _all_parallel else 1)):
                 batch_end = len(_parsed_calls) if _all_parallel else batch_start + 1
                 batch = _parsed_calls[batch_start:batch_end]
@@ -3243,7 +3253,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                             if not _f.done(): _f.set_exception(_e)
 
                     _spawn_bg(_run_tool_bg())
-                    _futures.append((_tf, _tool_chars, tool_name, _tool_icon, _tool_label, _tool_detail, _tool_call_id))
+                    _futures.append((_tf, _tool_chars, tool_name, _tool_icon, _tool_label, _tool_detail, _tool_call_id, tool_args))
+                    _round_tool_names.add(tool_name)
 
                 # Wait for all futures in this batch
                 _base_ctx = sum(len(m.get("content", "")) for m in messages) // 4
@@ -3251,7 +3262,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 _tool_start_time = _loop.time()
                 while _futures and not all(f[0].done() for f in _futures):
                     await asyncio.sleep(2)
-                    for _tf, _tool_chars, _tn, _ti, _tl, _td, _tcid in _futures:
+                    for _tf, _tool_chars, _tn, _ti, _tl, _td, _tcid, _targs in _futures:
                         if not _tf.done():
                             _elapsed = _loop.time() - _tool_start_time
                             if _tn != "generate_code":
@@ -3265,7 +3276,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
 
                 # Collect results in order
-                for _fi, (_tf, _tool_chars, tool_name, _tool_icon, _tool_label, _tool_detail, _tool_call_id) in enumerate(_futures):
+                for _fi, (_tf, _tool_chars, tool_name, _tool_icon, _tool_label, _tool_detail, _tool_call_id, tool_args) in enumerate(_futures):
                     try:
                         tool_result = _tf.result()
                     except Exception as te:
@@ -3378,7 +3389,28 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                             "project_id and a more detailed task. Otherwise present the results."
                         )})
 
+                    # Auto-index research results into persona's RAG memory.
+                    # Runs per result (not post-loop) so parallel batches —
+                    # e.g. research + fetch_url in one round — index too.
+                    if (not ephemeral
+                            and req.persona_id
+                            and tool_name in rag.RESEARCH_TOOLS
+                            and len(tool_result) > 100):
+                        try:
+                            _query_for_index = ""
+                            if isinstance(tool_args, dict):
+                                _query_for_index = tool_args.get("query", "") or tool_args.get("url", "") or tool_args.get("topic", "")
+                            _spawn_bg(
+                                rag.index_research(req.persona_id, tool_name, _query_for_index, tool_result, conv_id)
+                            )
+                        except Exception as _rag_e:
+                            print(f"[RAG] Auto-index error: {_rag_e}")
+
                 if _all_parallel:
+                    # Emit ctx_update so the frontend token counter reflects the
+                    # batch's tool results before we leave the batch loop.
+                    _est_prompt = sum(len(m.get("content", "")) for m in messages) // 4
+                    yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': _est_prompt, 'live': True})}\n\n"
                     break  # All were in one batch
 
                 # Detect repeated errors — inject guidance, then force-stop if stuck
@@ -3427,29 +3459,14 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 _est_prompt = sum(len(m.get("content", "")) for m in messages) // 4
                 yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': _est_prompt, 'live': True})}\n\n"
 
-                # Auto-index research results into persona's RAG memory
-                if (not ephemeral
-                        and req.persona_id
-                        and tool_name in rag.RESEARCH_TOOLS
-                        and len(tool_result) > 100):
-                    try:
-                        _query_for_index = ""
-                        if isinstance(tool_args, dict):
-                            _query_for_index = tool_args.get("query", "") or tool_args.get("url", "") or tool_args.get("topic", "")
-                        _spawn_bg(
-                            rag.index_research(req.persona_id, tool_name, _query_for_index, tool_result, conv_id)
-                        )
-                    except Exception as _rag_e:
-                        print(f"[RAG] Auto-index error: {_rag_e}")
-
             # Short-circuit: if ask_project succeeded as a non-change-request
             # in this round, stream the QA envelope's answer verbatim and exit
             # the agent loop. The QA run card already renders the rich grounded
             # answer with code blocks and citations; without this, the LLM
             # would paraphrase it on the next round and lose that detail.
-            _called_ask_project = any(
-                _f[2] == "ask_project" for _f in (_futures or [])
-            )
+            # Round-scoped: _futures only holds the LAST batch, so check the
+            # names collected across every batch this round.
+            _called_ask_project = "ask_project" in _round_tool_names
             if _called_ask_project:
                 try:
                     _qa_runs = await db.get_runs_by_conversation(conv_id, limit=10)
@@ -3684,6 +3701,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 print(f"[CHAT]   Zero tokens with native tools — switching to text-based")
                 ollama_tools = []
                 inject_text_tool_prompt(messages, available_tool_names, extra_tools=_extra_text_tool_defs)
+                _text_fallback_done = True
                 continue
 
             # Nudge the model to respond

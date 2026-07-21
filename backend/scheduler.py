@@ -264,6 +264,18 @@ async def _handle_due_task(task: dict) -> None:
             await db.update_scheduled_task(task["id"], {"next_run": None, "enabled": False})
         else:
             await db.update_scheduled_task(task["id"], {"next_run": nxt})
+            if nxt is None and task["schedule_kind"] not in ("event", "webhook"):
+                # A recurring task with no next_run is never re-selected — it
+                # would die silently. Tell the owner instead of vanishing.
+                print(f"[SCHEDULER] task {task['id']} ({task.get('title')}) could not compute next run — parking it")
+                try:
+                    await notifications.notify(
+                        "Scheduled task parked",
+                        f"\"{task.get('title') or task['id']}\" could not compute its next run "
+                        "time and will not fire again. Check its schedule in the Tasks panel.",
+                        kind="task", user_id=user_id)
+                except Exception as ne:
+                    print(f"[SCHEDULER] park notification failed: {ne}")
         _spawn_run(task, trigger="schedule")
     finally:
         db.reset_current_user_id(token)

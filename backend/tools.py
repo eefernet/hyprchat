@@ -1299,7 +1299,7 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "conspiracy_research",
-            "description": "Deep investigative research across WikiLeaks, FOIA vaults, court records, gov archives, alt-media, and leaked documents. Use for any topic where official narratives may be incomplete.",
+            "description": "Deep investigative research across direct archives — WikiLeaks/Cryptome/ICIJ (leaked docs), FBI Vault/DOJ/CIA Reading Room (gov records), CourtListener (court filings), MuckRock/National Security Archive/Archive.org (FOIA archives) — plus alt-media and the open web. Results come back grouped by source class. Use for any topic where official narratives may be incomplete.",
             "parameters": {"type": "object", "properties": {
                 "topic": {"type": "string", "description": "What to investigate — a person, event, organization, or claim"},
                 "angle": {"type": "string", "description": "Focus: evidence (default), key_players, timeline, debunk, documents, connections"},

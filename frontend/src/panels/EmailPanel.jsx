@@ -52,7 +52,9 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
     setPolling(true);setErr("");
     try{
       const r=await fetch(`${API}/api/email/poll`,{method:"POST"});
-      if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${r.status}`);}
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      if(d.ran===false)setErr("A background poll is already running — showing its results.");
       await loadMessages();await loadAccounts();
     }catch(e){setErr(String(e.message||e));}
     finally{setPolling(false);}
