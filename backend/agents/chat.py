@@ -16,6 +16,7 @@ import model_providers
 import persona_images
 import provider_tools
 import rag
+from agents import assistant as assistant_mod
 from tools import (CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls,
                    strip_tool_calls, _v2_name_match)
 from connectors import tool_def_from_connector_tool
@@ -1208,6 +1209,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     kb_sources = []
     persona_system_prompt = None
     persona_kb_ids = []
+    persona_tool_ids = None
     persona_think_budget = None
     persona_placeholder_ctx = None
     persona_name = ""
@@ -1223,6 +1225,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         if mc:
             persona_name = mc.get("name") or ""
             persona_system_prompt = mc.get("system_prompt") or None
+            persona_tool_ids = list(mc.get("tool_ids") or [])
             # Same matching rules as the tools.py gate (_is_v2_persona); the
             # two still differ on source — req.persona_id here vs the
             # conversation's model_config_id there.
@@ -1715,7 +1718,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     available_tool_names = set()
     ollama_tools = []
     _extra_text_tool_defs = []  # custom/connector defs re-surfaced in the text-fallback prompt
-    requested_tool_ids = list(req.tool_ids or [])
+    requested_tool_ids = await assistant_mod.resolve_chat_tool_ids(
+        conversation_id=conv_id,
+        persona_id=req.persona_id,
+        requested_tool_ids=req.tool_ids,
+        persona_tool_ids=persona_tool_ids,
+    )
     connector_tool_id_map = connector_tool_id_map or {}
     connector_tool_name_map = connector_tool_name_map or {}
 

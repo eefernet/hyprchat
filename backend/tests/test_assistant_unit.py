@@ -2,6 +2,8 @@
 the scheduler's check-in delivery seams).
 
 Covers the July 2026 bug-fix batch:
+- foreground Assistant chats inherit profile tools when the pinned conversation
+  has the legacy empty tool list, and profile saves keep both rows synchronized
 - headless tool resolution falls through task → conversation → persona
   (an empty list means "unset" — check-ins are created without tool_ids)
 - headless model resolution honors the persona base_model (explicit user
@@ -104,6 +106,47 @@ def _conv(**over):
 
 
 # ── run_headless_chat: tool resolution ───────────────────────────────────
+
+def test_foreground_assistant_empty_tools_fall_through_to_profile(monkeypatch):
+    async def profile(user_id=None):
+        return {"conversation_id": "assistant-c1", "model_config_id": "mc1"}
+
+    monkeypatch.setattr(assistant_mod.db, "get_assistant_profile", profile)
+    out = _run(assistant_mod.resolve_chat_tool_ids(
+        conversation_id="assistant-c1", persona_id="mc1",
+        requested_tool_ids=[], persona_tool_ids=["codeagent"]))
+    assert out == ["codeagent"]
+
+
+def test_foreground_assistant_explicit_tools_win(monkeypatch):
+    async def should_not_lookup(*args, **kwargs):
+        raise AssertionError("explicit tools should not query the assistant profile")
+
+    monkeypatch.setattr(assistant_mod.db, "get_assistant_profile", should_not_lookup)
+    out = _run(assistant_mod.resolve_chat_tool_ids(
+        conversation_id="assistant-c1", persona_id="mc1",
+        requested_tool_ids=["quick_search"], persona_tool_ids=["codeagent"]))
+    assert out == ["quick_search"]
+
+
+def test_foreground_tool_fallback_is_assistant_conversation_only(monkeypatch):
+    async def profile(user_id=None):
+        return {"conversation_id": "assistant-c1", "model_config_id": "mc1"}
+
+    monkeypatch.setattr(assistant_mod.db, "get_assistant_profile", profile)
+    unrelated = _run(assistant_mod.resolve_chat_tool_ids(
+        conversation_id="ordinary-c1", persona_id="mc1",
+        requested_tool_ids=[], persona_tool_ids=["codeagent"]))
+    wrong_persona = _run(assistant_mod.resolve_chat_tool_ids(
+        conversation_id="assistant-c1", persona_id="other-mc",
+        requested_tool_ids=[], persona_tool_ids=["codeagent"]))
+    disabled = _run(assistant_mod.resolve_chat_tool_ids(
+        conversation_id="assistant-c1", persona_id="mc1",
+        requested_tool_ids=[], persona_tool_ids=[]))
+    assert unrelated == []
+    assert wrong_persona == []
+    assert disabled == []
+
 
 def test_missing_conversation_raises(monkeypatch):
     async def none(cid):
@@ -244,13 +287,13 @@ def test_notifications_gatherer_skips_checkins_and_null_bodies(monkeypatch):
 # ── ensure_assistant self-healing ────────────────────────────────────────
 
 def test_ensure_assistant_repoints_checkins_on_reseed(monkeypatch):
-    created, repointed = {}, []
+    created, repointed, conv_updates = {}, [], []
 
     async def profile(user_id=None):
         return {"user_id": "u1", "model_config_id": "mc1", "conversation_id": "dead"}
 
     async def get_mc(mc_id):
-        return {"id": "mc1"} if mc_id == "mc1" else None
+        return {"id": "mc1", "tool_ids": ["codeagent"]} if mc_id == "mc1" else None
 
     async def get_conv(cid):
         return created.get(cid)  # "dead" was deleted; new conv exists once created
@@ -259,7 +302,7 @@ def test_ensure_assistant_repoints_checkins_on_reseed(monkeypatch):
         created[cid] = {"id": cid, **kw}
 
     async def update_conv(cid, **kw):
-        return None
+        conv_updates.append((cid, kw))
 
     async def list_tasks(user_id=None):
         return [
@@ -287,8 +330,62 @@ def test_ensure_assistant_repoints_checkins_on_reseed(monkeypatch):
     new_id = result["conversation_id"]
     assert new_id and new_id != "dead"
     assert new_id in created
+    assert conv_updates == [(new_id, {"pinned": "1", "tool_ids": ["codeagent"]})]
     # only the check_in was repointed; the llm task keeps its own target
     assert repointed == [("t1", new_id)]
+
+
+def test_ensure_assistant_repairs_existing_conversation_tools(monkeypatch):
+    updates = []
+    profile_row = {"user_id": "u1", "model_config_id": "mc1",
+                   "conversation_id": "assistant-c1"}
+
+    async def profile(user_id=None):
+        return profile_row
+
+    async def get_mc(mc_id):
+        return {"id": "mc1", "tool_ids": ["codeagent"]}
+
+    async def get_conv(cid):
+        return {"id": cid, "tool_ids": [], "messages": []}
+
+    async def update_conv(cid, **kw):
+        updates.append((cid, kw))
+
+    async def upsert(**kw):
+        return {**profile_row, **kw}
+
+    monkeypatch.setattr(assistant_mod.db, "get_assistant_profile", profile)
+    monkeypatch.setattr(assistant_mod.db, "get_model_config", get_mc)
+    monkeypatch.setattr(assistant_mod.db, "get_conversation", get_conv)
+    monkeypatch.setattr(assistant_mod.db, "update_conversation", update_conv)
+    monkeypatch.setattr(assistant_mod.db, "upsert_assistant_profile", upsert)
+    monkeypatch.setattr(assistant_mod.db, "_scope_user", lambda uid=None: "u1")
+
+    result = _run(assistant_mod.ensure_assistant("u1"))
+    assert result["conversation_id"] == "assistant-c1"
+    assert updates == [("assistant-c1", {"tool_ids": ["codeagent"]})]
+
+
+def test_assistant_settings_sync_tools_to_pinned_conversation(monkeypatch):
+    profile_row = {"user_id": "u1", "model_config_id": "mc1",
+                   "conversation_id": "assistant-c1", "timezone": "UTC"}
+    model_updates, conversation_updates = [], []
+
+    async def update_model_config(mc_id, **kw):
+        model_updates.append((mc_id, kw))
+
+    async def update_conversation(cid, **kw):
+        conversation_updates.append((cid, kw))
+
+    monkeypatch.setattr(assistant_mod.db, "update_model_config", update_model_config)
+    monkeypatch.setattr(assistant_mod.db, "update_conversation", update_conversation)
+
+    _run(assistant_mod.update_assistant_model_config(
+        profile_row, tool_ids=["codeagent"]))
+    assert model_updates == [("mc1", {"tool_ids": ["codeagent"]})]
+    assert conversation_updates == [
+        ("assistant-c1", {"tool_ids": ["codeagent"]})]
 
 
 # ── scheduler delivery seams ─────────────────────────────────────────────

@@ -141,7 +141,7 @@ async def update_assistant(req: AssistantUpdate):
     if req.tool_ids is not None:
         persona_fields["tool_ids"] = req.tool_ids
     if persona_fields:
-        await db.update_model_config(profile["model_config_id"], **persona_fields)
+        await assistant_mod.update_assistant_model_config(profile, **persona_fields)
 
     quiet = None
     if req.quiet_hours is not None:

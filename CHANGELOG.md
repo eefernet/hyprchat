@@ -81,6 +81,9 @@
   instead of tame. Cached per user + time of day; always a local model.
 
 ## Reliability
+- Manual prompts in the pinned Assistant chat now inherit the Assistant
+  profile's tools, so email listing, reading, and deletion no longer disappear
+  when the conversation was seeded with an empty tool list.
 - The whole suite shipped through a ~35-finding audit: IMAP socket timeouts
   and bounded scheduler subsystems (a hung mail server can't stall scheduled
   tasks), cancelled or timed-out runs stop their model generation, rescheduled

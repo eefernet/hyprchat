@@ -65,6 +65,49 @@ def gatherer_names() -> list[str]:
 _HISTORY_LIMIT = 20
 
 
+async def resolve_chat_tool_ids(*, conversation_id: str, persona_id: str | None,
+                                requested_tool_ids: list | None,
+                                persona_tool_ids: list | None = None) -> list:
+    """Resolve tools for a foreground Personal Assistant chat.
+
+    Normal chats keep the request's tool selection exactly as sent.  The
+    Personal Assistant is special: its original pinned conversation was seeded
+    without copying the persona's tools, so foreground messages arrived with an
+    empty list even though the Assistant profile carried ``["codeagent"]``.
+    Treat that empty list as unset only for the registered assistant
+    conversation and fall back to the profile's model-config tools.
+    """
+    requested = list(requested_tool_ids or [])
+    if requested:
+        return requested
+    # Seeded Assistant conversations use this stable prefix. Avoid an extra
+    # SQLite lookup on every ordinary tool-less chat.
+    if not str(conversation_id or "").startswith("assistant-"):
+        return requested
+
+    profile = await db.get_assistant_profile()
+    if not profile or conversation_id != (profile.get("conversation_id") or ""):
+        return requested
+    profile_persona_id = profile.get("model_config_id") or ""
+    if persona_id and persona_id != profile_persona_id:
+        return requested
+
+    if persona_tool_ids is None:
+        persona = await db.get_model_config(profile_persona_id) or {}
+        persona_tool_ids = persona.get("tool_ids") or []
+    return list(persona_tool_ids or [])
+
+
+async def update_assistant_model_config(profile: dict, **fields) -> None:
+    """Update the Assistant persona and keep its pinned chat tools in sync."""
+    if not fields:
+        return
+    await db.update_model_config(profile["model_config_id"], **fields)
+    if "tool_ids" in fields and profile.get("conversation_id"):
+        await db.update_conversation(
+            profile["conversation_id"], tool_ids=fields["tool_ids"])
+
+
 async def run_headless_chat(*, conversation_id: str, prompt: str, model: str = "",
                             tool_ids: list | None = None, run_id: str = "",
                             task_id: str = "", http=None, events=None) -> str:
@@ -271,8 +314,12 @@ async def _ensure_assistant_locked(user_id: str | None = None) -> dict:
                 parameters={"profile_type": "assistant"},
             )
 
+    persona = await db.get_model_config(model_config_id) or {}
+    persona_tool_ids = list(persona.get("tool_ids") or [])
+
     conversation_id = (profile or {}).get("conversation_id") or ""
-    if conversation_id and not await db.get_conversation(conversation_id):
+    conversation = await db.get_conversation(conversation_id) if conversation_id else None
+    if conversation_id and not conversation:
         conversation_id = ""
     if not conversation_id:
         conversation_id = f"assistant-{uuid.uuid4().hex[:10]}"
@@ -281,7 +328,8 @@ async def _ensure_assistant_locked(user_id: str | None = None) -> dict:
             model_config_id=model_config_id, use_memories="1",
         )
         try:
-            await db.update_conversation(conversation_id, pinned="1")
+            await db.update_conversation(
+                conversation_id, pinned="1", tool_ids=persona_tool_ids)
         except Exception:
             pass
         # The pinned conversation was deleted (or never existed): repoint every
@@ -295,6 +343,14 @@ async def _ensure_assistant_locked(user_id: str | None = None) -> dict:
                         task["id"], {"conversation_id": conversation_id}, user_id=uid)
         except Exception as e:
             print(f"[ASSISTANT] check-in repoint failed: {e}")
+    elif list(conversation.get("tool_ids") or []) != persona_tool_ids:
+        # The Assistant profile is the source of truth for its pinned chat.
+        # This repairs legacy conversations seeded with [] and keeps the
+        # frontend's persisted state aligned with later profile edits.
+        try:
+            await db.update_conversation(conversation_id, tool_ids=persona_tool_ids)
+        except Exception as e:
+            print(f"[ASSISTANT] conversation tool sync failed: {e}")
 
     return await db.upsert_assistant_profile(
         model_config_id=model_config_id,
